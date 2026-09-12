@@ -1,3 +1,5 @@
+export { createLatestRequestTracker } from './requestTaskManager.js'
+
 const hasValue = value => value !== undefined
 
 const firstDefined = (...values) => values.find(hasValue)
@@ -398,15 +400,6 @@ export const decorateMemoryJobs = (items) => {
   })
 
   return topLevelItems
-}
-
-export const createLatestRequestTracker = () => {
-  let latestRequest = 0
-  return {
-    begin: () => ++latestRequest,
-    isCurrent: request => request === latestRequest,
-    invalidate: () => ++latestRequest
-  }
 }
 
 const knownMemoryOperations = new Set([

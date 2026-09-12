@@ -11,6 +11,9 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+import app.core.memory.service_common as memory_service_common_module
+import app.core.memory.service_delete as memory_service_delete_module
+import app.core.memory.service_recall as memory_service_recall_module
 from app.core.constants import ERR_MEMORY_OVER_LIMIT, ERR_MEMORY_VERSION_CONFLICT
 from app.core.crud.memory.job import memory_job_crud
 from app.core.crud.memory.store import (
@@ -33,7 +36,6 @@ from app.core.memory import (
     normalize_memory_content,
     normalize_memory_key,
 )
-from app.core.memory import service as memory_service_module
 from app.core.memory_jobs.manager import memory_job_manager
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.memory import (
@@ -236,7 +238,7 @@ def test_validate_active_store_rejects_over_limit_capacity_configuration() -> No
     )
 
     with pytest.raises(MemoryConflictError) as exc_info:
-        memory_service_module._validate_active_store(store)
+        memory_service_common_module._validate_active_store(store)
 
     assert exc_info.value.message == ERR_MEMORY_OVER_LIMIT
 
@@ -538,7 +540,7 @@ async def test_update_unchanged_ignores_source_evidence_and_does_not_search(
     async def unexpected_search(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("update must not perform similarity search")
 
-    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", unexpected_search)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", unexpected_search)
     async with memory_database() as db:
         await _create_store(db, uid="unchanged-update-user")
         record = await _create_record(
@@ -873,7 +875,7 @@ async def test_delete_requires_expected_version_before_read_and_rejects_stale_ac
             raise AssertionError("missing expected_version must fail before reading the record")
 
         with monkeypatch.context() as patch:
-            patch.setattr(memory_service_module.memory_job_manager, "get_job_by_dedupe_key", unexpected_read)
+            patch.setattr(memory_service_delete_module.memory_job_manager, "get_job_by_dedupe_key", unexpected_read)
             with pytest.raises(MemoryValidationError):
                 await memory_service.delete(
                     db,
@@ -1056,9 +1058,9 @@ async def test_recall_returns_not_configured_or_empty_without_external_calls(
         calls.append("query")
         raise AssertionError("hybrid query must not run")
 
-    monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", unexpected_loader)
-    monkeypatch.setattr(memory_service_module, "embed_texts_with_config", unexpected_embed)
-    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", unexpected_query)
+    monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", unexpected_loader)
+    monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", unexpected_embed)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", unexpected_query)
 
     async with memory_database() as db:
         not_configured = await memory_service.recall(db, uid="missing-recall-user", query="query")
@@ -1127,9 +1129,9 @@ async def test_recall_filters_metadata_and_database_state_while_preserving_fusio
         assert limit == 10
         return hits
 
-    monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", fake_loader)
-    monkeypatch.setattr(memory_service_module, "embed_texts_with_config", fake_embed)
-    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", fake_query)
+    monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", fake_loader)
+    monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", fake_embed)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", fake_query)
 
     async with memory_database() as db:
         result = await memory_service.recall(
@@ -1206,10 +1208,10 @@ async def test_recall_touch_failure_returns_the_original_ok_result(
     async def failed_touch(*_args: Any, **_kwargs: Any) -> int:
         raise RuntimeError("touch unavailable")
 
-    monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", fake_loader)
-    monkeypatch.setattr(memory_service_module, "embed_texts_with_config", fake_embed)
-    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", fake_query)
-    monkeypatch.setattr(memory_service_module.memory_record_crud, "touch_last_recalled_at", failed_touch)
+    monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", fake_loader)
+    monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", fake_embed)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", fake_query)
+    monkeypatch.setattr(memory_service_recall_module.memory_record_crud, "touch_last_recalled_at", failed_touch)
 
     async with memory_database() as db:
         result = await memory_service.recall(db, uid=uid, query="touch failure")
@@ -1310,9 +1312,9 @@ async def test_recall_applies_top_k_and_total_character_budget_by_truncating_las
     async def fake_query(*_args: Any, **_kwargs: Any) -> list[_RecallHit]:
         return [_hit(first.id, uid=uid), _hit(second.id, uid=uid)]
 
-    monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", fake_loader)
-    monkeypatch.setattr(memory_service_module, "embed_texts_with_config", fake_embed)
-    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", fake_query)
+    monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", fake_loader)
+    monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", fake_embed)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", fake_query)
 
     async with memory_database() as db:
         result = await memory_service.recall(
@@ -1354,9 +1356,9 @@ async def test_recall_embedding_failure_and_dimension_mismatch_are_degraded(
     async def unexpected_query(*_args: Any, **_kwargs: Any) -> list[Any]:
         raise AssertionError("degraded recall must not query the collection")
 
-    monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", fake_loader)
-    monkeypatch.setattr(memory_service_module, "embed_texts_with_config", fake_embed)
-    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", unexpected_query)
+    monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", fake_loader)
+    monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", fake_embed)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", unexpected_query)
 
     async with memory_database() as db:
         result = await memory_service.recall(db, uid=uid, query="failure")
@@ -1395,9 +1397,9 @@ async def test_recall_returns_degraded_when_active_configuration_changes_after_e
             assert changed is not None
         return [_hit(record.id, uid=uid)]
 
-    monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", fake_loader)
-    monkeypatch.setattr(memory_service_module, "embed_texts_with_config", fake_embed)
-    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", query_then_change)
+    monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", fake_loader)
+    monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", fake_embed)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", query_then_change)
 
     async with memory_database() as db:
         result = await memory_service.recall(db, uid=uid, query="config change")

@@ -397,8 +397,9 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
         "db": context.db,
         "uid": "user-1",
         "query": "private query",
-        "top_k": 3,
-        "result_max_chars": 1234 - len("private recalled content") - len("second recalled content"),
+        "top_k": 5,
+        "candidate_k": 500,
+        "result_max_chars": 1234,
         "before_message_id": context.source_message_id,
     }
     assert json.loads(result) == {
@@ -769,7 +770,7 @@ async def test_build_system_prompt_includes_memory_rules_only_when_both_switches
     async def no_knowledge_bases(*_args, **_kwargs):
         return []
 
-    monkeypatch.setattr(inject_system_prompt_module, "list_available_knowledge_bases", no_knowledge_bases)
+    monkeypatch.setattr(inject_system_prompt_module.knowledge_base_crud, "list_recall_sources_by_profile", no_knowledge_bases)
     prompt = await inject_system_prompt_module.build_system_prompt(
         None,
         _profile(memory_enabled=memory_enabled),
@@ -952,8 +953,8 @@ async def test_knowledge_base_catalog_marks_name_and_description_as_untrusted(mo
         ]
 
     monkeypatch.setattr(
-        inject_system_prompt_module,
-        "list_available_knowledge_bases",
+        inject_system_prompt_module.knowledge_base_crud,
+        "list_recall_sources_by_profile",
         fake_knowledge_bases,
     )
 
@@ -984,11 +985,11 @@ async def test_dynamic_knowledge_base_tool_schema_does_not_embed_untrusted_names
             )
         ]
 
-    monkeypatch.setattr("app.core.tools.list_available_knowledge_bases", fake_knowledge_bases)
+    monkeypatch.setattr("app.core.tools.knowledge_base_crud.list_recall_sources_by_profile", fake_knowledge_bases)
 
     tools, whitelist = await get_tools_for_profile(
         None,
-        _profile(memory_enabled=True, enabled_tools=["query_knowledge_base"]),
+        _profile(memory_enabled=False, enabled_tools=[]),
     )
     query_tool = next(tool for tool in tools if tool["function"]["name"] == "query_knowledge_base")
     knowledge_base_id = query_tool["function"]["parameters"]["properties"]["knowledge_base_id"]

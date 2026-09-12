@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import ConfigDict, model_validator
 from sqlalchemy import DDL, CheckConstraint, ForeignKeyConstraint, Integer, Text, event
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlmodel import (
     JSON,
     Column,
@@ -441,6 +442,18 @@ class KnowledgeJobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class KnowledgeOrganizationStageStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INVALIDATED = "invalidated"
+
+
+class KnowledgeOrganizationFragmentStatus(StrEnum):
+    COMPLETED = "completed"
+    INVALIDATED = "invalidated"
+
+
 class ManagedKnowledgeItem(SQLModel, table=True):
     __tablename__ = "managed_knowledge_item"
     __table_args__ = (
@@ -461,7 +474,10 @@ class ManagedKnowledgeItem(SQLModel, table=True):
     knowledge_base_id: int = Field(nullable=False, index=True, description="所属托管知识库")
     uid: str = Field(nullable=False, index=True, max_length=50, description="所属用户")
     knowledge_key: str = Field(nullable=False, index=True, max_length=255, description="稳定知识键")
-    content: str = Field(sa_column=Column(Text, nullable=False), description="完整知识正文，不保存截断内容")
+    content: str = Field(
+        sa_column=Column(Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
+        description="完整知识正文，不保存截断内容",
+    )
     content_token_count: int = Field(default=0, ge=0, nullable=False, description="完整正文 Token 数")
     content_hash: str = Field(nullable=False, index=True, max_length=64, description="完整正文的稳定 SHA-256 摘要")
     version: int = Field(default=1, ge=1, index=True, nullable=False, description="当前知识版本")
@@ -475,6 +491,7 @@ class ManagedKnowledgeItem(SQLModel, table=True):
     vector_item_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False), description="当前关联的向量分块标识")
     is_recallable: bool = Field(default=False, index=True, nullable=False, description="当前版本是否允许召回")
     pending_job_id: int | None = Field(default=None, index=True, description="待处理知识作业；步骤 4 接入")
+    organization_lock_token: str | None = Field(default=None, index=True, max_length=64, description="知识整理运行锁；非空时禁止人工和 LLM 修改或删除")
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
     updated_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
     deleted_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), index=True))
@@ -589,6 +606,109 @@ class KnowledgeJob(SQLModel, table=True):
     finished_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), index=True))
 
 
+class KnowledgeOrganizationSnapshot(SQLModel, table=True):
+    __tablename__ = "knowledge_organization_snapshot"
+    __table_args__ = (
+        UniqueConstraint("uid", "knowledge_base_id", "snapshot_key", name="uq_knowledge_organization_snapshot_identity"),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "uid"],
+            ["knowledge_base.id", "knowledge_base.uid"],
+            name="fk_knowledge_organization_snapshot_kb_owner",
+            ondelete="CASCADE",
+        ),
+        Index("ix_knowledge_organization_snapshot_kb_created", "knowledge_base_id", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    uid: str = Field(nullable=False, index=True, max_length=50)
+    knowledge_base_id: int = Field(nullable=False, index=True)
+    snapshot_key: str = Field(nullable=False, index=True, max_length=64)
+    boundary_revision_id: int = Field(default=0, ge=0, nullable=False)
+    active_embedding_revision: int = Field(default=0, ge=0, nullable=False)
+    index_revision: int = Field(default=0, ge=0, nullable=False)
+    item_count: int = Field(default=0, ge=0, nullable=False)
+    items: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
+
+
+class KnowledgeOrganizationSnapshotItem(SQLModel, table=True):
+    __tablename__ = "knowledge_organization_snapshot_item"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "sequence", name="uq_knowledge_organization_snapshot_item_sequence"),
+        UniqueConstraint("snapshot_id", "knowledge_id", name="uq_knowledge_organization_snapshot_item_knowledge"),
+        Index("ix_knowledge_organization_snapshot_item_snapshot_sequence", "snapshot_id", "sequence"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    snapshot_id: int = Field(nullable=False, index=True, foreign_key="knowledge_organization_snapshot.id", ondelete="CASCADE")
+    uid: str = Field(nullable=False, index=True, max_length=50)
+    knowledge_base_id: int = Field(nullable=False, index=True)
+    sequence: int = Field(ge=0, nullable=False)
+    knowledge_id: int = Field(ge=1, nullable=False, index=True)
+    expected_version: int = Field(ge=1, nullable=False)
+    knowledge_key: str = Field(nullable=False, max_length=255)
+    content_hash: str = Field(nullable=False, max_length=64)
+    content_token_count: int = Field(default=0, ge=0, nullable=False)
+    revision_id: int = Field(ge=1, nullable=False, index=True)
+    source_type: str = Field(nullable=False, max_length=30)
+    source_reference: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    llm_maintainable: bool = Field(default=True, nullable=False)
+    indexed_version: int = Field(ge=1, nullable=False)
+    vector_item_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
+
+
+class KnowledgeOrganizationStage(SQLModel, table=True):
+    __tablename__ = "knowledge_organization_stage"
+    __table_args__ = (
+        UniqueConstraint("work_key", "stage_key", name="uq_knowledge_organization_stage_work_stage"),
+        Index("ix_knowledge_organization_stage_kb_status", "knowledge_base_id", "status", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    uid: str = Field(nullable=False, index=True, max_length=50)
+    knowledge_base_id: int = Field(nullable=False, index=True)
+    snapshot_id: int = Field(nullable=False, index=True, foreign_key="knowledge_organization_snapshot.id", ondelete="CASCADE")
+    work_key: str = Field(nullable=False, index=True, max_length=64)
+    snapshot_key: str = Field(nullable=False, index=True, max_length=64)
+    stage_key: str = Field(nullable=False, index=True, max_length=64)
+    stage_index: int = Field(default=0, ge=0, nullable=False)
+    lower_stage_key: str | None = Field(default=None, index=True, max_length=64)
+    model_key: str = Field(nullable=False, index=True, max_length=64)
+    model_snapshot: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    expected_fragment_count: int = Field(ge=1, nullable=False)
+    succeeded_fragment_count: int = Field(default=0, ge=0, nullable=False)
+    status: KnowledgeOrganizationStageStatus = Field(default=KnowledgeOrganizationStageStatus.RUNNING, index=True, max_length=20)
+    error: str | None = Field(default=None, sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
+    completed_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), index=True))
+
+
+class KnowledgeOrganizationFragment(SQLModel, table=True):
+    __tablename__ = "knowledge_organization_fragment"
+    __table_args__ = (
+        UniqueConstraint("work_key", "stage_key", "fragment_index", name="uq_knowledge_organization_fragment_work_stage_index"),
+        UniqueConstraint("dedupe_key", name="uq_knowledge_organization_fragment_dedupe"),
+        Index("ix_knowledge_organization_fragment_stage_index", "stage_id", "fragment_index"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    dedupe_key: str = Field(nullable=False, index=True, max_length=64)
+    uid: str = Field(nullable=False, index=True, max_length=50)
+    knowledge_base_id: int = Field(nullable=False, index=True)
+    snapshot_id: int = Field(nullable=False, index=True)
+    stage_id: int = Field(nullable=False, index=True, foreign_key="knowledge_organization_stage.id", ondelete="CASCADE")
+    work_key: str = Field(nullable=False, index=True, max_length=64)
+    snapshot_key: str = Field(nullable=False, index=True, max_length=64)
+    stage_key: str = Field(nullable=False, index=True, max_length=64)
+    model_key: str = Field(nullable=False, index=True, max_length=64)
+    fragment_index: int = Field(ge=0, nullable=False)
+    candidate_scope: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    result: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    status: KnowledgeOrganizationFragmentStatus = Field(default=KnowledgeOrganizationFragmentStatus.COMPLETED, index=True, max_length=20)
+    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
+
+
 class KnowledgeBaseCreate(SQLModel):
     name: str = Field(..., min_length=1, max_length=100, description="知识库名称")
     description: str | None = Field(None, max_length=500, description="知识库描述")
@@ -632,6 +752,83 @@ class KnowledgeBaseUpdate(SQLModel):
 class KnowledgeBaseEmbeddingMigrationRequest(SQLModel):
     embedding_channel_id: int = Field(..., gt=0, description="目标向量化渠道ID")
     embedding_model_id: str = Field(..., min_length=1, max_length=255, description="目标向量化模型ID")
+
+
+class ManagedKnowledgeCreateRequest(SQLModel):
+    knowledge_key: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(..., min_length=1)
+    llm_maintainable: bool = False
+    dedupe_key: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class ManagedKnowledgeUpdateRequest(ManagedKnowledgeCreateRequest):
+    expected_version: int = Field(..., ge=1)
+
+
+class ManagedKnowledgeDeleteRequest(SQLModel):
+    expected_version: int = Field(..., ge=1)
+    dedupe_key: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class ManagedKnowledgeRetryRequest(SQLModel):
+    expected_version: int = Field(..., ge=1)
+    failed_job_id: int = Field(..., ge=1)
+    dedupe_key: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class ManagedKnowledgeItemSummaryResponse(SQLModel):
+    id: int
+    knowledge_base_id: int
+    knowledge_key: str
+    content_preview: str
+    content_token_count: int
+    version: int
+    source_type: ManagedKnowledgeSourceType
+    source_reference: dict[str, Any] | None = None
+    created_by: ManagedKnowledgeActorType
+    last_modified_by: ManagedKnowledgeActorType
+    llm_maintainable: bool
+    indexed_version: int
+    is_recallable: bool
+    pending_job_id: int | None = None
+    publication_job_id: int | None = None
+    publication_job_status: KnowledgeJobStatus | None = None
+    publication_job_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    last_recalled_at: datetime | None = None
+
+
+class ManagedKnowledgeItemResponse(ManagedKnowledgeItemSummaryResponse):
+    content: str
+
+
+class ManagedKnowledgeListResponse(SQLModel):
+    items: list[ManagedKnowledgeItemSummaryResponse]
+    total: int
+
+
+class ManagedKnowledgeMutationResponse(SQLModel):
+    status: str
+    item: ManagedKnowledgeItemResponse | None = None
+    job_id: int | None = None
+
+
+class ManagedKnowledgeRevisionResponse(SQLModel):
+    id: int
+    knowledge_base_id: int
+    knowledge_id: int
+    version: int
+    operation: ManagedKnowledgeRevisionOperation
+    before_snapshot: dict[str, Any] | None = None
+    after_snapshot: dict[str, Any]
+    source_type: ManagedKnowledgeSourceType
+    source_reference: dict[str, Any] | None = None
+    source_job_id: int | None = None
+    modified_by: ManagedKnowledgeActorType
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class KnowledgeBaseProfileBindingUpdate(SQLModel):

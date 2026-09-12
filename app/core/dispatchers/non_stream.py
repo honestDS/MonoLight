@@ -4,13 +4,17 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dispatchers.interactive import InteractiveDispatcherMixin
+from app.core.dispatchers.interactive import dispatch_interactive
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage
 
+__all__ = [
+    "NonStreamDispatcherMixin",
+]
 
-class NonStreamDispatcherMixin(InteractiveDispatcherMixin):
+
+class NonStreamDispatcherMixin:
     @classmethod
     async def dispatch(
         cls,
@@ -37,7 +41,7 @@ class NonStreamDispatcherMixin(InteractiveDispatcherMixin):
         additional_system_prompt: str | None = None,
         request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ):
-        return await cls._dispatch_interactive(
+        return await dispatch_interactive(
             db=db,
             message=message,
             uid=uid,
@@ -61,4 +65,5 @@ class NonStreamDispatcherMixin(InteractiveDispatcherMixin):
             additional_system_prompt=additional_system_prompt,
             request_metadata_callback=request_metadata_callback,
             dispatcher_mode="non_stream",
+            validate_initial_message_before_save=cls.validate_initial_message_before_save,
         )

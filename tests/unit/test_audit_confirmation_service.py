@@ -1312,7 +1312,7 @@ def test_audit_file_reader_enforces_token_truncation_and_call_count(monkeypatch,
 @pytest.mark.parametrize("file_kind", ["missing", "truncated", "non_utf8"])
 def test_read_failure_snapshots_are_rechecked_before_confirmed_execution(tmp_path, file_kind):
     import app.core.audit.service as service
-    from app.core.session_reply_queue import executor as executor_module
+    from app.core.session_reply_queue import executor_audit as executor_audit_module
 
     target = tmp_path / f"{file_kind}.txt"
     if file_kind == "truncated":
@@ -1338,14 +1338,14 @@ def test_read_failure_snapshots_are_rechecked_before_confirmed_execution(tmp_pat
         assert snapshots[0]["sha256"]
 
     details = [SimpleNamespace(file_snapshots=snapshots)]
-    assert not executor_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
+    assert not executor_audit_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
     if file_kind == "missing":
         target.write_text("created", encoding="utf-8")
     elif file_kind == "truncated":
         target.write_bytes(b"changed-data")
     else:
         target.write_bytes(b"\xfd\xfb")
-    assert executor_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
+    assert executor_audit_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
 
 
 @pytest.mark.parametrize("file_type", ["regular_file", "other"])

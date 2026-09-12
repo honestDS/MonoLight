@@ -207,6 +207,21 @@ async def async_get_collection_items(
     return await _to_thread_and_wait(_get_collection_items_page_sync, collection_name, offset, limit, include)
 
 
+def _get_collection_items_by_ids_sync(collection_name: str, ids: Sequence[str], include: list[str] | None):
+    collection = get_collection(collection_name)
+    return collection.get(ids=list(ids), include=include or ["documents", "metadatas"])
+
+
+async def async_get_collection_items_by_ids(
+    collection_name: str,
+    ids: Sequence[str],
+    include: list[str] | None = None,
+):
+    if not ids:
+        return {"ids": []}
+    return await _to_thread_and_wait(_get_collection_items_by_ids_sync, collection_name, ids, include)
+
+
 def _query_collection_sync(
     collection_name: str,
     query_embedding: Sequence[float],

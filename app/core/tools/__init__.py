@@ -4,9 +4,11 @@ from typing import Any
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.embedding.knowledge_base import build_knowledge_base_whitelist, list_available_knowledge_bases
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.embedding.knowledge_base import build_knowledge_base_whitelist
 from app.core.log import get_logger
 from app.models.channel import ChannelConfig
+from app.models.knowledge_base import KnowledgeBaseType
 from app.models.profile import Profile
 
 from .cancel_background_task import CANCEL_BACKGROUND_TASK_TOOL_SCHEMA, CancelBackgroundTaskExecutor
@@ -251,7 +253,8 @@ async def _is_image_generation_profile_available(db: AsyncSession, profile: Prof
 async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_background: bool = True) -> tuple[list[dict[str, Any]], list[int]]:
     """
     根据 Profile 中的 enabled_tools 生成当前会话向 LLM 暴露的工具列表。
-    query_knowledge_base 属于动态工具：只有被启用且存在可用知识库时才暴露，并会注入运行时知识库白名单。
+    query_knowledge_base 属于动态工具：长期记忆关闭且存在已发布、索引可用的用户知识库时才暴露，
+    并会注入运行时知识库白名单；该工具不受 enabled_tools 控制。
     """
     enabled_tool_names = _get_enabled_tool_names(profile)
     base_tools = []
@@ -265,16 +268,25 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_bac
         base_tools.append(copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA))
     if _is_memory_enabled(profile):
         base_tools.extend(copy.deepcopy(schema) for schema in CONFIGURABLE_MEMORY_TOOL_SCHEMAS)
+        return base_tools, []
+
     whitelist_ids = []
 
     try:
-        if KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"] not in enabled_tool_names:
+        profile_id = profile.id
+        if not isinstance(profile_id, int):
             return base_tools, whitelist_ids
 
-        knowledge_bases = await list_available_knowledge_bases(db, profile)
+        knowledge_bases = await knowledge_base_crud.list_recall_sources_by_profile(
+            db,
+            uid=profile.uid,
+            profile_id=profile_id,
+            include_managed=False,
+        )
         valid_knowledge_bases = []
         for knowledge_base in knowledge_bases:
-            if isinstance(knowledge_base.id, int):
+            knowledge_base_type = getattr(knowledge_base.knowledge_base_type, "value", knowledge_base.knowledge_base_type)
+            if knowledge_base_type == KnowledgeBaseType.USER.value and isinstance(knowledge_base.id, int):
                 valid_knowledge_bases.append(knowledge_base)
         if valid_knowledge_bases:
             whitelist_ids = build_knowledge_base_whitelist(valid_knowledge_bases)

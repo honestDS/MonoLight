@@ -536,7 +536,7 @@ async def test_confirmation_status_sync_uses_database_status_and_deduplicates_br
     async def send_event(uid, session_id, event):
         events.append((uid, session_id, event))
 
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
 
     async with audit_database() as session:
         record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
@@ -592,7 +592,7 @@ async def test_confirmation_status_event_contains_persisted_tool_result_and_is_j
     async def send_event(uid, session_id, event):
         events.append((uid, session_id, event))
 
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
 
     async with audit_database() as session:
         record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
@@ -669,7 +669,7 @@ async def test_tool_result_notification_reads_result_after_status_event(audit_da
     async def send_event(_uid, _session_id, event):
         events.append(event)
 
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
 
     async with audit_database() as session:
         record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
@@ -722,7 +722,7 @@ async def test_confirmation_status_sync_covers_execution_terminal_states(audit_d
     async def send_event(uid, session_id, event):
         events.append(event)
 
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
 
     async with audit_database() as session:
         record, _snapshot = await _create_preparing(session, tmp_path, tool_count=1)
@@ -754,7 +754,7 @@ async def test_confirmation_status_sync_uses_database_compare_and_swap_across_se
     async def send_event(uid, session_id, event):
         events.append(event)
 
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
 
     async with audit_database() as session:
         record, _snapshot = await _create_preparing(session, tmp_path, tool_count=1)
@@ -835,8 +835,8 @@ async def test_confirmation_status_sync_reloads_database_status_after_compare_an
                 return False
             return await original_update(db, **kwargs)
 
-        monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
-        monkeypatch.setattr("app.core.audit.confirmation.message_crud.update_content_if_matches", conflicting_update)
+        monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
+        monkeypatch.setattr("app.core.audit.confirmation_events.message_crud.update_content_if_matches", conflicting_update)
 
         assert not await update_confirmation_message_status(session, audit_record_id=record.id)
         await session.refresh(card)
@@ -852,7 +852,7 @@ async def test_startup_expiration_syncs_confirmation_card_from_final_record(audi
     async def send_event(uid, session_id, event):
         events.append(event)
 
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
     audit_root = tmp_path / "audit"
 
     async with audit_database() as session:
@@ -1027,7 +1027,7 @@ async def test_startup_interrupted_confirmation_syncs_unknown_card(audit_databas
     async def send_event(_uid, _session_id, event):
         events.append(event)
 
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
     audit_root = tmp_path / "audit"
     audit_file = audit_root / "temp_u1" / "audit_confirmed_unknown.json"
     audit_file.parent.mkdir(parents=True)

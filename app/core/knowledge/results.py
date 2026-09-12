@@ -10,6 +10,7 @@ class ManagedKnowledgeMutationStatus(StrEnum):
     CREATED = "created"
     UPDATED = "updated"
     DELETED = "deleted"
+    RETRY_SUBMITTED = "retry_submitted"
     UNCHANGED = "unchanged"
     EXISTING_KEY = "existing_key"
     EXISTING_CONTENT = "existing_content"

@@ -115,3 +115,81 @@ def test_summary_threshold_and_hard_window_share_one_required_input_value():
     assert threshold_usage.required_input_tokens == hard_window_usage.required_input_tokens
     assert threshold_usage.budget == hard_window_usage.budget
     assert threshold_usage.summary_trigger_tokens * 2 <= hard_window_usage.summary_trigger_tokens + 1
+
+
+def test_final_request_budget_preserves_longterm_memory_recall_json():
+    recall_payload = json.dumps(
+        {
+            "items": [
+                {
+                    "memory_id": 1,
+                    "expected_version": 2,
+                    "memory_key": "project",
+                    "memory_type": "project",
+                    "content": "memory content " * 220,
+                }
+            ],
+            "knowledge_base": [
+                {
+                    "knowledge_base_id": 10,
+                    "knowledge_base_name": "Docs",
+                    "source_type": "user_knowledge",
+                    "source": "guide.md",
+                    "content": "knowledge content " * 180,
+                    "truncated": False,
+                    "llm_maintainable": False,
+                }
+            ],
+            "chat_history": [
+                {
+                    "role": "user",
+                    "content": "historical content " * 160,
+                    "session_id": "older-session",
+                    "created_at": "2026-09-01 10:00:00",
+                }
+            ],
+            "current_session_id": "session-1",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system prompt"),
+        InternalMessage(id=1, role=MessageRole.USER, content="current question"),
+        InternalMessage(
+            id=2,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[
+                InternalToolCall(
+                    id="memory-recall-1",
+                    name="manage_longterm_memory",
+                    arguments={
+                        "operation": "recall",
+                        "query": "stable background",
+                        "knowledge_query": "document question",
+                    },
+                )
+            ],
+        ),
+        InternalMessage(
+            id=3,
+            role=MessageRole.TOOL,
+            tool_call_id="memory-recall-1",
+            content=recall_payload,
+        ),
+    ]
+
+    request_messages = ContextManager.trim_messages_for_model_request(
+        messages=messages,
+        uid="user-1",
+        session_id="session-1",
+        context_window_k=1,
+        max_tokens=256,
+        tools=None,
+        safety_margin_tokens=64,
+    )
+
+    tool_message = next(message for message in request_messages if message.role == MessageRole.TOOL)
+    payload = json.loads(tool_message.content)
+    assert payload["items"][0]["memory_id"] == 1
+    assert payload["truncated"] is True

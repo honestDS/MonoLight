@@ -3,6 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.constants import (
+    ERR_KNOWLEDGE_ORGANIZATION_CONTEXT_EXCEEDED,
+    ERR_KNOWLEDGE_ORGANIZATION_FAILED,
+    ERR_KNOWLEDGE_ORGANIZATION_MODEL_CONFIG_INVALID,
+    ERR_KNOWLEDGE_ORGANIZATION_MODEL_EXECUTION_FAILED,
+    ERR_KNOWLEDGE_ORGANIZATION_NOT_CONVERGED,
     ERR_MANAGED_KNOWLEDGE_CONTAINER_CONFLICT,
     ERR_MANAGED_KNOWLEDGE_CONTENT_TOO_LONG,
     ERR_MANAGED_KNOWLEDGE_FIELD_TYPE_INVALID,
@@ -11,7 +16,98 @@ from app.core.constants import (
     ERR_MANAGED_KNOWLEDGE_VERSION_CONFLICT,
     MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS,
 )
-from app.core.exceptions import ParameterException, ResourceNotFoundException
+from app.core.exceptions import LLMException, ParameterException, ResourceNotFoundException, ServerException
+
+
+def _organization_error_data(
+    *,
+    status: str,
+    retryable: bool,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {"status": status, "retryable": retryable}
+    if data:
+        payload.update(data)
+    return payload
+
+
+class KnowledgeOrganizationExecutionError(ServerException):
+    def __init__(
+        self,
+        message: str = ERR_KNOWLEDGE_ORGANIZATION_FAILED,
+        code: int = 500,
+        *,
+        status: str = "knowledge_organization_failed",
+        retryable: bool = False,
+        data: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code=code,
+            data=_organization_error_data(status=status, retryable=retryable, data=data),
+            **kwargs,
+        )
+
+
+class KnowledgeOrganizationContextExceededError(ParameterException):
+    def __init__(
+        self,
+        message: str = ERR_KNOWLEDGE_ORGANIZATION_CONTEXT_EXCEEDED,
+        code: int = 400,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code=code,
+            data=_organization_error_data(status="organization_context_exceeded", retryable=False),
+            **kwargs,
+        )
+
+
+class KnowledgeOrganizationConfigurationError(ParameterException):
+    def __init__(
+        self,
+        message: str = ERR_KNOWLEDGE_ORGANIZATION_MODEL_CONFIG_INVALID,
+        code: int = 400,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code=code,
+            data=_organization_error_data(status="organization_model_config_invalid", retryable=False),
+            **kwargs,
+        )
+
+
+class KnowledgeOrganizationModelFailedError(LLMException):
+    def __init__(
+        self,
+        message: str = ERR_KNOWLEDGE_ORGANIZATION_MODEL_EXECUTION_FAILED,
+        code: int = 502,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code=code,
+            data=_organization_error_data(status="organization_model_execution_failed", retryable=True),
+            **kwargs,
+        )
+
+
+class KnowledgeOrganizationNotConvergedError(ServerException):
+    def __init__(
+        self,
+        message: str = ERR_KNOWLEDGE_ORGANIZATION_NOT_CONVERGED,
+        code: int = 500,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code=code,
+            data=_organization_error_data(status="organization_not_converged", retryable=False),
+            **kwargs,
+        )
 
 
 class ManagedKnowledgeValidationError(ParameterException):
@@ -60,6 +156,11 @@ class ManagedKnowledgeNotFoundError(ResourceNotFoundException):
 
 
 __all__ = [
+    "KnowledgeOrganizationConfigurationError",
+    "KnowledgeOrganizationContextExceededError",
+    "KnowledgeOrganizationExecutionError",
+    "KnowledgeOrganizationModelFailedError",
+    "KnowledgeOrganizationNotConvergedError",
     "ManagedKnowledgeConflictError",
     "ManagedKnowledgeContainerConflictError",
     "ManagedKnowledgeContentTooLongError",

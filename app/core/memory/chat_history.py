@@ -42,6 +42,7 @@ class ChatHistoryRecallService:
         uid: str,
         query: str,
         top_k: int = 5,
+        candidate_k: int | None = None,
         result_max_chars: int = 4000,
         before_message_id: int | None = None,
     ) -> ChatHistoryRecallResult:
@@ -53,6 +54,24 @@ class ChatHistoryRecallService:
             raise ValueError(t(ERR_MEMORY_FIELD_REQUIRED, field="query"))
         if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 50:
             raise ValueError(t(ERR_VALUE_MUST_BE_BETWEEN, field="top_k", minimum=1, maximum=50))
+        effective_candidate_k = (
+            MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT
+            if candidate_k is None
+            else candidate_k
+        )
+        if (
+            isinstance(effective_candidate_k, bool)
+            or not isinstance(effective_candidate_k, int)
+            or not 1 <= effective_candidate_k <= MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT
+        ):
+            raise ValueError(
+                t(
+                    ERR_VALUE_MUST_BE_BETWEEN,
+                    field="candidate_k",
+                    minimum=1,
+                    maximum=MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT,
+                )
+            )
         if isinstance(result_max_chars, bool) or not isinstance(result_max_chars, int) or not 1 <= result_max_chars <= 50000:
             raise ValueError(t(ERR_VALUE_MUST_BE_BETWEEN, field="result_max_chars", minimum=1, maximum=50000))
         if before_message_id is not None and (isinstance(before_message_id, bool) or not isinstance(before_message_id, int) or before_message_id <= 0):
@@ -62,7 +81,7 @@ class ChatHistoryRecallService:
             db,
             uid=normalized_uid,
             before_message_id=before_message_id,
-            limit=MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT,
+            limit=effective_candidate_k,
         )
 
         raw_messages_by_id = {message.id: message for message in raw_messages if message.id is not None}

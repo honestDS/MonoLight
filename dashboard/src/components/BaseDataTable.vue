@@ -15,6 +15,7 @@
         :data="data"
         v-loading="loading"
         size="default"
+        table-layout="auto"
         :empty-text="resolvedEmptyText">
         <slot></slot>
       </el-table>

@@ -160,7 +160,15 @@ app/core/
 ```text
 app/core/audit/
 ├── __init__.py             # 审计能力导出
-├── confirmation.py         # 审计确认数据
+├── confirmation.py         # 审计确认兼容导出入口
+├── confirmation_common.py  # 确认枚举、状态更新与投影数据结构
+├── confirmation_decision.py # 确认候选识别与决定解析
+├── confirmation_events.py  # 确认状态及工具结果事件通知
+├── confirmation_lifecycle.py # 确认过期、取消与会话清理
+├── confirmation_persistence.py # 待确认数据包及取消结果持久化
+├── confirmation_projection.py # 确认状态的消息投影同步
+├── confirmation_queries.py # 确认消息与结构化结果内部查询
+├── confirmation_results.py # 待确认工具结果读取、替换与终态更新
 ├── integrity.py            # 审计完整性数据
 ├── persistence.py          # 审计持久化协调
 ├── service.py              # 审计应用服务
@@ -193,6 +201,17 @@ app/core/knowledge/
 ├── managed.py              # 托管知识条目、版本与维护边界领域服务
 ├── managed_container.py    # 按 Profile 懒创建/复用托管知识库并复制长期记忆当前嵌入运行态
 ├── migration.py            # 知识库迁移期间的增量变更记录边界
+├── organization.py         # 托管知识整理快照冻结、分页读取与稳定工作身份
+├── organization_analysis.py # 整理分析阶段及上下文压缩
+├── organization_executor.py # 整理执行能力兼容导出入口
+├── organization_pipeline.py # 有界并发整理管线
+├── organization_plan.py    # 整理计划阶段执行
+├── organization_reduction.py # 多轮整理归约与收敛校验
+├── organization_run.py     # 整理作业运行、租约与终态协调
+├── organization_runtime.py # 模型配置、调用与语义邻居运行支持
+├── organization_scope.py   # 整理范围构建、分组与暂存
+├── organization_stages.py  # 整理阶段、片段与断点续跑持久化
+├── organization_types.py   # 整理计划、范围与执行结果契约
 ├── recall.py               # 托管知识候选校验、去重与最终主数据还原
 ├── results.py              # 托管知识操作及统一知识召回结果模型
 └── unified_recall.py       # 托管知识与用户知识库候选合并、全局重排和结果裁剪
@@ -219,7 +238,12 @@ app/core/knowledge_jobs/
 ├── consumer.py             # 作业消费、租约续期、恢复与重试
 ├── executor.py             # 租约栅栏与处理器执行器
 ├── handlers.py             # 托管知识异步嵌入、发布和删除清理
-├── migration.py            # 通用知识库嵌入迁移、校验、原子切换与旧集合清理
+├── migration.py            # 知识库嵌入迁移兼容导出入口
+├── migration_build.py      # 目标集合构建与增量追平
+├── migration_common.py     # 迁移契约、载荷校验与向量计划
+├── migration_handlers.py   # 迁移、取消、终态与旧集合清理处理器
+├── migration_prepare.py    # 迁移准备、配置锁定与作业提交
+├── migration_switch.py     # 目标校验、增量栅栏与原子切换
 └── vector_cleanup.py       # staged/superseded 向量的持久化独立清理作业
 ```
 
@@ -230,10 +254,20 @@ app/core/knowledge_jobs/
 ```text
 app/core/memory_jobs/
 ├── __init__.py             # 记忆作业能力导出
-├── manager.py              # 作业管理
 ├── consumer.py             # 作业消费与租约协调
 ├── executor.py             # 作业执行器
-├── handlers.py             # 记忆作业处理器
+├── handlers.py             # 记忆作业处理器兼容导出入口
+├── handler_cleanup.py      # 终态向量与占位记录清理
+├── handler_contracts.py    # 处理器上下文、快照与错误契约
+├── handler_execution.py    # 作业类型分派与执行协调
+├── handler_factory.py      # 处理器集合及默认执行器装配
+├── handler_organization.py # 整理合并发布
+├── handler_organization_validation.py # 整理与删除载荷校验
+├── handler_prepare.py      # 发布、替换、整理及删除执行前准备
+├── handler_publication.py  # 记忆版本发布与替换
+├── handler_publication_validation.py # 发布状态、容量与唯一性校验
+├── handler_replacement_validation.py # 替换载荷及快照校验
+├── handler_vector.py       # 向量生成、元数据与补偿删除
 ├── organization_handler.py # 记忆整理模型调用作业处理器
 ├── maintenance_handlers.py # 记忆维护作业处理器
 ├── maintenance_lifecycle.py # 维护作业生命周期组件
@@ -241,7 +275,15 @@ app/core/memory_jobs/
 ├── maintenance_vector.py   # 维护作业向量组件
 ├── vector_cleanup.py       # 记忆向量清理作业组件
 ├── migration_handler.py    # 嵌入模型迁移处理器
-└── reindex_handler.py      # 向量索引处理器
+├── reindex_handler.py      # 向量索引处理器
+├── manager.py              # 作业管理兼容导出与组合入口
+├── manager_cleanup.py      # 终态作业清理提交
+├── manager_common.py       # 提交结果、异常与幂等校验
+├── manager_control.py      # 取消及控制操作
+├── manager_organization.py # 自动与手动整理提交
+├── manager_organization_child.py # 整理子作业提交
+├── manager_query.py        # 作业状态查询
+└── manager_submission.py   # 普通变更作业提交
 ```
 
 该目录承载长期记忆的独立作业能力，与长期记忆领域服务和 Worker 进程协作。
@@ -253,20 +295,36 @@ app/core/memory/
 ├── __init__.py             # 长期记忆公开入口
 ├── errors.py               # 记忆领域异常
 ├── capacity.py             # 长期记忆容量状态
+├── chat_history.py         # 历史聊天稀疏召回
 ├── results.py              # 记忆领域结果类型
 ├── normalization.py        # 记忆数据规范化
 ├── identifiers.py          # 记忆持久化标识
-├── service.py              # 长期记忆领域服务
+├── service.py              # 长期记忆领域服务组合入口
+├── service_common.py       # 领域服务共用加载、校验与提交支持
+├── service_create.py       # 记忆创建
+├── service_delete.py       # 记忆删除
+├── service_embedding.py    # 嵌入变更增量记录
+├── service_pin.py          # 记忆固定状态更新
+├── service_recall.py       # 主动记忆召回
+├── service_resume.py       # 暂停变更恢复
+├── service_update.py       # 记忆更新
 ├── management.py           # 长期记忆管理应用服务
 ├── management_helpers.py   # 记忆管理辅助组件
 ├── embedding_config.py     # 记忆嵌入配置服务
 ├── maintenance.py          # 记忆维护服务
-├── organization_types.py   # 记忆整理内部契约
-├── organization.py         # 记忆整理领域策略
+├── organization.py         # 记忆整理领域能力兼容导出入口
+├── organization_config.py  # 整理设置与模型配置
+├── organization_contracts.py # 整理执行载荷、预算与快照契约
+├── organization_execution.py # 整理模型请求、调用与恢复
+├── organization_payload.py # 整理执行载荷序列化
+├── organization_pins.py    # 整理合并的固定记忆策略
+├── organization_snapshot.py # 整理快照、摘要与作业载荷构建
+├── organization_types.py   # 整理计划与来源类型
+├── organization_validation.py # 整理输出、令牌预算与提交校验
 └── channel_protection.py   # 记忆渠道与模型引用管理
 ```
 
-长期记忆领域由 `service.py` 提供核心领域服务，由 `management.py` 面向管理接口组织管理能力；`management_helpers.py` 提供管理层共用的数据辅助能力。
+长期记忆领域由 `service.py` 组合创建、更新、删除、恢复、固定和召回能力，对外入口保持不变；`management.py` 面向管理接口组织管理能力，`management_helpers.py` 提供管理层共用的数据辅助能力。`organization.py` 同样保留为整理能力的稳定导出入口，具体配置、执行、快照与校验职责由同名前缀模块承载。
 
 长期记忆召回由已发布主动记忆检索和用户级历史聊天稀疏检索两个协作部分组成。已发布主动记忆检索提供优先的主结果及其管理标识；历史聊天稀疏检索只提供次要上下文，不进入记忆变更链路，也不能挤占主动记忆结果。
 
@@ -276,8 +334,20 @@ app/core/memory/
 app/core/session_reply_queue/
 ├── __init__.py             # 队列能力导出
 ├── consumer.py             # 回复工作消费
-├── executor.py             # 回复工作执行
-└── manager.py              # 回复工作管理
+├── executor.py             # 回复工作执行兼容导出入口
+├── executor_audit.py       # 审计执行绑定、未知终态与文件快照校验
+├── executor_common.py      # 工作身份、去重键与响应事件辅助
+├── executor_confirmed.py   # 已确认工具执行
+├── executor_interactive.py # 交互式回复及流事件持久化
+├── executor_lifecycle.py   # 工作执行、失败、重试与租约生命周期
+├── executor_metadata.py    # 请求元数据与 Provider Usage 持久化
+├── executor_replies.py     # 前台、后台及定时回复执行
+├── manager.py              # 回复工作管理组合入口
+├── manager_common.py       # 请求标识、事件与失败处理辅助
+├── manager_enqueue.py      # 回复工作入队
+├── manager_freeze.py       # 用户输入冻结与工作边界确定
+├── manager_result.py       # 工作结果等待与读取
+└── manager_submission.py   # 用户消息提交、确认判定与入队协调
 ```
 
 ### 交互终端：`app/core/terminal/`
@@ -286,7 +356,16 @@ app/core/session_reply_queue/
 app/core/terminal/
 ├── __init__.py             # 终端能力导出
 ├── schemas.py              # 终端协议数据结构
-├── manager.py              # 终端会话管理
+├── manager.py              # 终端管理兼容导出与组合入口
+├── manager_common.py       # 管理常量与变更请求契约
+├── audit_lifecycle.py      # 终端审计终态与会话级清理
+├── session_manager.py      # 终端会话创建、读取、写入与关闭
+├── session_runtime.py      # 单会话运行时内部组合类型
+├── session_runtime_commands.py # 运行时写入、调整与关闭命令
+├── session_runtime_common.py # 输出缓冲与租约异常辅助
+├── session_runtime_core.py # PTY 启动、读取与状态转换
+├── session_runtime_state.py # 会话运行状态、租约与进程身份同步
+├── worker_coordinator.py   # Worker 认领、续租与资源回收协调
 ├── process_config.py       # 终端进程配置
 ├── pty_base.py             # PTY 抽象
 ├── pty_factory.py           # PTY 驱动创建
@@ -317,7 +396,12 @@ app/core/crud/
 ├── account/
 │   └── user.py                 # 用户数据访问
 ├── audit/
-│   ├── audit.py                # 审计数据访问
+│   ├── audit.py                # 审计数据访问组合入口
+│   ├── claims.py               # 确认与执行占用
+│   ├── common.py               # 状态更新、占用与文件快照辅助
+│   ├── execution.py            # 审计执行记录及终态
+│   ├── preparation.py          # 审计轮次、明细与待确认准备
+│   ├── recovery.py             # 过期确认与执行恢复
 │   └── tool_result_version.py  # 审计结果版本数据访问
 ├── channel/
 │   ├── channel.py              # 渠道和模型数据访问
@@ -329,10 +413,23 @@ app/core/crud/
 │   ├── base.py                 # 知识库数据访问
 │   ├── embedding_transition.py # 知识库嵌入模型切换数据访问
 │   ├── job.py                  # 知识作业数据访问
-│   └── managed.py              # 托管知识数据访问
+│   ├── managed.py              # 托管知识数据访问
+│   └── organization.py         # 知识整理快照、阶段与片段持久化
 ├── memory/
-│   ├── store.py                # 长期记忆数据访问
-│   ├── job.py                  # 长期记忆作业数据访问
+│   ├── store.py                # 长期记忆数据访问组合入口
+│   ├── store_common.py         # 记录条件、排序与事务辅助
+│   ├── store_history.py        # 修订、嵌入增量与引用访问
+│   ├── store_record.py         # 记忆记录访问组合类型
+│   ├── store_record_lifecycle.py # 记录墓碑、恢复与清理
+│   ├── store_record_mutation.py # 记录创建与状态变更
+│   ├── store_record_query.py   # 记录查询与容量候选选择
+│   ├── store_state.py          # 用户记忆仓库与嵌入选择令牌
+│   ├── job.py                  # 长期记忆作业数据访问组合入口
+│   ├── job_claim.py            # 作业认领与租约续期
+│   ├── job_common.py           # 作业条件、结果契约与参数校验
+│   ├── job_control.py          # 作业取消与释放
+│   ├── job_query.py            # 作业查询
+│   ├── job_terminal.py         # 作业成功、失败与恢复终态
 │   └── maintenance.py          # 长期记忆维护数据访问
 ├── message_platform/
 │   ├── platform.py             # 消息平台数据访问
@@ -365,8 +462,12 @@ app/core/crud/
 app/core/dispatchers/
 ├── __init__.py             # 分发器导出
 ├── background.py           # 后台对话分发
-├── interactive.py          # 交互式对话分发
+├── interactive.py          # 交互式对话分发兼容导出入口
+├── interactive_generation.py # 单轮模型生成与流输出
 ├── interactive_helpers.py  # 交互式分发辅助
+├── interactive_runtime.py  # 交互式代理循环协调
+├── interactive_state.py    # 分发运行状态构建
+├── interactive_tools.py    # 工具轮次执行与审计状态持久化
 ├── memory/                 # 长期记忆召回组件
 │   ├── __init__.py         # 记忆召回公开导出
 │   ├── persistence.py      # 记忆召回持久化组件
@@ -487,7 +588,7 @@ app/models/
 
 `app/models/` 定义关系型持久化对象，由 `app/core/crud/` 提供访问，由 `app/providers/database/` 提供数据库连接和初始化能力。
 
-`app/models/knowledge_base.py` 定义知识库容器、用户文档、托管知识、版本历史和知识作业。托管条目保存正文、稳定标识、版本、来源和维护状态；版本历史独立保存快照。知识作业保存幂等、租约、重试和目标版本，不携带知识正文；向量分块仅作派生索引。
+`app/models/knowledge_base.py` 定义知识库容器、用户文档、托管知识、版本历史、知识作业，以及知识整理快照、阶段和片段。整理快照仅保存稳定元数据和托管知识版本引用，完整正文继续由版本历史作为不可变来源；阶段与片段保存稳定工作身份、模型快照、连续进度和模型结果。托管条目保存正文、稳定标识、版本、来源和维护状态；知识作业保存幂等、租约、重试和目标版本，不携带知识正文；向量分块仅作派生索引。
 
 ## 外部能力封装：`app/providers/`
 
