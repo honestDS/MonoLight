@@ -54,16 +54,8 @@ class ChatHistoryRecallService:
             raise ValueError(t(ERR_MEMORY_FIELD_REQUIRED, field="query"))
         if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 50:
             raise ValueError(t(ERR_VALUE_MUST_BE_BETWEEN, field="top_k", minimum=1, maximum=50))
-        effective_candidate_k = (
-            MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT
-            if candidate_k is None
-            else candidate_k
-        )
-        if (
-            isinstance(effective_candidate_k, bool)
-            or not isinstance(effective_candidate_k, int)
-            or not 1 <= effective_candidate_k <= MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT
-        ):
+        effective_candidate_k = MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT if candidate_k is None else candidate_k
+        if isinstance(effective_candidate_k, bool) or not isinstance(effective_candidate_k, int) or not 1 <= effective_candidate_k <= MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT:
             raise ValueError(
                 t(
                     ERR_VALUE_MUST_BE_BETWEEN,

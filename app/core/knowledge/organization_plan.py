@@ -8,7 +8,11 @@ from typing import Any, TextIO
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.audit.integrity import canonical_json_dumps
-from app.core.constants import KNOWLEDGE_ORGANIZATION_MODEL_MAX_ATTEMPTS
+from app.core.constants import (
+    KNOWLEDGE_ORGANIZATION_MODEL_MAX_ATTEMPTS,
+    LOG_KNOWLEDGE_ORGANIZATION_FRAGMENT_COMPLETED,
+    LOG_KNOWLEDGE_ORGANIZATION_STAGE_SPLIT,
+)
 from app.core.i18n import t
 from app.core.knowledge import (
     organization_analysis,
@@ -31,6 +35,7 @@ from app.core.knowledge.organization_types import (
     KnowledgeOrganizationPlan,
     KnowledgeOrganizationScopeItem,
 )
+from app.core.log import get_logger
 from app.core.prompts import KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.knowledge_base import (
@@ -43,6 +48,8 @@ from app.providers.llm.client import LLMClient
 
 __all__ = []
 
+logger = get_logger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class _StageExecutionResult:
@@ -50,6 +57,80 @@ class _StageExecutionResult:
     input_tokens: int
     output_tokens: int
     stats: KnowledgeOrganizationPipelineStats | None = None
+
+
+def _fragment_audit_result(plan: KnowledgeOrganizationPlan) -> str:
+    items: list[dict[str, Any]] = []
+    for item in plan.items:
+        raw = item.model_dump(mode="json")
+        target = raw.pop("target", None)
+        if isinstance(target, dict):
+            raw["target_knowledge_key"] = target.get("knowledge_key")
+        items.append(raw)
+    return canonical_json_dumps(items)
+
+
+def _log_stage_split(
+    *,
+    snapshot: KnowledgeOrganizationSnapshot,
+    organization_job_id: int | None,
+    stage_index: int,
+    purpose: str,
+    expected_count: int,
+    model: KnowledgeOrganizationModelConfig,
+) -> None:
+    if organization_job_id is None:
+        return
+    logger.bind(
+        uid=snapshot.uid,
+        knowledge_base_id=snapshot.knowledge_base_id,
+        job_id=organization_job_id,
+        stage_index=stage_index,
+        fragment_count=expected_count,
+        organization_stage_purpose=purpose,
+        model_id=model.model_id,
+    ).info(
+        t(
+            LOG_KNOWLEDGE_ORGANIZATION_STAGE_SPLIT,
+            knowledge_base_id=snapshot.knowledge_base_id,
+            job_id=organization_job_id,
+            stage_index=stage_index,
+            purpose=purpose,
+            fragment_count=expected_count,
+            model_id=model.model_id,
+        )
+    )
+
+
+def _log_fragment_result(
+    *,
+    snapshot: KnowledgeOrganizationSnapshot,
+    organization_job_id: int | None,
+    stage_index: int,
+    expected_count: int,
+    result: KnowledgeOrganizationFragmentResult,
+) -> None:
+    if organization_job_id is None:
+        return
+    audit_result = _fragment_audit_result(result.plan)
+    logger.bind(
+        uid=snapshot.uid,
+        knowledge_base_id=snapshot.knowledge_base_id,
+        job_id=organization_job_id,
+        stage_index=stage_index,
+        fragment_index=result.fragment_index,
+        fragment_count=expected_count,
+    ).info(
+        t(
+            LOG_KNOWLEDGE_ORGANIZATION_FRAGMENT_COMPLETED,
+            knowledge_base_id=snapshot.knowledge_base_id,
+            job_id=organization_job_id,
+            stage_index=stage_index,
+            fragment_number=result.fragment_index + 1,
+            fragment_count=expected_count,
+            result=audit_result,
+        )
+    )
 
 
 async def _default_model_caller(
@@ -101,6 +182,7 @@ async def _execute_plan_stage_with_known_groups(
     expected_count: int,
     initial_group_spool: TextIO | None = None,
     single_scope: tuple[KnowledgeOrganizationScopeItem, ...] | None = None,
+    organization_job_id: int | None = None,
 ) -> tuple[_StageExecutionResult, int]:
     if expected_count <= 0:
         raise KnowledgeOrganizationExecutionError()
@@ -118,6 +200,14 @@ async def _execute_plan_stage_with_known_groups(
     )
     if stage.status == KnowledgeOrganizationStageStatus.INVALIDATED:
         raise KnowledgeOrganizationExecutionError()
+    _log_stage_split(
+        snapshot=snapshot,
+        organization_job_id=organization_job_id,
+        stage_index=stage_index,
+        purpose=purpose,
+        expected_count=expected_count,
+        model=model,
+    )
     if stage.status == KnowledgeOrganizationStageStatus.COMPLETED:
         output_tokens = await organization_reduction._measure_stage_output_tokens(session_factory, stage=stage)
         try:
@@ -187,11 +277,22 @@ async def _execute_plan_stage_with_known_groups(
 
         try:
             if first_index < expected_count:
+
+                async def persist(result: KnowledgeOrganizationFragmentResult) -> None:
+                    await organization_stages._write_plan_fragment(session_factory, stage=stage, result=result)
+                    _log_fragment_result(
+                        snapshot=snapshot,
+                        organization_job_id=organization_job_id,
+                        stage_index=stage_index,
+                        expected_count=expected_count,
+                        result=result,
+                    )
+
                 last_stats = await organization_pipeline.run_bounded_knowledge_organization_pipeline(
                     inputs=inputs(),
                     expected_count=expected_count,
                     process=process,
-                    persist=lambda result: organization_stages._write_plan_fragment(session_factory, stage=stage, result=result),
+                    persist=persist,
                     first_index=first_index,
                 )
             output_tokens = await organization_reduction._measure_stage_output_tokens(session_factory, stage=stage)
@@ -228,6 +329,7 @@ async def _execute_plan_stage_for_model(
     analysis_caller: Callable[..., Any],
     semantic_neighbor_loader: Callable[..., Any],
     single_scope: tuple[KnowledgeOrganizationScopeItem, ...] | None = None,
+    organization_job_id: int | None = None,
 ) -> tuple[_StageExecutionResult, int]:
     if single_scope is not None:
         return await _execute_plan_stage_with_known_groups(
@@ -241,6 +343,7 @@ async def _execute_plan_stage_for_model(
             analysis_caller=analysis_caller,
             expected_count=1,
             single_scope=single_scope,
+            organization_job_id=organization_job_id,
         )
 
     if lower_stage is None:
@@ -265,6 +368,7 @@ async def _execute_plan_stage_for_model(
                 analysis_caller=analysis_caller,
                 expected_count=expected_count,
                 initial_group_spool=spool,
+                organization_job_id=organization_job_id,
             )
         finally:
             spool.close()
@@ -280,4 +384,5 @@ async def _execute_plan_stage_for_model(
         model_caller=model_caller,
         analysis_caller=analysis_caller,
         expected_count=expected_count,
+        organization_job_id=organization_job_id,
     )

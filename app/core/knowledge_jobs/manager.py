@@ -318,6 +318,7 @@ class KnowledgeJobManager:
         source_profile_id: int | None,
         source_message_id: int | None,
         max_attempts: int,
+        parent_job_id: int | None = None,
     ) -> tuple[KnowledgeJob, bool]:
         await self._lock_sqlite_submission_scope(
             db,
@@ -342,6 +343,7 @@ class KnowledgeJobManager:
                 source_profile_id=source_profile_id,
                 source_message_id=source_message_id,
                 max_attempts=max_attempts,
+                parent_job_id=parent_job_id,
                 available_at=available_at,
                 commit=False,
             )
@@ -381,6 +383,7 @@ class KnowledgeJobManager:
         job: KnowledgeJob,
         item: ManagedKnowledgeItem,
         source_job_id: bool,
+        organization_lock_token: str | None = None,
     ) -> tuple[KnowledgeJob, ManagedKnowledgeItem]:
         if job.id is None or item.id is None:
             raise KnowledgeJobConflictError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
@@ -402,6 +405,7 @@ class KnowledgeJobManager:
             expected_version=item.version,
             job_id=job.id,
             source_job_id=job.id if source_job_id else None,
+            organization_lock_token=organization_lock_token,
             commit=False,
         )
         if bound is None:
@@ -637,6 +641,8 @@ class KnowledgeJobManager:
         source_session_id: str | None = None,
         source_profile_id: int | None = None,
         source_message_id: int | None = None,
+        parent_job_id: int | None = None,
+        organization_lock_token: str | None = None,
         max_attempts: int = 3,
         commit: bool = True,
     ) -> KnowledgeJobSubmissionResult:
@@ -678,6 +684,7 @@ class KnowledgeJobManager:
                 source_profile_id=source_profile_id,
                 source_message_id=source_message_id,
                 max_attempts=max_attempts,
+                parent_job_id=parent_job_id,
             )
             if not created:
                 if commit:
@@ -695,14 +702,27 @@ class KnowledgeJobManager:
                 actor=actor,
                 source_reference=source_reference,
                 source_job_id=job.id,
+                organization_lock_token=organization_lock_token,
                 llm_maintainable=llm_maintainable,
                 commit=False,
             )
             result_status = mutation.status
             if mutation.status == ManagedKnowledgeMutationStatus.UPDATED and mutation.item is not None:
-                job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=True)
+                job, item = await self._bind_job(
+                    db,
+                    job=job,
+                    item=mutation.item,
+                    source_job_id=True,
+                    organization_lock_token=organization_lock_token,
+                )
             elif mutation.item is not None and mutation.item.id == knowledge_id and self._needs_publication(mutation.item):
-                job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=False)
+                job, item = await self._bind_job(
+                    db,
+                    job=job,
+                    item=mutation.item,
+                    source_job_id=False,
+                    organization_lock_token=organization_lock_token,
+                )
                 result_status = ManagedKnowledgeMutationStatus.RETRY_SUBMITTED
             else:
                 await knowledge_job_crud.delete_unstarted(db, uid=uid, job_id=job.id, commit=False)
@@ -735,6 +755,8 @@ class KnowledgeJobManager:
         source_reference: dict[str, Any] | None = None,
         source_session_id: str | None = None,
         source_message_id: int | None = None,
+        parent_job_id: int | None = None,
+        organization_lock_token: str | None = None,
         max_attempts: int = 3,
         commit: bool = True,
     ) -> ProfileKnowledgeJobSubmissionResult:
@@ -762,6 +784,8 @@ class KnowledgeJobManager:
                 source_session_id=source_session_id,
                 source_profile_id=profile_id,
                 source_message_id=source_message_id,
+                parent_job_id=parent_job_id,
+                organization_lock_token=organization_lock_token,
                 max_attempts=max_attempts,
                 commit=False,
             )
@@ -789,6 +813,8 @@ class KnowledgeJobManager:
         source_session_id: str | None = None,
         source_profile_id: int | None = None,
         source_message_id: int | None = None,
+        parent_job_id: int | None = None,
+        organization_lock_token: str | None = None,
         max_attempts: int = 3,
         commit: bool = True,
     ) -> KnowledgeJobSubmissionResult:
@@ -826,6 +852,7 @@ class KnowledgeJobManager:
                 source_profile_id=source_profile_id,
                 source_message_id=source_message_id,
                 max_attempts=max_attempts,
+                parent_job_id=parent_job_id,
             )
             if not created:
                 if commit:
@@ -841,6 +868,7 @@ class KnowledgeJobManager:
                 actor=actor,
                 source_reference=source_reference,
                 source_job_id=job.id,
+                organization_lock_token=organization_lock_token,
                 commit=False,
             )
             result_status = mutation.status
@@ -850,6 +878,7 @@ class KnowledgeJobManager:
                     job=job,
                     item=mutation.item,
                     source_job_id=mutation.status == ManagedKnowledgeMutationStatus.DELETED,
+                    organization_lock_token=organization_lock_token,
                 )
                 if mutation.status != ManagedKnowledgeMutationStatus.DELETED:
                     result_status = ManagedKnowledgeMutationStatus.RETRY_SUBMITTED
@@ -883,6 +912,8 @@ class KnowledgeJobManager:
         source_reference: dict[str, Any] | None = None,
         source_session_id: str | None = None,
         source_message_id: int | None = None,
+        parent_job_id: int | None = None,
+        organization_lock_token: str | None = None,
         max_attempts: int = 3,
         commit: bool = True,
     ) -> ProfileKnowledgeJobSubmissionResult:
@@ -900,6 +931,8 @@ class KnowledgeJobManager:
                 source_session_id=source_session_id,
                 source_profile_id=profile_id,
                 source_message_id=source_message_id,
+                parent_job_id=parent_job_id,
+                organization_lock_token=organization_lock_token,
                 max_attempts=max_attempts,
                 commit=False,
             )

@@ -303,7 +303,12 @@ export const knowledgeBaseApi = {
   documents: (id, params) => request.get('/knowledge-base/documents/list', { params: { ...params, kb_id: id } }),
   document: (id, documentId) => request.get('/knowledge-base/documents/get', { params: { kb_id: id, document_id: documentId } }),
   deleteDocument: (id, documentId) => request.post(`/knowledge-base/documents/delete?kb_id=${id}&document_id=${documentId}`),
-  queryTest: (id, data) => request.post(`/knowledge-base/query-test?kb_id=${id}`, data)
+  queryTest: (id, data) => request.post(`/knowledge-base/query-test?kb_id=${id}`, data),
+  organize: (id, data) => request.post(`/knowledge-base/organization?kb_id=${id}`, data),
+  organizationJobs: (id, params) => request.get('/knowledge-base/organization/jobs', { params: { ...params, kb_id: id } }),
+  organizationJob: (id, jobId) => request.get(`/knowledge-base/organization/${jobId}`, { params: { kb_id: id } }),
+  cancelOrganizationJob: (id, jobId) => request.post(`/knowledge-base/organization/${jobId}/cancel?kb_id=${id}`),
+  retryOrganizationJob: (id, jobId) => request.post(`/knowledge-base/organization/${jobId}/retry?kb_id=${id}`)
 }
 
 export default request

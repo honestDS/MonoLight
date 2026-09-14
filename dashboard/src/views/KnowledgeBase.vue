@@ -339,8 +339,20 @@
         />
         <el-button type="primary" @click="handleManagedKnowledgeSearch">{{ $t('knowledgeBase.search') }}</el-button>
         <el-button type="success" @click="showManagedKnowledgeCreateDialog">{{ $t('knowledgeBase.managed_add') }}</el-button>
+        <el-button type="warning" @click="showOrganizationDialog">{{ $t('knowledgeBase.organization') }}</el-button>
+        <span v-if="managedKnowledgeSelectedIds.length" class="help-text">
+          {{ $t('knowledgeBase.organization_selected_count', { count: managedKnowledgeSelectedIds.length }) }}
+        </span>
       </div>
-      <el-table :data="managedKnowledgeItems" :loading="managedKnowledgeLoading" class="managed-knowledge-table">
+      <el-table
+        ref="managedKnowledgeTableRef"
+        :data="managedKnowledgeItems"
+        :loading="managedKnowledgeLoading"
+        row-key="id"
+        class="managed-knowledge-table"
+        @selection-change="handleManagedKnowledgeSelectionChange"
+      >
+        <el-table-column type="selection" width="55" :reserve-selection="true" :selectable="isManagedKnowledgeOrganizable" />
         <el-table-column prop="knowledge_key" :label="$t('knowledgeBase.managed_key')" min-width="180" show-overflow-tooltip />
         <el-table-column prop="content_preview" :label="$t('knowledgeBase.managed_content_preview')" min-width="280" show-overflow-tooltip />
         <el-table-column prop="version" :label="$t('knowledgeBase.managed_version')" width="80" align="center" />
@@ -409,6 +421,143 @@
           @size-change="handleManagedKnowledgeSizeChange"
         />
       </div>
+    </el-dialog>
+
+    <el-dialog
+      :title="$t('knowledgeBase.organization_title', { name: selectedKb?.name || '' })"
+      v-model="organizationDialogVisible"
+      width="1180px"
+      class="standard-dialog organization-dialog"
+      center
+      align-center
+      @closed="stopOrganizationPolling"
+    >
+      <el-alert
+        v-if="selectedKb?.organization_error"
+        :title="$t('knowledgeBase.organization_error')"
+        :description="selectedKb.organization_error"
+        type="error"
+        :closable="false"
+        class="mb-15"
+      />
+
+      <div class="managed-knowledge-toolbar">
+        <span class="help-text">{{ $t('knowledgeBase.organization_select_hint') }}</span>
+        <div>
+          <el-button
+            type="primary"
+            :loading="organizationSubmitting"
+            @click="submitKnowledgeOrganization(false)"
+          >
+            {{ $t('knowledgeBase.organization_start_full') }}
+          </el-button>
+          <el-button
+            type="success"
+            :loading="organizationSubmitting"
+            :disabled="!managedKnowledgeSelectedIds.length"
+            @click="submitKnowledgeOrganization(true)"
+          >
+            {{ $t('knowledgeBase.organization_start_selected') }}
+          </el-button>
+        </div>
+      </div>
+
+      <el-descriptions
+        v-if="latestOrganizationJob"
+        :title="$t('knowledgeBase.organization_jobs')"
+        :column="3"
+        border
+        class="mb-15"
+      >
+        <el-descriptions-item :label="$t('knowledgeBase.organization_job_id')">
+          {{ getOrganizationJobId(latestOrganizationJob) || '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('knowledgeBase.organization_status')">
+          <el-tag :type="getOrganizationStatusType(latestOrganizationJob.status)">
+            {{ getOrganizationStatusLabel(latestOrganizationJob.status) }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('knowledgeBase.organization_snapshot')">
+          {{ getOrganizationSnapshotId(latestOrganizationJob) }}
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('knowledgeBase.organization_stage_progress')">
+          <div>{{ getOrganizationStageProgress(latestOrganizationJob) }}</div>
+          <el-progress :percentage="getOrganizationStageProgressPercentage(latestOrganizationJob)" :show-text="false" />
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('knowledgeBase.organization_fragment_progress')">
+          <div>{{ getOrganizationFragmentProgress(latestOrganizationJob) }}</div>
+          <el-progress :percentage="getOrganizationFragmentProgressPercentage(latestOrganizationJob)" :show-text="false" />
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('knowledgeBase.organization_counts')">
+          {{ getOrganizationCountsText(latestOrganizationJob) }}
+        </el-descriptions-item>
+        <el-descriptions-item v-if="latestOrganizationJob.error" :label="$t('knowledgeBase.organization_error')" :span="3">
+          <el-alert type="error" :closable="false" :title="latestOrganizationJob.error" />
+        </el-descriptions-item>
+      </el-descriptions>
+
+      <el-empty
+        v-if="!organizationLoading && !organizationJobs.length"
+        :description="$t('knowledgeBase.organization_no_jobs')"
+      />
+      <el-table v-else :data="organizationJobs" :loading="organizationLoading" class="organization-job-table">
+        <el-table-column :label="$t('knowledgeBase.organization_job_id')" width="90" align="center">
+          <template #default="{ row }">{{ getOrganizationJobId(row) || '-' }}</template>
+        </el-table-column>
+        <el-table-column :label="$t('knowledgeBase.organization_status')" width="120" align="center">
+          <template #default="{ row }">
+            <el-tag :type="getOrganizationStatusType(row.status)">
+              {{ getOrganizationStatusLabel(row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column :label="$t('knowledgeBase.organization_snapshot')" width="120" align="center">
+          <template #default="{ row }">{{ getOrganizationSnapshotId(row) }}</template>
+        </el-table-column>
+        <el-table-column :label="$t('knowledgeBase.organization_stage_progress')" min-width="170">
+          <template #default="{ row }">
+            <div>{{ getOrganizationStageProgress(row) }}</div>
+            <el-progress :percentage="getOrganizationStageProgressPercentage(row)" :show-text="false" />
+          </template>
+        </el-table-column>
+        <el-table-column :label="$t('knowledgeBase.organization_fragment_progress')" min-width="170">
+          <template #default="{ row }">
+            <div>{{ getOrganizationFragmentProgress(row) }}</div>
+            <el-progress :percentage="getOrganizationFragmentProgressPercentage(row)" :show-text="false" />
+          </template>
+        </el-table-column>
+        <el-table-column :label="$t('knowledgeBase.organization_counts')" min-width="150">
+          <template #default="{ row }">{{ getOrganizationCountsText(row) }}</template>
+        </el-table-column>
+        <el-table-column :label="$t('knowledgeBase.organization_error')" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.error || '-' }}</template>
+        </el-table-column>
+        <el-table-column :label="$t('knowledgeBase.actions')" width="220" align="center" fixed="right">
+          <template #default="{ row }">
+            <div class="action-buttons">
+              <el-button
+                v-if="canCancelOrganizationJob(row)"
+                type="warning"
+                size="small"
+                :loading="organizationActionJobId === getOrganizationJobId(row)"
+                @click="handleCancelOrganizationJob(row)"
+              >
+                {{ $t('knowledgeBase.organization_cancel') }}
+              </el-button>
+              <el-button
+                v-if="canRetryOrganizationJob(row)"
+                type="primary"
+                size="small"
+                :loading="organizationActionJobId === getOrganizationJobId(row)"
+                @click="handleRetryOrganizationJob(row)"
+              >
+                {{ $t('knowledgeBase.organization_retry') }}
+              </el-button>
+              <span v-if="!canCancelOrganizationJob(row) && !canRetryOrganizationJob(row)">-</span>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
     </el-dialog>
 
     <el-dialog
@@ -553,6 +702,7 @@ import {
   createManagedKnowledgeDedupeKey,
   getManagedKnowledgeMutationFeedback,
   getKnowledgeBaseProfileIds,
+  getKnowledgeOrganizationPublishedSuccessCount,
   normalizeKnowledgeBase
 } from '@/utils/knowledgeBaseManagement'
 import { createAbortableTaskManager, createLatestRequestTracker } from '@/utils/requestTaskManager'
@@ -603,6 +753,8 @@ const managedKnowledgeTotal = ref(0)
 const managedKnowledgePage = ref(1)
 const managedKnowledgePageSize = ref(10)
 const managedKnowledgeQuery = ref('')
+const managedKnowledgeTableRef = ref(null)
+const managedKnowledgeSelectedIds = ref([])
 const managedKnowledgeEditDialogVisible = ref(false)
 const managedKnowledgeEditingId = ref(null)
 const managedKnowledgeFormRef = ref(null)
@@ -614,6 +766,17 @@ const managedKnowledgeHistoryKey = ref('')
 let managedKnowledgePollTimer = null
 const managedKnowledgeTaskManager = createAbortableTaskManager()
 const managedKnowledgeRequestTracker = createLatestRequestTracker()
+const organizationDialogVisible = ref(false)
+const organizationLoading = ref(false)
+const organizationSubmitting = ref(false)
+const organizationActionJobId = ref(null)
+const organizationJobs = ref([])
+const organizationTotal = ref(0)
+const organizationJobPageSize = 20
+let organizationPollTimer = null
+let organizationPollingSession = 0
+const organizationTaskManager = createAbortableTaskManager()
+const organizationRequestTracker = createLatestRequestTracker()
 
 
 const form = reactive({
@@ -635,6 +798,7 @@ const embeddingModelOptions = computed(() => embeddingModels.value.map(item => (
 
 const migrationProgress = computed(() => getKnowledgeBaseMigrationProgress(selectedKb.value))
 const managedMigrationTerminalHintKey = computed(() => getManagedKnowledgeBaseMigrationTerminalHintKey(selectedKb.value))
+const latestOrganizationJob = computed(() => organizationJobs.value[0] || null)
 
 const importForm = reactive({
   file: null,
@@ -877,12 +1041,34 @@ const resetManagedKnowledgeForm = () => {
   managedKnowledgeForm.llm_maintainable = false
 }
 
+const clearManagedKnowledgeSelection = () => {
+  managedKnowledgeSelectedIds.value = []
+  managedKnowledgeTableRef.value?.clearSelection()
+}
+
+const isManagedKnowledgeOrganizable = (item) => Boolean(
+  item?.llm_maintainable === true
+  && item?.is_recallable === true
+  && !item?.pending_job_id
+  && item?.indexed_version === item?.version
+)
+
+const handleManagedKnowledgeSelectionChange = (selection) => {
+  managedKnowledgeSelectedIds.value = selection
+    .filter(isManagedKnowledgeOrganizable)
+    .map(item => item.id)
+    .filter(id => id !== null && id !== undefined)
+}
+
 const managedKnowledgeListTaskKey = 'managed-knowledge-list'
 
 const fetchManagedKnowledgeItems = async (notifyError = true, replaceCurrent = false) => {
   if (!selectedKb.value || !canManageManagedKnowledge(selectedKb.value)) return
   const selectedId = selectedKb.value.id
-  if (replaceCurrent) managedKnowledgeTaskManager.cancel(managedKnowledgeListTaskKey)
+  if (replaceCurrent) {
+    managedKnowledgeTaskManager.cancel(managedKnowledgeListTaskKey)
+    clearManagedKnowledgeSelection()
+  }
   const token = managedKnowledgeTaskManager.begin(managedKnowledgeListTaskKey)
   if (!token) return
   const requestSeq = managedKnowledgeRequestTracker.begin()
@@ -900,6 +1086,8 @@ const fetchManagedKnowledgeItems = async (notifyError = true, replaceCurrent = f
     ) return
     managedKnowledgeItems.value = res.data.data.items || []
     managedKnowledgeTotal.value = res.data.data.total || 0
+    const pageIds = new Set(managedKnowledgeItems.value.map(item => item.id))
+    managedKnowledgeSelectedIds.value = managedKnowledgeSelectedIds.value.filter(id => pageIds.has(id))
   } catch (error) {
     if (token.signal.aborted || !managedKnowledgeTaskManager.isCurrent(token)) return
     if (notifyError && managedKnowledgeRequestTracker.isCurrent(requestSeq)) {
@@ -938,6 +1126,331 @@ const scheduleManagedKnowledgePolling = () => {
   }, 2000)
 }
 
+const organizationTerminalStatuses = ['succeeded', 'failed', 'cancelled']
+
+const getOrganizationJobId = (job) => job?.job_id ?? job?.id ?? null
+
+const getOrganizationStatusLabel = (status) => {
+  const key = ['pending', 'running', 'retry', 'succeeded', 'failed', 'cancelled'].includes(status) ? status : 'pending'
+  return t(`knowledgeBase.organization_status_${key}`)
+}
+
+const getOrganizationStatusType = (status) => ({
+  pending: 'info',
+  running: 'warning',
+  retry: 'warning',
+  succeeded: 'success',
+  failed: 'danger',
+  cancelled: 'info'
+}[status] || 'info')
+
+const getOrganizationNumber = (value) => {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null
+  const number = Number(value)
+  if (!Number.isFinite(number) || number < 0) return null
+  return Math.trunc(number)
+}
+
+const getOrganizationNumberFrom = (source, keys) => {
+  if (!source || typeof source !== 'object') return null
+  for (const key of keys) {
+    const value = getOrganizationNumber(source[key])
+    if (value !== null) return value
+  }
+  return null
+}
+
+const getOrganizationProgress = (job) => (
+  job?.organization_progress && typeof job.organization_progress === 'object'
+    ? job.organization_progress
+    : {}
+)
+
+const getOrganizationResult = (job) => (
+  job?.result && typeof job.result === 'object' && !Array.isArray(job.result)
+    ? job.result
+    : {}
+)
+
+const getOrganizationProgressValue = (job, keys) => getOrganizationNumberFrom(getOrganizationProgress(job), keys) ?? 0
+
+const getOrganizationStageProgress = (job) => {
+  const completed = getOrganizationProgressValue(job, ['completed_stage_count'])
+  const total = getOrganizationProgressValue(job, ['stage_count'])
+  return `${completed} / ${total}`
+}
+
+const getOrganizationFragmentProgress = (job) => {
+  const progress = getOrganizationProgress(job)
+  const completed = getOrganizationNumberFrom(progress, ['completed_fragment_count', 'succeeded_fragment_count']) ?? 0
+  const total = getOrganizationNumberFrom(progress, ['expected_fragment_count']) ?? 0
+  return `${completed} / ${total}`
+}
+
+const getOrganizationProgressPercentage = (completed, total) => {
+  if (!total) return 0
+  return Math.min(100, Math.max(0, Math.round((completed / total) * 100)))
+}
+
+const getOrganizationStageProgressPercentage = (job) => getOrganizationProgressPercentage(
+  getOrganizationProgressValue(job, ['completed_stage_count']),
+  getOrganizationProgressValue(job, ['stage_count'])
+)
+
+const getOrganizationFragmentProgressPercentage = (job) => getOrganizationProgressPercentage(
+  getOrganizationNumberFrom(getOrganizationProgress(job), ['completed_fragment_count', 'succeeded_fragment_count']) ?? 0,
+  getOrganizationProgressValue(job, ['expected_fragment_count'])
+)
+
+const getOrganizationSnapshotId = (job) => {
+  const result = getOrganizationResult(job)
+  const payload = job?.payload && typeof job.payload === 'object' ? job.payload : {}
+  const snapshotId = [job?.snapshot_id, result.snapshot_id, payload.snapshot_id]
+    .map(getOrganizationNumber)
+    .find(value => value !== null && value > 0)
+  return snapshotId ?? t('knowledgeBase.organization_no_snapshot')
+}
+
+const getOrganizationFailureCount = (job) => {
+  const result = getOrganizationResult(job)
+  const directCount = getOrganizationNumberFrom(result, ['failure_count', 'failed_count'])
+  if (directCount !== null) return directCount
+
+  const childFailureCount = getOrganizationNumber(job?.child_failed_count) ?? 0
+  const stageFailureCount = getOrganizationProgressValue(job, ['failed_stage_count'])
+    + getOrganizationProgressValue(job, ['invalidated_stage_count'])
+  return Math.max(childFailureCount, stageFailureCount)
+}
+
+const getOrganizationConflictCount = (job) => getOrganizationNumberFrom(
+  getOrganizationResult(job),
+  ['conflict_count', 'conflicts_count']
+) ?? 0
+
+const getOrganizationCountsText = (job) => [
+  `${t('knowledgeBase.organization_success_count')}: ${getKnowledgeOrganizationPublishedSuccessCount(job)}`,
+  `${t('knowledgeBase.organization_failure_count')}: ${getOrganizationFailureCount(job)}`,
+  `${t('knowledgeBase.organization_conflict_count')}: ${getOrganizationConflictCount(job)}`
+].join(' / ')
+
+const isOrganizationJobForSelectedKnowledgeBase = (job) => Boolean(
+  selectedKb.value
+  && job?.knowledge_base_id === selectedKb.value.id
+)
+
+const isOrganizationJobTerminal = (job) => {
+  if (!organizationTerminalStatuses.includes(job?.status)) return false
+  const childJobCount = getOrganizationNumber(job?.child_job_count) ?? 0
+  const childTerminalCount = getOrganizationNumber(job?.child_terminal_count) ?? 0
+  return childTerminalCount >= childJobCount
+}
+
+const canCancelOrganizationJob = (job) => Boolean(
+  isOrganizationJobForSelectedKnowledgeBase(job)
+  && ['pending', 'running', 'retry'].includes(job?.status)
+  && !job?.cancel_requested_at
+)
+
+const canRetryOrganizationJob = (job) => Boolean(
+  isOrganizationJobForSelectedKnowledgeBase(job)
+  && ['failed', 'cancelled'].includes(job?.status)
+)
+
+const fetchOrganizationJobs = async (notifyError = true, session = organizationPollingSession) => {
+  if (
+    !organizationDialogVisible.value
+    || !selectedKb.value
+    || !canManageManagedKnowledge(selectedKb.value)
+    || session !== organizationPollingSession
+  ) return
+
+  const selectedId = selectedKb.value.id
+  const taskKey = `organization-jobs-${session}`
+  const token = organizationTaskManager.begin(taskKey)
+  if (!token) return
+  const requestSeq = organizationRequestTracker.begin()
+  if (organizationTaskManager.isCurrent(token)) organizationLoading.value = true
+
+  try {
+    const res = await knowledgeBaseApi.organizationJobs(selectedId, {
+      page: 1,
+      size: organizationJobPageSize
+    })
+    const data = res.data.data || {}
+    const items = Array.isArray(data.items)
+      ? data.items.filter(item => item?.knowledge_base_id === selectedId)
+      : []
+    if (
+      !organizationTaskManager.isCurrent(token)
+      || !organizationRequestTracker.isCurrent(requestSeq)
+      || !organizationDialogVisible.value
+      || session !== organizationPollingSession
+      || selectedKb.value?.id !== selectedId
+    ) return
+    organizationJobs.value = items
+    organizationTotal.value = getOrganizationNumber(data.total) ?? items.length
+  } catch (error) {
+    if (
+      notifyError
+      && organizationTaskManager.isCurrent(token)
+      && organizationRequestTracker.isCurrent(requestSeq)
+      && session === organizationPollingSession
+    ) {
+      ElMessage.error(t('knowledgeBase.organization_fetch_failed') + error.message)
+    }
+  } finally {
+    if (
+      organizationTaskManager.isCurrent(token)
+      && organizationRequestTracker.isCurrent(requestSeq)
+      && session === organizationPollingSession
+    ) organizationLoading.value = false
+    organizationTaskManager.finish(token)
+  }
+}
+
+const beginOrganizationPollingSession = () => {
+  if (organizationPollTimer) {
+    clearTimeout(organizationPollTimer)
+    organizationPollTimer = null
+  }
+  organizationPollingSession += 1
+  organizationRequestTracker.invalidate()
+  organizationLoading.value = false
+  return organizationPollingSession
+}
+
+const stopOrganizationPolling = () => {
+  beginOrganizationPollingSession()
+}
+
+const scheduleOrganizationPolling = (session = organizationPollingSession) => {
+  if (organizationPollTimer) {
+    clearTimeout(organizationPollTimer)
+    organizationPollTimer = null
+  }
+  if (
+    !organizationDialogVisible.value
+    || session !== organizationPollingSession
+    || !organizationJobs.value.some(job => !isOrganizationJobTerminal(job))
+  ) return
+
+  organizationPollTimer = setTimeout(async () => {
+    organizationPollTimer = null
+    try {
+      await fetchOrganizationJobs(false, session)
+    } finally {
+      if (session === organizationPollingSession) scheduleOrganizationPolling(session)
+    }
+  }, 2000)
+}
+
+const showOrganizationDialog = async () => {
+  if (!selectedKb.value || !canManageManagedKnowledge(selectedKb.value)) return
+  stopOrganizationPolling()
+  organizationJobs.value = []
+  organizationTotal.value = 0
+  organizationDialogVisible.value = true
+  const session = organizationPollingSession
+  await fetchOrganizationJobs(true, session)
+  scheduleOrganizationPolling(session)
+}
+
+const refreshOrganizationData = async () => {
+  const session = beginOrganizationPollingSession()
+  await Promise.all([
+    fetchOrganizationJobs(true, session),
+    fetchManagedKnowledgeItems(true, true)
+  ])
+  scheduleManagedKnowledgePolling()
+  if (organizationDialogVisible.value) scheduleOrganizationPolling(session)
+}
+
+const submitKnowledgeOrganization = async (selectedOnly) => {
+  if (!selectedKb.value || !canManageManagedKnowledge(selectedKb.value) || organizationSubmitting.value) return
+  const knowledgeIds = [...managedKnowledgeSelectedIds.value]
+  if (selectedOnly && !knowledgeIds.length) {
+    ElMessage.warning(t('knowledgeBase.organization_select_at_least_one'))
+    return
+  }
+
+  const selectedId = selectedKb.value.id
+  organizationSubmitting.value = true
+  try {
+    await knowledgeBaseApi.organize(selectedId, selectedOnly ? { knowledge_ids: knowledgeIds } : {})
+    if (selectedKb.value?.id === selectedId) selectedKb.value.organization_error = null
+    ElMessage.success(t('knowledgeBase.organization_submitted'))
+    await refreshOrganizationData()
+  } catch (error) {
+    ElMessage.error(t('knowledgeBase.organization_submit_failed') + error.message)
+  } finally {
+    organizationSubmitting.value = false
+  }
+}
+
+const handleCancelOrganizationJob = async (job) => {
+  const selectedId = selectedKb.value?.id
+  const jobId = getOrganizationJobId(job)
+  if (!selectedId || !jobId || !canCancelOrganizationJob(job)) return
+  try {
+    await ElMessageBox.confirm(
+      t('knowledgeBase.organization_cancel_confirm'),
+      t('knowledgeBase.prompt'),
+      {
+        confirmButtonText: t('knowledgeBase.organization_cancel'),
+        cancelButtonText: t('knowledgeBase.cancel'),
+        type: 'warning'
+      }
+    )
+  } catch (action) {
+    if (action === 'cancel' || action === 'close') return
+    throw action
+  }
+  if (selectedKb.value?.id !== selectedId || !canCancelOrganizationJob(job)) return
+
+  organizationActionJobId.value = jobId
+  try {
+    await knowledgeBaseApi.cancelOrganizationJob(selectedId, jobId)
+    ElMessage.success(t('knowledgeBase.organization_cancelled'))
+    await refreshOrganizationData()
+  } catch (error) {
+    ElMessage.error(t('knowledgeBase.organization_cancel_failed') + error.message)
+  } finally {
+    organizationActionJobId.value = null
+  }
+}
+
+const handleRetryOrganizationJob = async (job) => {
+  const selectedId = selectedKb.value?.id
+  const jobId = getOrganizationJobId(job)
+  if (!selectedId || !jobId || !canRetryOrganizationJob(job)) return
+  try {
+    await ElMessageBox.confirm(
+      t('knowledgeBase.organization_retry_confirm'),
+      t('knowledgeBase.prompt'),
+      {
+        confirmButtonText: t('knowledgeBase.organization_retry'),
+        cancelButtonText: t('knowledgeBase.cancel'),
+        type: 'warning'
+      }
+    )
+  } catch (action) {
+    if (action === 'cancel' || action === 'close') return
+    throw action
+  }
+  if (selectedKb.value?.id !== selectedId || !canRetryOrganizationJob(job)) return
+
+  organizationActionJobId.value = jobId
+  try {
+    await knowledgeBaseApi.retryOrganizationJob(selectedId, jobId)
+    ElMessage.success(t('knowledgeBase.organization_retried'))
+    await refreshOrganizationData()
+  } catch (error) {
+    ElMessage.error(t('knowledgeBase.organization_retry_failed') + error.message)
+  } finally {
+    organizationActionJobId.value = null
+  }
+}
+
 const showManagedKnowledgeDialog = async (row) => {
   stopManagedKnowledgePolling()
   selectedKb.value = row
@@ -945,6 +1458,7 @@ const showManagedKnowledgeDialog = async (row) => {
   managedKnowledgeQuery.value = ''
   managedKnowledgeItems.value = []
   managedKnowledgeTotal.value = 0
+  clearManagedKnowledgeSelection()
   managedKnowledgeDialogVisible.value = true
   await fetchManagedKnowledgeItems(true, true)
   scheduleManagedKnowledgePolling()
@@ -952,17 +1466,20 @@ const showManagedKnowledgeDialog = async (row) => {
 
 const handleManagedKnowledgeSearch = async () => {
   managedKnowledgePage.value = 1
+  clearManagedKnowledgeSelection()
   await fetchManagedKnowledgeItems(true, true)
   scheduleManagedKnowledgePolling()
 }
 
 const handleManagedKnowledgeSizeChange = async () => {
   managedKnowledgePage.value = 1
+  clearManagedKnowledgeSelection()
   await fetchManagedKnowledgeItems(true, true)
   scheduleManagedKnowledgePolling()
 }
 
 const handleManagedKnowledgePageChange = async () => {
+  clearManagedKnowledgeSelection()
   await fetchManagedKnowledgeItems(true, true)
   scheduleManagedKnowledgePolling()
 }
@@ -1346,6 +1863,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopMigrationPolling()
   stopManagedKnowledgePolling()
+  stopOrganizationPolling()
 })
 </script>
 
