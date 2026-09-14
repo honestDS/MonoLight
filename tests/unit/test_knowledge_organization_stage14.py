@@ -45,6 +45,7 @@ from app.core.knowledge.organization_executor import (
     execute_knowledge_organization,
     run_bounded_knowledge_organization_pipeline,
 )
+from app.core.knowledge.organization_lifecycle import coordinate_organization_terminal
 from app.core.knowledge.organization_runtime import (
     KnowledgeOrganizationCandidate,
     KnowledgeOrganizationModelConfig,
@@ -394,7 +395,17 @@ async def test_stage14_expired_organization_job_fails_and_releases_persistent_it
         await db.commit()
 
     async with session_factory() as db:
-        recovery = await knowledge_job_crud.recover_expired(db, max_attempts_error="expired")
+        recovery = await knowledge_job_crud.recover_expired(db, max_attempts_error="expired", commit=False)
+        for terminal in recovery.terminal_jobs:
+            if terminal.job.id == job.id:
+                assert await coordinate_organization_terminal(
+                    db,
+                    uid="user-1",
+                    job_id=terminal.job.id,
+                    error=terminal.error,
+                    commit=False,
+                )
+        await db.commit()
         recovered = await knowledge_job_crud.get_by_id(db, uid="user-1", job_id=job.id)
         current = await db.get(ManagedKnowledgeItem, item.id)
 
@@ -2344,7 +2355,16 @@ async def test_stage14_new_execution_never_resumes_running_stage_from_previous_t
             job_id=previous_job.id,
             owner=previous_job.locked_by,
             error="simulated previous task failure",
+            commit=False,
         )
+        assert await coordinate_organization_terminal(
+            db,
+            uid="user-1",
+            job_id=previous_job.id,
+            error="simulated previous task failure",
+            commit=False,
+        )
+        await db.commit()
 
     result = await execute_knowledge_organization(
         session_factory,

@@ -23,6 +23,7 @@ from app.core.constants import (
     ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND,
     ERR_PROFILE_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
+    MSG_GENERIC_SUCCESS,
     MSG_KB_CREATED,
     MSG_KB_DELETED,
     MSG_KB_DOC_CREATED,
@@ -59,6 +60,13 @@ from app.core.knowledge.embedding_migration import submit_user_knowledge_base_em
 from app.core.knowledge.errors import ManagedKnowledgeConflictError, ManagedKnowledgeNotFoundError
 from app.core.knowledge.managed import build_managed_knowledge_snapshot, managed_knowledge_service
 from app.core.knowledge.migration import record_knowledge_base_migration_change
+from app.core.knowledge.organization_run import (
+    cancel_knowledge_organization,
+    get_knowledge_organization_job,
+    list_knowledge_organization_jobs,
+    retry_knowledge_organization,
+    submit_knowledge_organization,
+)
 from app.core.knowledge_jobs.manager import knowledge_job_manager
 from app.core.security import get_current_user
 from app.core.utils.text_splitter import TextSplitter
@@ -84,6 +92,7 @@ from app.models.knowledge_base import (
     KnowledgeJob,
     KnowledgeJobOperation,
     KnowledgeJobStatus,
+    KnowledgeOrganizationRequest,
     ManagedKnowledgeActorType,
     ManagedKnowledgeCreateRequest,
     ManagedKnowledgeDeleteRequest,
@@ -432,6 +441,90 @@ async def submit_knowledge_base_embedding_migration(
         data=await build_knowledge_base_response(db, refreshed),
         message=MSG_KB_EMBEDDING_MIGRATION_SUBMITTED,
     )
+
+
+@router.post("/organization", response_model=StandardResponse[dict[str, Any]])
+async def submit_knowledge_base_organization(
+    kb_id: int,
+    organization_in: KnowledgeOrganizationRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    job = await submit_knowledge_organization(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        knowledge_ids=organization_in.knowledge_ids if organization_in is not None else None,
+        dedupe_key=organization_in.dedupe_key if organization_in is not None else None,
+    )
+    return StandardResponse.success(
+        data=await get_knowledge_organization_job(db, uid=knowledge_base.uid, job_id=job.id),
+        message=MSG_GENERIC_SUCCESS,
+    )
+
+
+@router.get("/organization/jobs", response_model=StandardResponse[dict[str, Any]])
+async def list_knowledge_base_organization_jobs(
+    kb_id: int,
+    page: int = 1,
+    size: int = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    result = await list_knowledge_organization_jobs(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        skip=max(page - 1, 0) * min(max(size, 1), 100),
+        limit=min(max(size, 1), 100),
+    )
+    return StandardResponse.success(data=result, message=MSG_GENERIC_SUCCESS)
+
+
+@router.get("/organization/{job_id}", response_model=StandardResponse[dict[str, Any]])
+async def get_knowledge_base_organization_job(
+    kb_id: int,
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    result = await get_knowledge_organization_job(db, uid=knowledge_base.uid, job_id=job_id)
+    if result.get("knowledge_base_id") != kb_id:
+        raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND)
+    return StandardResponse.success(data=result, message=MSG_GENERIC_SUCCESS)
+
+
+@router.post("/organization/{job_id}/cancel", response_model=StandardResponse[dict[str, Any]])
+async def cancel_knowledge_base_organization_job(
+    kb_id: int,
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    old_job = await get_knowledge_organization_job(db, uid=knowledge_base.uid, job_id=job_id)
+    if old_job.get("knowledge_base_id") != knowledge_base.id:
+        raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND)
+    result = await cancel_knowledge_organization(db, uid=knowledge_base.uid, job_id=job_id)
+    return StandardResponse.success(data=result, message=MSG_GENERIC_SUCCESS)
+
+
+@router.post("/organization/{job_id}/retry", response_model=StandardResponse[dict[str, Any]])
+async def retry_knowledge_base_organization_job(
+    kb_id: int,
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    old_job = await get_knowledge_organization_job(db, uid=knowledge_base.uid, job_id=job_id)
+    if old_job.get("knowledge_base_id") != kb_id:
+        raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND)
+    result = await retry_knowledge_organization(db, uid=knowledge_base.uid, job_id=job_id)
+    return StandardResponse.success(data=result, message=MSG_GENERIC_SUCCESS)
 
 
 @router.post("/update", response_model=StandardResponse[KnowledgeBaseResponse])

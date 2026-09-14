@@ -7,9 +7,12 @@ from math import isfinite
 from numbers import Real
 
 from app.core.constants import (
+    ERR_KNOWLEDGE_JOB_CANCELLATION_REQUESTED,
     ERR_KNOWLEDGE_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED,
+    ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE,
     ERR_KNOWLEDGE_JOB_RENEW_INTERVAL_INVALID,
     ERR_KNOWLEDGE_JOB_UNEXPECTED_FAILURE,
+    ERR_KNOWLEDGE_ORGANIZATION_FAILED,
     ERR_VALUE_MUST_BE_POSITIVE,
     LOG_KNOWLEDGE_JOB_CANCELLED,
     LOG_KNOWLEDGE_JOB_DATABASE_OPERATION_FAILED,
@@ -18,21 +21,26 @@ from app.core.constants import (
     LOG_KNOWLEDGE_JOB_LOOP_FAILED,
     LOG_KNOWLEDGE_JOB_STARTUP_RECOVERY_COMPLETED,
     LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED,
+    LOG_KNOWLEDGE_ORGANIZATION_COMPLETED,
+    LOG_KNOWLEDGE_ORGANIZATION_STARTED,
     LOG_MANAGED_MEMORY_KB_MIGRATION_FAILED,
     LOG_MANAGED_MEMORY_KB_MIGRATION_RETRY,
     MANAGED_MEMORY_KB_MIGRATION_DEDUPE_PREFIX,
     MANAGED_MEMORY_KB_MIGRATION_RETRY_DELAY_SECONDS,
 )
+from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.crud.knowledge.job import (
     KnowledgeJobRecoveryResult,
     is_system_cleanup_operation,
     knowledge_job_crud,
 )
 from app.core.i18n import t
+from app.core.knowledge.organization_lifecycle import coordinate_organization_terminal
 from app.core.knowledge_jobs.executor import (
     KnowledgeJobCancelledError,
     KnowledgeJobDeterministicError,
     KnowledgeJobExecutionError,
+    KnowledgeJobExecutionResult,
     KnowledgeJobExecutor,
     KnowledgeJobLeaseLostError,
     KnowledgeJobRetryableError,
@@ -44,7 +52,7 @@ from app.core.knowledge_jobs.migration import (
     finalize_knowledge_migration_terminal_state,
 )
 from app.core.log import get_logger
-from app.models.knowledge_base import KnowledgeJob, KnowledgeJobOperation
+from app.models.knowledge_base import KnowledgeJob, KnowledgeJobOperation, KnowledgeJobStatus
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -58,6 +66,26 @@ KNOWLEDGE_JOB_RECOVERY_RETRY_DELAY_SECONDS = 1
 KNOWLEDGE_JOB_SHUTDOWN_RETRY_DELAY_SECONDS = 1
 KNOWLEDGE_JOB_RETRY_MAX_SECONDS = 300
 
+_ORGANIZATION_PARENT_OPERATIONS = frozenset(
+    {
+        KnowledgeJobOperation.AUTO_ORGANIZE,
+        KnowledgeJobOperation.MANUAL_ORGANIZE,
+    }
+)
+_TERMINAL_KNOWLEDGE_JOB_STATUSES = frozenset(
+    {
+        KnowledgeJobStatus.SUCCEEDED,
+        KnowledgeJobStatus.FAILED,
+        KnowledgeJobStatus.CANCELLED,
+    }
+)
+_FAILED_KNOWLEDGE_JOB_STATUSES = frozenset(
+    {
+        KnowledgeJobStatus.FAILED,
+        KnowledgeJobStatus.CANCELLED,
+    }
+)
+
 
 def retry_delay_seconds(attempt_count: int) -> int:
     if attempt_count <= 1:
@@ -69,6 +97,81 @@ def retry_delay_seconds(attempt_count: int) -> int:
 
 def _is_managed_memory_embedding_migration(job: KnowledgeJob) -> bool:
     return job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION and job.dedupe_key.startswith(f"{MANAGED_MEMORY_KB_MIGRATION_DEDUPE_PREFIX}:")
+
+
+def _is_organization_parent_job(job: KnowledgeJob) -> bool:
+    return job.operation in _ORGANIZATION_PARENT_OPERATIONS
+
+
+def _organization_result_count(result: dict | None, field: str) -> int:
+    if not isinstance(result, dict):
+        return 0
+    value = result.get(field)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+async def _organization_knowledge_base_name(session_factory: SessionFactory, job: KnowledgeJob) -> str:
+    try:
+        async with session_factory() as db:
+            knowledge_base = await knowledge_base_crud.get(db, job.knowledge_base_id)
+        if knowledge_base is not None and knowledge_base.uid == job.uid:
+            return knowledge_base.name
+    except Exception:
+        pass
+    return f"#{job.knowledge_base_id}"
+
+
+async def _log_organization_started(session_factory: SessionFactory, job: KnowledgeJob) -> None:
+    if not _is_organization_parent_job(job) or job.id is None:
+        return
+    knowledge_base_name = await _organization_knowledge_base_name(session_factory, job)
+    operation = job.operation.value if hasattr(job.operation, "value") else str(job.operation)
+    logger.bind(
+        uid=job.uid,
+        knowledge_base_id=job.knowledge_base_id,
+        knowledge_base_name=knowledge_base_name,
+        job_id=job.id,
+        operation=operation,
+    ).info(
+        t(
+            LOG_KNOWLEDGE_ORGANIZATION_STARTED,
+            knowledge_base_name=knowledge_base_name,
+            knowledge_base_id=job.knowledge_base_id,
+            job_id=job.id,
+            operation=operation,
+        )
+    )
+
+
+async def _log_organization_completed(session_factory: SessionFactory, job: KnowledgeJob, result: dict | None) -> None:
+    if not _is_organization_parent_job(job) or job.id is None:
+        return
+    knowledge_base_name = await _organization_knowledge_base_name(session_factory, job)
+    mutation_job_ids = result.get("mutation_job_ids") if isinstance(result, dict) else None
+    mutation_job_count = len(mutation_job_ids) if isinstance(mutation_job_ids, list) else 0
+    counts = {
+        "keep_count": _organization_result_count(result, "keep_count"),
+        "update_count": _organization_result_count(result, "update_count"),
+        "merge_count": _organization_result_count(result, "merge_count"),
+        "conflict_count": _organization_result_count(result, "conflict_count"),
+    }
+    logger.bind(
+        uid=job.uid,
+        knowledge_base_id=job.knowledge_base_id,
+        knowledge_base_name=knowledge_base_name,
+        job_id=job.id,
+        mutation_job_count=mutation_job_count,
+        **counts,
+    ).info(
+        t(
+            LOG_KNOWLEDGE_ORGANIZATION_COMPLETED,
+            knowledge_base_name=knowledge_base_name,
+            knowledge_base_id=job.knowledge_base_id,
+            job_id=job.id,
+            mutation_job_count=mutation_job_count,
+            **counts,
+        )
+    )
 
 
 def _retry_delay_seconds_for_job(job: KnowledgeJob) -> int:
@@ -128,6 +231,7 @@ class _RunningJob:
     uid: str
     worker_id: str
     task: asyncio.Task[None]
+    waiting_for_children: bool = False
 
 
 class KnowledgeJobConsumer:
@@ -251,6 +355,13 @@ class KnowledgeJobConsumer:
                 for terminal in recovery.terminal_jobs:
                     if terminal.job.id is None:
                         continue
+                    await coordinate_organization_terminal(
+                        db,
+                        uid=terminal.job.uid,
+                        job_id=terminal.job.id,
+                        error=terminal.error,
+                        commit=False,
+                    )
                     current = await knowledge_job_crud.get_by_id(
                         db,
                         uid=terminal.job.uid,
@@ -293,18 +404,10 @@ class KnowledgeJobConsumer:
             if not renewed:
                 entry.task.cancel()
 
-    async def _claim_available(self) -> None:
-        capacity = self._max_concurrency - len(self._running)
-        if capacity <= 0 or not self._executor.enabled_operations:
-            return
-        async with self._session_factory() as db:
-            candidates = await knowledge_job_crud.list_claimable_for_worker(
-                db,
-                enabled_operations=self._executor.enabled_operations,
-                limit=max(capacity * 2, capacity),
-            )
+    async def _claim_candidates(self, candidates: list[KnowledgeJob], capacity: int) -> int:
+        claimed_count = 0
         for candidate in candidates:
-            if capacity <= 0:
+            if claimed_count >= capacity:
                 break
             if candidate.id is None or candidate.id in self._running:
                 continue
@@ -323,14 +426,60 @@ class KnowledgeJobConsumer:
             task = asyncio.create_task(self._execute(claimed, worker_id))
             self._running[candidate.id] = _RunningJob(uid=candidate.uid, worker_id=worker_id, task=task)
             task.add_done_callback(lambda _task, job_id=candidate.id: self._running.pop(job_id, None))
-            capacity -= 1
+            claimed_count += 1
+        return claimed_count
+
+    async def _claim_available(self) -> None:
+        if not self._executor.enabled_operations:
+            return
+
+        normal_capacity = max(0, self._max_concurrency - len(self._running))
+        if normal_capacity > 0:
+            async with self._session_factory() as db:
+                candidates = await knowledge_job_crud.list_claimable_for_worker(
+                    db,
+                    enabled_operations=self._executor.enabled_operations,
+                    limit=max(normal_capacity * 2, normal_capacity),
+                )
+            await self._claim_candidates(candidates, normal_capacity)
+
+        waiting_parent_ids = {job_id for job_id, entry in self._running.items() if entry.waiting_for_children and not entry.task.done()}
+        if not waiting_parent_ids:
+            return
+
+        active_execution_count = sum(1 for entry in self._running.values() if not entry.task.done() and not entry.waiting_for_children)
+        dependent_capacity = self._max_concurrency - active_execution_count
+        if dependent_capacity <= 0:
+            return
+        async with self._session_factory() as db:
+            candidates = await knowledge_job_crud.list_claimable_for_worker(
+                db,
+                enabled_operations=self._executor.enabled_operations,
+                parent_job_ids=waiting_parent_ids,
+                limit=max(dependent_capacity * 2, dependent_capacity),
+            )
+        await self._claim_candidates(candidates, dependent_capacity)
+
+    def _set_waiting_for_children(self, job_id: int, worker_id: str, waiting: bool) -> None:
+        entry = self._running.get(job_id)
+        if entry is not None and entry.worker_id == worker_id:
+            entry.waiting_for_children = waiting
 
     async def _execute(self, job: KnowledgeJob, worker_id: str) -> None:
         if job.id is None:
             return
         try:
+            await _log_organization_started(self._session_factory, job)
             execution = await self._executor.execute_claimed(job, worker_id)
             if execution.finalized:
+                await self._submit_auto_organization_after_publication(job)
+                return
+            if execution.wait_for_children and _is_organization_parent_job(job):
+                self._set_waiting_for_children(job.id, worker_id, True)
+                try:
+                    await self._wait_for_organization_children(job, worker_id, execution)
+                finally:
+                    self._set_waiting_for_children(job.id, worker_id, False)
                 return
             async with self._session_factory() as db:
                 changed = await knowledge_job_crud.mark_succeeded(
@@ -339,9 +488,21 @@ class KnowledgeJobConsumer:
                     job_id=job.id,
                     owner=worker_id,
                     result=execution.result,
+                    commit=False,
                 )
+                if changed:
+                    await coordinate_organization_terminal(
+                        db,
+                        uid=job.uid,
+                        job_id=job.id,
+                        commit=False,
+                    )
+                await db.commit()
             if not changed:
                 logger.bind(job_id=job.id, operation=str(job.operation)).warning(t(LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED))
+            else:
+                await _log_organization_completed(self._session_factory, job, execution.result)
+                await self._submit_auto_organization_after_publication(job)
         except asyncio.CancelledError:
             await self._release_for_shutdown(job, worker_id)
             raise
@@ -359,10 +520,137 @@ class KnowledgeJobConsumer:
             logger.bind(job_id=job.id, operation=str(job.operation), error_type=type(exc).__name__).error(t(LOG_KNOWLEDGE_JOB_EXECUTION_FAILED))
             await self._retry_or_fail(job, worker_id, t(ERR_KNOWLEDGE_JOB_UNEXPECTED_FAILURE), None)
 
+    async def _wait_for_organization_children(
+        self,
+        job: KnowledgeJob,
+        worker_id: str,
+        execution: KnowledgeJobExecutionResult,
+    ) -> None:
+        if job.id is None:
+            return
+        while True:
+            completed_successfully = False
+            async with self._session_factory() as db:
+                active_claim = await knowledge_job_crud.get_active_claim(
+                    db,
+                    uid=job.uid,
+                    job_id=job.id,
+                    owner=worker_id,
+                )
+                children = await knowledge_job_crud.list_children(
+                    db,
+                    uid=job.uid,
+                    parent_job_id=job.id,
+                )
+                if active_claim is None:
+                    raise KnowledgeJobLeaseLostError(t(ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE))
+
+                changed: bool | None = None
+                if active_claim.cancel_requested_at is not None:
+                    error = t(ERR_KNOWLEDGE_JOB_CANCELLATION_REQUESTED)
+                    changed = await knowledge_job_crud.mark_cancelled(
+                        db,
+                        uid=job.uid,
+                        job_id=job.id,
+                        owner=worker_id,
+                        error=error,
+                        commit=False,
+                    )
+                    if changed:
+                        await coordinate_organization_terminal(
+                            db,
+                            uid=job.uid,
+                            job_id=job.id,
+                            error=error,
+                            commit=False,
+                        )
+                else:
+                    failed_children = [child for child in children if child.status in _FAILED_KNOWLEDGE_JOB_STATUSES]
+                    if not children or failed_children:
+                        error = next((child.error for child in failed_children if child.error), None) or t(ERR_KNOWLEDGE_ORGANIZATION_FAILED)
+                        changed = await knowledge_job_crud.mark_failed(
+                            db,
+                            uid=job.uid,
+                            job_id=job.id,
+                            owner=worker_id,
+                            error=error,
+                            commit=False,
+                        )
+                        if changed:
+                            await coordinate_organization_terminal(
+                                db,
+                                uid=job.uid,
+                                job_id=job.id,
+                                error=error,
+                                commit=False,
+                            )
+                    elif all(child.status in _TERMINAL_KNOWLEDGE_JOB_STATUSES for child in children):
+                        changed = await knowledge_job_crud.mark_succeeded(
+                            db,
+                            uid=job.uid,
+                            job_id=job.id,
+                            owner=worker_id,
+                            result=execution.result,
+                            commit=False,
+                        )
+                        if changed:
+                            completed_successfully = True
+                            await coordinate_organization_terminal(
+                                db,
+                                uid=job.uid,
+                                job_id=job.id,
+                                commit=False,
+                            )
+
+                if changed is None:
+                    continue_waiting = True
+                else:
+                    await db.commit()
+                    continue_waiting = False
+
+            if not continue_waiting:
+                if not changed:
+                    logger.bind(job_id=job.id, operation=str(job.operation)).warning(t(LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED))
+                elif completed_successfully:
+                    await _log_organization_completed(self._session_factory, job, execution.result)
+                return
+            await asyncio.sleep(float(self._poll_interval_seconds))
+
+    async def _submit_auto_organization_after_publication(self, job: KnowledgeJob) -> None:
+        if (
+            job.operation
+            not in {
+                KnowledgeJobOperation.MANAGED_CREATE,
+                KnowledgeJobOperation.MANAGED_UPDATE,
+            }
+            or job.parent_job_id is not None
+        ):
+            return
+        try:
+            from app.core.knowledge.organization_run import submit_auto_knowledge_organization
+
+            async with self._session_factory() as db:
+                await submit_auto_knowledge_organization(
+                    db,
+                    uid=job.uid,
+                    knowledge_base_id=job.knowledge_base_id,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.bind(
+                job_id=job.id,
+                knowledge_base_id=job.knowledge_base_id,
+                error_type=type(exc).__name__,
+            ).error(t(LOG_KNOWLEDGE_JOB_DATABASE_OPERATION_FAILED))
+
     async def _retry_or_fail(self, job: KnowledgeJob, worker_id: str, safe_message: str, result: dict | None) -> None:
         if job.id is None:
             return
         try:
+            if _is_organization_parent_job(job):
+                await self._mark_failed(job, worker_id, safe_message, result)
+                return
             target_collection = None
             log_managed_retry = False
             log_managed_failure = False
@@ -388,6 +676,13 @@ class KnowledgeJobConsumer:
                         commit=False,
                     )
                     if changed:
+                        await coordinate_organization_terminal(
+                            db,
+                            uid=job.uid,
+                            job_id=job.id,
+                            error=safe_message,
+                            commit=False,
+                        )
                         current = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
                         if current is not None:
                             target_collection = await finalize_knowledge_migration_terminal_state(
@@ -435,6 +730,13 @@ class KnowledgeJobConsumer:
                     commit=False,
                 )
                 if changed:
+                    await coordinate_organization_terminal(
+                        db,
+                        uid=job.uid,
+                        job_id=job.id,
+                        error=safe_message,
+                        commit=False,
+                    )
                     current = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
                     if current is not None:
                         target_collection = await finalize_knowledge_migration_terminal_state(
@@ -467,6 +769,13 @@ class KnowledgeJobConsumer:
                     commit=False,
                 )
                 if changed:
+                    await coordinate_organization_terminal(
+                        db,
+                        uid=job.uid,
+                        job_id=job.id,
+                        error=safe_message,
+                        commit=False,
+                    )
                     current = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
                     if current is not None:
                         target_collection = await finalize_knowledge_migration_terminal_state(
@@ -499,6 +808,14 @@ class KnowledgeJobConsumer:
                 if changed:
                     current = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
                     if current is not None:
+                        if current.status in _TERMINAL_KNOWLEDGE_JOB_STATUSES:
+                            await coordinate_organization_terminal(
+                                db,
+                                uid=job.uid,
+                                job_id=job.id,
+                                error=current.error,
+                                commit=False,
+                            )
                         target_collection = await finalize_knowledge_migration_terminal_state(
                             db,
                             job=current,
