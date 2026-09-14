@@ -5,7 +5,7 @@
 }
 
 .sessions-sidebar {
-  width: 280px;
+  width: 200px;
   flex-shrink: 0;
   background: #fff;
   display: flex;
@@ -34,12 +34,14 @@
       justify-content: flex-end;
       flex-shrink: 0;
       margin-left: auto;
+      gap: 4px;
 
-      .refresh-icon {
+      .sidebar-icon {
         color: #409eff;
         cursor: pointer;
         font-size: 22px;
         padding: 4px;
+        border-radius: 4px;
 
         &:hover {
           background: #ecf5ff;
@@ -51,6 +53,10 @@
           pointer-events: none;
         }
       }
+
+      .refresh-icon {
+        // 复用 .sidebar-icon 基础样式
+      }
     }
   }
 
@@ -60,12 +66,73 @@
     padding: 8px;
   }
 
+  .session-group {
+    margin-bottom: 8px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  .session-group-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 6px 4px 8px;
+    padding: 6px 12px 6px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #303133;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    background: #ebeef5;
+    border-radius: 8px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.2s ease, color 0.2s ease;
+
+    &:hover {
+      background: #dcdfe6;
+    }
+
+    &:focus-visible {
+      outline: 2px solid #409eff;
+      outline-offset: 2px;
+    }
+
+    .session-group-title-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .session-group-chevron {
+      flex-shrink: 0;
+      font-size: 14px;
+      color: #606266;
+      transition: transform 0.25s ease;
+    }
+
+    &.is-collapsed .session-group-chevron {
+      transform: rotate(-90deg);
+    }
+  }
+
+  .session-group-body {
+    overflow: hidden;
+  }
+
   .session-item {
+    position: relative;
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     padding: 10px 12px;
-    margin-bottom: 4px;
+    margin: 0 4px 4px;
+    border-radius: 8px;
     cursor: pointer;
     transition: background 0.2s;
 
@@ -75,7 +142,6 @@
 
     &.active {
       background: #ecf5ff;
-      border-left: 3px solid #409eff;
     }
 
     .session-content {
@@ -83,14 +149,23 @@
       min-width: 0;
 
       .session-title {
+        min-width: 0;
+        margin-bottom: 6px;
         font-size: 12px;
         line-height: 18px;
         color: #303133;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        margin-bottom: 6px;
         font-weight: 500;
+      }
+
+      .session-source {
+        font-size: 11px;
+        color: #a8abb2;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .session-meta {
@@ -148,8 +223,33 @@
       }
     }
 
+    .session-loading-indicator {
+      position: absolute;
+      right: 12px;
+      bottom: 10px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 2px solid #d2d6da;
+      border-top-color: #59636d;
+      animation: session-loading-spin 0.8s linear infinite;
+      pointer-events: none;
+    }
+
     &:hover .session-actions {
       opacity: 1;
+    }
+  }
+
+  @keyframes session-loading-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .session-loading-indicator {
+      animation: none;
     }
   }
 
@@ -614,9 +714,10 @@
 
   .input-area {
     padding: 16px 20px;
-    border-top: 1px solid #ebeef5;
-    background: #fafafa;
+    background: transparent;
+    border-top: none;
     position: relative;
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 
     .read-only-notice {
       padding: 8px 12px;
@@ -688,6 +789,9 @@
       display: flex;
       flex-direction: column;
       gap: 12px;
+      width: 100%;
+      margin: 0 auto;
+      transition: max-width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 
       .input-controls {
         display: flex;
@@ -700,12 +804,47 @@
           display: flex;
           flex-direction: column;
           background: #fff;
-          border: 1px solid #dcdfe6;
-          transition: border-color 0.2s cubic-bezier(0.645, 0.045, 0.355, 1);
+          border: 1px solid #d8d8d8;
+          border-radius: 26px;
+          padding: 6px 8px 6px 14px;
+          box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+          transition: border-color 0.2s ease, box-shadow 0.2s ease;
           overflow: hidden;
 
           &:focus-within {
-            border-color: #409eff;
+            border-color: #b5b5b5;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+          }
+
+          .chat-input-row {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 44px 6px 4px;
+          }
+
+          .more-options-trigger {
+            flex: 0 0 auto;
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+            padding: 0 !important;
+            margin: 0;
+            border-radius: 50% !important;
+            background: #f4f4f5;
+            border: none;
+            color: #606266;
+            transition: background 0.2s ease, color 0.2s ease;
+
+            &:hover {
+              background: #e9e9eb;
+              color: #303133;
+            }
+
+            .el-icon {
+              font-size: 18px;
+            }
           }
 
           .upload-container {
@@ -715,7 +854,7 @@
                 display: flex;
                 flex-wrap: wrap;
                 gap: 12px;
-                
+
                 .custom-upload-item {
                   position: relative;
                   width: 60px;
@@ -794,14 +933,17 @@
             }
 
           .chat-input {
+            flex: 1;
+            min-width: 0;
+
             .el-textarea__inner {
-              min-height: 80px !important;
-              padding: 8px 12px;
+              min-height: 36px !important;
+              padding: 8px 4px;
               border: none !important;
               box-shadow: none !important;
               background: transparent;
-              padding-right: 50px;
-              
+              border-radius: 0;
+
               &:focus {
                 box-shadow: none !important;
               }
@@ -810,8 +952,9 @@
 
           .action-btn-container {
             position: absolute;
+            top: 50%;
             right: 8px;
-            bottom: 8px;
+            transform: translateY(-50%);
 
             .action-btn {
               width: 32px !important;
@@ -822,7 +965,7 @@
               display: flex;
               align-items: center;
               justify-content: center;
-              
+
               .el-icon {
                 font-size: 16px;
               }
@@ -1049,3 +1192,214 @@
     }
   }
 }
+
+// 新建会话欢迎区
+.welcome-hero {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  bottom: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+
+  .welcome-greeting {
+    margin: 0;
+    color: #1f1f1f;
+    font-size: 32px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    line-height: 1.3;
+    text-align: center;
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+
+    &.is-exiting {
+      transform: translateY(-60px);
+      opacity: 0;
+      pointer-events: none;
+    }
+  }
+}
+
+// 更多选项 popover
+.chat-more-options-popover.el-popper {
+  padding: 0;
+  border: 1px solid #e4e4e4;
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+
+  .el-popper__arrow {
+    display: none;
+  }
+
+  .more-options-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 6px 0;
+
+    .more-option-upload {
+      display: block;
+      width: 100%;
+
+      > .el-upload {
+        display: block;
+        width: 100%;
+      }
+    }
+
+    .more-option-upload-hidden {
+      position: absolute;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+      pointer-events: none;
+      opacity: 0;
+    }
+
+    .more-option-row.is-disabled {
+      cursor: not-allowed;
+      color: #c0c4cc;
+
+      &:hover {
+        background: transparent;
+      }
+
+      .more-option-icon {
+        color: #c0c4cc;
+      }
+    }
+
+    .more-option-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      margin: 0 8px;
+      border-radius: 8px;
+      color: #1f1f1f;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background 0.15s ease;
+
+      &:hover {
+        background: #f5f5f5;
+      }
+
+      .more-option-icon {
+        font-size: 16px;
+        color: #606266;
+      }
+
+      .more-option-label {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .more-option-label--profile {
+        flex: 0 0 auto;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+
+    .more-option-divider {
+      height: 1px;
+      margin: 4px 16px;
+      background: #ececec;
+    }
+
+    .more-option-toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      margin: 0 8px;
+      border-radius: 8px;
+      color: #1f1f1f;
+      font-size: 14px;
+
+      .more-option-label {
+        flex: 1;
+        min-width: 0;
+      }
+    }
+
+    .more-option-segment {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      padding: 10px 12px;
+      margin: 0 8px;
+      border-radius: 8px;
+      color: #1f1f1f;
+      font-size: 14px;
+
+      .more-option-label {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .el-radio-group {
+        width: 100%;
+        display: flex;
+
+        .el-radio-button {
+          flex: 1;
+
+          .el-radio-button__inner {
+            width: 100%;
+            padding: 6px 10px;
+            box-sizing: border-box;
+          }
+        }
+      }
+    }
+
+    .more-option-profile {
+      gap: 10px;
+
+      .more-option-profile-select {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+    }
+  }
+}
+
+// 会话列表 info tooltip 多行样式
+.session-info-tooltip.el-popper {
+  white-space: pre-line;
+  line-height: 1.6;
+}
+
+// 会话分组展开/收起过渡（通过 .session-group-body 的 max-height + opacity 控制）
+.session-group-body {
+  max-height: 2000px;
+  opacity: 1;
+  overflow: hidden;
+  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  > .session-item {
+    transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+.session-group-body.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+
+  > .session-item {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
