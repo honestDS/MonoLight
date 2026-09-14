@@ -47,3 +47,10 @@ export const createManagedKnowledgeDedupeKey = (operation) => {
     || `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
   return `managed-ui-${operation}:${suffix}`.slice(0, 255)
 }
+
+export const getKnowledgeOrganizationPublishedSuccessCount = (job) => {
+  const value = job?.publication_success_count
+  if (typeof value !== 'number' && typeof value !== 'string') return 0
+  const numericValue = Number(value)
+  return Number.isFinite(numericValue) && numericValue > 0 ? Math.trunc(numericValue) : 0
+}

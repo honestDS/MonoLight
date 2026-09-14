@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from chromadb.errors import NotFoundError as ChromaNotFoundError
 
 from app.core.constants import (
+    ERR_KNOWLEDGE_JOB_CANCELLATION_REQUESTED,
     ERR_KNOWLEDGE_JOB_DELETE_CLEANUP_FAILED,
     ERR_KNOWLEDGE_JOB_EMBEDDING_FAILED,
     ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE,
@@ -24,8 +25,28 @@ from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, embed_texts_with_config, load_embedding_runtime_config
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.i18n import t
+from app.core.knowledge import organization_run
+from app.core.knowledge.errors import (
+    KnowledgeOrganizationConfigurationError,
+    KnowledgeOrganizationContextExceededError,
+    KnowledgeOrganizationExecutionError,
+    KnowledgeOrganizationModelFailedError,
+    KnowledgeOrganizationNotConvergedError,
+)
+from app.core.knowledge.managed import normalize_managed_knowledge_key
 from app.core.knowledge.migration import record_knowledge_base_migration_change
+from app.core.knowledge.organization_lifecycle import coordinate_organization_terminal
+from app.core.knowledge.organization_publication import (
+    load_knowledge_organization_mutation_item,
+    publish_knowledge_organization_plan,
+)
+from app.core.knowledge.organization_types import (
+    KnowledgeOrganizationMerge,
+    KnowledgeOrganizationUpdate,
+)
+from app.core.knowledge.results import ManagedKnowledgeMutationStatus
 from app.core.knowledge_jobs.executor import (
+    KnowledgeJobCancelledError,
     KnowledgeJobDeterministicError,
     KnowledgeJobExecutionContext,
     KnowledgeJobExecutionResult,
@@ -34,6 +55,7 @@ from app.core.knowledge_jobs.executor import (
     KnowledgeJobRetryableError,
     SessionFactory,
 )
+from app.core.knowledge_jobs.manager import KnowledgeJobSubmissionResult, knowledge_job_manager
 from app.core.knowledge_jobs.migration import (
     handle_embedding_migration,
     handle_old_collection_cleanup,
@@ -47,9 +69,14 @@ from app.models.knowledge_base import (
     KnowledgeBaseMigrationDeltaAction,
     KnowledgeBaseMigrationSourceType,
     KnowledgeBaseType,
+    KnowledgeJob,
     KnowledgeJobOperation,
+    KnowledgeJobStatus,
+    ManagedKnowledgeActorType,
+    ManagedKnowledgeSourceType,
 )
 from app.providers.database import AsyncSessionLocal
+from app.providers.database.time import get_database_time
 from app.providers.vector import (
     async_delete_collection_items,
     async_get_or_create_collection,
@@ -330,6 +357,13 @@ async def handle_managed_publication(context: KnowledgeJobExecutionContext) -> K
         if not succeeded:
             await db.rollback()
             raise KnowledgeJobLeaseLostError(t(ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE))
+        await coordinate_organization_terminal(
+            db,
+            snapshot.uid,
+            snapshot.job_id,
+            error=None,
+            commit=False,
+        )
         await db.commit()
     return KnowledgeJobExecutionResult(
         result={
@@ -419,6 +453,13 @@ async def handle_managed_delete_cleanup(context: KnowledgeJobExecutionContext) -
         if not succeeded:
             await db.rollback()
             raise KnowledgeJobLeaseLostError(t(ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE))
+        await coordinate_organization_terminal(
+            db,
+            snapshot.uid,
+            snapshot.job_id,
+            error=None,
+            commit=False,
+        )
         try:
             await db.commit()
         except Exception as exc:
@@ -427,6 +468,277 @@ async def handle_managed_delete_cleanup(context: KnowledgeJobExecutionContext) -
     return KnowledgeJobExecutionResult(
         result={"knowledge_id": snapshot.knowledge_id, "version": snapshot.version},
         finalized=True,
+    )
+
+
+def _organization_job_error(exc: BaseException) -> KnowledgeJobDeterministicError:
+    if isinstance(exc, KnowledgeOrganizationExecutionError):
+        message = exc.render_message()
+        result = exc.data if isinstance(exc.data, dict) else None
+    else:
+        message = t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT)
+        result = None
+    return KnowledgeJobDeterministicError(message, result=result)
+
+
+async def handle_knowledge_organization(context: KnowledgeJobExecutionContext) -> KnowledgeJobExecutionResult:
+    job = await context.checkpoint()
+    if job.id is None or job.operation not in {
+        KnowledgeJobOperation.AUTO_ORGANIZE,
+        KnowledgeJobOperation.MANUAL_ORGANIZE,
+    }:
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    try:
+        execution = await organization_run._execute_knowledge_organization_run(
+            context.session_factory,
+            uid=job.uid,
+            knowledge_base_id=job.knowledge_base_id,
+            organization_job_id=job.id,
+        )
+    except (
+        KnowledgeOrganizationConfigurationError,
+        KnowledgeOrganizationContextExceededError,
+        KnowledgeOrganizationModelFailedError,
+        KnowledgeOrganizationNotConvergedError,
+        KnowledgeOrganizationExecutionError,
+    ) as exc:
+        raise _organization_job_error(exc) from exc
+
+    await context.checkpoint()
+    publication = None
+    if execution.snapshot_id is not None and execution.final_stage_id is not None:
+        try:
+            publication = await publish_knowledge_organization_plan(
+                context.session_factory,
+                uid=job.uid,
+                knowledge_base_id=job.knowledge_base_id,
+                organization_job_id=job.id,
+                owner=context.worker_id,
+                snapshot_id=execution.snapshot_id,
+                final_stage_id=execution.final_stage_id,
+                plan=execution.plan,
+            )
+        except KnowledgeOrganizationExecutionError as exc:
+            raise _organization_job_error(exc) from exc
+
+    await context.checkpoint()
+    mutation_job_ids = list(publication.mutation_job_ids) if publication is not None else []
+    return KnowledgeJobExecutionResult(
+        result={
+            "snapshot_id": execution.snapshot_id,
+            "final_stage_id": execution.final_stage_id,
+            "final_stage_key": execution.final_stage_key,
+            "work_key": execution.work_key,
+            "model_id": execution.model_id,
+            "stage_count": execution.stage_count,
+            "keep_count": sum(item.action == "keep" for item in execution.plan.items),
+            "update_count": sum(item.action == "update" for item in execution.plan.items),
+            "merge_count": sum(item.action == "merge" for item in execution.plan.items),
+            "conflict_count": sum(item.action == "conflict" for item in execution.plan.items),
+            "mutation_job_ids": mutation_job_ids,
+        },
+        wait_for_children=bool(mutation_job_ids),
+    )
+
+
+def _organization_reference(job: KnowledgeJob) -> dict[str, int]:
+    if job.id is None or job.parent_job_id is None:
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    return {
+        "organization_job_id": job.parent_job_id,
+        "organization_mutation_job_id": job.id,
+    }
+
+
+def _validate_organization_mutation_job(job: KnowledgeJob) -> tuple[dict, int]:
+    if job.id is None or job.operation != KnowledgeJobOperation.ORGANIZE_MUTATION or job.parent_job_id is None:
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    payload = job.payload
+    if not isinstance(payload, dict) or set(payload) - {
+        "snapshot_id",
+        "stage_id",
+        "plan_item_index",
+        "action",
+        "sources",
+        "primary_knowledge_id",
+    }:
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    required = ("snapshot_id", "stage_id", "plan_item_index", "action", "sources")
+    if any(key not in payload for key in required):
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    if any(isinstance(payload[key], bool) or not isinstance(payload[key], int) or payload[key] < 1 for key in ("snapshot_id", "stage_id")):
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    if isinstance(payload["plan_item_index"], bool) or not isinstance(payload["plan_item_index"], int) or payload["plan_item_index"] < 0:
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    if payload["action"] not in {"update", "merge"} or not isinstance(payload["sources"], list) or not payload["sources"]:
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    if payload["action"] == "merge" and "primary_knowledge_id" not in payload:
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    return payload, job.parent_job_id
+
+
+async def handle_organization_mutation(context: KnowledgeJobExecutionContext) -> KnowledgeJobExecutionResult:
+    job = await context.checkpoint()
+    payload, organization_job_id = _validate_organization_mutation_job(job)
+    async with context.session_factory() as db:
+        parent = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=organization_job_id)
+        if (
+            parent is None
+            or parent.knowledge_base_id != job.knowledge_base_id
+            or parent.operation
+            not in {
+                KnowledgeJobOperation.AUTO_ORGANIZE,
+                KnowledgeJobOperation.MANUAL_ORGANIZE,
+            }
+            or parent.status not in {KnowledgeJobStatus.RUNNING, KnowledgeJobStatus.SUCCEEDED}
+            or parent.cancel_requested_at is not None
+        ):
+            raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+
+        plan_item = await load_knowledge_organization_mutation_item(
+            db,
+            uid=job.uid,
+            knowledge_base_id=job.knowledge_base_id,
+            snapshot_id=payload["snapshot_id"],
+            stage_id=payload["stage_id"],
+            plan_item_index=payload["plan_item_index"],
+        )
+        plan_sources = [(source.knowledge_id, source.expected_version) for source in ((plan_item.source,) if isinstance(plan_item, KnowledgeOrganizationUpdate) else plan_item.sources)]
+        if isinstance(plan_item, KnowledgeOrganizationUpdate):
+            expected_target = plan_sources[0]
+        else:
+            expected_target = (
+                next(
+                    (
+                        source.knowledge_id,
+                        source.expected_version,
+                    )
+                    for source in plan_item.sources
+                    if source.knowledge_id == plan_item.primary_knowledge_id
+                )
+                if any(source.knowledge_id == plan_item.primary_knowledge_id for source in plan_item.sources)
+                else None
+            )
+            if expected_target is None:
+                raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+        if payload["action"] != plan_item.action or job.knowledge_id != expected_target[0] or job.expected_version != expected_target[1] or (isinstance(plan_item, KnowledgeOrganizationMerge) and payload.get("primary_knowledge_id") != plan_item.primary_knowledge_id):
+            raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+        payload_sources = payload["sources"]
+        normalized_payload_sources = []
+        for source in payload_sources:
+            if not isinstance(source, dict) or set(source) != {"knowledge_id", "expected_version"}:
+                raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+            knowledge_id = source.get("knowledge_id")
+            expected_version = source.get("expected_version")
+            if isinstance(knowledge_id, bool) or not isinstance(knowledge_id, int) or knowledge_id < 1 or isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 1:
+                raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+            normalized_payload_sources.append((knowledge_id, expected_version))
+        if tuple(normalized_payload_sources) != tuple(plan_sources):
+            raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+
+        parent = await knowledge_job_crud.lock_by_id(db, uid=job.uid, job_id=organization_job_id)
+        now = await get_database_time(db)
+        if (
+            parent is None
+            or parent.uid != job.uid
+            or parent.knowledge_base_id != job.knowledge_base_id
+            or parent.operation
+            not in {
+                KnowledgeJobOperation.AUTO_ORGANIZE,
+                KnowledgeJobOperation.MANUAL_ORGANIZE,
+            }
+            or parent.status != KnowledgeJobStatus.RUNNING
+            or not parent.locked_by
+            or parent.lock_until is None
+            or parent.lock_until < now
+        ):
+            raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+        if parent.cancel_requested_at is not None:
+            raise KnowledgeJobCancelledError(t(ERR_KNOWLEDGE_JOB_CANCELLATION_REQUESTED))
+
+        reference = _organization_reference(job)
+        lock_token = f"job:{organization_job_id}"
+        child_job_ids: list[int] = []
+
+        async def submit_update(source_id: int, expected_version: int, target) -> None:
+            submission = await knowledge_job_manager.submit_update(
+                db,
+                uid=job.uid,
+                knowledge_base_id=job.knowledge_base_id,
+                knowledge_id=source_id,
+                expected_version=expected_version,
+                knowledge_key=target.knowledge_key,
+                content=target.content,
+                source_type=ManagedKnowledgeSourceType.AUTO_ORGANIZE,
+                actor=ManagedKnowledgeActorType.SYSTEM,
+                dedupe_key=f"knowledge-organization-publication:{job.id}:update:{source_id}",
+                source_reference=reference,
+                source_profile_id=parent.source_profile_id,
+                parent_job_id=organization_job_id,
+                organization_lock_token=lock_token,
+                commit=False,
+            )
+            if submission.status in {ManagedKnowledgeMutationStatus.EXISTING_KEY, ManagedKnowledgeMutationStatus.EXISTING_CONTENT}:
+                raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+            if submission.job is not None and submission.job.id is not None:
+                child_job_ids.append(submission.job.id)
+
+        async def submit_delete(source_id: int, expected_version: int) -> KnowledgeJobSubmissionResult:
+            submission = await knowledge_job_manager.submit_delete(
+                db,
+                uid=job.uid,
+                knowledge_base_id=job.knowledge_base_id,
+                knowledge_id=source_id,
+                expected_version=expected_version,
+                source_type=ManagedKnowledgeSourceType.AUTO_ORGANIZE,
+                actor=ManagedKnowledgeActorType.SYSTEM,
+                dedupe_key=f"knowledge-organization-publication:{job.id}:delete:{source_id}",
+                source_reference=reference,
+                source_profile_id=parent.source_profile_id,
+                parent_job_id=organization_job_id,
+                organization_lock_token=lock_token,
+                commit=False,
+            )
+            if submission.status in {ManagedKnowledgeMutationStatus.EXISTING_KEY, ManagedKnowledgeMutationStatus.EXISTING_CONTENT}:
+                raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+            if submission.job is not None and submission.job.id is not None:
+                child_job_ids.append(submission.job.id)
+            return submission
+
+        if isinstance(plan_item, KnowledgeOrganizationUpdate):
+            await submit_update(plan_item.source.knowledge_id, plan_item.source.expected_version, plan_item.target)
+        elif isinstance(plan_item, KnowledgeOrganizationMerge):
+            normalized_target_key = normalize_managed_knowledge_key(plan_item.target.knowledge_key)
+            for source in plan_item.sources:
+                if source.knowledge_id != plan_item.primary_knowledge_id:
+                    submission = await submit_delete(source.knowledge_id, source.expected_version)
+                    deleted_item = submission.item
+                    delete_job_id = submission.job.id if submission.job is not None else None
+                    if deleted_item is not None and delete_job_id is not None and (deleted_item.knowledge_key is None or normalize_managed_knowledge_key(deleted_item.knowledge_key) == normalized_target_key or deleted_item.content == plan_item.target.content):
+                        cleared = await managed_knowledge_item_crud.clear_organization_merge_unique_fields(
+                            db,
+                            uid=job.uid,
+                            knowledge_base_id=job.knowledge_base_id,
+                            knowledge_id=source.knowledge_id,
+                            expected_version=deleted_item.version,
+                            pending_job_id=delete_job_id,
+                            organization_lock_token=lock_token,
+                            commit=False,
+                        )
+                        if not cleared:
+                            raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+            await submit_update(plan_item.primary_knowledge_id, expected_target[1], plan_item.target)
+        else:
+            raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+
+        await db.commit()
+
+    return KnowledgeJobExecutionResult(
+        result={
+            "parent_job_id": organization_job_id,
+            "action": plan_item.action,
+            "mutation_job_ids": child_job_ids,
+        }
     )
 
 
@@ -442,6 +754,9 @@ def create_default_knowledge_job_executor(
             KnowledgeJobOperation.MANAGED_VECTOR_CLEANUP: execute_managed_vector_cleanup,
             KnowledgeJobOperation.EMBEDDING_MIGRATION: handle_embedding_migration,
             KnowledgeJobOperation.OLD_COLLECTION_CLEANUP: handle_old_collection_cleanup,
+            KnowledgeJobOperation.AUTO_ORGANIZE: handle_knowledge_organization,
+            KnowledgeJobOperation.MANUAL_ORGANIZE: handle_knowledge_organization,
+            KnowledgeJobOperation.ORGANIZE_MUTATION: handle_organization_mutation,
         },
         session_factory=session_factory,
     )
@@ -453,4 +768,6 @@ __all__ = [
     "handle_managed_delete_cleanup",
     "handle_managed_publication",
     "handle_old_collection_cleanup",
+    "handle_knowledge_organization",
+    "handle_organization_mutation",
 ]

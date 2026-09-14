@@ -152,11 +152,7 @@ async def _load_user_recall_documents(
             continue
         chunk_indexes_by_key.setdefault(key, set()).add(chunk_index)
 
-    requested_keys = {
-        key
-        for key, chunk_indexes in chunk_indexes_by_key.items()
-        if any(chunk_index + 1 in chunk_indexes for chunk_index in chunk_indexes)
-    }
+    requested_keys = {key for key, chunk_indexes in chunk_indexes_by_key.items() if any(chunk_index + 1 in chunk_indexes for chunk_index in chunk_indexes)}
     missing_keys = requested_keys - checked_keys
     if not missing_keys:
         return
@@ -404,9 +400,7 @@ async def _global_rerank(
                 excluded_priorities=excluded_priorities,
             )
         except LLMException as exc:
-            logger.bind(profile_id=profile.id).warning(
-                t("LOG_RERANK_CONFIG_READ_FAILED", error=t(exc.message, default=exc.message, **exc.kwargs))
-            )
+            logger.bind(profile_id=profile.id).warning(t("LOG_RERANK_CONFIG_READ_FAILED", error=t(exc.message, default=exc.message, **exc.kwargs)))
             return fallback_candidates
 
         if rerank_config is None:
@@ -530,13 +524,7 @@ def _build_recall_items(
             expected_version = _positive_int(metadata.get("managed_knowledge_version"))
             raw_key = metadata.get("managed_knowledge_key")
             knowledge_key = raw_key.strip() if isinstance(raw_key, str) and raw_key.strip() else None
-            maintainable = (
-                metadata.get("managed_knowledge_llm_maintainable") is True
-                and knowledge_id is not None
-                and expected_version is not None
-                and knowledge_key is not None
-                and not truncated
-            )
+            maintainable = metadata.get("managed_knowledge_llm_maintainable") is True and knowledge_id is not None and expected_version is not None and knowledge_key is not None and not truncated
             if truncated:
                 knowledge_id = None
                 expected_version = None

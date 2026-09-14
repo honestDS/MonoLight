@@ -107,9 +107,7 @@ def test_recall_validators_accept_only_empty_text_and_one_valid_recall_call(cont
 
 
 def test_live_precheck_requires_knowledge_query_but_persisted_legacy_recall_remains_valid():
-    message = _assistant(
-        arguments={"operation": "recall", "query": "legacy context", "top_k": 3}
-    )
+    message = _assistant(arguments={"operation": "recall", "query": "legacy context", "top_k": 3})
 
     assert not precheck_module.response_is_valid(_response(message))
     assert persistence_module.is_valid_recall_call(message)

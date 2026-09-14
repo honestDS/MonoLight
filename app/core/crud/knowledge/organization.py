@@ -38,6 +38,25 @@ def _validate_batch_size(batch_size: int) -> None:
 
 
 class CRUDKnowledgeOrganizationSnapshot:
+    async def get_by_id(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        snapshot_id: int,
+    ) -> KnowledgeOrganizationSnapshot | None:
+        result = await db.execute(
+            select(KnowledgeOrganizationSnapshot)
+            .where(
+                KnowledgeOrganizationSnapshot.uid == uid,
+                KnowledgeOrganizationSnapshot.knowledge_base_id == knowledge_base_id,
+                KnowledgeOrganizationSnapshot.id == snapshot_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
     async def get_by_identity(
         self,
         db: AsyncSession,
@@ -204,6 +223,23 @@ class CRUDKnowledgeOrganizationFragment:
         )
         return result.scalars().first()
 
+    async def get_by_stage_and_index(
+        self,
+        db: AsyncSession,
+        *,
+        stage_id: int,
+        fragment_index: int,
+    ) -> KnowledgeOrganizationFragment | None:
+        result = await db.execute(
+            select(KnowledgeOrganizationFragment)
+            .where(
+                KnowledgeOrganizationFragment.stage_id == stage_id,
+                KnowledgeOrganizationFragment.fragment_index == fragment_index,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
     async def list_stage_page(
         self,
         db: AsyncSession,
@@ -302,6 +338,72 @@ class CRUDKnowledgeOrganizationFragment:
 
 
 class CRUDKnowledgeOrganizationStage:
+    async def get_by_id(
+        self,
+        db: AsyncSession,
+        *,
+        stage_id: int,
+    ) -> KnowledgeOrganizationStage | None:
+        result = await db.execute(select(KnowledgeOrganizationStage).where(KnowledgeOrganizationStage.id == stage_id).execution_options(populate_existing=True))
+        return result.scalars().first()
+
+    async def get_snapshot_progress(
+        self,
+        db: AsyncSession,
+        *,
+        snapshot_id: int,
+    ) -> dict[str, int]:
+        stage_result = await db.execute(
+            select(
+                func.count(KnowledgeOrganizationStage.id).label("stage_count"),
+                func.coalesce(
+                    func.sum(KnowledgeOrganizationStage.status == KnowledgeOrganizationStageStatus.COMPLETED),
+                    0,
+                ).label("completed_stage_count"),
+                func.coalesce(
+                    func.sum(KnowledgeOrganizationStage.status == KnowledgeOrganizationStageStatus.RUNNING),
+                    0,
+                ).label("running_stage_count"),
+                func.coalesce(
+                    func.sum(KnowledgeOrganizationStage.status == KnowledgeOrganizationStageStatus.FAILED),
+                    0,
+                ).label("failed_stage_count"),
+                func.coalesce(
+                    func.sum(KnowledgeOrganizationStage.status == KnowledgeOrganizationStageStatus.INVALIDATED),
+                    0,
+                ).label("invalidated_stage_count"),
+                func.coalesce(func.sum(KnowledgeOrganizationStage.expected_fragment_count), 0).label("expected_fragment_count"),
+                func.coalesce(func.sum(KnowledgeOrganizationStage.succeeded_fragment_count), 0).label("succeeded_fragment_count"),
+            ).where(KnowledgeOrganizationStage.snapshot_id == snapshot_id)
+        )
+        stage = stage_result.one()
+
+        fragment_result = await db.execute(
+            select(
+                func.coalesce(
+                    func.sum(KnowledgeOrganizationFragment.status == KnowledgeOrganizationFragmentStatus.COMPLETED),
+                    0,
+                ).label("completed_fragment_count"),
+                func.coalesce(
+                    func.sum(KnowledgeOrganizationFragment.status == KnowledgeOrganizationFragmentStatus.INVALIDATED),
+                    0,
+                ).label("invalidated_fragment_count"),
+            ).where(KnowledgeOrganizationFragment.snapshot_id == snapshot_id)
+        )
+        fragment = fragment_result.one()
+
+        return {
+            "stage_count": int(stage.stage_count or 0),
+            "completed_stage_count": int(stage.completed_stage_count or 0),
+            "running_stage_count": int(stage.running_stage_count or 0),
+            "failed_stage_count": int(stage.failed_stage_count or 0),
+            "invalidated_stage_count": int(stage.invalidated_stage_count or 0),
+            "expected_fragment_count": int(stage.expected_fragment_count or 0),
+            "succeeded_fragment_count": int(stage.succeeded_fragment_count or 0),
+            "completed_fragment_count": int(fragment.completed_fragment_count or 0),
+            "invalidated_fragment_count": int(fragment.invalidated_fragment_count or 0),
+        }
+
     async def get_by_identity(
         self,
         db: AsyncSession,

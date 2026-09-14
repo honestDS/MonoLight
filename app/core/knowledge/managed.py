@@ -149,8 +149,16 @@ def build_managed_knowledge_snapshot(item: ManagedKnowledgeItem) -> dict[str, An
     }
 
 
-def _ensure_not_organization_locked(item: ManagedKnowledgeItem) -> None:
-    if item.organization_lock_token is not None:
+def _ensure_not_organization_locked(
+    item: ManagedKnowledgeItem,
+    *,
+    organization_lock_token: str | None = None,
+) -> None:
+    if organization_lock_token is None:
+        locked = item.organization_lock_token is not None
+    else:
+        locked = item.organization_lock_token != organization_lock_token
+    if locked:
         raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_ORGANIZATION_LOCKED)
 
 
@@ -337,6 +345,7 @@ class ManagedKnowledgeService:
         source_job_id: int | None = None,
         llm_maintainable: bool | None = None,
         commit: bool = True,
+        organization_lock_token: str | None = None,
     ) -> ManagedKnowledgeMutationResult:
         try:
             normalized_uid = _normalize_uid(uid)
@@ -354,7 +363,7 @@ class ManagedKnowledgeService:
             item = await managed_knowledge_item_crud.get_by_id(db, uid=normalized_uid, knowledge_base_id=normalized_kb_id, knowledge_id=normalized_id)
             if item is None or item.deleted_at is not None:
                 raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND)
-            _ensure_not_organization_locked(item)
+            _ensure_not_organization_locked(item, organization_lock_token=organization_lock_token)
             if item.version != normalized_version:
                 raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_VERSION_CONFLICT)
             if normalized_actor == ManagedKnowledgeActorType.LLM and not item.llm_maintainable:
@@ -385,6 +394,7 @@ class ManagedKnowledgeService:
                         knowledge_base_id=normalized_kb_id,
                         knowledge_id=normalized_id,
                         expected_version=normalized_version,
+                        organization_lock_token=organization_lock_token,
                         knowledge_key=normalized_key,
                         content=normalized_content,
                         content_token_count=token_count,
@@ -405,7 +415,7 @@ class ManagedKnowledgeService:
                             knowledge_id=normalized_id,
                         )
                         if current is not None:
-                            _ensure_not_organization_locked(current)
+                            _ensure_not_organization_locked(current, organization_lock_token=organization_lock_token)
                         raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_VERSION_CONFLICT)
                     await managed_knowledge_revision_crud.create(
                         db,
@@ -470,6 +480,7 @@ class ManagedKnowledgeService:
         source_reference: dict[str, Any] | None = None,
         source_job_id: int | None = None,
         commit: bool = True,
+        organization_lock_token: str | None = None,
     ) -> ManagedKnowledgeMutationResult:
         try:
             normalized_uid = _normalize_uid(uid)
@@ -485,7 +496,7 @@ class ManagedKnowledgeService:
             item = await managed_knowledge_item_crud.get_by_id(db, uid=normalized_uid, knowledge_base_id=normalized_kb_id, knowledge_id=normalized_id)
             if item is None:
                 raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND)
-            _ensure_not_organization_locked(item)
+            _ensure_not_organization_locked(item, organization_lock_token=organization_lock_token)
             if item.version != normalized_version:
                 raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_VERSION_CONFLICT)
             if item.deleted_at is not None:
@@ -502,6 +513,7 @@ class ManagedKnowledgeService:
                     knowledge_base_id=normalized_kb_id,
                     knowledge_id=normalized_id,
                     expected_version=normalized_version,
+                    organization_lock_token=organization_lock_token,
                     source_type=normalized_source,
                     source_reference=normalized_reference,
                     source_job_id=normalized_job_id,
@@ -518,7 +530,7 @@ class ManagedKnowledgeService:
                         knowledge_id=normalized_id,
                     )
                     if current is not None:
-                        _ensure_not_organization_locked(current)
+                        _ensure_not_organization_locked(current, organization_lock_token=organization_lock_token)
                     raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_VERSION_CONFLICT)
                 await managed_knowledge_revision_crud.create(
                     db,

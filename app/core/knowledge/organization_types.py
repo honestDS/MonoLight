@@ -138,6 +138,9 @@ class KnowledgeOrganizationExecutionResult:
     model_id: str | None
     stage_count: int
     snapshot_id: int | None
+    final_stage_id: int | None = None
+    final_stage_key: str | None = None
+    work_key: str | None = None
 
 
 __all__ = [
