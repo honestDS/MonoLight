@@ -84,6 +84,7 @@ class KnowledgeJobExecutionContext:
 class KnowledgeJobExecutionResult:
     result: dict[str, Any]
     finalized: bool = False
+    wait_for_children: bool = False
 
 
 type Handler = Callable[

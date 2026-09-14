@@ -5,18 +5,18 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, or_, update
+from sqlalchemy import and_, delete, func, not_, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlmodel import select
 
 from app.core.constants import (
+    ERR_KNOWLEDGE_JOB_FIELD_INVALID,
     ERR_KNOWLEDGE_JOB_FIELD_REQUIRED,
     ERR_KNOWLEDGE_JOB_OWNER_MISMATCH,
     ERR_VALUE_MUST_BE_POSITIVE,
 )
-from app.core.crud.knowledge.managed import organization_lock_token_for_job
 from app.core.i18n import t
 from app.models.knowledge_base import (
     KnowledgeJob,
@@ -40,6 +40,12 @@ _ORGANIZATION_OPERATIONS = {
     KnowledgeJobOperation.AUTO_ORGANIZE,
     KnowledgeJobOperation.MANUAL_ORGANIZE,
 }
+_ORGANIZATION_CHILD_OPERATIONS = {
+    KnowledgeJobOperation.ORGANIZE_MUTATION,
+    KnowledgeJobOperation.MANAGED_CREATE,
+    KnowledgeJobOperation.MANAGED_UPDATE,
+    KnowledgeJobOperation.MANAGED_DELETE_CLEANUP,
+}
 
 
 def is_system_cleanup_operation(operation: KnowledgeJobOperation | str) -> bool:
@@ -52,6 +58,13 @@ def is_system_cleanup_operation(operation: KnowledgeJobOperation | str) -> bool:
 def is_organization_operation(operation: KnowledgeJobOperation | str) -> bool:
     try:
         return KnowledgeJobOperation(operation) in _ORGANIZATION_OPERATIONS
+    except (TypeError, ValueError):
+        return False
+
+
+def is_organization_mutation_operation(operation: KnowledgeJobOperation | str) -> bool:
+    try:
+        return KnowledgeJobOperation(operation) == KnowledgeJobOperation.ORGANIZE_MUTATION
     except (TypeError, ValueError):
         return False
 
@@ -69,9 +82,42 @@ def _claim_dependency_condition():
         )
         .exists(),
     )
+    organization_delete_cleanup_parent_terminal = and_(
+        KnowledgeJob.operation == KnowledgeJobOperation.MANAGED_DELETE_CLEANUP,
+        KnowledgeJob.parent_job_id.is_not(None),
+        select(parent_job.id)
+        .where(
+            parent_job.id == KnowledgeJob.parent_job_id,
+            parent_job.uid == KnowledgeJob.uid,
+            parent_job.operation.in_(_ORGANIZATION_OPERATIONS),
+            parent_job.status.in_(_TERMINAL_STATUSES),
+        )
+        .exists(),
+    )
+    organization_parent_active = and_(
+        KnowledgeJob.operation.in_(_ORGANIZATION_CHILD_OPERATIONS),
+        KnowledgeJob.parent_job_id.is_not(None),
+        select(parent_job.id)
+        .where(
+            parent_job.id == KnowledgeJob.parent_job_id,
+            parent_job.uid == KnowledgeJob.uid,
+            parent_job.operation.in_(_ORGANIZATION_OPERATIONS),
+            parent_job.status.in_([KnowledgeJobStatus.RUNNING, KnowledgeJobStatus.SUCCEEDED]),
+            parent_job.cancel_requested_at.is_(None),
+        )
+        .exists(),
+    )
     return or_(
-        KnowledgeJob.operation != KnowledgeJobOperation.MANAGED_VECTOR_CLEANUP,
         cleanup_parent_terminal,
+        organization_delete_cleanup_parent_terminal,
+        and_(
+            KnowledgeJob.operation != KnowledgeJobOperation.MANAGED_VECTOR_CLEANUP,
+            or_(
+                KnowledgeJob.parent_job_id.is_(None),
+                KnowledgeJob.operation.not_in(_ORGANIZATION_CHILD_OPERATIONS),
+                organization_parent_active,
+            ),
+        ),
     )
 
 
@@ -111,6 +157,12 @@ class CRUDKnowledgeJob:
         result = await db.execute(select(KnowledgeJob).where(KnowledgeJob.uid == uid, KnowledgeJob.id == job_id).execution_options(populate_existing=True))
         return result.scalars().first()
 
+    async def lock_by_id(self, db: AsyncSession, *, uid: str, job_id: int) -> KnowledgeJob | None:
+        await db.execute(update(KnowledgeJob).where(KnowledgeJob.uid == uid, KnowledgeJob.id == job_id).values(updated_at=KnowledgeJob.updated_at).execution_options(synchronize_session=False))
+        await db.flush()
+        result = await db.execute(select(KnowledgeJob).where(KnowledgeJob.uid == uid, KnowledgeJob.id == job_id).with_for_update().execution_options(populate_existing=True))
+        return result.scalars().first()
+
     async def get_by_ids(self, db: AsyncSession, *, uid: str, job_ids: Iterable[int]) -> list[KnowledgeJob]:
         normalized_ids = sorted({job_id for job_id in job_ids if isinstance(job_id, int) and not isinstance(job_id, bool) and job_id > 0})
         if not normalized_ids:
@@ -124,6 +176,72 @@ class CRUDKnowledgeJob:
             .execution_options(populate_existing=True)
         )
         return list(result.scalars().all())
+
+    async def list_children(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        parent_job_id: int,
+        statuses: Iterable[KnowledgeJobStatus | str] | None = None,
+    ) -> list[KnowledgeJob]:
+        if not isinstance(parent_job_id, int) or isinstance(parent_job_id, bool) or parent_job_id <= 0:
+            return []
+
+        conditions: list[Any] = [
+            KnowledgeJob.uid == uid,
+            KnowledgeJob.parent_job_id == parent_job_id,
+        ]
+        normalized_statuses = [KnowledgeJobStatus(status) for status in statuses] if statuses is not None else []
+        if normalized_statuses:
+            conditions.append(KnowledgeJob.status.in_(normalized_statuses))
+        result = await db.execute(select(KnowledgeJob).where(*conditions).order_by(KnowledgeJob.id))
+        return list(result.scalars().all())
+
+    async def list_page_for_knowledge_base(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        skip: int = 0,
+        limit: int = 100,
+        operation: KnowledgeJobOperation | str | None = None,
+        operations: Iterable[KnowledgeJobOperation | str] | None = None,
+        statuses: Iterable[KnowledgeJobStatus | str] | None = None,
+    ) -> tuple[list[KnowledgeJob], int]:
+        if not isinstance(knowledge_base_id, int) or isinstance(knowledge_base_id, bool) or knowledge_base_id <= 0:
+            return [], 0
+
+        normalized_skip = skip if isinstance(skip, int) and not isinstance(skip, bool) else 0
+        normalized_skip = max(normalized_skip, 0)
+        normalized_limit = limit if isinstance(limit, int) and not isinstance(limit, bool) else 0
+        normalized_limit = min(max(normalized_limit, 0), 100)
+
+        conditions: list[Any] = [
+            KnowledgeJob.uid == uid,
+            KnowledgeJob.knowledge_base_id == knowledge_base_id,
+        ]
+        if operation is not None and operations is not None:
+            raise ValueError(t(ERR_KNOWLEDGE_JOB_FIELD_INVALID, field="operation and operations"))
+        if operation is not None:
+            conditions.append(KnowledgeJob.operation == KnowledgeJobOperation(operation))
+        elif operations is not None:
+            normalized_operations = [KnowledgeJobOperation(value) for value in operations]
+            if not normalized_operations:
+                return [], 0
+            conditions.append(KnowledgeJob.operation.in_(normalized_operations))
+        normalized_statuses = [KnowledgeJobStatus(status) for status in statuses] if statuses is not None else []
+        if normalized_statuses:
+            conditions.append(KnowledgeJob.status.in_(normalized_statuses))
+
+        count_result = await db.execute(select(func.count(KnowledgeJob.id)).where(*conditions))
+        total = count_result.scalar_one()
+        if normalized_limit == 0:
+            return [], total
+
+        result = await db.execute(select(KnowledgeJob).where(*conditions).order_by(KnowledgeJob.created_at.desc(), KnowledgeJob.id.desc()).offset(normalized_skip).limit(normalized_limit))
+        return list(result.scalars().all()), total
 
     async def latest_publication_jobs_for_targets(
         self,
@@ -351,25 +469,29 @@ class CRUDKnowledgeJob:
         db: AsyncSession,
         *,
         enabled_operations: Iterable[KnowledgeJobOperation | str],
+        parent_job_ids: Iterable[int] | None = None,
         limit: int = 20,
     ) -> list[KnowledgeJob]:
         operations = [KnowledgeJobOperation(operation) for operation in enabled_operations]
         limit = min(max(limit, 0), 100)
         if not operations or limit == 0:
             return []
+        normalized_parent_job_ids: list[int] | None = None
+        if parent_job_ids is not None:
+            normalized_parent_job_ids = sorted({parent_job_id for parent_job_id in parent_job_ids if isinstance(parent_job_id, int) and not isinstance(parent_job_id, bool) and parent_job_id > 0})
+            if not normalized_parent_job_ids:
+                return []
         now = await get_database_time(db)
-        result = await db.execute(
-            select(KnowledgeJob)
-            .where(
-                KnowledgeJob.status.in_([KnowledgeJobStatus.PENDING, KnowledgeJobStatus.RETRY]),
-                KnowledgeJob.available_at <= now,
-                KnowledgeJob.cancel_requested_at.is_(None),
-                KnowledgeJob.operation.in_(operations),
-                _claim_dependency_condition(),
-            )
-            .order_by(KnowledgeJob.available_at, KnowledgeJob.id)
-            .limit(limit)
-        )
+        conditions: list[Any] = [
+            KnowledgeJob.status.in_([KnowledgeJobStatus.PENDING, KnowledgeJobStatus.RETRY]),
+            KnowledgeJob.available_at <= now,
+            KnowledgeJob.cancel_requested_at.is_(None),
+            KnowledgeJob.operation.in_(operations),
+            _claim_dependency_condition(),
+        ]
+        if normalized_parent_job_ids is not None:
+            conditions.append(KnowledgeJob.parent_job_id.in_(normalized_parent_job_ids))
+        result = await db.execute(select(KnowledgeJob).where(*conditions).order_by(KnowledgeJob.available_at, KnowledgeJob.id).limit(limit))
         return list(result.scalars().all())
 
     async def try_claim(
@@ -499,17 +621,6 @@ class CRUDKnowledgeJob:
             .execution_options(synchronize_session=False)
         )
 
-    async def _clear_organization_locks(self, db: AsyncSession, *, uid: str, job_id: int) -> None:
-        await db.execute(
-            update(ManagedKnowledgeItem)
-            .where(
-                ManagedKnowledgeItem.uid == uid,
-                ManagedKnowledgeItem.organization_lock_token == organization_lock_token_for_job(job_id),
-            )
-            .values(organization_lock_token=None)
-            .execution_options(synchronize_session=False)
-        )
-
     async def _mark_terminal(
         self,
         db: AsyncSession,
@@ -532,6 +643,23 @@ class CRUDKnowledgeJob:
         ]
         if status != KnowledgeJobStatus.CANCELLED:
             conditions.append(KnowledgeJob.cancel_requested_at.is_(None))
+        if status == KnowledgeJobStatus.SUCCEEDED:
+            child_job = aliased(KnowledgeJob)
+            unsuccessful_child = (
+                select(child_job.id)
+                .where(
+                    child_job.uid == KnowledgeJob.uid,
+                    child_job.parent_job_id == KnowledgeJob.id,
+                    child_job.status != KnowledgeJobStatus.SUCCEEDED,
+                )
+                .exists()
+            )
+            conditions.append(
+                or_(
+                    KnowledgeJob.operation.not_in(_ORGANIZATION_OPERATIONS),
+                    not_(unsuccessful_child),
+                )
+            )
         update_result = await db.execute(
             update(KnowledgeJob)
             .where(*conditions)
@@ -549,9 +677,6 @@ class CRUDKnowledgeJob:
         )
         changed = (update_result.rowcount or 0) == 1
         if changed:
-            terminal_job = await self.get_by_id(db, uid=uid, job_id=job_id)
-            if terminal_job is not None and is_organization_operation(terminal_job.operation):
-                await self._clear_organization_locks(db, uid=uid, job_id=job_id)
             if status in {KnowledgeJobStatus.FAILED, KnowledgeJobStatus.CANCELLED}:
                 await self._clear_pending_reference(db, uid=uid, job_id=job_id, updated_at=now)
         if commit:
@@ -681,7 +806,8 @@ class CRUDKnowledgeJob:
             if job.id is None or not job.locked_by or job.lock_until is None:
                 continue
             system_cleanup = is_system_cleanup_operation(job.operation)
-            if system_cleanup:
+            organization_delete_cleanup_cancel_requested = job.operation == KnowledgeJobOperation.MANAGED_DELETE_CLEANUP and job.parent_job_id is not None and job.cancel_requested_at is not None
+            if system_cleanup and not organization_delete_cleanup_cancel_requested:
                 next_status = KnowledgeJobStatus.RETRY
             elif job.cancel_requested_at is not None:
                 next_status = KnowledgeJobStatus.CANCELLED
@@ -724,8 +850,6 @@ class CRUDKnowledgeJob:
             if (update_result.rowcount or 0) != 1:
                 continue
             if next_status in _TERMINAL_STATUSES:
-                if is_organization_operation(job.operation):
-                    await self._clear_organization_locks(db, uid=job.uid, job_id=job.id)
                 await self._clear_pending_reference(db, uid=job.uid, job_id=job.id, updated_at=now)
                 terminal_jobs.append(
                     KnowledgeJobRecoveryTerminal(
@@ -759,7 +883,7 @@ class CRUDKnowledgeJob:
         job_id: int,
         commit: bool = True,
     ) -> KnowledgeJobCancelResult:
-        job = await self.get_by_id(db, uid=uid, job_id=job_id)
+        job = await self.lock_by_id(db, uid=uid, job_id=job_id)
         if job is None:
             return KnowledgeJobCancelResult(job=None, accepted=False, changed=False)
         if is_system_cleanup_operation(job.operation) or job.status in _TERMINAL_STATUSES:
@@ -796,7 +920,7 @@ class CRUDKnowledgeJob:
                 changed=True,
             )
 
-        job = await self.get_by_id(db, uid=uid, job_id=job_id)
+        job = await self.lock_by_id(db, uid=uid, job_id=job_id)
         if job is None:
             return KnowledgeJobCancelResult(job=None, accepted=False, changed=False)
         if is_system_cleanup_operation(job.operation) or job.status in _TERMINAL_STATUSES:
@@ -831,7 +955,7 @@ class CRUDKnowledgeJob:
                 changed=True,
             )
 
-        current = await self.get_by_id(db, uid=uid, job_id=job_id)
+        current = await self.lock_by_id(db, uid=uid, job_id=job_id)
         if current is not None and current.status == KnowledgeJobStatus.RUNNING and current.cancel_requested_at is not None:
             return KnowledgeJobCancelResult(job=current, accepted=True, changed=False)
         return KnowledgeJobCancelResult(job=current, accepted=False, changed=False)
@@ -850,7 +974,8 @@ class CRUDKnowledgeJob:
         job = await self.get_by_id(db, uid=uid, job_id=job_id)
         if job is None or job.status != KnowledgeJobStatus.RUNNING or job.locked_by != owner:
             return False
-        if is_system_cleanup_operation(job.operation) or (job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION and job.cancel_requested_at is None):
+        organization_delete_cleanup_cancel_requested = job.operation == KnowledgeJobOperation.MANAGED_DELETE_CLEANUP and job.parent_job_id is not None and job.cancel_requested_at is not None
+        if (is_system_cleanup_operation(job.operation) and not organization_delete_cleanup_cancel_requested) or (job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION and job.cancel_requested_at is None):
             now = await get_database_time(db)
             result = await db.execute(
                 update(KnowledgeJob)
@@ -881,6 +1006,15 @@ class CRUDKnowledgeJob:
                 uid=uid,
                 job_id=job_id,
                 owner=owner,
+                commit=commit,
+            )
+        if is_organization_operation(job.operation):
+            return await self.mark_failed(
+                db,
+                uid=uid,
+                job_id=job_id,
+                owner=owner,
+                error=max_attempts_error,
                 commit=commit,
             )
         if job.attempt_count >= job.max_attempts:
@@ -925,6 +1059,7 @@ __all__ = [
     "KnowledgeJobCancelResult",
     "KnowledgeJobRecoveryResult",
     "KnowledgeJobRecoveryTerminal",
+    "is_organization_mutation_operation",
     "is_system_cleanup_operation",
     "knowledge_job_crud",
 ]

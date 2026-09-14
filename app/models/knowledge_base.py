@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict, StrictInt, StrictStr, model_validator
 from sqlalchemy import DDL, CheckConstraint, ForeignKeyConstraint, Integer, Text, event
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlmodel import (
@@ -139,6 +139,10 @@ class KnowledgeBaseCore(SQLModel):
     old_collection_cleanup_job_id: int | None = Field(default=None, index=True, description="旧 collection 清理任务ID")
     old_collection_cleanup_error: str | None = Field(default=None, sa_column=Column(Text), description="旧 collection 清理错误信息")
     old_collection_cleanup_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)), description="旧 collection 清理时间")
+
+    organization_last_job_id: int | None = Field(default=None, index=True, description="最近一次知识整理任务ID")
+    organization_last_run_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)), description="最近一次知识整理运行时间")
+    organization_error: str | None = Field(default=None, sa_column=Column(Text), description="知识整理错误信息")
 
     index_revision: int = Field(default=0, ge=0, index=True, description="索引版本")
     index_status: KnowledgeBaseIndexStatus = Field(
@@ -473,13 +477,13 @@ class ManagedKnowledgeItem(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True, index=True, description="稳定的托管知识标识")
     knowledge_base_id: int = Field(nullable=False, index=True, description="所属托管知识库")
     uid: str = Field(nullable=False, index=True, max_length=50, description="所属用户")
-    knowledge_key: str = Field(nullable=False, index=True, max_length=255, description="稳定知识键")
+    knowledge_key: str | None = Field(default=None, nullable=True, index=True, max_length=255, description="稳定知识键")
     content: str = Field(
         sa_column=Column(Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
         description="完整知识正文，不保存截断内容",
     )
     content_token_count: int = Field(default=0, ge=0, nullable=False, description="完整正文 Token 数")
-    content_hash: str = Field(nullable=False, index=True, max_length=64, description="完整正文的稳定 SHA-256 摘要")
+    content_hash: str | None = Field(default=None, nullable=True, index=True, max_length=64, description="完整正文的稳定 SHA-256 摘要")
     version: int = Field(default=1, ge=1, index=True, nullable=False, description="当前知识版本")
     source_type: ManagedKnowledgeSourceType = Field(default=ManagedKnowledgeSourceType.USER_API, index=True, max_length=30)
     source_reference: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON), description="当前版本来源引用")
@@ -752,6 +756,11 @@ class KnowledgeBaseUpdate(SQLModel):
 class KnowledgeBaseEmbeddingMigrationRequest(SQLModel):
     embedding_channel_id: int = Field(..., gt=0, description="目标向量化渠道ID")
     embedding_model_id: str = Field(..., min_length=1, max_length=255, description="目标向量化模型ID")
+
+
+class KnowledgeOrganizationRequest(SQLModel):
+    knowledge_ids: list[StrictInt] | None = Field(default=None, min_length=1, description="可选的托管知识条目范围")
+    dedupe_key: StrictStr | None = Field(default=None, min_length=1, max_length=255)
 
 
 class ManagedKnowledgeCreateRequest(SQLModel):

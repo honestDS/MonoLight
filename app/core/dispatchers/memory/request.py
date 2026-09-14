@@ -253,13 +253,7 @@ def response_is_valid(response: Any) -> bool:
     tool_call = message.tool_calls[0]
     operation, error = validate_longterm_memory_arguments(tool_call.arguments)
     knowledge_query = tool_call.arguments.get("knowledge_query")
-    return (
-        tool_call.name == MANAGE_LONGTERM_MEMORY_TOOL_NAME
-        and operation == "recall"
-        and error is None
-        and isinstance(knowledge_query, str)
-        and bool(knowledge_query.strip())
-    )
+    return tool_call.name == MANAGE_LONGTERM_MEMORY_TOOL_NAME and operation == "recall" and error is None and isinstance(knowledge_query, str) and bool(knowledge_query.strip())
 
 
 def _has_content(value: Any) -> bool:
