@@ -149,6 +149,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             payload["max_tokens"] = max_tokens
         if kwargs.get("top_p") is not None:
             payload["top_p"] = kwargs["top_p"]
+        if kwargs.get("reasoning_effort") is not None:
+            payload["reasoning_effort"] = kwargs["reasoning_effort"]
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         parsed = await self._post_json(
@@ -195,6 +197,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             payload["max_tokens"] = max_tokens
         if kwargs.get("top_p") is not None:
             payload["top_p"] = kwargs["top_p"]
+        if kwargs.get("reasoning_effort") is not None:
+            payload["reasoning_effort"] = kwargs["reasoning_effort"]
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         async for parsed in self._stream_sse_json(

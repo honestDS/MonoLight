@@ -151,6 +151,7 @@ async def _default_model_caller(
         ],
         temperature=model.temperature,
         top_p=model.top_p,
+        reasoning_effort=model.reasoning_effort,
         max_tokens=model.max_output_tokens,
         tools=None,
         protocol=model.protocol,

@@ -141,6 +141,7 @@ async def generate_interactive_turn(
                 "messages": request_messages,
                 "temperature": state.chat_params["temperature"],
                 "top_p": state.chat_params["top_p"],
+                "reasoning_effort": state.chat_params.get("reasoning_effort"),
                 "max_tokens": state.chat_params["max_tokens"],
                 "tools": current_tools,
                 "protocol": protocol,

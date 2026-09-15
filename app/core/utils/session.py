@@ -49,6 +49,7 @@ async def generate_session_title(
     custom_headers: dict[str, str] | None = None,
     temperature: float = 0.7,
     top_p: float | None = None,
+    reasoning_effort: str | None = None,
 ) -> str | None:
     """
     异步生成会话标题并保存到数据库
@@ -73,6 +74,7 @@ async def generate_session_title(
             messages=messages,
             temperature=temperature,
             top_p=top_p,
+            reasoning_effort=reasoning_effort,
             max_tokens=max_tokens,
             protocol=protocol,
             http_proxy=http_proxy,
@@ -157,6 +159,7 @@ async def generate_session_title_for_selected_profile(
                     max_tokens=model_entry.get("max_tokens") or 200,
                     temperature=chat_params["temperature"],
                     top_p=chat_params["top_p"],
+                    reasoning_effort=chat_params.get("reasoning_effort"),
                     raise_on_error=True,
                     http_proxy=get_channel_http_proxy(channel),
                     custom_headers=get_model_custom_headers(model_entry),

@@ -259,6 +259,7 @@ async def test_empty_snapshot_is_submittable_without_auto_organize_and_freezes_p
         "custom_headers",
         "temperature",
         "top_p",
+        "reasoning_effort",
         "timeout",
         "context_window_k",
         "context_window_tokens",

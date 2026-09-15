@@ -50,6 +50,7 @@ class SetupChannelInput(BaseModel):
     context_window_k: int = Field(..., ge=1, description="上下文窗口大小（K）")
     temperature: float | None = Field(None, ge=0, le=2, description="采样温度")
     top_p: float | None = Field(None, ge=0, le=1, description="核采样概率")
+    reasoning_effort: str | None = Field(None, min_length=1, max_length=64, description="思考等级")
     max_tokens: int | None = Field(None, ge=0, description="最大生成 Token 数")
     description: str | None = Field(None, description="模型描述")
     advanced_settings: ChannelModelAdvancedSettings = Field(

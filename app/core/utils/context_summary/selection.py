@@ -25,6 +25,7 @@ class ContextSummaryModelSnapshot:
     top_p: float | None
     safety_margin_tokens: int
     input_budget_tokens: int
+    reasoning_effort: str | None = None
     http_proxy: str | None = None
     custom_headers: dict[str, str] | None = None
 
@@ -72,6 +73,7 @@ async def select_context_summary_model(
         max_output_tokens=max_output_tokens,
         temperature=chat_params["temperature"],
         top_p=chat_params["top_p"],
+        reasoning_effort=chat_params.get("reasoning_effort"),
         safety_margin_tokens=normalized_safety_margin,
         input_budget_tokens=max(
             1,
