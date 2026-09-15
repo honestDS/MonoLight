@@ -321,6 +321,7 @@ def _patch_migration_backend(monkeypatch, backend: _VectorBackend) -> None:
     monkeypatch.setattr(migration_switch_module, "async_query_collection", backend.query)
     monkeypatch.setattr(migration_handlers_module, "async_validate_collection", backend.validate)
     monkeypatch.setattr(migration_handlers_module, "async_delete_collection", backend.delete_collection)
+    monkeypatch.setattr(migration_handlers_module, "async_delete_collection_if_exists", backend.delete_collection)
 
 
 @pytest.mark.asyncio
@@ -1569,9 +1570,31 @@ async def test_cancelled_migration_keeps_old_collection_and_cleans_target(
             uid=kb.uid,
             job_id=job.id,
         )
+        cleanup_job = await db.scalar(
+            select(KnowledgeJob).where(
+                KnowledgeJob.parent_job_id == job.id,
+                KnowledgeJob.operation == KnowledgeJobOperation.MIGRATION_TARGET_CLEANUP,
+            )
+        )
     assert current is not None
     assert current.active_collection_name == kb.active_collection_name
     assert current.migration_status == KnowledgeBaseMigrationStatus.CANCELLED
     assert current.target_collection_name is None
     assert cancelled_job is not None and cancelled_job.status == KnowledgeJobStatus.CANCELLED
+    assert cleanup_job is not None and cleanup_job.id is not None
+    assert "stage7-cancel-target" in backend.collections
+
+    cleanup_claim = await _claim(
+        migration_database,
+        uid=kb.uid,
+        job_id=cleanup_job.id,
+        owner="stage7-cancel-cleanup-worker",
+    )
+    cleanup_context = KnowledgeJobExecutionContext(
+        job=cleanup_claim,
+        worker_id="stage7-cancel-cleanup-worker",
+        session_factory=migration_database,
+    )
+    cleanup_result = await migration_module.handle_migration_target_cleanup(cleanup_context)
+    assert cleanup_result.result["collection"] == "stage7-cancel-target"
     assert "stage7-cancel-target" not in backend.collections

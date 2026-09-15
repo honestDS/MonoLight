@@ -1554,7 +1554,11 @@ async def test_stage15_parent_cancellation_rolls_back_committed_unpublished_merg
     assert requested_mutation.status == KnowledgeJobStatus.RUNNING
     assert requested_mutation.cancel_requested_at is not None
     assert cancelled_update is not None and cancelled_update.status == KnowledgeJobStatus.CANCELLED
-    assert cancelled_delete is not None and cancelled_delete.status == KnowledgeJobStatus.CANCELLED
+    assert cancelled_delete is not None and cancelled_delete.status == KnowledgeJobStatus.SUCCEEDED
+    assert cancelled_delete.active_change_key is None
+    assert cancelled_delete.cancel_requested_at is None
+    assert cancelled_delete.result is not None
+    assert cancelled_delete.result.get("cleanup_skipped") == "organization_rolled_back"
     assert restored_primary is not None
     assert restored_primary.knowledge_key == "topic-0"
     assert restored_primary.content == primary_content
@@ -1601,7 +1605,10 @@ async def test_stage15_parent_cancellation_rolls_back_committed_unpublished_merg
 
     assert final_parent is not None and final_parent.status == KnowledgeJobStatus.CANCELLED
     assert {child.id for child in final_children} == {mutation_job_id, *actual_mutation_job_ids}
-    assert all(child.status == KnowledgeJobStatus.CANCELLED for child in final_children)
+    final_status_by_id = {child.id: child.status for child in final_children}
+    assert final_status_by_id[mutation_job_id] == KnowledgeJobStatus.CANCELLED
+    assert final_status_by_id[managed_update.id] == KnowledgeJobStatus.CANCELLED
+    assert final_status_by_id[managed_delete.id] == KnowledgeJobStatus.SUCCEEDED
     assert all(item.organization_lock_token is None for item in final_items)
 
 

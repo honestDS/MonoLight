@@ -432,6 +432,8 @@ class KnowledgeJobOperation(StrEnum):
     EMBEDDING_MIGRATION = "embedding_migration"
     REINDEX = "reindex"
     OLD_COLLECTION_CLEANUP = "old_collection_cleanup"
+    MIGRATION_TARGET_CLEANUP = "migration_target_cleanup"
+    KNOWLEDGE_MAINTENANCE = "knowledge_maintenance"
     AUTO_ORGANIZE = "auto_organize"
     MANUAL_ORGANIZE = "manual_organize"
     ORGANIZE_MUTATION = "organize_mutation"

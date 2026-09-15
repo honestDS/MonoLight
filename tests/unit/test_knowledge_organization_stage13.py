@@ -717,8 +717,8 @@ async def test_out_of_order_fragment_is_rejected_without_advancing_prefix(sessio
 
 @pytest.mark.asyncio
 async def test_expired_temporary_state_is_cleaned_in_bounded_batches(session_factory):
-    old_time = get_local_time() - timedelta(days=2)
-    cutoff = get_local_time() - timedelta(days=1)
+    old_time = get_local_time() - timedelta(days=8)
+    cutoff = get_local_time() - timedelta(days=7)
     async with session_factory() as db:
         snapshot = await _build_snapshot(db)
         snapshot.created_at = old_time
@@ -731,6 +731,10 @@ async def test_expired_temporary_state_is_cleaned_in_bounded_batches(session_fac
             fragment.created_at = old_time
             persisted, created = await knowledge_organization_fragment_crud.write_ordered(db, fragment=fragment)
             assert persisted is not None and created is True
+
+        stage.status = KnowledgeOrganizationStageStatus.COMPLETED
+        stage.completed_at = old_time
+        await db.commit()
 
         for _ in range(8):
             deleted = await knowledge_organization_stage_crud.cleanup_expired(
@@ -745,6 +749,64 @@ async def test_expired_temporary_state_is_cleaned_in_bounded_batches(session_fac
         assert (await db.execute(select(KnowledgeOrganizationFragment))).scalars().all() == []
         assert (await db.execute(select(KnowledgeOrganizationStage))).scalars().all() == []
         assert (await db.execute(select(KnowledgeOrganizationSnapshot))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_organization_history_cleanup_preserves_recent_and_running_records(session_factory):
+    now = get_local_time()
+    cutoff = now - timedelta(days=7)
+    async with session_factory() as db:
+        snapshot = await _build_snapshot(db)
+        snapshot.created_at = now - timedelta(days=8)
+        await db.commit()
+
+        recent_stage = _make_stage(
+            snapshot,
+            expected_fragment_count=1,
+            stage_key="recent-stage",
+        )
+        recent_stage.created_at = now - timedelta(days=8)
+        recent_stage, _ = await knowledge_organization_stage_crud.create_stage(db, stage=recent_stage)
+        recent_fragment = _make_fragment(recent_stage, fragment_index=0)
+        recent_fragment.created_at = now - timedelta(days=8)
+        persisted, created = await knowledge_organization_fragment_crud.write_ordered(
+            db,
+            fragment=recent_fragment,
+        )
+        assert persisted is not None and created is True
+        recent_stage.status = KnowledgeOrganizationStageStatus.COMPLETED
+        recent_stage.completed_at = now - timedelta(days=6)
+        await db.commit()
+
+        running_stage = _make_stage(
+            snapshot,
+            expected_fragment_count=2,
+            stage_key="running-stage",
+        )
+        running_stage.created_at = now - timedelta(days=8)
+        running_stage, _ = await knowledge_organization_stage_crud.create_stage(db, stage=running_stage)
+        running_fragment = _make_fragment(running_stage, fragment_index=0)
+        running_fragment.created_at = now - timedelta(days=8)
+        persisted, created = await knowledge_organization_fragment_crud.write_ordered(
+            db,
+            fragment=running_fragment,
+        )
+        assert persisted is not None and created is True
+
+        for _ in range(8):
+            deleted = await knowledge_organization_stage_crud.cleanup_expired(
+                db,
+                before=cutoff,
+                batch_size=1,
+            )
+            if deleted == 0:
+                break
+
+        remaining_stages = list((await db.execute(select(KnowledgeOrganizationStage).order_by(KnowledgeOrganizationStage.id))).scalars().all())
+        remaining_fragments = list((await db.execute(select(KnowledgeOrganizationFragment))).scalars().all())
+
+    assert {stage.stage_key for stage in remaining_stages} == {"recent-stage", "running-stage"}
+    assert {fragment.stage_key for fragment in remaining_fragments} == {"recent-stage", "running-stage"}
 
 
 @pytest.mark.asyncio

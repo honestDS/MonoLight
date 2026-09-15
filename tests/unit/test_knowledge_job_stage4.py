@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -971,6 +972,37 @@ async def test_retryable_cleanup_continues_after_normal_max_attempts(
     assert current is not None
     assert current.status == KnowledgeJobStatus.RETRY
     assert current.attempt_count == current.max_attempts
+    async with knowledge_job_database() as db:
+        database_now = await get_database_time(db)
+    retry_delay = (current.available_at - database_now).total_seconds()
+    assert 25 <= retry_delay <= 30
+
+
+@pytest.mark.asyncio
+async def test_lease_renewal_database_error_immediately_cancels_running_job(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consumer = KnowledgeJobConsumer(
+        KnowledgeJobExecutor({}),
+        session_factory=knowledge_job_database,
+    )
+    running_task = asyncio.create_task(asyncio.Event().wait())
+    consumer._running[123] = SimpleNamespace(
+        uid="user-1",
+        worker_id="lease-worker",
+        task=running_task,
+        waiting_for_children=False,
+    )
+
+    async def fail_renew(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(knowledge_job_crud, "renew_lease", fail_renew)
+    await consumer._renew_running()
+    await asyncio.sleep(0)
+
+    assert running_task.cancelled()
 
 
 @pytest.mark.asyncio
