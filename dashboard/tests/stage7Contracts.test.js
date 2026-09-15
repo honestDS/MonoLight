@@ -206,10 +206,11 @@ test('ProfileFormDialog separates profile memory settings from user auto organiz
   assert.doesNotMatch(memorySource, /memoryEmbeddingTargetKey/)
   assert.doesNotMatch(memorySource, /preview-memory-embedding/)
   assert.match(memorySource, /form\.memory_organization\.auto_organize_enabled/)
-  assert.match(memorySource, /form\.memory_organization\.organization_channel_id/)
-  assert.match(memorySource, /form\.memory_organization\.organization_model_id/)
-  assert.match(memorySource, /<el-option v-for="channel in memoryOrganizationChannels"[^>]*:label="channel\.name"/)
-  assert.doesNotMatch(memorySource, /memoryOrganizationChannels"[^>]*:[^>]*label="[^"\n]*channel\.id/)
+  assert.match(memorySource, /:model-value="memoryOrganizationModelKey"/)
+  assert.match(memorySource, /update:memoryOrganizationModelKey/)
+  assert.match(memorySource, /<el-option[\s\S]*v-for="item in memoryOrganizationModelOptions"[\s\S]*:label="item\.label"[\s\S]*:value="item\.key"[\s\S]*:disabled="item\.channel_disabled \|\| item\.model_disabled"/)
+  assert.doesNotMatch(memorySource, /v-model="form\.memory_organization\.organization_(?:channel_id|model_id)"/)
+  assert.doesNotMatch(memorySource, /memoryOrganizationChannels|memoryOrganizationModels/)
   const configLineStyle = profilesScssSource.match(/\.config-line\s*\{([\s\S]*?)\}/)
   assert.ok(configLineStyle)
   assert.match(configLineStyle[1], /justify-content:\s*space-between;/)
@@ -342,8 +343,8 @@ const requiredProfileMemoryKeys = [
   'memory_embedding_confirmation_change_notice', 'memory_embedding_confirmation_same_notice',
   'memory_embedding_confirmation_check', 'memory_embedding_confirm', 'memory_embedding_confirm_success',
   'memory_embedding_create_hint', 'memory_organization_settings', 'auto_organize_enabled',
-  'auto_organize_enabled_hint', 'organization_channel', 'organization_channel_placeholder',
-  'organization_model', 'organization_model_placeholder', 'selected_model', 'context_window_k',
+  'auto_organize_enabled_hint', 'organization_model', 'organization_model_placeholder',
+  'selected_model', 'context_window_k',
   'model_max_tokens', 'required_output_tokens', 'organization_model_not_selected',
   'organization_selection_pair_required', 'organization_model_limits_invalid',
   'organization_max_tokens_too_small', 'organization_model_required', 'organization_model_invalid',
