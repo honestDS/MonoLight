@@ -35,6 +35,8 @@ _SYSTEM_CLEANUP_OPERATIONS = {
     KnowledgeJobOperation.MANAGED_DELETE_CLEANUP,
     KnowledgeJobOperation.MANAGED_VECTOR_CLEANUP,
     KnowledgeJobOperation.OLD_COLLECTION_CLEANUP,
+    KnowledgeJobOperation.MIGRATION_TARGET_CLEANUP,
+    KnowledgeJobOperation.KNOWLEDGE_MAINTENANCE,
 }
 _ORGANIZATION_OPERATIONS = {
     KnowledgeJobOperation.AUTO_ORGANIZE,
@@ -197,6 +199,32 @@ class CRUDKnowledgeJob:
             conditions.append(KnowledgeJob.status.in_(normalized_statuses))
         result = await db.execute(select(KnowledgeJob).where(*conditions).order_by(KnowledgeJob.id))
         return list(result.scalars().all())
+
+    async def has_active_for_knowledge_base_except(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        excluded_job_id: int,
+    ) -> bool:
+        result = await db.execute(
+            select(KnowledgeJob.id)
+            .where(
+                KnowledgeJob.uid == uid,
+                KnowledgeJob.knowledge_base_id == knowledge_base_id,
+                KnowledgeJob.id != excluded_job_id,
+                KnowledgeJob.status.in_(
+                    (
+                        KnowledgeJobStatus.PENDING,
+                        KnowledgeJobStatus.RETRY,
+                        KnowledgeJobStatus.RUNNING,
+                    )
+                ),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def list_page_for_knowledge_base(
         self,
@@ -790,6 +818,7 @@ class CRUDKnowledgeJob:
         db: AsyncSession,
         *,
         delay_seconds: int = 0,
+        system_cleanup_delay_seconds: int | None = None,
         max_attempts_error: str | None = None,
         commit: bool = True,
     ) -> KnowledgeJobRecoveryResult:
@@ -806,8 +835,7 @@ class CRUDKnowledgeJob:
             if job.id is None or not job.locked_by or job.lock_until is None:
                 continue
             system_cleanup = is_system_cleanup_operation(job.operation)
-            organization_delete_cleanup_cancel_requested = job.operation == KnowledgeJobOperation.MANAGED_DELETE_CLEANUP and job.parent_job_id is not None and job.cancel_requested_at is not None
-            if system_cleanup and not organization_delete_cleanup_cancel_requested:
+            if system_cleanup:
                 next_status = KnowledgeJobStatus.RETRY
             elif job.cancel_requested_at is not None:
                 next_status = KnowledgeJobStatus.CANCELLED
@@ -826,7 +854,8 @@ class CRUDKnowledgeJob:
                 "updated_at": now,
             }
             if next_status == KnowledgeJobStatus.RETRY:
-                values["available_at"] = now + timedelta(seconds=max(delay_seconds, 0))
+                retry_delay = system_cleanup_delay_seconds if system_cleanup and system_cleanup_delay_seconds is not None else delay_seconds
+                values["available_at"] = now + timedelta(seconds=max(retry_delay, 0))
                 if system_cleanup:
                     values["cancel_requested_at"] = None
             else:

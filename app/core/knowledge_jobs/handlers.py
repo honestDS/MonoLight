@@ -35,7 +35,7 @@ from app.core.knowledge.errors import (
 )
 from app.core.knowledge.managed import normalize_managed_knowledge_key
 from app.core.knowledge.migration import record_knowledge_base_migration_change
-from app.core.knowledge.organization_lifecycle import coordinate_organization_terminal
+from app.core.knowledge.organization_lifecycle import coordinate_organization_terminal, get_organization_parent
 from app.core.knowledge.organization_publication import (
     load_knowledge_organization_mutation_item,
     publish_knowledge_organization_plan,
@@ -55,9 +55,11 @@ from app.core.knowledge_jobs.executor import (
     KnowledgeJobRetryableError,
     SessionFactory,
 )
+from app.core.knowledge_jobs.maintenance import handle_knowledge_maintenance
 from app.core.knowledge_jobs.manager import KnowledgeJobSubmissionResult, knowledge_job_manager
 from app.core.knowledge_jobs.migration import (
     handle_embedding_migration,
+    handle_migration_target_cleanup,
     handle_old_collection_cleanup,
 )
 from app.core.knowledge_jobs.vector_cleanup import (
@@ -111,6 +113,7 @@ class _ManagedDeleteSnapshot:
     version: int
     collection_name: str
     vector_item_ids: tuple[str, ...]
+    rolled_back: bool = False
 
 
 async def _requeue_collection_cleanup_if_container_deleted(
@@ -390,6 +393,18 @@ async def _prepare_delete(context: KnowledgeJobExecutionContext) -> _ManagedDele
             knowledge_id=knowledge_id,
         )
         if item is None or item.deleted_at is None or item.is_recallable or item.version != expected_version or item.pending_job_id != job_id:
+            parent = await get_organization_parent(db, child=job)
+            if parent is not None and parent.status in {KnowledgeJobStatus.FAILED, KnowledgeJobStatus.CANCELLED} and (item is None or (item.deleted_at is None and item.pending_job_id is None)):
+                return _ManagedDeleteSnapshot(
+                    uid=job.uid,
+                    job_id=job_id,
+                    knowledge_base_id=job.knowledge_base_id,
+                    knowledge_id=knowledge_id,
+                    version=expected_version,
+                    collection_name="",
+                    vector_item_ids=(),
+                    rolled_back=True,
+                )
             raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
         knowledge_base = await _load_container(db, uid=job.uid, knowledge_base_id=job.knowledge_base_id)
         collection_name = resolve_active_knowledge_base_embedding(knowledge_base).collection_name
@@ -408,6 +423,40 @@ async def _prepare_delete(context: KnowledgeJobExecutionContext) -> _ManagedDele
 
 async def handle_managed_delete_cleanup(context: KnowledgeJobExecutionContext) -> KnowledgeJobExecutionResult:
     snapshot = await _prepare_delete(context)
+    if snapshot.rolled_back:
+        await context.checkpoint()
+        async with context.session_factory() as db:
+            succeeded = await knowledge_job_crud.mark_succeeded(
+                db,
+                uid=snapshot.uid,
+                job_id=snapshot.job_id,
+                owner=context.worker_id,
+                result={
+                    "knowledge_id": snapshot.knowledge_id,
+                    "version": snapshot.version,
+                    "cleanup_skipped": "organization_rolled_back",
+                },
+                commit=False,
+            )
+            if not succeeded:
+                await db.rollback()
+                raise KnowledgeJobLeaseLostError(t(ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE))
+            await coordinate_organization_terminal(
+                db,
+                snapshot.uid,
+                snapshot.job_id,
+                error=None,
+                commit=False,
+            )
+            await db.commit()
+        return KnowledgeJobExecutionResult(
+            result={
+                "knowledge_id": snapshot.knowledge_id,
+                "version": snapshot.version,
+                "cleanup_skipped": "organization_rolled_back",
+            },
+            finalized=True,
+        )
     if snapshot.vector_item_ids:
         try:
             await async_delete_collection_items(
@@ -754,6 +803,8 @@ def create_default_knowledge_job_executor(
             KnowledgeJobOperation.MANAGED_VECTOR_CLEANUP: execute_managed_vector_cleanup,
             KnowledgeJobOperation.EMBEDDING_MIGRATION: handle_embedding_migration,
             KnowledgeJobOperation.OLD_COLLECTION_CLEANUP: handle_old_collection_cleanup,
+            KnowledgeJobOperation.MIGRATION_TARGET_CLEANUP: handle_migration_target_cleanup,
+            KnowledgeJobOperation.KNOWLEDGE_MAINTENANCE: handle_knowledge_maintenance,
             KnowledgeJobOperation.AUTO_ORGANIZE: handle_knowledge_organization,
             KnowledgeJobOperation.MANUAL_ORGANIZE: handle_knowledge_organization,
             KnowledgeJobOperation.ORGANIZE_MUTATION: handle_organization_mutation,
@@ -768,6 +819,8 @@ __all__ = [
     "handle_managed_delete_cleanup",
     "handle_managed_publication",
     "handle_old_collection_cleanup",
+    "handle_migration_target_cleanup",
+    "handle_knowledge_maintenance",
     "handle_knowledge_organization",
     "handle_organization_mutation",
 ]
