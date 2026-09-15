@@ -202,6 +202,7 @@ test('buildSetupRequest preserves extended channel fields and normalizes its HTT
         context_window_k: 128,
         temperature: 0.7,
         top_p: 0.95,
+        reasoning_effort: '  high  ',
         max_tokens: 4096,
         description: 'Vision model',
         advanced_settings: {
@@ -234,6 +235,7 @@ test('buildSetupRequest preserves extended channel fields and normalizes its HTT
         context_window_k: 128,
         temperature: 0.7,
         top_p: 0.95,
+        reasoning_effort: 'high',
         max_tokens: 4096,
         description: 'Vision model',
         advanced_settings: {
@@ -267,6 +269,7 @@ test('buildSetupRequest safely normalizes missing nested objects', () => {
       context_window_k: undefined,
       temperature: undefined,
       top_p: undefined,
+      reasoning_effort: null,
       max_tokens: undefined,
       description: '',
       advanced_settings: {}

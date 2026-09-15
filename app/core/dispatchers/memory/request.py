@@ -203,6 +203,7 @@ async def generate(
         "messages": request_messages,
         "temperature": context.chat_params["temperature"],
         "top_p": context.chat_params["top_p"],
+        "reasoning_effort": context.chat_params.get("reasoning_effort"),
         "max_tokens": context.chat_params["max_tokens"],
         "tools": [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA],
         "protocol": resolve_model_protocol(model_entry),

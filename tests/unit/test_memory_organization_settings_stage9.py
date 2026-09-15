@@ -151,7 +151,7 @@ def test_calculate_organization_required_output_tokens_rejects_invalid_values(sn
 async def test_load_valid_chat_organization_config_and_runtime_snapshot(
     db_session: AsyncSession,
 ) -> None:
-    channel = await _create_channel(db_session)
+    channel = await _create_channel(db_session, model_ids=[_chat_model(reasoning_effort="high")])
     await _create_store(
         db_session,
         uid="organization-user",
@@ -178,6 +178,7 @@ async def test_load_valid_chat_organization_config_and_runtime_snapshot(
     assert config.required_output_tokens == 2 * (MEMORY_CONTENT_MAX_TOKENS + MEMORY_ORGANIZE_OUTPUT_ITEM_OVERHEAD_TOKENS)
     assert config.temperature == 0.25
     assert config.top_p == 0.8
+    assert config.reasoning_effort == "high"
     assert config.timeout == MEMORY_ORGANIZE_LLM_TIMEOUT_SECONDS
     assert config.api_key == "organization-api-key"
     assert config.base_url == "https://llm.example/v1"
@@ -201,6 +202,7 @@ async def test_load_valid_chat_organization_config_and_runtime_snapshot(
         "custom_headers": {"x-trace": "organization"},
         "temperature": 0.25,
         "top_p": 0.8,
+        "reasoning_effort": "high",
         "timeout": MEMORY_ORGANIZE_LLM_TIMEOUT_SECONDS,
         "context_window_k": 32,
         "context_window_tokens": 32 * CONTEXT_WINDOW_TOKENS_PER_K,
@@ -216,6 +218,7 @@ async def test_load_valid_chat_organization_config_and_runtime_snapshot(
     assert "http_proxy" not in public
     assert "custom_headers" not in public
     assert public["model_id"] == "chat-model"
+    assert public["reasoning_effort"] == "high"
     assert public["max_tokens"] == 2048
     assert public["required_output_tokens"] == snapshot["required_output_tokens"]
 

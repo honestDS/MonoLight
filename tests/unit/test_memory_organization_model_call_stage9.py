@@ -90,6 +90,7 @@ def _model_config(
     required_output_tokens: int | None = None,
     protocol: str = ModelProtocol.OPENAI.value.lower(),
     usage: str = ModelUsage.CHAT.value,
+    reasoning_effort: str | None = None,
 ) -> MemoryOrganizationModelConfig:
     return MemoryOrganizationModelConfig(
         channel_id=7,
@@ -109,6 +110,7 @@ def _model_config(
         custom_headers={"x-stage": "stage9"},
         temperature=0.35,
         top_p=0.65,
+        reasoning_effort=reasoning_effort,
         timeout=17.5,
     )
 
@@ -271,7 +273,7 @@ async def test_call_organization_model_uses_all_frozen_model_settings_and_dynami
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = _snapshot()
-    model = _model_config(snapshot.count, max_tokens=40_000)
+    model = _model_config(snapshot.count, max_tokens=40_000, reasoning_effort="high")
     request = build_organization_execution_request(build_organization_job_payload(snapshot, model))
     captured: dict[str, Any] = {}
     expected_response = _response()
@@ -292,6 +294,7 @@ async def test_call_organization_model_uses_all_frozen_model_settings_and_dynami
         "messages": list(request.messages),
         "temperature": model.temperature,
         "top_p": model.top_p,
+        "reasoning_effort": model.reasoning_effort,
         "max_tokens": request.budget.max_output_tokens,
         "tools": None,
         "protocol": model.protocol,
@@ -341,6 +344,15 @@ def test_restore_organization_execution_payload_strictly_rejects_frozen_contract
 
     with pytest.raises(MemoryValidationError):
         restore_organization_execution_payload(payload)
+
+
+def test_restore_organization_execution_payload_accepts_legacy_model_snapshot_without_reasoning_effort() -> None:
+    payload = _payload()
+    payload["organization_model"].pop("reasoning_effort")
+
+    restored = restore_organization_execution_payload(payload)
+
+    assert restored.organization_model.reasoning_effort is None
 
 
 def test_restore_organization_execution_payload_keeps_frozen_content_token_count_when_estimator_changes(

@@ -225,6 +225,15 @@
   min-width: 180px;
 }
 
+.model-entry-reasoning-effort {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.model-entry-reasoning-effort .el-input__inner {
+  line-height: 1;
+}
+
 .model-entry-field-half {
   flex: 1 1 calc(50% - 12px);
 }

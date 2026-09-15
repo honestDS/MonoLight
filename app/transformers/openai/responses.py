@@ -86,6 +86,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             tools=tools,
             tool_choice=tool_choice,
             top_p=kwargs.get("top_p"),
+            reasoning_effort=kwargs.get("reasoning_effort"),
         )
         url = f"{base_url.rstrip('/')}/responses"
         parsed = await self._post_json(
@@ -125,6 +126,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             tools=tools,
             tool_choice=tool_choice,
             top_p=kwargs.get("top_p"),
+            reasoning_effort=kwargs.get("reasoning_effort"),
         )
         url = f"{base_url.rstrip('/')}/responses"
         argument_delta_indexes: set[tuple[str, int | str | None]] = set()
@@ -405,6 +407,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         tools: list[dict[str, Any]] | None,
         tool_choice: str,
         top_p: Any,
+        reasoning_effort: Any = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model_id,
@@ -417,6 +420,8 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             payload["temperature"] = temperature
         if top_p is not None:
             payload["top_p"] = top_p
+        if reasoning_effort is not None:
+            payload["reasoning"] = {"effort": reasoning_effort}
         if max_tokens > 0:
             payload["max_output_tokens"] = max_tokens
         if tools:

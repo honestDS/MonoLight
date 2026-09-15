@@ -177,6 +177,7 @@ export function buildSetupRequest(form) {
       context_window_k: channel.context_window_k,
       temperature: channel.temperature,
       top_p: channel.top_p,
+      reasoning_effort: trimmedString(channel.reasoning_effort) || null,
       max_tokens: channel.max_tokens,
       description: stringValue(channel.description),
       advanced_settings: isPlainObject(channel.advanced_settings)

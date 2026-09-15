@@ -310,6 +310,69 @@ async def test_responses_generate_passes_normalized_http_proxy_kwargs(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_generate_passes_reasoning_effort(monkeypatch) -> None:
+    response = _FakeAiohttpResponse(
+        text=json.dumps(
+            {
+                "id": "chatcmpl_1",
+                "model": "gpt-test",
+                "choices": [{"message": {"role": "assistant", "content": "Answer"}}],
+            }
+        )
+    )
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+
+    await OpenAIChatCompletionsTransformer().generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Question")],
+        reasoning_effort="high",
+    )
+
+    assert sessions[0].post_calls[0]["kwargs"]["json"]["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_responses_generate_maps_reasoning_effort_to_reasoning_object(monkeypatch) -> None:
+    response = _FakeAiohttpResponse(
+        text=json.dumps(
+            {
+                "id": "resp_1",
+                "status": "completed",
+                "model": "gpt-test",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "Answer"}]}],
+            }
+        )
+    )
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+
+    await OpenAIResponsesTransformer().generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Question")],
+        reasoning_effort="xhigh",
+    )
+
+    assert sessions[0].post_calls[0]["kwargs"]["json"]["reasoning"] == {"effort": "xhigh"}
+
+
+@pytest.mark.asyncio
 async def test_responses_generate_stream_creates_connector_with_ssl_disabled(monkeypatch) -> None:
     connector_calls: list[dict] = []
     session_calls: list[dict] = []

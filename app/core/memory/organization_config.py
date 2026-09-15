@@ -187,6 +187,7 @@ def build_organization_model_config_for_channel_values(
         custom_headers=selected_item.advanced_settings.custom_headers,
         temperature=selected_item.temperature if selected_item.temperature is not None else 0.7,
         top_p=selected_item.top_p,
+        reasoning_effort=selected_item.reasoning_effort,
         timeout=MEMORY_ORGANIZE_LLM_TIMEOUT_SECONDS,
         context_window_k=context_window_k,
         context_window_tokens=context_window_tokens,

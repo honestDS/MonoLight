@@ -493,6 +493,7 @@ async def generate_title(
                 max_tokens=model_entry.get("max_tokens") or 200,
                 temperature=chat_params["temperature"],
                 top_p=chat_params["top_p"],
+                reasoning_effort=chat_params.get("reasoning_effort"),
                 raise_on_error=True,
                 http_proxy=get_channel_http_proxy(channel),
                 custom_headers=get_model_custom_headers(model_entry),

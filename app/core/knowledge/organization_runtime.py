@@ -52,6 +52,7 @@ class KnowledgeOrganizationModelConfig:
     custom_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     temperature: float = 0.1
     top_p: float | None = None
+    reasoning_effort: str | None = None
     timeout: float = 600.0
     context_window_tokens: int = 0
     max_output_tokens: int = 0
@@ -323,6 +324,7 @@ def _build_model_config(channel, item: ChannelModelItem) -> KnowledgeOrganizatio
         custom_headers=item.advanced_settings.custom_headers,
         temperature=item.temperature if item.temperature is not None else 0.1,
         top_p=item.top_p,
+        reasoning_effort=item.reasoning_effort,
         timeout=MEMORY_ORGANIZE_LLM_TIMEOUT_SECONDS,
         context_window_tokens=context_window_tokens,
         max_output_tokens=item.max_tokens,
@@ -391,6 +393,7 @@ async def call_knowledge_organization_model(
         ],
         temperature=model.temperature,
         top_p=model.top_p,
+        reasoning_effort=model.reasoning_effort,
         max_tokens=model.max_output_tokens,
         tools=None,
         protocol=model.protocol,

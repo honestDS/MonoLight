@@ -83,6 +83,19 @@ function getContextLength(model) {
   return toPositiveInteger(model.context_length)
 }
 
+export function getOpenRouterReasoningEfforts(model) {
+  if (!isObject(model) || !isObject(model.reasoning) || !Array.isArray(model.reasoning.supported_efforts)) {
+    return []
+  }
+
+  return [...new Set(
+    model.reasoning.supported_efforts
+      .filter(value => typeof value === 'string')
+      .map(value => value.trim())
+      .filter(Boolean)
+  )]
+}
+
 export function applyOpenRouterModelMetadata(entry, model) {
   if (!isObject(entry) || !isObject(model)) {
     return { fields: [], model: entry }
