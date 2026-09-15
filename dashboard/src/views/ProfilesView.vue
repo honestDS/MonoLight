@@ -73,8 +73,8 @@
       :memory-embedding-migration-status-text="memoryEmbeddingMigrationStatusText"
       :memory-embedding-migration-status-type="memoryEmbeddingMigrationStatusType"
       :memory-embedding-target-label="memoryEmbeddingTargetLabel"
-      :memory-organization-channels="memoryOrganizationChannels"
-      :memory-organization-models="memoryOrganizationModels"
+      v-model:memory-organization-model-key="memoryOrganizationModelKey"
+      :memory-organization-model-options="memoryOrganizationModelOptions"
       :memory-organization-model="memoryOrganizationModel"
       :memory-organization-required-output-tokens="memoryOrganizationRequiredOutputTokens"
       :memory-settings-loading="memorySettingsLoading"
@@ -159,7 +159,7 @@ import { SUPPORT_LOCALES } from '../i18n'
 import {
   buildOrganizationSettingsPayload,
   createLatestRequestTracker,
-  getOrganizationModelsForChannel,
+  getOrganizationModelOptions,
   normalizeMemorySettings,
   validateOrganizationSettings
 } from '../utils/memoryManagement'
@@ -277,14 +277,28 @@ const form = reactive({
   configs: defaultProfileConfigs()
 })
 
-const memoryOrganizationChannels = computed(() => channels.value.filter(channel => channel.is_active !== false))
-const memoryOrganizationModels = computed(() => getOrganizationModelsForChannel(
-  memoryOrganizationChannels.value,
-  form.memory_organization.organization_channel_id
+const memoryOrganizationModelOptions = computed(() => getOrganizationModelOptions(channels.value))
+const memoryOrganizationModelKey = computed({
+  get() {
+    const organization = form.memory_organization
+    if (!organization.organization_channel_id || !organization.organization_model_id) return null
+    return `${organization.organization_channel_id}::${organization.organization_model_id}`
+  },
+  set(key) {
+    if (!key) {
+      form.memory_organization.organization_channel_id = null
+      form.memory_organization.organization_model_id = null
+      return
+    }
+    const option = memoryOrganizationModelOptions.value.find(item => item.key === key)
+    if (!option) return
+    form.memory_organization.organization_channel_id = option.channel_id
+    form.memory_organization.organization_model_id = option.model_id
+  }
+})
+const memoryOrganizationModel = computed(() => (
+  memoryOrganizationModelOptions.value.find(item => item.key === memoryOrganizationModelKey.value) || null
 ))
-const memoryOrganizationModel = computed(() => memoryOrganizationModels.value.find(model => (
-  String(model.model_id) === String(form.memory_organization.organization_model_id)
-)) || null)
 
 const knowledgeBaseOptions = computed(() => filterUserKnowledgeBasesForOwner(knowledgeBases.value, form.uid)
   .map(item => ({
@@ -347,17 +361,17 @@ watch(() => form.uid, filterFormKnowledgeBaseIds)
 watch([knowledgeBasesReady, knowledgeBases], filterFormKnowledgeBaseIds)
 
 const normalizeMemoryOrganizationSelection = () => {
-  if (!memoryOrganizationChannels.value.length) return
-  const channelId = form.memory_organization.organization_channel_id
-  if (!channelId || !memoryOrganizationModels.value.some(model => String(model.model_id) === String(form.memory_organization.organization_model_id))) {
-    form.memory_organization.organization_model_id = null
+  const key = memoryOrganizationModelKey.value
+  if (!key) return
+  if (!memoryOrganizationModelOptions.value.some(item => item.key === key)) {
+    memoryOrganizationModelKey.value = null
   }
 }
 
 watch(
-  [() => form.memory_organization.organization_channel_id, memoryOrganizationChannels],
+  memoryOrganizationModelOptions,
   () => {
-    if (memorySettingsLoading.value && !memoryOrganizationChannels.value.length) return
+    if (memorySettingsLoading.value && !memoryOrganizationModelOptions.value.length) return
     normalizeMemoryOrganizationSelection()
   },
   { deep: true }
