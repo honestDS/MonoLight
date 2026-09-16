@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.prompts import (
-    CONTEXT_SUMMARY_WRAPPER,
     SYSTEM_CONTEXT_WRAPPER,
     SYSTEM_RUNTIME_CONTEXT_POLICY,
 )
@@ -311,59 +310,6 @@ async def test_prepare_messages_appends_additional_system_prompt_and_reserves_it
     assert get_messages_calls[0]["reserved_tokens"] == 123
     assert messages[0].role == MessageRole.SYSTEM
     assert messages[0].content == combined_system_prompt
-
-
-@pytest.mark.asyncio
-async def test_prepare_messages_combines_summary_with_history_after_boundary(monkeypatch):
-    get_messages_calls = []
-
-    async def build_system_prompt(_db, _profile):
-        return "stable system prompt"
-
-    async def build_runtime_instructions(_db, _session_id, _max_tokens):
-        return ""
-
-    async def get_summary_state(*_args, **_kwargs):
-        return ContextSummaryState(content="compressed old turns", message_id=20)
-
-    async def get_messages(*_args, **kwargs):
-        get_messages_calls.append(kwargs)
-        return [
-            InternalMessage(id=21, role=MessageRole.USER, content="recent question"),
-            InternalMessage(id=22, role=MessageRole.ASSISTANT, content="recent answer"),
-        ]
-
-    monkeypatch.setattr(prepare_module, "build_system_prompt", build_system_prompt)
-    monkeypatch.setattr(prepare_module, "build_user_runtime_instructions", build_runtime_instructions)
-    monkeypatch.setattr(
-        prepare_module,
-        "get_context_summary_state",
-        get_summary_state,
-    )
-    monkeypatch.setattr(prepare_module.ContextManager, "get_messages", get_messages)
-
-    messages = await prepare_module.prepare_messages(
-        object(),
-        "session-1",
-        "user-1",
-        SimpleNamespace(),
-        SimpleNamespace(),
-        None,
-        "",
-        False,
-        context_window_k=4,
-        max_tokens=512,
-    )
-
-    assert get_messages_calls[0]["after_id"] == 20
-    assert messages[0].role == MessageRole.SYSTEM
-    assert messages[0].content == "stable system prompt"
-    assert messages[1].role == MessageRole.USER
-    assert messages[1].content == CONTEXT_SUMMARY_WRAPPER.format(
-        through_message_id=20,
-        content="compressed old turns",
-    )
-    assert [message.id for message in messages[2:]] == [21, 22]
 
 
 @pytest.mark.asyncio

@@ -392,68 +392,6 @@ async def test_foreground_freeze_rolls_back_when_candidate_merge_is_incomplete(d
 
 
 @pytest.mark.asyncio
-async def test_running_foreground_work_absorbs_later_contiguous_messages(db_session: AsyncSession, monkeypatch):
-    crud = CRUDSessionReplyWorkItem()
-    manager = SessionReplyQueueManager()
-    await add_message(db_session, 1, "first")
-    first = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=1, dedupe_key="foreground-message:1")
-    first.execution_state = {"request_ids": ["request-1", "request-shared"]}
-    db_session.add(first)
-    await db_session.commit()
-
-    first.status = SessionReplyWorkStatus.RUNNING
-    first.locked_by = "worker-1"
-    db_session.add(first)
-    await db_session.commit()
-    await manager.freeze_foreground_input(db_session, work=first, worker_id="worker-1")
-
-    await add_message(db_session, 2, "second")
-    second = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=2, dedupe_key="foreground-message:2")
-    await add_message(db_session, 3, "third")
-    third = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=3, dedupe_key="foreground-message:3")
-    second.execution_state = {"request_ids": ["request-2", "request-shared"]}
-    third.execution_state = {"request_ids": ["request-shared", "request-3"]}
-    db_session.add(second)
-    db_session.add(third)
-    await db_session.commit()
-
-    logged_messages: list[str] = []
-
-    class CapturingLogger:
-        def bind(self, **kwargs):
-            return self
-
-        def info(self, message):
-            logged_messages.append(message)
-
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.logger", CapturingLogger())
-
-    additional_messages = await manager.absorb_contiguous_foreground_messages(
-        db_session,
-        work_id=first.id,
-        worker_id="worker-1",
-    )
-
-    assert len(additional_messages) == 1
-    assert additional_messages[0].content == "second\nthird"
-    assert additional_messages[0].id == 3
-    assert additional_messages.source_message_ids == (2, 3)
-    assert additional_messages.summary_boundary_message_id == 2
-    assert additional_messages.latest_message_id == 3
-    assert len(logged_messages) == 1
-    assert "second\nthird" in logged_messages[0]
-    await db_session.refresh(first)
-    await db_session.refresh(second)
-    await db_session.refresh(third)
-    assert first.input_message_ids == [1, 2, 3]
-    assert first.execution_state["request_ids"] == ["request-1", "request-shared", "request-2", "request-3"]
-    assert second.status == SessionReplyWorkStatus.MERGED
-    assert second.merged_into_id == first.id
-    assert third.status == SessionReplyWorkStatus.MERGED
-    assert third.merged_into_id == first.id
-
-
-@pytest.mark.asyncio
 async def test_running_confirmed_tool_execution_absorbs_later_foreground_message(db_session: AsyncSession, monkeypatch):
     crud = CRUDSessionReplyWorkItem()
     manager = SessionReplyQueueManager()

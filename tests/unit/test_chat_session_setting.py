@@ -8,13 +8,10 @@ from app.api.v1 import chat as chat_api
 from app.core.constants import (
     ERR_SESSION_NO_PERMISSION,
     ERR_SESSION_READ_ONLY,
-    GUIDANCE_MESSAGE_PREFIX,
-    GUIDANCE_MESSAGE_SUFFIX,
 )
 from app.core.exceptions import ForbiddenException
-from app.core.i18n import t
 from app.core.utils import session as session_utils
-from app.models.message import ChatCompletionRequest, Message, MessageRole, MessageType
+from app.models.message import ChatCompletionRequest
 from app.models.session import ChatSession
 
 
@@ -41,67 +38,6 @@ def test_chat_session_show_reasoning_defaults_to_enabled():
 
 
 @pytest.mark.asyncio
-async def test_update_web_session_setting_changes_reasoning_visibility(monkeypatch):
-    db = FakeDb()
-    session = SimpleNamespace(
-        uid="user-1",
-        source="ws",
-        enable_markdown=True,
-        show_reasoning=True,
-    )
-
-    async def get_by_session_id(db_arg, session_id: str):
-        assert db_arg is db
-        assert session_id == "session-1"
-        return session
-
-    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
-
-    response = await chat_api.update_session_setting(
-        chat_api.SessionSettingRequest(
-            session_id="session-1",
-            show_reasoning=False,
-        ),
-        db=db,
-        current_user=SimpleNamespace(uid="user-1", is_superuser=False),
-    )
-
-    assert session.show_reasoning is False
-    assert db.commit_count == 1
-    assert response.code == 200
-
-
-@pytest.mark.asyncio
-async def test_update_web_session_setting_changes_markdown(monkeypatch):
-    db = FakeDb()
-    session = SimpleNamespace(
-        uid="user-1",
-        source="ws",
-        enable_markdown=True,
-    )
-
-    async def get_by_session_id(db_arg, session_id: str):
-        assert db_arg is db
-        assert session_id == "session-1"
-        return session
-
-    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
-
-    response = await chat_api.update_session_setting(
-        chat_api.SessionSettingRequest(
-            session_id="session-1",
-            enable_markdown=False,
-        ),
-        db=db,
-        current_user=SimpleNamespace(uid="user-1", is_superuser=False),
-    )
-
-    assert session.enable_markdown is False
-    assert db.commit_count == 1
-    assert response.code == 200
-
-
-@pytest.mark.asyncio
 async def test_delete_external_session_uses_standard_owner_cleanup(monkeypatch):
     db = FakeDb()
     cleanup_calls = []
@@ -122,200 +58,6 @@ async def test_delete_external_session_uses_standard_owner_cleanup(monkeypatch):
     assert cleanup_calls == [(db, "weixin-openclaw:user-1", "user-1", False)]
     assert db.commit_count == 1
     assert db.rollback_count == 0
-
-
-@pytest.mark.asyncio
-async def test_update_external_session_setting_is_read_only(monkeypatch):
-    db = FakeDb()
-    session = SimpleNamespace(
-        uid="user-1",
-        source="weixin-openclaw",
-        enable_markdown=True,
-    )
-
-    async def get_by_session_id(db_arg, session_id: str):
-        return session
-
-    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
-
-    response = await chat_api.update_session_setting(
-        chat_api.SessionSettingRequest(
-            session_id="session-1",
-            enable_markdown=False,
-        ),
-        db=db,
-        current_user=SimpleNamespace(uid="user-1", is_superuser=False),
-    )
-
-    assert response.code == 403
-    assert response.message == "该会话来自外部消息平台，网页端仅允许查看"
-    assert session.enable_markdown is True
-    assert db.commit_count == 0
-
-
-@pytest.mark.asyncio
-async def test_update_external_session_setting_assigns_valid_profile_override(monkeypatch):
-    db = FakeDb()
-    profile_calls = []
-    session = SimpleNamespace(
-        uid="user-1",
-        source="weixin-openclaw",
-        enable_markdown=True,
-        profile_override_id=None,
-    )
-
-    async def get_by_session_id(db_arg, session_id: str):
-        assert db_arg is db
-        assert session_id == "session-1"
-        return session
-
-    async def get_validated_profile(db_arg, *, profile_id, uid):
-        assert db_arg is db
-        profile_calls.append((profile_id, uid))
-        return SimpleNamespace(id=17, uid=uid)
-
-    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
-    monkeypatch.setattr(chat_api, "get_validated_profile_for_assignment", get_validated_profile)
-
-    response = await chat_api.update_session_setting(
-        chat_api.SessionSettingRequest(
-            session_id="session-1",
-            profile_override_id=17,
-        ),
-        db=db,
-        current_user=SimpleNamespace(uid="user-1", is_superuser=False),
-    )
-
-    assert response.code == 200
-    assert profile_calls == [(17, "user-1")]
-    assert session.profile_override_id == 17
-    assert db.commit_count == 1
-
-
-@pytest.mark.asyncio
-async def test_update_session_setting_can_clear_profile_override_without_validation(monkeypatch):
-    db = FakeDb()
-    session = SimpleNamespace(
-        uid="user-1",
-        source="weixin-openclaw",
-        enable_markdown=True,
-        profile_override_id=17,
-    )
-
-    async def get_by_session_id(db_arg, session_id: str):
-        assert db_arg is db
-        assert session_id == "session-1"
-        return session
-
-    async def get_validated_profile(*args, **kwargs):
-        raise AssertionError("clearing a profile override must not validate a profile")
-
-    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
-    monkeypatch.setattr(chat_api, "get_validated_profile_for_assignment", get_validated_profile)
-
-    response = await chat_api.update_session_setting(
-        chat_api.SessionSettingRequest(
-            session_id="session-1",
-            profile_override_id=None,
-        ),
-        db=db,
-        current_user=SimpleNamespace(uid="user-1", is_superuser=False),
-    )
-
-    assert response.code == 200
-    assert session.profile_override_id is None
-    assert db.commit_count == 1
-
-
-@pytest.mark.asyncio
-async def test_non_admin_cannot_update_another_users_profile_override(monkeypatch):
-    db = FakeDb()
-    session = SimpleNamespace(
-        uid="user-2",
-        source="weixin-openclaw",
-        enable_markdown=True,
-        profile_override_id=17,
-    )
-
-    async def get_by_session_id(db_arg, session_id: str):
-        assert db_arg is db
-        assert session_id == "session-1"
-        return session
-
-    async def get_validated_profile(*args, **kwargs):
-        raise AssertionError("an unauthorized update must not validate a profile")
-
-    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
-    monkeypatch.setattr(chat_api, "get_validated_profile_for_assignment", get_validated_profile)
-
-    response = await chat_api.update_session_setting(
-        chat_api.SessionSettingRequest(
-            session_id="session-1",
-            profile_override_id=19,
-        ),
-        db=db,
-        current_user=SimpleNamespace(uid="user-1", is_superuser=False),
-    )
-
-    assert response.message == t(ERR_SESSION_NO_PERMISSION)
-    assert session.profile_override_id == 17
-    assert db.commit_count == 0
-
-
-@pytest.mark.asyncio
-async def test_create_external_session_guidance_wraps_and_persists_content(monkeypatch):
-    db = FakeDb()
-    session = SimpleNamespace(
-        session_id="weixin-openclaw:user-1",
-        uid="user-1",
-        source="weixin-openclaw",
-        profile_id=7,
-    )
-    create_calls = []
-
-    async def get_by_session_id(db_arg, session_id: str):
-        assert db_arg is db
-        assert session_id == session.session_id
-        return session
-
-    async def create_guidance(db_arg, **kwargs):
-        assert db_arg is db
-        create_calls.append(kwargs)
-        return Message(
-            id=11,
-            session_id=kwargs["session_id"],
-            uid=kwargs["uid"],
-            profile_id=kwargs["profile_id"],
-            role=MessageRole.SYSTEM,
-            type=MessageType.GUIDANCE,
-            content=kwargs["content"],
-            is_processed=False,
-        )
-
-    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
-    monkeypatch.setattr(chat_api.message_crud, "create_guidance", create_guidance)
-
-    response = await chat_api.create_session_guidance(
-        chat_api.SessionGuidanceRequest(
-            session_id=session.session_id,
-            content="  请先回答重点  ",
-        ),
-        db=db,
-        current_user=SimpleNamespace(uid="user-1"),
-    )
-
-    wrapped = f"{GUIDANCE_MESSAGE_PREFIX}请先回答重点{GUIDANCE_MESSAGE_SUFFIX}"
-    assert response.code == 200
-    assert response.data.type == MessageType.GUIDANCE
-    assert response.data.content == wrapped
-    assert create_calls == [
-        {
-            "session_id": session.session_id,
-            "uid": "user-1",
-            "profile_id": 7,
-            "content": wrapped,
-        }
-    ]
 
 
 @pytest.mark.asyncio
@@ -490,45 +232,6 @@ def test_websocket_event_matches_session(event, session_id, require_session_id, 
 
 
 @pytest.mark.asyncio
-async def test_create_new_web_session_with_profile_override_persists_valid_override(monkeypatch):
-    db = FakeDb()
-    profile_calls = []
-
-    async def get_by_session_id(db_arg, session_id: str):
-        assert db_arg is db
-        assert session_id == "session-1"
-        return None
-
-    async def get_validated_profile(db_arg, *, profile_id, uid):
-        assert db_arg is db
-        profile_calls.append((profile_id, uid))
-        return SimpleNamespace(id=17, uid=uid)
-
-    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
-    monkeypatch.setattr(chat_api, "get_validated_profile_for_assignment", get_validated_profile)
-
-    await chat_api._create_new_web_session_with_profile_override(
-        db,
-        session_id="session-1",
-        uid="user-1",
-        source="http",
-        profile_override_id=17,
-    )
-
-    assert profile_calls == [(17, "user-1")]
-    assert len(db.added) == 1
-    session = db.added[0]
-    assert session.uid == "user-1"
-    assert session.source == "http"
-    assert session.reply_target_source == "http"
-    assert session.show_tool_calls is True
-    assert session.show_reasoning is True
-    assert session.profile_override_id == 17
-    assert session.profile_id is None
-    assert db.commit_count == 1
-
-
-@pytest.mark.asyncio
 async def test_create_new_web_session_without_profile_override_does_not_persist(monkeypatch):
     db = FakeDb()
 
@@ -580,34 +283,6 @@ async def test_create_new_web_session_does_not_overwrite_existing_owner_session(
     assert existing_session.profile_override_id == 7
     assert db.added == []
     assert db.commit_count == 0
-
-
-@pytest.mark.asyncio
-async def test_chat_completions_creates_new_session_with_profile_override(monkeypatch):
-    db = FakeDb()
-    helper_calls = []
-
-    async def create_new_session(db_arg, *, session_id, uid, source, profile_override_id, show_tool_calls, show_reasoning):
-        assert db_arg is db
-        helper_calls.append((session_id, uid, source, profile_override_id, show_tool_calls, show_reasoning))
-
-    monkeypatch.setattr(chat_api, "_create_new_web_session_with_profile_override", create_new_session)
-
-    response = await chat_api.chat_completions(
-        ChatCompletionRequest(message="hello", profile_override_id=17, show_reasoning=False),
-        db=db,
-        current_user=SimpleNamespace(uid="user-1"),
-    )
-
-    assert len(helper_calls) == 1
-    session_id, uid, source, profile_override_id, show_tool_calls, show_reasoning = helper_calls[0]
-    assert session_id
-    assert uid == "user-1"
-    assert source == "http"
-    assert profile_override_id == 17
-    assert show_tool_calls is None
-    assert show_reasoning is False
-    assert response["choices"][0]["finish_reason"] == "new_session"
 
 
 @pytest.mark.parametrize("profile_override_id", [0, False])

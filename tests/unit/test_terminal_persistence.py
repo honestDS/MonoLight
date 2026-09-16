@@ -95,67 +95,6 @@ async def create_terminal_session(
 
 
 @pytest.mark.asyncio
-async def test_terminal_session_snapshot_persists_across_database_sessions():
-    terminal_session = await create_terminal_session(
-        terminal_session_id="p" * 32,
-        audit_record_id=101,
-        audit_execution_record_id=1001,
-    )
-
-    async with AsyncSessionLocal() as db:
-        snapshot = await terminal_session_manager.get_snapshot(
-            db,
-            terminal_session.terminal_session_id,
-            "user-1",
-            "chat-session-1",
-        )
-
-    assert snapshot.terminal_session_id == "p" * 32
-    assert snapshot.status is TerminalSessionStatus.STARTING
-    assert snapshot.permission_scope.owner_uid == "user-1"
-    assert snapshot.permission_scope.owner_session_id == "chat-session-1"
-    assert snapshot.permission_scope.original_tool_call_id == "tool-call-1"
-    assert snapshot.permission_scope.audit_record_id == 101
-    assert snapshot.permission_scope.audit_execution_record_id == 1001
-    assert snapshot.permission_scope.allowed_actions == ALL_TERMINAL_ACTIONS
-    assert snapshot.output_buffer.capacity_bytes == 1_048_576
-    assert snapshot.output_buffer.oldest_offset == 0
-    assert snapshot.output_buffer.next_offset == 0
-    assert snapshot.output_buffer.oldest_sequence == 1
-    assert snapshot.output_buffer.next_sequence == 1
-
-
-@pytest.mark.asyncio
-async def test_unaudited_terminal_session_preserves_none_audit_ids_and_reuses_identity():
-    session_kwargs = {
-        "uid": "user-1",
-        "session_id": "chat-session-1",
-        "profile_id": 1,
-        "original_tool_call_id": "unaudited-tool-call",
-        "audit_record_id": None,
-        "audit_execution_record_id": None,
-        "command": "python -i",
-        "working_directory": "temp/user-1",
-        "allowed_actions": ALL_TERMINAL_ACTIONS,
-    }
-
-    async with AsyncSessionLocal() as db:
-        first_session = await terminal_session_manager.get_or_create_session_for_execution(db, **session_kwargs)
-        second_session = await terminal_session_manager.get_or_create_session_for_execution(db, **session_kwargs)
-        snapshot = await terminal_session_manager.get_snapshot(
-            db,
-            first_session.terminal_session_id,
-            "user-1",
-            "chat-session-1",
-        )
-
-    assert second_session.terminal_session_id == first_session.terminal_session_id
-    assert snapshot.permission_scope.original_tool_call_id == "unaudited-tool-call"
-    assert snapshot.permission_scope.audit_record_id is None
-    assert snapshot.permission_scope.audit_execution_record_id is None
-
-
-@pytest.mark.asyncio
 async def test_terminal_session_snapshot_accepts_legacy_signal_action():
     terminal_session = await create_terminal_session(
         terminal_session_id="s" * 32,

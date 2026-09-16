@@ -11,11 +11,15 @@ from app.adapters.chat_ws import ws_chat_adapter
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.dispatcher import ChatDispatcher
+from app.core.exceptions import LLMException
+from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
+from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue import executor_replies as executor_replies_module
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.utils.dispatcher.save_message import save_message
 from app.models.audit import AuditConfirmationClaim, AuditRecord
-from app.models.message import Message
+from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
@@ -283,3 +287,202 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
         "session-independent-a",
         "session-independent-b",
     }
+
+
+def _patch_queue_runtime_database(monkeypatch, session_factory) -> None:
+    monkeypatch.setattr(database_provider, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", session_factory)
+
+
+async def _persist_fake_foreground_reply(kwargs: dict, content: str) -> dict:
+    await save_message(
+        kwargs["db"],
+        kwargs["session_id"],
+        kwargs["uid"],
+        MessageRole.ASSISTANT,
+        MessageType.TEXT,
+        InternalMessage(role=MessageRole.ASSISTANT, content=content),
+        kwargs["persisted_profile_id"],
+        dedupe_key=kwargs["final_message_dedupe_key"],
+    )
+    return {
+        "choices": [{"message": {"role": MessageRole.ASSISTANT, "content": content}, "finish_reason": "stop"}],
+        "history": [],
+        "files": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_foreground_work_retries_transient_failure_then_completes_through_consumer(
+    concurrent_queue_session_factory,
+    monkeypatch,
+):
+    profile = Profile(id=1, uid="owner", name="queue-test", configs={})
+    _patch_queue_runtime_database(monkeypatch, concurrent_queue_session_factory)
+    monkeypatch.setattr(consumer_module, "retry_delay_seconds", lambda _attempt: 0)
+    sent_events: list[dict] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event: dict) -> None:
+        sent_events.append(event)
+
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
+    dispatch_attempts = 0
+
+    async def transient_dispatch(**kwargs):
+        nonlocal dispatch_attempts
+        dispatch_attempts += 1
+        if dispatch_attempts == 1:
+            raise RuntimeError("transient dispatcher failure")
+        return await _persist_fake_foreground_reply(kwargs, "retry succeeded")
+
+    monkeypatch.setattr(ChatDispatcher, "dispatch", transient_dispatch)
+
+    async with concurrent_queue_session_factory() as db:
+        _message, work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-retry",
+            profile=profile,
+            message="retry me",
+            attachments=None,
+            source="http",
+            stream_requested=False,
+            request_id="request-retry",
+        )
+        assert submission_status == "accepted"
+        first_claim = await session_reply_work_item_crud.claim_next(db, worker_id="worker-retry-1", lease_seconds=300)
+
+    assert first_claim is not None
+    assert first_claim.id == work.id
+    consumer = consumer_module.SessionReplyConsumer()
+    await consumer._run_claimed(first_claim.id, "worker-retry-1", first_claim.attempt_count, first_claim.max_attempts)
+
+    async with concurrent_queue_session_factory() as db:
+        released = await session_reply_work_item_crud.get(db, work.id)
+        assert released is not None
+        assert released.status == SessionReplyWorkStatus.READY_FOR_LLM
+        assert released.locked_by is None
+        assert released.attempt_count == 1
+        assert isinstance(released.error, str) and released.error
+        second_claim = await session_reply_work_item_crud.claim_next(db, worker_id="worker-retry-2", lease_seconds=300)
+
+    assert second_claim is not None
+    assert second_claim.id == work.id
+    assert second_claim.attempt_count == 2
+    await consumer._run_claimed(second_claim.id, "worker-retry-2", second_claim.attempt_count, second_claim.max_attempts)
+
+    async with concurrent_queue_session_factory() as db:
+        completed = await session_reply_work_item_crud.get(db, work.id)
+        messages = list((await db.execute(select(Message).where(Message.session_id == "session-retry").order_by(Message.id))).scalars().all())
+
+    assert dispatch_attempts == 2
+    assert completed is not None
+    assert completed.status == SessionReplyWorkStatus.SUCCEEDED
+    assert completed.attempt_count == 2
+    assert completed.result_message_id is not None
+    assistant_messages = [message for message in messages if message.role == MessageRole.ASSISTANT]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0].content == "retry succeeded"
+    assert completed.result_message_id == assistant_messages[0].id
+    assert len(sent_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_foreground_business_failure_is_terminal_without_queue_retry(
+    concurrent_queue_session_factory,
+    monkeypatch,
+):
+    profile = Profile(id=1, uid="owner", name="queue-test", configs={})
+    _patch_queue_runtime_database(monkeypatch, concurrent_queue_session_factory)
+    sent_events: list[dict] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event: dict) -> None:
+        sent_events.append(event)
+
+    async def failed_dispatch(**_kwargs):
+        raise LLMException(message="ERR_LLM_CONNECTION_FAILED", detail="provider unavailable")
+
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
+    monkeypatch.setattr(ChatDispatcher, "dispatch", failed_dispatch)
+
+    async with concurrent_queue_session_factory() as db:
+        _message, work, _submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-business-failure",
+            profile=profile,
+            message="fail once",
+            attachments=None,
+            source="http",
+            stream_requested=False,
+            request_id="request-business-failure",
+        )
+        claim = await session_reply_work_item_crud.claim_next(db, worker_id="worker-business-failure", lease_seconds=300)
+
+    assert claim is not None
+    consumer = consumer_module.SessionReplyConsumer()
+    await consumer._run_claimed(claim.id, "worker-business-failure", claim.attempt_count, claim.max_attempts)
+
+    async with concurrent_queue_session_factory() as db:
+        failed = await session_reply_work_item_crud.get(db, work.id)
+        messages = list((await db.execute(select(Message).where(Message.session_id == "session-business-failure").order_by(Message.id))).scalars().all())
+
+    assert failed is not None
+    assert failed.status == SessionReplyWorkStatus.FAILED
+    assert failed.attempt_count == 1
+    assert failed.result_message_id is not None
+    error_messages = [message for message in messages if message.role == MessageRole.ERR]
+    assert len(error_messages) == 1
+    assert error_messages[0].id == failed.result_message_id
+    assert len(sent_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_streamed_foreground_failure_is_terminal_after_persisted_output(
+    concurrent_queue_session_factory,
+    monkeypatch,
+):
+    profile = Profile(id=1, uid="owner", name="queue-test", configs={})
+    _patch_queue_runtime_database(monkeypatch, concurrent_queue_session_factory)
+    sent_events: list[dict] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event: dict) -> None:
+        sent_events.append(event)
+
+    async def failing_stream(**_kwargs):
+        yield {"type": "agent_loop_start", "response_id": "response-stream-failure", "turn": 1}
+        yield {"type": "content", "content": "partial", "response_id": "response-stream-failure", "turn": 1}
+        raise RuntimeError("stream interrupted")
+
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
+    monkeypatch.setattr(ChatDispatcher, "dispatch_stream", failing_stream)
+
+    async with concurrent_queue_session_factory() as db:
+        _message, work, _submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-stream-failure",
+            profile=profile,
+            message="stream me",
+            attachments=None,
+            source="ws",
+            stream_requested=True,
+            request_id="request-stream-failure",
+        )
+        claim = await session_reply_work_item_crud.claim_next(db, worker_id="worker-stream-failure", lease_seconds=300)
+
+    assert claim is not None
+    consumer = consumer_module.SessionReplyConsumer()
+    await consumer._run_claimed(claim.id, "worker-stream-failure", claim.attempt_count, claim.max_attempts)
+
+    async with concurrent_queue_session_factory() as db:
+        failed = await session_reply_work_item_crud.get(db, work.id)
+        persisted_events = await session_reply_stream_event_crud.list_after_sequence(db, work_id=work.id, after_sequence_no=0)
+
+    assert failed is not None
+    assert failed.status == SessionReplyWorkStatus.FAILED
+    assert failed.attempt_count == 1
+    assert [event.event["type"] for event in persisted_events] == ["input_dequeued", "agent_loop_start", "content"]
+    assert len(sent_events) == 1
