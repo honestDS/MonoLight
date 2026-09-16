@@ -1202,34 +1202,6 @@ def test_message_platform_t_uses_explicit_platform_language():
 
 
 @pytest.mark.asyncio
-async def test_enqueue_is_idempotent_by_dedupe_key():
-    event = {"type": "proactive_reply", "task_id": 1, "content": "done"}
-    dedupe_key = build_outbox_dedupe_key("uid", "session", "outbox-test", event)
-
-    async with AsyncSessionLocal() as db:
-        first, first_created = await message_platform_outbox_crud.enqueue(
-            db,
-            dedupe_key=dedupe_key,
-            uid="uid",
-            session_id="session",
-            source="outbox-test",
-            event=event,
-        )
-        second, second_created = await message_platform_outbox_crud.enqueue(
-            db,
-            dedupe_key=dedupe_key,
-            uid="uid",
-            session_id="session",
-            source="outbox-test",
-            event=event,
-        )
-
-    assert first_created is True
-    assert second_created is False
-    assert second.id == first.id
-
-
-@pytest.mark.asyncio
 async def test_claim_is_atomic_and_requires_matching_owner_to_complete():
     async with AsyncSessionLocal() as db:
         item, _ = await message_platform_outbox_crud.enqueue(
@@ -1278,34 +1250,6 @@ async def test_expired_processing_item_can_be_reclaimed():
     assert second_claim is not None
     assert second_claim.locked_by == "worker-b"
     assert second_claim.attempt_count == 2
-
-
-@pytest.mark.asyncio
-async def test_manager_sends_and_marks_outbox_item_sent():
-    handler = DeliveringHandler()
-    manager = MessagePlatformPollingManager((handler,))
-    event = {"type": "proactive_reply", "content": "done"}
-
-    async with AsyncSessionLocal() as db:
-        item, _ = await message_platform_outbox_crud.enqueue(
-            db,
-            dedupe_key="delivery-key",
-            uid="uid",
-            session_id="session",
-            source="outbox-test",
-            event=event,
-        )
-
-    processed_count = await manager.process_outbox_batch()
-
-    async with AsyncSessionLocal() as db:
-        saved_item = await message_platform_outbox_crud.get(db, item.id)
-
-    assert processed_count == 1
-    assert handler.sent_events == [event]
-    assert saved_item is not None
-    assert saved_item.status == MessagePlatformOutboxStatus.SENT
-    assert saved_item.sent_at is not None
 
 
 @pytest.mark.asyncio

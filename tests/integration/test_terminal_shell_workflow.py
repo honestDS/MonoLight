@@ -1,16 +1,20 @@
 import asyncio
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import psutil
 import pytest
 from sqlalchemy import delete
 
+from app.core.constants import ERR_TERMINAL_WORKER_STOPPED
 from app.core.dispatch_context import DispatchContext
+from app.core.i18n import t
 from app.core.terminal import (
     ShellInteractiveHandoffResult,
     TerminalAction,
@@ -159,8 +163,11 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
                 tool_call_id="shell-workflow-shell-tool-call",
             )
             handoff = ShellInteractiveHandoffResult.model_validate(json.loads(await shell_executor.execute(command=command, execution_mode="interactive")))
+            replayed_handoff = ShellInteractiveHandoffResult.model_validate(json.loads(await shell_executor.execute(command=command, execution_mode="interactive")))
 
         assert handoff.status is TerminalSessionStatus.STARTING
+        assert replayed_handoff.terminal_session_id == handoff.terminal_session_id
+        assert replayed_handoff.status is TerminalSessionStatus.STARTING
         async with AsyncSessionLocal() as db:
             terminal_session = await db.get(TerminalSession, handoff.terminal_session_id)
         assert terminal_session is not None
@@ -178,7 +185,16 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
             stored_terminal = await db.get(TerminalSession, handoff.terminal_session_id)
         assert stored_terminal is not None
         assert stored_terminal.locked_by == coordinator.worker_id
-        assert stored_terminal.process_identity is not None
+        process_identity = stored_terminal.process_identity
+        assert process_identity is not None
+        assert process_identity["platform"] == platform.system()
+        assert isinstance(process_identity["boot_time"], (int, float))
+        assert isinstance(process_identity["root_pid"], int)
+        assert isinstance(process_identity["root_create_time"], (int, float))
+        assert isinstance(process_identity["known_processes"], dict)
+        root_process = psutil.Process(process_identity["root_pid"])
+        assert root_process.is_running()
+        assert root_process.status() != psutil.STATUS_ZOMBIE
 
         async with AsyncSessionLocal() as db:
             status_executor = _configure_executor(
@@ -253,5 +269,115 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
             exited_terminal = await db.get(TerminalSession, handoff.terminal_session_id)
         assert exited_terminal is not None
         assert exited_terminal.status is TerminalSessionStatus.EXITED
+
+        async with AsyncSessionLocal() as db:
+            retained_read_executor = _configure_executor(
+                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="shell-workflow-read-after-exit",
+            )
+            retained_read = TerminalReadResult.model_validate(
+                json.loads(
+                    await retained_read_executor.execute(
+                        handoff.terminal_session_id,
+                        offset=0,
+                        max_bytes=65_536,
+                    )
+                )
+            )
+        assert retained_read.eof is True
+        assert all(marker in retained_read.output for marker in TTY_MARKERS)
+        assert ECHO_MARKER in retained_read.output
+
+        async with AsyncSessionLocal() as db:
+            repeated_close_executor = _configure_executor(
+                TerminalCloseExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="shell-workflow-close-tool-call",
+            )
+            repeated_close = TerminalActionReceipt.model_validate(
+                json.loads(
+                    await repeated_close_executor.execute(
+                        handoff.terminal_session_id,
+                        force=True,
+                    )
+                )
+            )
+        assert repeated_close.action is TerminalAction.CLOSE
+        assert repeated_close.session_status is TerminalSessionStatus.EXITED
+    finally:
+        await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)
+
+
+@pytest.mark.asyncio
+async def test_terminal_worker_stop_marks_real_unaudited_shell_session_lost_and_kills_process(tmp_path):
+    uid = TEST_UID
+    session_id = TEST_SESSION_ID
+    script_path = (tmp_path / "terminal_worker_stop.py").resolve()
+    await asyncio.to_thread(
+        script_path.write_text,
+        'import time\nprint("WORKER_STOP_READY", flush=True)\ntime.sleep(60)\n',
+        encoding="utf-8",
+    )
+    command = _interactive_python_command(script_path)
+    coordinator = TerminalWorkerCoordinator()
+    process_identity = None
+
+    try:
+        async with AsyncSessionLocal() as db:
+            shell_executor = _configure_executor(
+                ShellExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="shell-worker-stop-tool-call",
+            )
+            handoff = ShellInteractiveHandoffResult.model_validate(
+                json.loads(
+                    await shell_executor.execute(
+                        command=command,
+                        execution_mode="interactive",
+                    )
+                )
+            )
+
+        assert handoff.status is TerminalSessionStatus.STARTING
+        coordinator.start()
+        running_snapshot = await _wait_until(
+            lambda: _get_snapshot(handoff.terminal_session_id, uid, session_id),
+            lambda snapshot: snapshot.status is TerminalSessionStatus.RUNNING,
+        )
+        assert running_snapshot.status is TerminalSessionStatus.RUNNING
+
+        async with AsyncSessionLocal() as db:
+            stored_terminal = await db.get(TerminalSession, handoff.terminal_session_id)
+        assert stored_terminal is not None
+        process_identity = stored_terminal.process_identity
+        assert process_identity is not None
+        assert stored_terminal.audit_record_id is None
+        assert stored_terminal.audit_execution_record_id is None
+
+        await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)
+
+        async with AsyncSessionLocal() as db:
+            stopped_terminal = await db.get(TerminalSession, handoff.terminal_session_id)
+        assert stopped_terminal is not None
+        assert stopped_terminal.status is TerminalSessionStatus.LOST
+        assert stopped_terminal.failure_reason == t(ERR_TERMINAL_WORKER_STOPPED)
+        assert stopped_terminal.locked_by is None
+        assert stopped_terminal.lock_until is None
+
+        root_pid = process_identity["root_pid"]
+        root_create_time = process_identity["root_create_time"]
+        try:
+            root_process = psutil.Process(root_pid)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            pass
+        else:
+            assert not root_process.is_running() or root_process.status() == psutil.STATUS_ZOMBIE or root_process.create_time() != root_create_time
     finally:
         await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)

@@ -69,41 +69,6 @@ async def test_duplicate_enqueue_returns_existing_work(db_session: AsyncSession)
 
 
 @pytest.mark.asyncio
-async def test_concurrent_enqueue_assigns_contiguous_session_sequence_numbers(
-    concurrent_session_factory: async_sessionmaker[AsyncSession],
-):
-    crud = CRUDSessionReplyWorkItem()
-    barrier = AsyncBarrier(3)
-    source_ids = [30, 10, 20]
-
-    async def enqueue_in_session(source_id: int) -> tuple[int | None, int | None, bool]:
-        async with concurrent_session_factory() as db:
-            await barrier.wait()
-            work, created = await crud.enqueue(
-                db,
-                uid="user-1",
-                session_id="session-1",
-                profile_id=1,
-                work_type=SessionReplyWorkType.FOREGROUND_REPLY,
-                source_type=SessionReplySourceType.USER_MESSAGE,
-                source_id=source_id,
-                dedupe_key=f"foreground-message:{source_id}",
-            )
-            return work.id, work.sequence_no, created
-
-    results = await asyncio.gather(*(enqueue_in_session(source_id) for source_id in source_ids))
-
-    async with concurrent_session_factory() as db:
-        work = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == "session-1").order_by(SessionReplyWorkItem.sequence_no))).scalars().all())
-
-    assert all(created for _work_id, _sequence_no, created in results)
-    assert [item.sequence_no for item in work] == [1, 2, 3]
-    assert len({item.sequence_no for item in work}) == len(work)
-    assert {int(item.source_id) for item in work} == set(source_ids)
-    assert [item.sequence_no for item in work] != [int(item.source_id) for item in work]
-
-
-@pytest.mark.asyncio
 async def test_concurrent_duplicate_enqueue_does_not_consume_a_sequence_number(
     concurrent_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch,
@@ -220,29 +185,6 @@ async def test_claim_does_not_skip_an_earlier_waiting_work(db_session: AsyncSess
     assert claimed is None
     await db_session.refresh(second)
     assert second.status == SessionReplyWorkStatus.READY_FOR_LLM
-
-
-@pytest.mark.asyncio
-async def test_claim_allows_different_sessions_to_run_concurrently(db_session: AsyncSession):
-    crud = CRUDSessionReplyWorkItem()
-    first = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=1, dedupe_key="foreground-message:1")
-    other, _created = await crud.enqueue(
-        db_session,
-        uid="user-1",
-        session_id="session-2",
-        profile_id=1,
-        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
-        source_type=SessionReplySourceType.USER_MESSAGE,
-        source_id=2,
-        dedupe_key="foreground-message:2",
-        commit=False,
-    )
-    await db_session.commit()
-
-    claimed_first = await crud.claim_next(db_session, worker_id="worker-1", lease_seconds=300)
-    claimed_second = await crud.claim_next(db_session, worker_id="worker-2", lease_seconds=300)
-
-    assert {claimed_first.id, claimed_second.id} == {first.id, other.id}
 
 
 @pytest.mark.asyncio

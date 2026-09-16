@@ -12,21 +12,27 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 import app.api.v1.setup as setup_api
 import app.core.crypto as crypto_module
 import app.core.setup as setup_service
+import app.providers.database.bootstrap as database_bootstrap
 from app.core.constants import (
+    ERR_CHANNEL_NAME_EXISTS,
     ERR_SETUP_ALREADY_COMPLETED,
     ERR_SETUP_CONFLICT,
     ERR_SETUP_NOT_ALLOWED,
     ERR_SETUP_SESSION_INVALID,
+    ERR_SETUP_STATE_UPDATE_FAILED,
     ERR_SETUP_STATUS_INVALID,
     ERR_SETUP_STATUS_NOT_INITIALIZED,
     ERR_SYSTEM_SECRETS_FILE_INVALID,
+    ERR_USER_NAME_EXISTS,
     MSG_SETUP_STATUS_SUCCESS,
+    SETUP_ADMIN_UID_KEY,
     SETUP_SESSION_COOKIE_NAME,
     SETUP_SESSION_RECORD_KEY,
     SETUP_SESSION_RECORD_VERSION,
@@ -36,10 +42,12 @@ from app.core.constants import (
     SETUP_STATUS_KEY,
     SETUP_STATUS_PENDING,
 )
+from app.core.crud.system.setting import DEFAULT_SYSTEM_SETTINGS
 from app.core.i18n import t
+from app.core.security import verify_password
 from app.core.system_secrets import SystemSecrets, SystemSecretsError
 from app.handler import register_handlers
-from app.models.channel import ENCRYPTED_API_KEY_PREFIX, MODEL_PROTOCOLS_BY_USAGE, ModelChannel, ModelUsage
+from app.models.channel import ENCRYPTED_API_KEY_PREFIX, MODEL_PROTOCOLS_BY_USAGE, ModelChannel, ModelProtocol, ModelUsage
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.system_setting import SystemSetting
@@ -205,6 +213,103 @@ async def _read_setup_data(session_factory: async_sessionmaker[AsyncSession]) ->
 
 def _business_record_counts(database: dict[str, Any]) -> dict[str, int]:
     return {key: len(database[key]) for key in ("users", "channels", "prompts", "profiles")}
+
+
+async def _clear_setup_database(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    async with session_factory() as session:
+        for model in (Profile, PromptLibrary, ModelChannel, User, SystemSetting):
+            await session.execute(delete(model))
+        await session.commit()
+
+
+async def _noop_init_database_schema(_session: AsyncSession) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_system_bootstrap_initializes_pending_setup_without_default_profile(
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _clear_setup_database(setup_session_factory)
+    monkeypatch.setattr(database_bootstrap, "init_database_schema", _noop_init_database_schema)
+
+    async with setup_session_factory() as session:
+        await database_bootstrap.init_system_data(session)
+
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+    assert database["settings"][SETUP_ADMIN_UID_KEY] == ""
+    for key, value in DEFAULT_SYSTEM_SETTINGS.items():
+        assert database["settings"][key] == value
+    assert len(database["prompts"]) == 1
+    assert database["prompts"][0].name == "default"
+    assert database["prompts"][0].uid is None
+    assert database["profiles"] == []
+
+
+@pytest.mark.asyncio
+async def test_system_bootstrap_uses_first_superuser_and_is_idempotent(
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _clear_setup_database(setup_session_factory)
+    monkeypatch.setattr(database_bootstrap, "init_database_schema", _noop_init_database_schema)
+
+    first_superuser_uid = "first-superuser"
+    second_superuser_uid = "second-superuser"
+    async with setup_session_factory() as session:
+        legacy_admin = User(uid="legacy-admin", username="admin", is_superuser=False)
+        first_superuser = User(uid=first_superuser_uid, username="operator-one", is_superuser=True)
+        second_superuser = User(uid=second_superuser_uid, username="operator-two", is_superuser=True)
+        session.add(legacy_admin)
+        await session.flush()
+        session.add(first_superuser)
+        await session.flush()
+        session.add(second_superuser)
+        await session.commit()
+        assert legacy_admin.id < first_superuser.id < second_superuser.id
+
+        await database_bootstrap.init_system_data(session)
+        await database_bootstrap.init_system_data(session)
+
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_COMPLETED
+    assert database["settings"][SETUP_ADMIN_UID_KEY] == first_superuser_uid
+    assert len(database["prompts"]) == 1
+    assert len(database["profiles"]) == 1
+    profile = database["profiles"][0]
+    assert profile.uid == first_superuser_uid
+    assert profile.is_default is True
+    assert profile.prompt_id == database["prompts"][0].id
+    assert second_superuser_uid not in {item.uid for item in database["profiles"]}
+
+
+@pytest.mark.asyncio
+async def test_system_bootstrap_preserves_configured_non_superuser_admin_without_creating_profile(
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _clear_setup_database(setup_session_factory)
+    monkeypatch.setattr(database_bootstrap, "init_database_schema", _noop_init_database_schema)
+
+    protected_admin_uid = "configured-user"
+    async with setup_session_factory() as session:
+        session.add_all(
+            [
+                User(uid=protected_admin_uid, username="configured-user", is_superuser=False),
+                User(uid="actual-superuser", username="actual-superuser", is_superuser=True),
+                SystemSetting(key=SETUP_STATUS_KEY, value=SETUP_STATUS_COMPLETED),
+                SystemSetting(key=SETUP_ADMIN_UID_KEY, value=protected_admin_uid),
+            ]
+        )
+        await session.commit()
+        await database_bootstrap.init_system_data(session)
+
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_COMPLETED
+    assert database["settings"][SETUP_ADMIN_UID_KEY] == protected_admin_uid
+    assert database["profiles"] == []
 
 
 @pytest.mark.asyncio
@@ -391,44 +496,17 @@ async def test_setup_dashboard_static_hosting_preserves_setup_cookie_for_models(
 
 
 @pytest.mark.asyncio
-async def test_setup_models_pending_forwards_payload_and_returns_standard_response(
+async def test_setup_pending_probe_workflow_forwards_models_and_chat_payloads(
     setup_app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    request_payload = {
+    model_request = {
         "api_key": "setup-models-api-key",
         "base_url": "https://models.example.test/v1",
         "http_proxy": "http://proxy.example.test:8080",
         "timeout": 12,
     }
-    forwarded: dict[str, Any] = {}
-
-    async def fake_list_channel_models(*, payload: Any, _admin: dict[str, Any]) -> Any:
-        forwarded["payload"] = payload
-        forwarded["admin"] = _admin
-        return setup_api.StandardResponse.success(data={"models": [{"id": "setup-model"}]})
-
-    monkeypatch.setattr(setup_api, "list_channel_models", fake_list_channel_models)
-
-    response = await _request(setup_app, "POST", "/api/v1/setup/models", json=request_payload)
-    body = _assert_standard_response(response, 200)
-
-    assert forwarded["payload"].model_dump(mode="json") == {
-        "api_key": "setup-models-api-key",
-        "base_url": "https://models.example.test/v1",
-        "http_proxy": "http://proxy.example.test:8080",
-        "timeout": 12.0,
-    }
-    assert forwarded["admin"] == {}
-    assert body["data"] == {"models": [{"id": "setup-model"}]}
-
-
-@pytest.mark.asyncio
-async def test_setup_chat_pending_forwards_payload_and_returns_standard_response(
-    setup_app: FastAPI,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request_payload = {
+    chat_request = {
         "prompt": "ping",
         "protocol": "OPENAI",
         "api_key": "setup-chat-api-key",
@@ -445,17 +523,34 @@ async def test_setup_chat_pending_forwards_payload_and_returns_standard_response
     }
     forwarded: dict[str, Any] = {}
 
+    async def fake_list_channel_models(*, payload: Any, _admin: dict[str, Any]) -> Any:
+        forwarded["models"] = payload.model_dump(mode="json")
+        forwarded["models_admin"] = _admin
+        return setup_api.StandardResponse.success(data={"models": [{"id": "setup-model"}]})
+
     async def fake_test_channel_chat(*, payload: Any, _admin: dict[str, Any]) -> Any:
-        forwarded["payload"] = payload
-        forwarded["admin"] = _admin
+        forwarded["chat"] = payload.model_dump(mode="json")
+        forwarded["chat_admin"] = _admin
         return setup_api.StandardResponse.success(data={"model": "setup-chat-model", "reply": "pong"})
 
+    monkeypatch.setattr(setup_api, "list_channel_models", fake_list_channel_models)
     monkeypatch.setattr(setup_api, "test_channel_chat", fake_test_channel_chat)
 
-    response = await _request(setup_app, "POST", "/api/v1/setup/test-chat", json=request_payload)
-    body = _assert_standard_response(response, 200)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=setup_app), base_url="http://test") as client:
+        status_response = await client.get("/api/v1/setup/status")
+        _assert_standard_response(status_response, 200)
+        models_response = await client.post("/api/v1/setup/models", json=model_request)
+        chat_response = await client.post("/api/v1/setup/test-chat", json=chat_request)
 
-    assert forwarded["payload"].model_dump(mode="json") == {
+    assert forwarded["models"] == {
+        "api_key": "setup-models-api-key",
+        "base_url": "https://models.example.test/v1",
+        "http_proxy": "http://proxy.example.test:8080",
+        "timeout": 12.0,
+    }
+    assert forwarded["models_admin"] == {}
+    assert _assert_standard_response(models_response, 200)["data"] == {"models": [{"id": "setup-model"}]}
+    assert forwarded["chat"] == {
         "advanced_settings": {"custom_headers": {"x-setup-test": "enabled"}},
         "api_key": "setup-chat-api-key",
         "base_url": "https://chat.example.test/v1",
@@ -470,8 +565,11 @@ async def test_setup_chat_pending_forwards_payload_and_returns_standard_response
         "timeout": 45.0,
         "top_p": 0.8,
     }
-    assert forwarded["admin"] == {}
-    assert body["data"] == {"model": "setup-chat-model", "reply": "pong"}
+    assert forwarded["chat_admin"] == {}
+    assert _assert_standard_response(chat_response, 200)["data"] == {
+        "model": "setup-chat-model",
+        "reply": "pong",
+    }
 
 
 @pytest.mark.asyncio
@@ -654,6 +752,21 @@ async def test_setup_complete_returns_token_data_and_creates_initial_records(
     setup_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     payload = _setup_payload()
+    payload["channel"].update(
+        {
+            "http_proxy": "http://user%40name:password%3Awith%2Fslash@PROXY.EXAMPLE.TEST:8080/",
+            "image_understanding": True,
+            "audio_understanding": True,
+            "video_understanding": True,
+            "context_window_k": 128,
+            "temperature": 0.35,
+            "top_p": 0.85,
+            "reasoning_effort": "high",
+            "max_tokens": 2048,
+            "description": "Full chat setup model",
+            "advanced_settings": {"custom_headers": {"X-Setup-Trace": "setup-test"}},
+        }
+    )
     response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=payload)
     body = _assert_standard_response(response, 200)
     clear_cookie = response.headers["set-cookie"]
@@ -680,6 +793,13 @@ async def test_setup_complete_returns_token_data_and_creates_initial_records(
     users = database["users"]
     assert len(users) == 1
     assert sum(user.is_superuser for user in users) == 1
+    admin = users[0]
+    assert database["settings"][SETUP_ADMIN_UID_KEY] == admin.uid
+    assert admin.username == TEST_USERNAME
+    assert admin.is_superuser is True
+    assert admin.is_active is True
+    assert admin.hashed_password != TEST_PASSWORD
+    assert verify_password(TEST_PASSWORD, admin.hashed_password)
 
     channels = database["channels"]
     assert len(channels) == 1
@@ -688,6 +808,22 @@ async def test_setup_complete_returns_token_data_and_creates_initial_records(
     assert channel.api_key != TEST_API_KEY
     assert channel.get_decrypted_api_key() == TEST_API_KEY
     assert body["data"]["channel_id"] == channel.id
+    assert channel.http_proxy == "http://user%40name:password%3Awith%2Fslash@proxy.example.test:8080"
+    assert len(channel.model_ids) == 1
+    model = channel.model_ids[0]
+    assert model["model_id"] == TEST_MODEL_ID
+    assert model["usage"] == ModelUsage.CHAT.value
+    assert model["protocol"] == ModelProtocol.OPENAI.value
+    assert model["image_understanding"] is True
+    assert model["audio_understanding"] is True
+    assert model["video_understanding"] is True
+    assert model["context_window_k"] == 128
+    assert model["temperature"] == 0.35
+    assert model["top_p"] == 0.85
+    assert model["reasoning_effort"] == "high"
+    assert model["max_tokens"] == 2048
+    assert model["description"] == "Full chat setup model"
+    assert model["advanced_settings"] == {"custom_headers": {"x-setup-trace": "setup-test"}}
 
     prompts = database["prompts"]
     assert len(prompts) == 1
@@ -697,7 +833,95 @@ async def test_setup_complete_returns_token_data_and_creates_initial_records(
     assert len(profiles) == 1
     assert profiles[0].uid == users[0].uid
     assert profiles[0].prompt_id == prompts[0].id
+    assert profiles[0].is_default is True
     assert body["data"]["profile_id"] == profiles[0].id
+    for channel_name in ("chat_channel", "context_summary_channel"):
+        rule = profiles[0].configs["channel"][channel_name]["rules"][0]
+        assert rule["channel_id"] == channel.id
+        assert rule["model_id"] == TEST_MODEL_ID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("conflict", "expected_error"),
+    [
+        ("username", ERR_USER_NAME_EXISTS),
+        ("channel", ERR_CHANNEL_NAME_EXISTS),
+    ],
+)
+async def test_setup_complete_rejects_existing_names_and_rolls_back(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    conflict: str,
+    expected_error: str,
+) -> None:
+    async with setup_session_factory() as session:
+        if conflict == "username":
+            session.add(User(uid="existing-user", username=TEST_USERNAME, hashed_password="existing-hash"))
+        else:
+            session.add(ModelChannel(name="setup-channel", api_key="existing-key", base_url="https://existing.example.test/v1", model_ids=[]))
+        await session.commit()
+
+    response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=_setup_payload())
+    body = _assert_standard_response(response, 400)
+    assert body["message"] == t(expected_error)
+    assert body["data"] is None
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+    assert len(database["users"]) == int(conflict == "username")
+    assert not any(user.is_superuser for user in database["users"])
+    assert len(database["channels"]) == int(conflict == "channel")
+    assert database["prompts"] == []
+    assert database["profiles"] == []
+
+
+@pytest.mark.asyncio
+async def test_setup_complete_rolls_back_failed_creation_and_same_session_can_retry(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_create = setup_service.profile_crud.create
+
+    async def fail_profile_create(_db: AsyncSession, **_kwargs: Any) -> Any:
+        raise RuntimeError("simulated profile creation failure")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=setup_app, raise_app_exceptions=False), base_url="http://test") as client:
+        status_response = await client.get("/api/v1/setup/status")
+        _assert_standard_response(status_response, 200)
+        monkeypatch.setattr(setup_service.profile_crud, "create", fail_profile_create)
+        failed_response = await client.post("/api/v1/setup/complete", json=_setup_payload())
+        assert _assert_standard_response(failed_response, 500)["data"] is None
+        failed_database = await _read_setup_data(setup_session_factory)
+        assert failed_database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+        assert _business_record_counts(failed_database) == {"users": 0, "channels": 0, "prompts": 0, "profiles": 0}
+        monkeypatch.setattr(setup_service.profile_crud, "create", original_create)
+        retry_response = await client.post("/api/v1/setup/complete", json=_setup_payload())
+        _assert_standard_response(retry_response, 200)
+
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_COMPLETED
+    assert _business_record_counts(database) == {"users": 1, "channels": 1, "prompts": 1, "profiles": 1}
+
+
+@pytest.mark.asyncio
+async def test_setup_complete_rolls_back_when_admin_binding_update_fails(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_admin_binding(_db: AsyncSession, *, admin_uid: str) -> bool:
+        assert admin_uid
+        return False
+
+    monkeypatch.setattr(setup_service.system_setting_crud, "set_setup_admin_uid", fail_admin_binding)
+    response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=_setup_payload())
+    body = _assert_standard_response(response, 500)
+    assert body["message"] == t(ERR_SETUP_STATE_UPDATE_FAILED)
+    assert body["data"] is None
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+    assert _business_record_counts(database) == {"users": 0, "channels": 0, "prompts": 0, "profiles": 0}
 
 
 @pytest.mark.asyncio
@@ -864,38 +1088,6 @@ async def test_setup_complete_validation_error_is_standard_and_does_not_echo_sec
     assert sensitive_api_key not in response.text
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("section", "field", "invalid_value"),
-    [
-        ("admin", "password", "中" * 25),
-        ("channel", "base_url", "ftp://api.example.test"),
-        ("channel", "model_id", "   "),
-        ("channel", "protocol", "OPENAI_EMBEDDING"),
-    ],
-)
-async def test_setup_complete_rejects_common_validation_errors_without_writes(
-    setup_app: FastAPI,
-    setup_session_factory: async_sessionmaker[AsyncSession],
-    section: str,
-    field: str,
-    invalid_value: str,
-) -> None:
-    payload = _setup_payload()
-    payload[section][field] = invalid_value
-
-    response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=payload)
-    body = _assert_standard_response(response, 422)
-    assert body["data"] is None
-    assert TEST_API_KEY not in response.text
-    if section == "admin" and field == "password":
-        assert invalid_value not in response.text
-
-    database = await _read_setup_data(setup_session_factory)
-    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
-    assert _business_record_counts(database) == {"users": 0, "channels": 0, "prompts": 0, "profiles": 0}
-
-
 def _resolve_schema(openapi: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     resolved = schema
     while "$ref" in resolved:
@@ -1028,27 +1220,3 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
     token_data_schema = _object_schema(openapi, openapi["components"]["schemas"]["SetupTokenData"])
     assert set(status_data_schema["properties"]) == {"required"}
     assert set(token_data_schema["properties"]) == {"access_token", "token_type", "profile_id", "channel_id"}
-
-
-@pytest.mark.asyncio
-async def test_setup_complete_rejects_blank_api_key_without_creating_records(
-    setup_app: FastAPI,
-    setup_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    response = await _request(
-        setup_app,
-        "POST",
-        "/api/v1/setup/complete",
-        json=_setup_payload(api_key="   "),
-    )
-    body = _assert_standard_response(response, 422)
-    assert body["data"] is None
-
-    database = await _read_setup_data(setup_session_factory)
-    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
-    assert _business_record_counts(database) == {
-        "users": 0,
-        "channels": 0,
-        "prompts": 0,
-        "profiles": 0,
-    }

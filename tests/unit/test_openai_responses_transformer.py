@@ -1610,7 +1610,6 @@ def test_responses_accepts_reasoning_only_output() -> None:
     assert response.message.reasoning_content == "Only reasoning."
 
 
-
 def test_responses_completed_event_uses_reasoning_summary_as_stream_fallback() -> None:
     chunk, has_payload = OpenAIResponsesTransformer._normalize_stream_event(
         {
@@ -1666,7 +1665,6 @@ def test_responses_completed_event_does_not_repeat_reasoning_after_stream_delta(
 
     assert chunk["choices"][0]["delta"] == {}
     assert has_payload is False
-
 
 
 def test_responses_multiple_reasoning_parts_are_separated_by_blank_lines() -> None:
