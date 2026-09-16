@@ -14,7 +14,7 @@ from app.core.constants import (
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     ERR_VALUE_MUST_BE_BETWEEN,
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     MANAGED_KNOWLEDGE_KEY_MAX_CHARS,
     MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
     MEMORY_CONTENT_MAX_CHARS,
@@ -33,10 +33,10 @@ from app.models.knowledge_base import (
 from app.models.memory import LongTermMemorySource
 from app.providers.database import AsyncSessionLocal
 
-MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
+MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        "name": MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
         "description": (
             "Recall unified context and maintain two different writable stores: personal long-term memory and Profile-scoped managed knowledge. "
             "The recall operation is a unified read across personal long-term memory, read-only chat history, Profile-scoped managed knowledge, and bound user knowledge bases relevant to the current request. "
@@ -355,7 +355,7 @@ def validate_longterm_memory_arguments(arguments: dict[str, Any]) -> tuple[str |
     if unsupported:
         return operation, t(
             ERR_TOOL_UNSUPPORTED_ARGUMENTS,
-            tool_name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+            tool_name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
             fields=", ".join(unsupported),
         )
 
@@ -712,8 +712,8 @@ class LongTermMemoryExecutor(BaseExecutor):
 
 
 __all__ = [
-    "MANAGE_LONGTERM_MEMORY_TOOL_NAME",
-    "MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA",
+    "MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME",
+    "MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA",
     "LongTermMemoryExecutor",
     "validate_longterm_memory_arguments",
 ]

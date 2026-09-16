@@ -12,7 +12,7 @@ from app.core.constants import (
 from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.tools.longterm_memory import (
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     validate_longterm_memory_arguments,
 )
 from app.core.utils.dispatcher.helpers import process_single_tool_with_isolated_db
@@ -102,7 +102,7 @@ def is_valid_recall_call(message: InternalMessage | None) -> bool:
         return False
     tool_call = message.tool_calls[0]
     operation, error = validate_longterm_memory_arguments(tool_call.arguments)
-    return tool_call.name == MANAGE_LONGTERM_MEMORY_TOOL_NAME and operation == "recall" and error is None
+    return tool_call.name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME and operation == "recall" and error is None
 
 
 def _tool_result_matches(

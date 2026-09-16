@@ -13,8 +13,8 @@ from app.core.exceptions import BaseBusinessException
 from app.core.memory import MemoryContentTooLongError, MemoryRecallItem, MemoryRecallResult, MemoryRecallStatus
 from app.core.prompts import LONGTERM_MEMORY_SYSTEM_PROMPT
 from app.core.tools import (
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
-    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
     SEND_FILE_TO_USER_TOOL_SCHEMA,
     LongTermMemoryExecutor,
     get_tools_for_profile,
@@ -55,7 +55,7 @@ def _config(*, memory_enabled: bool, enabled_tools: list[str] | None = None) -> 
 
 
 def _tool_call(operation: str, arguments: dict) -> SimpleNamespace:
-    return SimpleNamespace(id=f"call-{operation}", name=MANAGE_LONGTERM_MEMORY_TOOL_NAME, arguments=arguments)
+    return SimpleNamespace(id=f"call-{operation}", name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, arguments=arguments)
 
 
 def _valid_arguments(operation: str) -> dict:
@@ -97,7 +97,8 @@ def _valid_arguments(operation: str) -> dict:
 
 
 def test_longterm_memory_schema_exposes_only_model_fields_and_operations():
-    parameters = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["parameters"]
+    assert MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA["function"]["name"] == "manage_memory_and_knowledge"
+    parameters = MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA["function"]["parameters"]
     properties = parameters["properties"]
 
     assert properties["operation"]["enum"] == [
@@ -124,8 +125,8 @@ def test_longterm_memory_schema_exposes_only_model_fields_and_operations():
 
 
 def test_longterm_memory_tool_descriptions_require_atomic_memory_updates():
-    properties = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["parameters"]["properties"]
-    function_description = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["description"].lower()
+    properties = MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA["function"]["parameters"]["properties"]
+    function_description = MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA["function"]["description"].lower()
 
     query_description = properties["query"]["description"].lower()
     content_description = properties["content"]["description"].lower()
@@ -185,7 +186,7 @@ async def test_get_tools_for_profile_memory_switch_is_independent_of_enabled_too
     tools, _whitelist = await get_tools_for_profile(None, _profile(memory_enabled=memory_enabled, enabled_tools=[]))
     names = {tool["function"]["name"] for tool in tools}
 
-    assert (MANAGE_LONGTERM_MEMORY_TOOL_NAME in names) is expected_exposed
+    assert (MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME in names) is expected_exposed
 
 
 @pytest.mark.parametrize(
@@ -237,7 +238,7 @@ def test_prevalidate_tool_round_rejects_operation_specific_extra_fields(operatio
     )
 
     assert payload["status"] == "failed"
-    assert payload["tool_name"] == MANAGE_LONGTERM_MEMORY_TOOL_NAME
+    assert payload["tool_name"] == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
     assert extra_field in payload["error"]
 
 
@@ -264,7 +265,7 @@ def test_prevalidate_tool_round_rejects_operation_specific_missing_fields(operat
     payload = json.loads(process_single_tool_module.prevalidate_tool_round([call], _config(memory_enabled=True))[call.id])
 
     assert payload["status"] == "failed"
-    assert payload["tool_name"] == MANAGE_LONGTERM_MEMORY_TOOL_NAME
+    assert payload["tool_name"] == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
     assert missing_field in payload["error"]
 
 
@@ -297,7 +298,7 @@ def test_prevalidate_tool_round_rejects_memory_tool_when_memory_is_disabled():
     payload = json.loads(process_single_tool_module.prevalidate_tool_round([call], _config(memory_enabled=False))[call.id])
 
     assert payload["status"] == "failed"
-    assert payload["tool_name"] == MANAGE_LONGTERM_MEMORY_TOOL_NAME
+    assert payload["tool_name"] == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
     assert "missing_arguments" not in payload
 
 
@@ -858,7 +859,7 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
     async def fake_get_tools(_db, _profile, allow_background):
         assert allow_background is False
         return [
-            copy.deepcopy(MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA),
+            copy.deepcopy(MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA),
             copy.deepcopy(SEND_FILE_TO_USER_TOOL_SCHEMA),
         ], []
 
@@ -930,7 +931,7 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
     assert final_message.content == "background reply"
     assert len(requests) == 1
     request_tool_names = {tool["function"]["name"] for tool in requests[0]["tools"]}
-    assert MANAGE_LONGTERM_MEMORY_TOOL_NAME not in request_tool_names
+    assert MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME not in request_tool_names
     assert "send_file_to_user" in request_tool_names
     if submission_context is None:
         assert prepare_flags == [False]

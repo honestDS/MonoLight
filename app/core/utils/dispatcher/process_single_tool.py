@@ -31,7 +31,7 @@ from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.terminal.schemas import ShellInteractiveHandoffResult
 from app.core.tools import (
     KNOWLEDGE_BASE_QUERY_TOOL_NAME,
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     SHELL_COMPANION_TOOL_NAMES,
     TOOL_EXECUTOR_MAP,
     get_tool_parameters_schema,
@@ -58,7 +58,7 @@ from app.models.profile import (
 
 
 def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
-    if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
+    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         return bool(getattr(getattr(cfg, "memory", None), "enabled", False))
     if tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
         return not bool(getattr(getattr(cfg, "memory", None), "enabled", False))
@@ -479,7 +479,7 @@ def prevalidate_tool_round(
             )
         elif parameters_schema is not None and (schema_errors := _validate_schema_value(args, parameters_schema, "arguments")):
             errors[tool_call.id] = _build_schema_validation_result(tool_name, schema_errors)
-        elif tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
+        elif tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
             _, validation_error = validate_longterm_memory_arguments(args)
             if validation_error:
                 errors[tool_call.id] = _build_tool_error_result(tool_name, validation_error)
@@ -516,7 +516,7 @@ async def process_single_tool(
     background_required = tool_runs_in_background(tool_name)
     run_in_background = background_required or background_requested
 
-    if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
+    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         log_args = _serialize_longterm_memory_log_arguments(args)
     elif tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
         log_args = _serialize_knowledge_base_query_log_arguments(args)
@@ -622,7 +622,7 @@ async def process_single_tool(
         1,
         (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2,
     )
-    if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
+    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         tool_msg.content, truncation_stats = truncate_longterm_memory_recall_result_for_budget(
             cmd_result,
             context_window_k=context_window_k,
@@ -649,7 +649,7 @@ async def process_single_tool(
             tool_name=tool_name,
         ).warning(t("LOG_TOOL_RESULT_TRUNCATED", tool_name=tool_name, context_window_k=context_window_k))
 
-    if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
+    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         log_result = _serialize_longterm_memory_log_result(cmd_result)
     elif tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
         log_result = _serialize_knowledge_base_query_log_result(cmd_result)

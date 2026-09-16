@@ -12,8 +12,8 @@ from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
 from app.core.dispatchers.memory.types import build_result
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
-from app.core.tools import MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA
-from app.core.tools.longterm_memory import MANAGE_LONGTERM_MEMORY_TOOL_NAME
+from app.core.tools import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA
+from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
@@ -64,7 +64,7 @@ def _build_cfg(memory=_MISSING, *, max_turns=1):
 def _recall_messages(boundary: int) -> tuple[InternalMessage, InternalMessage]:
     tool_call = InternalToolCall(
         id=f"recall-{boundary}",
-        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
         arguments={"operation": "recall", "query": "current request"},
     )
     return (
@@ -116,7 +116,7 @@ def _install_dispatcher_stubs(
 
     async def get_tools(db, current_profile):
         if expose_memory_tool:
-            return [copy.deepcopy(MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA)], []
+            return [copy.deepcopy(MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA)], []
         return [], []
 
     async def mark_processed(db, message_id):
@@ -477,7 +477,7 @@ async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_sourc
     source_message_ids = []
     mutation_call = InternalToolCall(
         id="mutation-1",
-        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
         arguments={
             "operation": "create",
             "content": "a project fact",
@@ -528,7 +528,7 @@ async def test_formal_non_stream_memory_content_too_long_retries_same_fact_witho
     long_content = f"{factual_content} Keep this stable database compatibility requirement available across future sessions and do not add unrelated implementation explanation."
     first_call = InternalToolCall(
         id="memory-create-too-long",
-        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
         arguments={
             "operation": "create",
             "content": long_content,
@@ -538,7 +538,7 @@ async def test_formal_non_stream_memory_content_too_long_retries_same_fact_witho
     )
     second_call = InternalToolCall(
         id="memory-create-retry",
-        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
         arguments={
             "operation": "create",
             "content": factual_content,
@@ -585,7 +585,7 @@ async def test_formal_non_stream_memory_content_too_long_retries_same_fact_witho
     response = await _dispatch_non_stream(additional_fetcher=lambda: _empty_batch())
 
     assert len(request_log) == 3
-    assert all(item["tools"] == [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA] for item in request_log)
+    assert all(item["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA] for item in request_log)
     second_request_messages = request_log[1]["messages"]
     first_tool_result = next(message for message in second_request_messages if message.tool_call_id == first_call.id)
     assert json.loads(first_tool_result.content) == {
@@ -621,7 +621,7 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
     execution_calls = []
     first_call = InternalToolCall(
         id="memory-create-too-long-1",
-        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
         arguments={
             "operation": "create",
             "content": "SQLite and MySQL compatibility must be maintained.",
@@ -631,7 +631,7 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
     )
     second_call = InternalToolCall(
         id="memory-create-too-long-2",
-        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
         arguments={
             "operation": "create",
             "content": "SQLite and MySQL compatibility must be maintained.",
@@ -671,8 +671,8 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
     response = await _dispatch_non_stream(additional_fetcher=lambda: _empty_batch())
 
     assert len(request_log) == 3
-    assert all(item["tools"] == [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA] for item in request_log[:2])
-    assert request_log[-1]["tools"] == [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA]
+    assert all(item["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA] for item in request_log[:2])
+    assert request_log[-1]["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA]
     assert [item["tool_choice"] for item in request_log] == ["auto", "auto", "none"]
     summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=cfg.tool.max_turns)
     assert any(message.role == MessageRole.USER and summary_notice in (message.content or "") for message in request_log[-1]["messages"])

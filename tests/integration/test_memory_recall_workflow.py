@@ -17,7 +17,7 @@ from app.core.memory.identifiers import build_memory_vector_item_id
 from app.core.memory.normalization import build_memory_content_hash
 from app.core.retrieval.schemas import RetrievalHit
 from app.core.tools import longterm_memory as longterm_memory_module
-from app.core.tools.longterm_memory import MANAGE_LONGTERM_MEMORY_TOOL_NAME
+from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
@@ -256,14 +256,14 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     async def fake_generate(**kwargs):
         nonlocal llm_calls
         llm_calls += 1
-        assert [tool["function"]["name"] for tool in kwargs["tools"]] == [MANAGE_LONGTERM_MEMORY_TOOL_NAME]
+        assert [tool["function"]["name"] for tool in kwargs["tools"]] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME]
         return SimpleNamespace(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 tool_calls=[
                     InternalToolCall(
                         id="recall-call-1",
-                        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+                        name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
                         arguments={
                             "operation": "recall",
                             "query": "VS Code editor preference",

@@ -37,7 +37,7 @@ from app.core.prompts import (
     TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
 )
 from app.core.tools import (
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     get_tools_for_profile,
 )
 from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
@@ -159,7 +159,7 @@ class BackgroundDispatcherMixin:
         allowed_tool_names = None
         if allow_tools:
             profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
-            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") != MANAGE_LONGTERM_MEMORY_TOOL_NAME]
+            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") != MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME]
             if restrict_tools_to_background_allowlist:
                 profile_tools = filter_background_proactive_tools(profile_tools)
                 allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES

@@ -7,8 +7,8 @@ from app.core.dispatchers.memory import persistence as persistence_module
 from app.core.dispatchers.memory import request as request_module
 from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.tools.longterm_memory import (
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
-    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
 )
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
 
@@ -26,7 +26,7 @@ class _FakeDb:
         return None
 
 
-def _call(call_id="call-1", arguments=None, name=MANAGE_LONGTERM_MEMORY_TOOL_NAME):
+def _call(call_id="call-1", arguments=None, name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME):
     return InternalToolCall(
         id=call_id,
         name=name,
@@ -337,7 +337,7 @@ async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summ
         is_main_context=True,
     )
 
-    expected_tools = [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA]
+    expected_tools = [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA]
     assert context.messages is summary_messages
     assert request_messages == summary_messages
     assert checkpoint_calls[0]["tools"] == expected_tools

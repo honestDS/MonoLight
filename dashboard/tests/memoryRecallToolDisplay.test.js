@@ -14,7 +14,7 @@ test('memory recall tool uses a user-facing context recall title in both locales
 
   assert.match(
     utilsSource,
-    /name === 'manage_longterm_memory'[\s\S]*operation === 'recall'[\s\S]*common\.context_recall/
+    /name === 'manage_memory_and_knowledge'[\s\S]*operation === 'recall'[\s\S]*common\.context_recall/
   )
   assert.match(zhSource, /context_recall:\s*'上下文召回'/)
   assert.match(enSource, /context_recall:\s*'Context Recall'/)
