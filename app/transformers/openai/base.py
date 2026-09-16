@@ -173,6 +173,10 @@ class BaseOpenAITransformer(BaseTransformer):
             ) as session:
                 async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
                     text = await resp.text()
+                    logger.bind(model_id=model_id, base_url=base_url, stream=False).debug(
+                        "LLM upstream raw response: {raw_response}",
+                        raw_response=text,
+                    )
                     if resp.status != 200:
                         self._raise_provider_error(
                             text,
@@ -251,6 +255,10 @@ class BaseOpenAITransformer(BaseTransformer):
                             if not raw_line or not raw_line.startswith("data:"):
                                 continue
                             data_content = raw_line[5:].lstrip()
+                            logger.bind(model_id=model_id, base_url=base_url, stream=True).debug(
+                                "LLM upstream raw stream event: {raw_response}",
+                                raw_response=data_content,
+                            )
                             if data_content == "[DONE]":
                                 done = True
                                 break

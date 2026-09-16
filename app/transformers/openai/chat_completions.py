@@ -332,6 +332,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
                     logger.bind(tool_call=tc).warning(t("LOG_OPENAI_TOOL_ARGS_PARSE_FAILED", error=str(e)))
 
         refusal = message.get("refusal") if isinstance(message.get("refusal"), str) else None
+        reasoning_content = message.get("reasoning_content") if isinstance(message.get("reasoning_content"), str) else None
         content = message.get("content")
         if tool_calls and isinstance(content, str) and content.strip() == cls._TOOL_CALL_PLACEHOLDER:
             content = None
@@ -341,6 +342,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         return InternalMessage(
             role=MessageRole.ASSISTANT,
             content=content,
+            reasoning_content=reasoning_content,
             refusal=refusal,
             provider_metadata=cls._message_provider_metadata(first_choice, message),
             tool_calls=tool_calls if tool_calls else None,

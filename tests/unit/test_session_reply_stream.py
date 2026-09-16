@@ -411,8 +411,13 @@ async def test_chat_stream_concatenates_reasoning_content_metadata(monkeypatch):
         for chunk in chunks:
             yield chunk
 
+    emitted_reasoning: list[str] = []
+
     async def on_content(_content: str) -> None:
         return None
+
+    async def on_reasoning(content: str) -> None:
+        emitted_reasoning.append(content)
 
     monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
 
@@ -422,11 +427,12 @@ async def test_chat_stream_concatenates_reasoning_content_metadata(monkeypatch):
         model_id="model",
         messages=[InternalMessage(role=MessageRole.USER, content="test")],
         on_content=on_content,
+        on_reasoning=on_reasoning,
         protocol="openai",
     )
 
-    assert response.message.provider_metadata["message"]["reasoning_content"] == "First reasoning. Second reasoning."
-    assert response.provider_metadata["message"]["reasoning_content"] == "First reasoning. Second reasoning."
+    assert emitted_reasoning == ["First reasoning. ", "Second reasoning."]
+    assert response.message.reasoning_content == "First reasoning. Second reasoning."
 
 
 @pytest.mark.asyncio

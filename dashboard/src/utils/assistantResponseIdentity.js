@@ -63,15 +63,21 @@ const isWeakResponseIdentity = (responseId, workId) => (
   !hasIdentity(responseId) || isSyntheticWorkResponseId(responseId, workId)
 )
 
-const mergeRemoteMessage = (localMessage, remoteMessage) => ({
-  ...localMessage,
-  ...remoteMessage,
-  id: localMessage?.id ?? remoteMessage?.id,
-  response_id: localMessage?.response_id ?? remoteMessage?.response_id,
-  request_id: localMessage?.request_id ?? remoteMessage?.request_id,
-  work_id: localMessage?.work_id ?? remoteMessage?.work_id,
-  turn: localMessage?.turn ?? remoteMessage?.turn
-})
+const mergeRemoteMessage = (localMessage, remoteMessage) => {
+  const remoteReasoning = typeof remoteMessage?.reasoning_content === 'string' && remoteMessage.reasoning_content.trim()
+    ? remoteMessage.reasoning_content
+    : null
+  return {
+    ...localMessage,
+    ...remoteMessage,
+    id: localMessage?.id ?? remoteMessage?.id,
+    response_id: localMessage?.response_id ?? remoteMessage?.response_id,
+    request_id: localMessage?.request_id ?? remoteMessage?.request_id,
+    work_id: localMessage?.work_id ?? remoteMessage?.work_id,
+    turn: localMessage?.turn ?? remoteMessage?.turn,
+    reasoning_content: remoteReasoning ?? localMessage?.reasoning_content ?? remoteMessage?.reasoning_content
+  }
+}
 
 export const getMessageDbId = (message) => {
   const dbId = [

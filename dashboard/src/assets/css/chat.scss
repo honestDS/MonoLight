@@ -345,57 +345,6 @@
         }
       }
 
-      &.thinking {
-        align-items: flex-start;
-        margin-right: auto;
-
-        .message-attachments {
-          align-self: flex-start;
-          justify-content: flex-start;
-        }
-
-        .content {
-          display: inline-flex;
-          align-items: center;
-          gap: 7px;
-          overflow: hidden;
-          color: #747b85;
-          font-style: normal;
-          font-weight: 400;
-          letter-spacing: 0;
-          background: #f4f4f5;
-
-          &::before {
-            content: '';
-            width: 2.4px;
-            height: 2.4px;
-            flex: 0 0 2.4px;
-            margin: 6.8px;
-            background: transparent;
-            border-radius: 50%;
-            transform-origin: center;
-            box-shadow:
-              /* Row 1: 2 dots */
-              -1.7px -5.1px 0 rgba(125, 135, 146, 0.5),
-               1.7px -5.1px 0 rgba(125, 135, 146, 0.5),
-              /* Row 2: 4 dots */
-              -5.1px -1.7px 0 rgba(125, 135, 146, 0.35),
-              -1.7px -1.7px 0 rgba(125, 135, 146, 0.9),
-               1.7px -1.7px 0 rgba(125, 135, 146, 0.9),
-               5.1px -1.7px 0 rgba(125, 135, 146, 0.35),
-              /* Row 3: 4 dots */
-              -5.1px 1.7px 0 rgba(125, 135, 146, 0.35),
-              -1.7px 1.7px 0 rgba(125, 135, 146, 0.9),
-               1.7px 1.7px 0 rgba(125, 135, 146, 0.9),
-               5.1px 1.7px 0 rgba(125, 135, 146, 0.35),
-              /* Row 4: 2 dots */
-              -1.7px 5.1px 0 rgba(125, 135, 146, 0.5),
-               1.7px 5.1px 0 rgba(125, 135, 146, 0.5);
-            animation: thinking-indicator-breathe 2.4s ease-in-out infinite;
-          }
-        }
-      }
-
       &.background-system {
         align-items: center;
         max-width: 72%;
@@ -569,47 +518,6 @@
   .new-message-indicator-leave-to {
     opacity: 0;
     transform: translateY(6px) scale(0.9);
-  }
-
-  .history-loading-indicator {
-    position: absolute;
-    top: 12px;
-    left: 50%;
-    z-index: 12;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 12px;
-    color: #606266;
-    font-size: 12px;
-    line-height: 18px;
-    white-space: nowrap;
-    pointer-events: none;
-    background: rgba(255, 255, 255, 0.96);
-    border: 1px solid #dcdfe6;
-    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.1);
-    transform: translateX(-50%);
-  }
-
-  .history-loading-spinner {
-    width: 12px;
-    height: 12px;
-    flex: 0 0 auto;
-    border: 2px solid #c6e2ff;
-    border-top-color: #409eff;
-    border-radius: 50%;
-    animation: history-loading-spin 0.8s linear infinite;
-  }
-
-  .history-loading-enter-active,
-  .history-loading-leave-active {
-    transition: opacity 0.15s ease, transform 0.15s ease;
-  }
-
-  .history-loading-enter-from,
-  .history-loading-leave-to {
-    opacity: 0;
-    transform: translate(-50%, -4px);
   }
 
   .input-area {
@@ -843,30 +751,6 @@
   100% {
     opacity: 1;
     transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes history-loading-spin {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes thinking-indicator-breathe {
-  0%, 100% {
-    opacity: 0.55;
-    transform: scale(0.9);
-  }
-
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chat-main .message-list .message-item.thinking .content::before {
-    animation: none;
-    opacity: 1;
-    transform: scale(1);
   }
 }
 

@@ -83,7 +83,7 @@ export const startRequestLifecycle = (messages, event) => {
     {
       id: getUniqueThinkingId(messages, requestId),
       role: 'thinking',
-      content: 'Thinking...',
+      content: '',
       request_id: requestId,
       request_ids: [requestId]
     }
@@ -188,7 +188,7 @@ export const startAgentLoop = (messages, event) => {
     ...existingMarkerFields,
     id: existingMarker?.id || `thinking_${workId}_${responseId}`,
     role: 'thinking',
-    content: 'Thinking...',
+    content: '',
     work_id: event.work_id,
     response_id: event.response_id,
     ...(event.turn !== undefined ? { turn: event.turn } : {}),
@@ -203,7 +203,8 @@ export const stopAgentLoop = (messages, event) => {
   if (!workId || !responseId) return messages
 
   return messages.filter(message => !(
-    isThinkingForWork(message, workId) && sameIdentity(message.response_id, responseId)
+    isThinkingForWork(message, workId)
+    && sameIdentity(message.response_id, responseId)
   ))
 }
 

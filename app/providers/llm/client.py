@@ -453,11 +453,13 @@ class LLMClient:
         request_context_tokens: int | None = None,
         http_proxy: str | None = None,
         custom_headers: dict[str, str] | None = None,
+        on_reasoning: Callable[[str], Awaitable[None]] | None = None,
         **kwargs,
     ) -> InternalResponse:
         content_chunks: list[str] = []
         deferred_content_chunks: list[str] = []
         refusal_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
         normalized_protocol = protocol.lower()
         content_callbacks_released = normalized_protocol != "openai"
         tool_call_assembler = _StreamToolCallAssembler(normalized_protocol)
@@ -521,6 +523,11 @@ class LLMClient:
                 continue
             content = delta.get("content")
             refusal = delta.get("refusal")
+            reasoning_content = delta.get("reasoning_content")
+            if isinstance(reasoning_content, str) and reasoning_content:
+                reasoning_chunks.append(reasoning_content)
+                if on_reasoning is not None:
+                    await on_reasoning(reasoning_content)
             if isinstance(content, str) and content:
                 content_chunks.append(content)
                 if normalized_protocol == "openai" and not content_callbacks_released:
@@ -555,6 +562,7 @@ class LLMClient:
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 content=content or refusal,
+                reasoning_content="".join(reasoning_chunks) or None,
                 refusal=refusal,
                 provider_metadata=message_provider_metadata,
                 tool_calls=cls.normalize_tool_calls(tool_calls),

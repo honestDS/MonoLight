@@ -15,6 +15,7 @@ from app.core.exceptions import ForbiddenException
 from app.core.i18n import t
 from app.core.utils import session as session_utils
 from app.models.message import ChatCompletionRequest, Message, MessageRole, MessageType
+from app.models.session import ChatSession
 
 
 class FakeDb:
@@ -31,6 +32,43 @@ class FakeDb:
 
     async def rollback(self) -> None:
         self.rollback_count += 1
+
+
+def test_chat_session_show_reasoning_defaults_to_enabled():
+    session = ChatSession(session_id="session-reasoning", uid="user-1")
+    assert session.show_reasoning is True
+    assert ChatCompletionRequest(message="hello").show_reasoning is None
+
+
+@pytest.mark.asyncio
+async def test_update_web_session_setting_changes_reasoning_visibility(monkeypatch):
+    db = FakeDb()
+    session = SimpleNamespace(
+        uid="user-1",
+        source="ws",
+        enable_markdown=True,
+        show_reasoning=True,
+    )
+
+    async def get_by_session_id(db_arg, session_id: str):
+        assert db_arg is db
+        assert session_id == "session-1"
+        return session
+
+    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
+
+    response = await chat_api.update_session_setting(
+        chat_api.SessionSettingRequest(
+            session_id="session-1",
+            show_reasoning=False,
+        ),
+        db=db,
+        current_user=SimpleNamespace(uid="user-1", is_superuser=False),
+    )
+
+    assert session.show_reasoning is False
+    assert db.commit_count == 1
+    assert response.code == 200
 
 
 @pytest.mark.asyncio
@@ -484,6 +522,7 @@ async def test_create_new_web_session_with_profile_override_persists_valid_overr
     assert session.source == "http"
     assert session.reply_target_source == "http"
     assert session.show_tool_calls is True
+    assert session.show_reasoning is True
     assert session.profile_override_id == 17
     assert session.profile_id is None
     assert db.commit_count == 1
@@ -548,25 +587,26 @@ async def test_chat_completions_creates_new_session_with_profile_override(monkey
     db = FakeDb()
     helper_calls = []
 
-    async def create_new_session(db_arg, *, session_id, uid, source, profile_override_id, show_tool_calls):
+    async def create_new_session(db_arg, *, session_id, uid, source, profile_override_id, show_tool_calls, show_reasoning):
         assert db_arg is db
-        helper_calls.append((session_id, uid, source, profile_override_id, show_tool_calls))
+        helper_calls.append((session_id, uid, source, profile_override_id, show_tool_calls, show_reasoning))
 
     monkeypatch.setattr(chat_api, "_create_new_web_session_with_profile_override", create_new_session)
 
     response = await chat_api.chat_completions(
-        ChatCompletionRequest(message="hello", profile_override_id=17),
+        ChatCompletionRequest(message="hello", profile_override_id=17, show_reasoning=False),
         db=db,
         current_user=SimpleNamespace(uid="user-1"),
     )
 
     assert len(helper_calls) == 1
-    session_id, uid, source, profile_override_id, show_tool_calls = helper_calls[0]
+    session_id, uid, source, profile_override_id, show_tool_calls, show_reasoning = helper_calls[0]
     assert session_id
     assert uid == "user-1"
     assert source == "http"
     assert profile_override_id == 17
     assert show_tool_calls is None
+    assert show_reasoning is False
     assert response["choices"][0]["finish_reason"] == "new_session"
 
 

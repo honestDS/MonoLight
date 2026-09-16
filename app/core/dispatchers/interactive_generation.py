@@ -47,6 +47,7 @@ from .interactive_helpers import (
     _AgentLoopStreamState,
     _emit_agent_loop_output,
     _handle_stream_content,
+    _handle_stream_reasoning,
     build_pending_multimodal_input_message,
     collect_pending_multimodal_file_inputs,
 )
@@ -225,6 +226,7 @@ async def generate_interactive_turn(
                 response = await LLMClient.generate_with_stream_callback(
                     **generation_kwargs,
                     on_content=partial(_handle_stream_content, stream_state),
+                    on_reasoning=partial(_handle_stream_reasoning, stream_state),
                 )
             ai_msg = response.message
             response_finish_reason = getattr(response, "finish_reason", None)

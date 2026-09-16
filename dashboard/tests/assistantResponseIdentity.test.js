@@ -33,6 +33,21 @@ test('done response merges into the live message by work identity and adds db id
   assert.equal(merged[0].content, 'final body')
 })
 
+
+test('terminal or history merge preserves archived reasoning when the incoming copy has no reasoning', () => {
+  const local = liveResponse({ reasoning_content: 'persist this reasoning' })
+  const incoming = liveResponse({
+    id: 'assistant-history',
+    db_id: 9,
+    reasoning_content: null
+  })
+
+  const merged = mergeAssistantResponseIntoList([local], incoming)
+
+  assert.equal(merged.length, 1)
+  assert.equal(merged[0].reasoning_content, 'persist this reasoning')
+})
+
 test('repeated done responses remain idempotent', () => {
   const doneResponse = liveResponse({
     id: 'assistant-done',

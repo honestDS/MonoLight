@@ -71,6 +71,7 @@ class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
     content: str | list[TextPart | ImagePart | FilePart | MessagePart] | None = None
+    reasoning_content: str | None = None
     refusal: str | None = None
     provider_metadata: dict[str, Any] | None = None
     environment_prompt: str | None = None
@@ -117,6 +118,7 @@ class Message(MessageBase, table=True):
         ),
     )
     id: int | None = Field(default=None, primary_key=True, index=True)
+    reasoning_content: str | None = Field(default=None, sa_column=Column(Text))
     profile_id: int = Field()
     environment_prompt: str | None = Field(default=None, sa_column=Column(Text))
     guidance_prompt: str | None = Field(default=None, sa_column=Column(Text))
@@ -137,6 +139,7 @@ class MessageCreate(MessageBase):
 
 class MessageResponse(MessageBase):
     id: int
+    reasoning_content: str | None = None
     profile_id: int
     created_at: Any
     content: str | list[Any] | dict[str, Any] | None = None
@@ -172,3 +175,4 @@ class ChatCompletionRequest(BaseModel):
     stream: bool | None = False
     profile_override_id: int | None = PyField(default=None, gt=0)
     show_tool_calls: bool | None = None
+    show_reasoning: bool | None = None
