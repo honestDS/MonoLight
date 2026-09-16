@@ -21,7 +21,8 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.markdown_instruction import (
-    materialize_latest_user_environment_prompt,
+    materialize_user_environment_prompts,
+    refresh_latest_user_max_output_tokens_instruction,
 )
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
@@ -77,8 +78,15 @@ async def fallback_channel(
     )
     if not selection:
         return False
+    previous_max_tokens = context.chat_params.get("max_tokens")
     context.chat_channel_obj, context.model_entry, context.channel_rule = selection
     context.chat_params = resolve_chat_params(context.model_entry, context.chat_channel)
+    if previous_max_tokens is not None and context.chat_params["max_tokens"] != previous_max_tokens:
+        await refresh_latest_user_max_output_tokens_instruction(
+            context.db,
+            context.messages,
+            context.chat_params["max_tokens"],
+        )
     reassemble_multimodal_messages(
         context.messages,
         *get_multimodal_from_entry(context.model_entry),
@@ -115,12 +123,7 @@ async def prepare_request_messages(
         if is_main_context:
             context.messages = messages
 
-    request_messages = await materialize_latest_user_environment_prompt(
-        context.db,
-        context.session_id,
-        messages,
-        context.chat_params["max_tokens"],
-    )
+    request_messages = materialize_user_environment_prompts(messages)
     request_messages = ContextManager.trim_messages_for_model_request(
         messages=request_messages,
         uid=context.uid,

@@ -55,7 +55,7 @@ from app.core.utils.dispatcher.helpers import (
     validate_background_proactive_tool_calls,
 )
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
-from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_environment_prompt
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
@@ -113,12 +113,7 @@ class BackgroundDispatcherMixin:
         session_id: str,
     ) -> list[InternalMessage]:
         return ContextManager.trim_messages_for_model_request(
-            messages=await materialize_latest_user_environment_prompt(
-                db,
-                session_id,
-                messages,
-                retry_chat_params["max_tokens"],
-            ),
+            messages=materialize_user_environment_prompts(messages),
             uid=uid,
             session_id=session_id,
             context_window_k=retry_chat_params["context_window_k"],
@@ -224,12 +219,7 @@ class BackgroundDispatcherMixin:
                         message.guidance_prompt = cleaned_guidance_prompt
                         break
             return ContextManager.trim_messages_for_model_request(
-                messages=await materialize_latest_user_environment_prompt(
-                    db,
-                    session_id,
-                    messages,
-                    chat_params["max_tokens"],
-                ),
+                messages=materialize_user_environment_prompts(messages),
                 uid=uid,
                 session_id=session_id,
                 context_window_k=chat_params["context_window_k"],
@@ -317,12 +307,7 @@ class BackgroundDispatcherMixin:
 
                 async def build_correction_request(retry_chat_params):
                     return ContextManager.trim_messages_for_model_request(
-                        messages=await materialize_latest_user_environment_prompt(
-                            db,
-                            session_id,
-                            correction_context_messages,
-                            retry_chat_params["max_tokens"],
-                        ),
+                        messages=materialize_user_environment_prompts(correction_context_messages),
                         uid=uid,
                         session_id=session_id,
                         context_window_k=retry_chat_params["context_window_k"],
@@ -360,12 +345,7 @@ class BackgroundDispatcherMixin:
 
                     async def build_text_only_request(retry_chat_params):
                         return ContextManager.trim_messages_for_model_request(
-                            messages=await materialize_latest_user_environment_prompt(
-                                db,
-                                session_id,
-                                text_only_context_messages,
-                                retry_chat_params["max_tokens"],
-                            ),
+                            messages=materialize_user_environment_prompts(text_only_context_messages),
                             uid=uid,
                             session_id=session_id,
                             context_window_k=retry_chat_params["context_window_k"],
@@ -635,12 +615,7 @@ class BackgroundDispatcherMixin:
                     tools=None,
                 )
             return ContextManager.trim_messages_for_model_request(
-                messages=await materialize_latest_user_environment_prompt(
-                    db,
-                    session_id,
-                    messages,
-                    final_chat_params["max_tokens"],
-                ),
+                messages=materialize_user_environment_prompts(messages),
                 uid=uid,
                 session_id=session_id,
                 context_window_k=final_chat_params["context_window_k"],

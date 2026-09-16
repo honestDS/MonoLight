@@ -128,7 +128,7 @@ def _install_dispatcher_stubs(
     async def apply_checkpoint(db, **kwargs):
         return kwargs["messages"]
 
-    async def materialize_environment_prompt(db, session_id, messages, max_tokens):
+    def materialize_environment_prompt(messages):
         return messages
 
     async def save_assistant(db, session_id, uid, profile_id, message, **kwargs):
@@ -205,7 +205,7 @@ def _install_dispatcher_stubs(
     )
     monkeypatch.setattr(interactive_runtime_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_checkpoint)
-    monkeypatch.setattr(interactive_generation_module, "materialize_latest_user_environment_prompt", materialize_environment_prompt)
+    monkeypatch.setattr(interactive_generation_module, "materialize_user_environment_prompts", materialize_environment_prompt)
     monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
     monkeypatch.setattr(interactive_runtime_module, "run_memory_recall_precheck", precheck)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
@@ -215,6 +215,13 @@ def _install_dispatcher_stubs(
     monkeypatch.setattr(interactive_tools_module, "audit_tool_round", _audit_tool_round_none)
     monkeypatch.setattr(interactive_tools_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
     monkeypatch.setattr(interactive_helpers_module, "process_single_tool_with_isolated_db", isolated_tool)
+
+    async def ensure_runtime_snapshot(_db, _session_id, message, _max_tokens):
+        if not message.environment_prompt:
+            message.environment_prompt = "runtime snapshot"
+        return message
+
+    monkeypatch.setattr(interactive_helpers_module, "ensure_user_runtime_instructions", ensure_runtime_snapshot)
 
 
 async def _dispatch_non_stream(*, checkpoint_callback=None, additional_fetcher=None, resume_state=None):

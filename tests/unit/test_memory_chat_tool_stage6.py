@@ -870,7 +870,7 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
         build_flags.append(kwargs["include_longterm_memory"])
         return "base system prompt"
 
-    async def fake_materialize(_db, _session_id, messages, _max_tokens):
+    def fake_materialize(messages):
         return messages
 
     async def fake_generate(_db, **kwargs):
@@ -908,7 +908,7 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
     monkeypatch.setattr(background_module, "get_tools_for_profile", fake_get_tools)
     monkeypatch.setattr(background_module, "prepare_messages", fake_prepare)
     monkeypatch.setattr(background_module, "build_system_prompt", fake_build_prompt)
-    monkeypatch.setattr(background_module, "materialize_latest_user_environment_prompt", fake_materialize)
+    monkeypatch.setattr(background_module, "materialize_user_environment_prompts", fake_materialize)
     monkeypatch.setattr(
         background_module.ContextManager,
         "trim_messages_for_model_request",

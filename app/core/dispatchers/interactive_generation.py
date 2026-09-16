@@ -24,7 +24,7 @@ from app.core.utils.dispatcher.helpers import (
     reassemble_multimodal_messages,
     resolve_chat_params,
 )
-from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_environment_prompt
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
@@ -110,12 +110,7 @@ async def generate_interactive_turn(
             pending_file_inputs = collect_pending_multimodal_file_inputs(state.messages)
             if pending_file_inputs and not state.img_understanding:
                 raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
-            request_messages = await materialize_latest_user_environment_prompt(
-                state.db,
-                state.session_id,
-                state.messages,
-                state.chat_params["max_tokens"],
-            )
+            request_messages = materialize_user_environment_prompts(state.messages)
             pending_multimodal_message = build_pending_multimodal_input_message(
                 pending_file_inputs,
                 image_understanding=state.img_understanding,
@@ -313,9 +308,16 @@ async def generate_interactive_turn(
             )
             if not selection:
                 raise
+            previous_max_tokens = state.chat_params["max_tokens"]
             state.chat_channel_obj, state.model_entry, state.channel_rule = selection
             state.img_understanding, state.audio_understanding, state.video_understanding = get_multimodal_from_entry(state.model_entry)
             state.chat_params = resolve_chat_params(state.model_entry, state.chat_channel)
+            if state.chat_params["max_tokens"] != previous_max_tokens:
+                await refresh_latest_user_max_output_tokens_instruction(
+                    state.db,
+                    state.messages,
+                    state.chat_params["max_tokens"],
+                )
             reassemble_multimodal_messages(
                 state.messages,
                 state.img_understanding,
