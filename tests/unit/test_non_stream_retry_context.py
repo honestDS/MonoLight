@@ -1046,14 +1046,14 @@ async def _run_audited_interactive_dispatch(
     async def prepare_messages(*args, **kwargs):
         return [InternalMessage(role=MessageRole.USER, content="request")]
 
-    async def materialize_environment_prompt(db, session_id, messages, max_tokens):
+    def materialize_environment_prompt(messages):
         if multimodal_capabilities is not None:
             return [message.model_copy(deep=True) for message in messages]
         return messages
 
     monkeypatch.setattr(interactive_runtime_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", _passthrough_context_summary_checkpoint)
-    monkeypatch.setattr(interactive_generation_module, "materialize_latest_user_environment_prompt", materialize_environment_prompt)
+    monkeypatch.setattr(interactive_generation_module, "materialize_user_environment_prompts", materialize_environment_prompt)
     monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
@@ -1089,6 +1089,13 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(interactive_helpers_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(interactive_tools_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
     monkeypatch.setattr(interactive_helpers_module, "process_single_tool_with_isolated_db", process_tool)
+
+    async def ensure_runtime_snapshot(_db, _session_id, message, _max_tokens):
+        if not message.environment_prompt:
+            message.environment_prompt = "runtime snapshot"
+        return message
+
+    monkeypatch.setattr(interactive_helpers_module, "ensure_user_runtime_instructions", ensure_runtime_snapshot)
 
     async def get_session_by_id(*args, **kwargs):
         return None

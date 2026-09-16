@@ -3,7 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED
 from app.core.crud.session.message import message_crud
 from app.core.i18n import t
-from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, MessageRole
 
@@ -57,7 +56,6 @@ async def fetch_and_merge_new_user_messages(
         content="\n".join(merged_content) if merged_content else None,
         attachments=list(dict.fromkeys(merged_attachments)) if merged_attachments else None,
     )
-    await append_user_runtime_instructions(db, session_id, combined_message, max_tokens)
     return UserInputBatch(
         messages=(combined_message,),
         source_message_ids=tuple(source_message_ids),

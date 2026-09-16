@@ -18,10 +18,7 @@ from app.core.tools.read_multimodal_file import parse_multimodal_file_read_resul
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.helpers import process_single_tool_with_isolated_db
-from app.core.utils.dispatcher.markdown_instruction import (
-    append_environment_prompt_instruction,
-    build_max_output_tokens_instruction,
-)
+from app.core.utils.dispatcher.markdown_instruction import ensure_user_runtime_instructions
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, MessageRole
@@ -139,9 +136,8 @@ async def _fetch_additional_user_messages(
     new_user_batch = _normalize_additional_user_messages(new_user_batch)
     if new_user_batch is None:
         return None
-    max_tokens_instruction = build_max_output_tokens_instruction(max_tokens)
     for new_message in new_user_batch.messages:
-        append_environment_prompt_instruction(new_message, max_tokens_instruction)
+        await ensure_user_runtime_instructions(context.db, context.session_id, new_message, max_tokens)
     return new_user_batch
 
 

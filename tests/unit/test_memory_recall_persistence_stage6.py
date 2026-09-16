@@ -326,7 +326,7 @@ async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summ
         checkpoint_calls.append(kwargs)
         return summary_messages
 
-    async def materialize(_db, _session_id, messages, _max_tokens):
+    def materialize(messages):
         return list(messages)
 
     def trim(**kwargs):
@@ -344,7 +344,7 @@ async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summ
         return {"token_fingerprint": "no-content"}
 
     monkeypatch.setattr(request_module, "apply_context_summary_checkpoint", apply_checkpoint)
-    monkeypatch.setattr(request_module, "materialize_latest_user_environment_prompt", materialize)
+    monkeypatch.setattr(request_module, "materialize_user_environment_prompts", materialize)
     monkeypatch.setattr(request_module.ContextManager, "trim_messages_for_model_request", trim)
     monkeypatch.setattr(request_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(request_module, "estimate_request_context_tokens", estimate)
