@@ -865,6 +865,31 @@ async def test_notifier_enqueues_sanitized_stream_tool_summary_for_external_sess
 
 
 @pytest.mark.asyncio
+async def test_notifier_ignores_stream_reasoning_events(monkeypatch):
+    class UnexpectedSessionContext:
+        async def __aenter__(self):
+            raise AssertionError("reasoning events must not enter message-platform delivery")
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", UnexpectedSessionContext)
+
+    await notifier_module.send_session_stream_event(
+        "uid-1",
+        "weixin-openclaw:user-1",
+        {
+            "type": "reasoning",
+            "session_id": "weixin-openclaw:user-1",
+            "work_id": 17,
+            "event_sequence_no": 8,
+            "response_id": "response-1",
+            "content": "private reasoning",
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_notifier_does_not_enqueue_stream_tool_summary_when_tool_calls_are_hidden(monkeypatch):
     enqueue_calls = []
 
@@ -1104,6 +1129,32 @@ def test_combine_tool_output_uses_structured_final_reply_text(content, expected)
     assert "history" not in combined
     assert combined["event_id"] == "event-1"
     assert combined["files"] == [{"id": "file-1"}]
+
+
+def test_combine_tool_output_does_not_expose_reasoning_content():
+    combined = combine_proactive_reply_tool_output(
+        {
+            "event_id": "event-1",
+            "type": "proactive_reply",
+            "content": "final reply",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "tool round body",
+                    "reasoning_content": "private tool reasoning",
+                    "tool_calls": [
+                        {"id": "call-1", "name": "search", "arguments": {"query": "MonoLight"}},
+                    ],
+                }
+            ],
+        },
+        language="en",
+    )
+
+    assert "private tool reasoning" not in combined["content"]
+    assert "tool round body" in combined["content"]
+    assert "final reply" in combined["content"]
+    assert "history" not in combined
 
 
 def test_combine_tool_output_lists_multiple_tools_without_round_content():

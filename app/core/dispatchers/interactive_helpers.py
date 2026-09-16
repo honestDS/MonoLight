@@ -229,6 +229,7 @@ class _AgentLoopStreamState:
     emitted_agent_loop_output: bool = False
     emitted_stream_content: bool = False
     buffered_content_chunks: list[str] = field(default_factory=list)
+    buffered_reasoning_chunks: list[str] = field(default_factory=list)
 
 
 async def _emit_agent_loop_output(state: _AgentLoopStreamState) -> None:
@@ -244,8 +245,8 @@ async def _emit_agent_loop_output(state: _AgentLoopStreamState) -> None:
     state.emitted_agent_loop_output = True
 
 
-async def _handle_stream_reasoning(state: _AgentLoopStreamState, content: str) -> None:
-    if state.callback is None or not content:
+async def _publish_stream_reasoning(state: _AgentLoopStreamState, content: str) -> None:
+    if state.callback is None:
         return
     await state.callback(
         {
@@ -255,6 +256,22 @@ async def _handle_stream_reasoning(state: _AgentLoopStreamState, content: str) -
             "response_id": state.response_id,
         }
     )
+
+
+async def _handle_stream_reasoning(state: _AgentLoopStreamState, content: str) -> None:
+    if state.callback is None or not content:
+        return
+    if not state.show_tool_calls:
+        state.buffered_reasoning_chunks.append(content)
+        return
+    await _publish_stream_reasoning(state, content)
+
+
+async def _flush_buffered_stream_reasoning(state: _AgentLoopStreamState) -> None:
+    buffered_chunks = list(state.buffered_reasoning_chunks)
+    state.buffered_reasoning_chunks.clear()
+    for content in buffered_chunks:
+        await _publish_stream_reasoning(state, content)
 
 
 async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> None:

@@ -46,6 +46,7 @@ from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 from .interactive_helpers import (
     _AgentLoopStreamState,
     _emit_agent_loop_output,
+    _flush_buffered_stream_reasoning,
     _handle_stream_content,
     _handle_stream_reasoning,
     build_pending_multimodal_input_message,
@@ -89,6 +90,7 @@ async def generate_interactive_turn(
     while True:
         stream_state.emitted_stream_content = False
         stream_state.buffered_content_chunks.clear()
+        stream_state.buffered_reasoning_chunks.clear()
         try:
             if state.checkpoint_state.upper_message_id is not None:
                 state.messages = await apply_context_summary_checkpoint(
@@ -258,6 +260,11 @@ async def generate_interactive_turn(
             if not ai_msg.tool_calls and not has_content and not has_refusal and response_finish_reason not in legal_empty_finish_reasons:
                 raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
             hidden_tool_round = bool(ai_msg.tool_calls) and not state.show_tool_calls
+            if not state.show_tool_calls:
+                if hidden_tool_round:
+                    stream_state.buffered_reasoning_chunks.clear()
+                else:
+                    await _flush_buffered_stream_reasoning(stream_state)
             if not hidden_tool_round:
                 await _emit_agent_loop_output(stream_state)
             if state.stream_event_callback is not None and state.show_tool_calls and not hidden_tool_round and state.expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content.strip():

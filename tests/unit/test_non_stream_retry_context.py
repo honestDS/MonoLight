@@ -822,6 +822,7 @@ async def _run_audited_interactive_dispatch(
     claim_execution_success=True,
     stream_event_callback=None,
     stream_dispatch=False,
+    show_tool_calls=True,
     additional_user_messages_fetcher=None,
     persist_pending_confirmation_bundle_handler=None,
     persist_cancelled_pending_audit_results_handler=None,
@@ -905,7 +906,11 @@ async def _run_audited_interactive_dispatch(
         return SimpleNamespace(message=response_message, usage=next(response_usage_iterator, None))
 
     async def generate_with_stream_callback(**kwargs):
-        return await generate(**kwargs)
+        response = await generate(**kwargs)
+        reasoning_content = response.message.reasoning_content
+        if isinstance(reasoning_content, str) and reasoning_content:
+            await kwargs["on_reasoning"](reasoning_content)
+        return response
 
     async def save_assistant(*args, **kwargs):
         nonlocal saved_message_id
@@ -1118,6 +1123,7 @@ async def _run_audited_interactive_dispatch(
                 persisted_profile_id=1,
                 execution_checkpoint_callback=checkpoint_callback,
                 additional_user_messages_fetcher=additional_user_messages_fetcher,
+                show_tool_calls=show_tool_calls,
             )
         ]
     else:
@@ -1133,6 +1139,7 @@ async def _run_audited_interactive_dispatch(
             stream_event_callback=stream_event_callback,
             additional_user_messages_fetcher=additional_user_messages_fetcher,
             execution_resume_state=execution_resume_state,
+            show_tool_calls=show_tool_calls,
         )
     return response, unknown_calls
 
@@ -1184,6 +1191,59 @@ async def test_interactive_omits_whitespace_only_tool_turn_content_events(monkey
     assert "content" not in tool_round_turn_end_events[0]
     assert [event["content"] for event in emitted_events if event["type"] == "content"] == ["finished"]
     assert response["choices"][0]["message"]["content"] == "finished"
+
+
+@pytest.mark.asyncio
+async def test_hidden_tool_round_suppresses_reasoning_but_keeps_final_round_reasoning(monkeypatch):
+    emitted_events = []
+    tool_call = InternalToolCall(
+        id="call-hidden-reasoning",
+        name="execute_shell",
+        arguments={"command": "echo 1"},
+    )
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(current_tool_call, *args, **kwargs):
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=current_tool_call.id,
+            content='{"status":"success"}',
+        )
+
+    async def publish_event(event):
+        emitted_events.append(event)
+
+    response, _unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        stream_event_callback=publish_event,
+        show_tool_calls=False,
+        tool_call=tool_call,
+        response_messages=[
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                reasoning_content="tool round reasoning",
+                tool_calls=[tool_call],
+            ),
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content="finished",
+                reasoning_content="final round reasoning",
+            ),
+        ],
+    )
+
+    reasoning_events = [event for event in emitted_events if event["type"] == "reasoning"]
+    assert [event["content"] for event in reasoning_events] == ["final round reasoning"]
+    assert all(event["type"] not in {"tool_start", "tool_end"} for event in emitted_events)
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert response["choices"][0]["message"]["reasoning_content"] == "final round reasoning"
+    assert all(item.get("role") != MessageRole.TOOL for item in response["history"])
+    assert all(not item.get("tool_calls") for item in response["history"])
 
 
 @pytest.mark.asyncio
