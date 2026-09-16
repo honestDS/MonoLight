@@ -278,14 +278,17 @@ async def dispatch_interactive(
                     if state.current_turn == max_turns:
                         summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                         state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
-                        current_tools = None
+                        current_tools = state.tools
+                        current_tool_choice = "none"
                     else:
                         current_tools = state.tools
+                        current_tool_choice = "auto"
 
                     response_id = str(uuid.uuid4())
                     generation_result = await generate_interactive_turn(
                         state,
                         current_tools=current_tools,
+                        tool_choice=current_tool_choice,
                         response_id=response_id,
                     )
                     ai_msg = generation_result.message
