@@ -32,6 +32,7 @@ from app.models.session import ChatSession
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.time import get_database_timestamp
+from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +47,7 @@ async def isolated_terminal_database():
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.create(sync_connection, checkfirst=True))
 
     async with AsyncSessionLocal() as db:
+        await migrate_chat_session_show_reasoning(db)
         await db.execute(delete(ChatSession).where(ChatSession.session_id == "chat-session-1"))
         db.add(ChatSession(session_id="chat-session-1", uid="user-1"))
         await db.commit()
