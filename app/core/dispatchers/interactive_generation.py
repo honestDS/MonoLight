@@ -72,6 +72,7 @@ async def generate_interactive_turn(
     state: InteractiveDispatchState,
     *,
     current_tools,
+    tool_choice: str = "auto",
     response_id: str,
 ) -> InteractiveGenerationResult:
     excluded_priorities: set[int] = set()
@@ -139,6 +140,7 @@ async def generate_interactive_turn(
                 "reasoning_effort": state.chat_params.get("reasoning_effort"),
                 "max_tokens": state.chat_params["max_tokens"],
                 "tools": current_tools,
+                "tool_choice": tool_choice,
                 "protocol": protocol,
                 "timeout": state.chat_params["chat_timeout"],
                 "http_proxy": get_channel_http_proxy(state.chat_channel_obj),

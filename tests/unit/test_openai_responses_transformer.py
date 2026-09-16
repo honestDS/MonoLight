@@ -406,6 +406,73 @@ async def test_responses_generate_stream_creates_connector_with_ssl_disabled(mon
     assert session_calls[0]["connector"] is connector
 
 
+@pytest.mark.asyncio
+async def test_chat_completions_keeps_tools_when_tool_choice_none(monkeypatch) -> None:
+    response = _FakeAiohttpResponse(
+        text=json.dumps(
+            {
+                "id": "chatcmpl_1",
+                "model": "gpt-test",
+                "choices": [{"message": {"role": "assistant", "content": "Summary"}}],
+            }
+        )
+    )
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+    tools = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+
+    await OpenAIChatCompletionsTransformer().generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Summarize")],
+        tools=tools,
+        tool_choice="none",
+    )
+
+    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    assert payload["tools"] == tools
+    assert payload["tool_choice"] == "none"
+
+
+def test_responses_keeps_tools_when_tool_choice_none() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    payload = OpenAIResponsesTransformer._request_payload(
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Summarize")],
+        stream=False,
+        temperature=None,
+        max_tokens=256,
+        tools=tools,
+        tool_choice="none",
+        top_p=None,
+    )
+
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "name": "lookup",
+            "parameters": {"type": "object"},
+            "strict": False,
+        }
+    ]
+    assert payload["tool_choice"] == "none"
+
+
 def test_responses_request_payload() -> None:
     messages = [InternalMessage(role=MessageRole.SYSTEM, content="Follow policy")]
     payload = OpenAIResponsesTransformer._request_payload(
