@@ -7,8 +7,8 @@ from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import (
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
-    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
     validate_longterm_memory_arguments,
 )
 from app.core.utils.context_summary import ContextSummaryTriggerMode
@@ -113,7 +113,7 @@ async def prepare_request_messages(
             fixed_upper_message_id=context.upper_message_id,
             context_window_k=context.chat_params["context_window_k"],
             max_tokens=context.chat_params["max_tokens"],
-            tools=[MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA],
+            tools=[MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
             work_validity_checker=context.context_summary_checker,
             lifecycle_event_callback=context.context_summary_callback,
             model_id=context.model_entry["model_id"],
@@ -130,7 +130,7 @@ async def prepare_request_messages(
         session_id=context.session_id,
         context_window_k=context.chat_params["context_window_k"],
         max_tokens=context.chat_params["max_tokens"],
-        tools=[MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA],
+        tools=[MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
     )
     session = await session_crud.get_by_session_id(context.db, context.session_id)
     if session is not None and hasattr(context.db, "refresh"):
@@ -157,7 +157,7 @@ async def prepare_request_messages(
     protocol = resolve_model_protocol(context.model_entry)
     input_tokens = estimate_request_context_tokens(
         request_messages,
-        [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA],
+        [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
     )
     response_id = str(uuid.uuid4())
     metadata = {
@@ -174,7 +174,7 @@ async def prepare_request_messages(
         "max_output_tokens": max(0, int(context.chat_params["max_tokens"])),
         **build_request_token_baseline(
             request_messages,
-            [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA],
+            [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
             model_id=model_id,
             protocol=protocol,
             context_summary_revision=summary_revision,
@@ -208,7 +208,7 @@ async def generate(
         "top_p": context.chat_params["top_p"],
         "reasoning_effort": context.chat_params.get("reasoning_effort"),
         "max_tokens": context.chat_params["max_tokens"],
-        "tools": [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA],
+        "tools": [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
         "protocol": resolve_model_protocol(model_entry),
         "timeout": context.chat_params["chat_timeout"],
         "http_proxy": get_channel_http_proxy(channel),
@@ -257,7 +257,7 @@ def response_is_valid(response: Any) -> bool:
     tool_call = message.tool_calls[0]
     operation, error = validate_longterm_memory_arguments(tool_call.arguments)
     knowledge_query = tool_call.arguments.get("knowledge_query")
-    return tool_call.name == MANAGE_LONGTERM_MEMORY_TOOL_NAME and operation == "recall" and error is None and isinstance(knowledge_query, str) and bool(knowledge_query.strip())
+    return tool_call.name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME and operation == "recall" and error is None and isinstance(knowledge_query, str) and bool(knowledge_query.strip())
 
 
 def _has_content(value: Any) -> bool:

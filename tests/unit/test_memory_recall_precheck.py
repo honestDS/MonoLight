@@ -9,7 +9,7 @@ from app.core.dispatchers.memory import recall as precheck_module
 from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.exceptions import LLMException
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
-from app.core.tools.longterm_memory import MANAGE_LONGTERM_MEMORY_TOOL_NAME
+from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
@@ -26,7 +26,7 @@ class _FakeDb:
         return None
 
 
-def _call(call_id="call-1", arguments=None, name=MANAGE_LONGTERM_MEMORY_TOOL_NAME):
+def _call(call_id="call-1", arguments=None, name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME):
     return InternalToolCall(
         id=call_id,
         name=name,
@@ -46,7 +46,7 @@ def _assistant(
     content=None,
     refusal=None,
     message_id=None,
-    name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+    name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
 ):
     return InternalMessage(
         id=message_id,

@@ -22,7 +22,7 @@ from app.core.knowledge.managed_container import get_or_create_managed_knowledge
 from app.core.knowledge_jobs import manager as knowledge_job_manager_module
 from app.core.profile_deletion import execute_profile_deletion
 from app.core.tools.longterm_memory import (
-    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
     LongTermMemoryExecutor,
 )
 from app.models.channel import ModelChannel
@@ -194,8 +194,8 @@ async def _create_direct_item(
 
 
 def test_managed_knowledge_tool_schema_has_no_knowledge_base_creation_or_user_document_target():
-    properties = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["parameters"]["properties"]
-    operations = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["parameters"]["properties"]["operation"]["enum"]
+    properties = MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA["function"]["parameters"]["properties"]
+    operations = MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA["function"]["parameters"]["properties"]["operation"]["enum"]
 
     assert "knowledge_create" in operations
     assert "knowledge_update" in operations

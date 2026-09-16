@@ -17,7 +17,7 @@ from app.core.memory import MemoryRecallItem, MemoryRecallResult, MemoryRecallSt
 from app.core.memory import chat_history as chat_history_module
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT, LONGTERM_MEMORY_SYSTEM_PROMPT
 from app.core.tools import (
-    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
     LongTermMemoryExecutor,
     validate_longterm_memory_arguments,
 )
@@ -71,9 +71,9 @@ def _build_executor():
 
 
 def test_recall_schema_requires_distinct_memory_and_knowledge_queries():
-    parameters = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["parameters"]
+    parameters = MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA["function"]["parameters"]
     properties = parameters["properties"]
-    function_description = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["description"].lower()
+    function_description = MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA["function"]["description"].lower()
 
     assert "knowledge_query" in properties
     assert "unified" in function_description
