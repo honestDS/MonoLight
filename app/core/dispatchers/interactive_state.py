@@ -70,6 +70,7 @@ class InteractiveDispatchState:
     audio_understanding: bool = False
     video_understanding: bool = False
     final_ai_content: Any = None
+    final_reasoning_content: str | None = None
     final_finish_reason: str | None = None
     final_finish_details: dict[str, Any] | None = None
     final_provider_metadata: dict[str, Any] | None = None

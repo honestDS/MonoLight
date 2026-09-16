@@ -66,25 +66,18 @@
   padding: 72px 0 20px;
 }
 
-.chat-main .history-loading-indicator {
-  top: 72px;
-}
 
 @media (max-width: 420px) {
   .chat-main .message-list {
     padding: 92px 0 20px;
   }
 
-  .chat-main .history-loading-indicator {
-    top: 92px;
-  }
 }
 
-.context-summary-notice {
+.activity-status-notice {
   position: absolute;
-  bottom: 14px;
+  top: 72px;
   left: 50%;
-  z-index: 20;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -102,30 +95,42 @@
   backdrop-filter: blur(6px);
 }
 
-.context-summary-notice-spinner {
+.activity-status-notice-spinner {
   width: 13px;
   height: 13px;
   flex: 0 0 auto;
   border: 2px solid #c6e2ff;
   border-top-color: #409eff;
   border-radius: 50%;
-  animation: context-summary-spin 0.8s linear infinite;
+  animation: activity-status-spin 0.8s linear infinite;
 }
 
-.context-summary-notice-enter-active,
-.context-summary-notice-leave-active {
+.activity-status-notice-enter-active,
+.activity-status-notice-leave-active {
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
-.context-summary-notice-enter-from,
-.context-summary-notice-leave-to {
+.activity-status-notice-enter-from,
+.activity-status-notice-leave-to {
   opacity: 0;
-  transform: translate(-50%, 6px);
+  transform: translate(-50%, -4px);
 }
 
-@keyframes context-summary-spin {
+@keyframes activity-status-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-status-notice-spinner {
+    animation: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .activity-status-notice {
+    top: 92px;
   }
 }
 
@@ -239,7 +244,8 @@
   min-width: 0;
 }
 
-.chat-main .input-area .toolbar-row .tool-output-setting {
+.chat-main .input-area .toolbar-row .tool-output-setting,
+.chat-main .input-area .toolbar-row .reasoning-output-setting {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -247,7 +253,8 @@
   min-height: 32px;
 }
 
-.tool-output-setting-label {
+.tool-output-setting-label,
+.reasoning-output-setting-label {
   color: #606266;
   font-size: 12px;
   line-height: 18px;
@@ -265,7 +272,8 @@
     width: auto;
   }
 
-  .chat-main .input-area .toolbar-row .tool-output-setting {
+  .chat-main .input-area .toolbar-row .tool-output-setting,
+  .chat-main .input-area .toolbar-row .reasoning-output-setting {
     flex: 1 1 auto;
     justify-content: space-between;
   }

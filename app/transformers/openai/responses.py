@@ -135,6 +135,8 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         text_fallback_indexes: set[tuple[int | str | None, int | str | None]] = set()
         refusal_delta_indexes: set[tuple[int | str | None, int | str | None]] = set()
         refusal_fallback_indexes: set[tuple[int | str | None, int | str | None]] = set()
+        reasoning_delta_indexes: set[tuple[str, int | str | None, int | str | None]] = set()
+        reasoning_fallback_indexes: set[tuple[str, int | str | None, int | str | None]] = set()
 
         def normalize_event(event: Any) -> tuple[dict[str, Any] | None, bool]:
             return self._normalize_stream_event(
@@ -145,6 +147,8 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 text_fallback_indexes=text_fallback_indexes,
                 refusal_delta_indexes=refusal_delta_indexes,
                 refusal_fallback_indexes=refusal_fallback_indexes,
+                reasoning_delta_indexes=reasoning_delta_indexes,
+                reasoning_fallback_indexes=reasoning_fallback_indexes,
             )
 
         async for chunk in self._stream_sse_json(
@@ -204,6 +208,24 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         return provider_items
 
     @classmethod
+    def _reasoning_content_from_output(cls, output: Any) -> str | None:
+        if not isinstance(output, list):
+            return None
+        summary_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "reasoning":
+                continue
+            for part in item.get("content") or []:
+                if isinstance(part, dict) and part.get("type") == "reasoning_text" and isinstance(part.get("text"), str):
+                    reasoning_parts.append(part["text"])
+            for part in item.get("summary") or []:
+                if isinstance(part, dict) and part.get("type") == "summary_text" and isinstance(part.get("text"), str):
+                    summary_parts.append(part["text"])
+        content = "\n\n".join(reasoning_parts) or "\n\n".join(summary_parts)
+        return content or None
+
+    @classmethod
     def from_provider(cls, provider_response: Any) -> InternalMessage:
         output = provider_response.get("output") if isinstance(provider_response, dict) else None
         if not isinstance(output, list):
@@ -248,12 +270,14 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 )
 
         refusal = "".join(refusal_parts) or None
+        reasoning_content = cls._reasoning_content_from_output(output)
         content = "".join(text_parts) or refusal
-        if not content and not tool_calls and provider_response.get("status") != "incomplete":
+        if not content and not reasoning_content and not tool_calls and provider_response.get("status") != "incomplete":
             raise LLMException(ERR_LLM_EMPTY_RESPONSE)
         return InternalMessage(
             role=MessageRole.ASSISTANT,
             content=content or None,
+            reasoning_content=reasoning_content,
             refusal=refusal,
             provider_metadata=cls._responses_message_provider_metadata(output),
             tool_calls=tool_calls or None,
@@ -421,7 +445,10 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         if top_p is not None:
             payload["top_p"] = top_p
         if reasoning_effort is not None:
-            payload["reasoning"] = {"effort": reasoning_effort}
+            reasoning: dict[str, Any] = {"effort": reasoning_effort}
+            if not (isinstance(reasoning_effort, str) and reasoning_effort.strip().lower() == "none"):
+                reasoning["summary"] = "auto"
+            payload["reasoning"] = reasoning
         if max_tokens > 0:
             payload["max_output_tokens"] = max_tokens
         if tools:
@@ -535,6 +562,8 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         text_fallback_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
         refusal_delta_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
         refusal_fallback_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
+        reasoning_delta_indexes: set[tuple[str, int | str | None, int | str | None]] | None = None,
+        reasoning_fallback_indexes: set[tuple[str, int | str | None, int | str | None]] | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         if not isinstance(event, dict):
             return None, False
@@ -542,9 +571,40 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         text_fallback_indexes = text_fallback_indexes if text_fallback_indexes is not None else set()
         refusal_delta_indexes = refusal_delta_indexes if refusal_delta_indexes is not None else set()
         refusal_fallback_indexes = refusal_fallback_indexes if refusal_fallback_indexes is not None else set()
+        reasoning_delta_indexes = reasoning_delta_indexes if reasoning_delta_indexes is not None else set()
+        reasoning_fallback_indexes = reasoning_fallback_indexes if reasoning_fallback_indexes is not None else set()
         event_type = event.get("type")
         if event_type in {"response.failed", "error"}:
             cls._raise_event_error(event)
+
+        if event_type in {"response.reasoning_text.delta", "response.reasoning_summary_text.delta"}:
+            delta = event.get("delta")
+            if not isinstance(delta, str):
+                return None, False
+            reasoning_kind = "summary" if event_type == "response.reasoning_summary_text.delta" else "text"
+            part_index = event.get("summary_index") if reasoning_kind == "summary" else event.get("content_index")
+            reasoning_index = (reasoning_kind, cls._output_index(event), part_index)
+            is_new_part = reasoning_index not in reasoning_delta_indexes and reasoning_index not in reasoning_fallback_indexes
+            has_previous_part = any(index[0] == reasoning_kind for index in reasoning_delta_indexes | reasoning_fallback_indexes)
+            reasoning_delta_indexes.add(reasoning_index)
+            if is_new_part and has_previous_part:
+                delta = f"\n\n{delta}"
+            return {"choices": [{"delta": {"reasoning_content": delta}}]}, True
+
+        if event_type in {"response.reasoning_text.done", "response.reasoning_summary_text.done"}:
+            reasoning_kind = "summary" if event_type == "response.reasoning_summary_text.done" else "text"
+            part_index = event.get("summary_index") if reasoning_kind == "summary" else event.get("content_index")
+            reasoning_index = (reasoning_kind, cls._output_index(event), part_index)
+            if reasoning_index in reasoning_delta_indexes or reasoning_index in reasoning_fallback_indexes:
+                return None, False
+            text = event.get("text")
+            if not isinstance(text, str):
+                return None, False
+            has_previous_part = any(index[0] == reasoning_kind for index in reasoning_delta_indexes | reasoning_fallback_indexes)
+            reasoning_fallback_indexes.add(reasoning_index)
+            if has_previous_part:
+                text = f"\n\n{text}"
+            return {"choices": [{"delta": {"reasoning_content": text}}]}, True
 
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
@@ -666,14 +726,19 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             if response.get("status") == "failed" or response.get("error"):
                 cls._raise_response_error(response)
             finish_reason, finish_details = cls._responses_finish(response)
+            delta: dict[str, Any] = {}
+            if not reasoning_delta_indexes and not reasoning_fallback_indexes:
+                reasoning_content = cls._reasoning_content_from_output(response.get("output"))
+                if reasoning_content:
+                    delta["reasoning_content"] = reasoning_content
             return {
-                "choices": [{"delta": {}, "finish_reason": finish_reason}],
+                "choices": [{"delta": delta, "finish_reason": finish_reason}],
                 "model": response.get("model"),
                 "usage": cls._normalize_responses_usage(response.get("usage")),
                 "finish_details": finish_details,
                 "provider_metadata": cls._responses_provider_metadata(response),
                 "message_provider_metadata": cls._responses_message_provider_metadata(response.get("output")),
-            }, False
+            }, bool(delta)
 
         return None, False
 

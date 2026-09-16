@@ -28,7 +28,7 @@ test('tracks queued inputs and agent loop markers independently', () => {
   assert.deepEqual(messages.at(-1), {
     id: 'thinking_work-a_response-a',
     role: 'thinking',
-    content: 'Thinking...',
+    content: '',
     work_id: 'work-a',
     response_id: 'response-a',
     turn: 1

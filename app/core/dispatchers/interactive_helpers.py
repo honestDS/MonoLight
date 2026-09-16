@@ -244,6 +244,19 @@ async def _emit_agent_loop_output(state: _AgentLoopStreamState) -> None:
     state.emitted_agent_loop_output = True
 
 
+async def _handle_stream_reasoning(state: _AgentLoopStreamState, content: str) -> None:
+    if state.callback is None or not content:
+        return
+    await state.callback(
+        {
+            "type": "reasoning",
+            "content": content,
+            "turn": state.current_turn,
+            "response_id": state.response_id,
+        }
+    )
+
+
 async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> None:
     if not state.expose_tool_call_content or not state.show_tool_calls:
         state.buffered_content_chunks.append(content)

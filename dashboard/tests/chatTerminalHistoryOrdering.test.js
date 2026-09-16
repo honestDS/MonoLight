@@ -213,3 +213,66 @@ test('terminal history reconciliation does not duplicate an already streamed too
   assert.equal(shellCallCount, 1, 'terminal history must not duplicate an already streamed tool call')
   assert.equal(shellResultCount, 1, 'terminal history must keep the existing tool result paired with the call')
 })
+
+
+test('tool-call conversion preserves both streamed body and archived reasoning', () => {
+  const source = fs.readFileSync(new URL('../src/composables/chat/useMessageProcessor.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const startMarker = '  const processStreamToolStart = '
+  const start = source.indexOf(startMarker)
+  assert.notEqual(start, -1)
+  const endMarker = '\n\n  // '
+  const end = source.indexOf(endMarker, start)
+  assert.notEqual(end, -1)
+  const declaration = source.slice(start + 2, end)
+  const expression = declaration.replace(/^const processStreamToolStart = /, '')
+
+  const normalizeMessageContent = content => {
+    try { return typeof content === 'string' ? JSON.parse(content) : content } catch { return content }
+  }
+  const isToolCall = message => {
+    const content = normalizeMessageContent(message?.content)
+    return message?.role === 'assistant' && Array.isArray(content?.tool_calls) && content.tool_calls.length > 0
+  }
+  const processStreamToolStart = new Function(
+    'findToolCallIndex',
+    'normalizeMessageContent',
+    'isToolCall',
+    'insertBeforeThinking',
+    'findLastRelatedStreamMessageIndex',
+    `return (${expression})`
+  )(
+    () => -1,
+    normalizeMessageContent,
+    isToolCall,
+    () => false,
+    () => -1
+  )
+
+  const messagesRef = { value: [{
+    id: 'assistant-live',
+    role: 'assistant',
+    content: '**Executing Python script**',
+    reasoning_content: 'persist me',
+    response_id: 'response-1',
+    request_id: 'request-1',
+    work_id: 'work-1',
+    turn: 1,
+    db_id: 42
+  }] }
+
+  processStreamToolStart(
+    messagesRef,
+    { id: 'call-1', name: 'tool', arguments: '{}' },
+    null,
+    'response-1',
+    'request-1',
+    'work-1'
+  )
+
+  assert.equal(messagesRef.value.length, 1)
+  assert.equal(messagesRef.value[0].reasoning_content, 'persist me')
+  assert.equal(normalizeMessageContent(messagesRef.value[0].content).content, '**Executing Python script**')
+  assert.equal(messagesRef.value[0].turn, 1)
+  assert.equal(messagesRef.value[0].db_id, 42)
+  assert.equal(isToolCall(messagesRef.value[0]), true)
+})

@@ -132,6 +132,7 @@ export function useChatSession() {
   // 默认 Markdown 开关状态（用于未选择会话时）
   const enableMarkdownDefault = ref(false)
   const showToolCallsDefault = ref(true)
+  const showReasoningDefault = ref(true)
   const newSessionProfileOverrideId = ref(null)
   
   // 2. 会话管理
@@ -160,6 +161,28 @@ export function useChatSession() {
         sessionManager.sessions.value[sessionIndex] = {
           ...sessionManager.sessions.value[sessionIndex],
           show_tool_calls: enabled
+        }
+      }
+    }
+  })
+  const currentSessionShowReasoning = computed({
+    get: () => {
+      if (!sessionManager.currentSessionId.value) return showReasoningDefault.value
+      return currentSession.value?.show_reasoning ?? true
+    },
+    set: (showReasoning) => {
+      const enabled = Boolean(showReasoning)
+      const sessionId = sessionManager.currentSessionId.value
+      if (!sessionId) {
+        showReasoningDefault.value = enabled
+        return
+      }
+
+      const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
+      if (sessionIndex !== -1) {
+        sessionManager.sessions.value[sessionIndex] = {
+          ...sessionManager.sessions.value[sessionIndex],
+          show_reasoning: enabled
         }
       }
     }
@@ -677,14 +700,15 @@ export function useChatSession() {
       requestSessionId,
       requestId,
       newProfileOverrideId,
-      currentSessionShowToolCalls.value
+      currentSessionShowToolCalls.value,
+      currentSessionShowReasoning.value
     )
   }
 
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true) => {
+  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true) => {
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
     let finalResponseProcessed = false
     try {
@@ -695,6 +719,7 @@ export function useChatSession() {
         requestId,
         profileOverrideId,
         showToolCalls,
+        showReasoning,
         callbacks: {
           ...createLifecycleCallbacks(isCurrentRequestSession),
           completeBeforeWorkFinished: true,
@@ -744,6 +769,7 @@ export function useChatSession() {
           title: t('chat.default_title'),
           enable_markdown: enableMarkdownDefault.value,
           show_tool_calls: showToolCalls,
+          show_reasoning: showReasoning,
           profile_override_id: profileOverrideId
         })
         
@@ -756,7 +782,7 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId, showToolCalls)
+        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId, showToolCalls, showReasoning)
       }
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
@@ -850,6 +876,7 @@ export function useChatSession() {
       newSessionProfileOverrideId.value
     )
     const showToolCalls = currentSessionShowToolCalls.value
+    const showReasoning = currentSessionShowReasoning.value
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
 
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
@@ -864,6 +891,11 @@ export function useChatSession() {
         if (isCurrentRequestSession() && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
           contextSummaryTracker.endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
         }
+      },
+      onReasoning: (text, turn, responseId, requestIdParam, workId, eventId) => {
+        if (!isCurrentRequestSession()) return
+        if (workLifecycleTracker.isWorkTerminal(workId)) return
+        messageProcessor.processStreamReasoning(chatState.messages, text, turn, responseId, requestIdParam, workId, eventId)
       },
       onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam, workId, eventId) => {
         if (!isCurrentRequestSession()) return
@@ -960,6 +992,7 @@ export function useChatSession() {
           title: t('chat.default_title'),
           enable_markdown: enableMarkdownDefault.value,
           show_tool_calls: showToolCalls,
+          show_reasoning: showReasoning,
           profile_override_id: newProfileOverrideId
         })
         
@@ -993,6 +1026,7 @@ export function useChatSession() {
             ...(data.message_id !== null && data.message_id !== undefined && data.message_id !== '' ? { db_id: data.message_id } : {}),
             ...(typeof data.finish_reason === 'string' && data.finish_reason ? { finish_reason: data.finish_reason } : {}),
             ...(data.finish_details && typeof data.finish_details === 'object' && Object.keys(data.finish_details).length > 0 ? { finish_details: data.finish_details } : {}),
+            ...(typeof data.reasoning_content === 'string' && data.reasoning_content.trim() ? { reasoning_content: data.reasoning_content } : {}),
             ...(typeof data.refusal === 'string' && data.refusal ? { refusal: data.refusal } : {}),
             ...(data.provider_metadata && typeof data.provider_metadata === 'object' && Object.keys(data.provider_metadata).length > 0 ? { provider_metadata: data.provider_metadata } : {}),
             ...(data.message_provider_metadata && typeof data.message_provider_metadata === 'object' && Object.keys(data.message_provider_metadata).length > 0 ? { message_provider_metadata: data.message_provider_metadata } : {})
@@ -1103,6 +1137,14 @@ export function useChatSession() {
               }
             }
           }
+          messageProcessor.finalizeStreamReasoning(
+            chatState.messages,
+            data.reasoning_content,
+            data.turn,
+            data.response_id,
+            requestIdParam,
+            data.work_id
+          )
           return // turn_end 时不需要执行 done 的历史比对和占位符清理
         }
 
@@ -1165,6 +1207,7 @@ export function useChatSession() {
         requestId,
         profileOverrideId: newProfileOverrideId,
         showToolCalls,
+        showReasoning,
         callbacks
       })
       if (!sent) handleWsSendFailure()
@@ -1203,6 +1246,7 @@ export function useChatSession() {
     chatState.inputMsg.value = ''
     newSessionProfileOverrideId.value = null
     showToolCallsDefault.value = true
+    showReasoningDefault.value = true
     // 新建会话时重置加载状态，解除模式锁定
     chatState.loading.value = false
   }
@@ -1277,6 +1321,7 @@ export function useChatSession() {
     attachments,
     enableMarkdownDefault,
     showToolCallsDefault,
+    showReasoningDefault,
     newSessionProfileOverrideId,
 
     // 状态 - 会话相关
@@ -1290,6 +1335,7 @@ export function useChatSession() {
     sessionCreating: sessionManager.sessionCreating,
     currentSession,
     currentSessionShowToolCalls,
+    currentSessionShowReasoning,
     isCurrentSessionReadOnly,
     externalSessionAutoPullEnabled,
     
