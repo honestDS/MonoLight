@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   applyOpenRouterModelMetadata,
   getOpenRouterModelMatches,
+  getOpenRouterReasoningEfforts,
   toPositiveInteger
 } from '../src/utils/channelModelMetadata.js'
 
@@ -132,4 +133,18 @@ test('does not modify invalid metadata inputs', () => {
   assert.deepEqual(applyOpenRouterModelMetadata(entry, null), { fields: [], model: entry })
   assert.deepEqual(applyOpenRouterModelMetadata(entry, []), { fields: [], model: entry })
   assert.deepEqual(entry, originalEntry)
+})
+
+test('reads reasoning effort options from OpenRouter reasoning metadata', () => {
+  const model = {
+    supported_parameters: ['reasoning_effort'],
+    reasoning: {
+      supported_efforts: ['max', ' high ', 'high', '', null, 'low'],
+      default_effort: 'high'
+    }
+  }
+
+  assert.deepEqual(getOpenRouterReasoningEfforts(model), ['max', 'high', 'low'])
+  assert.deepEqual(getOpenRouterReasoningEfforts({ supported_parameters: ['reasoning_effort'] }), [])
+  assert.deepEqual(getOpenRouterReasoningEfforts(null), [])
 })

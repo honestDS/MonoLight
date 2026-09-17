@@ -18,10 +18,7 @@ from app.core.tools.read_multimodal_file import parse_multimodal_file_read_resul
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.helpers import process_single_tool_with_isolated_db
-from app.core.utils.dispatcher.markdown_instruction import (
-    append_environment_prompt_instruction,
-    build_max_output_tokens_instruction,
-)
+from app.core.utils.dispatcher.markdown_instruction import ensure_user_runtime_instructions
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, MessageRole
@@ -139,9 +136,8 @@ async def _fetch_additional_user_messages(
     new_user_batch = _normalize_additional_user_messages(new_user_batch)
     if new_user_batch is None:
         return None
-    max_tokens_instruction = build_max_output_tokens_instruction(max_tokens)
     for new_message in new_user_batch.messages:
-        append_environment_prompt_instruction(new_message, max_tokens_instruction)
+        await ensure_user_runtime_instructions(context.db, context.session_id, new_message, max_tokens)
     return new_user_batch
 
 
@@ -233,6 +229,7 @@ class _AgentLoopStreamState:
     emitted_agent_loop_output: bool = False
     emitted_stream_content: bool = False
     buffered_content_chunks: list[str] = field(default_factory=list)
+    buffered_reasoning_chunks: list[str] = field(default_factory=list)
 
 
 async def _emit_agent_loop_output(state: _AgentLoopStreamState) -> None:
@@ -246,6 +243,35 @@ async def _emit_agent_loop_output(state: _AgentLoopStreamState) -> None:
         }
     )
     state.emitted_agent_loop_output = True
+
+
+async def _publish_stream_reasoning(state: _AgentLoopStreamState, content: str) -> None:
+    if state.callback is None:
+        return
+    await state.callback(
+        {
+            "type": "reasoning",
+            "content": content,
+            "turn": state.current_turn,
+            "response_id": state.response_id,
+        }
+    )
+
+
+async def _handle_stream_reasoning(state: _AgentLoopStreamState, content: str) -> None:
+    if state.callback is None or not content:
+        return
+    if not state.show_tool_calls:
+        state.buffered_reasoning_chunks.append(content)
+        return
+    await _publish_stream_reasoning(state, content)
+
+
+async def _flush_buffered_stream_reasoning(state: _AgentLoopStreamState) -> None:
+    buffered_chunks = list(state.buffered_reasoning_chunks)
+    state.buffered_reasoning_chunks.clear()
+    for content in buffered_chunks:
+        await _publish_stream_reasoning(state, content)
 
 
 async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> None:

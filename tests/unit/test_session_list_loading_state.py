@@ -85,7 +85,7 @@ async def test_user_sessions_loading_state_follows_persisted_reply_work_status(d
 @pytest.mark.asyncio
 async def test_session_list_api_exposes_loading_state(db_session: AsyncSession):
     db_session.add(User(uid="user-1", username="alice"))
-    db_session.add(ChatSession(session_id="session-1", uid="user-1", profile_id=1))
+    db_session.add(ChatSession(session_id="session-1", uid="user-1", profile_id=1, show_reasoning=False))
     db_session.add(_work(session_id="session-1", status=SessionReplyWorkStatus.RUNNING, sequence_no=1))
     await db_session.commit()
 
@@ -98,3 +98,4 @@ async def test_session_list_api_exposes_loading_state(db_session: AsyncSession):
     assert response.data is not None
     assert response.data[0]["session_id"] == "session-1"
     assert response.data[0]["is_loading"] is True
+    assert response.data[0]["show_reasoning"] is False

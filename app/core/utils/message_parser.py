@@ -108,6 +108,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                     id=msg.id,
                     role=role,
                     content=content,
+                    reasoning_content=msg.reasoning_content,
                     refusal=refusal,
                     provider_metadata=provider_metadata,
                     environment_prompt=msg.environment_prompt,

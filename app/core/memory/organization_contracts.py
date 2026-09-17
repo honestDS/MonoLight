@@ -75,6 +75,7 @@ class MemoryOrganizationModelConfig:
     custom_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     temperature: float = 0.7
     top_p: float | None = None
+    reasoning_effort: str | None = None
     timeout: float = MEMORY_ORGANIZE_LLM_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
@@ -93,6 +94,7 @@ class MemoryOrganizationModelConfig:
             "custom_headers": dict(self.custom_headers),
             "temperature": self.temperature,
             "top_p": self.top_p,
+            "reasoning_effort": self.reasoning_effort,
             "timeout": self.timeout,
             "context_window_k": self.context_window_k,
             "context_window_tokens": self.context_window_tokens,
@@ -111,6 +113,7 @@ class MemoryOrganizationModelConfig:
             "protocol": self.protocol,
             "temperature": self.temperature,
             "top_p": self.top_p,
+            "reasoning_effort": self.reasoning_effort,
             "timeout": self.timeout,
             "context_window_k": self.context_window_k,
             "context_window_tokens": self.context_window_tokens,

@@ -11,7 +11,7 @@ from app.core.context import (
 )
 from app.core.utils.context_summary.service import get_context_summary_state
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
-from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instruction_text, build_user_runtime_instructions
+from app.core.utils.dispatcher.markdown_instruction import build_user_runtime_instructions, ensure_user_runtime_instructions
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
@@ -53,16 +53,27 @@ async def prepare_messages(
     cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
     if cleaned_additional_system_prompt:
         system_prompt = f"{system_prompt}\n\n{cleaned_additional_system_prompt}" if system_prompt.strip() else cleaned_additional_system_prompt
-    user_runtime_instructions = await build_user_runtime_instructions(db, session_id, max_tokens) if is_first_iter else ""
     current_msg = initial_msg.model_copy(deep=True) if is_first_iter and initial_msg is not None else None
-    if current_msg is not None:
-        append_user_runtime_instruction_text(current_msg, user_runtime_instructions)
-        if current_msg.attachments or isinstance(current_msg.content, list):
-            current_msg = MessageAssembler.assemble(
+    if current_msg is not None and current_msg.environment_prompt:
+        user_runtime_instructions = current_msg.environment_prompt
+    elif is_first_iter:
+        user_runtime_instructions = await build_user_runtime_instructions(db, session_id, max_tokens)
+        if current_msg is not None:
+            await ensure_user_runtime_instructions(
+                db,
+                session_id,
                 current_msg,
-                image_understanding=False,
-                is_history=False,
+                max_tokens,
+                instruction=user_runtime_instructions,
             )
+    else:
+        user_runtime_instructions = ""
+    if current_msg is not None and (current_msg.attachments or isinstance(current_msg.content, list)):
+        current_msg = MessageAssembler.assemble(
+            current_msg,
+            image_understanding=False,
+            is_history=False,
+        )
     history_before_id = history_before_id if is_first_iter and history_before_id is not None else initial_msg.id if is_first_iter else None
     summary_state = await get_context_summary_state(
         db,

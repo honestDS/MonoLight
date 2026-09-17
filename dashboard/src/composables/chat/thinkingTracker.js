@@ -50,7 +50,7 @@ export const ensureActiveThinkingMessage = (messages, newThinkingId, requestId, 
     messages.push({
       id: newThinkingId,
       role: 'thinking',
-      content: 'Thinking...',
+      content: '',
       request_id: requestId,
       request_ids: [...requestIds]
     })

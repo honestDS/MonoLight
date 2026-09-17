@@ -2,13 +2,13 @@ from .migration_handlers import (
     cancel_knowledge_base_embedding_migration as cancel_knowledge_base_embedding_migration,
 )
 from .migration_handlers import (
-    cleanup_terminal_target_collection as cleanup_terminal_target_collection,
-)
-from .migration_handlers import (
     finalize_knowledge_migration_terminal_state as finalize_knowledge_migration_terminal_state,
 )
 from .migration_handlers import (
     handle_embedding_migration as handle_embedding_migration,
+)
+from .migration_handlers import (
+    handle_migration_target_cleanup as handle_migration_target_cleanup,
 )
 from .migration_handlers import (
     handle_old_collection_cleanup as handle_old_collection_cleanup,
@@ -22,7 +22,7 @@ from .migration_prepare import (
 
 __all__ = [
     "cancel_knowledge_base_embedding_migration",
-    "cleanup_terminal_target_collection",
+    "handle_migration_target_cleanup",
     "finalize_knowledge_migration_terminal_state",
     "handle_embedding_migration",
     "handle_old_collection_cleanup",

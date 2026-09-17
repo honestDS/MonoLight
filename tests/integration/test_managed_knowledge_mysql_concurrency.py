@@ -220,7 +220,7 @@ async def test_managed_knowledge_first_writes_converge_to_one_container_under_my
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     suffix = uuid.uuid4().hex[:12]
-    uid = f"mysql-stage5-{suffix}"
+    uid = f"mysql-managed-concurrency-{suffix}"
     profile_id: int | None = None
     prompt_id: int | None = None
     channel_id: int | None = None
@@ -239,7 +239,7 @@ async def test_managed_knowledge_first_writes_converge_to_one_container_under_my
 
         async with session_factory() as setup_session:
             channel = ModelChannel(
-                name=f"managed-stage5-{suffix}",
+                name=f"managed-concurrency-{suffix}",
                 api_key="test-api-key",
                 base_url="https://example.invalid",
                 model_ids=[
@@ -257,7 +257,7 @@ async def test_managed_knowledge_first_writes_converge_to_one_container_under_my
             channel_id = channel.id
 
             prompt = PromptLibrary(
-                name=f"managed-stage5-{suffix}",
+                name=f"managed-concurrency-{suffix}",
                 uid=uid,
                 content="prompt",
             )
@@ -266,7 +266,7 @@ async def test_managed_knowledge_first_writes_converge_to_one_container_under_my
             prompt_id = prompt.id
 
             profile = Profile(
-                name=f"managed-stage5-{suffix}",
+                name=f"managed-concurrency-{suffix}",
                 uid=uid,
                 prompt_id=prompt.id,
                 configs={},
@@ -396,7 +396,7 @@ async def test_memory_switch_sees_managed_container_created_after_repeatable_rea
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     suffix = uuid.uuid4().hex[:12]
-    uid = f"mysql-stage8-switch-{suffix}"
+    uid = f"mysql-managed-switch-{suffix}"
     profile_id: int | None = None
     prompt_id: int | None = None
     channel_id: int | None = None
@@ -414,7 +414,7 @@ async def test_memory_switch_sees_managed_container_created_after_repeatable_rea
 
         async with session_factory() as setup_session:
             channel = ModelChannel(
-                name=f"managed-stage8-switch-{suffix}",
+                name=f"managed-switch-{suffix}",
                 api_key="test-api-key",
                 base_url="https://example.invalid",
                 model_ids=[
@@ -439,7 +439,7 @@ async def test_memory_switch_sees_managed_container_created_after_repeatable_rea
             channel_id = channel.id
 
             prompt = PromptLibrary(
-                name=f"managed-stage8-switch-{suffix}",
+                name=f"managed-switch-{suffix}",
                 uid=uid,
                 content="prompt",
             )
@@ -448,7 +448,7 @@ async def test_memory_switch_sees_managed_container_created_after_repeatable_rea
             prompt_id = prompt.id
 
             profile = Profile(
-                name=f"managed-stage8-switch-{suffix}",
+                name=f"managed-switch-{suffix}",
                 uid=uid,
                 prompt_id=prompt.id,
                 configs={},
@@ -465,7 +465,7 @@ async def test_memory_switch_sees_managed_container_created_after_repeatable_rea
                     active_embedding_dimensions=1536,
                     active_embedding_signature=f"signature-v1-{suffix}",
                     active_embedding_revision=1,
-                    active_collection_name=f"memory-stage8-switch-{suffix}",
+                    active_collection_name=f"memory-managed-switch-{suffix}",
                     index_revision=1,
                 )
             )
@@ -559,7 +559,7 @@ async def test_same_user_knowledge_base_concurrent_migration_submissions_reuse_o
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     suffix = uuid.uuid4().hex[:12]
-    uid = f"mysql-stage8-user-submit-{suffix}"
+    uid = f"mysql-user-submit-{suffix}"
     channel_id: int | None = None
     knowledge_base_id: int | None = None
     schema_ready = False
@@ -576,7 +576,7 @@ async def test_same_user_knowledge_base_concurrent_migration_submissions_reuse_o
 
         async with session_factory() as setup_session:
             channel = ModelChannel(
-                name=f"user-stage8-submit-{suffix}",
+                name=f"user-submit-{suffix}",
                 api_key="test-api-key",
                 base_url="https://example.invalid",
                 model_ids=[
@@ -602,18 +602,18 @@ async def test_same_user_knowledge_base_concurrent_migration_submissions_reuse_o
 
             knowledge_base = KnowledgeBase(
                 uid=uid,
-                name=f"user-stage8-submit-{suffix}",
+                name=f"user-submit-{suffix}",
                 embedding_channel_id=channel.id,
                 embedding_model_id="embedding-v1",
                 embedding_dimensions=1536,
-                collection_name=f"user-stage8-submit-{suffix}",
+                collection_name=f"user-submit-{suffix}",
                 knowledge_base_type=KnowledgeBaseType.USER,
                 active_embedding_channel_id=channel.id,
                 active_embedding_model_id="embedding-v1",
                 active_embedding_dimensions=1536,
                 active_embedding_signature=f"signature-v1-{suffix}",
                 active_embedding_revision=1,
-                active_collection_name=f"user-stage8-submit-{suffix}",
+                active_collection_name=f"user-submit-{suffix}",
                 index_revision=1,
                 index_status=KnowledgeBaseIndexStatus.READY,
             )
@@ -623,7 +623,7 @@ async def test_same_user_knowledge_base_concurrent_migration_submissions_reuse_o
             knowledge_base_id = knowledge_base.id
             assert knowledge_base_id is not None
 
-        dedupe_key = f"mysql-stage8-user-submit-{suffix}"
+        dedupe_key = f"mysql-user-submit-{suffix}"
 
         async def submit():
             async with session_factory() as session:

@@ -9,7 +9,7 @@ from sqlmodel import select
 
 from app.core.constants import ERR_KNOWLEDGE_ORGANIZATION_FAILED
 from app.core.crud.knowledge.base import knowledge_base_crud
-from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.crud.knowledge.job import is_system_cleanup_operation, knowledge_job_crud
 from app.core.crud.knowledge.managed import (
     managed_knowledge_item_crud,
     organization_lock_token_for_job,
@@ -222,9 +222,48 @@ async def cancel_pending_children(
     for child in result.scalars().all():
         if child.id is None:
             continue
+        if is_system_cleanup_operation(child.operation):
+            if child.operation == KnowledgeJobOperation.MANAGED_DELETE_CLEANUP and child.status == KnowledgeJobStatus.PENDING and child.attempt_count == 0:
+                await rollback_organization_mutation_if_needed(
+                    db,
+                    child=child,
+                    updated_at=updated_at,
+                )
+                update_result = await db.execute(
+                    update(KnowledgeJob)
+                    .where(
+                        KnowledgeJob.uid == uid,
+                        KnowledgeJob.id == child.id,
+                        KnowledgeJob.parent_job_id == parent_job_id,
+                        KnowledgeJob.status == KnowledgeJobStatus.PENDING,
+                        KnowledgeJob.attempt_count == 0,
+                    )
+                    .values(
+                        status=KnowledgeJobStatus.SUCCEEDED,
+                        active_change_key=None,
+                        result={
+                            "knowledge_id": child.knowledge_id,
+                            "version": child.expected_version,
+                            "cleanup_skipped": "organization_rolled_back",
+                        },
+                        error=None,
+                        locked_by=None,
+                        lock_until=None,
+                        cancel_requested_at=None,
+                        finished_at=updated_at,
+                        updated_at=updated_at,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                if (update_result.rowcount or 0) == 1:
+                    await _clear_pending_reference(
+                        db,
+                        uid=uid,
+                        job_id=child.id,
+                        updated_at=updated_at,
+                    )
+            continue
         if child.status == KnowledgeJobStatus.RUNNING:
-            if child.operation == KnowledgeJobOperation.MANAGED_DELETE_CLEANUP:
-                continue
             await db.execute(
                 update(KnowledgeJob)
                 .where(

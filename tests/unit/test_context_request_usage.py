@@ -162,7 +162,7 @@ def test_final_request_budget_preserves_longterm_memory_recall_json():
             tool_calls=[
                 InternalToolCall(
                     id="memory-recall-1",
-                    name="manage_longterm_memory",
+                    name="manage_memory_and_knowledge",
                     arguments={
                         "operation": "recall",
                         "query": "stable background",

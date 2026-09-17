@@ -16,6 +16,7 @@ const channelModelItemFields = [
   'context_window_k',
   'temperature',
   'top_p',
+  'reasoning_effort',
   'max_tokens',
   'embedding_dimensions',
   'size',
@@ -28,6 +29,7 @@ const channelModelItemFields = [
 ].sort()
 
 const componentSource = readFileSync(new URL('../src/components/ChannelModelEntry.vue', import.meta.url), 'utf8')
+const channelFormStyleSource = readFileSync(new URL('../src/assets/css/ChannelFormDialog.scss', import.meta.url), 'utf8')
 
 test('defaultModelEntry covers every ChannelModelItem field and its defaults', () => {
   const entry = defaultModelEntry()
@@ -43,6 +45,7 @@ test('defaultModelEntry covers every ChannelModelItem field and its defaults', (
     context_window_k: 64,
     temperature: 0.7,
     top_p: 1,
+    reasoning_effort: null,
     max_tokens: 20480,
     embedding_dimensions: null,
     embedding_timeout: 30,
@@ -84,6 +87,29 @@ test('ChannelModelEntry contains enabled and usage-specific timeout controls', (
   assert.match(componentSource, /channels\.rerank_timeout[\s\S]*?v-model="props\.entry\.rerank_timeout"/)
 })
 
+test('ChannelModelEntry supports detected and custom reasoning effort values', () => {
+  assert.match(componentSource, /<el-autocomplete[\s\S]*?v-model="props\.entry\.reasoning_effort"/)
+  assert.match(componentSource, /:fetch-suggestions="queryReasoningEfforts"/)
+  assert.match(componentSource, /props\.reasoningEffortOptions[\s\S]*?map\(value => \(\{ value \}\)\)/)
+})
+
+test('ChannelModelEntry keeps reasoning effort immediately after context window', () => {
+  const contextWindowIndex = componentSource.indexOf("$t('channels.context_window_k')")
+  const reasoningEffortIndex = componentSource.indexOf("$t('channels.reasoning_effort')")
+  const understandingIndex = componentSource.indexOf("$t('channels.image_understanding')")
+
+  assert.ok(contextWindowIndex >= 0)
+  assert.ok(reasoningEffortIndex > contextWindowIndex)
+  assert.ok(understandingIndex > reasoningEffortIndex)
+})
+
+test('ChannelModelEntry aligns reasoning effort with the numeric controls', () => {
+  assert.match(componentSource, /<el-autocomplete[\s\S]*?class="full-width-input model-entry-reasoning-effort"/)
+  assert.match(channelFormStyleSource, /\.model-entry-reasoning-effort\s*\{[\s\S]*?display:\s*inline-flex;/)
+  assert.match(channelFormStyleSource, /\.model-entry-reasoning-effort\s*\{[\s\S]*?vertical-align:\s*middle;/)
+  assert.match(channelFormStyleSource, /\.model-entry-reasoning-effort\s+\.el-input__inner\s*\{[\s\S]*?line-height:\s*1;/)
+})
+
 test('ChannelModelEntry keeps remove and enabled props enabled by default', () => {
   assert.match(componentSource, /showRemove:\s*\{\s*type:\s*Boolean,\s*default:\s*true\s*\}/)
   assert.match(componentSource, /showEnabled:\s*\{\s*type:\s*Boolean,\s*default:\s*true\s*\}/)
@@ -106,7 +132,7 @@ test('ChannelModelEntry no longer hides test results in a test collapse section'
 })
 
 test('new channel model labels exist in both locales', () => {
-  for (const key of ['is_enabled', 'embedding_timeout', 'rerank_timeout', 'model_test_view_result']) {
+  for (const key of ['is_enabled', 'embedding_timeout', 'rerank_timeout', 'reasoning_effort', 'reasoning_effort_placeholder', 'model_test_view_result']) {
     assert.equal(Object.prototype.hasOwnProperty.call(zhChannels, key), true, `missing zh key: ${key}`)
     assert.equal(Object.prototype.hasOwnProperty.call(enChannels, key), true, `missing en key: ${key}`)
     assert.equal(typeof zhChannels[key], 'string')

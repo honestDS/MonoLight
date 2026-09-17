@@ -1,121 +1,127 @@
 # MonoLight
 
-MonoLight 是一个专注于安全执行与人机协同的通用自主智能体（General Autonomous Agent）运行时。
+**English** | [中文](./README_ZH.md)
+
+MonoLight is a general-purpose autonomous agent runtime focused on safe execution and human-AI collaboration.
 
 <p align="center">
   <img src="./docs/banner.webp" alt="MonoLight Banner" width="100%" />
 </p>
 
-## 我们的愿景
+## Our Vision
 
-当智能体从回答问题逐渐走向执行命令、修改文件、访问网络和管理长期任务时，一次看似微小的判断错误，都可能对真实系统造成不可逆的影响。MonoLight 关注的核心问题是：当我们赋予 AI 更强自主执行能力时，如何同时保证这种能力是可控、可审计且值得信任的？
+As agents evolve from answering questions to executing commands, modifying files, accessing networks, and managing long-running tasks, even a seemingly small judgment error can cause irreversible effects on real systems. MonoLight focuses on a central question: as we give AI greater autonomy to act, how can we keep that autonomy controllable, auditable, and trustworthy at the same time?
 
-MonoLight 不追求让智能体彻底脱离人类，而是希望在人类监督与 AI 自主执行之间建立清晰的安全边界。通过执行前安全审计、人工确认和完整的执行记录，让关键操作在真正发生之前得到审查，并在发生之后能够被追溯。
+MonoLight does not aim to remove humans from the loop entirely. Instead, it seeks to establish a clear safety boundary between human oversight and autonomous AI execution. Through pre-execution safety audits, explicit human confirmation, and complete execution records, critical actions can be reviewed before they happen and traced afterward.
 
-从日常办公任务，到服务器运维和复杂的自动化操作，MonoLight 致力于将大模型的决策能力转化为现实世界的执行能力，同时尽可能降低自主执行带来的风险。我们希望通过持续的工程实践与安全实验，探索一种更安全、更可控的人机协同 Agent 运行模式。
+From everyday office tasks to server operations and complex automation workflows, MonoLight aims to turn the decision-making ability of large language models into real-world execution capability while reducing the risks introduced by autonomous actions as much as possible. Through continuous engineering practice and safety experimentation, we hope to explore a safer and more controllable operating model for human-AI collaborative agents.
 
 ---
 
-## PR/Issue
+## PR / Issue Policy
 
 > [!IMPORTANT]
-> 项目当前处于早期活跃开发阶段，架构仍在快速演进中，暂不接受 Pull Request。欢迎通过 Issue 报告使用中遇到的问题或提出改进建议，你的反馈对我们非常重要。
+> The project is currently in an early stage of active development, and its architecture is still evolving rapidly. Pull Requests are not accepted for now. You are welcome to report issues or suggest improvements through Issues. Your feedback is highly valuable to us.
 
-## 0. 当前进度
-- 长期记忆与知识库统一改造 进行中 2026-08-20
+## 0. Current Progress
+- Long-term memory and knowledge base unification in progress since 2026-08-20
 
-## 1. 核心特性
+## 1. Core Features
 
-MonoLight 不只是一个对话界面或单次工具调用封装，而是一套让 AI 能够持续执行任务、接受人工监督并留下完整记录的自主智能体系统。
+MonoLight is more than a chat interface or a thin wrapper around one-off tool calls. It is an autonomous agent system designed to execute tasks continuously, accept human oversight, and preserve complete execution records.
 
-- **双模型安全审计**：将任务执行与安全审查分开，主模型负责规划和调用工具，独立配置的审计模型在执行前逐项评估风险；高风险操作会被阻断或生成可读的人工确认卡片，审计结论、确认过程和执行结果均可追溯。
-- **长期记忆与用户偏好管理**：支持跨会话长期记忆与用户级个性化偏好管理，结合关系型数据库与 RAG 检索，实现对历史信息与用户偏好的持久化存储、混合检索与上下文关联。
-- **全功能 Shell**：除普通的一次性 Shell 命令外，还支持 Windows ConPTY 与 Linux PTY 交互终端。AI 可以持续读取输出、写入后续输入、查询状态、调整终端尺寸并主动关闭会话，能够操作需要 TTY、持续交互或长时间运行的命令行程序。
-- **自主与持续任务执行**：支持多轮工具调用、并行工具调用、后台任务和定时任务；耗时工作可以转入后台继续执行，用户可查看或取消任务，并在完成后收到总结回复。
-- **知识、网络与文件能力**：支持文档知识库、向量检索与结果重排，并可让 AI 查询知识库、搜索和抓取网页、生成图片、写入文件以及向用户发送文件。
-- **多模型协同配置**：可接入并统一管理多个模型渠道，为聊天、上下文总结、知识库重排和图片生成分别选择模型，并通过优先级与权重配置模型路由，不必将所有工作绑定到单一模型。
-- **IM 消息平台接入**：无需停留在浏览器中，即可从日常聊天软件使用完整的智能体能力。当前已支持微信 OpenClaw 扫码接入、文本/图片/文件双向收发、连续消息自动合并以及聊天内工具调用和安全确认；后台任务与定时任务完成后可主动回推结果，投递失败会自动重试。
-- **完整的可视化工作台**：提供聊天与会话历史、工具执行结果、审计确认卡片、知识库、模型渠道、提示词、定时任务、消息平台以及实时和历史日志管理。
-- **多用户与数据隔离**：支持用户与角色管理，并隔离不同用户的会话数据；每个 IM 接入账号还可绑定指定用户与 Profile。
-- **自托管与数据掌控**：支持 SQLite、MySQL，可从个人本地部署扩展到多用户部署，模型渠道、提示词和运行数据均由部署者自行管理。
+- **Dual-model safety auditing**: Separates task execution from safety review. The primary model plans tasks and invokes tools, while an independently configured audit model evaluates risks before execution. High-risk operations can be blocked or converted into readable human-confirmation cards. Audit decisions, confirmation flows, and execution results are all traceable.
+- **Long-term memory and user preference management**: Supports cross-session long-term memory and user-level personalization. By combining relational storage with RAG retrieval, MonoLight can persist historical information and user preferences, perform hybrid retrieval, and relate retrieved information to the current context.
+- **Full-featured Shell**: In addition to ordinary one-shot shell commands, MonoLight supports interactive terminals through Windows ConPTY and Linux PTY. The AI can continuously read output, send follow-up input, query terminal status, resize the terminal, and close sessions proactively, enabling operation of TTY-dependent, interactive, or long-running command-line programs.
+- **Autonomous and continuous task execution**: Supports multi-turn tool use, parallel tool calls, background tasks, and scheduled tasks. Long-running work can continue in the background, users can inspect or cancel it, and a summary reply can be sent when the work completes.
+- **Knowledge, web, and file capabilities**: Supports document knowledge bases, vector retrieval, and reranking. The AI can query knowledge bases, search and crawl the web, generate images, write files, and send files back to users.
+- **Multi-model orchestration**: Connect and centrally manage multiple model channels. Different models can be selected for chat, context summarization, knowledge-base reranking, and image generation, with priority- and weight-based routing so that all workloads do not need to depend on a single model.
+- **IM platform integration**: Use the full agent experience directly from everyday messaging applications without staying in the browser. MonoLight currently supports WeChat OpenClaw QR-code integration, bidirectional text/image/file messaging, automatic merging of consecutive messages, in-chat tool calls, and safety confirmations. Background and scheduled tasks can proactively push results back to the platform, with automatic retry on delivery failure.
+- **Complete visual workspace**: Includes chat and session history, tool execution results, audit confirmation cards, knowledge bases, model channels, prompts, scheduled tasks, messaging platforms, and real-time/historical log management.
+- **Multi-user support and data isolation**: Supports users and roles while isolating session data between users. Each IM integration account can also be bound to a specific user and Profile.
+- **Self-hosting and data ownership**: Supports SQLite and MySQL, scaling from local personal deployment to multi-user environments. Model channels, prompts, and runtime data remain under the deployer's control.
 
-## 模型运行要求
+## Model Runtime Requirements
 
-MonoLight 是面向多轮工具调用、上下文总结和持续任务执行设计的 Agent 运行时，对模型能力的要求高于普通聊天应用。下面的“最低要求”表示能够较完整地使用核心 Agent 能力，而不是仅能完成基础对话。
+MonoLight is designed for multi-turn tool use, context summarization, and continuous task execution. Its model requirements are therefore higher than those of a typical chat application. The "minimum requirements" below indicate the baseline for using the core Agent capabilities with reasonable completeness, not merely for basic conversation.
 
-| 项目 | 最低要求 | 推荐配置 |
+| Item | Minimum Requirement | Recommended Configuration |
 | --- | --- | --- |
-| 主聊天模型上下文窗口 | 32K Tokens | 64K Tokens 以上；复杂工具任务推荐 128K 以上 |
-| 主聊天模型单次最大输出 | 16K Tokens | 20K Tokens 以上 |
-| 总结模型上下文窗口 | 32K Tokens | 64K Tokens 以上 |
-| 总结模型单次最大输出 | 8K Tokens | 16K Tokens 以上 |
-| 记忆整理模型上下文窗口 | 32K Tokens | 64K Tokens 以上 |
-| 记忆整理模型单次最大输出 | 16K Tokens | 20K Tokens 以上；默认 45 条记忆触发整理时至少需要 11,520 Tokens，50 条满容量整理需 12,800 Tokens |
-| 审计模型上下文窗口 | 32K Tokens | 64K Tokens 以上 |
-| 审计模型单次最大输出 | 4K Tokens | 8K Tokens 以上 |
-| 工具调用 | 主聊天模型支持原生 Tool/Function Calling，能够稳定生成合法参数并正确处理工具结果 | 支持稳定的多轮、并行工具调用 |
-| 指令遵循 | 各文本生成模型能可靠区分 System、User、Assistant、Tool 消息并持续遵循系统约束 | 使用面向 Agent/工具调用优化、指令遵循能力较强的模型 |
+| Main chat model context window | 32K tokens | 64K tokens or more; 128K+ recommended for complex tool tasks |
+| Main chat model max output per request | 16K tokens | 20K tokens or more |
+| Summarization model context window | 32K tokens | 64K tokens or more |
+| Summarization model max output per request | 8K tokens | 16K tokens or more |
+| Memory-organization model context window | 32K tokens | 64K tokens or more |
+| Memory-organization model max output per request | 16K tokens | 20K tokens or more; the default 45-memory organization trigger requires at least 11,520 tokens, while organizing the full 50-memory capacity requires 12,800 tokens |
+| Audit model context window | 32K tokens | 64K tokens or more |
+| Audit model max output per request | 4K tokens | 8K tokens or more |
+| Tool calling | The main chat model must support native Tool/Function Calling, reliably produce valid arguments, and correctly process tool results | Stable multi-turn and parallel tool calling support |
+| Instruction following | All text-generation models must reliably distinguish System, User, Assistant, and Tool messages and continue following system constraints | Prefer models optimized for agents/tool use with strong instruction-following ability |
 
 > [!IMPORTANT]
-> 低于上述要求的模型可能仍可用于简单聊天或部分功能，但不建议用于完整的 MonoLight Agent 工作流。系统会通过历史总结、滑动窗口和工具结果截断控制上下文体积；如果在旧历史已经压缩后，最近必要交互和工具结果仍无法放入模型上下文，通常意味着当前模型的上下文能力不足以承载该任务。主聊天、上下文总结、长期记忆整理和安全审计可以分别选择模型，其中主聊天、总结、记忆整理和审计当前均使用 对话用途的模型条目。
+> Models below these requirements may still work for simple chat or a subset of features, but they are not recommended for the complete MonoLight Agent workflow. The system controls context size through history summarization, sliding windows, and tool-result truncation. If recent required interactions and tool results still cannot fit after older history has already been compressed, the model's context capacity is generally insufficient for that task. The main chat, context summarization, long-term memory organization, and safety audit workloads can use different models. At present, the main chat, summarization, memory-organization, and audit workloads all use model entries configured for chat usage.
 
-图像、音频、视频理解和图像生成属于可选能力，仅在使用对应功能时要求所配置的模型支持。
+Image, audio, and video understanding, as well as image generation, are optional capabilities. They are only required when the corresponding features are used.
 
-## 已知问题
-- 连续对话以上一轮 API 返回的真实 input token 数为基线，增量估算下一轮；运行时提示仅附加到每轮最新用户消息，跨轮时会从旧消息移到新消息，因此下一轮发送前的增量估算会保留上一轮提示的 token，可能略微高估并提前触发上下文总结。真实模型响应返回 usage 后，界面展示会由实际值校正；当前暂不通过额外探测请求校准，以避免额外 token 消耗。
-- 审计系统只审查本次直接运行的脚本，不会继续追踪并审查该脚本间接调用、导入或启动的其他脚本。链式审查没有明确边界；当入口脚本涉及大型项目时，可能导致巨量 Token 消耗，因此当前不支持链式审查。
-- [ ] 前端侧边栏在FireFox浏览器下的自动滚动有兼容性问题,已排期修复。
+## Known Issues
 
+- For continuous conversations, the real input token count returned by the previous API call is used as the baseline for estimating the next turn incrementally. Runtime instructions are attached only to the latest user message in each turn and are moved from the previous user message to the newest one across turns. As a result, the next-turn incremental estimate may retain the previous runtime-instruction tokens, slightly overestimating usage and triggering context summarization earlier than necessary. Once the model returns actual usage, the UI is corrected using the real value. MonoLight currently avoids extra probing requests for calibration in order to prevent additional token usage.
+- The audit system only reviews the script directly executed in the current operation. It does not recursively track and audit other scripts that the entry script indirectly calls, imports, or launches. Recursive auditing has no clear natural boundary and can cause very large token consumption for large projects, so chained auditing is currently unsupported.
+- [ ] Automatic sidebar scrolling in the frontend has a compatibility issue in Firefox and is scheduled for a future fix.
 
-## 2. 交互入口
-- **仪表盘 (Dashboard)**: 基于 Vue 3 + Element Plus 的现代管理后台，提供极致流畅的配置与交互体验。
-- **API 文档**: 内置 Swagger (/docs)，支持标准的鉴权与业务接口调用。
+## 2. Interaction Entry Points
 
-## 3. 未来规划
-- 核心类
-  - [ ] **Skill 动态加载**: 实现技能库的热插拔与在线热更新机制。
-  - [ ] **全模态支持**: 除了图片、文本、文件的数据传输，还支持视频、音频等多媒体数据的上传与交互。
-  - [x] **SETUP 机制**: 重构并简化安全部署流程，为不熟悉 Agent 相关配置的用户提供更友好的部署体验。
-  - [ ] **Agent 自行管理的系统配置工具**： 通过与LLM对话方式，实现对系统配置文件的动态调整与管理。
-  - [ ] **WEBUI 数据看板**： 提供实时的系统运行状态、用户会话数据、模型调用统计等信息，帮助管理员监控与管理系统运行。
-  - [ ] **思考等级与思维链支持**： 支持用户自定义思考等级并展示思维链。
-  - [ ] **定义长期记忆存储标准**： 定义通用的长期记忆存储标准，用于与外部系统进行数据交换。
-  - [ ] **支持长期记忆导入/导出**： 支持用户将长期记忆导出为标准格式，或从标准格式导入长期记忆。
-- 扩展类
-  - [ ] **现代化UI**： 重构项目UI，使其更符合现代设计规范，提供更好的用户体验。
-  - [ ] **企业级审计系统**: 使用平台自带的双模型审计机制(已实现)，实现企业级的审计报告自动生成与发送，且在发送后立即删除暂存在服务器上的审计数据，避免被恶意篡改或泄露。
-  - [ ] **接入 QQ平台 消息适配器**: 实现与 QQ平台 的消息交互功能。
-  - [ ] **合并知识库与长期记忆**： 
-  这是一个探索性功能，需要进一步研究与实现。 
-  主要思想是“知识”也属于“长期记忆”的一种，合并后可减少工具数量，避免相似工具对LLM产生误导。
-  - [ ] **主代理的子代理派生**：
-  这是一个探索性功能，需要进一步研究与实现。
-  主要思想是通过主代理生成临时子代理来执行任务，用于完成可并发的重型任务，子代理在父代理的指导下执行任务。
-  需要考虑该功能在当前系统架构下是否有确必要。
+- **Dashboard**: A modern management interface built with Vue 3 and Element Plus for smooth configuration and interaction.
+- **API documentation**: Built-in Swagger documentation at `/docs`, supporting authenticated access and business API calls.
 
-## 4. 技术架构
-架构文档 [ARCHITECTURE.md](./ARCHITECTURE.md)
-开发规范 [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md)
+## 3. Roadmap
 
-## 运行服务
+- Core
+  - [ ] **Dynamic Skill loading**: Add hot-pluggable skills and online hot updates for the skill library.
+  - [ ] **Full multimodal support**: Extend beyond image, text, and file transfer to support video, audio, and other multimedia upload and interaction workflows.
+  - [x] **SETUP mechanism**: Refactor and simplify secure deployment to provide a friendlier setup experience for users unfamiliar with Agent-related configuration.
+  - [ ] **Agent-managed system configuration tools**: Allow system configuration files to be dynamically adjusted and managed through conversations with the LLM.
+  - [ ] **WebUI analytics dashboard**: Provide real-time system health, user session data, model-call statistics, and other operational information for administrators.
+  - [ ] **Reasoning effort and chain-of-thought display support**: Allow users to configure reasoning effort and display reasoning content.
+  - [ ] **Define a long-term memory storage standard**: Establish a general long-term memory storage format for data exchange with external systems.
+  - [ ] **Long-term memory import/export**: Allow users to export long-term memory in a standard format and import it back from that format.
+- Extensions
+  - [ ] **Modernized UI**: Refactor the project UI to better match modern design conventions and improve the overall user experience.
+  - [ ] **Enterprise-grade audit system**: Build on the platform's existing dual-model audit mechanism to automatically generate and deliver enterprise-grade audit reports, then immediately delete temporary audit data from the server after delivery to reduce the risk of tampering or leakage.
+  - [ ] **QQ messaging adapter**: Add messaging integration for the QQ platform.
+  - [ ] **Merge knowledge bases and long-term memory**:
+    This is an exploratory feature that requires further research and implementation.
+    The main idea is that "knowledge" can also be considered a form of "long-term memory." Merging them could reduce the number of tools and avoid confusing the LLM with similar tools.
+  - [ ] **Sub-agent spawning by the primary agent**:
+    This is an exploratory feature that requires further research and implementation.
+    The main idea is for the primary agent to create temporary sub-agents for heavy workloads that can run concurrently, with the sub-agents operating under the primary agent's guidance.
+    The necessity of this feature within the current system architecture still needs to be evaluated.
 
-MonoLight 包含一个 Web 服务和五个独立 Worker：消息平台 Worker、后台任务 Worker、长期记忆 Worker、终端 Worker、会话最终回复 Worker。Web 服务可通过 `APP_WORKERS` 启动多个 Web Worker；五个后台 Worker 使用数据库租约，保证在同一数据库范围内每类 Worker 只有一个有效实例。
+## 4. Technical Architecture
 
-### 共同后端准备
+Architecture documentation: [ARCHITECTURE.md](./ARCHITECTURE.md)
 
-三种方式都先在项目根目录安装后端依赖：
+Development guide: [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md)
+
+## Running the Services
+
+MonoLight consists of one Web service and five independent workers: the messaging-platform worker, background-task worker, long-term-memory worker, terminal worker, and session final-reply worker. The Web service can start multiple Web workers through `APP_WORKERS`. The five background workers use database leases to ensure that only one active instance of each worker type exists within the same database scope.
+
+### Common Backend Setup
+
+All three deployment modes start by installing backend dependencies from the project root:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-在根目录 `.env` 配置数据库、监听地址、端口和 Web Worker 数量。SQLite 与 MySQL 的 `DATABASE_URL` 二选一：
+Configure the database, listen address, port, and number of Web workers in the root `.env` file. Choose either SQLite or MySQL for `DATABASE_URL`:
 
 ```dotenv
 # SQLite
 DATABASE_URL=sqlite+aiosqlite:///./data/monolight.db
 
-# MySQL（替换上面的 SQLite 配置）
+# MySQL (replace the SQLite configuration above)
 # DATABASE_URL=mysql+aiomysql://username:password@127.0.0.1:3306/monolight
 
 APP_HOST=0.0.0.0
@@ -123,32 +129,32 @@ APP_PORT=8001
 APP_WORKERS=1
 ```
 
-`APP_HOST` 默认值为 `0.0.0.0`，只能填写 IP 地址字面量；不接受主机名，也拒绝 IPv6 未指定地址 `::`。`0.0.0.0` 表示监听所有网卡；配置为该地址时，控制台打印的 `127.0.0.1` 地址只供服务器本机访问，其他设备需使用服务器实际 IP 或反向代理域名。通过反向代理对外提供服务时，建议将其设为 `127.0.0.1`。当前示例端口为 `8001`，可按部署环境修改。
+`APP_HOST` defaults to `0.0.0.0` and accepts only IP address literals. Hostnames and the unspecified IPv6 address `::` are rejected. `0.0.0.0` means listening on all network interfaces. When configured this way, the `127.0.0.1` URL printed in the console is only reachable from the server itself; other devices must use the server's actual IP address or a reverse-proxy domain name. When exposing the service through a reverse proxy, `127.0.0.1` is recommended. The example port is `8001` and can be changed for your deployment environment.
 
-### 方式一：一体化部署（推荐）
+### Option 1: Integrated Deployment (Recommended)
 
-这是默认且推荐的部署方式。发布包预置 `app/static/dashboard/` 中的 Dashboard 构建资源，部署机器不需要安装 Node.js 或 npm。执行：
+This is the default and recommended deployment mode. Release packages include the prebuilt Dashboard assets under `app/static/dashboard/`, so Node.js and npm are not required on the deployment machine. Run:
 
 ```bash
 python start.py
 ```
 
-Dashboard、API 和 WebSocket 由同一 Web 服务提供，浏览器访问时保持同源。`start.py` 不执行前端构建，只校验预构建资源是否存在；完整启动后，控制台会打印英文 `Dashboard access URL: ...` 访问地址。
+The Dashboard, API, and WebSocket endpoints are served by the same Web service and therefore remain same-origin in the browser. `start.py` does not build the frontend; it only validates that the prebuilt assets exist. After startup completes, the console prints the English `Dashboard access URL: ...` address.
 
-启动器会在创建任何子进程前校验预构建资源和系统密钥完整性，完成数据库建表与迁移及系统初始化；全部成功后才启动 Web 服务和五个 Worker。任一前置步骤失败时不会启动子进程；子进程启动后如有任一进程异常退出或收到终止信号，启动器会清理其余进程。
+Before creating any child process, the launcher validates the prebuilt assets and system-key integrity, creates/migrates the database schema, and completes system initialization. Web services and all five workers are started only after every prerequisite succeeds. If a prerequisite fails, no child process is launched. After child processes are running, an abnormal exit from any process or a termination signal causes the launcher to clean up the remaining processes.
 
-### 方式二：前后端分离部署
+### Option 2: Separate Frontend and Backend Deployment
 
-后端仍必须通过 `python start.py` 启动。当前启动器仍要求保留 `app/static/dashboard/` 的预构建资源，即使外部前端不使用这些文件也不能删除。
+The backend must still be started with `python start.py`. The current launcher still requires the prebuilt files under `app/static/dashboard/`, even if an external frontend does not use them, so they must not be removed.
 
-前端构建需要 Node.js 和 npm。推荐让浏览器保持同源：独立静态服务器托管前端，并将 `/api`（包括 WebSocket Upgrade）反向代理到后端。此方式保持根 `.env` 中以下变量为注释状态，前端会使用当前浏览器源的 `/api/v1`：
+Building the frontend requires Node.js and npm. Keeping the browser same-origin is recommended: host the frontend with an independent static server and reverse-proxy `/api` (including WebSocket Upgrade requests) to the backend. In this mode, leave the following root `.env` variables commented out so the frontend uses `/api/v1` on the current browser origin:
 
 ```dotenv
 # VUE_APP_API_BASE_URL=https://api.example.com/api/v1
 # VUE_APP_WS_BASE_URL=wss://api.example.com
 ```
 
-只有让浏览器直接跨域访问后端时，才取消注释并按实际地址配置这两个变量。`VUE_APP_API_BASE_URL` 必须包含 `/api/v1`；`VUE_APP_WS_BASE_URL` 只填写 WebSocket 服务根地址或反向代理前缀，不填写最终的 `/api/v1/.../ws` 端点。它们是前端构建期变量，修改后必须重新构建：
+Only uncomment and configure these variables when the browser must access the backend directly across origins. `VUE_APP_API_BASE_URL` must include `/api/v1`. `VUE_APP_WS_BASE_URL` should contain only the WebSocket service root address or reverse-proxy prefix, not the final `/api/v1/.../ws` endpoint. These are frontend build-time variables, so the frontend must be rebuilt after changing them:
 
 ```bash
 cd dashboard
@@ -156,19 +162,19 @@ npm install
 npm run build
 ```
 
-构建产物固定输出到 `app/static/dashboard/`，随后将其复制或发布到独立静态服务器。
+Build output is always written to `app/static/dashboard/`. Copy or publish those assets to the independent static server afterward.
 
-初始化流程使用 `SameSite=Strict` Cookie。跨域直连时，前后端至少应为同一站点下且都使用 HTTPS 的子域，例如 `console.example.com` 和 `api.example.com`；完全不同的站点会导致初始化会话失败。生产环境应使用 HTTPS 和 WSS。
+The initialization flow uses `SameSite=Strict` cookies. For direct cross-origin access, the frontend and backend should at minimum be HTTPS subdomains under the same site, such as `console.example.com` and `api.example.com`. Completely unrelated sites will cause the initialization session to fail. HTTPS and WSS are recommended for production deployments.
 
-### 方式三：开发模式
+### Option 3: Development Mode
 
-根目录 `.env` 中的 `VUE_APP_API_BASE_URL` 和 `VUE_APP_WS_BASE_URL` 通常保持注释。第一个终端在项目根目录启动后端：
+Normally leave `VUE_APP_API_BASE_URL` and `VUE_APP_WS_BASE_URL` commented out in the root `.env` file. Start the backend from the project root in the first terminal:
 
 ```bash
 python start.py
 ```
 
-第二个终端进入 `dashboard`；首次运行先安装依赖，再启动 Vue 开发服务器：
+In a second terminal, enter `dashboard`. Install dependencies on the first run, then start the Vue development server:
 
 ```bash
 cd dashboard
@@ -176,15 +182,15 @@ npm install
 npm run serve
 ```
 
-Vue 开发服务器读取根 `.env` 的 `APP_HOST` 和 `APP_PORT`，将 `/api` 的 HTTP 和 WebSocket 请求代理到后端，并提供热更新。修改 `APP_HOST` 或 `APP_PORT` 后需要重启 `npm run serve`；开发时不需要每次执行 `npm run build`。
+The Vue development server reads `APP_HOST` and `APP_PORT` from the root `.env`, proxies `/api` HTTP and WebSocket requests to the backend, and provides hot reload. Restart `npm run serve` after changing `APP_HOST` or `APP_PORT`. You do not need to run `npm run build` after every frontend change during development.
 
-需要分别调试各进程时，先执行一次全局初始化：
+When debugging individual processes separately, first run global initialization once:
 
 ```bash
 python -c "import asyncio; from start import initialize_system; asyncio.run(initialize_system())"
 ```
 
-然后分别启动：
+Then start the processes independently:
 
 ```bash
 python main.py
@@ -195,28 +201,30 @@ python -m app.workers.terminal
 python -m app.workers.session_reply
 ```
 
-### 多实例部署
+### Multi-instance Deployment
 
-所有实例必须连接同一个数据库。未取得租约的后台 Worker 会保持待命，并在当前持有者退出或租约过期后自动接管。
+All instances must connect to the same database. Background workers that do not acquire the lease remain on standby and automatically take over after the current lease holder exits or the lease expires.
 
-## 自动化测试
-项目已接入自动化测试体系，涵盖单元测试、初始化逻辑测试以及 API 集成测试。
+## Automated Tests
 
-### 执行测试命令
-在项目根目录下执行以下命令运行全量测试：
+The project includes automated tests covering unit tests, initialization logic, and API integration tests.
+
+### Running the Test Suite
+
+Run the full test suite from the project root:
 
 ```bash
 PYTHONPATH=. pytest tests/
 ```
 
-## 项目预览
+## Project Preview
 
-- 清晰的WEBUI对话页面
+- Clean WebUI chat experience
 <p align="center">
   <img src="./docs/screenshot.png" alt="MonoLight Dialog Page" width="100%" />
 </p>
 
-- 丰富的配置
+- Rich configuration options
 <p align="center">
   <img src="./docs/screenshot2.png" alt="MonoLight Config Page" width="100%" />
 </p>
@@ -233,29 +241,30 @@ PYTHONPATH=. pytest tests/
   <img src="./docs/screenshot6.png" alt="MonoLight Config Page 4" width="100%" />
 </p>
 
-- 详细的实时日志
+- Detailed real-time logs
 <p align="center">
   <img src="./docs/screenshot7.png" alt="MonoLight Log Page" width="100%" />
 </p>
 
-## AI Agent 开发规范守则
+## AI Agent Development Rules
 
 > [!IMPORTANT]
-> 所有参与本项目贡献的 AI Agent 必须严格遵守以下开发标准与架构原则：
-> 1. 阅读并执行 [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md) 中的命名规范、代码风格（Ruff）及测试要求。
-> 2. 参考 [ARCHITECTURE.md](./ARCHITECTURE.md) 以确保符合系统设计与模块依赖关系。
-> 2. 在提交任何代码前，必须确保通过 `ruff check` 与 `ruff format` 检查。
-> 3. 所有测试用例的编写或修改必须严格基于目标代码的实际实现。在编写测试前，AI Agent 必须完整阅读并解析目标源码，确保 Mock 逻辑与业务流转完全对齐，严禁凭经验或假设编写测试代码。
+> All AI Agents contributing to this project must strictly follow these development standards and architectural principles:
+> 1. Read and follow the naming conventions, code style requirements (Ruff), and testing requirements in [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md).
+> 2. Refer to [ARCHITECTURE.md](./ARCHITECTURE.md) to ensure changes comply with the system design and module dependency rules.
+> 3. Before submitting any code, ensure that both `ruff check` and `ruff format` pass.
+> 4. Every added or modified test must be based strictly on the actual implementation of the target code. Before writing tests, an AI Agent must fully read and understand the relevant source code so that mocks and business flows match the real implementation. Tests based on assumptions or experience rather than the actual code are prohibited.
 
-## 致谢
+## Acknowledgements
 
-MonoLight 的诞生离不开开源社区的滋养。在开发过程中，以下项目为我们提供了重要的设计灵感与思路参考：
+MonoLight is built on the knowledge and inspiration of the open-source community. The following projects and communities provided important design inspiration during development:
 
-- **[LinuxDo](https://linux.do)** —— 新的理想型社区。作者本人从该社区获取了大量 AI 相关的知识与灵感。
-- **[New API](https://github.com/QuantumNous/new-api)** —— 新一代大模型网关与 AI 资产管理系统。MonoLight 的**模型渠道路由与多模型调度**设计深受其启发。
-- **[AstrBot](https://github.com/AstrBotDevs/AstrBot)** —— 开源一体化 Agentic 聊天机器人平台。MonoLight 的**知识库工具化与 IM 平台接入**思路借鉴了该项目的优秀实践。
+- **[LinuxDo](https://linux.do)** - A new ideal-style community. The author has gained a large amount of AI-related knowledge and inspiration from this community.
+- **[New API](https://github.com/QuantumNous/new-api)** - A next-generation LLM gateway and AI asset management system. MonoLight's **model channel routing and multi-model scheduling** design was strongly inspired by this project.
+- **[AstrBot](https://github.com/AstrBotDevs/AstrBot)** - An open-source all-in-one Agentic chatbot platform. MonoLight's approach to **knowledge-base tooling and IM platform integration** draws on its excellent practices.
 
-感谢开源社区中每一位先行者的探索与分享。
+Thanks to every pioneer in the open-source community for exploring, building, and sharing.
 
-## 5. 开源协议
-本项目采用 AGPL-3.0 协议开源。
+## 5. License
+
+This project is open source under the AGPL-3.0 license.

@@ -98,6 +98,7 @@ export const defaultModelEntry = () => ({
   context_window_k: 64,
   temperature: 0.7,
   top_p: 1,
+  reasoning_effort: null,
   max_tokens: 20480,
   embedding_dimensions: null,
   embedding_timeout: 30,

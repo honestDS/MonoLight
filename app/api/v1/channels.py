@@ -133,10 +133,19 @@ class ChannelChatTestRequest(ChannelAPIKeyRequest):
     model_id: str | None = None
     temperature: float | None = PydanticField(None, ge=0, le=2.0)
     top_p: float | None = PydanticField(None, ge=0, le=1.0)
+    reasoning_effort: str | None = PydanticField(None, min_length=1, max_length=64)
     max_tokens: int | None = PydanticField(None, ge=0)
     timeout: float = PydanticField(60.0, gt=0, le=600)
     advanced_settings: ChannelModelAdvancedSettings = PydanticField(default_factory=ChannelModelAdvancedSettings)
     test_mode: ChannelChatTestMode = ChannelChatTestMode.NON_STREAM
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def normalize_reasoning_effort(cls, value):
+        if value is None or not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
 
 
 class ChannelImageGenerationTestRequest(ChannelAPIKeyRequest):
@@ -402,6 +411,7 @@ async def test_channel_chat(
         "temperature": payload.temperature if payload.temperature is not None else 0.7,
         "max_tokens": payload.max_tokens or 0,
         "top_p": payload.top_p,
+        "reasoning_effort": payload.reasoning_effort,
         "timeout": payload.timeout,
         "http_proxy": payload.http_proxy,
         "custom_headers": payload.advanced_settings.custom_headers,

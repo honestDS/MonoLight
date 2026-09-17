@@ -61,6 +61,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
             context_window_k=request.channel.context_window_k,
             temperature=request.channel.temperature,
             top_p=request.channel.top_p,
+            reasoning_effort=request.channel.reasoning_effort,
             max_tokens=request.channel.max_tokens,
             description=request.channel.description,
             advanced_settings=request.channel.advanced_settings,

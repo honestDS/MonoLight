@@ -86,6 +86,7 @@
         :messages="messages"
         :current-session-id="currentSessionId"
         :current-session-enable-markdown="currentSessionEnableMarkdown"
+        :current-session-show-reasoning="currentSessionShowReasoning"
         :current-session-read-only="isCurrentSessionReadOnly"
         :history-loading="historyLoading"
         :initial-history-loaded="initialHistoryLoaded"
@@ -239,6 +240,17 @@
                         @update:model-value="updateSessionShowToolCalls"
                       />
                     </div>
+
+                    <div class="more-option-divider"></div>
+
+                    <div class="more-option-toggle">
+                      <span class="more-option-label">{{ $t('chat.show_reasoning') }}</span>
+                      <el-switch
+                        :model-value="currentSessionShowReasoning"
+                        :disabled="isCurrentSessionReadOnly || reasoningSettingSubmitting || loading"
+                        @update:model-value="updateSessionShowReasoning"
+                      />
+                    </div>
                   </div>
                 </el-popover>
 
@@ -310,6 +322,8 @@ const openUploadPicker = () => {
   const input = triggerEl?.querySelector?.('input[type="file"]')
   if (input) input.click()
 }
+
+const reasoningSettingSubmitting = ref(false)
 
 // 获取当前会话的 Markdown 开关状态
 const currentSessionEnableMarkdown = computed({
@@ -434,7 +448,8 @@ const {
   historyLoading,
   initialHistoryLoaded,
   newSessionProfileOverrideId,
-  currentSessionShowToolCalls
+  currentSessionShowToolCalls,
+  currentSessionShowReasoning
 } = chat
 
 const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(
@@ -506,6 +521,25 @@ const updateSessionShowToolCalls = async (showToolCalls) => {
     ElMessage.error(error.message || t('chat.setting_failed'))
   } finally {
     toolOutputSettingSubmitting.value = false
+  }
+}
+
+const updateSessionShowReasoning = async (showReasoning) => {
+  if (reasoningSettingSubmitting.value) return
+
+  const sessionId = currentSessionId.value
+  const previousValue = currentSessionShowReasoning.value
+  currentSessionShowReasoning.value = showReasoning
+  if (!sessionId) return
+
+  reasoningSettingSubmitting.value = true
+  try {
+    await chatApi.updateSessionSetting(sessionId, { show_reasoning: showReasoning })
+  } catch (error) {
+    currentSessionShowReasoning.value = previousValue
+    ElMessage.error(error.message || t('chat.setting_failed'))
+  } finally {
+    reasoningSettingSubmitting.value = false
   }
 }
 

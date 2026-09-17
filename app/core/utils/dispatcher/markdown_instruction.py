@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session.message import message_crud
@@ -39,29 +41,21 @@ def build_max_output_tokens_instruction(max_tokens: int) -> str:
     return "\n\n" + MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT.format(max_tokens=max_tokens)
 
 
-def append_environment_prompt_instruction(message: InternalMessage, instruction: str) -> InternalMessage:
-    message.environment_prompt = f"{message.environment_prompt or ''}{instruction}"
-    return message
-
-
-async def materialize_latest_user_environment_prompt(
-    db: AsyncSession,
-    session_id: str,
-    messages: list[InternalMessage],
-    max_tokens: int,
-) -> list[InternalMessage]:
+def materialize_user_environment_prompts(messages: list[InternalMessage]) -> list[InternalMessage]:
     request_messages = [message.model_copy(deep=True) for message in messages]
-    for message in reversed(request_messages):
-        if message.role != MessageRole.USER or (message.id is None and not message.environment_prompt and not message.guidance_prompt):
+    latest_user_message: InternalMessage | None = None
+    for message in request_messages:
+        if message.role != MessageRole.USER:
             continue
-        message.environment_prompt = await build_user_runtime_instructions(db, session_id, max_tokens)
-        if message.id is not None:
-            await message_crud.set_environment_prompt(db, message.id, message.environment_prompt)
-        append_text_instruction(message, message.environment_prompt)
-        guidance_prompt = message.guidance_prompt.strip() if isinstance(message.guidance_prompt, str) else ""
+        latest_user_message = message
+        environment_prompt = message.environment_prompt if isinstance(message.environment_prompt, str) else ""
+        if environment_prompt:
+            append_text_instruction(message, environment_prompt)
+
+    if latest_user_message is not None:
+        guidance_prompt = latest_user_message.guidance_prompt.strip() if isinstance(latest_user_message.guidance_prompt, str) else ""
         if guidance_prompt:
-            append_text_instruction(message, f"\n\n{guidance_prompt}")
-        break
+            append_text_instruction(latest_user_message, f"\n\n{guidance_prompt}")
     return request_messages
 
 
@@ -80,5 +74,45 @@ def append_user_runtime_instruction_text(message: InternalMessage, instruction: 
     return message
 
 
-async def append_user_runtime_instructions(db: AsyncSession, session_id: str, message: InternalMessage, max_tokens: int = 0) -> InternalMessage:
-    return append_user_runtime_instruction_text(message, await build_user_runtime_instructions(db, session_id, max_tokens))
+async def ensure_user_runtime_instructions(
+    db: AsyncSession,
+    session_id: str,
+    message: InternalMessage,
+    max_tokens: int = 0,
+    *,
+    instruction: str | None = None,
+) -> InternalMessage:
+    if isinstance(message.environment_prompt, str) and message.environment_prompt:
+        return message
+
+    if instruction is None:
+        instruction = await build_user_runtime_instructions(db, session_id, max_tokens)
+    append_user_runtime_instruction_text(message, instruction)
+    if message.id is not None:
+        await message_crud.set_environment_prompt(db, message.id, instruction)
+    return message
+
+
+def refresh_max_output_tokens_instruction(message: InternalMessage, max_tokens: int) -> InternalMessage:
+    environment_prompt = message.environment_prompt if isinstance(message.environment_prompt, str) else ""
+    pattern = r"(The hard maximum for this response is )\d+( output tokens\.)"
+    replacement = rf"\g<1>{max_tokens}\2"
+    if re.search(pattern, environment_prompt):
+        message.environment_prompt = re.sub(pattern, replacement, environment_prompt, count=1)
+    else:
+        message.environment_prompt = f"{environment_prompt}{build_max_output_tokens_instruction(max_tokens)}"
+    return message
+
+
+async def refresh_latest_user_max_output_tokens_instruction(
+    db: AsyncSession,
+    messages: list[InternalMessage],
+    max_tokens: int,
+) -> None:
+    for message in reversed(messages):
+        if message.role != MessageRole.USER:
+            continue
+        refresh_max_output_tokens_instruction(message, max_tokens)
+        if message.id is not None:
+            await message_crud.set_environment_prompt(db, message.id, message.environment_prompt)
+        return

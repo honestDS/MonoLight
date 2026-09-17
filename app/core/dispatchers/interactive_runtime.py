@@ -278,14 +278,17 @@ async def dispatch_interactive(
                     if state.current_turn == max_turns:
                         summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                         state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
-                        current_tools = None
+                        current_tools = state.tools
+                        current_tool_choice = "none"
                     else:
                         current_tools = state.tools
+                        current_tool_choice = "auto"
 
                     response_id = str(uuid.uuid4())
                     generation_result = await generate_interactive_turn(
                         state,
                         current_tools=current_tools,
+                        tool_choice=current_tool_choice,
                         response_id=response_id,
                     )
                     ai_msg = generation_result.message
@@ -323,6 +326,7 @@ async def dispatch_interactive(
                             turn_end_content = None
                         turn_end_event: dict[str, Any] = {
                             "type": "turn_end",
+                            "turn": state.current_turn,
                             "response_id": response_id,
                         }
                         saved_message_id = getattr(saved_msg, "id", None)
@@ -330,6 +334,7 @@ async def dispatch_interactive(
                             turn_end_event["message_id"] = saved_message_id
                         turn_end_values = {
                             "content": turn_end_content,
+                            "reasoning_content": ai_msg.reasoning_content,
                             "finish_reason": generation_result.finish_reason,
                             "finish_details": generation_result.finish_details,
                             "refusal": generation_result.refusal,
@@ -341,6 +346,7 @@ async def dispatch_interactive(
 
                     if not ai_msg.tool_calls:
                         state.final_ai_content = ai_msg.content
+                        state.final_reasoning_content = ai_msg.reasoning_content
                         state.final_finish_reason = generation_result.finish_reason
                         state.final_finish_details = generation_result.finish_details
                         state.final_provider_metadata = generation_result.provider_metadata
@@ -393,6 +399,7 @@ async def dispatch_interactive(
                     message=LLMChoiceMessage(
                         role=MessageRole.ASSISTANT,
                         content=state.final_ai_content,
+                        reasoning_content=state.final_reasoning_content,
                         refusal=state.final_refusal,
                         provider_metadata=state.final_message_provider_metadata,
                     ),

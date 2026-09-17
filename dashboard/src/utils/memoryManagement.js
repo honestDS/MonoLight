@@ -191,15 +191,27 @@ export const normalizeMemorySettings = (data) => {
   }
 }
 
-export const getOrganizationModelsForChannel = (channels, channelId) => {
+export const getOrganizationModelOptions = channels => {
   if (!Array.isArray(channels)) return []
-  const channel = channels.find(item => String(item?.id) === String(channelId))
-  if (!Array.isArray(channel?.model_ids)) return []
-  return channel.model_ids.filter(model => (
-    model?.model_id &&
-    String(model.usage || '').toUpperCase() === 'CHAT' &&
-    model.is_enabled !== false
-  ))
+  return channels
+    .flatMap(channel => {
+      if (!channel?.id || !Array.isArray(channel.model_ids)) return []
+      return channel.model_ids
+        .filter(model => (
+          model?.model_id &&
+          String(model.usage || '').toUpperCase() === 'CHAT'
+        ))
+        .map(model => ({
+          ...model,
+          key: `${channel.id}::${model.model_id}`,
+          channel_id: channel.id,
+          channel_name: channel.name || String(channel.id),
+          model_id: model.model_id,
+          label: `${channel.name || channel.id} / ${model.model_id}`,
+          channel_disabled: channel.is_active === false,
+          model_disabled: model.is_enabled === false
+        }))
+    })
 }
 
 export const validateOrganizationSettings = (form, selectedModel, requiredOutputTokens) => {
@@ -208,7 +220,7 @@ export const validateOrganizationSettings = (form, selectedModel, requiredOutput
 
   if (hasChannel !== hasModel) return 'organization_selection_pair_required'
 
-  if (hasChannel && (!selectedModel || String(selectedModel.usage || '').toUpperCase() !== 'CHAT' || selectedModel.is_enabled === false)) {
+  if (hasChannel && (!selectedModel || String(selectedModel.usage || '').toUpperCase() !== 'CHAT' || selectedModel.channel_disabled === true || selectedModel.model_disabled === true || selectedModel.is_enabled === false)) {
     return 'organization_model_invalid'
   }
 

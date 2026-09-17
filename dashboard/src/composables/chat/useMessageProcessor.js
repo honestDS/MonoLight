@@ -4,6 +4,7 @@ import { chatApi } from '../../api'
 import i18n from '../../i18n'
 import { findAssistantResponseReplacementIndex, getMessageDedupeKeys, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, normalizeMessageContent } from '../../utils'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
+import { appendStreamReasoning, finalizeStreamReasoning as finalizeReasoning } from './reasoningTracker.js'
 import { findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
@@ -96,6 +97,7 @@ export function useMessageProcessor() {
   // ==================== 消息处理方法 ====================
 
   const seenContentEvents = new Map()
+  const seenReasoningEvents = new Set()
   const shouldSkipRepeatedContentEvent = (text, responseId, workId, turn, requestId, eventId) => {
     const stableId = normalizeStableId(responseId) || (normalizeStableId(workId) && turn !== undefined && turn !== null
       ? `work:${normalizeStableId(workId)}:${turn}`
@@ -122,6 +124,21 @@ export function useMessageProcessor() {
   }
 
   // 处理流式的增量文本推送事件
+  const processStreamReasoning = (messagesRef, text, turn, responseId, requestId, workId, eventId) => {
+    if (typeof text !== 'string' || !text) return
+    const stableResponseId = normalizeStableId(responseId)
+    const stableWorkId = normalizeStableId(workId)
+    const eventKey = eventId || `reasoning:${stableResponseId || stableWorkId || requestId || 'unknown'}:${turn ?? ''}:${text}`
+    if (seenReasoningEvents.has(eventKey)) return
+    seenReasoningEvents.add(eventKey)
+    if (seenReasoningEvents.size > 2000) seenReasoningEvents.delete(seenReasoningEvents.values().next().value)
+    messagesRef.value = appendStreamReasoning(messagesRef.value, text, { turn, responseId, requestId, workId })
+  }
+
+  const finalizeStreamReasoning = (messagesRef, reasoningContent, turn, responseId, requestId, workId) => {
+    messagesRef.value = finalizeReasoning(messagesRef.value, reasoningContent, { turn, responseId, requestId, workId })
+  }
+
   const processStreamContent = (messagesRef, text, turn, thinkingId, finishReason, responseId, requestId, workId, eventId) => {
     // 识别排队状态
     if (finishReason === 'queued') {
@@ -294,13 +311,14 @@ export function useMessageProcessor() {
     }
 
     const newMsg = {
-      id: `tool_call_${toolCall.id || Date.now()}`,
-      role: 'assistant', 
+      ...(streamedContentMsg || {}),
+      id: streamedContentMsg?.id || `tool_call_${toolCall.id || Date.now()}`,
+      role: 'assistant',
       content: JSON.stringify(contentObj),
-      response_id: responseId,
-      request_id: requestId,
-      work_id: workId,
-      created_at: Date.now() / 1000
+      response_id: streamedContentMsg?.response_id || responseId,
+      request_id: streamedContentMsg?.request_id || requestId,
+      work_id: streamedContentMsg?.work_id || workId,
+      created_at: streamedContentMsg?.created_at || Date.now() / 1000
     }
 
     // 工具调用与同轮流式正文属于同一条助手消息，合并后可避免后续事件将正文覆盖掉。
@@ -418,6 +436,7 @@ export function useMessageProcessor() {
     const choiceMessage = choice?.message
     const finishReason = choice?.finish_reason ?? response.finish_reason
     const refusal = choiceMessage?.refusal ?? response.refusal
+    const reasoningContent = choiceMessage?.reasoning_content ?? response.reasoning_content
     const finishDetails = choice?.finish_details ?? response.finish_details
     const providerMetadata = choice?.provider_metadata ?? response.provider_metadata
     const messageProviderMetadata = choiceMessage?.provider_metadata ?? response.message_provider_metadata
@@ -513,6 +532,9 @@ export function useMessageProcessor() {
     if (finishDetails && typeof finishDetails === 'object' && Object.keys(finishDetails).length > 0) {
       finalAiMsg.finish_details = finishDetails
     }
+    if (typeof reasoningContent === 'string' && reasoningContent.trim()) {
+      finalAiMsg.reasoning_content = reasoningContent
+    }
     if (typeof refusal === 'string' && refusal) {
       finalAiMsg.refusal = refusal
     }
@@ -570,7 +592,7 @@ export function useMessageProcessor() {
   // 添加 thinking 占位符消息
   const addThinkingMessage = (messagesRef) => {
     const thinkingId = Date.now() + 1
-    messagesRef.value.push({ id: thinkingId, role: 'thinking', content: 'Thinking...' })
+    messagesRef.value.push({ id: thinkingId, role: 'thinking', content: '' })
     return thinkingId
   }
 
@@ -602,7 +624,8 @@ export function useMessageProcessor() {
             ? Boolean(displayContent.trim())
             : displayContent !== undefined && displayContent !== null
           const hasFiles = Array.isArray(message.files) && message.files.length > 0
-          if (!hasDisplayContent && !hasFiles) continue
+          const hasReasoning = typeof message.reasoning_content === 'string' && Boolean(message.reasoning_content.trim())
+          if (!hasDisplayContent && !hasFiles && !hasReasoning) continue
         }
       }
 
@@ -670,6 +693,8 @@ export function useMessageProcessor() {
 
   return {
     processStreamContent,
+    processStreamReasoning,
+    finalizeStreamReasoning,
     processStreamToolStart,
     processStreamToolEnd,
     processStreamError,

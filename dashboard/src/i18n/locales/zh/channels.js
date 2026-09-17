@@ -46,6 +46,8 @@ export default {
   model_id_placeholder: '如 gpt-4o',
   temperature: 'Temperature',
   top_p: 'Top P',
+  reasoning_effort: '思考等级',
+  reasoning_effort_placeholder: '请选择或输入思考等级',
   max_tokens: '最大输出 Token',
   context_window_k: '上下文限制 K',
   image_understanding: '图像理解',

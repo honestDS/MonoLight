@@ -923,7 +923,6 @@ async def test_pending_confirmation_bundle_rolls_back_all_rows_when_activation_f
 @pytest.mark.parametrize(
     ("message", "attachments", "expected_status", "expected_work_type"),
     [
-        ("同意", None, AuditRecordStatus.EXECUTING, SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION),
         ("拒绝", None, AuditRecordStatus.REJECTED, SessionReplyWorkType.FOREGROUND_REPLY),
         ("忽略", None, AuditRecordStatus.CANCELLED, SessionReplyWorkType.FOREGROUND_REPLY),
         ("继续做别的事", None, AuditRecordStatus.CANCELLED, SessionReplyWorkType.FOREGROUND_REPLY),

@@ -72,6 +72,13 @@
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
           </div>
+          <ThinkingBlock
+            v-if="currentSessionShowReasoning && getReasoningContent(msg)"
+            v-model="reasoningCollapseModel"
+            :name="getReasoningCollapseName(msg)"
+            :content="getReasoningContent(msg)"
+            :rendered-content="renderMarkdown(getReasoningContent(msg))"
+          />
           <div
             v-if="msg.content.trim() && currentSessionEnableMarkdown"
             class="content markdown-body tool-call-message"
@@ -156,6 +163,15 @@
             </div>
           </div>
         </template>
+        <template v-else-if="msg.role === 'reasoning'">
+          <ThinkingBlock
+            v-if="currentSessionShowReasoning && getReasoningContent(msg)"
+            v-model="reasoningCollapseModel"
+            :name="getReasoningCollapseName(msg)"
+            :content="getReasoningContent(msg)"
+            :rendered-content="renderMarkdown(getReasoningContent(msg))"
+          />
+        </template>
         <template v-else-if="msg.role === 'background_system'">
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
@@ -169,6 +185,14 @@
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
           </div>
+
+          <ThinkingBlock
+            v-if="currentSessionShowReasoning && msg.role === 'assistant' && getReasoningContent(msg)"
+            v-model="reasoningCollapseModel"
+            :name="getReasoningCollapseName(msg)"
+            :content="getReasoningContent(msg)"
+            :rendered-content="renderMarkdown(getReasoningContent(msg))"
+          />
 
           <div v-if="msg.attachments && msg.attachments.length > 0" class="message-attachments">
             <div v-for="(att, idx) in msg.attachments" :key="idx" class="message-attachment-item">
@@ -276,16 +300,16 @@
         <img src="@/assets/svg/new_msg.svg" alt="" />
       </button>
     </Transition>
-    <Transition name="history-loading">
-      <div v-if="historyLoading" class="history-loading-indicator" role="status" aria-live="polite">
-        <span class="history-loading-spinner"></span>
-        <span>{{ $t('chat.loading_history') }}</span>
-      </div>
-    </Transition>
-    <Transition name="context-summary-notice">
-      <div v-if="contextSummarizing" class="context-summary-notice" role="status" aria-live="polite">
-        <span class="context-summary-notice-spinner"></span>
-        <span>{{ $t('chat.context_summarizing') }}</span>
+    <Transition name="activity-status-notice" mode="out-in">
+      <div
+        v-if="activityNotice"
+        :key="activityNotice.type"
+        class="activity-status-notice"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="activity-status-notice-spinner"></span>
+        <span>{{ activityNotice.text }}</span>
       </div>
     </Transition>
   </div>
@@ -302,6 +326,7 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/github.css'
 import 'github-markdown-css/github-markdown.css'
 import VirtualizedCode from './VirtualizedCode.vue'
+import ThinkingBlock from './ThinkingBlock.vue'
 import { fileApi } from '../api'
 import {
   formatTimestamp,
@@ -317,11 +342,13 @@ import {
 } from '../utils'
 import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
+import { getReasoningCollapseName, resolveChatActivityNotice } from '../utils/chatPresentation.js'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
   currentSessionId: { type: String, default: null },
   currentSessionEnableMarkdown: { type: Boolean, default: false },
+  currentSessionShowReasoning: { type: Boolean, default: true },
   currentSessionReadOnly: { type: Boolean, default: false },
   activeCollapse: { type: Array, default: () => [] },
   historyLoading: { type: Boolean, default: false },
@@ -368,6 +395,7 @@ const collapseModel = computed({
   get: () => props.activeCollapse,
   set: value => emit('update:activeCollapse', value)
 })
+const reasoningCollapseModel = ref([])
 
 const md = new MarkdownIt({
   html: false,
@@ -478,8 +506,11 @@ const buildDisplayMessages = (messages) => {
           role: 'assistant',
           response_id: responseId,
           request_id: message.request_id,
+          work_id: message.work_id,
+          turn: message.turn,
           created_at: message.created_at,
           content: '',
+          reasoning_content: message.reasoning_content || '',
           pairs: [],
           latestEvent: null
         }
@@ -488,6 +519,7 @@ const buildDisplayMessages = (messages) => {
 
       const toolContent = getToolCallContent(message).trim()
       if (toolContent) activeToolGroup.content = activeToolGroup.content ? `${activeToolGroup.content}\n${toolContent}` : toolContent
+      if (!activeToolGroup.reasoning_content && message.reasoning_content) activeToolGroup.reasoning_content = message.reasoning_content
       getToolCalls(message).forEach((toolCall, toolIndex) => {
         const toolCallId = getToolCallId(toolCall, `${messageKey}_${toolIndex}`)
         let pair = activeToolGroup.pairs.find(item => item.id === toolCallId)
@@ -548,7 +580,24 @@ const buildDisplayMessages = (messages) => {
   return output
 }
 
-const displayMessages = computed(() => buildDisplayMessages(props.messages))
+const displayMessages = computed(() => buildDisplayMessages(props.messages).filter(message => (
+  message.role !== 'thinking' && (props.currentSessionShowReasoning || message.role !== 'reasoning')
+)))
+const hasActiveThinking = computed(() => props.messages.some(message => message?.role === 'thinking'))
+const activityNotice = computed(() => {
+  const type = resolveChatActivityNotice({
+    contextSummarizing: props.contextSummarizing,
+    thinking: hasActiveThinking.value,
+    historyLoading: props.historyLoading
+  })
+  if (!type) return null
+  const textKeys = {
+    context_summary: 'chat.context_summarizing',
+    thinking: 'chat.thinking_in_progress',
+    history_loading: 'chat.loading_history'
+  }
+  return { type, text: t(textKeys[type]) }
+})
 const unreadMessageKeys = ref([])
 const latestLlmMessageVisible = ref(true)
 const followsOutput = ref(true)
@@ -646,6 +695,7 @@ const getIncomingMessageFields = message => ({
   role: message?.role,
   type: message?.type,
   content: message?.content,
+  reasoning_content: message?.reasoning_content,
   status: message?.status,
   attachments: message?.attachments,
   files: message?.files,
@@ -710,6 +760,10 @@ const handleChangedIncomingMessages = async (changedMessages, replaceUnread = fa
   }
   scheduleUnreadVisibilityCheck()
 }
+
+watch(() => props.currentSessionId, () => {
+  reasoningCollapseModel.value = []
+})
 
 watch(
   () => [props.currentSessionId, props.initialHistoryLoaded],
@@ -927,6 +981,7 @@ const getMessageText = (message) => {
   return message.role === 'err' ? truncateErrorMessage(text) : text
 }
 const getMessageFiles = (message) => message.files || parseAssistantFilesContent(message.content)?.files || []
+const getReasoningContent = message => typeof message?.reasoning_content === 'string' ? message.reasoning_content : ''
 const GUIDANCE_START_MARKER = '[系统提示信息]'
 const GUIDANCE_END_MARKER = '[系统提示信息结束]'
 const getGuidanceText = (content) => {
@@ -1067,7 +1122,7 @@ const formatFileSize = (size) => {
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
-const getMessageClass = role => ({ user: 'user', thinking: 'thinking', background_system: 'background-system', err: 'error' })[role] || 'ai'
+const getMessageClass = role => ({ user: 'user', background_system: 'background-system', err: 'error' })[role] || 'ai'
 const handleNewMessageClick = async () => {
   await scrollToBottom('smooth')
   updateMessageListBottomState()

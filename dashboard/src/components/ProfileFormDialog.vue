@@ -205,28 +205,29 @@
                   </template>
                   <el-switch v-model="form.memory_organization.auto_organize_enabled" :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady" />
                 </el-form-item>
-                <el-form-item :label="$t('profiles.organization_channel')">
-                  <el-select
-                    v-model="form.memory_organization.organization_channel_id"
-                    clearable
-                    filterable
-                    class="full-width-input"
-                    :placeholder="$t('profiles.organization_channel_placeholder')"
-                    :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady"
-                  >
-                    <el-option v-for="channel in memoryOrganizationChannels" :key="channel.id" :label="channel.name" :value="channel.id" />
-                  </el-select>
-                </el-form-item>
                 <el-form-item :label="$t('profiles.organization_model')">
                   <el-select
-                    v-model="form.memory_organization.organization_model_id"
+                    :model-value="memoryOrganizationModelKey"
                     clearable
                     filterable
                     class="full-width-input"
                     :placeholder="$t('profiles.organization_model_placeholder')"
-                    :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady || !form.memory_organization.organization_channel_id"
+                    :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady"
+                    @update:model-value="$emit('update:memoryOrganizationModelKey', $event)"
                   >
-                    <el-option v-for="model in memoryOrganizationModels" :key="model.model_id" :label="model.model_id" :value="model.model_id" />
+                    <el-option
+                      v-for="item in memoryOrganizationModelOptions"
+                      :key="item.key"
+                      :label="item.label"
+                      :value="item.key"
+                      :disabled="item.channel_disabled || item.model_disabled"
+                    >
+                      <div class="organization-model-option">
+                        <span>{{ item.label }}</span>
+                        <el-tag v-if="item.channel_disabled" type="warning" size="small">{{ $t('profiles.channel_disabled') }}</el-tag>
+                        <el-tag v-else-if="item.model_disabled" type="warning" size="small">{{ $t('profiles.model_disabled') }}</el-tag>
+                      </div>
+                    </el-option>
                   </el-select>
                 </el-form-item>
                 <div v-if="memoryOrganizationModel" class="model-summary">
@@ -599,8 +600,8 @@ defineProps({
   memoryEmbeddingMigrationStatusText: { type: String, default: '' },
   memoryEmbeddingMigrationStatusType: { type: String, default: 'warning' },
   memoryEmbeddingTargetLabel: { type: String, default: '' },
-  memoryOrganizationChannels: { type: Array, required: true },
-  memoryOrganizationModels: { type: Array, required: true },
+  memoryOrganizationModelKey: { type: String, default: null },
+  memoryOrganizationModelOptions: { type: Array, required: true },
   memoryOrganizationModel: { type: Object, default: null },
   memoryOrganizationRequiredOutputTokens: { type: Number, default: 0 },
   memorySettingsLoading: { type: Boolean, required: true },
@@ -626,6 +627,7 @@ defineEmits([
   'update:allowedOperationDirInput',
   'update:auditModelKey',
   'update:dialogVisible',
-  'update:fileSendBlockedExtensionInput'
+  'update:fileSendBlockedExtensionInput',
+  'update:memoryOrganizationModelKey'
 ])
 </script>

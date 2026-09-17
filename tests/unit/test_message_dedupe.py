@@ -6,12 +6,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.dispatcher.save_message import save_message
-from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.message import InternalMessage, Message, MessageResponse, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.client import CancellationSafeAsyncSession
+from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
 
 TEST_SESSION_ID = "message-dedupe-session"
 TEST_UID = "message-dedupe-user"
@@ -23,6 +24,12 @@ async def clean_message_table():
         await connection.run_sync(lambda sync_connection: PromptLibrary.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: Profile.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: ChatSession.__table__.create(sync_connection, checkfirst=True))
+
+    async with AsyncSessionLocal() as db:
+        await migrate_chat_session_show_reasoning(db)
+        await db.commit()
+
+    async with engine.begin() as connection:
         await connection.run_sync(lambda sync_connection: Message.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: Message.__table__.create(sync_connection))
 
@@ -92,6 +99,26 @@ async def test_save_message_persists_outbound_text_refinement_as_plain_text():
     assert persisted is not None
     assert persisted.type == MessageType.OUTBOUND_TEXT_REFINEMENT
     assert persisted.content == "refinement prompt"
+
+
+@pytest.mark.asyncio
+async def test_save_message_persists_reasoning_content():
+    async with AsyncSessionLocal() as db:
+        saved = await save_message(
+            db,
+            TEST_SESSION_ID,
+            TEST_UID,
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content="answer", reasoning_content="thinking"),
+            1,
+        )
+        persisted = await db.get(Message, saved.id)
+
+    assert saved.reasoning_content == "thinking"
+    assert persisted is not None
+    assert persisted.reasoning_content == "thinking"
+    assert MessageResponse.model_validate(persisted).reasoning_content == "thinking"
 
 
 @pytest.mark.asyncio

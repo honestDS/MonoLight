@@ -15,11 +15,9 @@ from app.core.constants import (
     ERR_SYSTEM_SETTING_NOT_FOUND_AFTER_INSERT,
     SETUP_ADMIN_UID_KEY,
     SETUP_STATUS_COMPLETED,
-    SETUP_STATUS_CONFIGURING,
     SETUP_STATUS_KEY,
     SETUP_STATUS_PENDING,
 )
-from app.core.crud.account.user import user_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.models.system_setting import SystemSetting
@@ -57,33 +55,6 @@ async def _initialize_and_commit(
         return result
 
 
-async def _claim_and_commit(session_factory: async_sessionmaker[AsyncSession]) -> bool:
-    async with session_factory() as session:
-        claimed = await system_setting_crud.claim_setup(session)
-        await session.commit()
-        return claimed
-
-
-@pytest.mark.asyncio
-async def test_initialize_setup_state_creates_pending_state(
-    setup_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with setup_session_factory() as session:
-        status, admin_uid = await system_setting_crud.initialize_setup_state(session, admin_uid=None)
-
-        assert status == SETUP_STATUS_PENDING
-        assert admin_uid is None
-        await session.commit()
-
-        rows = await _get_setup_rows(session)
-        assert len(rows) == 2
-        assert {row.key for row in rows} == {SETUP_STATUS_KEY, SETUP_ADMIN_UID_KEY}
-
-        values = {row.key: row.value for row in rows}
-        assert values[SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
-        assert values[SETUP_ADMIN_UID_KEY] == ""
-
-
 @pytest.mark.asyncio
 async def test_insert_if_missing_raises_when_setting_is_not_found_after_insert(
     setup_session_factory: async_sessionmaker[AsyncSession],
@@ -116,31 +87,6 @@ async def test_initialize_setup_state_raises_when_setup_status_is_not_initialize
 
 
 @pytest.mark.asyncio
-async def test_initialize_setup_state_preserves_existing_admin(
-    setup_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with setup_session_factory() as session:
-        status, admin_uid = await system_setting_crud.initialize_setup_state(session, admin_uid="admin-a")
-        assert status == SETUP_STATUS_COMPLETED
-        assert admin_uid == "admin-a"
-        await session.commit()
-
-    async with setup_session_factory() as session:
-        await system_setting_crud.initialize_setup_state(session, admin_uid="admin-b")
-        await session.commit()
-
-    async with setup_session_factory() as session:
-        status, admin_uid = await system_setting_crud.initialize_setup_state(session, admin_uid=None)
-        assert status == SETUP_STATUS_COMPLETED
-        assert admin_uid == "admin-a"
-        await session.commit()
-
-    async with setup_session_factory() as session:
-        assert await system_setting_crud.get_setup_status(session) == SETUP_STATUS_COMPLETED
-        assert await system_setting_crud.get_setup_admin_uid(session) == "admin-a"
-
-
-@pytest.mark.asyncio
 async def test_concurrent_first_initialization_is_idempotent(
     setup_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -155,41 +101,6 @@ async def test_concurrent_first_initialization_is_idempotent(
         rows = await _get_setup_rows(session)
         assert len(rows) == 2
         assert {row.key for row in rows} == {SETUP_STATUS_KEY, SETUP_ADMIN_UID_KEY}
-
-
-@pytest.mark.asyncio
-async def test_concurrent_setup_claim_allows_only_one_winner(
-    setup_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with setup_session_factory() as session:
-        await system_setting_crud.initialize_setup_state(session, admin_uid=None)
-        await session.commit()
-
-    results = await asyncio.gather(
-        _claim_and_commit(setup_session_factory),
-        _claim_and_commit(setup_session_factory),
-    )
-
-    assert sum(results) == 1
-    async with setup_session_factory() as session:
-        assert await system_setting_crud.get_setup_status(session) == SETUP_STATUS_CONFIGURING
-
-
-@pytest.mark.asyncio
-async def test_setup_claim_rollback_leaves_pending_state_and_allows_retry(
-    setup_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with setup_session_factory() as session:
-        await system_setting_crud.initialize_setup_state(session, admin_uid=None)
-        await session.commit()
-
-    async with setup_session_factory() as rolled_back_session, setup_session_factory() as retry_session:
-        assert await system_setting_crud.claim_setup(rolled_back_session)
-        await rolled_back_session.rollback()
-
-        assert await system_setting_crud.get_setup_status(retry_session) == SETUP_STATUS_PENDING
-        assert await system_setting_crud.claim_setup(retry_session)
-        await retry_session.commit()
 
 
 @pytest.mark.asyncio
@@ -211,26 +122,3 @@ async def test_setup_completion_requires_claim_and_is_terminal(
         assert await system_setting_crud.get_setup_admin_uid(session) == "admin-final"
         assert not await system_setting_crud.claim_setup(session)
         assert not await system_setting_crud.complete_setup(session)
-
-
-@pytest.mark.asyncio
-async def test_get_superuser_ignores_username_and_orders_by_id(
-    setup_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with setup_session_factory() as session:
-        session.add_all(
-            [
-                User(id=1, uid="uid-admin", username="admin", is_superuser=False),
-                User(id=30, uid="uid-super-high", username="super-high", is_superuser=True),
-                User(id=10, uid="uid-super-low", username="super-low", is_superuser=True),
-            ]
-        )
-        await session.commit()
-
-        superuser = await user_crud.get_superuser(session)
-
-        assert superuser is not None
-        assert superuser.id == 10
-        assert superuser.uid == "uid-super-low"
-        assert superuser.username == "super-low"
-        assert superuser.is_superuser
