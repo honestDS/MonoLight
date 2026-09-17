@@ -33,6 +33,7 @@ from app.core.tools import (
     KNOWLEDGE_BASE_QUERY_TOOL_NAME,
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     SHELL_COMPANION_TOOL_NAMES,
+    SYSTEM_BUILTIN_TOOL_NAMES,
     TOOL_EXECUTOR_MAP,
     get_tool_parameters_schema,
     get_tool_required_parameters,
@@ -58,6 +59,8 @@ from app.models.profile import (
 
 
 def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
+    if tool_name in SYSTEM_BUILTIN_TOOL_NAMES:
+        return True
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         return bool(getattr(getattr(cfg, "memory", None), "enabled", False))
     if tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
