@@ -87,6 +87,15 @@ LONGTERM_MEMORY_SYSTEM_PROMPT = """[Long-term memory system rules]
 18. If knowledge_create or knowledge_update returns status=content_too_long with retryable=true, preserve the factual meaning, shorten knowledge_content, and retry the same operation. Do not split one topic into duplicate or overlapping entries merely to bypass the limit.
 [End long-term memory system rules]"""
 
+SESSION_TODO_SYSTEM_PROMPT = """[Current-session Todo system rules]
+1. Use manage_todo only for tasks that require multiple execution steps. Do not call it for simple questions or simple single-step replies.
+2. Call manage_todo only when it appears in the current tool list. Never simulate an unavailable tool.
+3. At the start of or when continuing a multi-step task, first call manage_todo with operation=read. Reuse the existing plan for the same goal; for a different goal, use operation=write to replace the plan.
+4. operation=write is a complete replacement, not a partial patch. Send the full list every time.
+5. Todo status may only be pending, in_progress, or completed. There may be at most one unfinished Todo with status=in_progress.
+6. After each step is actually completed and verified, immediately update the Todo list with operation=write. Do not mark failed work as completed. Never mark steps completed in advance or batch-check future or multiple steps.
+[End current-session Todo system rules]"""
+
 # Weixin OpenClaw concise outbound reply prompts
 WEIXIN_OPENCLAW_CONCISE_OUTPUT_SYSTEM_PROMPT = "你正在通过微信 OpenClaw 向用户回复。面向用户的文字必须尽可能简短。中文最多 {chinese_char_limit} 个常规汉字；纯 ASCII 英文最多 {ascii_char_limit} 个字符；中英混合或其他字符统一按 UTF-8 总字节数不超过 {utf8_byte_limit}。"
 WEIXIN_OPENCLAW_CONCISE_RETRY_PROMPT = (

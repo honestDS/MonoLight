@@ -20,6 +20,7 @@ from app.core.terminal import (
 from app.core.tools import (
     SHELL_COMPANION_TOOL_SCHEMAS,
     SHELL_TOOL_SCHEMA,
+    SYSTEM_BUILTIN_TOOL_NAMES,
     get_tools_for_profile,
 )
 from app.core.tools.terminal import (
@@ -127,7 +128,7 @@ def _executor(executor_class, *, tool_timeout: float = 30.0):
 @pytest.mark.asyncio
 async def test_get_tools_for_profile_exposes_shell_companions_only_with_shell():
     enabled_tools, _ = await get_tools_for_profile(None, _profile(["execute_shell"]))
-    enabled_names = [tool["function"]["name"] for tool in enabled_tools]
+    enabled_names = [tool["function"]["name"] for tool in enabled_tools if tool["function"]["name"] not in SYSTEM_BUILTIN_TOOL_NAMES]
 
     assert enabled_names == [
         SHELL_TOOL_SCHEMA["function"]["name"],

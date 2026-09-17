@@ -1,0 +1,345 @@
+import copy
+import json
+from collections.abc import AsyncGenerator
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import delete, event, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateTable
+
+from app.core.dispatch_context import DispatchContext
+from app.core.prompts import SESSION_TODO_SYSTEM_PROMPT
+from app.core.tools import (
+    MANAGE_TODO_TOOL_NAME,
+    MANAGE_TODO_TOOL_SCHEMA,
+    ManageTodoExecutor,
+    get_tools_for_profile,
+    tool_requires_audit,
+)
+from app.core.tools.todo import validate_manage_todo_arguments
+from app.core.utils.dispatcher import inject_system_prompt as inject_system_prompt_module
+from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
+from app.models.profile import Profile, ProfileConfig
+from app.models.session import ChatSession
+from app.models.session_todo import SessionTodoPlan
+
+
+@pytest_asyncio.fixture
+async def db_session() -> AsyncGenerator[AsyncSession]:
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            CreateTable(
+                ChatSession.__table__,
+                include_foreign_key_constraints=[],
+            )
+        )
+        await connection.run_sync(lambda sync_connection: SessionTodoPlan.__table__.create(sync_connection))
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            yield session
+    finally:
+        await engine.dispose()
+
+
+def _profile(*, uid: str = "user-1", profile_id: int | None = None, enabled_tools: list[str] | None = None) -> Profile:
+    return Profile(
+        id=profile_id,
+        uid=uid,
+        name="todo-test-profile",
+        configs={"tool": {"enabled_tools": list(enabled_tools or [])}},
+    )
+
+
+def _dispatch_context(db: AsyncSession, *, uid: str, session_id: str) -> DispatchContext:
+    return DispatchContext(
+        mode="interactive",
+        source="todo-unit-test",
+        uid=uid,
+        session_id=session_id,
+        profile=_profile(uid=uid),
+        db=db,
+    )
+
+
+def _executor(db: AsyncSession, *, uid: str, session_id: str) -> ManageTodoExecutor:
+    executor = ManageTodoExecutor(project_root=".", uid=uid)
+    executor.set_runtime_context(
+        dispatch_context=_dispatch_context(db, uid=uid, session_id=session_id),
+    )
+    return executor
+
+
+async def _create_sessions(db: AsyncSession, *identities: tuple[str, str]) -> None:
+    db.add_all([ChatSession(uid=uid, session_id=session_id) for uid, session_id in identities])
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_read_without_plan_then_first_write_returns_trimmed_todos(db_session: AsyncSession):
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+
+    assert json.loads(await executor.execute("read")) == {
+        "status": "success",
+        "operation": "read",
+        "revision": 0,
+        "todos": [],
+    }
+
+    payload = json.loads(
+        await executor.execute(
+            "write",
+            todos=[{"content": "  first step  ", "status": "pending"}],
+        )
+    )
+
+    assert payload == {
+        "status": "success",
+        "operation": "write",
+        "revision": 1,
+        "todos": [{"content": "first step", "status": "pending"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_write_replaces_full_plan_increments_revision_and_keeps_empty_plan(db_session: AsyncSession):
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+    writes = [
+        (
+            1,
+            [
+                {"content": "prepare", "status": "pending"},
+                {"content": "execute", "status": "in_progress"},
+            ],
+        ),
+        (
+            2,
+            [
+                {"content": "prepare", "status": "completed"},
+                {"content": "execute", "status": "in_progress"},
+                {"content": "verify", "status": "pending"},
+            ],
+        ),
+        (
+            3,
+            [
+                {"content": "prepare", "status": "completed"},
+                {"content": "execute", "status": "completed"},
+                {"content": "verify", "status": "in_progress"},
+            ],
+        ),
+        (
+            4,
+            [
+                {"content": "prepare", "status": "completed"},
+                {"content": "execute", "status": "completed"},
+                {"content": "verify", "status": "completed"},
+            ],
+        ),
+        (5, []),
+    ]
+
+    for expected_revision, expected_todos in writes:
+        payload = json.loads(await executor.execute("write", todos=expected_todos))
+        assert payload == {
+            "status": "success",
+            "operation": "write",
+            "revision": expected_revision,
+            "todos": expected_todos,
+        }
+
+        plan = await db_session.get(SessionTodoPlan, "session-1")
+        assert plan is not None
+        assert plan.revision == expected_revision
+        assert plan.todos == expected_todos
+
+    plan = await db_session.get(SessionTodoPlan, "session-1")
+    assert plan is not None
+    assert plan.revision == 5
+    assert plan.todos == []
+
+
+def test_validate_manage_todo_arguments_accepts_maximum_items_and_500_character_content():
+    maximum_items = [{"content": f"todo-{index}", "status": "pending"} for index in range(20)]
+    operation, todos, error = validate_manage_todo_arguments({"operation": "write", "todos": maximum_items})
+    assert operation == "write"
+    assert error is None
+    assert todos == maximum_items
+
+    boundary_content = "x" * 500
+    operation, todos, error = validate_manage_todo_arguments({"operation": "write", "todos": [{"content": boundary_content, "status": "pending"}]})
+    assert operation == "write"
+    assert error is None
+    assert todos == [{"content": boundary_content, "status": "pending"}]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"operation": "write", "todos": [{"content": str(index), "status": "pending"} for index in range(21)]},
+        {"operation": "write", "todos": [{"content": "x" * 501, "status": "pending"}]},
+        {"operation": "write", "todos": [{"content": " \t\n ", "status": "pending"}]},
+        {
+            "operation": "write",
+            "todos": [
+                {"content": "same", "status": "pending"},
+                {"content": " same ", "status": "completed"},
+            ],
+        },
+        {"operation": "write", "todos": [{"content": "unknown status", "status": "blocked"}]},
+        {
+            "operation": "write",
+            "todos": [
+                {"content": "first", "status": "in_progress"},
+                {"content": "second", "status": "in_progress"},
+            ],
+        },
+        {"operation": "read", "todos": []},
+        {"operation": "read", "uid": "user-1"},
+        {"operation": "write", "todos": [], "session_id": "session-1"},
+    ],
+)
+def test_validate_manage_todo_arguments_rejects_invalid_boundaries(arguments):
+    _operation, _todos, error = validate_manage_todo_arguments(arguments)
+    assert error
+
+
+@pytest.mark.asyncio
+async def test_runtime_identity_isolation_returns_uniform_failures_without_plan_leak(db_session: AsyncSession):
+    identities = (
+        ("owner", "owner-session"),
+        ("other-user", "other-user-session"),
+        ("owner", "other-session"),
+    )
+    await _create_sessions(db_session, *identities)
+
+    owner_executor = _executor(db_session, uid="owner", session_id="owner-session")
+    owner_todos = [{"content": "private plan", "status": "in_progress"}]
+    owner_write = json.loads(await owner_executor.execute("write", todos=owner_todos))
+    assert owner_write["status"] == "success"
+
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": []}})
+    forged_tool_call = SimpleNamespace(
+        id="forged-todo-call",
+        name=MANAGE_TODO_TOOL_NAME,
+        arguments={"operation": "read", "session_id": "other-session"},
+    )
+    precheck_errors = process_single_tool_module.prevalidate_tool_round(
+        [forged_tool_call],
+        cfg,
+        tool_schemas=[MANAGE_TODO_TOOL_SCHEMA],
+    )
+    forged_payload = json.loads(precheck_errors[forged_tool_call.id])
+    assert forged_payload["status"] == "failed"
+    assert "session_id" in forged_payload["error"]
+
+    failures = []
+    for uid, session_id in (
+        ("other-user", "owner-session"),
+        ("owner", "other-user-session"),
+    ):
+        executor = _executor(db_session, uid=uid, session_id=session_id)
+        failures.append(json.loads(await executor.execute("read")))
+        failures.append(
+            json.loads(
+                await executor.execute(
+                    "write",
+                    todos=[{"content": "must not be written", "status": "pending"}],
+                )
+            )
+        )
+
+    assert all(payload["status"] == "failed" for payload in failures)
+    assert {payload["error"] for payload in failures} == {failures[0]["error"]}
+    assert all(set(payload) == {"status", "operation", "error"} for payload in failures)
+    assert {payload["operation"] for payload in failures} == {"read", "write"}
+
+    owner_read = json.loads(await owner_executor.execute("read"))
+    assert owner_read == {
+        "status": "success",
+        "operation": "read",
+        "revision": 1,
+        "todos": owner_todos,
+    }
+    assert await db_session.get(SessionTodoPlan, "other-user-session") is None
+    assert await db_session.get(SessionTodoPlan, "other-session") is None
+
+
+@pytest.mark.asyncio
+async def test_manage_todo_is_builtin_even_when_profile_disables_all_tools():
+    profile = _profile(profile_id=None, enabled_tools=[])
+    original_configs = copy.deepcopy(profile.configs)
+
+    tools, whitelist = await get_tools_for_profile(None, profile)
+
+    assert MANAGE_TODO_TOOL_NAME in {tool["function"]["name"] for tool in tools}
+    assert whitelist == []
+    assert profile.configs == original_configs
+
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": []}})
+    tool_call = SimpleNamespace(
+        id="todo-call",
+        name=MANAGE_TODO_TOOL_NAME,
+        arguments={"operation": "read"},
+    )
+    errors = process_single_tool_module.prevalidate_tool_round([tool_call], cfg)
+    assert errors == {}
+
+
+def test_manage_todo_does_not_require_audit():
+    assert ManageTodoExecutor.requires_audit is False
+    assert tool_requires_audit(MANAGE_TODO_TOOL_NAME) is False
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_includes_current_session_todo_rules_without_profile_prompt_or_knowledge_base(
+    db_session: AsyncSession,
+):
+    prompt = await inject_system_prompt_module.build_system_prompt(db_session, _profile(profile_id=None))
+
+    assert SESSION_TODO_SYSTEM_PROMPT in prompt
+    for phrase in (
+        "Use manage_todo only for tasks that require multiple execution steps",
+        "Call manage_todo only when it appears in the current tool list",
+        "operation=write is a complete replacement, not a partial patch",
+        "Send the full list every time",
+        "Todo status may only be pending, in_progress, or completed",
+        "at most one unfinished Todo with status=in_progress",
+        "After each step is actually completed and verified",
+    ):
+        assert phrase in prompt
+
+
+@pytest.mark.asyncio
+async def test_deleting_chat_session_cascades_to_todo_plan_with_sqlite_foreign_keys(db_session: AsyncSession):
+    assert await db_session.scalar(text("PRAGMA foreign_keys")) == 1
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+    await executor.execute("write", todos=[{"content": "remove me", "status": "pending"}])
+    assert await db_session.get(SessionTodoPlan, "session-1") is not None
+
+    await db_session.execute(delete(ChatSession).where(ChatSession.session_id == "session-1"))
+    await db_session.commit()
+
+    assert await db_session.get(ChatSession, "session-1") is None
+    assert await db_session.get(SessionTodoPlan, "session-1") is None

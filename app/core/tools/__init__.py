@@ -52,8 +52,15 @@ from .terminal import (
     TerminalStatusExecutor,
     TerminalWriteExecutor,
 )
+from .todo import MANAGE_TODO_TOOL_NAME, MANAGE_TODO_TOOL_SCHEMA, ManageTodoExecutor
 
 logger = get_logger(__name__)
+
+# 始终向模型暴露的系统内置工具 Schema
+SYSTEM_BUILTIN_TOOL_SCHEMAS = [
+    MANAGE_TODO_TOOL_SCHEMA,
+]
+SYSTEM_BUILTIN_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS)
 
 # 可由 Profile 配置启用或禁用的常规工具 Schema
 CONFIGURABLE_TOOL_SCHEMAS = [
@@ -111,6 +118,7 @@ TOOL_EXECUTOR_MAP = {
     TERMINAL_WRITE_TOOL_SCHEMA["function"]["name"]: TerminalWriteExecutor,
     TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
     TERMINAL_CLOSE_TOOL_SCHEMA["function"]["name"]: TerminalCloseExecutor,
+    MANAGE_TODO_TOOL_NAME: ManageTodoExecutor,
 }
 
 
@@ -121,6 +129,8 @@ def tool_requires_audit(tool_name: str) -> bool:
 
 def get_registered_tool_names():
     registered_tool_names = []
+    for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS:
+        registered_tool_names.append(schema["function"]["name"])
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
     for schema in SHELL_COMPANION_TOOL_SCHEMAS:
@@ -154,6 +164,7 @@ def _inject_background_control(schema: dict[str, Any]) -> dict[str, Any]:
 
 def _iter_tool_schemas() -> list[dict[str, Any]]:
     return [
+        *SYSTEM_BUILTIN_TOOL_SCHEMAS,
         *CONFIGURABLE_TOOL_SCHEMAS,
         *SHELL_COMPANION_TOOL_SCHEMAS,
         *CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS,
@@ -257,7 +268,7 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_bac
     并会注入运行时知识库白名单；该工具不受 enabled_tools 控制。
     """
     enabled_tool_names = _get_enabled_tool_names(profile)
-    base_tools = []
+    base_tools = [copy.deepcopy(schema) for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS]
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
         if schema["function"]["name"] in enabled_tool_names:
             tool_schema = copy.deepcopy(schema)

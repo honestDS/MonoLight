@@ -6,6 +6,7 @@ from app.core.crud.session.event import session_event_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
+from app.core.crud.session.todo import session_todo_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.terminal.manager import cleanup_terminal_sessions_by_chat_session
@@ -59,6 +60,12 @@ async def delete_session_data(
         commit=False,
     )
     await scheduled_task_crud.delete_by_session(
+        db,
+        session_id=session_id,
+        is_admin=True,
+        commit=False,
+    )
+    await session_todo_crud.delete_by_session(
         db,
         session_id=session_id,
         is_admin=True,
