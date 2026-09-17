@@ -28,6 +28,7 @@ def resolve_chat_params(model_entry: dict, chat_channel) -> dict:
     return {
         "temperature": model_entry.get("temperature") if model_entry.get("temperature") is not None else 0.7,
         "top_p": model_entry.get("top_p"),
+        "reasoning_effort": model_entry.get("reasoning_effort"),
         "max_tokens": model_entry.get("max_tokens") if model_entry.get("max_tokens") is not None else DEFAULT_CHAT_MAX_TOKENS,
         "chat_timeout": chat_channel.chat_timeout,
         "context_window_k": model_entry.get("context_window_k") if model_entry.get("context_window_k") is not None else DEFAULT_CHAT_CONTEXT_WINDOW_K,

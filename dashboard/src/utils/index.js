@@ -173,7 +173,7 @@ export const getToolCalls = (msg) => {
 
 export const getToolCallName = (toolCall) => {
   const name = toolCall?.name || toolCall?.function?.name
-  if (name === 'manage_longterm_memory') {
+  if (name === 'manage_memory_and_knowledge') {
     const rawArguments = toolCall?.arguments ?? toolCall?.function?.arguments
     let argumentsValue = rawArguments
     if (typeof rawArguments === 'string') {

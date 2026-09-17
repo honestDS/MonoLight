@@ -71,6 +71,7 @@
           :index="idx"
           :model-usages="modelUsages"
           :model-protocols="getModelProtocols(entry.usage)"
+          :reasoning-effort-options="reasoningEffortOptions[idx] || []"
           :model-id-error="modelIdErrors[idx]"
           :protocol-error="protocolErrors[idx]"
           :advanced-settings-draft="advancedSettingsDrafts[idx]"
@@ -154,7 +155,7 @@ import { truncateErrorMessage } from '../utils/errorMessage.js'
 import { createChannelTestManager } from '../utils/channelTestManager.js'
 import { normalizeHttpProxy, isValidHttpProxy } from '../utils/channelHttpProxy.js'
 import { customHeadersTemplate, customHeadersPlaceholder, ensureAdvancedSettings, formatAdvancedSettings, parseAdvancedSettingsDraft, mergeCustomHeaders } from '../utils/channelAdvancedSettings.js'
-import { getOpenRouterModelMatches, applyOpenRouterModelMetadata } from '../utils/channelModelMetadata.js'
+import { getOpenRouterModelMatches, getOpenRouterReasoningEfforts, applyOpenRouterModelMetadata } from '../utils/channelModelMetadata.js'
 import ChannelModelEntry from './ChannelModelEntry.vue'
 import ModelTestResultDialog from './ModelTestResultDialog.vue'
 
@@ -188,6 +189,7 @@ const protocolErrors = ref([])
 const advancedSettingsDrafts = ref([])
 const advancedSettingsErrors = ref([])
 const advancedSettingsExpanded = ref([])
+const reasoningEffortOptions = ref([])
 const proxyError = ref('')
 const selectedDetectedModels = ref([])
 const detectedModels = ref([])
@@ -308,6 +310,7 @@ const syncModelEntryStates = () => {
   ))
   advancedSettingsErrors.value = form.model_ids.map((_, idx) => advancedSettingsErrors.value[idx] || '')
   advancedSettingsExpanded.value = form.model_ids.map((_, idx) => advancedSettingsExpanded.value[idx] || [])
+  reasoningEffortOptions.value = form.model_ids.map((_, idx) => reasoningEffortOptions.value[idx] || [])
 }
 
 const addModelEntry = () => {
@@ -347,6 +350,7 @@ const removeModelEntry = (idx) => {
   advancedSettingsDrafts.value.splice(idx, 1)
   advancedSettingsErrors.value.splice(idx, 1)
   advancedSettingsExpanded.value.splice(idx, 1)
+  reasoningEffortOptions.value.splice(idx, 1)
   syncDetectedSelection()
 }
 
@@ -358,6 +362,7 @@ const resetDetectedModels = () => {
 
 const handleModelIdInput = (idx) => {
   modelIdErrors.value[idx] = ''
+  reasoningEffortOptions.value[idx] = []
   syncDetectedSelection()
 }
 
@@ -552,6 +557,7 @@ const detectModelMetadata = async (entry, idx) => {
   }
 
   detectingMetadataIndex.value = idx
+  reasoningEffortOptions.value[idx] = []
   try {
     if (!openRouterModelsCache) {
       const res = await openRouterApi.models()
@@ -571,13 +577,16 @@ const detectModelMetadata = async (entry, idx) => {
     }
 
     const { fields: filledFields, model } = applyOpenRouterModelMetadata(entry, matches[0])
-    if (filledFields.length === 0) {
+    const reasoningEfforts = getOpenRouterReasoningEfforts(model)
+    reasoningEffortOptions.value[idx] = reasoningEfforts
+    const detectedFields = reasoningEfforts.length > 0 ? [...filledFields, 'reasoning_effort'] : filledFields
+    if (detectedFields.length === 0) {
       throw new Error(t('channels.model_metadata_no_mappable_fields'))
     }
 
     ElMessage.success(t('channels.model_metadata_detect_success', {
       model: typeof model.id === 'string' && model.id.trim() ? model.id : entry.model_id.trim(),
-      fields: filledFields.map(field => t('channels.' + field)).join(', ')
+      fields: detectedFields.map(field => t('channels.' + field)).join(', ')
     }))
   } catch (err) {
     ElMessage.error(err.message || t('channels.model_metadata_detect_failed'))
@@ -656,6 +665,7 @@ const testChatModel = async (entry, idx, testMode, prompt) => {
       protocol: entry.protocol,
       temperature: entry.temperature,
       top_p: entry.top_p,
+      reasoning_effort: entry.reasoning_effort || null,
       max_tokens: entry.max_tokens || 0,
       test_mode: testMode,
       prompt,
@@ -830,6 +840,7 @@ const resetTemporaryState = () => {
   advancedSettingsDrafts.value = []
   advancedSettingsErrors.value = []
   advancedSettingsExpanded.value = []
+  reasoningEffortOptions.value = []
   proxyError.value = ''
   selectedDetectedModels.value = []
   detectedModels.value = []

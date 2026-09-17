@@ -46,6 +46,8 @@ export default {
   model_id_placeholder: 'e.g. gpt-4o',
   temperature: 'Temperature',
   top_p: 'Top P',
+  reasoning_effort: 'Reasoning Effort',
+  reasoning_effort_placeholder: 'Select or enter a reasoning effort',
   max_tokens: 'Max Tokens',
   context_window_k: 'Context Window K',
   image_understanding: 'Image Understanding',

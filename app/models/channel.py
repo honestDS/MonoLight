@@ -192,6 +192,7 @@ class ChannelModelItem(BaseModel):
     context_window_k: int | None = PydanticField(None, ge=1, description="上下文窗口（K Tokens），CHAT 专属")
     temperature: float | None = PydanticField(None, ge=0, le=2.0, description="采样温度，CHAT 专属")
     top_p: float | None = PydanticField(None, ge=0, le=1.0, description="核采样阈值，CHAT 专属")
+    reasoning_effort: str | None = PydanticField(None, min_length=1, max_length=64, description="思考等级，CHAT 专属")
     max_tokens: int | None = PydanticField(None, ge=0, description="单次生成最大 Token 数，CHAT 专属")
     embedding_dimensions: int | None = PydanticField(None, gt=0, description="向量输出维度，EMBEDDING 专属")
     size: ImageGenerationSize | None = PydanticField(None, description="生成图片尺寸，IMAGE_GENERATION 专属")
@@ -208,6 +209,14 @@ class ChannelModelItem(BaseModel):
         default_factory=ChannelModelAdvancedSettings,
         description="模型高级设置",
     )
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def normalize_reasoning_effort(cls, value):
+        if value is None or not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
 
     @model_validator(mode="after")
     def validate_usage_specific_fields(self):

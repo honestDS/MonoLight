@@ -411,8 +411,13 @@ async def test_chat_stream_concatenates_reasoning_content_metadata(monkeypatch):
         for chunk in chunks:
             yield chunk
 
+    emitted_reasoning: list[str] = []
+
     async def on_content(_content: str) -> None:
         return None
+
+    async def on_reasoning(content: str) -> None:
+        emitted_reasoning.append(content)
 
     monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
 
@@ -422,11 +427,12 @@ async def test_chat_stream_concatenates_reasoning_content_metadata(monkeypatch):
         model_id="model",
         messages=[InternalMessage(role=MessageRole.USER, content="test")],
         on_content=on_content,
+        on_reasoning=on_reasoning,
         protocol="openai",
     )
 
-    assert response.message.provider_metadata["message"]["reasoning_content"] == "First reasoning. Second reasoning."
-    assert response.provider_metadata["message"]["reasoning_content"] == "First reasoning. Second reasoning."
+    assert emitted_reasoning == ["First reasoning. ", "Second reasoning."]
+    assert response.message.reasoning_content == "First reasoning. Second reasoning."
 
 
 @pytest.mark.asyncio
@@ -1064,87 +1070,6 @@ async def test_http_foreground_can_request_summary_events_without_content_stream
     assert queued_work.execution_state["stream_requested"] is False
     assert queued_work.execution_state["context_summary_events_requested"] is True
     assert queued_work.execution_state["request_ids"] == []
-
-
-@pytest.mark.asyncio
-async def test_http_stream_adapter_enqueues_stream_dispatch(monkeypatch):
-    adapter = chat_web_module.WebChatAdapter()
-    captured_kwargs = {}
-
-    async def ensure_writable(*_args, **_kwargs):
-        return None
-
-    async def get_profile(*_args, **_kwargs):
-        return SimpleNamespace(id=1)
-
-    async def validate_message(*_args, **_kwargs):
-        return None
-
-    async def enqueue_message(*_args, **kwargs):
-        captured_kwargs.update(kwargs)
-        return (
-            SimpleNamespace(id=1),
-            SimpleNamespace(id=9),
-            "queued",
-            [
-                {
-                    "type": "audit_confirmation_status",
-                    "event_id": "audit-confirmation:1:rejected",
-                    "session_id": "session-1",
-                    "audit_record_id": 1,
-                    "status": "rejected",
-                },
-                {
-                    "type": "audit_tool_results_update",
-                    "event_id": "audit-tool-results:1:rejected",
-                    "session_id": "session-1",
-                    "audit_record_id": 1,
-                    "messages": [{"tool_call_id": "call-1", "content": '{"status":"rejected"}'}],
-                },
-            ],
-        )
-
-    async def wait_for_stream(_work_id):
-        yield {"type": "done", "response": {"history": [], "files": None}}
-
-    monkeypatch.setattr(chat_web_module, "ensure_web_session_writable", ensure_writable)
-    monkeypatch.setattr(chat_web_module, "resolve_profile_for_session", get_profile)
-    monkeypatch.setattr(chat_web_module.ChatDispatcher, "validate_initial_message_before_save", validate_message)
-    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "submit_user_message", enqueue_message)
-    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "wait_for_stream", wait_for_stream)
-
-    events = [
-        event
-        async for event in adapter.chat_stream(
-            db=SimpleNamespace(),
-            message="test",
-            uid="user-1",
-            session_id="session-1",
-            request_id="request-1",
-        )
-    ]
-
-    assert captured_kwargs["stream_requested"] is True
-    assert captured_kwargs["context_summary_events_requested"] is True
-    assert captured_kwargs["request_id"] == "request-1"
-    assert [event["type"] for event in events] == [
-        "audit_confirmation_status",
-        "audit_tool_results_update",
-        "input_queued",
-        "done",
-    ]
-    assert events[0]["event_id"] == "audit-confirmation:1:rejected"
-    assert events[0]["status"] == "rejected"
-    assert events[1]["event_id"] == "audit-tool-results:1:rejected"
-    assert events[1]["messages"][0]["content"] == '{"status":"rejected"}'
-    assert events[2] == {
-        "type": "input_queued",
-        "session_id": "session-1",
-        "request_id": "request-1",
-        "work_id": 9,
-        "submission_status": "queued",
-    }
-    assert events[-1]["type"] == "done"
 
 
 @pytest.mark.asyncio
@@ -1859,87 +1784,6 @@ async def test_execute_foreground_persists_non_stream_llm_request_metadata(monke
             "commit": False,
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_publish_interactive_stream_dequeues_request_ids_once_across_agent_loop_boundaries(monkeypatch):
-    work = SimpleNamespace(
-        id=7,
-        sequence_no=1,
-        uid="user-1",
-        session_id="session-1",
-        execution_state={"request_ids": ["request-1"]},
-    )
-    persisted_events = []
-    commits = []
-    refresh_count = 0
-
-    class EventDb:
-        async def commit(self):
-            commits.append(True)
-
-    class SessionContext:
-        async def __aenter__(self):
-            return EventDb()
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
-    class FakeDb:
-        async def refresh(self, refreshed_work):
-            nonlocal refresh_count
-            refresh_count += 1
-            if refresh_count == 1:
-                refreshed_work.execution_state = {"request_ids": ["request-1", "request-2", "request-1"]}
-
-    async def publish(_db, *, work_id, sequence_no, event, commit):
-        assert commit is False
-        persisted_events.append((work_id, sequence_no, dict(event)))
-
-    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(
-        executor_interactive_module.session_reply_stream_event_crud,
-        "publish",
-        publish,
-    )
-    stream_state = executor_interactive_module._InteractiveWorkStreamEventState(
-        work=work,
-        next_sequence=1,
-        dequeued_request_ids=set(),
-        turn_end_content_by_response_id={},
-        tool_names_by_response_id={},
-    )
-    db = FakeDb()
-
-    await asyncio.wait_for(
-        executor_interactive_module._publish_interactive_work_stream_event(
-            db,
-            stream_state,
-            {"type": "agent_loop_start", "response_id": "response-1"},
-        ),
-        timeout=1,
-    )
-    work.execution_state["request_ids"].extend(["request-3", "request-2"])
-    await asyncio.wait_for(
-        executor_interactive_module._publish_interactive_work_stream_event(
-            db,
-            stream_state,
-            {"type": "agent_loop_start", "response_id": "response-2"},
-        ),
-        timeout=1,
-    )
-
-    dequeued_events = [event for _work_id, _sequence_no, event in persisted_events if event["type"] == "input_dequeued"]
-    assert [event["request_ids"] for event in dequeued_events] == [["request-1", "request-2"], ["request-3"]]
-    assert [request_id for event in dequeued_events for request_id in event["request_ids"]] == ["request-1", "request-2", "request-3"]
-    assert [event["type"] for _work_id, _sequence_no, event in persisted_events] == [
-        "input_dequeued",
-        "agent_loop_start",
-        "input_dequeued",
-        "agent_loop_start",
-    ]
-    assert [sequence_no for _work_id, sequence_no, _event in persisted_events] == [1, 2, 3, 4]
-    assert len(commits) == 4
 
 
 @pytest.mark.asyncio

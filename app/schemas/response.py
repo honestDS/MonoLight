@@ -64,6 +64,7 @@ class SentFile(BaseModel):
 class LLMChoiceMessage(BaseModel):
     role: str
     content: str | None = None
+    reasoning_content: str | None = None
     refusal: str | None = None
     provider_metadata: dict[str, Any] | None = None
 

@@ -25,8 +25,8 @@ from .knowledge_base_query import (
 )
 from .list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA, ListBackgroundTasksExecutor
 from .longterm_memory import (
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
-    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
     LongTermMemoryExecutor,
 )
 from .longterm_memory import (
@@ -79,7 +79,7 @@ CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS = [
 
 # 仅由 Profile 的长期记忆开关控制的工具 Schema
 CONFIGURABLE_MEMORY_TOOL_SCHEMAS = [
-    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
 ]
 
 # 可由模型通过 run_in_background 参数选择后台执行的工具名称
@@ -105,7 +105,7 @@ TOOL_EXECUTOR_MAP = {
     READ_MULTIMODAL_FILE_TOOL_SCHEMA["function"]["name"]: ReadMultimodalFileExecutor,
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
-    MANAGE_LONGTERM_MEMORY_TOOL_NAME: LongTermMemoryExecutor,
+    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME: LongTermMemoryExecutor,
     TERMINAL_STATUS_TOOL_SCHEMA["function"]["name"]: TerminalStatusExecutor,
     TERMINAL_READ_TOOL_SCHEMA["function"]["name"]: TerminalReadExecutor,
     TERMINAL_WRITE_TOOL_SCHEMA["function"]["name"]: TerminalWriteExecutor,

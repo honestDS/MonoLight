@@ -35,7 +35,6 @@ MESSAGES = {
     "ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL": "The embedding model channel has no Base URL configured",
     "ERR_PROFILE_EMBEDDING_CALL_FAILED": "Embedding model call failed: {message}",
     "ERR_PROFILE_RERANK_CONFIG_INCOMPLETE": "The profile rerank configuration is incomplete",
-    "ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL": "The rerank candidate count must be greater than or equal to the knowledge base result count",
     "ERR_PROFILE_RERANK_CHANNEL_NOT_FOUND": "The rerank model channel bound to the profile does not exist",
     "ERR_PROFILE_CHANNEL_NOT_RERANK": "The channel bound to the profile is not a rerank model type",
     "ERR_PROFILE_RERANK_CHANNEL_DISABLED": "The rerank model channel has been disabled; enable it in model management and try again",
@@ -52,6 +51,5 @@ MESSAGES = {
     "TOOL_LIST_BACKGROUND_TASKS_LABEL": "List Background Tasks",
     "TOOL_CANCEL_BACKGROUND_TASK_LABEL": "Cancel Background Task",
     "TOOL_GENERATE_IMAGE_LABEL": "Generate Image",
-    "TOOL_QUERY_KNOWLEDGE_BASE_LABEL": "Query Knowledge Base",
     "TOOL_READ_MULTIMODAL_FILE_LABEL": "Read Multimodal File",
 }

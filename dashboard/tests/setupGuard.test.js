@@ -383,7 +383,8 @@ test('SetupView keeps model test results in the shared dialog and preserves meta
   assert.doesNotMatch(setupSource, /update:test-result-expanded/)
 
   assert.match(setupSource, /@detect-metadata="detectModelMetadata"/)
-  assert.match(setupSource, /import\s+\{\s*getOpenRouterModelMatches,\s*applyOpenRouterModelMetadata\s*\}\s+from\s+'@\/utils\/channelModelMetadata\.js'/)
+  assert.match(setupSource, /import\s+\{\s*getOpenRouterModelMatches,\s*getOpenRouterReasoningEfforts,\s*applyOpenRouterModelMetadata\s*\}\s+from\s+'@\/utils\/channelModelMetadata\.js'/)
+  assert.match(setupSource.slice(channelEntryStart, channelEntryEnd), /:reasoning-effort-options="reasoningEffortOptions"/)
   const metadataStart = setupSource.indexOf('async function detectModelMetadata()')
   const metadataEnd = setupSource.indexOf('\nfunction openChatTestDialog', metadataStart)
   assert.ok(metadataStart >= 0)
@@ -392,6 +393,7 @@ test('SetupView keeps model test results in the shared dialog and preserves meta
   assert.match(metadataSource, /openRouterApi\.models\(\)/)
   assert.match(metadataSource, /getOpenRouterModelMatches\(/)
   assert.match(metadataSource, /applyOpenRouterModelMetadata\(entry,\s*matches\[0\]\)/)
+  assert.match(metadataSource, /getOpenRouterReasoningEfforts\(model\)/)
   assert.doesNotMatch(metadataSource, /modelTestResultDialogVisible/)
 })
 

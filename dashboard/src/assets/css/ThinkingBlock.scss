@@ -1,0 +1,78 @@
+.thinking-block {
+  width: min(720px, 100%);
+  overflow: hidden;
+  border-top: 0;
+  border-bottom: 0;
+  border-radius: 8px;
+
+  :deep(.el-collapse-item) {
+    overflow: hidden;
+    background: #f4f4f5;
+    border-radius: 8px;
+  }
+
+  :deep(.el-collapse-item__header),
+  :deep(.el-collapse-item__wrap) {
+    background: #f4f4f5;
+  }
+
+  :deep(.el-collapse-item__header) {
+    min-height: 38px;
+    height: auto;
+    padding: 0 12px;
+    color: #747b85;
+    border-bottom: 0;
+    border-radius: 0;
+  }
+
+  :deep(.el-collapse-item__wrap) {
+    border-bottom: 0;
+    border-radius: 0;
+  }
+
+  :deep(.el-collapse-item__content) {
+    padding: 0 12px 12px;
+  }
+}
+
+.thinking-block-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.thinking-block-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: thinking-block-pulse 1.2s ease-in-out infinite;
+}
+
+.thinking-block-content.markdown-body {
+  padding: 8px;
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  background: transparent;
+}
+
+:deep(.thinking-block-content > :first-child) {
+  margin-top: 0;
+}
+
+:deep(.thinking-block-content > :last-child) {
+  margin-bottom: 0;
+}
+
+@keyframes thinking-block-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-block-indicator {
+    animation: none;
+  }
+}

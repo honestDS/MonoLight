@@ -69,6 +69,7 @@ async def generate_chat_with_fallback(
                 messages=request_messages,
                 temperature=chat_params["temperature"],
                 top_p=chat_params["top_p"],
+                reasoning_effort=chat_params.get("reasoning_effort"),
                 max_tokens=chat_params["max_tokens"],
                 tools=tools,
                 protocol=resolve_model_protocol(model_entry),

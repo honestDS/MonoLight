@@ -5,12 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import (
     ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE,
     ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT,
-    LOG_KB_TERMINAL_TARGET_CLEANUP_FAILED,
 )
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.crud.knowledge.job import KnowledgeJobCancelResult, knowledge_job_crud
+from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.i18n import t
 from app.core.knowledge_jobs.executor import (
+    KnowledgeJobDeterministicError,
     KnowledgeJobExecutionContext,
     KnowledgeJobExecutionResult,
     KnowledgeJobLeaseLostError,
@@ -24,7 +25,7 @@ from app.models.knowledge_base import (
     KnowledgeJobStatus,
 )
 from app.providers.database.time import get_database_time
-from app.providers.vector import async_delete_collection, async_validate_collection
+from app.providers.vector import async_delete_collection, async_delete_collection_if_exists, async_validate_collection
 
 from .migration_build import (
     _build_migration,
@@ -32,8 +33,8 @@ from .migration_build import (
 )
 from .migration_common import (
     _PRE_SWITCH_MIGRATION_STATUSES,
+    _request_hash,
     _validate_payload,
-    logger,
 )
 from .migration_prepare import (
     _prepare_migration,
@@ -48,7 +49,7 @@ __all__ = [
     "handle_embedding_migration",
     "handle_old_collection_cleanup",
     "finalize_knowledge_migration_terminal_state",
-    "cleanup_terminal_target_collection",
+    "handle_migration_target_cleanup",
     "cancel_knowledge_base_embedding_migration",
 ]
 
@@ -101,7 +102,7 @@ async def handle_old_collection_cleanup(
 ) -> KnowledgeJobExecutionResult:
     job = await context.checkpoint()
     if job.id is None or not isinstance(job.payload, dict):
-        raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
     collection_name = job.payload.get("collection")
     migration_job_id = job.payload.get("migration_job_id")
     if not isinstance(collection_name, str) or not collection_name or isinstance(migration_job_id, bool) or not isinstance(migration_job_id, int) or migration_job_id < 1:
@@ -170,7 +171,7 @@ async def finalize_knowledge_migration_terminal_state(
     *,
     job: KnowledgeJob,
     error: str | None,
-) -> str | None:
+) -> KnowledgeJob | None:
     if (
         job.operation != KnowledgeJobOperation.EMBEDDING_MIGRATION
         or job.id is None
@@ -204,20 +205,87 @@ async def finalize_knowledge_migration_terminal_state(
     knowledge_base.target_embedding_signature = None
     knowledge_base.target_embedding_revision = None
     knowledge_base.target_collection_name = None
+    cleanup_job = None
+    if target_collection:
+        cleanup_request = {
+            "knowledge_base_id": job.knowledge_base_id,
+            "migration_job_id": job.id,
+            "collection": target_collection,
+        }
+        cleanup_job, _ = await knowledge_job_crud.create(
+            db,
+            uid=job.uid,
+            parent_job_id=job.id,
+            operation=KnowledgeJobOperation.MIGRATION_TARGET_CLEANUP,
+            dedupe_key=f"kb-migration-target-cleanup:{job.id}",
+            request_hash=_request_hash(cleanup_request),
+            active_change_key=None,
+            knowledge_base_id=job.knowledge_base_id,
+            payload=cleanup_request,
+            available_at=await get_database_time(db),
+            max_attempts=job.max_attempts,
+            commit=False,
+        )
     await db.flush()
-    return target_collection
+    return cleanup_job
 
 
-async def cleanup_terminal_target_collection(collection_name: str | None) -> None:
-    if not collection_name:
-        return
+async def handle_migration_target_cleanup(
+    context: KnowledgeJobExecutionContext,
+) -> KnowledgeJobExecutionResult:
+    job = await context.checkpoint()
+    if job.id is None or job.parent_job_id is None or not isinstance(job.payload, dict):
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+    collection_name = job.payload.get("collection")
+    migration_job_id = job.payload.get("migration_job_id")
+    knowledge_base_id = job.payload.get("knowledge_base_id")
+    if (
+        not isinstance(collection_name, str)
+        or not collection_name
+        or isinstance(migration_job_id, bool)
+        or not isinstance(migration_job_id, int)
+        or migration_job_id < 1
+        or migration_job_id != job.parent_job_id
+        or isinstance(knowledge_base_id, bool)
+        or not isinstance(knowledge_base_id, int)
+        or knowledge_base_id != job.knowledge_base_id
+    ):
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+
+    async with context.session_factory() as db:
+        parent = await knowledge_job_crud.get_by_id(
+            db,
+            uid=job.uid,
+            job_id=migration_job_id,
+        )
+        knowledge_base = await knowledge_base_crud.get(db, job.knowledge_base_id)
+        await db.commit()
+    parent_target = parent.payload.get("target") if parent is not None and isinstance(parent.payload, dict) else None
+    if (
+        parent is None
+        or parent.operation != KnowledgeJobOperation.EMBEDDING_MIGRATION
+        or parent.status not in {KnowledgeJobStatus.FAILED, KnowledgeJobStatus.CANCELLED}
+        or parent.knowledge_base_id != job.knowledge_base_id
+        or not isinstance(parent_target, dict)
+        or parent_target.get("collection") != collection_name
+        or knowledge_base is None
+        or knowledge_base.uid != job.uid
+        or resolve_active_knowledge_base_embedding(knowledge_base).collection_name == collection_name
+    ):
+        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+
+    await context.checkpoint()
     try:
-        validation = await async_validate_collection(collection_name)
-        if getattr(validation, "exists", False):
-            await async_delete_collection(collection_name)
+        await async_delete_collection_if_exists(collection_name)
     except Exception as exc:
-        logger.bind(collection_name=collection_name, error_type=type(exc).__name__).warning(t(LOG_KB_TERMINAL_TARGET_CLEANUP_FAILED, collection_name=collection_name))
-        return
+        raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT)) from exc
+    return KnowledgeJobExecutionResult(
+        result={
+            "knowledge_base_id": job.knowledge_base_id,
+            "migration_job_id": migration_job_id,
+            "collection": collection_name,
+        }
+    )
 
 
 async def cancel_knowledge_base_embedding_migration(
@@ -242,13 +310,11 @@ async def cancel_knowledge_base_embedding_migration(
         job_id=job.id,
         commit=False,
     )
-    target_collection = None
     if cancellation.changed and cancellation.job is not None and cancellation.job.status == KnowledgeJobStatus.CANCELLED:
-        target_collection = await finalize_knowledge_migration_terminal_state(
+        await finalize_knowledge_migration_terminal_state(
             db,
             job=cancellation.job,
             error=cancellation.job.error,
         )
     await db.commit()
-    await cleanup_terminal_target_collection(target_collection)
     return cancellation

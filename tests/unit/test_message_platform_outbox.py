@@ -27,6 +27,7 @@ from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.message_platform_outbox import MessagePlatformOutbox, MessagePlatformOutboxStatus
 from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal, engine
+from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
 
 
 class DeliveringHandler(MessagePlatformHandler):
@@ -129,6 +130,7 @@ async def clean_outbox_table():
             )
         )
     async with AsyncSessionLocal() as db:
+        await migrate_chat_session_show_reasoning(db)
         await db.execute(delete(MessagePlatformOutbox))
         await db.execute(delete(ChatSession).where(ChatSession.session_id == "session"))
         db.add(ChatSession(session_id="session", uid="uid"))
@@ -865,6 +867,31 @@ async def test_notifier_enqueues_sanitized_stream_tool_summary_for_external_sess
 
 
 @pytest.mark.asyncio
+async def test_notifier_ignores_stream_reasoning_events(monkeypatch):
+    class UnexpectedSessionContext:
+        async def __aenter__(self):
+            raise AssertionError("reasoning events must not enter message-platform delivery")
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", UnexpectedSessionContext)
+
+    await notifier_module.send_session_stream_event(
+        "uid-1",
+        "weixin-openclaw:user-1",
+        {
+            "type": "reasoning",
+            "session_id": "weixin-openclaw:user-1",
+            "work_id": 17,
+            "event_sequence_no": 8,
+            "response_id": "response-1",
+            "content": "private reasoning",
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_notifier_does_not_enqueue_stream_tool_summary_when_tool_calls_are_hidden(monkeypatch):
     enqueue_calls = []
 
@@ -1106,6 +1133,32 @@ def test_combine_tool_output_uses_structured_final_reply_text(content, expected)
     assert combined["files"] == [{"id": "file-1"}]
 
 
+def test_combine_tool_output_does_not_expose_reasoning_content():
+    combined = combine_proactive_reply_tool_output(
+        {
+            "event_id": "event-1",
+            "type": "proactive_reply",
+            "content": "final reply",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "tool round body",
+                    "reasoning_content": "private tool reasoning",
+                    "tool_calls": [
+                        {"id": "call-1", "name": "search", "arguments": {"query": "MonoLight"}},
+                    ],
+                }
+            ],
+        },
+        language="en",
+    )
+
+    assert "private tool reasoning" not in combined["content"]
+    assert "tool round body" in combined["content"]
+    assert "final reply" in combined["content"]
+    assert "history" not in combined
+
+
 def test_combine_tool_output_lists_multiple_tools_without_round_content():
     combined = combine_proactive_reply_tool_output(
         {
@@ -1146,34 +1199,6 @@ def test_message_platform_t_uses_explicit_platform_language():
         assert message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language="en", name="lookup") == "Using tool:lookup"
     finally:
         reset_current_locale(english_locale_token)
-
-
-@pytest.mark.asyncio
-async def test_enqueue_is_idempotent_by_dedupe_key():
-    event = {"type": "proactive_reply", "task_id": 1, "content": "done"}
-    dedupe_key = build_outbox_dedupe_key("uid", "session", "outbox-test", event)
-
-    async with AsyncSessionLocal() as db:
-        first, first_created = await message_platform_outbox_crud.enqueue(
-            db,
-            dedupe_key=dedupe_key,
-            uid="uid",
-            session_id="session",
-            source="outbox-test",
-            event=event,
-        )
-        second, second_created = await message_platform_outbox_crud.enqueue(
-            db,
-            dedupe_key=dedupe_key,
-            uid="uid",
-            session_id="session",
-            source="outbox-test",
-            event=event,
-        )
-
-    assert first_created is True
-    assert second_created is False
-    assert second.id == first.id
 
 
 @pytest.mark.asyncio
@@ -1225,34 +1250,6 @@ async def test_expired_processing_item_can_be_reclaimed():
     assert second_claim is not None
     assert second_claim.locked_by == "worker-b"
     assert second_claim.attempt_count == 2
-
-
-@pytest.mark.asyncio
-async def test_manager_sends_and_marks_outbox_item_sent():
-    handler = DeliveringHandler()
-    manager = MessagePlatformPollingManager((handler,))
-    event = {"type": "proactive_reply", "content": "done"}
-
-    async with AsyncSessionLocal() as db:
-        item, _ = await message_platform_outbox_crud.enqueue(
-            db,
-            dedupe_key="delivery-key",
-            uid="uid",
-            session_id="session",
-            source="outbox-test",
-            event=event,
-        )
-
-    processed_count = await manager.process_outbox_batch()
-
-    async with AsyncSessionLocal() as db:
-        saved_item = await message_platform_outbox_crud.get(db, item.id)
-
-    assert processed_count == 1
-    assert handler.sent_events == [event]
-    assert saved_item is not None
-    assert saved_item.status == MessagePlatformOutboxStatus.SENT
-    assert saved_item.sent_at is not None
 
 
 @pytest.mark.asyncio

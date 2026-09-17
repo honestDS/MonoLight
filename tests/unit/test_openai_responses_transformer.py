@@ -310,6 +310,69 @@ async def test_responses_generate_passes_normalized_http_proxy_kwargs(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_generate_passes_reasoning_effort(monkeypatch) -> None:
+    response = _FakeAiohttpResponse(
+        text=json.dumps(
+            {
+                "id": "chatcmpl_1",
+                "model": "gpt-test",
+                "choices": [{"message": {"role": "assistant", "content": "Answer"}}],
+            }
+        )
+    )
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+
+    await OpenAIChatCompletionsTransformer().generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Question")],
+        reasoning_effort="high",
+    )
+
+    assert sessions[0].post_calls[0]["kwargs"]["json"]["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_responses_generate_maps_reasoning_effort_to_reasoning_object(monkeypatch) -> None:
+    response = _FakeAiohttpResponse(
+        text=json.dumps(
+            {
+                "id": "resp_1",
+                "status": "completed",
+                "model": "gpt-test",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "Answer"}]}],
+            }
+        )
+    )
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+
+    await OpenAIResponsesTransformer().generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Question")],
+        reasoning_effort="xhigh",
+    )
+
+    assert sessions[0].post_calls[0]["kwargs"]["json"]["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+
+
+@pytest.mark.asyncio
 async def test_responses_generate_stream_creates_connector_with_ssl_disabled(monkeypatch) -> None:
     connector_calls: list[dict] = []
     session_calls: list[dict] = []
@@ -341,6 +404,73 @@ async def test_responses_generate_stream_creates_connector_with_ssl_disabled(mon
     assert len(connector_calls) == 1
     assert connector_calls[0]["ssl"] is False
     assert session_calls[0]["connector"] is connector
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_keeps_tools_when_tool_choice_none(monkeypatch) -> None:
+    response = _FakeAiohttpResponse(
+        text=json.dumps(
+            {
+                "id": "chatcmpl_1",
+                "model": "gpt-test",
+                "choices": [{"message": {"role": "assistant", "content": "Summary"}}],
+            }
+        )
+    )
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+    tools = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+
+    await OpenAIChatCompletionsTransformer().generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Summarize")],
+        tools=tools,
+        tool_choice="none",
+    )
+
+    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    assert payload["tools"] == tools
+    assert payload["tool_choice"] == "none"
+
+
+def test_responses_keeps_tools_when_tool_choice_none() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    payload = OpenAIResponsesTransformer._request_payload(
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Summarize")],
+        stream=False,
+        temperature=None,
+        max_tokens=256,
+        tools=tools,
+        tool_choice="none",
+        top_p=None,
+    )
+
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "name": "lookup",
+            "parameters": {"type": "object"},
+            "strict": False,
+        }
+    ]
+    assert payload["tool_choice"] == "none"
 
 
 def test_responses_request_payload() -> None:
@@ -1391,3 +1521,207 @@ async def test_responses_stream_argument_deltas_without_output_index_use_item_id
         ("lookup_a", {"value": "a"}),
         ("lookup_b", {"value": "b"}),
     ]
+
+
+def test_chat_completions_exposes_reasoning_content_as_standard_message_field() -> None:
+    response = OpenAIChatCompletionsTransformer.to_internal_response(
+        {
+            "model": "gpt-test",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Answer",
+                        "reasoning_content": "Think first.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {},
+        },
+        "gpt-test",
+    )
+
+    assert response.message.content == "Answer"
+    assert response.message.reasoning_content == "Think first."
+
+
+def test_responses_exposes_reasoning_text_as_standard_message_field() -> None:
+    response = OpenAIResponsesTransformer.to_internal_response(
+        {
+            "id": "resp_reasoning",
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "content": [{"type": "reasoning_text", "text": "Think carefully."}],
+                    "summary": [{"type": "summary_text", "text": "Summary."}],
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Answer"}],
+                },
+            ],
+            "usage": {},
+        },
+        "gpt-test",
+    )
+
+    assert response.message.content == "Answer"
+    assert response.message.reasoning_content == "Think carefully."
+
+
+def test_responses_stream_reasoning_delta_is_normalized() -> None:
+    chunk, has_payload = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.reasoning_text.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Think ",
+        },
+        argument_delta_indexes=set(),
+        argument_fallback_indexes=set(),
+    )
+
+    assert chunk == {"choices": [{"delta": {"reasoning_content": "Think "}}]}
+    assert has_payload is True
+
+
+def test_responses_accepts_reasoning_only_output() -> None:
+    response = OpenAIResponsesTransformer.to_internal_response(
+        {
+            "id": "resp_reasoning_only",
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": "Only reasoning."}],
+                }
+            ],
+            "usage": {},
+        },
+        "gpt-test",
+    )
+
+    assert response.message.content is None
+    assert response.message.reasoning_content == "Only reasoning."
+
+
+def test_responses_completed_event_uses_reasoning_summary_as_stream_fallback() -> None:
+    chunk, has_payload = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_summary",
+                "status": "completed",
+                "model": "gpt-test",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "content": [],
+                        "encrypted_content": "opaque",
+                        "summary": [{"type": "summary_text", "text": "Readable summary."}],
+                    }
+                ],
+                "usage": {},
+            },
+        },
+        argument_delta_indexes=set(),
+        argument_fallback_indexes=set(),
+        reasoning_delta_indexes=set(),
+        reasoning_fallback_indexes=set(),
+    )
+
+    assert chunk["choices"][0]["delta"]["reasoning_content"] == "Readable summary."
+    assert has_payload is True
+
+
+def test_responses_completed_event_does_not_repeat_reasoning_after_stream_delta() -> None:
+    reasoning_delta_indexes = {("summary", 0, 0)}
+    chunk, has_payload = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_summary",
+                "status": "completed",
+                "model": "gpt-test",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "Readable summary."}],
+                    }
+                ],
+                "usage": {},
+            },
+        },
+        argument_delta_indexes=set(),
+        argument_fallback_indexes=set(),
+        reasoning_delta_indexes=reasoning_delta_indexes,
+        reasoning_fallback_indexes=set(),
+    )
+
+    assert chunk["choices"][0]["delta"] == {}
+    assert has_payload is False
+
+
+def test_responses_multiple_reasoning_parts_are_separated_by_blank_lines() -> None:
+    response = OpenAIResponsesTransformer.to_internal_response(
+        {
+            "id": "resp_reasoning_parts",
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "content": [],
+                    "summary": [
+                        {"type": "summary_text", "text": "First thought."},
+                        {"type": "summary_text", "text": "Second thought."},
+                    ],
+                }
+            ],
+            "usage": {},
+        },
+        "gpt-test",
+    )
+
+    assert response.message.reasoning_content == "First thought.\n\nSecond thought."
+
+
+def test_responses_stream_separates_distinct_reasoning_summary_parts() -> None:
+    reasoning_delta_indexes: set[tuple[str, int | str | None, int | str | None]] = set()
+    reasoning_fallback_indexes: set[tuple[str, int | str | None, int | str | None]] = set()
+
+    first, first_has_payload = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "First thought.",
+        },
+        argument_delta_indexes=set(),
+        argument_fallback_indexes=set(),
+        reasoning_delta_indexes=reasoning_delta_indexes,
+        reasoning_fallback_indexes=reasoning_fallback_indexes,
+    )
+    second, second_has_payload = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "summary_index": 1,
+            "delta": "Second thought.",
+        },
+        argument_delta_indexes=set(),
+        argument_fallback_indexes=set(),
+        reasoning_delta_indexes=reasoning_delta_indexes,
+        reasoning_fallback_indexes=reasoning_fallback_indexes,
+    )
+
+    assert first_has_payload is True
+    assert second_has_payload is True
+    assert first["choices"][0]["delta"]["reasoning_content"] == "First thought."
+    assert second["choices"][0]["delta"]["reasoning_content"] == "\n\nSecond thought."

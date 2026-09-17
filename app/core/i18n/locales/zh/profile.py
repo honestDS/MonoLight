@@ -35,7 +35,6 @@ MESSAGES = {
     "ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL": "嵌入模型渠道未配置 Base URL",
     "ERR_PROFILE_EMBEDDING_CALL_FAILED": "嵌入模型调用失败: {message}",
     "ERR_PROFILE_RERANK_CONFIG_INCOMPLETE": "配置文件中的重排模型配置不完整",
-    "ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL": "重排候选数量必须大于或等于知识库结果数量",
     "ERR_PROFILE_RERANK_CHANNEL_NOT_FOUND": "配置文件绑定的重排模型渠道不存在",
     "ERR_PROFILE_CHANNEL_NOT_RERANK": "配置文件绑定的渠道不是重排模型类型",
     "ERR_PROFILE_RERANK_CHANNEL_DISABLED": "重排模型渠道已被禁用，请在模型管理中启用后重试",
@@ -52,6 +51,5 @@ MESSAGES = {
     "TOOL_LIST_BACKGROUND_TASKS_LABEL": "查看后台任务",
     "TOOL_CANCEL_BACKGROUND_TASK_LABEL": "取消后台任务",
     "TOOL_GENERATE_IMAGE_LABEL": "生成图像",
-    "TOOL_QUERY_KNOWLEDGE_BASE_LABEL": "查询知识库",
     "TOOL_READ_MULTIMODAL_FILE_LABEL": "读取多模态文件",
 }

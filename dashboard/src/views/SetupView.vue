@@ -203,6 +203,7 @@
                       :index="0"
                       :model-usages="['CHAT']"
                       :model-protocols="SETUP_PROTOCOLS"
+                      :reasoning-effort-options="reasoningEffortOptions"
                       model-id-prop="model_id"
                       protocol-prop="protocol"
                       :model-id-error="modelIdError"
@@ -400,7 +401,7 @@ import {
   parseAdvancedSettingsDraft,
   mergeCustomHeaders,
 } from '@/utils/channelAdvancedSettings.js'
-import { getOpenRouterModelMatches, applyOpenRouterModelMetadata } from '@/utils/channelModelMetadata.js'
+import { getOpenRouterModelMatches, getOpenRouterReasoningEfforts, applyOpenRouterModelMetadata } from '@/utils/channelModelMetadata.js'
 import {
   SETUP_PROTOCOLS,
   buildSetupRequest,
@@ -486,6 +487,7 @@ const proxyError = ref('')
 const advancedSettingsDraft = ref(formatAdvancedSettings(form.channel.advanced_settings))
 const advancedSettingsError = ref('')
 const advancedSettingsExpanded = ref([])
+const reasoningEffortOptions = ref([])
 const detectedModels = ref([])
 const selectedDetectedModel = ref('')
 const detectingModels = ref(false)
@@ -668,6 +670,7 @@ function validateAndMergeAdvancedSettings() {
 
 function handleModelIdInput() {
   modelIdError.value = ''
+  reasoningEffortOptions.value = []
   clearChannelTest()
   syncDetectedSelection()
 }
@@ -692,6 +695,7 @@ function handleDetectedModelChange(value) {
   clearChannelTest()
   form.channel.model_id = value
   modelIdError.value = ''
+  reasoningEffortOptions.value = []
 }
 
 async function detectModelList() {
@@ -755,6 +759,7 @@ async function detectModelMetadata() {
   }
 
   detectingMetadata.value = true
+  reasoningEffortOptions.value = []
   try {
     if (!openRouterModelsCache) {
       const res = await openRouterApi.models()
@@ -776,13 +781,16 @@ async function detectModelMetadata() {
     }
 
     const { fields: filledFields, model } = applyOpenRouterModelMetadata(entry, matches[0])
-    if (filledFields.length === 0) {
+    const reasoningEfforts = getOpenRouterReasoningEfforts(model)
+    reasoningEffortOptions.value = reasoningEfforts
+    const detectedFields = reasoningEfforts.length > 0 ? [...filledFields, 'reasoning_effort'] : filledFields
+    if (detectedFields.length === 0) {
       throw new Error(t('channels.model_metadata_no_mappable_fields'))
     }
 
     ElMessage.success(t('channels.model_metadata_detect_success', {
       model: typeof model.id === 'string' && model.id.trim() ? model.id : entry.model_id.trim(),
-      fields: filledFields.map(field => t('channels.' + field)).join(', '),
+      fields: detectedFields.map(field => t('channels.' + field)).join(', '),
     }))
   } catch (error) {
     ElMessage.error(error.message || t('channels.model_metadata_detect_failed'))
@@ -857,6 +865,7 @@ async function testChatModel(testMode, prompt) {
       protocol: entry.protocol,
       temperature: entry.temperature,
       top_p: entry.top_p,
+      reasoning_effort: entry.reasoning_effort || null,
       max_tokens: entry.max_tokens || 0,
       test_mode: testMode,
       prompt,

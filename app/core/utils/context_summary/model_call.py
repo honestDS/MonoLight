@@ -17,6 +17,7 @@ async def call_context_summary_model(
         messages=[InternalMessage(role=MessageRole.USER, content=prompt)],
         temperature=model.temperature,
         top_p=model.top_p,
+        reasoning_effort=model.reasoning_effort,
         max_tokens=model.max_output_tokens,
         protocol=model.protocol,
         timeout=CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,

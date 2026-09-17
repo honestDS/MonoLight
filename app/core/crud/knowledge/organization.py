@@ -677,10 +677,47 @@ class CRUDKnowledgeOrganizationStage:
         *,
         before: datetime,
         batch_size: int = KNOWLEDGE_ORGANIZATION_CLEANUP_BATCH_SIZE,
+        uid: str | None = None,
+        knowledge_base_id: int | None = None,
     ) -> int:
         _validate_batch_size(batch_size)
+        terminal_statuses = (
+            KnowledgeOrganizationStageStatus.COMPLETED,
+            KnowledgeOrganizationStageStatus.FAILED,
+            KnowledgeOrganizationStageStatus.INVALIDATED,
+        )
+        stage_scope = [
+            KnowledgeOrganizationStage.status.in_(terminal_statuses),
+            KnowledgeOrganizationStage.completed_at.is_not(None),
+            KnowledgeOrganizationStage.completed_at < before,
+        ]
+        fragment_scope = []
+        snapshot_scope = [KnowledgeOrganizationSnapshot.created_at < before]
+        if uid is not None:
+            stage_scope.append(KnowledgeOrganizationStage.uid == uid)
+            fragment_scope.append(KnowledgeOrganizationFragment.uid == uid)
+            snapshot_scope.append(KnowledgeOrganizationSnapshot.uid == uid)
+        if knowledge_base_id is not None:
+            stage_scope.append(KnowledgeOrganizationStage.knowledge_base_id == knowledge_base_id)
+            fragment_scope.append(KnowledgeOrganizationFragment.knowledge_base_id == knowledge_base_id)
+            snapshot_scope.append(KnowledgeOrganizationSnapshot.knowledge_base_id == knowledge_base_id)
 
-        fragment_ids = list((await db.execute(select(KnowledgeOrganizationFragment.id).where(KnowledgeOrganizationFragment.created_at < before).order_by(KnowledgeOrganizationFragment.id).limit(batch_size))).scalars().all())
+        terminal_stage_ids = select(KnowledgeOrganizationStage.id).where(*stage_scope)
+        fragment_ids = list(
+            (
+                await db.execute(
+                    select(KnowledgeOrganizationFragment.id)
+                    .where(
+                        *fragment_scope,
+                        KnowledgeOrganizationFragment.stage_id.in_(terminal_stage_ids),
+                    )
+                    .order_by(KnowledgeOrganizationFragment.id)
+                    .limit(batch_size)
+                )
+            )
+            .scalars()
+            .all()
+        )
         if fragment_ids:
             result = await db.execute(delete(KnowledgeOrganizationFragment).where(KnowledgeOrganizationFragment.id.in_(fragment_ids)).execution_options(synchronize_session=False))
             await db.commit()
@@ -692,7 +729,7 @@ class CRUDKnowledgeOrganizationStage:
                 await db.execute(
                     select(KnowledgeOrganizationStage.id)
                     .where(
-                        KnowledgeOrganizationStage.created_at < before,
+                        *stage_scope,
                         ~fragment_exists,
                     )
                     .order_by(KnowledgeOrganizationStage.id)
@@ -708,21 +745,7 @@ class CRUDKnowledgeOrganizationStage:
             return result.rowcount or 0
 
         stage_exists = exists().where(KnowledgeOrganizationStage.snapshot_id == KnowledgeOrganizationSnapshot.id)
-        snapshot_ids = list(
-            (
-                await db.execute(
-                    select(KnowledgeOrganizationSnapshot.id)
-                    .where(
-                        KnowledgeOrganizationSnapshot.created_at < before,
-                        ~stage_exists,
-                    )
-                    .order_by(KnowledgeOrganizationSnapshot.id)
-                    .limit(batch_size)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        snapshot_ids = list((await db.execute(select(KnowledgeOrganizationSnapshot.id).where(*snapshot_scope, ~stage_exists).order_by(KnowledgeOrganizationSnapshot.id).limit(batch_size))).scalars().all())
         if not snapshot_ids:
             return 0
         result = await db.execute(delete(KnowledgeOrganizationSnapshot).where(KnowledgeOrganizationSnapshot.id.in_(snapshot_ids)).execution_options(synchronize_session=False))

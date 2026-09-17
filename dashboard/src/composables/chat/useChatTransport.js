@@ -23,6 +23,7 @@ const lifecycleEventTypes = new Set([
   'agent_loop_start',
   'agent_loop_output',
   'llm_request_metadata',
+  'reasoning',
   'content',
   'turn_end',
   'tool_start',
@@ -90,6 +91,7 @@ export function useChatTransport() {
   const handleWsMessage = (data, options = {}) => {
     const {
       onContent,
+      onReasoning,
       onToolStart,
       onToolEnd,
       onComplete,
@@ -155,6 +157,14 @@ export function useChatTransport() {
 
     if (type === 'agent_loop_output') {
       if (!deferAgentLoopOutput && onAgentLoopOutput) onAgentLoopOutput(data)
+      if (scrollToBottom) scrollToBottom()
+      return
+    }
+
+    if (type === 'reasoning') {
+      if (onReasoning) {
+        onReasoning(data.content, data.turn, data.response_id, requestId, data.work_id, getStreamEventIdentity(data))
+      }
       if (scrollToBottom) scrollToBottom()
       return
     }
@@ -347,7 +357,7 @@ export function useChatTransport() {
 
   // ==================== 发送方法 ====================
 
-  const httpSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, callbacks = {} }) => {
+  const httpSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, callbacks = {} }) => {
     const finalCallbacks = { ...callbacks, requestId, sessionId }
     const payload = {
       message,
@@ -361,6 +371,9 @@ export function useChatTransport() {
     if (!sessionId && showToolCalls === false) {
       payload.show_tool_calls = false
     }
+    if (!sessionId && showReasoning === false) {
+      payload.show_reasoning = false
+    }
     if (!sessionId) {
       const res = await chatApi.completions({ ...payload, stream: false })
       return res.data
@@ -368,7 +381,7 @@ export function useChatTransport() {
     return chatApi.completionsStream(payload, event => handleWsMessage(event, finalCallbacks))
   }
 
-  const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, callbacks = {} }) => {
+  const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, callbacks = {} }) => {
     const token = localStorage.getItem('token')
     if (!token) throw new Error(t('chat.not_logged_in'))
 
@@ -403,6 +416,9 @@ export function useChatTransport() {
     }
     if (!sessionId && showToolCalls === false) {
       wsData.show_tool_calls = false
+    }
+    if (!sessionId && showReasoning === false) {
+      wsData.show_reasoning = false
     }
 
     if (!wsManager.sendMessage(wsData)) {

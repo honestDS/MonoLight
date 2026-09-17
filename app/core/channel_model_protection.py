@@ -286,6 +286,7 @@ def _safe_memory_organization_model_runtime_signature(item: object) -> str | Non
                 "max_tokens": normalized.max_tokens,
                 "temperature": normalized.temperature,
                 "top_p": normalized.top_p,
+                "reasoning_effort": normalized.reasoning_effort,
                 "advanced_settings": normalized.advanced_settings.model_dump(mode="json"),
             },
             sort_keys=True,

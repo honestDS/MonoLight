@@ -24,7 +24,7 @@ from app.core.utils.dispatcher.helpers import (
     reassemble_multimodal_messages,
     resolve_chat_params,
 )
-from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_environment_prompt
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
@@ -46,7 +46,9 @@ from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 from .interactive_helpers import (
     _AgentLoopStreamState,
     _emit_agent_loop_output,
+    _flush_buffered_stream_reasoning,
     _handle_stream_content,
+    _handle_stream_reasoning,
     build_pending_multimodal_input_message,
     collect_pending_multimodal_file_inputs,
 )
@@ -72,6 +74,7 @@ async def generate_interactive_turn(
     state: InteractiveDispatchState,
     *,
     current_tools,
+    tool_choice: str = "auto",
     response_id: str,
 ) -> InteractiveGenerationResult:
     excluded_priorities: set[int] = set()
@@ -87,6 +90,7 @@ async def generate_interactive_turn(
     while True:
         stream_state.emitted_stream_content = False
         stream_state.buffered_content_chunks.clear()
+        stream_state.buffered_reasoning_chunks.clear()
         try:
             if state.checkpoint_state.upper_message_id is not None:
                 state.messages = await apply_context_summary_checkpoint(
@@ -110,12 +114,7 @@ async def generate_interactive_turn(
             pending_file_inputs = collect_pending_multimodal_file_inputs(state.messages)
             if pending_file_inputs and not state.img_understanding:
                 raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
-            request_messages = await materialize_latest_user_environment_prompt(
-                state.db,
-                state.session_id,
-                state.messages,
-                state.chat_params["max_tokens"],
-            )
+            request_messages = materialize_user_environment_prompts(state.messages)
             pending_multimodal_message = build_pending_multimodal_input_message(
                 pending_file_inputs,
                 image_understanding=state.img_understanding,
@@ -141,8 +140,10 @@ async def generate_interactive_turn(
                 "messages": request_messages,
                 "temperature": state.chat_params["temperature"],
                 "top_p": state.chat_params["top_p"],
+                "reasoning_effort": state.chat_params.get("reasoning_effort"),
                 "max_tokens": state.chat_params["max_tokens"],
                 "tools": current_tools,
+                "tool_choice": tool_choice,
                 "protocol": protocol,
                 "timeout": state.chat_params["chat_timeout"],
                 "http_proxy": get_channel_http_proxy(state.chat_channel_obj),
@@ -227,6 +228,7 @@ async def generate_interactive_turn(
                 response = await LLMClient.generate_with_stream_callback(
                     **generation_kwargs,
                     on_content=partial(_handle_stream_content, stream_state),
+                    on_reasoning=partial(_handle_stream_reasoning, stream_state),
                 )
             ai_msg = response.message
             response_finish_reason = getattr(response, "finish_reason", None)
@@ -258,6 +260,11 @@ async def generate_interactive_turn(
             if not ai_msg.tool_calls and not has_content and not has_refusal and response_finish_reason not in legal_empty_finish_reasons:
                 raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
             hidden_tool_round = bool(ai_msg.tool_calls) and not state.show_tool_calls
+            if not state.show_tool_calls:
+                if hidden_tool_round:
+                    stream_state.buffered_reasoning_chunks.clear()
+                else:
+                    await _flush_buffered_stream_reasoning(stream_state)
             if not hidden_tool_round:
                 await _emit_agent_loop_output(stream_state)
             if state.stream_event_callback is not None and state.show_tool_calls and not hidden_tool_round and state.expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content.strip():
@@ -312,9 +319,16 @@ async def generate_interactive_turn(
             )
             if not selection:
                 raise
+            previous_max_tokens = state.chat_params["max_tokens"]
             state.chat_channel_obj, state.model_entry, state.channel_rule = selection
             state.img_understanding, state.audio_understanding, state.video_understanding = get_multimodal_from_entry(state.model_entry)
             state.chat_params = resolve_chat_params(state.model_entry, state.chat_channel)
+            if state.chat_params["max_tokens"] != previous_max_tokens:
+                await refresh_latest_user_max_output_tokens_instruction(
+                    state.db,
+                    state.messages,
+                    state.chat_params["max_tokens"],
+                )
             reassemble_multimodal_messages(
                 state.messages,
                 state.img_understanding,

@@ -8,7 +8,6 @@ from app.core.constants import (
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
-from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import (
@@ -260,7 +259,6 @@ class SessionReplyFreeze:
                 attachments=str(attachments),
             )
         )
-        await append_user_runtime_instructions(db, work.session_id, combined_message)
         return UserInputBatch(
             messages=(combined_message,),
             source_message_ids=source_message_ids,

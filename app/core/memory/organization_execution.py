@@ -147,7 +147,10 @@ def _restore_organization_model_config(
     *,
     snapshot: MemoryOrganizationSnapshot,
 ) -> MemoryOrganizationModelConfig:
-    if not isinstance(value, dict) or set(value) != _ORGANIZATION_MODEL_FIELDS:
+    if not isinstance(value, dict) or set(value) not in {
+        _ORGANIZATION_MODEL_FIELDS,
+        _ORGANIZATION_MODEL_FIELDS | {"reasoning_effort"},
+    }:
         raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID)
 
     channel_id = value.get("channel_id")
@@ -162,6 +165,7 @@ def _restore_organization_model_config(
     temperature = _strict_number(value.get("temperature"), minimum=0, maximum=2)
     raw_top_p = value.get("top_p")
     top_p = None if raw_top_p is None else _strict_number(raw_top_p, minimum=0, maximum=1)
+    reasoning_effort = value.get("reasoning_effort")
     timeout = _strict_number(value.get("timeout"), minimum=0.000001)
     context_window_k = value.get("context_window_k")
     context_window_tokens = value.get("context_window_tokens")
@@ -181,6 +185,7 @@ def _restore_organization_model_config(
         or not _strict_text(api_key)
         or temperature is None
         or (raw_top_p is not None and top_p is None)
+        or (reasoning_effort is not None and (not _strict_text(reasoning_effort) or reasoning_effort != reasoning_effort.strip() or len(reasoning_effort) > 64))
         or timeout is None
         or not _strict_positive_integer(context_window_k)
         or not _strict_positive_integer(context_window_tokens)
@@ -234,6 +239,7 @@ def _restore_organization_model_config(
         custom_headers=custom_headers,
         temperature=temperature,
         top_p=top_p,
+        reasoning_effort=reasoning_effort,
         timeout=timeout,
     )
 
@@ -306,6 +312,7 @@ async def call_organization_model(request: MemoryOrganizationExecutionRequest) -
         messages=list(request.messages),
         temperature=model.temperature,
         top_p=model.top_p,
+        reasoning_effort=model.reasoning_effort,
         max_tokens=request.budget.max_output_tokens,
         tools=None,
         protocol=model.protocol,

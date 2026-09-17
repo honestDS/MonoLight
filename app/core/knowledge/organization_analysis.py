@@ -61,6 +61,7 @@ async def _default_analysis_caller(model: KnowledgeOrganizationModelConfig, *, c
         ],
         temperature=model.temperature,
         top_p=model.top_p,
+        reasoning_effort=model.reasoning_effort,
         max_tokens=analysis_max_output_tokens,
         tools=None,
         protocol=model.protocol,

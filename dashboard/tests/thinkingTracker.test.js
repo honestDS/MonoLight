@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
+import { appendStreamReasoning, finalizeStreamReasoning } from '../src/composables/chat/reasoningTracker.js'
 import { clearThinkingRequestCallbacks, ensureActiveThinkingMessage, findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from '../src/composables/chat/thinkingTracker.js'
 
 test('creates an active Thinking message for the first request', () => {
@@ -12,7 +14,7 @@ test('creates an active Thinking message for the first request', () => {
   assert.deepEqual(messages, [{
     id: 'thinking-1',
     role: 'thinking',
-    content: 'Thinking...',
+    content: '',
     request_id: 'request-1',
     request_ids: ['request-1']
   }])
@@ -51,7 +53,7 @@ test('does not match another request Thinking without an exact id', () => {
 })
 
 test('inserts streaming content before Thinking without replacing it', () => {
-  const thinkingMessage = { id: 'thinking-1', role: 'thinking', content: 'Thinking...', request_id: 'request-1' }
+  const thinkingMessage = { id: 'thinking-1', role: 'thinking', content: '', request_id: 'request-1' }
   const messages = [
     { id: 'user-1', role: 'user', content: 'request' },
     thinkingMessage
@@ -112,4 +114,99 @@ test('clears callbacks for all requests absorbed by a Thinking work', () => {
   assert.equal(callbacksMap.has('request-a'), false)
   assert.equal(callbacksMap.has('request-b'), false)
   assert.equal(callbacksMap.has('request-c'), true)
+})
+
+
+test('ThinkingBlock is controlled by the shared collapse model and starts collapsed from the parent default', () => {
+  const componentSource = readFileSync(new URL('../src/components/ThinkingBlock.vue', import.meta.url), 'utf8')
+  const trackerSource = readFileSync(new URL('../src/composables/chat/thinkingTracker.js', import.meta.url), 'utf8')
+  const lifecycleSource = readFileSync(new URL('../src/composables/chat/workLifecycleTracker.js', import.meta.url), 'utf8')
+  const listSource = readFileSync(new URL('../src/components/ChatMessageList.vue', import.meta.url), 'utf8')
+
+  assert.match(componentSource, /modelValue/)
+  assert.match(componentSource, /update:modelValue/)
+  assert.doesNotMatch(componentSource, /const activeNames = ref\(\[\]\)/)
+  assert.match(componentSource, /<el-collapse[\s\S]*?<el-collapse-item :name="name"/)
+  assert.match(listSource, /const reasoningCollapseModel = ref\(\[\]\)/)
+  assert.match(listSource, /v-model="reasoningCollapseModel"/)
+  assert.match(listSource, /getReasoningCollapseName\(msg\)/)
+  assert.equal(trackerSource.includes("content: 'Thinking...'"), false)
+  assert.equal(lifecycleSource.includes("content: 'Thinking...'"), false)
+})
+
+test('creates a reasoning block only after the first real reasoning chunk and leaves Thinking as lifecycle state', () => {
+  let messages = [
+    { id: 'user-1', role: 'user', content: 'question', request_id: 'request-1' },
+    { id: 'thinking-1', role: 'thinking', content: '', request_id: 'request-1', work_id: 'work-1', response_id: 'response-1', turn: 1 }
+  ]
+
+  assert.equal(messages.some(message => message.role === 'reasoning'), false)
+  messages = appendStreamReasoning(messages, 'first ', { turn: 1, responseId: 'response-1', requestId: 'request-1', workId: 'work-1' })
+  messages = appendStreamReasoning(messages, 'second', { turn: 1, responseId: 'response-1', requestId: 'request-1', workId: 'work-1' })
+
+  assert.equal(messages.filter(message => message.role === 'thinking').length, 1)
+  assert.equal(messages.find(message => message.role === 'thinking').reasoning_content, undefined)
+  assert.equal(messages.filter(message => message.role === 'reasoning').length, 1)
+  assert.equal(messages.find(message => message.role === 'reasoning').reasoning_content, 'first second')
+})
+
+
+test('keeps accumulating in the transient reasoning block when an assistant tool message appears mid-turn', () => {
+  let messages = [
+    { id: 'thinking-1', role: 'thinking', content: '', request_id: 'request-1', work_id: 'work-1', response_id: 'response-1', turn: 1 }
+  ]
+
+  messages = appendStreamReasoning(messages, 'first ', { turn: 1, responseId: 'response-1', requestId: 'request-1', workId: 'work-1' })
+  messages.splice(1, 0, { id: 'assistant-tool', role: 'assistant', content: '{"tool_calls":[]}', response_id: 'response-1', work_id: 'work-1', turn: 1 })
+  messages = appendStreamReasoning(messages, 'second', { turn: 1, responseId: 'response-1', requestId: 'request-1', workId: 'work-1' })
+  messages = finalizeStreamReasoning(messages, null, { turn: 1, responseId: 'response-1', requestId: 'request-1', workId: 'work-1' })
+
+  assert.equal(messages.find(message => message.id === 'assistant-tool').reasoning_content, 'first second')
+  assert.equal(messages.some(message => message.role === 'reasoning'), false)
+})
+
+test('turn end archives streamed reasoning on the assistant and removes only the transient reasoning block', () => {
+  const messages = [
+    { id: 'assistant-1', role: 'assistant', content: 'answer', response_id: 'response-1', work_id: 'work-1', turn: 1 },
+    { id: 'reasoning-1', role: 'reasoning', content: '', reasoning_content: 'streamed reasoning', response_id: 'response-1', work_id: 'work-1', turn: 1 },
+    { id: 'thinking-1', role: 'thinking', content: '', response_id: 'response-1', work_id: 'work-1', turn: 1 }
+  ]
+
+  const finalized = finalizeStreamReasoning(messages, null, { turn: 1, responseId: 'response-1', workId: 'work-1' })
+
+  assert.equal(finalized.some(message => message.role === 'reasoning'), false)
+  assert.equal(finalized.some(message => message.role === 'thinking'), true)
+  assert.equal(finalized.find(message => message.id === 'assistant-1').reasoning_content, 'streamed reasoning')
+})
+
+
+test('chat rendering keeps Thinking as lifecycle state, hides its row, and gates reasoning by the session switch', () => {
+  const listSource = readFileSync(new URL('../src/components/ChatMessageList.vue', import.meta.url), 'utf8')
+  const viewSource = readFileSync(new URL('../src/views/ChatView.vue', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(listSource, /msg\.role === 'thinking'[\s\S]*?thinking-status/)
+  assert.match(listSource, /message\.role !== 'thinking'/)
+  assert.match(listSource, /msg\.role === 'reasoning'[\s\S]*?currentSessionShowReasoning[\s\S]*?<ThinkingBlock/)
+  assert.match(listSource, /currentSessionShowReasoning:\s*\{ type: Boolean, default: true \}/)
+  assert.match(viewSource, /chat\.show_reasoning/)
+  assert.match(viewSource, /:current-session-show-reasoning="currentSessionShowReasoning"/)
+  const sessionSource = readFileSync(new URL('../src/composables/chat/useChatSession.js', import.meta.url), 'utf8')
+  assert.match(sessionSource, /performHttpSend\([\s\S]*?currentSessionShowToolCalls\.value,\s*currentSessionShowReasoning\.value\s*\)/)
+})
+
+test('top activity notice uses the compression notice presentation and reasoning uses the existing markdown renderer', () => {
+  const componentSource = readFileSync(new URL('../src/components/ThinkingBlock.vue', import.meta.url), 'utf8')
+  const styleSource = readFileSync(new URL('../src/assets/css/ThinkingBlock.scss', import.meta.url), 'utf8')
+  const viewStyleSource = readFileSync(new URL('../src/assets/css/ChatView.scss', import.meta.url), 'utf8')
+  const listSource = readFileSync(new URL('../src/components/ChatMessageList.vue', import.meta.url), 'utf8')
+
+  assert.match(listSource, /activity-status-notice/)
+  assert.match(listSource, /resolveChatActivityNotice/)
+  assert.match(viewStyleSource, /\.activity-status-notice\s*\{[\s\S]*?box-shadow:/)
+  assert.doesNotMatch(viewStyleSource, /\.activity-status-notice\s*\{[\s\S]*?z-index:/)
+  assert.match(componentSource, /v-html="renderedContent"/)
+  assert.match(componentSource, /class="thinking-block-content markdown-body"/)
+  assert.match(listSource, /:rendered-content="renderMarkdown\(getReasoningContent\(msg\)\)"/)
+  assert.match(styleSource, /background:\s*transparent/)
+  assert.match(styleSource, /border-radius:\s*8px/)
 })

@@ -121,8 +121,9 @@ async def _create_new_web_session_with_profile_override(
     source: str,
     profile_override_id: int | None,
     show_tool_calls: bool | None = None,
+    show_reasoning: bool | None = None,
 ) -> None:
-    if profile_override_id is None and show_tool_calls is None:
+    if profile_override_id is None and show_tool_calls is None and show_reasoning is None:
         return
 
     existing_session = await session_crud.get_by_session_id(db, session_id)
@@ -146,6 +147,7 @@ async def _create_new_web_session_with_profile_override(
             source=source,
             reply_target_source=source,
             show_tool_calls=show_tool_calls if show_tool_calls is not None else default_show_tool_calls_for_source(source),
+            show_reasoning=show_reasoning if show_reasoning is not None else True,
         )
     )
     await db.commit()
@@ -161,6 +163,7 @@ class _WebSocketChatState:
 class NewSessionProfileSetting(BaseModel):
     profile_override_id: int | None = Field(default=None, gt=0)
     show_tool_calls: bool | None = None
+    show_reasoning: bool | None = None
 
 
 async def _cancel_websocket_stream_task(state: _WebSocketChatState) -> None:
@@ -253,6 +256,7 @@ async def chat_completions(
             source="http",
             profile_override_id=request.profile_override_id,
             show_tool_calls=request.show_tool_calls,
+            show_reasoning=request.show_reasoning,
         )
         return LLMResponse(
             choices=[
@@ -308,6 +312,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
                 "show_tool_calls": row.show_tool_calls,
+                "show_reasoning": row.show_reasoning,
                 "profile_id": row.profile_id,
                 "profile_override_id": row.profile_override_id,
                 "source": row.source or "http",
@@ -347,6 +352,7 @@ class SessionSettingRequest(BaseModel):
     session_id: str
     enable_markdown: bool | None = None
     show_tool_calls: bool | None = None
+    show_reasoning: bool | None = None
     profile_override_id: int | None = Field(default=None, gt=0)
 
 
@@ -419,6 +425,8 @@ async def update_session_setting(
         session.enable_markdown = request.enable_markdown
     if request.show_tool_calls is not None:
         session.show_tool_calls = request.show_tool_calls
+    if request.show_reasoning is not None:
+        session.show_reasoning = request.show_reasoning
     if "profile_override_id" in request.model_fields_set:
         if request.profile_override_id is None:
             session.profile_override_id = None
@@ -493,6 +501,7 @@ async def generate_title(
                 max_tokens=model_entry.get("max_tokens") or 200,
                 temperature=chat_params["temperature"],
                 top_p=chat_params["top_p"],
+                reasoning_effort=chat_params.get("reasoning_effort"),
                 raise_on_error=True,
                 http_proxy=get_channel_http_proxy(channel),
                 custom_headers=get_model_custom_headers(model_entry),
@@ -638,6 +647,7 @@ async def chat_websocket(
                             {
                                 "profile_override_id": profile_override_id,
                                 "show_tool_calls": data.get("show_tool_calls"),
+                                "show_reasoning": data.get("show_reasoning"),
                             }
                         )
                     except ValidationError as exc:
@@ -661,6 +671,7 @@ async def chat_websocket(
                                 source="ws",
                                 profile_override_id=profile_setting.profile_override_id,
                                 show_tool_calls=profile_setting.show_tool_calls,
+                                show_reasoning=profile_setting.show_reasoning,
                             )
                     except BaseBusinessException as exc:
                         await websocket.send_json(

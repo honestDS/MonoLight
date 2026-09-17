@@ -8,7 +8,7 @@ import {
   decorateMemoryJobs,
   estimateMemoryTokens,
   getCurrentMemoryTask,
-  getOrganizationModelsForChannel,
+  getOrganizationModelOptions,
   isMemoryContentTooLong,
   memoryOperationLabelKey,
   memorySourceLabelKey,
@@ -229,30 +229,99 @@ test('does not misclassify content when maxTokens is invalid', () => {
   assert.equal(isMemoryContentTooLong(content, '160'), false)
 })
 
-test('filters organization models by channel, CHAT usage, model id, and enabled state', () => {
+test('builds one organization model selector with channel and model availability state', () => {
   const channels = [
     {
       id: 7,
+      name: 'primary',
       model_ids: [
-        { model_id: 'chat-upper', usage: 'CHAT', is_enabled: true },
-        { model_id: 'chat-lower', usage: 'chat', is_enabled: true },
+        { model_id: 'shared-chat', usage: 'CHAT', is_enabled: true, context_window_k: 128, max_tokens: 8192 },
+        { model_id: 'chat-lower', usage: 'chat', is_enabled: true, context_window_k: 64, max_tokens: 4096 },
         { model_id: 'not-chat', usage: 'EMBEDDING', is_enabled: true },
         { model_id: 'disabled', usage: 'CHAT', is_enabled: false },
         { usage: 'CHAT', is_enabled: true }
       ]
     },
-    { id: 8, model_ids: [{ model_id: 'other-channel', usage: 'CHAT', is_enabled: true }] }
+    {
+      id: 8,
+      name: 'secondary',
+      model_ids: [{ model_id: 'shared-chat', usage: 'CHAT', is_enabled: true, context_window_k: 32, max_tokens: 2048 }]
+    },
+    {
+      id: 9,
+      name: 'inactive',
+      is_active: false,
+      model_ids: [{ model_id: 'hidden-chat', usage: 'CHAT', is_enabled: true }]
+    }
   ]
   const original = clone(channels)
 
   assert.deepEqual(
-    getOrganizationModelsForChannel(channels, 7),
+    getOrganizationModelOptions(channels),
     [
-      { model_id: 'chat-upper', usage: 'CHAT', is_enabled: true },
-      { model_id: 'chat-lower', usage: 'chat', is_enabled: true }
+      {
+        key: '7::shared-chat',
+        channel_id: 7,
+        model_id: 'shared-chat',
+        label: 'primary / shared-chat',
+        channel_name: 'primary',
+        channel_disabled: false,
+        model_disabled: false,
+        usage: 'CHAT',
+        is_enabled: true,
+        context_window_k: 128,
+        max_tokens: 8192
+      },
+      {
+        key: '7::chat-lower',
+        channel_id: 7,
+        model_id: 'chat-lower',
+        label: 'primary / chat-lower',
+        channel_name: 'primary',
+        channel_disabled: false,
+        model_disabled: false,
+        usage: 'chat',
+        is_enabled: true,
+        context_window_k: 64,
+        max_tokens: 4096
+      },
+      {
+        key: '7::disabled',
+        channel_id: 7,
+        channel_name: 'primary',
+        model_id: 'disabled',
+        label: 'primary / disabled',
+        channel_disabled: false,
+        model_disabled: true,
+        usage: 'CHAT',
+        is_enabled: false
+      },
+      {
+        key: '8::shared-chat',
+        channel_id: 8,
+        model_id: 'shared-chat',
+        label: 'secondary / shared-chat',
+        channel_name: 'secondary',
+        channel_disabled: false,
+        model_disabled: false,
+        usage: 'CHAT',
+        is_enabled: true,
+        context_window_k: 32,
+        max_tokens: 2048
+      },
+      {
+        key: '9::hidden-chat',
+        channel_id: 9,
+        channel_name: 'inactive',
+        model_id: 'hidden-chat',
+        label: 'inactive / hidden-chat',
+        channel_disabled: true,
+        model_disabled: false,
+        usage: 'CHAT',
+        is_enabled: true
+      }
     ]
   )
-  assert.deepEqual(getOrganizationModelsForChannel(channels, 99), [])
   assert.deepEqual(channels, original)
 })
 

@@ -79,6 +79,19 @@
             <el-input-number v-model="props.entry.context_window_k" :min="1" controls-position="right" :disabled="props.locked" />
           </el-form-item>
         </div>
+        <div class="model-entry-field">
+          <el-form-item :label="$t('channels.reasoning_effort')">
+            <el-autocomplete
+              v-model="props.entry.reasoning_effort"
+              class="full-width-input model-entry-reasoning-effort"
+              clearable
+              :fetch-suggestions="queryReasoningEfforts"
+              :placeholder="$t('channels.reasoning_effort_placeholder')"
+              :disabled="props.locked"
+              @input="emit('test-config-change')"
+              @select="emit('test-config-change')" />
+          </el-form-item>
+        </div>
         <div class="model-entry-understanding-row">
           <div class="model-entry-field model-entry-field-third">
             <el-form-item :label="$t('channels.image_understanding')">
@@ -205,6 +218,10 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  reasoningEffortOptions: {
+    type: Array,
+    default: () => []
+  },
   showRemove: {
     type: Boolean,
     default: true
@@ -293,6 +310,14 @@ const handleProtocolChange = (value) => {
 const handleAdvancedSettingsInput = () => {
   emit('advanced-settings-input')
   emit('test-config-change')
+}
+
+const queryReasoningEfforts = (query, callback) => {
+  const normalizedQuery = String(query || '').trim().toLowerCase()
+  const suggestions = props.reasoningEffortOptions
+    .filter(value => !normalizedQuery || value.toLowerCase().includes(normalizedQuery))
+    .map(value => ({ value }))
+  callback(suggestions)
 }
 
 const getTestStatusType = (status) => {

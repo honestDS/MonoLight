@@ -392,72 +392,6 @@ async def test_foreground_freeze_rolls_back_when_candidate_merge_is_incomplete(d
 
 
 @pytest.mark.asyncio
-async def test_running_foreground_work_absorbs_later_contiguous_messages(db_session: AsyncSession, monkeypatch):
-    crud = CRUDSessionReplyWorkItem()
-    manager = SessionReplyQueueManager()
-    await add_message(db_session, 1, "first")
-    first = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=1, dedupe_key="foreground-message:1")
-    first.execution_state = {"request_ids": ["request-1", "request-shared"]}
-    db_session.add(first)
-    await db_session.commit()
-
-    first.status = SessionReplyWorkStatus.RUNNING
-    first.locked_by = "worker-1"
-    db_session.add(first)
-    await db_session.commit()
-    await manager.freeze_foreground_input(db_session, work=first, worker_id="worker-1")
-
-    await add_message(db_session, 2, "second")
-    second = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=2, dedupe_key="foreground-message:2")
-    await add_message(db_session, 3, "third")
-    third = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=3, dedupe_key="foreground-message:3")
-    second.execution_state = {"request_ids": ["request-2", "request-shared"]}
-    third.execution_state = {"request_ids": ["request-shared", "request-3"]}
-    db_session.add(second)
-    db_session.add(third)
-    await db_session.commit()
-
-    logged_messages: list[str] = []
-
-    class CapturingLogger:
-        def bind(self, **kwargs):
-            return self
-
-        def info(self, message):
-            logged_messages.append(message)
-
-    async def skip_runtime_instructions(db, session_id, message):
-        return None
-
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.logger", CapturingLogger())
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
-
-    additional_messages = await manager.absorb_contiguous_foreground_messages(
-        db_session,
-        work_id=first.id,
-        worker_id="worker-1",
-    )
-
-    assert len(additional_messages) == 1
-    assert additional_messages[0].content == "second\nthird"
-    assert additional_messages[0].id == 3
-    assert additional_messages.source_message_ids == (2, 3)
-    assert additional_messages.summary_boundary_message_id == 2
-    assert additional_messages.latest_message_id == 3
-    assert len(logged_messages) == 1
-    assert "second\nthird" in logged_messages[0]
-    await db_session.refresh(first)
-    await db_session.refresh(second)
-    await db_session.refresh(third)
-    assert first.input_message_ids == [1, 2, 3]
-    assert first.execution_state["request_ids"] == ["request-1", "request-shared", "request-2", "request-3"]
-    assert second.status == SessionReplyWorkStatus.MERGED
-    assert second.merged_into_id == first.id
-    assert third.status == SessionReplyWorkStatus.MERGED
-    assert third.merged_into_id == first.id
-
-
-@pytest.mark.asyncio
 async def test_running_confirmed_tool_execution_absorbs_later_foreground_message(db_session: AsyncSession, monkeypatch):
     crud = CRUDSessionReplyWorkItem()
     manager = SessionReplyQueueManager()
@@ -512,11 +446,6 @@ async def test_running_confirmed_tool_execution_absorbs_later_foreground_message
     third_foreground.execution_state = {"request_ids": ["request-third", "request-first"]}
     db_session.add_all([first_foreground, second_foreground, third_foreground])
     await db_session.commit()
-
-    async def skip_runtime_instructions(db, session_id, message):
-        return None
-
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     additional_messages = await manager.absorb_contiguous_foreground_messages(
         db_session,
@@ -603,11 +532,7 @@ async def test_concurrent_absorb_merges_each_work_once_and_preserves_work_order(
         await merge_barrier.wait()
         return await original_merge_ready_foreground(*args, **kwargs)
 
-    async def skip_runtime_instructions(db, session_id, message):
-        return None
-
     monkeypatch.setattr(session_reply_work_item_crud, "merge_ready_foreground", synchronize_merge)
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     async def absorb_in_session():
         async with concurrent_session_factory() as db:
@@ -675,11 +600,7 @@ async def test_absorb_rolls_back_when_work_reaches_terminal_state_before_commit(
         await terminal_finished.wait()
         return await original_merge_ready_foreground(*args, **kwargs)
 
-    async def skip_runtime_instructions(db, session_id, message):
-        return None
-
     monkeypatch.setattr(session_reply_work_item_crud, "merge_ready_foreground", wait_for_terminal)
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     async def absorb():
         async with concurrent_session_factory() as db:
@@ -750,16 +671,12 @@ async def test_absorb_contiguous_messages_rolls_back_when_candidate_merge_is_not
 
     original_merge_ready_foreground = session_reply_work_item_crud.merge_ready_foreground
 
-    async def skip_runtime_instructions(db, session_id, message):
-        return None
-
     async def merge_ready_foreground(*args, **kwargs):
         if merge_mode == "failure":
             return []
         updated_work_ids = await original_merge_ready_foreground(*args, **kwargs)
         return updated_work_ids[:-1]
 
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
     monkeypatch.setattr(session_reply_work_item_crud, "merge_ready_foreground", merge_ready_foreground)
 
     assert (
@@ -841,13 +758,9 @@ async def test_absorb_contiguous_messages_rolls_back_when_claim_is_lost(db_sessi
 
     original_update_claimed = session_reply_work_item_crud.update_claimed
 
-    async def skip_runtime_instructions(db, session_id, message):
-        return None
-
     async def lose_claim(*args, **kwargs):
         return False
 
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
     monkeypatch.setattr(session_reply_work_item_crud, "update_claimed", lose_claim)
 
     assert (
@@ -924,11 +837,6 @@ async def test_running_foreground_work_does_not_absorb_across_background_boundar
     await add_message(db_session, 3, "after boundary")
     after_boundary = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=3, dedupe_key="foreground-message:3")
     await db_session.commit()
-
-    async def skip_runtime_instructions(db, session_id, message):
-        return None
-
-    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     additional_messages = await manager.absorb_contiguous_foreground_messages(
         db_session,

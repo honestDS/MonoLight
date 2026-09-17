@@ -207,6 +207,20 @@ def test_chat_model_accepts_valid_input_budget_configurations(model_settings: di
     assert model_entry.max_tokens == model_settings.get("max_tokens")
 
 
+def test_chat_model_accepts_custom_reasoning_effort() -> None:
+    model_entry = ChannelModelItem.model_validate(
+        {
+            "model_id": "model",
+            "usage": ModelUsage.CHAT,
+            "protocol": ModelProtocol.OPENAI,
+            "context_window_k": 64,
+            "reasoning_effort": "  custom-tier  ",
+        }
+    )
+
+    assert model_entry.reasoning_effort == "custom-tier"
+
+
 @pytest.mark.parametrize(
     ("http_proxy", "expected_proxy"),
     [
