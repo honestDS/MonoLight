@@ -3,6 +3,7 @@ from importlib import import_module
 from typing import Any
 
 from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL
+from app.core.dispatch_context import DispatchMode
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -102,6 +103,8 @@ async def process_single_tool_with_isolated_db(
     allow_background_submission: bool = True,
     context_summary_boundary_message_id: int | None = None,
     source_message_id: int | None = None,
+    dispatch_mode: DispatchMode = "interactive",
+    dispatch_source: str = "interactive_tool",
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
@@ -123,6 +126,8 @@ async def process_single_tool_with_isolated_db(
             allow_background_submission=allow_background_submission,
             context_summary_boundary_message_id=context_summary_boundary_message_id,
             source_message_id=source_message_id,
+            dispatch_mode=dispatch_mode,
+            dispatch_source=dispatch_source,
         )
 
 

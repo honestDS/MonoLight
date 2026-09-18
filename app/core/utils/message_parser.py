@@ -1,6 +1,7 @@
 import json
 
 from app.core.prompts import SCHEDULED_TASK_TRIGGER_PROMPT
+from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -90,8 +91,10 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 except json.JSONDecodeError:
                     # 鲁棒性退避：解析失败按原样呈现
                     pass
-                if m_type == MessageType.TOOL_RESULT and isinstance(content, str) and isinstance(msg.model_context_suffix, str) and msg.model_context_suffix:
-                    content = f"{content}\n\n{msg.model_context_suffix}"
+                if m_type == MessageType.TOOL_RESULT and isinstance(content, str):
+                    content = strip_session_todo_snapshot(content)
+                    if isinstance(msg.model_context_suffix, str) and msg.model_context_suffix:
+                        content = f"{content}\n\n{msg.model_context_suffix}"
             elif m_type == MessageType.TEXT and content.startswith("[") and content.endswith("]"):
                 try:
                     parsed_content = json.loads(content)

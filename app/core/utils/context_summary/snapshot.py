@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session.message import message_crud
+from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshots
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, Message, MessageRole
 
@@ -94,7 +95,7 @@ async def build_context_summary_snapshot(
             break
         page_before_id = last_id
 
-    recent_messages = tuple(parse_db_messages_to_internal(list(reversed(recent_raw_desc))))
+    recent_messages = tuple(strip_session_todo_snapshots(parse_db_messages_to_internal(list(reversed(recent_raw_desc)))))
     return ContextSummarySnapshot(
         expected_summary_message_id=expected_summary_message_id,
         snapshot_before_id=snapshot_before_id,
@@ -141,7 +142,7 @@ async def iter_persistent_summary_rounds(
 
         for message in page:
             if current_round and message.role == MessageRole.USER:
-                parsed_round = parse_db_messages_to_internal([item for item in current_round if item.id not in snapshot.model_excluded_message_ids])
+                parsed_round = strip_session_todo_snapshots(parse_db_messages_to_internal([item for item in current_round if item.id not in snapshot.model_excluded_message_ids]))
                 if parsed_round:
                     yield parsed_round
                 current_round = []
@@ -156,6 +157,6 @@ async def iter_persistent_summary_rounds(
         page_after_id = last_id
 
     if current_round:
-        parsed_round = parse_db_messages_to_internal([item for item in current_round if item.id not in snapshot.model_excluded_message_ids])
+        parsed_round = strip_session_todo_snapshots(parse_db_messages_to_internal([item for item in current_round if item.id not in snapshot.model_excluded_message_ids]))
         if parsed_round:
             yield parsed_round

@@ -21,7 +21,7 @@ from app.core.constants import (
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
 )
-from app.core.dispatch_context import build_dispatch_context
+from app.core.dispatch_context import DispatchMode, build_dispatch_context
 from app.core.i18n import t
 from app.core.log import (
     LogManager,
@@ -511,6 +511,8 @@ async def process_single_tool(
     *,
     context_summary_boundary_message_id: int | None = None,
     source_message_id: int | None = None,
+    dispatch_mode: DispatchMode = "interactive",
+    dispatch_source: str = "interactive_tool",
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -571,8 +573,8 @@ async def process_single_tool(
             # 传递运行时上下文给 Executor
             if hasattr(instance, "set_runtime_context"):
                 dispatch_context = build_dispatch_context(
-                    mode="interactive",
-                    source="interactive_tool",
+                    mode=dispatch_mode,
+                    source=dispatch_source,
                     uid=uid,
                     session_id=session_id,
                     profile=profile,

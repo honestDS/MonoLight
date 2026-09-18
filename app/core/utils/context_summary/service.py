@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS,
     ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
     ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
@@ -412,6 +413,7 @@ async def _ensure_context_summary(
 
     recent_messages = list(snapshot.recent_messages)
     refinement_attempts = 0
+    insufficient_refinement_progress = False
     while True:
         if fixed_request_messages is not None:
             candidate_message_id = snapshot.persistent_summary_target_id or state.message_id
@@ -452,8 +454,12 @@ async def _ensure_context_summary(
             )
         if final_usage["required_tokens"] <= final_usage["compression_goal_tokens"]:
             break
+        if insufficient_refinement_progress:
+            await release_db_session(db)
+            raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
 
         refinement_attempts += 1
+        previous_candidate_tokens = max(1, estimate_tokens(candidate_summary or ""))
         await ensure_context_summary_work_valid(combined_work_validity_checker)
         if completed_stage is not None:
             from app.core.utils.context_summary.reduction import (
@@ -499,7 +505,11 @@ async def _ensure_context_summary(
             if not compressed:
                 await release_db_session(db)
                 raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
+        compressed_tokens = max(1, estimate_tokens(compressed or ""))
         candidate_summary = compressed
+        insufficient_refinement_progress = (
+            previous_candidate_tokens - compressed_tokens < CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS
+        )
 
     if final_usage["required_tokens"] > final_usage["compression_goal_tokens"]:
         logger.bind(
