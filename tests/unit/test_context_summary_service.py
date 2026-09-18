@@ -389,7 +389,18 @@ async def test_context_summary_refines_until_goal_without_attempt_limit(monkeypa
             ),
         )
 
+    token_counts = {
+        "compressed history": 100,
+        "refined-1": 80,
+        "refined-2": 60,
+        "refined-3": 40,
+    }
+
+    def estimate_tokens(content):
+        return token_counts.get(content, 20)
+
     monkeypatch.setattr(service_module, "calc_token_usage", calc_usage)
+    monkeypatch.setattr(service_module, "estimate_tokens", estimate_tokens)
     monkeypatch.setattr(
         reduction_module,
         "refine_completed_summary_stage",

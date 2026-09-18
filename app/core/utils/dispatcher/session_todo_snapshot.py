@@ -4,13 +4,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.todo import session_todo_crud
+from app.core.utils.context_messages import is_context_summary_message
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.session_todo import SessionTodoPlan
 
 __all__ = [
+    "append_session_todo_snapshot",
     "load_current_session_todo_snapshot",
+    "measure_session_todo_snapshot_tokens",
     "persist_session_todo_snapshot_on_tool_results",
     "strip_session_todo_snapshot",
+    "strip_session_todo_snapshots",
 ]
 
 _SNAPSHOT_OPEN = "<current_session_todo_snapshot>"
@@ -79,6 +84,50 @@ def strip_session_todo_snapshot(content: str | None) -> str | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("revision"), int) or not isinstance(payload.get("todos"), list):
         return content
     return content[:marker_index]
+
+
+def strip_session_todo_snapshots(messages: list[InternalMessage]) -> list[InternalMessage]:
+    stripped: list[InternalMessage] = []
+    for message in messages:
+        if message.role == MessageRole.TOOL and isinstance(message.content, str):
+            stripped.append(
+                message.model_copy(
+                    deep=True,
+                    update={"content": strip_session_todo_snapshot(message.content)},
+                )
+            )
+        else:
+            stripped.append(message.model_copy(deep=True))
+    return stripped
+
+
+def append_session_todo_snapshot(
+    messages: list[InternalMessage],
+    snapshot: str | None,
+) -> list[InternalMessage]:
+    updated = [message.model_copy(deep=True) for message in messages]
+    if not snapshot:
+        return updated
+
+    target = next(
+        (message for message in reversed(updated) if message.role == MessageRole.TOOL and isinstance(message.content, str)),
+        None,
+    )
+    if target is None:
+        target = next((message for message in updated if is_context_summary_message(message)), None)
+    if target is None or not isinstance(target.content, str):
+        return updated
+
+    base_content = strip_session_todo_snapshot(target.content) or ""
+    target.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
+    return updated
+
+
+def measure_session_todo_snapshot_tokens(snapshot: str | None) -> int:
+    if not snapshot:
+        return 0
+    # 独立估算追加片段会略偏保守，最终模型请求仍会按完整拼接后的消息再次做硬窗口校验。
+    return estimate_tokens(f"\n\n{snapshot}")
 
 
 async def persist_session_todo_snapshot_on_tool_results(

@@ -38,6 +38,7 @@ from app.core.prompts import (
 )
 from app.core.tools import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+    MANAGE_TODO_TOOL_NAME,
     get_tools_for_profile,
 )
 from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
@@ -161,7 +162,7 @@ class BackgroundDispatcherMixin:
         allowed_tool_names = None
         if allow_tools:
             profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
-            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") != MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME]
+            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") not in {MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
             if restrict_tools_to_background_allowlist:
                 profile_tools = filter_background_proactive_tools(profile_tools)
                 allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
@@ -542,6 +543,8 @@ class BackgroundDispatcherMixin:
                                 context_window_k=chat_params["context_window_k"],
                                 tool_call_count=len(ai_msg.tool_calls),
                                 allow_background_submission=False,
+                                dispatch_mode="background",
+                                dispatch_source=reply_source,
                             )
                             for tool_call in ai_msg.tool_calls
                         ]
