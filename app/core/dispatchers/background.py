@@ -551,6 +551,7 @@ class BackgroundDispatcherMixin:
                                 uid,
                                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                                 context_window_k=chat_params["context_window_k"],
+                                tool_call_count=len(ai_msg.tool_calls),
                                 allow_background_submission=False,
                             )
                             for tool_call in ai_msg.tool_calls

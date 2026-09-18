@@ -400,6 +400,7 @@ async def handle_interactive_tool_round(
         uid=state.uid,
         allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
         context_window_k=state.chat_params["context_window_k"],
+        tool_call_count=len(ai_msg.tool_calls),
         context_summary_boundary_message_id=state.checkpoint_state.upper_message_id,
         source_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
     )

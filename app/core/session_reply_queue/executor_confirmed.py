@@ -13,12 +13,14 @@ from app.core.audit.confirmation import (
 from app.core.audit.integrity import verify_persisted_tool_round
 from app.core.audit.service import audit_tool_round, is_audit_configured
 from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.session import session_crud
 from app.core.i18n import get_current_locale, t
 from app.core.prompts import AUDIT_SOURCE_MESSAGE_INVALID_PROMPT
 from app.core.session_reply_queue.executor_audit import (
@@ -45,6 +47,14 @@ from app.models.message import InternalMessage, InternalToolCall, Message, Messa
 from app.models.session_reply_work_item import SessionReplyWorkItem
 
 __all__ = []
+
+
+def _resolve_confirmed_tool_context_window_k(session) -> int:
+    metadata = getattr(session, "llm_request_metadata", None)
+    context_window_tokens = metadata.get("context_window_tokens") if isinstance(metadata, dict) else None
+    if isinstance(context_window_tokens, int) and not isinstance(context_window_tokens, bool) and context_window_tokens > 0:
+        return max(1, context_window_tokens // CONTEXT_WINDOW_TOKENS_PER_K)
+    return 4
 
 
 async def _source_invalid_confirmed_tool_response(
@@ -181,6 +191,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         )
 
     cfg = await validate_profile_and_cfg(db, profile)
+    session = await session_crud.get_by_session_id(db, work.session_id)
+    confirmed_tool_context_window_k = _resolve_confirmed_tool_context_window_k(session)
     files_changed = _confirmed_file_snapshots_changed(details, working_directory=record.working_directory)
     pending_tool_results = await get_pending_tool_results(
         db,
@@ -397,6 +409,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 detail.turn_index,
                 work.uid,
                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                context_window_k=confirmed_tool_context_window_k,
+                tool_call_count=len(confirmed_calls),
             )
             await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
             try:
