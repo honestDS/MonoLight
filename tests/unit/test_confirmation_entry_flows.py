@@ -665,6 +665,10 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
     )
     assert pending is not None
     assert set(pending) == {"call-atomic"}
+    pending_message = pending["call-atomic"]
+    pending_message.model_context_suffix = "<current_session_todo_snapshot>{}</current_session_todo_snapshot>"
+    db_session.add(pending_message)
+    await db_session.flush()
 
     replacement_content = {
         "type": "files_to_user",
@@ -682,17 +686,19 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
     replacement_content_json = json.dumps(replacement_content)
     returned_content = await replace_pending_tool_result(
         db_session,
-        pending_message=pending["call-atomic"],
+        pending_message=pending_message,
         original_tool_call_id="call-atomic",
         content=replacement_content_json,
         audit_record_id=record.id,
     )
     assert returned_content == replacement_content_json
     await db_session.commit()
+    await db_session.refresh(pending_message)
     versions = list((await db_session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == record.id).order_by(AuditToolResultVersion.version_no))).scalars().all())
     assert [version.version_no for version in versions] == [0, 1]
     assert json.loads(InternalMessage.model_validate_json(versions[0].content).content) == pending_content
     assert json.loads(InternalMessage.model_validate_json(versions[1].content).content) == replacement_content
+    assert pending_message.model_context_suffix is None
 
 
 @pytest.mark.asyncio

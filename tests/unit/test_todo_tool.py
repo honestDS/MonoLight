@@ -22,12 +22,13 @@ from app.core.tools import (
 from app.core.tools.todo import validate_manage_todo_arguments
 from app.core.utils.dispatcher import inject_system_prompt as inject_system_prompt_module
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
+from app.core.utils.dispatcher.helpers import dump_output_history
 from app.core.utils.dispatcher.session_todo_snapshot import (
-    append_session_todo_snapshot,
     load_current_session_todo_snapshot,
-    measure_session_todo_snapshot_tokens,
+    persist_session_todo_snapshot_on_tool_results,
 )
-from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
@@ -53,6 +54,12 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
         await connection.execute(
             CreateTable(
                 ChatSession.__table__,
+                include_foreign_key_constraints=[],
+            )
+        )
+        await connection.execute(
+            CreateTable(
+                Message.__table__,
                 include_foreign_key_constraints=[],
             )
         )
@@ -350,6 +357,7 @@ async def test_build_system_prompt_includes_current_session_todo_rules_without_p
         "Use manage_todo only for tasks that require multiple execution steps",
         "Call manage_todo only when it appears in the current tool list",
         "operation=write requires expected_revision",
+        "only the last one in message order is the latest authoritative complete Todo state",
         "Set replace_existing=true only after checking the latest plan from the current_session_todo_snapshot or operation=read",
         "On a revision conflict",
         "operation=write is a complete replacement, not a partial patch",
@@ -486,54 +494,60 @@ async def test_write_without_explicit_replace_preserves_completed_progress(db_se
 
 
 @pytest.mark.asyncio
-async def test_current_todo_snapshot_is_appended_once_to_last_tool_result_without_mutating_originals(db_session: AsyncSession):
+async def test_todo_snapshot_is_persisted_as_model_only_suffix_on_last_tool_result(db_session: AsyncSession):
     await _create_sessions(db_session, ("user-1", "session-1"))
     executor = _executor(db_session, uid="user-1", session_id="session-1")
-    todos = [
-        {"content": "inspect", "status": "completed"},
-        {"content": "modify", "status": "in_progress"},
-        {"content": "verify", "status": "pending"},
+    await executor.execute(
+        "write",
+        todos=[{"content": "verify", "status": "in_progress"}],
+        expected_revision=0,
+    )
+    first = Message(
+        session_id="session-1",
+        uid="user-1",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=json.dumps({"role": "tool", "content": "result-a", "tool_call_id": "call-a"}),
+        profile_id=1,
+    )
+    second = Message(
+        session_id="session-1",
+        uid="user-1",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=json.dumps({"role": "tool", "content": "result-b", "tool_call_id": "call-b"}),
+        profile_id=1,
+    )
+    db_session.add_all([first, second])
+    await db_session.commit()
+    await db_session.refresh(first)
+    await db_session.refresh(second)
+    tool_results = [
+        InternalMessage(id=first.id, role=MessageRole.TOOL, tool_call_id="call-a", content="result-a"),
+        InternalMessage(id=second.id, role=MessageRole.TOOL, tool_call_id="call-b", content="result-b"),
     ]
-    await executor.execute("write", todos=todos, expected_revision=0)
 
-    messages = [
-        InternalMessage(
-            role=MessageRole.ASSISTANT,
-            tool_calls=[
-                InternalToolCall(id="call-a", name="tool_a", arguments={}),
-                InternalToolCall(id="call-b", name="tool_b", arguments={}),
-            ],
-        ),
-        InternalMessage(role=MessageRole.TOOL, tool_call_id="call-a", content="result-a"),
-        InternalMessage(role=MessageRole.TOOL, tool_call_id="call-b", content="result-b"),
-    ]
-
-    snapshot = await load_current_session_todo_snapshot(
+    await persist_session_todo_snapshot_on_tool_results(
         db_session,
         uid="user-1",
         session_id="session-1",
+        tool_results=tool_results,
     )
-    updated = append_session_todo_snapshot(messages, snapshot)
+    await db_session.refresh(first)
+    await db_session.refresh(second)
+    session = await db_session.get(ChatSession, "session-1")
 
-    assert messages[1].content == "result-a"
-    assert messages[2].content == "result-b"
-    assert updated[1].content == "result-a"
-    content = updated[2].content
-    assert isinstance(content, str)
-    assert content.startswith("result-b")
-    assert '<current_session_todo_snapshot>{"revision":1,"todos":' in content
-    assert '"content":"modify","status":"in_progress"' in content
-    assert sum(isinstance(message.content, str) and "<current_session_todo_snapshot>" in message.content for message in updated) == 1
-    snapshot_tokens = measure_session_todo_snapshot_tokens(messages, snapshot)
-    single_result_messages = [
-        InternalMessage(
-            role=MessageRole.ASSISTANT,
-            tool_calls=[InternalToolCall(id="call-b", name="tool_b", arguments={})],
-        ),
-        InternalMessage(role=MessageRole.TOOL, tool_call_id="call-b", content="result-b"),
-    ]
-    assert snapshot_tokens > 0
-    assert snapshot_tokens == measure_session_todo_snapshot_tokens(single_result_messages, snapshot)
+    assert first.model_context_suffix is None
+    assert second.model_context_suffix is not None
+    assert session is not None
+    assert session.context_content_revision == 0
+    assert session.context_summary_revision == 0
+    assert "<current_session_todo_snapshot>" not in second.content
+    parsed = parse_db_messages_to_internal([first, second])
+    assert parsed[0].content == "result-a"
+    assert "<current_session_todo_snapshot>" in parsed[1].content
+    visible = dump_output_history(tool_results, show_tool_calls=True)
+    assert visible[-1]["content"] == "result-b"
 
 
 @pytest.mark.asyncio
@@ -561,35 +575,3 @@ async def test_todo_snapshot_escapes_wrapper_delimiters_inside_todo_content(db_s
     assert snapshot.count("</current_session_todo_snapshot>") == 1
     assert "\\u003c/current_session_todo_snapshot\\u003e" in snapshot
     assert "\\u003cfake\\u003e" in snapshot
-
-
-@pytest.mark.asyncio
-async def test_compacted_context_recovers_latest_todo_from_next_tool_result(db_session: AsyncSession):
-    await _create_sessions(db_session, ("user-1", "session-1"))
-    executor = _executor(db_session, uid="user-1", session_id="session-1")
-    await executor.execute(
-        "write",
-        todos=[{"content": "survive compaction", "status": "in_progress"}],
-        expected_revision=0,
-    )
-
-    compacted_messages = [
-        InternalMessage(
-            role=MessageRole.ASSISTANT,
-            tool_calls=[InternalToolCall(id="call-after-summary", name="any_tool", arguments={})],
-        ),
-        InternalMessage(role=MessageRole.TOOL, tool_call_id="call-after-summary", content="fresh result"),
-    ]
-
-    snapshot = await load_current_session_todo_snapshot(
-        db_session,
-        uid="user-1",
-        session_id="session-1",
-    )
-    updated = append_session_todo_snapshot(compacted_messages, snapshot)
-
-    content = updated[-1].content
-    assert isinstance(content, str)
-    assert "fresh result" in content
-    assert '"revision":1' in content
-    assert '"content":"survive compaction","status":"in_progress"' in content

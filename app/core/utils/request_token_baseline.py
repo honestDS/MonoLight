@@ -1,10 +1,7 @@
 import json
 from typing import Any
 
-from app.core.constants import (
-    ERR_PROVIDER_REQUEST_ID_INVALID,
-    RUNTIME_CONTEXT_OVERLAY_METADATA_KEY,
-)
+from app.core.constants import ERR_PROVIDER_REQUEST_ID_INVALID
 from app.core.i18n import t
 from app.core.utils.context_messages import is_context_summary_message, message_token_text
 from app.core.utils.tokenizer import estimate_tokens
@@ -228,9 +225,6 @@ def estimate_incremental_input_tokens(
 ) -> int | None:
     if not isinstance(metadata, dict) or metadata.get("input_tokens_source") != "provider":
         return None
-    if metadata.get(RUNTIME_CONTEXT_OVERLAY_METADATA_KEY) is True:
-        return None
-
     input_tokens = metadata.get("input_tokens")
     previous_min_id = metadata.get("request_message_min_id")
     previous_max_id = metadata.get("request_message_max_id")

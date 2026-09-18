@@ -521,7 +521,7 @@ app/core/utils/
 ├── model_request_headers.py # 模型请求头辅助
 ├── operation_directories.py # 文件系统目录辅助
 ├── request_token_baseline.py # 请求令牌统计辅助
-├── session_todo_snapshot.py # 工具轮次后的 Todo 快照读取、预算与模型请求注入
+├── session_todo_snapshot.py # 工具轮次后的 Todo 快照读取、模型上下文后缀持久化与隐藏
 ├── session.py              # 会话辅助
 ├── system.py               # 系统信息辅助
 ├── text_splitter.py        # 文本切分辅助

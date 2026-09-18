@@ -7,6 +7,7 @@ from app.core.exceptions import BaseBusinessException, LLMException, ServerExcep
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
+from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.providers.database import AsyncSessionLocal
@@ -131,7 +132,13 @@ def dump_output_history(
     show_tool_calls: bool = True,
 ) -> list[dict[str, Any]]:
     output_messages = messages if show_tool_calls else [message for message in messages if message.role != MessageRole.TOOL and not (message.role == MessageRole.ASSISTANT and message.tool_calls)]
-    return [message.model_dump(exclude_none=True) for message in output_messages]
+    visible_messages: list[InternalMessage] = []
+    for message in output_messages:
+        if message.role == MessageRole.TOOL and isinstance(message.content, str):
+            visible_messages.append(message.model_copy(update={"content": strip_session_todo_snapshot(message.content)}))
+        else:
+            visible_messages.append(message)
+    return [message.model_dump(exclude_none=True) for message in visible_messages]
 
 
 def dump_background_proactive_history(messages: list[InternalMessage]) -> list[dict[str, Any]]:

@@ -54,8 +54,6 @@ from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
 
-CONTEXT_SUMMARY_MAX_REFINEMENT_ATTEMPTS = 2
-
 
 ContextSummaryLifecycleCallback = Callable[[dict[str, object]], Awaitable[None]]
 
@@ -453,19 +451,9 @@ async def _ensure_context_summary(
             )
         if final_usage["required_tokens"] <= final_usage["compression_goal_tokens"]:
             break
-        if refinement_attempts >= CONTEXT_SUMMARY_MAX_REFINEMENT_ATTEMPTS:
-            logger.bind(
-                uid=uid,
-                session_id=session_id,
-                refinement_attempts=refinement_attempts,
-                required_tokens=final_usage["required_tokens"],
-                compression_goal_tokens=final_usage["compression_goal_tokens"],
-            ).warning("Context summary refinement limit reached before compression goal")
-            break
 
         refinement_attempts += 1
         await ensure_context_summary_work_valid(combined_work_validity_checker)
-        previous_summary_tokens = final_usage["summary_tokens"]
         if completed_stage is not None:
             from app.core.utils.context_summary.reduction import (
                 refine_completed_summary_stage,
@@ -510,10 +498,18 @@ async def _ensure_context_summary(
             if not compressed:
                 await release_db_session(db)
                 return state
-        compressed_tokens = estimate_summary_tokens(compressed)
-        if compressed_tokens >= previous_summary_tokens:
-            break
         candidate_summary = compressed
+
+    if final_usage["required_tokens"] > final_usage["compression_goal_tokens"]:
+        logger.bind(
+            uid=uid,
+            session_id=session_id,
+            refinement_attempts=refinement_attempts,
+            required_tokens=final_usage["required_tokens"],
+            compression_goal_tokens=final_usage["compression_goal_tokens"],
+        ).warning("Context summary did not reach compression goal; candidate will not be persisted")
+        await release_db_session(db)
+        return state
 
     target_message_id = snapshot.persistent_summary_target_id if snapshot.has_persistent_history else state.message_id
     if target_message_id is None:

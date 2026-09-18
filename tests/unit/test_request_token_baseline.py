@@ -222,30 +222,6 @@ def test_incremental_input_tokens_falls_back_when_model_or_summary_changes(monke
     assert summary_changed is None
 
 
-def test_incremental_input_tokens_falls_back_after_runtime_context_overlay():
-    messages = [
-        InternalMessage(id=1, role=MessageRole.USER, content="old user"),
-        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
-    ]
-    metadata = _metadata_for(messages)
-    metadata[baseline_module.RUNTIME_CONTEXT_OVERLAY_METADATA_KEY] = True
-
-    result = baseline_module.estimate_incremental_input_tokens(
-        [
-            *messages,
-            InternalMessage(id=3, role=MessageRole.USER, content="new user"),
-        ],
-        None,
-        metadata,
-        model_id="grok-4.5",
-        protocol="openai",
-        context_summary_revision=2,
-        context_content_revision=3,
-    )
-
-    assert result is None
-
-
 @pytest.mark.parametrize(
     ("metadata", "expected"),
     (

@@ -90,6 +90,8 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 except json.JSONDecodeError:
                     # 鲁棒性退避：解析失败按原样呈现
                     pass
+                if m_type == MessageType.TOOL_RESULT and isinstance(content, str) and isinstance(msg.model_context_suffix, str) and msg.model_context_suffix:
+                    content = f"{content}\n\n{msg.model_context_suffix}"
             elif m_type == MessageType.TEXT and content.startswith("[") and content.endswith("]"):
                 try:
                     parsed_content = json.loads(content)

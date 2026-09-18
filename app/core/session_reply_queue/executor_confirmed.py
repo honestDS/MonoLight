@@ -41,6 +41,7 @@ from app.core.utils.dispatcher.process_single_tool import (
     process_single_tool,
 )
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
@@ -119,6 +120,7 @@ async def _append_confirmed_tool_result(
     )
     stored_tool_result = tool_result.model_copy(deep=True)
     stored_tool_result.content = sanitized_content
+    stored_tool_result.id = replacement_state.pending_tool_results[original_tool_call_id].id
     replacement_state.messages.append(stored_tool_result)
     replacement_state.turn_messages.append(stored_tool_result)
     replacement_state.replaced_tool_results = True
@@ -261,8 +263,15 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 )
                 stored_tool_result = tool_result.model_copy(deep=True)
                 stored_tool_result.content = sanitized_content
+                stored_tool_result.id = pending_tool_results[original_call.id].id
                 messages.append(stored_tool_result)
                 turn_messages.append(stored_tool_result)
+            await persist_session_todo_snapshot_on_tool_results(
+                db,
+                uid=work.uid,
+                session_id=work.session_id,
+                tool_results=[message for message in turn_messages if message.role == MessageRole.TOOL],
+            )
             if reaudit_round.confirmation_payload is not None:
                 confirmation_content = json.dumps(reaudit_round.confirmation_payload, ensure_ascii=False)
                 await save_message(
@@ -445,6 +454,13 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             await _commit_and_notify_confirmation_tool_results(audit_record_id)
     elif replacement_state.replaced_tool_results:
         await _commit_and_notify_confirmation_tool_results(audit_record_id)
+
+    await persist_session_todo_snapshot_on_tool_results(
+        db,
+        uid=work.uid,
+        session_id=work.session_id,
+        tool_results=[message for message in replacement_state.turn_messages if message.role == MessageRole.TOOL],
+    )
 
     guidance_prompt = (work.execution_state or {}).get("guidance_prompt")
     initial_message = InternalMessage(
