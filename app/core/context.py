@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
-    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
     ERR_CHAT_INPUT_TOO_LONG,
 )
@@ -21,15 +20,8 @@ from app.core.utils.context_budget import (
     measure_context_request_usage,
 )
 from app.core.utils.context_messages import (
-    find_protected_tail_start,
-    is_context_summary_message,
-    is_synthetic_summary_message,
     message_token_text,
-    replace_protected_tool_chains_for_budget,
-    to_jsonable,
-    trim_protected_tail_tools,
 )
-from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result_with_stats
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
@@ -58,10 +50,7 @@ def _is_background_tool_result_message(msg: InternalMessage) -> bool:
 
 
 class ContextManager:
-    _to_jsonable = staticmethod(to_jsonable)
     _message_token_text = staticmethod(message_token_text)
-    _find_protected_tail_start = staticmethod(find_protected_tail_start)
-    _trim_protected_tail_tools = staticmethod(trim_protected_tail_tools)
 
     @classmethod
     async def _load_history_backward_by_id(
@@ -72,16 +61,10 @@ class ContextManager:
         uid: str,
         before_id: int | None,
         after_id: int | None,
-        limit_tokens: int,
-        current_msg_tokens: int,
-        context_window_k: int,
         page_size: int = CONTEXT_HISTORY_PAGE_SIZE,
     ) -> list[Message]:
         raw_history: list[Message] = []
         page_before_id = before_id
-        estimated_scan_tokens = current_msg_tokens
-        max_scanned_messages = max(1, limit_tokens - current_msg_tokens)
-        scanned_user_messages = 0
 
         while True:
             page = await message_crud.get_history_backward_by_id(
@@ -96,31 +79,8 @@ class ContextManager:
             if not page:
                 break
 
-            reached_safe_budget_boundary = False
-            for raw_message in page:
-                raw_history.append(raw_message)
-                estimated_scan_tokens += max(1, estimate_tokens(raw_message.content or ""))
-                if raw_message.role == MessageRole.USER:
-                    scanned_user_messages += 1
-
-                if raw_message.role != MessageRole.USER or estimated_scan_tokens < limit_tokens or scanned_user_messages < 2:
-                    continue
-
-                parsed_candidate = parse_db_messages_to_internal(raw_history)
-                _, probe = cls._strategy_atomic_truncate(
-                    uid=uid,
-                    session_id=session_id,
-                    parsed_history=parsed_candidate,
-                    limit_tokens=limit_tokens,
-                    current_msg_tokens=current_msg_tokens,
-                    context_window_k=context_window_k,
-                    emit_logs=False,
-                )
-                if probe["is_hard_truncated"] or len(raw_history) >= max_scanned_messages:
-                    reached_safe_budget_boundary = True
-                    break
-
-            if reached_safe_budget_boundary or len(page) < page_size:
+            raw_history.extend(page)
+            if len(page) < page_size:
                 break
 
             last_id = page[-1].id
@@ -144,68 +104,26 @@ class ContextManager:
         reserved_tokens: int = 0,
     ) -> list[InternalMessage]:
         """
-        获取经过压缩与对齐后的上下文消息列表。
+        获取总结边界之后的完整持久化历史，并仅做工具链协议对齐。
 
-        reserved_tokens：预留给系统提示词等运行时注入内容的 Token 数，
-        从总预算中扣除，确保压缩后加上系统消息不会超出模型上下文限制。
+        历史消息在这里不再按请求预算裁剪或改写。上下文缩减统一由总结机制负责，
+        最终模型请求阶段只做硬窗口预算校验。
         """
-        limit_tokens = cls.get_history_budget_tokens(context_window_k=context_window_k, reserved_tokens=reserved_tokens)
-
-        current_msg_tokens = estimate_tokens(current_message)
-
-        # 1. 按消息编号从新到旧分页读取；达到预算后仅在完整轮次起点停止。
+        del profile, current_message, context_window_k, reserved_tokens
         raw_history = await cls._load_history_backward_by_id(
             db,
             session_id=session_id,
             uid=uid,
             before_id=before_id,
             after_id=after_id,
-            limit_tokens=limit_tokens,
-            current_msg_tokens=current_msg_tokens,
-            context_window_k=context_window_k,
         )
         parsed_history_desc = parse_db_messages_to_internal(raw_history)
         parsed_history = list(reversed(parsed_history_desc))
-        protected_start_idx = find_protected_tail_start(
+        return cls.audit_tool_chain(
             parsed_history,
-            historical_round_count=1,
-        )
-        older_history = parsed_history[:protected_start_idx]
-        protected_history = parsed_history[protected_start_idx:]
-        protected_history_tokens = sum(estimate_tokens(cls._message_token_text(item)) for item in protected_history)
-
-        # 2. 最近两个历史轮次先作为保护区保留；更早历史使用剩余预算裁剪。
-        older_budget = max(1, limit_tokens - protected_history_tokens)
-        trimmed_older, log_data = cls._strategy_atomic_truncate(
-            uid=uid,
-            session_id=session_id,
-            parsed_history=list(reversed(older_history)),
-            limit_tokens=older_budget,
-            current_msg_tokens=current_msg_tokens,
-            context_window_k=context_window_k,
-        )
-        final_msgs = cls.audit_tool_chain(
-            [*trimmed_older, *protected_history],
             uid=uid,
             session_id=session_id,
         )
-
-        # 3. 压缩日志记录：仅当确实发生压缩（Token 真正减少）时才记录，避免误导性日志
-        if log_data["is_hard_truncated"] and log_data["after"] < log_data["before"]:
-            logger.bind(uid=uid, session_id=session_id).info(
-                t(
-                    "LOG_CONTEXT_COMPRESSED",
-                    before=log_data["before"],
-                    after=log_data["after"],
-                    reserved_tokens=reserved_tokens,
-                )
-            )
-
-        return final_msgs
-
-    @classmethod
-    def get_history_budget_tokens(cls, context_window_k: int, reserved_tokens: int = 0) -> int:
-        return max(1, context_window_k * CONTEXT_WINDOW_TOKENS_PER_K - max(reserved_tokens, 0))
 
     @classmethod
     def build_request_budget(
@@ -262,18 +180,12 @@ class ContextManager:
         additional_non_system_tokens: int = 0,
     ) -> list[InternalMessage]:
         """
-        在每次模型请求前对完整内存上下文做统一预算裁剪。
+        在每次模型请求前只校验完整请求预算，不修改消息内容或历史范围。
 
-        预算包含模型上下文窗口、输出 token、工具 schema 与安全余量，避免工具响应追加到
-        内存 messages 后绕过数据库历史压缩逻辑。
+        历史压缩由上下文总结机制负责；工具结果在当前工具轮结束时一次性定稿并持久化。
+        这里不得重新截断工具结果、替换工具链或滑动删除历史消息，以保持请求前缀稳定。
         """
         request_messages = [msg.model_copy(deep=True) for msg in messages]
-        system_msgs = [msg for msg in request_messages if msg.role == MessageRole.SYSTEM]
-        non_system_msgs = [msg for msg in request_messages if msg.role != MessageRole.SYSTEM]
-        summary_msgs = [msg for msg in non_system_msgs if is_context_summary_message(msg)]
-        summary_msg_ids = {id(msg) for msg in summary_msgs}
-        dialogue_msgs = [msg for msg in non_system_msgs if id(msg) not in summary_msg_ids]
-
         usage = measure_context_request_usage(
             messages=request_messages,
             context_window_k=context_window_k,
@@ -284,182 +196,13 @@ class ContextManager:
         )
         budget = usage.budget
         cls.ensure_request_budget_available(budget)
-
-        summary_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in summary_msgs)
-        dialogue_budget = budget.non_system_budget - summary_tokens - max(additional_non_system_tokens, 0)
-        if dialogue_budget <= 0:
-            raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
-
-        protected_start_idx = cls._find_protected_tail_start(dialogue_msgs)
-        history_msgs = dialogue_msgs[:protected_start_idx]
-        protected_tail = dialogue_msgs[protected_start_idx:]
-
-        protected_tail = cls._trim_protected_tail_tools(
-            protected_tail,
-            uid=uid,
-            session_id=session_id,
-            context_window_k=context_window_k,
-            non_system_budget=dialogue_budget,
-        )
-        protected_tail = replace_protected_tool_chains_for_budget(
-            protected_tail,
-            non_system_budget=dialogue_budget,
-        )
-        protected_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in protected_tail)
-        if protected_tokens > dialogue_budget:
-            latest_msg = protected_tail[-1] if protected_tail else None
-            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and not is_synthetic_summary_message(latest_msg):
+        if usage.exceeds_hard_window:
+            latest_msg = next((message for message in reversed(request_messages) if message.role != MessageRole.SYSTEM), None)
+            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and estimate_tokens(cls._message_token_text(latest_msg)) > budget.non_system_budget:
                 raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
             raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
 
-        history_budget = dialogue_budget - protected_tokens
-
-        if history_msgs and history_budget > 0:
-            trimmed_history, _log_data = cls._strategy_atomic_truncate(
-                uid=uid,
-                session_id=session_id,
-                parsed_history=list(reversed(history_msgs)),
-                limit_tokens=history_budget,
-                current_msg_tokens=0,
-                context_window_k=context_window_k,
-                tool_result_limit_tokens=max(1, history_budget // 2),
-            )
-        else:
-            trimmed_history = []
-
-        audited_dialogue = cls.audit_tool_chain([*trimmed_history, *protected_tail], uid=uid, session_id=session_id)
-        audited_non_system = [*summary_msgs, *audited_dialogue]
-        final_usage = measure_context_request_usage(
-            messages=[*system_msgs, *audited_non_system],
-            context_window_k=context_window_k,
-            max_tokens=max_tokens,
-            tools=tools,
-            safety_margin_tokens=safety_margin_tokens,
-            additional_non_system_tokens=additional_non_system_tokens,
-        )
-        if final_usage.exceeds_hard_window:
-            latest_msg = audited_non_system[-1] if audited_non_system else None
-            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and not is_synthetic_summary_message(latest_msg):
-                raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
-            raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
-
-        return [*system_msgs, *audited_non_system]
-
-    @classmethod
-    def _strategy_atomic_truncate(
-        cls,
-        uid: str,
-        session_id: str,
-        parsed_history: list[InternalMessage],
-        limit_tokens: float,
-        current_msg_tokens: int,
-        context_window_k: int,
-        tool_result_limit_tokens: int | None = None,
-        emit_logs: bool = True,
-    ) -> tuple[list[InternalMessage], dict]:
-        """
-        默认策略：基于原子轮次对齐与工具审计的硬截断。
-        """
-        known_tool_call_ids: set[str] = set()
-        for message in parsed_history:
-            for tool_call in message.tool_calls or []:
-                known_tool_call_ids.add(tool_call.id)
-        temp_msgs = []
-        current_total = current_msg_tokens
-        raw_history_tokens = 0
-        dropped_history_tokens = 0
-        is_hard_truncated = False
-        tool_truncation_stats: dict[int, int] = {}
-        final_token_cache: dict[int, int] = {}
-
-        # 反向装载（从新到旧）：窗口已满后继续累计本次有限扫描范围内
-        # 被丢弃消息的原始 Token，供压缩日志展示本次裁剪前后的规模。
-        for msg in parsed_history:
-            if is_hard_truncated:
-                msg_str = cls._message_token_text(msg)
-                dropped_history_tokens += estimate_tokens(msg_str)
-                continue
-
-            if msg.role == MessageRole.TOOL:
-                truncation = truncate_tool_result_with_stats(msg.content or "", context_window_k, limit_tokens=tool_result_limit_tokens)
-                msg.content = truncation.content
-                original_msg_tokens = truncation.original_tokens
-                msg_tokens = truncation.final_tokens
-                if truncation.truncated:
-                    tool_truncation_stats[id(msg)] = truncation.removed_chars
-            else:
-                msg_str = cls._message_token_text(msg)
-                original_msg_tokens = estimate_tokens(msg_str)
-                msg_tokens = original_msg_tokens
-
-            if current_total + msg_tokens > limit_tokens:
-                is_hard_truncated = True
-                dropped_history_tokens += original_msg_tokens
-                continue
-
-            temp_msgs.insert(0, msg)
-            final_token_cache[id(msg)] = msg_tokens
-            current_total += msg_tokens
-            raw_history_tokens += original_msg_tokens
-
-        # A. 原子化轮次对齐 (保留所有窗口内的 SYSTEM 消息，并从第一个 USER 开始对齐后续消息)
-        system_msgs = [m for m in temp_msgs if m.role == MessageRole.SYSTEM]
-
-        # 合并：保持 SYSTEM 在前，随后保留窗口内已装载的完整消息序列。
-        # 孤儿 TOOL 结果由 audit_tool_chain 过滤，避免因第一个 USER 刚好被窗口截断而丢弃其后的完整 assistant/tool 链路。
-        aligned_msgs = []
-        added_ids = set()
-
-        for m in system_msgs:
-            aligned_msgs.append(m)
-            added_ids.add(id(m))
-
-        for m in temp_msgs:
-            if id(m) not in added_ids:
-                aligned_msgs.append(m)
-
-        audited_msgs = cls.audit_tool_chain(
-            aligned_msgs,
-            uid=uid,
-            session_id=session_id,
-            emit_logs=emit_logs,
-            known_tool_call_ids=known_tool_call_ids,
-        )
-
-        final_truncated_tool_result_chars = 0
-        final_truncated_tool_results = 0
-        for fm in audited_msgs:
-            removed_chars = tool_truncation_stats.get(id(fm))
-            if removed_chars is not None:
-                final_truncated_tool_results += 1
-                final_truncated_tool_result_chars += removed_chars
-
-        if emit_logs and final_truncated_tool_results:
-            logger.bind(uid=uid, session_id=session_id).info(
-                t(
-                    "LOG_CONTEXT_TOOL_RESULTS_TRUNCATED_SCANNED",
-                    count=final_truncated_tool_results,
-                    removed_chars=final_truncated_tool_result_chars,
-                    context_window_k=context_window_k,
-                )
-            )
-
-        # 计算压缩后的 Token 数。扫描阶段已计算过的消息直接复用缓存，虚拟补偿消息再估算。
-        final_history_tokens = 0
-        for fm in audited_msgs:
-            cached_tokens = final_token_cache.get(id(fm))
-            if cached_tokens is not None:
-                final_history_tokens += cached_tokens
-                continue
-
-            fm_str = cls._message_token_text(fm)
-            final_history_tokens += estimate_tokens(fm_str)
-
-        return audited_msgs, {
-            "is_hard_truncated": is_hard_truncated,
-            "before": current_msg_tokens + raw_history_tokens + dropped_history_tokens,
-            "after": current_msg_tokens + final_history_tokens,
-        }
+        return request_messages
 
     @classmethod
     def audit_tool_chain(

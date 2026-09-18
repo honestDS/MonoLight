@@ -506,6 +506,7 @@ async def process_single_tool(
     allowed_knowledge_base_ids: list[int] | None = None,
     active_tasks: set[asyncio.Task] | None = None,
     context_window_k: int = 4,
+    tool_call_count: int = 1,
     allow_background_submission: bool = True,
     *,
     context_summary_boundary_message_id: int | None = None,
@@ -621,10 +622,8 @@ async def process_single_tool(
         tool_call_id=tool_call.id,
         content=cmd_result,
     )
-    tool_result_budget_tokens = max(
-        1,
-        (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2,
-    )
+    tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
+    tool_result_budget_tokens = max(1, tool_result_round_budget_tokens // max(1, tool_call_count))
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         tool_msg.content, truncation_stats = truncate_longterm_memory_recall_result_for_budget(
             cmd_result,

@@ -269,7 +269,7 @@ def truncate_tool_messages_for_budget(
     if truncated_count:
         logger.bind(uid=uid, session_id=session_id).info(
             t(
-                "LOG_CONTEXT_TOOL_RESULTS_TRUNCATED_SCANNED",
+                "LOG_TOOL_RESULTS_TRUNCATED_FOR_BUDGET",
                 count=truncated_count,
                 removed_chars=removed_chars,
                 context_window_k=context_window_k,

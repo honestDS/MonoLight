@@ -3,7 +3,7 @@ import json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session.todo import session_todo_crud
-from app.core.utils.context_messages import is_recent_tool_summary_message, message_token_text
+from app.core.utils.context_messages import message_token_text
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.session_todo import SessionTodoPlan
@@ -71,11 +71,7 @@ def _snapshot_target_indices(messages: list[InternalMessage]) -> list[int]:
         if tool_indices:
             return [tool_indices[-1]]
 
-    recent_summary_index = next(
-        (index for index in range(len(messages) - 1, -1, -1) if is_recent_tool_summary_message(messages[index])),
-        None,
-    )
-    return [recent_summary_index] if recent_summary_index is not None else []
+    return []
 
 
 def has_session_todo_snapshot_target(messages: list[InternalMessage]) -> bool:
