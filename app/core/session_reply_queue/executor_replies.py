@@ -220,7 +220,7 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = ""
     content = parse_assistant_files_content(ai_msg.content)
     response = {
         "content": content,
-        "history": [message.model_dump(mode="json") for message in turn_messages],
+        "history": dump_background_proactive_history(turn_messages),
         "files": files,
     }
     if llm_request_metadata is not None:

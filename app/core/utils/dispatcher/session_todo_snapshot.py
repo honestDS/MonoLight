@@ -2,18 +2,19 @@ import json
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.todo import session_todo_crud
-from app.core.utils.context_messages import message_token_text
-from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.session_todo import SessionTodoPlan
 
 __all__ = [
-    "append_session_todo_snapshot",
-    "has_session_todo_snapshot_target",
     "load_current_session_todo_snapshot",
-    "measure_session_todo_snapshot_tokens",
+    "persist_session_todo_snapshot_on_tool_results",
+    "strip_session_todo_snapshot",
 ]
+
+_SNAPSHOT_OPEN = "<current_session_todo_snapshot>"
+_SNAPSHOT_CLOSE = "</current_session_todo_snapshot>"
 
 
 def _serialize_todo_snapshot(plan: SessionTodoPlan) -> str | None:
@@ -41,7 +42,7 @@ def _serialize_todo_snapshot(plan: SessionTodoPlan) -> str | None:
         separators=(",", ":"),
     )
     payload = payload.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    return f"<current_session_todo_snapshot>{payload}</current_session_todo_snapshot>"
+    return f"{_SNAPSHOT_OPEN}{payload}{_SNAPSHOT_CLOSE}"
 
 
 async def load_current_session_todo_snapshot(
@@ -60,56 +61,55 @@ async def load_current_session_todo_snapshot(
     return _serialize_todo_snapshot(plan)
 
 
-def _snapshot_target_indices(messages: list[InternalMessage]) -> list[int]:
-    assistant_index = next(
-        (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == MessageRole.ASSISTANT and isinstance(messages[index].tool_calls, list) and messages[index].tool_calls),
+def strip_session_todo_snapshot(content: str | None) -> str | None:
+    if not isinstance(content, str) or not content.endswith(_SNAPSHOT_CLOSE):
+        return content
+
+    marker_index = content.rfind(f"\n\n{_SNAPSHOT_OPEN}")
+    if marker_index < 0:
+        return content
+
+    payload_start = marker_index + 2 + len(_SNAPSHOT_OPEN)
+    payload_end = len(content) - len(_SNAPSHOT_CLOSE)
+    try:
+        payload = json.loads(content[payload_start:payload_end])
+    except (TypeError, ValueError):
+        return content
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("revision"), int) or not isinstance(payload.get("todos"), list):
+        return content
+    return content[:marker_index]
+
+
+async def persist_session_todo_snapshot_on_tool_results(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    tool_results: list[InternalMessage],
+) -> str | None:
+    target = next(
+        (message for message in reversed(tool_results) if message.role == MessageRole.TOOL and isinstance(message.id, int) and not isinstance(message.id, bool) and isinstance(message.content, str)),
         None,
     )
-    if assistant_index is not None:
-        tool_call_ids = {tool_call.id for tool_call in messages[assistant_index].tool_calls or [] if isinstance(getattr(tool_call, "id", None), str) and tool_call.id}
-        tool_indices = [index for index in range(assistant_index + 1, len(messages)) if messages[index].role == MessageRole.TOOL and messages[index].tool_call_id in tool_call_ids]
-        if tool_indices:
-            return [tool_indices[-1]]
+    if target is None:
+        return None
 
-    return []
+    snapshot = await load_current_session_todo_snapshot(
+        db,
+        uid=uid,
+        session_id=session_id,
+    )
+    await message_crud.update_model_context_suffix(
+        db,
+        message_id=target.id,
+        uid=uid,
+        session_id=session_id,
+        model_context_suffix=snapshot,
+        commit=False,
+    )
+    await db.commit()
 
-
-def has_session_todo_snapshot_target(messages: list[InternalMessage]) -> bool:
-    return bool(_snapshot_target_indices(messages))
-
-
-def append_session_todo_snapshot(
-    messages: list[InternalMessage],
-    snapshot: str | None,
-) -> list[InternalMessage]:
-    updated_messages = list(messages)
-    if not isinstance(snapshot, str) or not snapshot:
-        return updated_messages
-
-    for index in _snapshot_target_indices(messages):
-        message = messages[index]
-        if not isinstance(message.content, str) or snapshot in message.content:
-            continue
-        updated_message = message.model_copy(deep=True)
-        updated_message.content = f"{message.content}\n\n{snapshot}"
-        updated_messages[index] = updated_message
-    return updated_messages
-
-
-def measure_session_todo_snapshot_tokens(
-    messages: list[InternalMessage],
-    snapshot: str | None,
-) -> int:
-    if not isinstance(snapshot, str) or not snapshot:
-        return 0
-
-    updated_messages = append_session_todo_snapshot(messages, snapshot)
-    additional_tokens = 0
-    for index in _snapshot_target_indices(messages):
-        before = messages[index]
-        after = updated_messages[index]
-        additional_tokens += max(
-            0,
-            estimate_tokens(message_token_text(after)) - estimate_tokens(message_token_text(before)),
-        )
-    return additional_tokens
+    base_content = strip_session_todo_snapshot(target.content) or ""
+    target.content = f"{base_content}\n\n{snapshot}" if snapshot else base_content
+    return snapshot

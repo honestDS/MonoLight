@@ -31,10 +31,6 @@ from app.core.utils.dispatcher.mark_initial_message_processed import mark_initia
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
-from app.core.utils.dispatcher.session_todo_snapshot import (
-    has_session_todo_snapshot_target,
-    load_current_session_todo_snapshot,
-)
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
@@ -176,12 +172,6 @@ async def dispatch_interactive(
                 if state.execution_resume_state is not None:
                     state.messages = [InternalMessage.model_validate(item) for item in state.execution_resume_state.get("messages", [])]
                     state.current_turn = int(state.execution_resume_state.get("current_turn", 0))
-                    if has_session_todo_snapshot_target(state.messages):
-                        state.todo_snapshot = await load_current_session_todo_snapshot(
-                            state.db,
-                            uid=state.uid,
-                            session_id=state.session_id,
-                        )
                     state.execution_resume_state = None
                 else:
                     state.messages = await prepare_messages(
@@ -390,11 +380,6 @@ async def dispatch_interactive(
                     )
                     if tool_response is not None:
                         return tool_response
-                    state.todo_snapshot = await load_current_session_todo_snapshot(
-                        state.db,
-                        uid=state.uid,
-                        session_id=state.session_id,
-                    )
 
             finally:
                 state.is_first_iter = False

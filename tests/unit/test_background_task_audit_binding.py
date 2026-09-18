@@ -833,7 +833,7 @@ async def test_background_without_audit_configuration_executes_tool_without_audi
     async def save(*_args, **_kwargs):
         return None
 
-    async def load_todo_snapshot(_db, *, uid, session_id):
+    async def persist_todo_snapshot(_db, *, uid, session_id, tool_results):
         return None
 
     async def fail_audit_binding(*_args, **_kwargs):
@@ -846,7 +846,7 @@ async def test_background_without_audit_configuration_executes_tool_without_audi
     monkeypatch.setattr(background_module, "process_single_tool_with_isolated_db", process_tool)
     monkeypatch.setattr(background_module, "save_tool_response", save_tool_response)
     monkeypatch.setattr(background_module, "save_assistant_message", save)
-    monkeypatch.setattr(background_module, "load_current_session_todo_snapshot", load_todo_snapshot)
+    monkeypatch.setattr(background_module, "persist_session_todo_snapshot_on_tool_results", persist_todo_snapshot)
     monkeypatch.setattr(background_module, "prevalidate_tool_round", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(background_module, "extract_files_to_user", lambda _responses: [])
     monkeypatch.setattr(background_module.audit_crud, "claim_passed_for_execution", fail_audit_binding)

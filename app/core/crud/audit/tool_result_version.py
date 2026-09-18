@@ -49,6 +49,7 @@ class CRUDAuditToolResultVersion(CRUDBase[AuditToolResultVersion, AuditToolResul
                 audit_record_id=audit_record_id,
                 audit_tool_call_id=original_tool_call_id,
                 content_revision=version_no,
+                model_context_suffix=None,
             )
             .execution_options(synchronize_session=False)
         )

@@ -30,6 +30,7 @@ from app.core.utils.dispatcher.process_single_tool import (
     prevalidate_tool_round,
 )
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
+from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
@@ -79,6 +80,7 @@ async def handle_interactive_tool_round(
 
     precheck_errors = prevalidate_tool_round(ai_msg.tool_calls, state.cfg, tool_schemas=state.tools)
     if precheck_errors:
+        stored_tool_results: list[InternalMessage] = []
         for tool_call in ai_msg.tool_calls:
             content = precheck_errors.get(tool_call.id)
             if content is None:
@@ -95,15 +97,23 @@ async def handle_interactive_tool_round(
                 tool_call_id=tool_call.id,
                 content=content,
             )
-            await save_tool_response(
-                state.db,
-                state.session_id,
-                state.uid,
-                state.profile.id,
-                tool_result,
-                state.messages,
-                state.turn_messages,
+            stored_tool_results.append(
+                await save_tool_response(
+                    state.db,
+                    state.session_id,
+                    state.uid,
+                    state.profile.id,
+                    tool_result,
+                    state.messages,
+                    state.turn_messages,
+                )
             )
+        await persist_session_todo_snapshot_on_tool_results(
+            state.db,
+            uid=state.uid,
+            session_id=state.session_id,
+            tool_results=stored_tool_results,
+        )
         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
         return None
 
@@ -143,6 +153,12 @@ async def handle_interactive_tool_round(
                     session_id=state.session_id,
                     profile_id=state.profile.id,
                     tool_results=audit_round.tool_results,
+                )
+                await persist_session_todo_snapshot_on_tool_results(
+                    state.db,
+                    uid=state.uid,
+                    session_id=state.session_id,
+                    tool_results=stored_tool_results,
                 )
                 for stored_tool_result in stored_tool_results:
                     state.messages.append(stored_tool_result)
@@ -190,6 +206,12 @@ async def handle_interactive_tool_round(
                     uid=state.uid,
                     session_id=state.session_id,
                 )
+                await persist_session_todo_snapshot_on_tool_results(
+                    state.db,
+                    uid=state.uid,
+                    session_id=state.session_id,
+                    tool_results=stored_tool_results,
+                )
                 for stored_tool_result in stored_tool_results:
                     state.messages.append(stored_tool_result)
                     state.turn_messages.append(stored_tool_result)
@@ -218,6 +240,12 @@ async def handle_interactive_tool_round(
                 state.current_turn = 0
                 await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
                 return None
+            await persist_session_todo_snapshot_on_tool_results(
+                state.db,
+                uid=state.uid,
+                session_id=state.session_id,
+                tool_results=stored_tool_results,
+            )
             for tool_result, stored_tool_result in zip(audit_round.tool_results, stored_tool_results, strict=True):
                 state.messages.append(stored_tool_result)
                 state.turn_messages.append(stored_tool_result)
@@ -233,6 +261,7 @@ async def handle_interactive_tool_round(
                         }
                     )
         else:
+            stored_tool_results: list[InternalMessage] = []
             for tool_result in audit_round.tool_results:
                 stored_tool_result = await save_tool_response(
                     state.db,
@@ -243,6 +272,7 @@ async def handle_interactive_tool_round(
                     state.messages,
                     state.turn_messages,
                 )
+                stored_tool_results.append(stored_tool_result)
                 if state.stream_event_callback is not None and state.show_tool_calls:
                     tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_result.tool_call_id)
                     await state.stream_event_callback(
@@ -254,6 +284,12 @@ async def handle_interactive_tool_round(
                             "response_id": response_id,
                         }
                     )
+            await persist_session_todo_snapshot_on_tool_results(
+                state.db,
+                uid=state.uid,
+                session_id=state.session_id,
+                tool_results=stored_tool_results,
+            )
         if audit_round.confirmation_payload is not None:
             confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
             await update_confirmation_message_status(state.db, audit_record_id=audit_round.audit_record_id)
@@ -326,6 +362,7 @@ async def handle_interactive_tool_round(
                         error_reason=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
                     )
                     await update_confirmation_message_status(state.db, audit_record_id=audit_round.audit_record_id)
+                stored_tool_results: list[InternalMessage] = []
                 for tool_call in ai_msg.tool_calls:
                     tool_result = InternalMessage(
                         role=MessageRole.TOOL,
@@ -339,14 +376,16 @@ async def handle_interactive_tool_round(
                             ensure_ascii=False,
                         ),
                     )
-                    await save_tool_response(
-                        state.db,
-                        state.session_id,
-                        state.uid,
-                        state.profile.id,
-                        tool_result,
-                        state.messages,
-                        state.turn_messages,
+                    stored_tool_results.append(
+                        await save_tool_response(
+                            state.db,
+                            state.session_id,
+                            state.uid,
+                            state.profile.id,
+                            tool_result,
+                            state.messages,
+                            state.turn_messages,
+                        )
                     )
                     if state.stream_event_callback is not None and state.show_tool_calls:
                         await state.stream_event_callback(
@@ -358,6 +397,12 @@ async def handle_interactive_tool_round(
                                 "response_id": response_id,
                             }
                         )
+                await persist_session_todo_snapshot_on_tool_results(
+                    state.db,
+                    uid=state.uid,
+                    session_id=state.session_id,
+                    tool_results=stored_tool_results,
+                )
                 await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
                 return None
 
@@ -405,6 +450,8 @@ async def handle_interactive_tool_round(
         source_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
     )
     tasks = [asyncio.create_task(_execute_isolated_tool_call(parallel_tool_context, tc)) for tc in ai_msg.tool_calls]
+    stored_tool_results: list[InternalMessage] = []
+    completed_tool_count = 0
     try:
         for completed_task in asyncio.as_completed(tasks):
             tool_res = await completed_task
@@ -438,15 +485,25 @@ async def handle_interactive_tool_round(
                         if terminal_session_id not in terminal_session_ids:
                             terminal_session_ids.append(terminal_session_id)
             state.files_to_user.extend(extract_files_to_user([tool_res]))
-            await save_tool_response(
-                state.db,
-                state.session_id,
-                state.uid,
-                state.profile.id,
-                tool_res,
-                state.messages,
-                state.turn_messages,
+            stored_tool_results.append(
+                await save_tool_response(
+                    state.db,
+                    state.session_id,
+                    state.uid,
+                    state.profile.id,
+                    tool_res,
+                    state.messages,
+                    state.turn_messages,
+                )
             )
+            completed_tool_count += 1
+            if completed_tool_count == len(tasks):
+                await persist_session_todo_snapshot_on_tool_results(
+                    state.db,
+                    uid=state.uid,
+                    session_id=state.session_id,
+                    tool_results=stored_tool_results,
+                )
             if audit_execution_checkpoint_state is not None and (queued_task_id is not None or terminal_session_id is not None):
                 await _save_execution_checkpoint(
                     state.checkpoint_state,

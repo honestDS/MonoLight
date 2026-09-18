@@ -2,7 +2,7 @@ from typing import (
     Any,
 )
 
-from sqlalchemy import and_, exists, update
+from sqlalchemy import and_, exists, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
@@ -157,6 +157,41 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             await db.flush()
         return (result.rowcount or 0) == 1
 
+    async def update_model_context_suffix(
+        self,
+        db: AsyncSession,
+        *,
+        message_id: int,
+        uid: str,
+        session_id: str,
+        model_context_suffix: str | None,
+        commit: bool = True,
+    ) -> bool:
+        suffix_changed = (
+            Message.model_context_suffix.is_not(None)
+            if model_context_suffix is None
+            else or_(
+                Message.model_context_suffix.is_(None),
+                Message.model_context_suffix != model_context_suffix,
+            )
+        )
+        result = await db.execute(
+            update(Message)
+            .where(
+                Message.id == message_id,
+                Message.uid == uid,
+                Message.session_id == session_id,
+                suffix_changed,
+            )
+            .values(model_context_suffix=model_context_suffix)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return (result.rowcount or 0) == 1
+
     async def update_content_if_matches(
         self,
         db: AsyncSession,
@@ -167,6 +202,9 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         message_type: MessageType = MessageType.AUDIT_CONFIRMATION,
         commit: bool = True,
     ) -> bool:
+        values: dict[str, Any] = {"content": content}
+        if message_type == MessageType.TOOL_RESULT:
+            values["model_context_suffix"] = None
         result = await db.execute(
             update(Message)
             .where(
@@ -174,7 +212,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 Message.type == message_type,
                 Message.content == expected_content,
             )
-            .values(content=content)
+            .values(**values)
             .execution_options(synchronize_session=False)
         )
         if commit:

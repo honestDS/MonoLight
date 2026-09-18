@@ -4,6 +4,7 @@ import pytest
 
 from app.core.constants import ERR_CONTEXT_SUMMARY_WORK_INVALID
 from app.core.i18n import t
+from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import service as service_module
 from app.core.utils.context_summary import stage as stage_module
 from app.core.utils.context_summary.boundary import (
@@ -250,6 +251,113 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
         {"type": "context_summary_start"},
         {"type": "context_summary_end"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_context_summary_does_not_persist_candidate_that_misses_compression_goal(monkeypatch):
+    _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    def estimate_tokens(content):
+        if content.startswith('{"role":'):
+            return 200
+        if "compressed history" in content:
+            return 600
+        if content == "current":
+            return 10
+        return 40
+
+    _patch_token_counter(monkeypatch, estimate_tokens)
+
+    state = await service_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert state == ContextSummaryState(content=None, message_id=None)
+    assert len(generated_calls) >= 2
+    assert update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_context_summary_refines_until_goal_without_attempt_limit(monkeypatch):
+    _selected_calls, update_calls, _generated_calls = _patch_summary_dependencies(monkeypatch)
+    refinement_calls: list[int] = []
+
+    def calc_usage(*_args, summary_content=None, **_kwargs):
+        required_by_summary = {
+            None: 100,
+            "compressed history": 90,
+            "refined-1": 80,
+            "refined-2": 70,
+            "refined-3": 40,
+        }
+        return {
+            "context_window_tokens": 1024,
+            "output_tokens": 24,
+            "safety_tokens": 0,
+            "input_budget": 1000,
+            "threshold_percent": 50,
+            "summary_tokens": 10,
+            "history_tokens": 100,
+            "tools_tokens": 0,
+            "current_message_tokens": 0,
+            "history_message_count": 4,
+            "reserved_tokens": 0,
+            "required_tokens": required_by_summary[summary_content],
+            "summary_trigger_tokens": 50,
+            "compression_goal_tokens": 50,
+        }
+
+    async def refine_completed_summary_stage(
+        _db,
+        *,
+        refinement_index,
+        **_kwargs,
+    ):
+        refinement_calls.append(refinement_index)
+        content = f"refined-{refinement_index}"
+        return reduction_module.CompletedSummaryResult(
+            content=content,
+            stage=SimpleNamespace(
+                content=content,
+                refinement_index=refinement_index,
+            ),
+        )
+
+    monkeypatch.setattr(service_module, "calc_token_usage", calc_usage)
+    monkeypatch.setattr(
+        reduction_module,
+        "refine_completed_summary_stage",
+        refine_completed_summary_stage,
+    )
+
+    state = await service_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert refinement_calls == [1, 2, 3]
+    assert state.content == "refined-3"
+    assert len(update_calls) == 1
+    assert update_calls[0]["summary"] == "refined-3"
 
 
 @pytest.mark.asyncio

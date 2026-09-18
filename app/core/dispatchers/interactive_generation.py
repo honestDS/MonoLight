@@ -9,7 +9,6 @@ from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_LLM_EMPTY_RESPONSE,
     ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED,
-    RUNTIME_CONTEXT_OVERLAY_METADATA_KEY,
 )
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
@@ -26,10 +25,6 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
-from app.core.utils.dispatcher.session_todo_snapshot import (
-    append_session_todo_snapshot,
-    measure_session_todo_snapshot_tokens,
-)
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
@@ -98,10 +93,6 @@ async def generate_interactive_turn(
         stream_state.buffered_reasoning_chunks.clear()
         try:
             if state.checkpoint_state.upper_message_id is not None:
-                todo_snapshot_tokens = measure_session_todo_snapshot_tokens(
-                    state.messages,
-                    state.todo_snapshot,
-                )
                 state.messages = await apply_context_summary_checkpoint(
                     state.db,
                     session_id=state.session_id,
@@ -119,8 +110,6 @@ async def generate_interactive_turn(
                     model_id=state.model_entry["model_id"],
                     protocol=resolve_model_protocol(state.model_entry),
                     previous_llm_request_metadata=(state.latest_llm_request_metadata if isinstance(state.latest_llm_request_metadata, dict) and state.latest_llm_request_metadata.get("input_tokens_source") == "provider" else None),
-                    reserved_tokens=todo_snapshot_tokens,
-                    allow_incremental_input_estimate=state.todo_snapshot is None,
                 )
             pending_file_inputs = collect_pending_multimodal_file_inputs(state.messages)
             if pending_file_inputs and not state.img_understanding:
@@ -134,10 +123,6 @@ async def generate_interactive_turn(
             )
             if pending_multimodal_message is not None:
                 request_messages.append(pending_multimodal_message)
-            todo_snapshot_tokens = measure_session_todo_snapshot_tokens(
-                request_messages,
-                state.todo_snapshot,
-            )
             request_messages = ContextManager.trim_messages_for_model_request(
                 messages=request_messages,
                 uid=state.uid,
@@ -145,11 +130,6 @@ async def generate_interactive_turn(
                 context_window_k=state.chat_params["context_window_k"],
                 max_tokens=state.chat_params["max_tokens"],
                 tools=current_tools,
-                additional_non_system_tokens=todo_snapshot_tokens,
-            )
-            request_messages = append_session_todo_snapshot(
-                request_messages,
-                state.todo_snapshot,
             )
             model_id = state.model_entry["model_id"]
             protocol = resolve_model_protocol(state.model_entry)
@@ -193,18 +173,14 @@ async def generate_interactive_turn(
                 )
             previous_input_token_baseline_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) and previous_in_memory_llm_request_metadata.get("input_tokens_source") == "provider" else previous_session_llm_request_metadata
             previous_display_token_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) else previous_input_token_baseline_metadata
-            incremental_input_tokens = (
-                estimate_incremental_input_tokens(
-                    request_messages,
-                    current_tools,
-                    previous_input_token_baseline_metadata,
-                    model_id=model_id,
-                    protocol=protocol,
-                    context_summary_revision=context_summary_revision,
-                    context_content_revision=context_content_revision,
-                )
-                if state.todo_snapshot is None
-                else None
+            incremental_input_tokens = estimate_incremental_input_tokens(
+                request_messages,
+                current_tools,
+                previous_input_token_baseline_metadata,
+                model_id=model_id,
+                protocol=protocol,
+                context_summary_revision=context_summary_revision,
+                context_content_revision=context_content_revision,
             )
             estimated_input_tokens = incremental_input_tokens if incremental_input_tokens is not None else estimate_request_context_tokens(request_messages, current_tools)
             generation_kwargs["request_context_tokens"] = estimated_input_tokens
@@ -212,7 +188,6 @@ async def generate_interactive_turn(
                 "type": "llm_request_metadata",
                 "turn": state.current_turn,
                 "response_id": response_id,
-                RUNTIME_CONTEXT_OVERLAY_METADATA_KEY: state.todo_snapshot is not None,
                 "input_tokens": estimated_input_tokens,
                 "input_tokens_source": "estimated",
                 "total_output_tokens": state.checkpoint_state.session_total_output_tokens,
