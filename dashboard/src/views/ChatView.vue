@@ -79,7 +79,7 @@
     </div>
 
     <!-- 右侧聊天区域 -->
-    <div class="chat-main">
+    <div class="chat-main" :class="{ 'is-welcome': !sessionEngaged }">
       <ChatMessageList
         ref="messageList"
         v-model:active-collapse="activeCollapse"
@@ -97,12 +97,12 @@
         @audit-decision="handleAuditDecision"
       />
 
-      <!-- 新建会话 / 无会话时的欢迎区 -->
-      <div class="welcome-hero">
-        <h1 class="welcome-greeting" :class="{ 'is-exiting': sessionEngaged }">{{ $t('chat.welcome_greeting') }}</h1>
-      </div>
+      <div class="input-area">
+        <!-- 新建会话 / 无会话时的欢迎区 -->
+        <div class="welcome-hero" :class="{ 'is-exiting': sessionEngaged }">
+          <h1 class="welcome-greeting">{{ $t('chat.welcome_greeting') }}</h1>
+        </div>
 
-      <div class="input-area" :style="{ transform: !sessionEngaged ? 'translateY(-300px)' : '' }">
         <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
           <span class="read-only-notice-text">{{ $t('chat.external_session_read_only') }}</span>
         </div>
