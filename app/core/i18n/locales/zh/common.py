@@ -293,6 +293,7 @@ MESSAGES = {
     "ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING": "总结工作在{stage}期间失效",
     "ERR_CONTEXT_SUMMARY_WORK_INVALID": "总结工作已失效",
     "ERR_CONTEXT_SUMMARY_MODELS_EXHAUSTED": "总结{stage}已尝试完所有模型",
+    "ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED": "当前会话上下文过长，自动压缩未能将内容缩减到可继续处理的范围，请重试",
     "ERR_CONTEXT_SUMMARY_REFINEMENT_LOWER_INVALID": "总结精炼要求下层阶段恰好包含一个已完成分片",
     "ERR_CONTEXT_SUMMARY_MODEL_RESULT_EMPTY": "总结模型返回了空结果",
     "ERR_CONTEXT_SUMMARY_MODEL_NOT_REDUCED": "总结模型未缩短输入：输出令牌数={output_tokens}，替换输入令牌数={input_tokens}",

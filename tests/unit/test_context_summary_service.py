@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.constants import ERR_CONTEXT_SUMMARY_WORK_INVALID
+from app.core.constants import ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED, ERR_CONTEXT_SUMMARY_WORK_INVALID
+from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import service as service_module
@@ -74,23 +75,24 @@ async def test_complete_candidate_including_covered_user_block_must_reduce_repla
     )
     _patch_token_counter(monkeypatch, estimate_tokens)
 
-    state = await service_module.ensure_context_summary(
-        object(),
-        session_id="session-1",
-        uid="user-1",
-        profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(50),
-        before_id=5,
-        current_message="",
-        context_window_k=1,
-        max_tokens=24,
-        reserved_tokens=0,
-        safety_margin_tokens=0,
-        trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
-        fixed_upper_message_id=4,
-    )
+    with pytest.raises(LLMException) as exc_info:
+        await service_module.ensure_context_summary(
+            object(),
+            session_id="session-1",
+            uid="user-1",
+            profile=SimpleNamespace(id=9),
+            cfg=_summary_cfg(50),
+            before_id=5,
+            current_message="",
+            context_window_k=1,
+            max_tokens=24,
+            reserved_tokens=0,
+            safety_margin_tokens=0,
+            trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
+            fixed_upper_message_id=4,
+        )
 
-    assert state == ContextSummaryState(content=None, message_id=None)
+    assert exc_info.value.message == ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED
     assert generated_calls
     assert update_calls == []
     assert snapshot_calls[0]["target_message_id"] == 4
@@ -268,22 +270,76 @@ async def test_context_summary_does_not_persist_candidate_that_misses_compressio
 
     _patch_token_counter(monkeypatch, estimate_tokens)
 
-    state = await service_module.ensure_context_summary(
-        object(),
-        session_id="session-1",
-        uid="user-1",
-        profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(50),
-        before_id=10,
-        current_message="current",
-        context_window_k=1,
-        max_tokens=24,
-        reserved_tokens=0,
-        safety_margin_tokens=0,
+    with pytest.raises(LLMException) as exc_info:
+        await service_module.ensure_context_summary(
+            object(),
+            session_id="session-1",
+            uid="user-1",
+            profile=SimpleNamespace(id=9),
+            cfg=_summary_cfg(50),
+            before_id=10,
+            current_message="current",
+            context_window_k=1,
+            max_tokens=24,
+            reserved_tokens=0,
+            safety_margin_tokens=0,
+        )
+
+    assert exc_info.value.message == ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED
+    assert len(generated_calls) >= 2
+    assert update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_context_summary_refinement_failure_uses_specific_user_error(monkeypatch):
+    _selected_calls, update_calls, _generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    def calc_usage(*_args, summary_content=None, **_kwargs):
+        required_tokens = 100 if summary_content is None else 90
+        return {
+            "context_window_tokens": 1024,
+            "output_tokens": 24,
+            "safety_tokens": 0,
+            "input_budget": 1000,
+            "threshold_percent": 50,
+            "summary_tokens": 10,
+            "history_tokens": 100,
+            "tools_tokens": 0,
+            "current_message_tokens": 0,
+            "history_message_count": 4,
+            "reserved_tokens": 0,
+            "required_tokens": required_tokens,
+            "summary_trigger_tokens": 50,
+            "compression_goal_tokens": 50,
+        }
+
+    async def refine_completed_summary_stage(*_args, **_kwargs):
+        raise RuntimeError("all summary models failed")
+
+    monkeypatch.setattr(service_module, "calc_token_usage", calc_usage)
+    monkeypatch.setattr(
+        reduction_module,
+        "refine_completed_summary_stage",
+        refine_completed_summary_stage,
     )
 
-    assert state == ContextSummaryState(content=None, message_id=None)
-    assert len(generated_calls) >= 2
+    with pytest.raises(LLMException) as exc_info:
+        await service_module.ensure_context_summary(
+            object(),
+            session_id="session-1",
+            uid="user-1",
+            profile=SimpleNamespace(id=9),
+            cfg=_summary_cfg(50),
+            before_id=10,
+            current_message="current",
+            context_window_k=1,
+            max_tokens=24,
+            reserved_tokens=0,
+            safety_margin_tokens=0,
+        )
+
+    assert exc_info.value.message == ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
     assert update_calls == []
 
 
@@ -481,7 +537,7 @@ async def test_context_summary_threshold_includes_tool_definition_tokens(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch):
+async def test_ensure_context_summary_failure_uses_specific_user_error(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(
         monkeypatch,
         generation_error=RuntimeError("provider unavailable"),
@@ -509,22 +565,24 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
     )
     _patch_token_counter(monkeypatch, estimate_tokens)
 
-    state = await service_module.ensure_context_summary(
-        object(),
-        session_id="session-1",
-        uid="user-1",
-        profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(50),
-        before_id=None,
-        current_message="current",
-        context_window_k=1,
-        max_tokens=24,
-        reserved_tokens=0,
-        safety_margin_tokens=0,
-        lifecycle_event_callback=lifecycle_event_callback,
-    )
+    with pytest.raises(LLMException) as exc_info:
+        await service_module.ensure_context_summary(
+            object(),
+            session_id="session-1",
+            uid="user-1",
+            profile=SimpleNamespace(id=9),
+            cfg=_summary_cfg(50),
+            before_id=None,
+            current_message="current",
+            context_window_k=1,
+            max_tokens=24,
+            reserved_tokens=0,
+            safety_margin_tokens=0,
+            lifecycle_event_callback=lifecycle_event_callback,
+        )
 
-    assert state == ContextSummaryState(content=None, message_id=None)
+    assert exc_info.value.message == ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
     assert update_calls == []
     assert len(generated_calls) == stage_module.CONTEXT_SUMMARY_MODEL_ATTEMPTS
     assert len(selected_calls) == 2
