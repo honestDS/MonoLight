@@ -60,6 +60,11 @@ from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
+from app.core.utils.dispatcher.session_todo_snapshot import (
+    append_session_todo_snapshot,
+    load_current_session_todo_snapshot,
+    measure_session_todo_snapshot_tokens,
+)
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole
@@ -111,15 +116,23 @@ class BackgroundDispatcherMixin:
         messages: list[InternalMessage],
         uid: str,
         session_id: str,
+        todo_snapshot: str | None = None,
     ) -> list[InternalMessage]:
-        return ContextManager.trim_messages_for_model_request(
-            messages=materialize_user_environment_prompts(messages),
+        request_messages = materialize_user_environment_prompts(messages)
+        todo_snapshot_tokens = measure_session_todo_snapshot_tokens(
+            request_messages,
+            todo_snapshot,
+        )
+        request_messages = ContextManager.trim_messages_for_model_request(
+            messages=request_messages,
             uid=uid,
             session_id=session_id,
             context_window_k=retry_chat_params["context_window_k"],
             max_tokens=retry_chat_params["max_tokens"],
             tools=None,
+            additional_non_system_tokens=todo_snapshot_tokens,
         )
+        return append_session_todo_snapshot(request_messages, todo_snapshot)
 
     @classmethod
     async def _generate_reply_from_history(
@@ -598,9 +611,19 @@ class BackgroundDispatcherMixin:
             turn_messages.append(confirmation_message)
             return confirmation_message, turn_messages, []
 
+        todo_snapshot = await load_current_session_todo_snapshot(
+            db,
+            uid=uid,
+            session_id=session_id,
+        )
+
         async def build_final_request(final_chat_params):
             nonlocal messages
             if initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
+                todo_snapshot_tokens = measure_session_todo_snapshot_tokens(
+                    messages,
+                    todo_snapshot,
+                )
                 messages = await apply_context_summary_checkpoint(
                     db,
                     session_id=session_id,
@@ -613,15 +636,23 @@ class BackgroundDispatcherMixin:
                     context_window_k=final_chat_params["context_window_k"],
                     max_tokens=final_chat_params["max_tokens"],
                     tools=None,
+                    reserved_tokens=todo_snapshot_tokens,
                 )
-            return ContextManager.trim_messages_for_model_request(
-                messages=materialize_user_environment_prompts(messages),
+            request_messages = materialize_user_environment_prompts(messages)
+            todo_snapshot_tokens = measure_session_todo_snapshot_tokens(
+                request_messages,
+                todo_snapshot,
+            )
+            request_messages = ContextManager.trim_messages_for_model_request(
+                messages=request_messages,
                 uid=uid,
                 session_id=session_id,
                 context_window_k=final_chat_params["context_window_k"],
                 max_tokens=final_chat_params["max_tokens"],
                 tools=None,
+                additional_non_system_tokens=todo_snapshot_tokens,
             )
+            return append_session_todo_snapshot(request_messages, todo_snapshot)
 
         final_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
             db,
@@ -634,6 +665,7 @@ class BackgroundDispatcherMixin:
             tools=None,
             require_content_or_tools=False,
             request_metadata_callback=request_metadata_callback,
+            runtime_context_overlay=todo_snapshot is not None,
         )
         final_msg = final_response.message
         if final_msg.tool_calls:
@@ -660,6 +692,7 @@ class BackgroundDispatcherMixin:
                 messages=final_correction_context_messages,
                 uid=uid,
                 session_id=session_id,
+                todo_snapshot=todo_snapshot,
             )
 
             corrected_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
@@ -673,6 +706,7 @@ class BackgroundDispatcherMixin:
                 tools=None,
                 require_content_or_tools=True,
                 request_metadata_callback=request_metadata_callback,
+                runtime_context_overlay=todo_snapshot is not None,
             )
             final_msg = corrected_response.message
             if final_msg.tool_calls:

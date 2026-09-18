@@ -243,6 +243,7 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "context_content_revision": 3,
             "system_tokens": 50,
             "tools_tokens": 60,
+            "_runtime_context_overlay": True,
         },
     )
     await db_session.refresh(session)
@@ -267,6 +268,7 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "model_id": "grok-4.5",
         "protocol": "openai",
         "input_tokens_source": "provider",
+        "_runtime_context_overlay": True,
     }
 
     invalid_updated = await session_crud.update_llm_request_metadata(
@@ -346,6 +348,17 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "total_cached_tokens": 1001,
         },
     )
+    invalid_runtime_context_overlay_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": 123,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "_runtime_context_overlay": 1,
+        },
+    )
     await db_session.refresh(session)
 
     assert invalid_updated is False
@@ -355,6 +368,7 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
     assert invalid_total_input_tokens_updated is False
     assert invalid_total_cached_tokens_updated is False
     assert invalid_total_cached_tokens_exceed_input_updated is False
+    assert invalid_runtime_context_overlay_updated is False
     assert session.llm_request_metadata == {
         "input_tokens": 123,
         "context_window_tokens": 4096,
@@ -374,6 +388,7 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "model_id": "grok-4.5",
         "protocol": "openai",
         "input_tokens_source": "provider",
+        "_runtime_context_overlay": True,
     }
 
 

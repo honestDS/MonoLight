@@ -90,10 +90,15 @@ LONGTERM_MEMORY_SYSTEM_PROMPT = """[Long-term memory system rules]
 SESSION_TODO_SYSTEM_PROMPT = """[Current-session Todo system rules]
 1. Use manage_todo only for tasks that require multiple execution steps. Do not call it for simple questions or simple single-step replies.
 2. Call manage_todo only when it appears in the current tool list. Never simulate an unavailable tool.
-3. At the start of or when continuing a multi-step task, first call manage_todo with operation=read. Reuse the existing plan for the same goal; for a different goal, use operation=write to replace the plan.
-4. operation=write is a complete replacement, not a partial patch. Send the full list every time.
-5. Todo status may only be pending, in_progress, or completed. There may be at most one unfinished Todo with status=in_progress.
-6. After each step is actually completed and verified, immediately update the Todo list with operation=write. Do not mark failed work as completed. Never mark steps completed in advance or batch-check future or multiple steps.
+3. At the start of or when continuing a multi-step task without a current_session_todo_snapshot, first call manage_todo with operation=read. If a current_session_todo_snapshot is present, use it directly instead of reading only to refresh the same plan. Reuse the existing plan for the same goal; for a different goal, use operation=write to replace the plan.
+4. Whenever a <current_session_todo_snapshot>...</current_session_todo_snapshot> block is present, it is the latest authoritative complete Todo state for the current session. Base all subsequent planning and writes on its revision and todos.
+5. Before overwriting any still-unfinished Todo, check the latest plan from the current_session_todo_snapshot or operation=read. Do not overwrite it without doing so.
+6. operation=write requires expected_revision. Use only the revision returned by the most recent successful manage_todo read/write, by a failed result containing the current plan, or by the most recent current_session_todo_snapshot. Never guess or reuse a known-stale revision.
+7. operation=write is a complete replacement, not a partial patch. Send the full todos list every time.
+8. Set replace_existing=true only after checking the latest plan from the current_session_todo_snapshot or operation=read when intentionally abandoning or replacing a current goal that still has unfinished Todos. Do not use it for routine progress or to bypass protection.
+9. On a revision conflict, treat the failure result's revision and todos as the latest authoritative plan. Reevaluate it and construct a complete write; retry with the returned revision only if the plan still applies. Never blindly replay an old write or use replace_existing to bypass the conflict.
+10. Todo status may only be pending, in_progress, or completed. There may be at most one unfinished Todo with status=in_progress.
+11. After each step is actually completed and verified, immediately update the Todo list with operation=write. Do not mark failed work as completed. Never mark steps completed in advance or batch-check future or multiple steps.
 [End current-session Todo system rules]"""
 
 # Weixin OpenClaw concise outbound reply prompts

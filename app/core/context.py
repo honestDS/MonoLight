@@ -259,6 +259,7 @@ class ContextManager:
         max_tokens: int,
         tools: list[dict] | None = None,
         safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+        additional_non_system_tokens: int = 0,
     ) -> list[InternalMessage]:
         """
         在每次模型请求前对完整内存上下文做统一预算裁剪。
@@ -279,12 +280,13 @@ class ContextManager:
             max_tokens=max_tokens,
             tools=tools,
             safety_margin_tokens=safety_margin_tokens,
+            additional_non_system_tokens=additional_non_system_tokens,
         )
         budget = usage.budget
         cls.ensure_request_budget_available(budget)
 
         summary_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in summary_msgs)
-        dialogue_budget = budget.non_system_budget - summary_tokens
+        dialogue_budget = budget.non_system_budget - summary_tokens - max(additional_non_system_tokens, 0)
         if dialogue_budget <= 0:
             raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
 
@@ -333,6 +335,7 @@ class ContextManager:
             max_tokens=max_tokens,
             tools=tools,
             safety_margin_tokens=safety_margin_tokens,
+            additional_non_system_tokens=additional_non_system_tokens,
         )
         if final_usage.exceeds_hard_window:
             latest_msg = audited_non_system[-1] if audited_non_system else None

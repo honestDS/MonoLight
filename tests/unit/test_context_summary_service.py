@@ -292,6 +292,49 @@ async def test_context_summary_threshold_uses_previous_provider_plus_new_overrid
 
 
 @pytest.mark.asyncio
+async def test_fixed_request_summary_usage_includes_reserved_runtime_tokens(monkeypatch):
+    _patch_summary_dependencies(monkeypatch)
+    captured_additional_tokens = []
+    original_measure_context_request_usage = service_module.measure_context_request_usage
+
+    async def measure_snapshot_history(*_args, **_kwargs):
+        return 1000, 1
+
+    def measure_context_request_usage(**kwargs):
+        captured_additional_tokens.append(kwargs["additional_non_system_tokens"])
+        return original_measure_context_request_usage(**kwargs)
+
+    monkeypatch.setattr(
+        service_module,
+        "measure_snapshot_history",
+        measure_snapshot_history,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "measure_context_request_usage",
+        measure_context_request_usage,
+    )
+
+    await service_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(100),
+        before_id=10,
+        current_message="",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=37,
+        safety_margin_tokens=0,
+        fixed_request_messages=[InternalMessage(role=MessageRole.SYSTEM, content="system")],
+    )
+
+    assert captured_additional_tokens[0] == 1037
+    assert 37 in captured_additional_tokens[1:]
+
+
+@pytest.mark.asyncio
 async def test_context_summary_threshold_includes_tool_definition_tokens(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
 

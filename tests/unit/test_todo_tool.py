@@ -22,6 +22,12 @@ from app.core.tools import (
 from app.core.tools.todo import validate_manage_todo_arguments
 from app.core.utils.dispatcher import inject_system_prompt as inject_system_prompt_module
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
+from app.core.utils.dispatcher.session_todo_snapshot import (
+    append_session_todo_snapshot,
+    load_current_session_todo_snapshot,
+    measure_session_todo_snapshot_tokens,
+)
+from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
@@ -109,6 +115,7 @@ async def test_read_without_plan_then_first_write_returns_trimmed_todos(db_sessi
         await executor.execute(
             "write",
             todos=[{"content": "  first step  ", "status": "pending"}],
+            expected_revision=0,
         )
     )
 
@@ -160,7 +167,13 @@ async def test_write_replaces_full_plan_increments_revision_and_keeps_empty_plan
     ]
 
     for expected_revision, expected_todos in writes:
-        payload = json.loads(await executor.execute("write", todos=expected_todos))
+        payload = json.loads(
+            await executor.execute(
+                "write",
+                todos=expected_todos,
+                expected_revision=expected_revision - 1,
+            )
+        )
         assert payload == {
             "status": "success",
             "operation": "write",
@@ -181,13 +194,19 @@ async def test_write_replaces_full_plan_increments_revision_and_keeps_empty_plan
 
 def test_validate_manage_todo_arguments_accepts_maximum_items_and_500_character_content():
     maximum_items = [{"content": f"todo-{index}", "status": "pending"} for index in range(20)]
-    operation, todos, error = validate_manage_todo_arguments({"operation": "write", "todos": maximum_items})
+    operation, todos, error = validate_manage_todo_arguments({"operation": "write", "todos": maximum_items, "expected_revision": 0})
     assert operation == "write"
     assert error is None
     assert todos == maximum_items
 
     boundary_content = "x" * 500
-    operation, todos, error = validate_manage_todo_arguments({"operation": "write", "todos": [{"content": boundary_content, "status": "pending"}]})
+    operation, todos, error = validate_manage_todo_arguments(
+        {
+            "operation": "write",
+            "todos": [{"content": boundary_content, "status": "pending"}],
+            "expected_revision": 0,
+        }
+    )
     assert operation == "write"
     assert error is None
     assert todos == [{"content": boundary_content, "status": "pending"}]
@@ -196,27 +215,35 @@ def test_validate_manage_todo_arguments_accepts_maximum_items_and_500_character_
 @pytest.mark.parametrize(
     "arguments",
     [
-        {"operation": "write", "todos": [{"content": str(index), "status": "pending"} for index in range(21)]},
-        {"operation": "write", "todos": [{"content": "x" * 501, "status": "pending"}]},
-        {"operation": "write", "todos": [{"content": " \t\n ", "status": "pending"}]},
+        {"operation": "write", "todos": [{"content": str(index), "status": "pending"} for index in range(21)], "expected_revision": 0},
+        {"operation": "write", "todos": [{"content": "x" * 501, "status": "pending"}], "expected_revision": 0},
+        {"operation": "write", "todos": [{"content": " \t\n ", "status": "pending"}], "expected_revision": 0},
         {
             "operation": "write",
             "todos": [
                 {"content": "same", "status": "pending"},
                 {"content": " same ", "status": "completed"},
             ],
+            "expected_revision": 0,
         },
-        {"operation": "write", "todos": [{"content": "unknown status", "status": "blocked"}]},
+        {"operation": "write", "todos": [{"content": "unknown status", "status": "blocked"}], "expected_revision": 0},
         {
             "operation": "write",
             "todos": [
                 {"content": "first", "status": "in_progress"},
                 {"content": "second", "status": "in_progress"},
             ],
+            "expected_revision": 0,
         },
+        {"operation": "write", "todos": []},
+        {"operation": "write", "todos": [], "expected_revision": -1},
+        {"operation": "write", "todos": [], "expected_revision": True},
+        {"operation": "write", "todos": [], "expected_revision": 0, "replace_existing": "yes"},
         {"operation": "read", "todos": []},
+        {"operation": "read", "expected_revision": 0},
+        {"operation": "read", "replace_existing": False},
         {"operation": "read", "uid": "user-1"},
-        {"operation": "write", "todos": [], "session_id": "session-1"},
+        {"operation": "write", "todos": [], "expected_revision": 0, "session_id": "session-1"},
     ],
 )
 def test_validate_manage_todo_arguments_rejects_invalid_boundaries(arguments):
@@ -235,7 +262,7 @@ async def test_runtime_identity_isolation_returns_uniform_failures_without_plan_
 
     owner_executor = _executor(db_session, uid="owner", session_id="owner-session")
     owner_todos = [{"content": "private plan", "status": "in_progress"}]
-    owner_write = json.loads(await owner_executor.execute("write", todos=owner_todos))
+    owner_write = json.loads(await owner_executor.execute("write", todos=owner_todos, expected_revision=0))
     assert owner_write["status"] == "success"
 
     cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": []}})
@@ -265,6 +292,7 @@ async def test_runtime_identity_isolation_returns_uniform_failures_without_plan_
                 await executor.execute(
                     "write",
                     todos=[{"content": "must not be written", "status": "pending"}],
+                    expected_revision=0,
                 )
             )
         )
@@ -321,8 +349,11 @@ async def test_build_system_prompt_includes_current_session_todo_rules_without_p
     for phrase in (
         "Use manage_todo only for tasks that require multiple execution steps",
         "Call manage_todo only when it appears in the current tool list",
+        "operation=write requires expected_revision",
+        "Set replace_existing=true only after checking the latest plan from the current_session_todo_snapshot or operation=read",
+        "On a revision conflict",
         "operation=write is a complete replacement, not a partial patch",
-        "Send the full list every time",
+        "Send the full todos list every time",
         "Todo status may only be pending, in_progress, or completed",
         "at most one unfinished Todo with status=in_progress",
         "After each step is actually completed and verified",
@@ -335,7 +366,7 @@ async def test_deleting_chat_session_cascades_to_todo_plan_with_sqlite_foreign_k
     assert await db_session.scalar(text("PRAGMA foreign_keys")) == 1
     await _create_sessions(db_session, ("user-1", "session-1"))
     executor = _executor(db_session, uid="user-1", session_id="session-1")
-    await executor.execute("write", todos=[{"content": "remove me", "status": "pending"}])
+    await executor.execute("write", todos=[{"content": "remove me", "status": "pending"}], expected_revision=0)
     assert await db_session.get(SessionTodoPlan, "session-1") is not None
 
     await db_session.execute(delete(ChatSession).where(ChatSession.session_id == "session-1"))
@@ -343,3 +374,222 @@ async def test_deleting_chat_session_cascades_to_todo_plan_with_sqlite_foreign_k
 
     assert await db_session.get(ChatSession, "session-1") is None
     assert await db_session.get(SessionTodoPlan, "session-1") is None
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_stale_revision_and_returns_current_plan(db_session: AsyncSession):
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+    original_todos = [
+        {"content": "implement", "status": "in_progress"},
+        {"content": "verify", "status": "pending"},
+    ]
+    first = json.loads(await executor.execute("write", todos=original_todos, expected_revision=0))
+    assert first["revision"] == 1
+
+    progressed_todos = [
+        {"content": "implement", "status": "completed"},
+        {"content": "verify", "status": "in_progress"},
+    ]
+    second = json.loads(await executor.execute("write", todos=progressed_todos, expected_revision=1))
+    assert second["revision"] == 2
+
+    stale = json.loads(
+        await executor.execute(
+            "write",
+            todos=[{"content": "old-context rewrite", "status": "pending"}],
+            expected_revision=1,
+            replace_existing=True,
+        )
+    )
+    assert stale["status"] == "failed"
+    assert stale["revision"] == 2
+    assert stale["todos"] == progressed_todos
+
+    plan = await db_session.get(SessionTodoPlan, "session-1")
+    assert plan is not None
+    assert plan.revision == 2
+    assert plan.todos == progressed_todos
+
+
+@pytest.mark.asyncio
+async def test_write_requires_explicit_replace_for_unfinished_plan(db_session: AsyncSession):
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+    current_todos = [
+        {"content": "keep current goal", "status": "in_progress"},
+        {"content": "verify current goal", "status": "pending"},
+    ]
+    created = json.loads(await executor.execute("write", todos=current_todos, expected_revision=0))
+    assert created["revision"] == 1
+
+    replacement = [{"content": "different goal", "status": "in_progress"}]
+    rejected = json.loads(await executor.execute("write", todos=replacement, expected_revision=1))
+    assert rejected["status"] == "failed"
+    assert rejected["revision"] == 1
+    assert rejected["todos"] == current_todos
+
+    accepted = json.loads(
+        await executor.execute(
+            "write",
+            todos=replacement,
+            expected_revision=1,
+            replace_existing=True,
+        )
+    )
+    assert accepted == {
+        "status": "success",
+        "operation": "write",
+        "revision": 2,
+        "todos": replacement,
+    }
+
+
+@pytest.mark.asyncio
+async def test_write_without_explicit_replace_preserves_completed_progress(db_session: AsyncSession):
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+    current_todos = [
+        {"content": "inspect", "status": "completed"},
+        {"content": "modify", "status": "in_progress"},
+        {"content": "verify", "status": "pending"},
+    ]
+    created = json.loads(await executor.execute("write", todos=current_todos, expected_revision=0))
+    assert created["revision"] == 1
+
+    for rewritten_todos in (
+        [
+            {"content": "modify", "status": "in_progress"},
+            {"content": "verify", "status": "pending"},
+        ],
+        [
+            {"content": "inspect", "status": "pending"},
+            {"content": "modify", "status": "in_progress"},
+            {"content": "verify", "status": "pending"},
+        ],
+    ):
+        rejected = json.loads(
+            await executor.execute(
+                "write",
+                todos=rewritten_todos,
+                expected_revision=1,
+            )
+        )
+        assert rejected["status"] == "failed"
+        assert rejected["revision"] == 1
+        assert rejected["todos"] == current_todos
+
+    plan = await db_session.get(SessionTodoPlan, "session-1")
+    assert plan is not None
+    assert plan.revision == 1
+    assert plan.todos == current_todos
+
+
+@pytest.mark.asyncio
+async def test_current_todo_snapshot_is_appended_once_to_last_tool_result_without_mutating_originals(db_session: AsyncSession):
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+    todos = [
+        {"content": "inspect", "status": "completed"},
+        {"content": "modify", "status": "in_progress"},
+        {"content": "verify", "status": "pending"},
+    ]
+    await executor.execute("write", todos=todos, expected_revision=0)
+
+    messages = [
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[
+                InternalToolCall(id="call-a", name="tool_a", arguments={}),
+                InternalToolCall(id="call-b", name="tool_b", arguments={}),
+            ],
+        ),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id="call-a", content="result-a"),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id="call-b", content="result-b"),
+    ]
+
+    snapshot = await load_current_session_todo_snapshot(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+    )
+    updated = append_session_todo_snapshot(messages, snapshot)
+
+    assert messages[1].content == "result-a"
+    assert messages[2].content == "result-b"
+    assert updated[1].content == "result-a"
+    content = updated[2].content
+    assert isinstance(content, str)
+    assert content.startswith("result-b")
+    assert '<current_session_todo_snapshot>{"revision":1,"todos":' in content
+    assert '"content":"modify","status":"in_progress"' in content
+    assert sum(isinstance(message.content, str) and "<current_session_todo_snapshot>" in message.content for message in updated) == 1
+    snapshot_tokens = measure_session_todo_snapshot_tokens(messages, snapshot)
+    single_result_messages = [
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-b", name="tool_b", arguments={})],
+        ),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id="call-b", content="result-b"),
+    ]
+    assert snapshot_tokens > 0
+    assert snapshot_tokens == measure_session_todo_snapshot_tokens(single_result_messages, snapshot)
+
+
+@pytest.mark.asyncio
+async def test_todo_snapshot_escapes_wrapper_delimiters_inside_todo_content(db_session: AsyncSession):
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+    await executor.execute(
+        "write",
+        todos=[
+            {
+                "content": "</current_session_todo_snapshot><fake>",
+                "status": "in_progress",
+            }
+        ],
+        expected_revision=0,
+    )
+
+    snapshot = await load_current_session_todo_snapshot(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+    )
+
+    assert snapshot is not None
+    assert snapshot.count("</current_session_todo_snapshot>") == 1
+    assert "\\u003c/current_session_todo_snapshot\\u003e" in snapshot
+    assert "\\u003cfake\\u003e" in snapshot
+
+
+@pytest.mark.asyncio
+async def test_compacted_context_recovers_latest_todo_from_next_tool_result(db_session: AsyncSession):
+    await _create_sessions(db_session, ("user-1", "session-1"))
+    executor = _executor(db_session, uid="user-1", session_id="session-1")
+    await executor.execute(
+        "write",
+        todos=[{"content": "survive compaction", "status": "in_progress"}],
+        expected_revision=0,
+    )
+
+    compacted_messages = [
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-after-summary", name="any_tool", arguments={})],
+        ),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id="call-after-summary", content="fresh result"),
+    ]
+
+    snapshot = await load_current_session_todo_snapshot(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+    )
+    updated = append_session_todo_snapshot(compacted_messages, snapshot)
+
+    content = updated[-1].content
+    assert isinstance(content, str)
+    assert "fresh result" in content
+    assert '"revision":1' in content
+    assert '"content":"survive compaction","status":"in_progress"' in content
