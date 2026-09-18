@@ -23,6 +23,18 @@ class _Session:
         return None
 
 
+@pytest.fixture(autouse=True)
+def _isolate_session_todo_snapshot(monkeypatch):
+    async def no_todo_snapshot(_db, *, uid, session_id):
+        return None
+
+    monkeypatch.setattr(
+        interactive_runtime_module,
+        "load_current_session_todo_snapshot",
+        no_todo_snapshot,
+    )
+
+
 class _Channel:
     id = 1
     base_url = "https://example.invalid"

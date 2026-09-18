@@ -4,6 +4,7 @@ from sqlalchemy import and_, delete, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import RUNTIME_CONTEXT_OVERLAY_METADATA_KEY
 from app.core.crud.base import CRUDBase
 from app.core.crud.profile.profile import profile_crud
 from app.core.session_source import default_show_tool_calls_for_source
@@ -182,6 +183,12 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             if not isinstance(input_tokens_source, str) or input_tokens_source not in {"estimated", "provider"}:
                 return False
             persisted_metadata["input_tokens_source"] = input_tokens_source
+
+        if RUNTIME_CONTEXT_OVERLAY_METADATA_KEY in metadata:
+            runtime_context_overlay = metadata[RUNTIME_CONTEXT_OVERLAY_METADATA_KEY]
+            if not isinstance(runtime_context_overlay, bool):
+                return False
+            persisted_metadata[RUNTIME_CONTEXT_OVERLAY_METADATA_KEY] = runtime_context_overlay
 
         work_sequence_no = metadata.get("work_sequence_no")
         use_work_order = isinstance(work_sequence_no, int) and not isinstance(work_sequence_no, bool) and work_sequence_no > 0

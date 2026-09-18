@@ -141,12 +141,14 @@ async def test_channel_call_releases_connection_and_reports_empty_response_usage
         uid="user-1",
         session_id="session-1",
         request_metadata_callback=request_metadata_callback,
+        runtime_context_overlay=True,
     )
 
     assert model_call_commit_counts == [1, 2]
     assert response.model == "model-2"
     assert [metadata["input_tokens"] for metadata in request_metadata] == [100, 100]
     assert [metadata["cached_tokens"] for metadata in request_metadata] == [100, 0]
+    assert [metadata["_runtime_context_overlay"] for metadata in request_metadata] == [True, True]
     provider_request_ids = [metadata["_provider_request_id"] for metadata in request_metadata]
     assert all(isinstance(request_id, str) and request_id for request_id in provider_request_ids)
     assert provider_request_ids[0] != provider_request_ids[1]

@@ -42,6 +42,8 @@ async def apply_context_summary_checkpoint(
     model_id: str | None = None,
     protocol: str | None = None,
     previous_llm_request_metadata: dict | None = None,
+    reserved_tokens: int = 0,
+    allow_incremental_input_estimate: bool = True,
 ) -> list[InternalMessage]:
     system_messages = [message.model_copy(deep=True) for message in messages if message.role == MessageRole.SYSTEM]
     uncovered_messages = [
@@ -58,7 +60,7 @@ async def apply_context_summary_checkpoint(
     fixed_request_messages = [*system_messages, *uncovered_messages]
 
     required_input_tokens_override = None
-    if isinstance(model_id, str) and model_id.strip() and isinstance(protocol, str) and protocol.strip():
+    if allow_incremental_input_estimate and isinstance(model_id, str) and model_id.strip() and isinstance(protocol, str) and protocol.strip():
         session = await session_crud.get_by_session_id(db, session_id)
         if session is not None and hasattr(db, "refresh"):
             await db.refresh(session)
@@ -85,7 +87,7 @@ async def apply_context_summary_checkpoint(
         current_message="",
         context_window_k=context_window_k,
         max_tokens=max_tokens,
-        reserved_tokens=0,
+        reserved_tokens=max(reserved_tokens, 0),
         tools=tools,
         trigger_mode=trigger_mode,
         fixed_upper_message_id=fixed_upper_message_id,

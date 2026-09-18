@@ -283,7 +283,7 @@ async def _ensure_context_summary(
             tools=tools,
             safety_margin_tokens=safety_margin_tokens,
             threshold_percent=threshold_percent,
-            additional_non_system_tokens=history_tokens + summary_tokens,
+            additional_non_system_tokens=history_tokens + summary_tokens + max(reserved_tokens, 0),
         )
         usage = {
             "summary_tokens": summary_tokens,
@@ -432,6 +432,7 @@ async def _ensure_context_summary(
                 tools=tools,
                 safety_margin_tokens=safety_margin_tokens,
                 threshold_percent=threshold_percent,
+                additional_non_system_tokens=max(reserved_tokens, 0),
             )
             final_usage = {
                 "required_tokens": measured_final_usage.required_input_tokens,

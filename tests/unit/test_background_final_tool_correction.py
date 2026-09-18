@@ -59,6 +59,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         ),
     ]
     requests = []
+    todo_snapshot = '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"finish","status":"in_progress"}]}</current_session_todo_snapshot>'
 
     async def fake_get_user(_db, _uid):
         return SimpleNamespace(username="tester")
@@ -101,6 +102,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
             {
                 "call_context": kwargs["call_context"],
                 "tools": kwargs["tools"],
+                "runtime_context_overlay": kwargs.get("runtime_context_overlay", False),
                 "messages": request_messages,
             }
         )
@@ -132,6 +134,9 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         messages.append(tool_response)
         turn_messages.append(tool_response)
 
+    async def fake_load_todo_snapshot(_db, *, uid, session_id):
+        return todo_snapshot
+
     monkeypatch.setattr(background_module.user_crud, "get_by_uid", fake_get_user)
     monkeypatch.setattr(background_module, "validate_profile_and_cfg", fake_validate_profile_and_cfg)
     monkeypatch.setattr(background_module, "get_tools_for_profile", fake_get_tools_for_profile)
@@ -141,6 +146,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     monkeypatch.setattr(background_module, "extract_files_to_user", lambda _responses: [sent_file] if has_files else [])
     monkeypatch.setattr(background_module, "save_assistant_message", fake_save)
     monkeypatch.setattr(background_module, "save_tool_response", fake_save_tool_response)
+    monkeypatch.setattr(background_module, "load_current_session_todo_snapshot", fake_load_todo_snapshot)
 
     final_msg, turn_messages, files = await BackgroundDispatcherMixin._generate_reply_from_history(
         object(),
@@ -176,6 +182,8 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         expected_contexts.append("background_task_proactive_reply_final_tool_correction")
     assert [request["call_context"] for request in requests] == expected_contexts
     assert requests[1]["tools"] is None
+    assert [request["runtime_context_overlay"] for request in requests] == [False, *([True] * (len(requests) - 1))]
+    assert todo_snapshot in next(message.content for message in requests[1]["messages"] if message.role == MessageRole.TOOL)
 
     if correction_succeeds is not None:
         assert requests[2]["tools"] is None

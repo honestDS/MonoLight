@@ -5,14 +5,22 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
+from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    ERR_CHAT_CHANNEL_NOT_FOUND,
+    ERR_LLM_EMPTY_RESPONSE,
+    RUNTIME_CONTEXT_OVERLAY_METADATA_KEY,
+)
 from app.core.exceptions import ApiKeyException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
-from app.core.utils.request_token_baseline import build_provider_request_usage_metadata, extract_provider_token_metrics
+from app.core.utils.request_token_baseline import (
+    build_provider_request_usage_metadata,
+    extract_provider_token_metrics,
+)
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, resolve_model_protocol
 from app.models.message import InternalMessage, InternalResponse
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
@@ -44,6 +52,7 @@ async def generate_chat_with_fallback(
     require_content_or_tools: bool = True,
     require_content: bool = False,
     request_metadata_callback: RequestMetadataCallback | None = None,
+    runtime_context_overlay: bool = False,
 ) -> tuple[InternalResponse, ModelChannel, dict[str, Any], ChannelRule, dict[str, Any]]:
     excluded_priorities: set[int] = set()
     selection = await select_channel(db, chat_channel, "CHAT", call_context=call_context, cursor_key=cursor_key)
@@ -84,6 +93,7 @@ async def generate_chat_with_fallback(
                 await request_metadata_callback(
                     {
                         "type": "llm_request_metadata",
+                        RUNTIME_CONTEXT_OVERLAY_METADATA_KEY: runtime_context_overlay,
                         "input_tokens": estimated_input_tokens,
                         "input_tokens_source": "estimated",
                         "context_window_tokens": max(1, int(chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K),

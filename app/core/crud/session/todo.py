@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -5,6 +7,13 @@ from sqlmodel import select
 from app.core.utils.time import get_local_time
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTodoWriteResult:
+    session_exists: bool
+    plan: SessionTodoPlan | None
+    written: bool
 
 
 class CRUDSessionTodoPlan:
@@ -66,8 +75,10 @@ class CRUDSessionTodoPlan:
         uid: str,
         session_id: str,
         todos: list[dict[str, str]],
+        expected_revision: int,
+        replace_existing: bool = False,
         commit: bool = True,
-    ) -> SessionTodoPlan | None:
+    ) -> SessionTodoWriteResult:
         await db.execute(
             update(ChatSession)
             .where(
@@ -87,7 +98,7 @@ class CRUDSessionTodoPlan:
             .execution_options(populate_existing=True)
         )
         if session_result.scalars().first() is None:
-            return None
+            return SessionTodoWriteResult(session_exists=False, plan=None, written=False)
 
         plan_result = await db.execute(
             select(SessionTodoPlan)
@@ -99,6 +110,23 @@ class CRUDSessionTodoPlan:
             .execution_options(populate_existing=True)
         )
         plan = plan_result.scalars().first()
+        current_revision = 0 if plan is None else plan.revision
+        if expected_revision != current_revision:
+            if commit:
+                await db.commit()
+            return SessionTodoWriteResult(session_exists=True, plan=plan, written=False)
+
+        if plan is not None and not replace_existing:
+            current_items = {item.get("content", "").strip(): item.get("status") for item in plan.todos}
+            incoming_items = {item.get("content", "").strip(): item.get("status") for item in todos}
+            has_unfinished = any(status != "completed" for status in current_items.values())
+            removes_existing_item = has_unfinished and not set(current_items).issubset(incoming_items)
+            regresses_completed_item = has_unfinished and any(status == "completed" and incoming_items.get(content) != "completed" for content, status in current_items.items())
+            if removes_existing_item or regresses_completed_item:
+                if commit:
+                    await db.commit()
+                return SessionTodoWriteResult(session_exists=True, plan=plan, written=False)
+
         now = get_local_time()
         if plan is None:
             plan = SessionTodoPlan(
@@ -119,7 +147,7 @@ class CRUDSessionTodoPlan:
             await db.commit()
         else:
             await db.flush()
-        return plan
+        return SessionTodoWriteResult(session_exists=True, plan=plan, written=True)
 
 
 session_todo_crud = CRUDSessionTodoPlan()

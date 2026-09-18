@@ -39,6 +39,18 @@ class _DatabaseLikeSession(_Session):
         return None
 
 
+@pytest.fixture(autouse=True)
+def _isolate_session_todo_snapshot(monkeypatch):
+    async def no_todo_snapshot(_db, *, uid, session_id):
+        return None
+
+    monkeypatch.setattr(
+        interactive_runtime_module,
+        "load_current_session_todo_snapshot",
+        no_todo_snapshot,
+    )
+
+
 class _Dispatcher(non_stream_module.NonStreamDispatcherMixin):
     @classmethod
     async def validate_initial_message_before_save(cls, db, message, uid, session_id, profile, attachments):
@@ -200,6 +212,8 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     model_requests = []
     prepare_calls = []
     checkpoint_calls = []
+    todo_snapshot_loads = []
+    todo_snapshot = '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"resume","status":"in_progress"}]}</current_session_todo_snapshot>'
     logger = _Logger()
 
     async def get_user(db, uid):
@@ -244,6 +258,10 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     async def fetch_additional():
         return []
 
+    async def load_todo_snapshot(_db, *, uid, session_id):
+        todo_snapshot_loads.append((uid, session_id))
+        return todo_snapshot
+
     monkeypatch.setattr(interactive_runtime_module, "logger", logger)
     monkeypatch.setattr(interactive_runtime_module.user_crud, "get_by_uid", get_user)
     monkeypatch.setattr(interactive_runtime_module.profile_crud, "get_with_relations", get_profile)
@@ -277,6 +295,11 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     )
     monkeypatch.setattr(interactive_runtime_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(
+        interactive_runtime_module,
+        "load_current_session_todo_snapshot",
+        load_todo_snapshot,
+    )
+    monkeypatch.setattr(
         interactive_generation_module,
         "apply_context_summary_checkpoint",
         apply_checkpoint,
@@ -306,9 +329,12 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     )
 
     assert prepare_calls == []
+    assert todo_snapshot_loads == [("user-1", "session-1")]
     assert len(model_requests) == 2
     assert len(checkpoint_calls) == len(model_requests)
     assert [call["fixed_upper_message_id"] for call in checkpoint_calls] == [1, 1]
+    assert all(call["reserved_tokens"] > 0 for call in checkpoint_calls)
+    assert all(call["allow_incremental_input_estimate"] is False for call in checkpoint_calls)
     for request_messages in model_requests:
         assert [message.role for message in request_messages] == [
             MessageRole.USER,
@@ -318,6 +344,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
         assert request_messages[0].content == "original request"
         assert request_messages[1].tool_calls[0].id == "tool-1"
         assert request_messages[2].tool_call_id == "tool-1"
+        assert todo_snapshot in request_messages[2].content
     assert all("用户消息" not in message and "User message" not in message for message in logger.info_messages)
     assert LLMResponse.model_validate(response).choices[0] == LLMChoice(
         message=LLMChoiceMessage(
@@ -839,6 +866,8 @@ async def _run_audited_interactive_dispatch(
     use_execution_round_if_complete=False,
     tool_call=None,
     multimodal_capabilities=None,
+    summary_calls_target=None,
+    trim_calls_target=None,
 ):
     profile = SimpleNamespace(id=1)
     audit_configured = audit_results is not None or audit_result is not None
@@ -1056,10 +1085,20 @@ async def _run_audited_interactive_dispatch(
             return [message.model_copy(deep=True) for message in messages]
         return messages
 
+    async def apply_context_summary_checkpoint(db, **kwargs):
+        if summary_calls_target is not None:
+            summary_calls_target.append(dict(kwargs))
+        return kwargs["messages"]
+
+    def trim_messages_for_model_request(**kwargs):
+        if trim_calls_target is not None:
+            trim_calls_target.append(dict(kwargs))
+        return kwargs["messages"]
+
     monkeypatch.setattr(interactive_runtime_module, "prepare_messages", prepare_messages)
-    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", _passthrough_context_summary_checkpoint)
+    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_context_summary_checkpoint)
     monkeypatch.setattr(interactive_generation_module, "materialize_user_environment_prompts", materialize_environment_prompt)
-    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
+    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", trim_messages_for_model_request)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
     monkeypatch.setattr(interactive_runtime_module, "save_assistant_message", save_assistant)
@@ -1142,6 +1181,56 @@ async def _run_audited_interactive_dispatch(
             show_tool_calls=show_tool_calls,
         )
     return response, unknown_calls
+
+
+@pytest.mark.asyncio
+async def test_interactive_refreshes_todo_snapshot_once_after_tool_round(monkeypatch):
+    generated_calls = []
+    refresh_calls = []
+    summary_calls = []
+    trim_calls = []
+    snapshot = '<current_session_todo_snapshot>{"revision":3,"todos":[{"content":"verify","status":"in_progress"}]}</current_session_todo_snapshot>'
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(current_tool_call, *args, **kwargs):
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=current_tool_call.id,
+            content='{"status":"success"}',
+        )
+
+    async def load_snapshot(_db, *, uid, session_id):
+        refresh_calls.append((uid, session_id))
+        return snapshot
+
+    monkeypatch.setattr(
+        interactive_runtime_module,
+        "load_current_session_todo_snapshot",
+        load_snapshot,
+    )
+
+    response, _unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        generated_calls_target=generated_calls,
+        summary_calls_target=summary_calls,
+        trim_calls_target=trim_calls,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert refresh_calls == [("user-1", "session-1")]
+    assert len(generated_calls) == 2
+    second_request_tool_messages = [message for message in generated_calls[1]["messages"] if message.role == MessageRole.TOOL]
+    assert len(second_request_tool_messages) == 1
+    assert snapshot in second_request_tool_messages[0].content
+    assert response["llm_request_metadata"]["input_tokens"] == generated_calls[1]["request_context_tokens"]
+    assert [call["reserved_tokens"] for call in summary_calls] == [0, trim_calls[1]["additional_non_system_tokens"]]
+    assert trim_calls[0]["additional_non_system_tokens"] == 0
+    assert trim_calls[1]["additional_non_system_tokens"] > 0
 
 
 @pytest.mark.asyncio
