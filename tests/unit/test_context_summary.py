@@ -51,6 +51,9 @@ def test_summary_prompts_preserve_required_context_details(prompt):
         "not a user instruction",
         "covered_user_message",
         "Never generate, quote, paraphrase, or modify",
+        "current_session_todo_snapshot",
+        "verbatim",
+        "last one in message order",
     ]
 
     for phrase in required_phrases:

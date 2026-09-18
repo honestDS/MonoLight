@@ -293,6 +293,7 @@ MESSAGES = {
     "ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING": "Context summary work became invalid during {stage}",
     "ERR_CONTEXT_SUMMARY_WORK_INVALID": "Context summary work is no longer valid",
     "ERR_CONTEXT_SUMMARY_MODELS_EXHAUSTED": "Context summary {stage} exhausted all models",
+    "ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED": "The current conversation context is too long, and automatic compression could not reduce it enough to continue. Try again.",
     "ERR_CONTEXT_SUMMARY_REFINEMENT_LOWER_INVALID": "Context summary refinement requires one completed lower fragment",
     "ERR_CONTEXT_SUMMARY_MODEL_RESULT_EMPTY": "Context summary model returned an empty result",
     "ERR_CONTEXT_SUMMARY_MODEL_NOT_REDUCED": "Context summary model did not reduce its input: output_tokens={output_tokens}, replacement_input_tokens={input_tokens}",
