@@ -225,7 +225,6 @@ def estimate_incremental_input_tokens(
 ) -> int | None:
     if not isinstance(metadata, dict) or metadata.get("input_tokens_source") != "provider":
         return None
-
     input_tokens = metadata.get("input_tokens")
     previous_min_id = metadata.get("request_message_min_id")
     previous_max_id = metadata.get("request_message_max_id")

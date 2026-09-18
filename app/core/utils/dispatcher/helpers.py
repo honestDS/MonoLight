@@ -3,10 +3,12 @@ from importlib import import_module
 from typing import Any
 
 from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL
+from app.core.dispatch_context import DispatchMode
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
+from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.providers.database import AsyncSessionLocal
@@ -97,9 +99,12 @@ async def process_single_tool_with_isolated_db(
     *,
     allowed_knowledge_base_ids: list[int] | None = None,
     context_window_k: int = 4,
+    tool_call_count: int = 1,
     allow_background_submission: bool = True,
     context_summary_boundary_message_id: int | None = None,
     source_message_id: int | None = None,
+    dispatch_mode: DispatchMode = "interactive",
+    dispatch_source: str = "interactive_tool",
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
@@ -117,9 +122,12 @@ async def process_single_tool_with_isolated_db(
             uid,
             allowed_knowledge_base_ids=allowed_knowledge_base_ids,
             context_window_k=context_window_k,
+            tool_call_count=tool_call_count,
             allow_background_submission=allow_background_submission,
             context_summary_boundary_message_id=context_summary_boundary_message_id,
             source_message_id=source_message_id,
+            dispatch_mode=dispatch_mode,
+            dispatch_source=dispatch_source,
         )
 
 
@@ -129,7 +137,13 @@ def dump_output_history(
     show_tool_calls: bool = True,
 ) -> list[dict[str, Any]]:
     output_messages = messages if show_tool_calls else [message for message in messages if message.role != MessageRole.TOOL and not (message.role == MessageRole.ASSISTANT and message.tool_calls)]
-    return [message.model_dump(exclude_none=True) for message in output_messages]
+    visible_messages: list[InternalMessage] = []
+    for message in output_messages:
+        if message.role == MessageRole.TOOL and isinstance(message.content, str):
+            visible_messages.append(message.model_copy(update={"content": strip_session_todo_snapshot(message.content)}))
+        else:
+            visible_messages.append(message)
+    return [message.model_dump(exclude_none=True) for message in visible_messages]
 
 
 def dump_background_proactive_history(messages: list[InternalMessage]) -> list[dict[str, Any]]:

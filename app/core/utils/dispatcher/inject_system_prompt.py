@@ -11,6 +11,7 @@ from app.core.log import (
 from app.core.prompts import (
     KNOWLEDGE_BASES_WRAPPER,
     LONGTERM_MEMORY_SYSTEM_PROMPT,
+    SESSION_TODO_SYSTEM_PROMPT,
     SYSTEM_INSTRUCTIONS_WRAPPER,
     SYSTEM_RUNTIME_CONTEXT_POLICY,
     UNIFIED_KNOWLEDGE_BASES_WRAPPER,
@@ -47,6 +48,8 @@ async def build_system_prompt(
         if prompt and prompt.content:
             instruction_part = SYSTEM_INSTRUCTIONS_WRAPPER.format(content=prompt.content)
             full_parts.append(instruction_part)
+
+    full_parts.append(SESSION_TODO_SYSTEM_PROMPT)
 
     # 长期记忆规则放在 Profile Prompt 之后，避免被普通 Profile 指令覆盖。
     profile_configs = profile.configs if isinstance(profile.configs, dict) else {}

@@ -300,7 +300,7 @@ async def test_checkpoint_uses_fixed_upper_and_preserves_messages_after_new_summ
     ]
 
     result = await checkpoint_module.apply_context_summary_checkpoint(
-        object(),
+        db_session,
         session_id="session-1",
         uid="user-1",
         profile=object(),
@@ -324,6 +324,51 @@ async def test_checkpoint_uses_fixed_upper_and_preserves_messages_after_new_summ
     ]
     assert "新累计总结" in result[1].content
     assert result[-1].id == 4
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_excludes_todo_from_summary_input_and_reattaches_latest_snapshot(monkeypatch, db_session: AsyncSession):
+    captured = {}
+    todo_snapshot = '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"verify","status":"in_progress"}]}</current_session_todo_snapshot>'
+
+    async def load_snapshot(_db, *, uid, session_id):
+        assert uid == "user-1"
+        assert session_id == "session-1"
+        return todo_snapshot
+
+    async def ensure_summary(_db, **kwargs):
+        captured.update(kwargs)
+        return ContextSummaryState(content="compacted", message_id=3)
+
+    monkeypatch.setattr(checkpoint_module, "load_current_session_todo_snapshot", load_snapshot)
+    monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(id=1, role=MessageRole.USER, content="old"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="tooling"),
+        InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content=f"result\n\n{todo_snapshot}"),
+        InternalMessage(id=4, role=MessageRole.USER, content="current"),
+    ]
+
+    result = await checkpoint_module.apply_context_summary_checkpoint(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile=object(),
+        cfg=object(),
+        messages=messages,
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=4,
+        context_window_k=8,
+        max_tokens=512,
+        tools=None,
+    )
+
+    assert all("current_session_todo_snapshot" not in str(message.content) for message in captured["fixed_request_messages"])
+    assert captured["reserved_tokens"] > 0
+    assert sum("current_session_todo_snapshot" in str(message.content) for message in result) == 1
+    summary_message = next(message for message in result if isinstance(message.content, str) and message.content.startswith("<conversation_summary "))
+    assert todo_snapshot in summary_message.content
 
 
 @pytest.mark.asyncio

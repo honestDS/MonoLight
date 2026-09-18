@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.constants import MANAGE_TODO_TOOL_NAME
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.prompts import BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
@@ -59,6 +60,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         ),
     ]
     requests = []
+    todo_snapshot = '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"finish","status":"in_progress"}]}</current_session_todo_snapshot>'
 
     async def fake_get_user(_db, _uid):
         return SimpleNamespace(username="tester")
@@ -75,6 +77,14 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
                     "function": {
                         "name": "send_file_to_user",
                         "description": "Send a file",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+                ,{
+                    "type": "function",
+                    "function": {
+                        "name": MANAGE_TODO_TOOL_NAME,
+                        "description": "Todo",
                         "parameters": {"type": "object", "properties": {}},
                     },
                 }
@@ -118,7 +128,9 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
             },
         )
 
-    async def fake_process_single_tool(*_args, **_kwargs):
+    async def fake_process_single_tool(*_args, **kwargs):
+        assert kwargs["dispatch_mode"] == "background"
+        assert kwargs["dispatch_source"] == "background_task_proactive_reply"
         return InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id=initial_tool_call.id,
@@ -129,8 +141,15 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         return None
 
     async def fake_save_tool_response(_db, _session_id, _uid, _profile_id, tool_response, messages, turn_messages):
+        tool_response.id = 100 + len(turn_messages)
         messages.append(tool_response)
         turn_messages.append(tool_response)
+        return tool_response
+
+    async def fake_persist_todo_snapshot(_db, *, uid, session_id, tool_results):
+        if tool_results:
+            tool_results[-1].content = f"{tool_results[-1].content}\n\n{todo_snapshot}"
+        return todo_snapshot
 
     monkeypatch.setattr(background_module.user_crud, "get_by_uid", fake_get_user)
     monkeypatch.setattr(background_module, "validate_profile_and_cfg", fake_validate_profile_and_cfg)
@@ -141,6 +160,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     monkeypatch.setattr(background_module, "extract_files_to_user", lambda _responses: [sent_file] if has_files else [])
     monkeypatch.setattr(background_module, "save_assistant_message", fake_save)
     monkeypatch.setattr(background_module, "save_tool_response", fake_save_tool_response)
+    monkeypatch.setattr(background_module, "persist_session_todo_snapshot_on_tool_results", fake_persist_todo_snapshot)
 
     final_msg, turn_messages, files = await BackgroundDispatcherMixin._generate_reply_from_history(
         object(),
@@ -149,6 +169,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         profile=profile,
         call_context="background_task_proactive_reply",
         allow_tools=True,
+        restrict_tools_to_background_allowlist=False,
     )
 
     assert final_msg.tool_calls in (None, [])
@@ -175,7 +196,9 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     if correction_succeeds is not None:
         expected_contexts.append("background_task_proactive_reply_final_tool_correction")
     assert [request["call_context"] for request in requests] == expected_contexts
+    assert MANAGE_TODO_TOOL_NAME not in {tool["function"]["name"] for tool in requests[0]["tools"]}
     assert requests[1]["tools"] is None
+    assert todo_snapshot in next(message.content for message in requests[1]["messages"] if message.role == MessageRole.TOOL)
 
     if correction_succeeds is not None:
         assert requests[2]["tools"] is None

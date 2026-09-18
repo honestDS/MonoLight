@@ -43,6 +43,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.session_todo import SessionTodoPlan
 
 
 @pytest_asyncio.fixture
@@ -65,6 +66,7 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
         PromptLibrary.__table__,
         Profile.__table__,
         ChatSession.__table__,
+        SessionTodoPlan.__table__,
         KnowledgeBase.__table__,
         KnowledgeBaseProfileBinding.__table__,
         KnowledgeBaseDocument.__table__,

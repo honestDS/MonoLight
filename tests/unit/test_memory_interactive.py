@@ -139,6 +139,9 @@ def _install_dispatcher_stubs(
         turn_messages.append(tool_result)
         return SimpleNamespace(id=3001, content=tool_result.content)
 
+    async def persist_todo_snapshot(db, *, uid, session_id, tool_results):
+        return None
+
     async def generate(**kwargs):
         request_log.append(
             {
@@ -214,6 +217,11 @@ def _install_dispatcher_stubs(
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
     monkeypatch.setattr(interactive_runtime_module, "save_assistant_message", save_assistant)
     monkeypatch.setattr(interactive_tools_module, "save_tool_response", save_tool_response)
+    monkeypatch.setattr(
+        interactive_tools_module,
+        "persist_session_todo_snapshot_on_tool_results",
+        persist_todo_snapshot,
+    )
     monkeypatch.setattr(interactive_tools_module, "audit_tool_round", _audit_tool_round_none)
     monkeypatch.setattr(interactive_tools_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
     monkeypatch.setattr(interactive_helpers_module, "process_single_tool_with_isolated_db", isolated_tool)

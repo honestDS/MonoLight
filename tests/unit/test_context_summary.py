@@ -2,13 +2,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.context import ContextManager
+from app.core.exceptions import ParameterException
 from app.core.prompts import (
     CONTEXT_SUMMARY_COMPRESS_PROMPT,
     CONTEXT_SUMMARY_PROMPT,
     CONTEXT_SUMMARY_WRAPPER,
-    RECENT_TOOL_SUMMARY_WRAPPER,
 )
-from app.core.utils.context_messages import find_protected_tail_start
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
 )
@@ -159,7 +158,7 @@ def test_summary_state_builds_bounded_user_message():
     )
 
 
-def test_summary_survives_request_sliding_window_as_bounded_user_message():
+def test_summary_request_validation_preserves_full_message_sequence():
     summary_content = CONTEXT_SUMMARY_WRAPPER.format(
         through_message_id=20,
         content="compressed old turns",
@@ -176,7 +175,7 @@ def test_summary_survives_request_sliding_window_as_bounded_user_message():
         messages=messages,
         uid="user-1",
         session_id="session-1",
-        context_window_k=1,
+        context_window_k=20,
         max_tokens=256,
         tools=None,
         safety_margin_tokens=64,
@@ -185,11 +184,12 @@ def test_summary_survives_request_sliding_window_as_bounded_user_message():
     assert request[0].role == MessageRole.SYSTEM
     assert request[1].role == MessageRole.USER
     assert request[1].content == summary_content
+    assert [message.id for message in request if message.id is not None] == [21, 22, 23]
     assert request[-1].id == 23
     assert request[-1].content == "latest question"
 
 
-def test_request_sliding_window_preserves_two_historical_rounds_and_current_input():
+def test_request_budget_rejects_instead_of_sliding_history():
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
         InternalMessage(id=1, role=MessageRole.USER, content="discardable old question " * 200),
@@ -201,41 +201,22 @@ def test_request_sliding_window_preserves_two_historical_rounds_and_current_inpu
         InternalMessage(id=7, role=MessageRole.USER, content="current input"),
     ]
 
-    request = ContextManager.trim_messages_for_model_request(
-        messages=messages,
-        uid="user-1",
-        session_id="session-1",
-        context_window_k=1,
-        max_tokens=256,
-        tools=None,
-        safety_margin_tokens=64,
-    )
+    original_ids = [message.id for message in messages]
+    with pytest.raises(ParameterException):
+        ContextManager.trim_messages_for_model_request(
+            messages=messages,
+            uid="user-1",
+            session_id="session-1",
+            context_window_k=1,
+            max_tokens=256,
+            tools=None,
+            safety_margin_tokens=64,
+        )
 
-    assert [message.id for message in request if message.id is not None] == [3, 4, 5, 6, 7]
-
-
-def test_user_role_tool_summary_does_not_count_as_a_user_round():
-    temporary_summary = InternalMessage(
-        role=MessageRole.USER,
-        content=RECENT_TOOL_SUMMARY_WRAPPER.format(
-            from_message_id=2,
-            through_message_id=3,
-            content="lookup completed",
-        ),
-    )
-    messages = [
-        InternalMessage(id=1, role=MessageRole.USER, content="first question"),
-        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="first answer"),
-        temporary_summary,
-        InternalMessage(id=4, role=MessageRole.USER, content="second question"),
-        InternalMessage(id=5, role=MessageRole.ASSISTANT, content="second answer"),
-        InternalMessage(id=6, role=MessageRole.USER, content="current input"),
-    ]
-
-    assert find_protected_tail_start(messages) == 0
+    assert [message.id for message in messages] == original_ids
 
 
-def test_recent_tool_chain_is_replaced_in_place_without_orphans_when_budget_is_tight():
+def test_request_validation_keeps_persisted_tool_chain_unchanged():
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
         InternalMessage(id=1, role=MessageRole.USER, content="write the generated file"),
@@ -265,27 +246,18 @@ def test_recent_tool_chain_is_replaced_in_place_without_orphans_when_budget_is_t
         messages=messages,
         uid="user-1",
         session_id="session-1",
-        context_window_k=1,
+        context_window_k=50,
         max_tokens=256,
         tools=None,
         safety_margin_tokens=64,
     )
 
     non_system = [message for message in request if message.role != MessageRole.SYSTEM]
-    assert [message.id for message in non_system if message.id is not None] == [1, 2, 4, 5]
-    assert non_system[1].content == "I will write the file."
-    assert non_system[1].tool_calls is None
-    temporary_summary = non_system[2]
-    assert temporary_summary.role == MessageRole.USER
-    assert temporary_summary.content.startswith(
-        RECENT_TOOL_SUMMARY_WRAPPER.format(
-            from_message_id=2,
-            through_message_id=3,
-            content="",
-        ).split("\n", 1)[0]
-    )
-    assert not any(message.role == MessageRole.TOOL for message in request)
-    assert not any(message.tool_calls for message in request)
+    assert [message.id for message in non_system if message.id is not None] == [1, 2, 3, 4, 5]
+    assert non_system[1].tool_calls is not None
+    assert non_system[1].tool_calls[0].id == "call-1"
+    assert non_system[2].role == MessageRole.TOOL
+    assert non_system[2].content == "file write result " * 1000
 
 
 @pytest.mark.parametrize("threshold_percent", [50, 60, 70, 80, 90])

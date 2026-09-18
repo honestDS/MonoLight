@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.constants import ERR_TOOL_NOT_ENABLED
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_TOOL_NOT_ENABLED
 from app.core.i18n import t
 from app.core.tools import (
     IMAGE_GENERATION_TOOL_SCHEMA,
@@ -20,6 +20,48 @@ from app.models.profile import Profile, ProfileConfig
 def test_get_tool_required_parameters_reads_registered_schema():
     assert get_tool_required_parameters("execute_shell") == ["command", "execution_mode"]
     assert get_tool_required_parameters("unknown_tool") == []
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_splits_round_result_budget_across_parallel_calls(monkeypatch):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
+    tool_call = SimpleNamespace(
+        id="call-1",
+        name="execute_shell",
+        arguments={"command": "echo ok", "execution_mode": "non_interactive"},
+    )
+    captured_budget_tokens: list[int] = []
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def execute(self, **_kwargs):
+            return "tool output"
+
+    def capture_truncation(*, budget_tokens, **_kwargs):
+        captured_budget_tokens.append(budget_tokens)
+        return SimpleNamespace(truncated_count=0)
+
+    monkeypatch.setitem(process_single_tool_module.TOOL_EXECUTOR_MAP, "execute_shell", FakeExecutor)
+    monkeypatch.setattr(process_single_tool_module, "truncate_tool_messages_for_budget", capture_truncation)
+
+    await process_single_tool_module.process_single_tool(
+        tool_call,
+        db=SimpleNamespace(),
+        profile=profile,
+        cfg=cfg,
+        messages=[],
+        username="user",
+        session_id="session-1",
+        turn=1,
+        uid="user-1",
+        context_window_k=8,
+        tool_call_count=4,
+    )
+
+    assert captured_budget_tokens == [(8 * CONTEXT_WINDOW_TOKENS_PER_K) // 2 // 4]
 
 
 @pytest.mark.asyncio
