@@ -309,6 +309,8 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     assert len(model_requests) == 2
     assert len(checkpoint_calls) == len(model_requests)
     assert [call["fixed_upper_message_id"] for call in checkpoint_calls] == [1, 1]
+    assert all(call.get("reserved_tokens", 0) == 0 for call in checkpoint_calls)
+    assert all(call.get("allow_incremental_input_estimate", True) is True for call in checkpoint_calls)
     for request_messages in model_requests:
         assert [message.role for message in request_messages] == [
             MessageRole.USER,
@@ -318,6 +320,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
         assert request_messages[0].content == "original request"
         assert request_messages[1].tool_calls[0].id == "tool-1"
         assert request_messages[2].tool_call_id == "tool-1"
+        assert request_messages[2].content == "1"
     assert all("用户消息" not in message and "User message" not in message for message in logger.info_messages)
     assert LLMResponse.model_validate(response).choices[0] == LLMChoice(
         message=LLMChoiceMessage(
@@ -839,6 +842,8 @@ async def _run_audited_interactive_dispatch(
     use_execution_round_if_complete=False,
     tool_call=None,
     multimodal_capabilities=None,
+    summary_calls_target=None,
+    trim_calls_target=None,
 ):
     profile = SimpleNamespace(id=1)
     audit_configured = audit_results is not None or audit_result is not None
@@ -1056,10 +1061,20 @@ async def _run_audited_interactive_dispatch(
             return [message.model_copy(deep=True) for message in messages]
         return messages
 
+    async def apply_context_summary_checkpoint(db, **kwargs):
+        if summary_calls_target is not None:
+            summary_calls_target.append(dict(kwargs))
+        return kwargs["messages"]
+
+    def trim_messages_for_model_request(**kwargs):
+        if trim_calls_target is not None:
+            trim_calls_target.append(dict(kwargs))
+        return kwargs["messages"]
+
     monkeypatch.setattr(interactive_runtime_module, "prepare_messages", prepare_messages)
-    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", _passthrough_context_summary_checkpoint)
+    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_context_summary_checkpoint)
     monkeypatch.setattr(interactive_generation_module, "materialize_user_environment_prompts", materialize_environment_prompt)
-    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
+    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", trim_messages_for_model_request)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
     monkeypatch.setattr(interactive_runtime_module, "save_assistant_message", save_assistant)
@@ -1081,6 +1096,15 @@ async def _run_audited_interactive_dispatch(
             supersede_pending_confirmation_bundle_handler,
         )
     monkeypatch.setattr(interactive_tools_module, "save_tool_response", save_tool_response)
+
+    async def persist_todo_snapshot(_db, *, uid, session_id, tool_results):
+        return None
+
+    monkeypatch.setattr(
+        interactive_tools_module,
+        "persist_session_todo_snapshot_on_tool_results",
+        persist_todo_snapshot,
+    )
     monkeypatch.setattr(interactive_tools_module, "audit_tool_round", audit_round)
     monkeypatch.setattr(interactive_tools_module.audit_crud, "claim_passed_for_execution", claim_execution)
     monkeypatch.setattr(interactive_tools_module.audit_crud, "list_tool_details", list_details)

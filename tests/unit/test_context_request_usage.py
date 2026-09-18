@@ -1,7 +1,10 @@
 import json
 
+import pytest
+
 from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.context import ContextManager
+from app.core.exceptions import ParameterException
 from app.core.utils.context_budget import measure_context_request_usage
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.tokenizer import estimate_tokens
@@ -56,7 +59,7 @@ def test_complete_request_usage_counts_messages_tools_output_and_safety_with_sha
     assert usage.exceeds_hard_window == (usage.required_input_tokens > expected_input_limit)
 
 
-def test_final_request_hard_window_check_uses_same_complete_request_measurement():
+def test_final_request_hard_window_check_rejects_without_sliding_history():
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="stable system prompt"),
         InternalMessage(id=1, role=MessageRole.USER, content="discardable history " * 300),
@@ -69,25 +72,19 @@ def test_final_request_hard_window_check_uses_same_complete_request_measurement(
     ]
     tools = [{"type": "function", "function": {"name": "lookup", "description": "lookup tool"}}]
 
-    request_messages = ContextManager.trim_messages_for_model_request(
-        messages=messages,
-        uid="user-1",
-        session_id="session-1",
-        context_window_k=1,
-        max_tokens=256,
-        tools=tools,
-        safety_margin_tokens=64,
-    )
-    usage = measure_context_request_usage(
-        messages=request_messages,
-        context_window_k=1,
-        max_tokens=256,
-        tools=tools,
-        safety_margin_tokens=64,
-    )
+    original_contents = [message.content for message in messages]
+    with pytest.raises(ParameterException):
+        ContextManager.trim_messages_for_model_request(
+            messages=messages,
+            uid="user-1",
+            session_id="session-1",
+            context_window_k=1,
+            max_tokens=256,
+            tools=tools,
+            safety_margin_tokens=64,
+        )
 
-    assert request_messages[-1].id == 7
-    assert not usage.exceeds_hard_window
+    assert [message.content for message in messages] == original_contents
 
 
 def test_summary_threshold_and_hard_window_share_one_required_input_value():
@@ -115,6 +112,35 @@ def test_summary_threshold_and_hard_window_share_one_required_input_value():
     assert threshold_usage.required_input_tokens == hard_window_usage.required_input_tokens
     assert threshold_usage.budget == hard_window_usage.budget
     assert threshold_usage.summary_trigger_tokens * 2 <= hard_window_usage.summary_trigger_tokens + 1
+
+
+def test_final_request_budget_reserves_runtime_non_system_tokens():
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(role=MessageRole.USER, content="current request"),
+    ]
+
+    ContextManager.trim_messages_for_model_request(
+        messages=messages,
+        uid="user-1",
+        session_id="session-1",
+        context_window_k=1,
+        max_tokens=0,
+        tools=None,
+        safety_margin_tokens=0,
+    )
+
+    with pytest.raises(ParameterException):
+        ContextManager.trim_messages_for_model_request(
+            messages=messages,
+            uid="user-1",
+            session_id="session-1",
+            context_window_k=1,
+            max_tokens=0,
+            tools=None,
+            safety_margin_tokens=0,
+            additional_non_system_tokens=CONTEXT_WINDOW_TOKENS_PER_K,
+        )
 
 
 def test_final_request_budget_preserves_longterm_memory_recall_json():
@@ -183,13 +209,11 @@ def test_final_request_budget_preserves_longterm_memory_recall_json():
         messages=messages,
         uid="user-1",
         session_id="session-1",
-        context_window_k=1,
+        context_window_k=20,
         max_tokens=256,
         tools=None,
         safety_margin_tokens=64,
     )
 
     tool_message = next(message for message in request_messages if message.role == MessageRole.TOOL)
-    payload = json.loads(tool_message.content)
-    assert payload["items"][0]["memory_id"] == 1
-    assert payload["truncated"] is True
+    assert tool_message.content == recall_payload

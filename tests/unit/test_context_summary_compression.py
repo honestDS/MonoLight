@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.exceptions import LLMException
 from app.core.utils.context_summary import service as service_module
 from app.core.utils.context_summary import stage as stage_module
 from app.core.utils.context_summary.model_call import CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
@@ -86,13 +87,14 @@ async def test_summary_recompresses_until_configured_threshold_goal(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_summary_refinement_stops_after_two_attempts(monkeypatch):
+async def test_summary_refinement_stops_when_token_reduction_is_too_small(monkeypatch):
     _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
     summaries = iter(
         [
             "initial summary",
             "refined summary one",
             "refined summary two",
+            "must not be requested",
         ]
     )
 
@@ -112,7 +114,8 @@ async def test_summary_refinement_stops_after_two_attempts(monkeypatch):
     token_counts = {
         "initial summary": 400,
         "refined summary one": 300,
-        "refined summary two": 200,
+        "refined summary two": 296,
+        "must not be requested": 100,
     }
 
     def estimate_tokens(content):
@@ -127,22 +130,22 @@ async def test_summary_refinement_stops_after_two_attempts(monkeypatch):
 
     _patch_token_counter(monkeypatch, estimate_tokens)
 
-    state = await service_module.ensure_context_summary(
-        object(),
-        session_id="session-1",
-        uid="user-1",
-        profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(50),
-        before_id=10,
-        current_message="current",
-        context_window_k=1,
-        max_tokens=24,
-        reserved_tokens=0,
-        safety_margin_tokens=0,
-    )
+    with pytest.raises(LLMException):
+        await service_module.ensure_context_summary(
+            object(),
+            session_id="session-1",
+            uid="user-1",
+            profile=SimpleNamespace(id=9),
+            cfg=_summary_cfg(50),
+            before_id=10,
+            current_message="current",
+            context_window_k=1,
+            max_tokens=24,
+            reserved_tokens=0,
+            safety_margin_tokens=0,
+        )
 
-    assert state.content == "refined summary two"
     assert len(generated_calls) == 3
-    assert len(update_calls) == 1
-    assert update_calls[0]["summary"] == "refined summary two"
+    assert update_calls == []
     assert all("Further compress the summary below" in generated_calls[index]["messages"][0].content for index in (1, 2))
+

@@ -21,7 +21,7 @@ from app.core.constants import (
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
 )
-from app.core.dispatch_context import build_dispatch_context
+from app.core.dispatch_context import DispatchMode, build_dispatch_context
 from app.core.i18n import t
 from app.core.log import (
     LogManager,
@@ -33,6 +33,7 @@ from app.core.tools import (
     KNOWLEDGE_BASE_QUERY_TOOL_NAME,
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     SHELL_COMPANION_TOOL_NAMES,
+    SYSTEM_BUILTIN_TOOL_NAMES,
     TOOL_EXECUTOR_MAP,
     get_tool_parameters_schema,
     get_tool_required_parameters,
@@ -58,6 +59,8 @@ from app.models.profile import (
 
 
 def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
+    if tool_name in SYSTEM_BUILTIN_TOOL_NAMES:
+        return True
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         return bool(getattr(getattr(cfg, "memory", None), "enabled", False))
     if tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
@@ -503,10 +506,13 @@ async def process_single_tool(
     allowed_knowledge_base_ids: list[int] | None = None,
     active_tasks: set[asyncio.Task] | None = None,
     context_window_k: int = 4,
+    tool_call_count: int = 1,
     allow_background_submission: bool = True,
     *,
     context_summary_boundary_message_id: int | None = None,
     source_message_id: int | None = None,
+    dispatch_mode: DispatchMode = "interactive",
+    dispatch_source: str = "interactive_tool",
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -567,8 +573,8 @@ async def process_single_tool(
             # 传递运行时上下文给 Executor
             if hasattr(instance, "set_runtime_context"):
                 dispatch_context = build_dispatch_context(
-                    mode="interactive",
-                    source="interactive_tool",
+                    mode=dispatch_mode,
+                    source=dispatch_source,
                     uid=uid,
                     session_id=session_id,
                     profile=profile,
@@ -618,10 +624,8 @@ async def process_single_tool(
         tool_call_id=tool_call.id,
         content=cmd_result,
     )
-    tool_result_budget_tokens = max(
-        1,
-        (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2,
-    )
+    tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
+    tool_result_budget_tokens = max(1, tool_result_round_budget_tokens // max(1, tool_call_count))
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         tool_msg.content, truncation_stats = truncate_longterm_memory_recall_result_for_budget(
             cmd_result,

@@ -1,4 +1,5 @@
 import inspect
+from types import SimpleNamespace
 
 from app.core.dispatchers import interactive_helpers as interactive_helpers_module
 from app.core.dispatchers import interactive_runtime as interactive_runtime_module
@@ -67,3 +68,10 @@ def test_confirmed_entrypoint_reaudits_changed_files_before_precheck_and_executi
     interactive_source = inspect.getsource(executor_interactive_module._dispatch_interactive_work)
     assert "ChatDispatcher.dispatch(" in interactive_source
     assert "ChatDispatcher.dispatch_stream(" in interactive_source
+
+
+def test_confirmed_tool_result_budget_reuses_last_model_context_window():
+    session = SimpleNamespace(llm_request_metadata={"context_window_tokens": 1_050_000})
+
+    assert executor_confirmed_module._resolve_confirmed_tool_context_window_k(session) == 1050
+    assert executor_confirmed_module._resolve_confirmed_tool_context_window_k(SimpleNamespace(llm_request_metadata=None)) == 4

@@ -54,6 +54,29 @@ from app.models.session_reply_work_item import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_confirmed_tool_runtime_dependencies(monkeypatch):
+    async def get_session(_db, session_id):
+        return SimpleNamespace(
+            session_id=session_id,
+            llm_request_metadata={"context_window_tokens": 4096},
+        )
+
+    async def persist_todo_snapshot(_db, *, uid, session_id, tool_results):
+        return None
+
+    monkeypatch.setattr(
+        executor_confirmed_module,
+        "session_crud",
+        SimpleNamespace(get_by_session_id=get_session),
+    )
+    monkeypatch.setattr(
+        executor_confirmed_module,
+        "persist_session_todo_snapshot_on_tool_results",
+        persist_todo_snapshot,
+    )
+
+
 @pytest.mark.asyncio
 async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
     checkpoint = {

@@ -124,6 +124,13 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         "CASCADE",
     ),
     (
+        "session_todo_plan",
+        ("session_id", "uid"),
+        "chat_session",
+        ("session_id", "uid"),
+        "CASCADE",
+    ),
+    (
         "message",
         ("session_id", "uid"),
         "chat_session",

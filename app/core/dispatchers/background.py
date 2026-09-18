@@ -38,6 +38,7 @@ from app.core.prompts import (
 )
 from app.core.tools import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+    MANAGE_TODO_TOOL_NAME,
     get_tools_for_profile,
 )
 from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
@@ -60,6 +61,7 @@ from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
+from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole
@@ -112,8 +114,9 @@ class BackgroundDispatcherMixin:
         uid: str,
         session_id: str,
     ) -> list[InternalMessage]:
+        request_messages = materialize_user_environment_prompts(messages)
         return ContextManager.trim_messages_for_model_request(
-            messages=materialize_user_environment_prompts(messages),
+            messages=request_messages,
             uid=uid,
             session_id=session_id,
             context_window_k=retry_chat_params["context_window_k"],
@@ -159,7 +162,7 @@ class BackgroundDispatcherMixin:
         allowed_tool_names = None
         if allow_tools:
             profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
-            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") != MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME]
+            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") not in {MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
             if restrict_tools_to_background_allowlist:
                 profile_tools = filter_background_proactive_tools(profile_tools)
                 allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
@@ -538,7 +541,10 @@ class BackgroundDispatcherMixin:
                                 uid,
                                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                                 context_window_k=chat_params["context_window_k"],
+                                tool_call_count=len(ai_msg.tool_calls),
                                 allow_background_submission=False,
+                                dispatch_mode="background",
+                                dispatch_source=reply_source,
                             )
                             for tool_call in ai_msg.tool_calls
                         ]
@@ -587,8 +593,16 @@ class BackgroundDispatcherMixin:
             messages.extend(stored_tool_responses)
             turn_messages.extend(stored_tool_responses)
         else:
+            stored_tool_responses = []
             for tool_response in tool_responses:
-                await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
+                stored_tool_responses.append(await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages))
+
+        await persist_session_todo_snapshot_on_tool_results(
+            db,
+            uid=uid,
+            session_id=session_id,
+            tool_results=stored_tool_responses,
+        )
 
         if audit_round is not None and audit_round.confirmation_payload is not None:
             confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
@@ -614,8 +628,9 @@ class BackgroundDispatcherMixin:
                     max_tokens=final_chat_params["max_tokens"],
                     tools=None,
                 )
+            request_messages = materialize_user_environment_prompts(messages)
             return ContextManager.trim_messages_for_model_request(
-                messages=materialize_user_environment_prompts(messages),
+                messages=request_messages,
                 uid=uid,
                 session_id=session_id,
                 context_window_k=final_chat_params["context_window_k"],

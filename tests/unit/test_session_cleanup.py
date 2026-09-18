@@ -25,6 +25,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.session_todo import SessionTodoPlan
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 
 
@@ -37,6 +38,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                 sync_connection,
                 tables=[
                     ChatSession.__table__,
+                    SessionTodoPlan.__table__,
                     AuditRecord.__table__,
                     AuditConfirmationClaim.__table__,
                     Message.__table__,
@@ -67,6 +69,14 @@ async def _seed_session_data(db: AsyncSession) -> tuple[int, int, int]:
             profile_id=1,
             source="weixin-openclaw",
             reply_target_source="weixin-openclaw",
+        )
+    )
+    db.add(
+        SessionTodoPlan(
+            session_id="session-1",
+            uid="user-1",
+            todos=[{"content": "pending todo", "status": "pending"}],
+            revision=1,
         )
     )
     audit_record = AuditRecord(
@@ -230,6 +240,7 @@ async def test_delete_session_data_rejects_non_owner_without_changes(db_session:
 
     assert deleted is False
     assert await db_session.get(ChatSession, "session-1") is not None
+    assert await db_session.get(SessionTodoPlan, "session-1") is not None
     assert await db_session.get(TerminalSession, terminal_session.terminal_session_id) is not None
     assert list((await db_session.execute(select(Message))).scalars().all())
 
@@ -303,6 +314,7 @@ async def test_delete_session_data_removes_all_associations_and_cancels_running_
 
     assert deleted is True
     assert await db_session.get(ChatSession, "session-1") is None
+    assert await db_session.get(SessionTodoPlan, "session-1") is None
     assert await db_session.get(TerminalSession, target_terminal.terminal_session_id) is None
     assert await db_session.get(TerminalControlCommand, target_command.id) is None
     assert await db_session.get(TerminalSession, other_terminal.terminal_session_id) is not None
@@ -348,3 +360,29 @@ async def test_delete_session_data_removes_all_associations_and_cancels_running_
     assert retained_memory_job is not None
     assert retained_memory_job.status == LongTermMemoryMutationStatus.PENDING
     assert retained_memory_job.source_session_id == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_delete_session_data_allows_admin_to_delete_another_users_session(db_session: AsyncSession):
+    db_session.add(ChatSession(session_id="admin-session", uid="user-1", profile_id=1))
+    db_session.add(
+        SessionTodoPlan(
+            session_id="admin-session",
+            uid="user-1",
+            todos=[{"content": "pending todo", "status": "pending"}],
+            revision=1,
+        )
+    )
+    await db_session.commit()
+
+    deleted = await delete_session_data(
+        db_session,
+        session_id="admin-session",
+        uid="admin",
+        is_admin=True,
+    )
+    await db_session.commit()
+
+    assert deleted is True
+    assert await db_session.get(ChatSession, "admin-session") is None
+    assert await db_session.get(SessionTodoPlan, "admin-session") is None

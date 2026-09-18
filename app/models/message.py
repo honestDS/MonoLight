@@ -122,6 +122,7 @@ class Message(MessageBase, table=True):
     profile_id: int = Field()
     environment_prompt: str | None = Field(default=None, sa_column=Column(Text))
     guidance_prompt: str | None = Field(default=None, sa_column=Column(Text))
+    model_context_suffix: str | None = Field(default=None, sa_column=Column(Text))
     dedupe_key: str | None = Field(default=None, unique=True, max_length=64)
     audit_record_id: int | None = Field(default=None, index=True)
     audit_tool_call_id: str | None = Field(default=None, index=True, max_length=100)

@@ -73,7 +73,7 @@ async def test_completion_validation_accepts_global_message_id_gaps(
     ("field_name", "invalid_value"),
     [
         ("fragment_index", 2),
-        ("message_start_id", 10),
+        ("message_start_id", 9),
         ("message_start_id", 12),
         ("message_end_id", 19),
         ("model_key", "other-model"),
@@ -120,6 +120,48 @@ async def test_completion_validation_rejects_invalid_fragment_set(
     assert stage is not None
     assert stage.status == ContextSummaryStageStatus.RUNNING
     assert stage.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_completion_validation_accepts_adjacent_fragments_sharing_boundary_message(
+    db_session: AsyncSession,
+):
+    await create_messages(db_session, list(range(1, 9)))
+    await context_summary_stage_crud.create_stage(
+        db_session,
+        stage=make_stage(
+            expected_fragment_count=5,
+            persistent_summary_target_id=8,
+        ),
+    )
+    fragment_ranges = [
+        (1, 2),
+        (3, 3),
+        (3, 3),
+        (3, 6),
+        (7, 8),
+    ]
+    for fragment_index, (message_start_id, message_end_id) in enumerate(fragment_ranges):
+        fragment, created = await context_summary_fragment_crud.write_ordered(
+            db_session,
+            fragment=make_fragment(
+                fragment_index=fragment_index,
+                message_start_id=message_start_id,
+                message_end_id=message_end_id,
+            ),
+        )
+        assert fragment is not None
+        assert created is True
+
+    assert (
+        await context_summary_stage_crud.mark_completed(
+            db_session,
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+        )
+        is True
+    )
 
 
 @pytest.mark.asyncio

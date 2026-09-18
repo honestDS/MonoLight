@@ -185,7 +185,6 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
             .order_by(ContextSummaryFragment.fragment_index)
         )
         fragment_count = 0
-        previous_message_start_id: int | None = None
         previous_message_end_id: int | None = None
         async for fragment in fragment_result:
             if (
@@ -199,14 +198,13 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
                 or fragment.model_id != stage.model_id
                 or fragment.status != ContextSummaryFragmentStatus.COMPLETED
                 or fragment.message_start_id > fragment.message_end_id
-                or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id and not (fragment.message_start_id == previous_message_start_id and fragment.message_end_id == previous_message_end_id))
+                or (previous_message_end_id is not None and fragment.message_start_id < previous_message_end_id)
             ):
                 await db.rollback()
                 return False
             if fragment_count == 0 and fragment.message_start_id <= (stage.expected_summary_message_id or 0):
                 await db.rollback()
                 return False
-            previous_message_start_id = fragment.message_start_id
             previous_message_end_id = fragment.message_end_id
             fragment_count += 1
 

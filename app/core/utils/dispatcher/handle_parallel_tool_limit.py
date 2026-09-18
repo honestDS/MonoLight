@@ -7,11 +7,11 @@ from sqlalchemy.ext.asyncio import (
 from app.core.prompts import (
     ERR_PARALLEL_LIMIT_EXCEEDED,
 )
-from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.dispatcher.save_tool_response import save_tool_response
+from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.models.message import (
     InternalMessage,
     MessageRole,
-    MessageType,
 )
 from app.models.profile import (
     Profile,
@@ -37,12 +37,24 @@ async def handle_parallel_tool_limit(
         ensure_ascii=False,
     )
     last_message_id: int | None = None
+    stored_tool_results: list[InternalMessage] = []
     for tool_call in ai_msg.tool_calls:
         tool_res = InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=error_msg)
-        saved_msg = await save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
-        tool_res.id = saved_msg.id
-        tool_res.created_at = saved_msg.created_at
-        messages.append(tool_res)
-        turn_messages.append(tool_res)
-        last_message_id = saved_msg.id
+        stored_tool_res = await save_tool_response(
+            db,
+            session_id,
+            uid,
+            profile.id,
+            tool_res,
+            messages,
+            turn_messages,
+        )
+        stored_tool_results.append(stored_tool_res)
+        last_message_id = stored_tool_res.id
+    await persist_session_todo_snapshot_on_tool_results(
+        db,
+        uid=uid,
+        session_id=session_id,
+        tool_results=stored_tool_results,
+    )
     return last_message_id

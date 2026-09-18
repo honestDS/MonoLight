@@ -5,10 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS,
+    ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
     ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
 )
 from app.core.crud.session.session import session_crud
+from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT
@@ -28,7 +31,6 @@ from app.core.utils.context_summary.common import (
     calc_token_usage,
     contains_context_summary_work_invalid,
     ensure_context_summary_work_valid,
-    estimate_summary_tokens,
 )
 from app.core.utils.context_summary.history import (
     measure_complete_replacement_input,
@@ -53,8 +55,6 @@ from app.models.profile import Profile, ProfileConfig
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
-
-CONTEXT_SUMMARY_MAX_REFINEMENT_ATTEMPTS = 2
 
 
 ContextSummaryLifecycleCallback = Callable[[dict[str, object]], Awaitable[None]]
@@ -283,7 +283,7 @@ async def _ensure_context_summary(
             tools=tools,
             safety_margin_tokens=safety_margin_tokens,
             threshold_percent=threshold_percent,
-            additional_non_system_tokens=history_tokens + summary_tokens,
+            additional_non_system_tokens=history_tokens + summary_tokens + max(reserved_tokens, 0),
         )
         usage = {
             "summary_tokens": summary_tokens,
@@ -406,13 +406,14 @@ async def _ensure_context_summary(
         completed_stage = generated.completed_stage
         if not candidate_summary or completed_stage is None:
             await release_db_session(db)
-            return state
+            raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
     elif not candidate_summary or state.message_id is None:
         await release_db_session(db)
         return state
 
     recent_messages = list(snapshot.recent_messages)
     refinement_attempts = 0
+    insufficient_refinement_progress = False
     while True:
         if fixed_request_messages is not None:
             candidate_message_id = snapshot.persistent_summary_target_id or state.message_id
@@ -432,6 +433,7 @@ async def _ensure_context_summary(
                 tools=tools,
                 safety_margin_tokens=safety_margin_tokens,
                 threshold_percent=threshold_percent,
+                additional_non_system_tokens=max(reserved_tokens, 0),
             )
             final_usage = {
                 "required_tokens": measured_final_usage.required_input_tokens,
@@ -452,19 +454,13 @@ async def _ensure_context_summary(
             )
         if final_usage["required_tokens"] <= final_usage["compression_goal_tokens"]:
             break
-        if refinement_attempts >= CONTEXT_SUMMARY_MAX_REFINEMENT_ATTEMPTS:
-            logger.bind(
-                uid=uid,
-                session_id=session_id,
-                refinement_attempts=refinement_attempts,
-                required_tokens=final_usage["required_tokens"],
-                compression_goal_tokens=final_usage["compression_goal_tokens"],
-            ).warning("Context summary refinement limit reached before compression goal")
-            break
+        if insufficient_refinement_progress:
+            await release_db_session(db)
+            raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
 
         refinement_attempts += 1
+        previous_candidate_tokens = max(1, estimate_tokens(candidate_summary or ""))
         await ensure_context_summary_work_valid(combined_work_validity_checker)
-        previous_summary_tokens = final_usage["summary_tokens"]
         if completed_stage is not None:
             from app.core.utils.context_summary.reduction import (
                 refine_completed_summary_stage,
@@ -492,7 +488,7 @@ async def _ensure_context_summary(
                     error=format_exception_message(exc),
                 )
                 await release_db_session(db)
-                return state
+                raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED) from exc
             compressed = refined.content
             completed_stage = refined.stage
         else:
@@ -508,11 +504,23 @@ async def _ensure_context_summary(
             )
             if not compressed:
                 await release_db_session(db)
-                return state
-        compressed_tokens = estimate_summary_tokens(compressed)
-        if compressed_tokens >= previous_summary_tokens:
-            break
+                raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
+        compressed_tokens = max(1, estimate_tokens(compressed or ""))
         candidate_summary = compressed
+        insufficient_refinement_progress = (
+            previous_candidate_tokens - compressed_tokens < CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS
+        )
+
+    if final_usage["required_tokens"] > final_usage["compression_goal_tokens"]:
+        logger.bind(
+            uid=uid,
+            session_id=session_id,
+            refinement_attempts=refinement_attempts,
+            required_tokens=final_usage["required_tokens"],
+            compression_goal_tokens=final_usage["compression_goal_tokens"],
+        ).warning("Context summary did not reach compression goal; candidate will not be persisted")
+        await release_db_session(db)
+        raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
 
     target_message_id = snapshot.persistent_summary_target_id if snapshot.has_persistent_history else state.message_id
     if target_message_id is None:
@@ -554,7 +562,7 @@ async def _ensure_context_summary(
             candidate_tokens=estimate_tokens(candidate_summary),
         ).warning("Context summary candidate did not reduce its complete replacement input")
         await release_db_session(db)
-        return state
+        raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
 
     logger.bind(
         uid=uid,

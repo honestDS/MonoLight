@@ -158,6 +158,7 @@ async def test_tool_result_version_invalidates_summary_and_preserves_previous_co
         audit_record_id=20,
         audit_tool_call_id="call-1",
         content_revision=0,
+        model_context_suffix="<current_session_todo_snapshot>{}</current_session_todo_snapshot>",
         is_processed=True,
     )
     session = ChatSession(
@@ -205,6 +206,7 @@ async def test_tool_result_version_invalidates_summary_and_preserves_previous_co
     assert len(versions) == 2
     assert json.loads(versions[0].content)["content"] == '{"status":"pending"}'
     assert json.loads(message.content)["content"] == '{"status":"succeeded"}'
+    assert message.model_context_suffix is None
     assert session.context_summary is None
     assert session.context_summary_message_id is None
     assert session.context_content_revision == 2

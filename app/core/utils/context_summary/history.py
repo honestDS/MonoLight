@@ -14,6 +14,7 @@ from app.core.utils.context_summary.common import join_messages, serialize_messa
 from app.core.utils.context_summary.pipeline import SummaryFragmentInput
 from app.core.utils.context_summary.snapshot import CONTEXT_SUMMARY_SCAN_PAGE_SIZE, ContextSummarySnapshot, iter_persistent_summary_rounds
 from app.core.utils.context_summary.split import SummarySourceUnit, iter_round_source_units
+from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshots
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 
@@ -69,7 +70,8 @@ async def measure_complete_replacement_input(
         if not page:
             break
 
-        total_tokens += sum(estimate_tokens(message_token_text(message)) for message in parse_db_messages_to_internal(page))
+        parsed_page = strip_session_todo_snapshots(parse_db_messages_to_internal(page))
+        total_tokens += sum(estimate_tokens(message_token_text(message)) for message in parsed_page)
         if len(page) < page_size:
             break
         last_id = page[-1].id

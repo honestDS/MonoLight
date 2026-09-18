@@ -180,81 +180,69 @@ async def test_context_history_keeps_tool_chain_complete_across_backward_pages(
         uid="user-1",
         before_id=None,
         after_id=None,
-        limit_tokens=4096,
-        current_msg_tokens=0,
-        context_window_k=4,
         page_size=2,
     )
-    parsed_history = parse_db_messages_to_internal(raw_history)
-    messages, log_data = ContextManager._strategy_atomic_truncate(
+    parsed_history = list(reversed(parse_db_messages_to_internal(raw_history)))
+    messages = ContextManager.audit_tool_chain(
+        parsed_history,
         uid="user-1",
         session_id="session-1",
-        parsed_history=parsed_history,
-        limit_tokens=4096,
-        current_msg_tokens=0,
-        context_window_k=4,
     )
 
     assert [message.id for message in messages] == [1, 2, 3, 4]
     assert messages[1].tool_calls is not None
     assert messages[1].tool_calls[0].id == "call-1"
     assert messages[2].tool_call_id == "call-1"
-    assert log_data["is_hard_truncated"] is False
 
 
-def test_atomic_truncate_does_not_report_tool_result_orphaned_only_by_budget(
-    monkeypatch,
+@pytest.mark.asyncio
+async def test_context_history_does_not_retruncate_persisted_tool_result(
+    db_session: AsyncSession,
 ):
-    log = CapturingLogger()
-    monkeypatch.setattr(context_module, "logger", log)
-    messages = parse_db_messages_to_internal(
+    tool_call_content = json.dumps(
+        {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-large",
+                    "name": "execute_shell",
+                    "arguments": {"command": "large output", "execution_mode": "non_interactive"},
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    persisted_result = "stable-result-" * 2000
+    tool_result_content = json.dumps(
+        {
+            "tool_call_id": "call-large",
+            "content": persisted_result,
+        },
+        ensure_ascii=False,
+    )
+    db_session.add_all(
         [
-            _message(
-                2,
-                MessageRole.ASSISTANT,
-                content=json.dumps(
-                    {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call-1",
-                                "name": "firecrawl_scrape",
-                                "arguments": {},
-                            }
-                        ],
-                    }
-                ),
-                message_type=MessageType.TOOL_CALL,
-            ),
-            _message(
-                3,
-                MessageRole.TOOL,
-                content=json.dumps(
-                    {
-                        "tool_call_id": "call-1",
-                        "content": "small result",
-                    }
-                ),
-                message_type=MessageType.TOOL_RESULT,
-            ),
+            _message(1, MessageRole.USER, content="run it"),
+            _message(2, MessageRole.ASSISTANT, content=tool_call_content, message_type=MessageType.TOOL_CALL),
+            _message(3, MessageRole.TOOL, content=tool_result_content, message_type=MessageType.TOOL_RESULT),
         ]
     )
+    await db_session.commit()
 
-    retained, log_data = ContextManager._strategy_atomic_truncate(
-        uid="user-1",
+    messages = await ContextManager.get_messages(
+        db_session,
         session_id="session-1",
-        parsed_history=list(reversed(messages)),
-        limit_tokens=10,
-        current_msg_tokens=0,
+        uid="user-1",
+        profile=_profile(),
+        current_message="continue",
         context_window_k=1,
     )
 
-    assert retained == []
-    assert log_data["is_hard_truncated"] is True
-    assert log.warning_messages == []
+    tool_result = next(message for message in messages if message.role == MessageRole.TOOL)
+    assert tool_result.content == persisted_result
 
 
-def test_atomic_truncate_still_reports_genuine_orphan_tool_result(
+def test_tool_audit_still_reports_genuine_orphan_tool_result(
     monkeypatch,
 ):
     log = CapturingLogger()
@@ -275,13 +263,10 @@ def test_atomic_truncate_still_reports_genuine_orphan_tool_result(
         ]
     )
 
-    retained, _log_data = ContextManager._strategy_atomic_truncate(
+    retained = ContextManager.audit_tool_chain(
+        orphan_result,
         uid="user-1",
         session_id="session-1",
-        parsed_history=orphan_result,
-        limit_tokens=1024,
-        current_msg_tokens=0,
-        context_window_k=1,
     )
 
     assert retained == []
@@ -312,7 +297,7 @@ def test_tool_audit_does_not_report_duplicate_known_results_as_orphaned(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_context_history_stops_at_user_boundary_after_budget_is_reached(
+async def test_context_history_loads_complete_unsummarized_range_without_request_budget_cutoff(
     db_session: AsyncSession,
 ):
     db_session.add_all(
@@ -333,13 +318,7 @@ async def test_context_history_stops_at_user_boundary_after_budget_is_reached(
         uid="user-1",
         before_id=None,
         after_id=None,
-        limit_tokens=1024,
-        current_msg_tokens=0,
-        context_window_k=1,
         page_size=2,
     )
 
-    loaded_ids = [message.id for message in raw_history]
-    assert loaded_ids == sorted(loaded_ids, reverse=True)
-    assert loaded_ids[-1] in {1, 3, 5}
-    assert 1 not in loaded_ids
+    assert [message.id for message in raw_history] == [6, 5, 4, 3, 2, 1]
