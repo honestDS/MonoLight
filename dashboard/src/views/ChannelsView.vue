@@ -137,7 +137,3 @@ const handleSizeChange = () => {
 
 onMounted(fetchChannels)
 </script>
-
-<style lang="scss">
-@import "@/assets/css/common.scss";
-</style>

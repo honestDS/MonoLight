@@ -8,7 +8,7 @@
       :class="{ 'is-sidebar-collapsed': isSidebarCollapsed }"
     >
       <el-aside
-        :width="sidebarWidth"
+        width="var(--sidebar-current-width)"
         class="sidebar"
         :class="{ 'is-collapsed': isSidebarCollapsed }"
       >
@@ -27,9 +27,8 @@
           <button
             type="button"
             class="sidebar-collapse-button"
-            :class="{ 'is-submenu-open': isCollapsedSubmenuOpen }"
             :aria-label="$t(isSidebarCollapsed ? 'common.expand_sidebar' : 'common.collapse_sidebar')"
-            @click="isSidebarCollapsed = !isSidebarCollapsed"
+            @click="handleSidebarToggle"
           >
             <el-icon
               class="sidebar-collapse-arrow"
@@ -195,12 +194,13 @@ export default {
     },
     locale() {
       return this.$i18n.locale === 'zh' ? zhCn : en
-    },
-    sidebarWidth() {
-      return this.isSidebarCollapsed ? '72px' : '236px'
     }
   },
   methods: {
+    handleSidebarToggle() {
+      this.isSidebarCollapsed = !this.isSidebarCollapsed
+      this.isCollapsedSubmenuOpen = false
+    },
     handleSidebarSubmenuOpen() {
       if (this.isSidebarCollapsed) {
         this.isCollapsedSubmenuOpen = true

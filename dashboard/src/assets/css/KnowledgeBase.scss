@@ -1,4 +1,3 @@
-@import "./common.scss";
 
 .full-width-input {
   width: 100%;
@@ -42,10 +41,6 @@
 
 .managed-knowledge-action-buttons .el-dropdown {
   display: inline-flex;
-}
-
-.knowledge-base-more-dropdown .danger-dropdown-item {
-  color: var(--el-color-danger);
 }
 
 .managed-knowledge-toolbar {
