@@ -207,6 +207,51 @@
   font-size: 14px !important;
 }
 
+/* Element Plus 下拉菜单 */
+.el-dropdown__popper.el-popper {
+  padding: 6px !important;
+  border: 1px solid rgba(148, 163, 184, 0.2) !important;
+  border-radius: 12px !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.12) !important;
+}
+
+.el-dropdown__popper .el-dropdown-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  background: transparent;
+}
+
+.el-dropdown__popper .el-dropdown-menu__item {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: #475569;
+  font-size: 14px;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.el-dropdown__popper .el-dropdown-menu__item:not(.is-disabled):focus,
+.el-dropdown__popper .el-dropdown-menu__item:not(.is-disabled):hover {
+  color: var(--color-primary-dark);
+  background: #f1f5f9;
+}
+
+.el-dropdown__popper .el-dropdown-menu__item.is-active {
+  color: var(--color-primary-dark);
+  font-weight: 600;
+  background: rgba(15, 23, 42, 0.07);
+}
+
+.el-dropdown__popper .el-popper__arrow::before {
+  border-color: rgba(148, 163, 184, 0.2) !important;
+  background: #ffffff !important;
+}
+
 .el-card__header {
   font-size: 18px !important;
   font-weight: bold;
