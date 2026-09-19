@@ -295,8 +295,15 @@ export function useChatSession() {
     }
   }
 
+  const refreshSessionLoadingState = () => {
+    void sessionManager.refreshSessionLoadingState()
+  }
+
   const createLifecycleCallbacks = isCurrentRequestSession => ({
-    onInputQueued: event => applyLifecycleEvent(workLifecycleTracker.markInputQueued, event, isCurrentRequestSession),
+    onInputQueued: event => {
+      refreshSessionLoadingState()
+      applyLifecycleEvent(workLifecycleTracker.markInputQueued, event, isCurrentRequestSession)
+    },
     onInputDequeued: event => applyLifecycleEvent(workLifecycleTracker.markInputsDequeued, event, isCurrentRequestSession),
     onAgentLoopStart: event => applyLifecycleEvent(workLifecycleTracker.startAgentLoop, event, isCurrentRequestSession),
     onAgentLoopOutput: event => {
@@ -306,7 +313,10 @@ export function useChatSession() {
       }))
     },
     onLlmRequestMetadata: event => updateLlmRequestMetadata(event, isCurrentRequestSession),
-    onWorkFinished: event => applyLifecycleEvent(workLifecycleTracker.finishWorkLifecycle, event, isCurrentRequestSession)
+    onWorkFinished: event => {
+      refreshSessionLoadingState()
+      applyLifecycleEvent(workLifecycleTracker.finishWorkLifecycle, event, isCurrentRequestSession)
+    }
   })
 
   const finishRequestLifecycle = (requestId, isCurrentRequestSession) => {
@@ -1226,6 +1236,7 @@ export function useChatSession() {
     chatState.messages.value = workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = false
     sessionManager.selectSession(session, transport.disconnectWebSocket)
+    refreshSessionLoadingState()
     chatState.clearMessages()
     chatState.inputMsg.value = ''
     // 切换会话时重置加载状态，解除模式锁定
@@ -1242,6 +1253,7 @@ export function useChatSession() {
     initialHistoryLoaded.value = true
     transport.setTransportMode('ws', transport.disconnectWebSocket)
     sessionManager.createNewSession(transport.disconnectWebSocket)
+    refreshSessionLoadingState()
     chatState.clearMessages()
     chatState.inputMsg.value = ''
     newSessionProfileOverrideId.value = null
