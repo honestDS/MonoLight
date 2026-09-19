@@ -12,6 +12,8 @@ export default {
   delete_failed: 'Delete failed',
   action_failed: 'Action failed',
   logout: 'Logout',
+  collapse_sidebar: 'Collapse sidebar',
+  expand_sidebar: 'Expand sidebar',
   total_items: 'Total {total} items',
   no_data: 'No Data',
   empty_content: 'No content',

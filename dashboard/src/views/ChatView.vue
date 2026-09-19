@@ -60,15 +60,15 @@
                 </div>
               </div>
               <div class="session-actions">
+                <div
+                  v-if="session.is_loading"
+                  class="session-loading-indicator"
+                  :title="$t('chat.session_reply_in_progress')"
+                  role="status"
+                  aria-live="polite"
+                ></div>
                 <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
               </div>
-              <div
-                v-if="session.is_loading"
-                class="session-loading-indicator"
-                :title="$t('chat.session_reply_in_progress')"
-                role="status"
-                aria-live="polite"
-              ></div>
             </div>
           </div>
         </template>
@@ -93,6 +93,7 @@
         :context-summarizing="isContextSummarizing"
         :llm-request-metadata="llmRequestMetadata"
         :current-session-info="currentSessionInfo"
+        :show-request-metadata="sessionEngaged"
         :hide-empty-tip="!currentSessionId"
         @audit-decision="handleAuditDecision"
       />
