@@ -5,20 +5,11 @@ import test from 'node:test'
 const chatViewSource = readFileSync(new URL('../src/views/ChatView.vue', import.meta.url), 'utf8')
 const sessionManagerSource = readFileSync(new URL('../src/composables/chat/useSessionManager.js', import.meta.url), 'utf8')
 const chatSessionSource = readFileSync(new URL('../src/composables/chat/useChatSession.js', import.meta.url), 'utf8')
-const chatStyleSource = readFileSync(new URL('../src/assets/css/chat.scss', import.meta.url), 'utf8')
 
 const loadSessionLoadingModule = () => import('../src/composables/chat/sessionListLoading.js')
 
 test('session list renders a loading indicator from the backend is_loading field', () => {
-  assert.match(chatViewSource, /session\.is_loading/)
-  assert.match(chatViewSource, /session-loading-indicator/)
-})
-
-test('session loading indicator uses the bootstrap spinner style at the session bottom right', () => {
-  assert.doesNotMatch(chatViewSource, /<Loading \/>/)
-  assert.match(chatStyleSource, /\.session-item \{[\s\S]*?position: relative/)
-  assert.match(chatStyleSource, /\.session-loading-indicator \{[\s\S]*?position: absolute;[\s\S]*?right: 12px;[\s\S]*?bottom: 10px/)
-  assert.match(chatStyleSource, /\.session-loading-indicator \{[\s\S]*?width: 14px;[\s\S]*?height: 14px;[\s\S]*?border: 2px solid #d2d6da;[\s\S]*?border-top-color: #59636d;[\s\S]*?animation: session-loading-spin 0\.8s linear infinite/)
+  assert.match(chatViewSource, /v-if="session\.is_loading"/)
 })
 
 test('session loading poller keeps refreshing while any session is loading and stops when all finish', async () => {

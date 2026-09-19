@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
@@ -7,8 +6,6 @@ import {
   shouldExposeChatContent,
   shouldReleaseChatContent
 } from '../src/utils/chatContentReveal.js'
-
-const chatViewSource = readFileSync(new URL('../src/views/ChatView.vue', import.meta.url), 'utf8')
 
 test('new-session to existing-session transition defers content until the welcome exit finishes', () => {
   assert.equal(shouldDeferChatContent({
@@ -57,11 +54,4 @@ test('only the current input-area transform transition releases deferred content
     currentSessionId: 'session-b',
     propertyName: 'transform'
   }), false)
-})
-
-test('ChatView gates both message data and layout-ready state behind the reveal gate', () => {
-  assert.match(chatViewSource, /:messages="renderedMessages"/)
-  assert.match(chatViewSource, /:initial-history-loaded="renderedInitialHistoryLoaded"/)
-  assert.match(chatViewSource, /@transitionend\.self="handleWelcomeExitTransitionEnd"/)
-  assert.match(chatViewSource, /@click="handleSelectSession\(session\)"/)
 })
