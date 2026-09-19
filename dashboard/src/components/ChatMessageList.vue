@@ -3,7 +3,7 @@
     <Transition name="request-metadata-fade">
       <div
         v-if="showRequestMetadata"
-        class="llm-request-metadata"
+        class="llm-request-metadata glass-surface"
         role="status"
         :aria-label="$t('chat.llm_request_metadata_label')"
       >
@@ -307,7 +307,7 @@
       <div
         v-if="activityNotice"
         :key="activityNotice.type"
-        class="activity-status-notice"
+        class="activity-status-notice glass-surface"
         role="status"
         aria-live="polite"
       >
