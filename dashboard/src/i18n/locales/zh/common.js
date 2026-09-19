@@ -12,6 +12,8 @@ export default {
   delete_failed: '删除失败',
   action_failed: '操作失败',
   logout: '退出登录',
+  collapse_sidebar: '收起侧边栏',
+  expand_sidebar: '展开侧边栏',
   total_items: '共 {total} 条',
   no_data: '暂无数据',
   empty_content: '暂无内容',

@@ -1,40 +1,43 @@
 <template>
   <div class="message-list-wrapper">
-    <div
-      class="llm-request-metadata"
-      role="status"
-      :aria-label="$t('chat.llm_request_metadata_label')"
-    >
-      <el-tooltip
-        v-if="currentSessionInfo"
-        :content="formatSessionTooltip(currentSessionInfo)"
-        placement="bottom"
-        :show-after="100"
-        popper-class="session-info-tooltip"
+    <Transition name="request-metadata-fade">
+      <div
+        v-if="showRequestMetadata"
+        class="llm-request-metadata"
+        role="status"
+        :aria-label="$t('chat.llm_request_metadata_label')"
       >
-        <el-icon class="session-info-icon"><InfoFilled /></el-icon>
-      </el-tooltip>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.input_tokens') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
-      </span>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.total_output') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.total_output_tokens ?? llmRequestMetadata?.output_tokens) }}</strong>
-      </span>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.cache_hit_rate') }}</span>
-        <strong>{{ formatCacheHitRate(llmRequestMetadata?.cache_hit_rate) }}</strong>
-      </span>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.context_limit') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
-      </span>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.max_output') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.max_output_tokens) }}</strong>
-      </span>
-    </div>
+        <span class="llm-request-metadata-item">
+          <span>{{ $t('chat.input_tokens') }}</span>
+          <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
+        </span>
+        <span class="llm-request-metadata-item">
+          <span>{{ $t('chat.total_output') }}</span>
+          <strong>{{ formatTokenCount(llmRequestMetadata?.total_output_tokens ?? llmRequestMetadata?.output_tokens) }}</strong>
+        </span>
+        <span class="llm-request-metadata-item">
+          <span>{{ $t('chat.cache_hit_rate') }}</span>
+          <strong>{{ formatCacheHitRate(llmRequestMetadata?.cache_hit_rate) }}</strong>
+        </span>
+        <span class="llm-request-metadata-item">
+          <span>{{ $t('chat.context_limit') }}</span>
+          <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
+        </span>
+        <span class="llm-request-metadata-item">
+          <span>{{ $t('chat.max_output') }}</span>
+          <strong>{{ formatTokenCount(llmRequestMetadata?.max_output_tokens) }}</strong>
+        </span>
+        <el-tooltip
+          v-if="currentSessionInfo"
+          :content="formatSessionTooltip(currentSessionInfo)"
+          placement="bottom"
+          :show-after="100"
+          popper-class="session-info-tooltip"
+        >
+          <el-icon class="session-info-icon"><InfoFilled /></el-icon>
+        </el-tooltip>
+      </div>
+    </Transition>
     <VList
       :key="currentSessionId || '__new_session__'"
       ref="virtualList"
@@ -356,6 +359,7 @@ const props = defineProps({
   contextSummarizing: { type: Boolean, default: false },
   llmRequestMetadata: { type: Object, default: null },
   currentSessionInfo: { type: Object, default: null },
+  showRequestMetadata: { type: Boolean, default: true },
   hideEmptyTip: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
