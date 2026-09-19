@@ -268,9 +268,14 @@
   background: #fff;
   overflow: hidden;
   container-type: size;
+  --chat-input-inline-inset: 0px;
 
-  &.is-welcome .input-area {
-    transform: translateY(calc(-50cqh + 50%));
+  &.is-welcome {
+    --chat-input-inline-inset: max(0px, calc((100% - 640px) / 2));
+
+    .input-area {
+      transform: translateY(calc(-50cqh + 50%));
+    }
   }
 
   .message-list-wrapper {
@@ -703,8 +708,12 @@
       flex-direction: column;
       gap: 12px;
       width: 100%;
-      margin: 0 auto;
-      transition: max-width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+      box-sizing: border-box;
+      padding-left: var(--chat-input-inline-inset);
+      padding-right: var(--chat-input-inline-inset);
+      transition:
+        padding-left 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+        padding-right 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 
       .input-controls {
         display: flex;

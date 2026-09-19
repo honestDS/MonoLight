@@ -93,7 +93,13 @@
           </div>
 
         </el-header>
-        <el-main class="app-main" :class="{ 'app-main--memories': $route.path === '/memories' }">
+        <el-main
+          class="app-main"
+          :class="{
+            'app-main--memories': $route.path === '/memories',
+            'app-main--chat': $route.path === '/'
+          }"
+        >
           <transition name="fade" mode="out-in">
             <router-view></router-view>
           </transition>
