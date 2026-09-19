@@ -23,7 +23,12 @@
           <p class="brand-desc">{{ $t('login.brand_desc') }}</p>
         </div>
         <div class="illustration">
-          <div class="circle-bg"></div>
+          <div class="intelligence-visual" aria-hidden="true">
+            <div class="intelligence-orbit intelligence-orbit--outer"></div>
+            <div class="intelligence-orbit intelligence-orbit--middle"></div>
+            <div class="intelligence-orbit intelligence-orbit--inner"></div>
+            <div class="intelligence-core"></div>
+          </div>
         </div>
       </div>
       
@@ -35,10 +40,24 @@
 
         <el-form :model="form" class="login-form" @keyup.enter="handleLogin">
           <el-form-item>
-            <el-input v-model="form.username" :placeholder="$t('login.username')" class="custom-input"></el-input>
+            <label class="field-label" for="login-username">{{ $t('login.username') }}</label>
+            <el-input
+              id="login-username"
+              v-model="form.username"
+              :placeholder="$t('login.username')"
+              class="custom-input"
+            ></el-input>
           </el-form-item>
           <el-form-item>
-            <el-input v-model="form.password" type="password" :placeholder="$t('login.password')" show-password class="custom-input"></el-input>
+            <label class="field-label" for="login-password">{{ $t('login.password') }}</label>
+            <el-input
+              id="login-password"
+              v-model="form.password"
+              type="password"
+              :placeholder="$t('login.password')"
+              show-password
+              class="custom-input"
+            ></el-input>
           </el-form-item>
           
           <div class="form-actions">
