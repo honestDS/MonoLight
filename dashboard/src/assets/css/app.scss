@@ -30,10 +30,12 @@ body {
 
 /* Logo 区域 */
 .logo-container {
+  height: 85px;
   padding: 22px 18px 20px;
   display: flex;
   align-items: center;
   gap: 12px;
+  box-sizing: border-box;
   background: transparent;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
   transition: padding 0.22s ease, gap 0.22s ease;
@@ -260,6 +262,30 @@ body {
   }
 }
 
+.sidebar-menu-tooltip.el-popper {
+  width: max-content;
+  min-width: 0 !important;
+  max-width: 180px;
+  min-height: 28px;
+  padding: 6px 10px !important;
+  box-sizing: border-box;
+  color: rgba(241, 245, 249, 0.96) !important;
+  background: #111c2f !important;
+  border: 1px solid rgba(186, 230, 253, 0.16) !important;
+  border-radius: 6px !important;
+  box-shadow:
+    0 8px 24px rgba(2, 6, 23, 0.2),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.025) !important;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.sidebar-menu-tooltip.el-popper .el-popper__arrow::before {
+  background: #111c2f !important;
+  border-color: rgba(186, 230, 253, 0.16) !important;
+}
+
 .sidebar-submenu-popper.el-popper {
   min-width: 184px;
   padding: 6px !important;
@@ -343,13 +369,19 @@ body {
   display: inline-flex;
   align-items: center;
   min-height: 38px;
-  padding: 0 11px;
+  padding: 0;
   box-sizing: border-box;
   color: #475569;
   border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 10px;
   background: #f8fafc;
   transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.app-header .header-lang-switcher .lang-switcher-label {
+  min-height: 38px;
+  padding: 0 11px;
+  box-sizing: border-box;
 }
 .app-header .header-lang-switcher:hover {
   background: #ffffff;
@@ -483,7 +515,7 @@ body {
 .sidebar.is-collapsed .logo-container {
   justify-content: center;
   gap: 0;
-  padding: 16px 10px 12px;
+  padding: 0 10px;
 }
 
 .sidebar.is-collapsed .logo-image {
@@ -514,10 +546,10 @@ body {
   padding: 0 !important;
 }
 
-.side-menu.el-menu--collapse .el-menu-item,
-.side-menu.el-menu--collapse .el-sub-menu__title {
-  width: calc(100% + 6px);
-  margin-left: -6px;
+.side-menu.el-menu--collapse .el-menu-tooltip__trigger,
+.side-menu-footer.el-menu--collapse .el-menu-tooltip__trigger {
+  justify-content: center;
+  padding: 0 !important;
 }
 
 .side-menu.el-menu--collapse .el-menu-item > .el-icon,

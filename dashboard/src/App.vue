@@ -44,7 +44,7 @@
           :collapse="isSidebarCollapsed"
           :collapse-transition="false"
           :popper-offset="-4"
-          popper-class="sidebar-submenu-popper"
+          popper-class="sidebar-menu-tooltip"
           router
           class="side-menu"
           @open="handleSidebarSubmenuOpen"
@@ -69,7 +69,7 @@
             <el-icon><Reading /></el-icon>
             <template #title><span>{{ $t('common.menu.knowledge_base') }}</span></template>
           </el-menu-item>
-          <el-sub-menu index="/system">
+          <el-sub-menu index="/system" popper-class="sidebar-submenu-popper">
             <template #title>
               <el-icon><Setting /></el-icon>
               <span>{{ $t('common.menu.system') }}</span>
@@ -87,7 +87,7 @@
               <span>{{ $t('common.menu.prompts') }}</span>
             </el-menu-item>
           </el-sub-menu>
-          <el-sub-menu index="/logs">
+          <el-sub-menu index="/logs" popper-class="sidebar-submenu-popper">
             <template #title>
               <el-icon><Document /></el-icon>
               <span>{{ $t('common.menu.logs') }}</span>
