@@ -8,7 +8,7 @@
           <el-icon
             class="sidebar-icon"
             :title="$t('chat.new_session_title')"
-            @click.stop="createNewSession"
+            @click.stop="handleCreateNewSession"
           ><Plus /></el-icon>
           <el-icon
             class="sidebar-icon refresh-icon"
@@ -40,7 +40,7 @@
               :key="session.session_id"
               :data-session-id="session.session_id"
               :class="['session-item', { active: currentSessionId === session.session_id }]"
-              @click="selectSession(session)"
+              @click="handleSelectSession(session)"
             >
               <div class="session-content">
                 <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
@@ -83,13 +83,13 @@
       <ChatMessageList
         ref="messageList"
         v-model:active-collapse="activeCollapse"
-        :messages="messages"
+        :messages="renderedMessages"
         :current-session-id="currentSessionId"
         :current-session-enable-markdown="currentSessionEnableMarkdown"
         :current-session-show-reasoning="currentSessionShowReasoning"
         :current-session-read-only="isCurrentSessionReadOnly"
         :history-loading="historyLoading"
-        :initial-history-loaded="initialHistoryLoaded"
+        :initial-history-loaded="renderedInitialHistoryLoaded"
         :context-summarizing="isContextSummarizing"
         :llm-request-metadata="llmRequestMetadata"
         :current-session-info="currentSessionInfo"
@@ -97,7 +97,7 @@
         @audit-decision="handleAuditDecision"
       />
 
-      <div class="input-area">
+      <div class="input-area" @transitionend.self="handleWelcomeExitTransitionEnd">
         <!-- 新建会话 / 无会话时的欢迎区 -->
         <div class="welcome-hero" :class="{ 'is-exiting': sessionEngaged }">
           <h1 class="welcome-greeting">{{ $t('chat.welcome_greeting') }}</h1>
@@ -107,7 +107,7 @@
           <span class="read-only-notice-text">{{ $t('chat.external_session_read_only') }}</span>
         </div>
 
-        <div class="input-wrapper" :style="{ maxWidth: !sessionEngaged ? '640px' : '100%' }">
+        <div class="input-wrapper">
           <div class="input-controls">
             <div class="chat-input-box">
               <!-- 自定义附件展示区域（取代 el-upload 原生列表） -->
@@ -305,6 +305,11 @@ import {
   resolveSessionProfilePlaceholder,
   resolveProfileOwnerUid
 } from '../utils/profileOptions'
+import {
+  shouldDeferChatContent,
+  shouldExposeChatContent,
+  shouldReleaseChatContent
+} from '../utils/chatContentReveal'
 
 const { t } = useI18n()
 
@@ -467,6 +472,16 @@ const currentSessionProfilePlaceholder = computed(() => resolveSessionProfilePla
   t('chat.inherited_profile')
 ))
 
+const deferredContentSessionId = ref(null)
+const chatContentVisible = computed(() => shouldExposeChatContent({
+  deferredSessionId: deferredContentSessionId.value,
+  currentSessionId: currentSessionId.value
+}))
+const renderedMessages = computed(() => chatContentVisible.value ? messages.value : [])
+const renderedInitialHistoryLoaded = computed(() => (
+  chatContentVisible.value && initialHistoryLoaded.value
+))
+
 const loadProfiles = async () => {
   profilesLoading.value = true
   try {
@@ -555,6 +570,33 @@ const {
   disconnectWebSocket,
   handleScroll
 } = chat
+
+const handleSelectSession = (session) => {
+  const sessionId = session?.session_id
+  const shouldDefer = shouldDeferChatContent({
+    wasWelcome: !sessionEngaged.value,
+    deferActive: Boolean(deferredContentSessionId.value),
+    sessionId
+  })
+
+  deferredContentSessionId.value = shouldDefer ? sessionId : null
+  selectSession(session)
+}
+
+const handleCreateNewSession = () => {
+  deferredContentSessionId.value = null
+  createNewSession()
+}
+
+const handleWelcomeExitTransitionEnd = (event) => {
+  if (!shouldReleaseChatContent({
+    deferredSessionId: deferredContentSessionId.value,
+    currentSessionId: currentSessionId.value,
+    propertyName: event.propertyName
+  })) return
+
+  deferredContentSessionId.value = null
+}
 
 const guidanceSubmitting = ref(false)
 

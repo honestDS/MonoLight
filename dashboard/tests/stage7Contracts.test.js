@@ -426,7 +426,9 @@ test('app layout adds memory page spacing and keeps the fixed footer above it', 
   const appMainSource = appMainMatch[1]
   const memoriesAppMainSource = memoriesAppMainMatch[1]
   const appFooterSource = appFooterMatch[1]
-  assert.match(appSource, /<el-main class="app-main" :class="\{ 'app-main--memories': \$route\.path === '\/memories' \}">/)
+  assert.match(appSource, /class="app-main"/)
+  assert.match(appSource, /'app-main--memories':\s*\$route\.path === '\/memories'/)
+  assert.match(appSource, /'app-main--chat':\s*\$route\.path === '\/'/)
   assert.doesNotMatch(appMainSource, /padding-bottom:\s*80px\s*;/)
   assert.match(memoriesAppMainSource, /padding-bottom:\s*80px\s*;/)
   assert.match(appFooterSource, /\bposition:\s*fixed\s*;/)

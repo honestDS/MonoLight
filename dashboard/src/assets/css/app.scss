@@ -194,6 +194,7 @@ body {
   min-height: calc(100vh - 60px);
 }
 .app-main.app-main--memories { padding-bottom: 80px; }
+.app-main.app-main--chat { scrollbar-gutter: stable; }
 
 /* 页脚 */
 .app-footer {
