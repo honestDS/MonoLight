@@ -3,39 +3,68 @@
     <Transition name="request-metadata-fade">
       <div
         v-if="showRequestMetadata"
-        class="llm-request-metadata glass-surface"
-        role="status"
-        :aria-label="$t('chat.llm_request_metadata_label')"
+        :class="['llm-request-metadata', 'glass-surface', { 'is-collapsed': requestMetadataCollapsed }]"
       >
-        <span class="llm-request-metadata-item">
-          <span>{{ $t('chat.input_tokens') }}</span>
-          <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
-        </span>
-        <span class="llm-request-metadata-item">
-          <span>{{ $t('chat.total_output') }}</span>
-          <strong>{{ formatTokenCount(llmRequestMetadata?.total_output_tokens ?? llmRequestMetadata?.output_tokens) }}</strong>
-        </span>
-        <span class="llm-request-metadata-item">
-          <span>{{ $t('chat.cache_hit_rate') }}</span>
-          <strong>{{ formatCacheHitRate(llmRequestMetadata?.cache_hit_rate) }}</strong>
-        </span>
-        <span class="llm-request-metadata-item">
-          <span>{{ $t('chat.context_limit') }}</span>
-          <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
-        </span>
-        <span class="llm-request-metadata-item">
-          <span>{{ $t('chat.max_output') }}</span>
-          <strong>{{ formatTokenCount(llmRequestMetadata?.max_output_tokens) }}</strong>
-        </span>
-        <el-tooltip
-          v-if="currentSessionInfo"
-          :content="formatSessionTooltip(currentSessionInfo)"
-          placement="bottom"
-          :show-after="100"
-          popper-class="session-info-tooltip"
+        <div
+          id="llm-request-metadata-content"
+          class="llm-request-metadata-content"
+          role="status"
+          :aria-hidden="requestMetadataCollapsed"
+          :aria-label="$t('chat.llm_request_metadata_label')"
         >
-          <el-icon class="session-info-icon"><InfoFilled /></el-icon>
-        </el-tooltip>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.input_tokens') }}</span>
+            <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
+          </span>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.total_output') }}</span>
+            <strong>{{ formatTokenCount(llmRequestMetadata?.total_output_tokens ?? llmRequestMetadata?.output_tokens) }}</strong>
+          </span>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.cache_hit_rate') }}</span>
+            <strong>{{ formatCacheHitRate(llmRequestMetadata?.cache_hit_rate) }}</strong>
+          </span>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.context_limit') }}</span>
+            <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
+          </span>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.max_output') }}</span>
+            <strong>{{ formatTokenCount(llmRequestMetadata?.max_output_tokens) }}</strong>
+          </span>
+        </div>
+        <div class="request-metadata-actions">
+          <span class="request-metadata-collapsed-label" aria-hidden="true">
+            {{ $t('chat.request_metadata_short_label') }}
+          </span>
+          <el-tooltip
+            v-if="currentSessionInfo"
+            :content="formatSessionTooltip(currentSessionInfo)"
+            placement="bottom"
+            :show-after="100"
+            popper-class="session-info-tooltip"
+          >
+            <el-icon class="session-info-icon"><InfoFilled /></el-icon>
+          </el-tooltip>
+          <el-tooltip
+            :content="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
+            placement="bottom"
+            :show-after="300"
+          >
+            <button
+              type="button"
+              class="request-metadata-toggle"
+              :aria-label="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
+              :aria-expanded="!requestMetadataCollapsed"
+              aria-controls="llm-request-metadata-content"
+              @click="requestMetadataCollapsed = !requestMetadataCollapsed"
+            >
+              <el-icon class="request-metadata-toggle-icon" :class="{ 'is-expanded': !requestMetadataCollapsed }">
+                <ArrowDown />
+              </el-icon>
+            </button>
+          </el-tooltip>
+        </div>
       </div>
     </Transition>
     <VList
@@ -329,7 +358,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
-import { InfoFilled, WarningFilled } from '@element-plus/icons-vue'
+import { ArrowDown, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github.css'
@@ -370,6 +399,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
+const requestMetadataCollapsed = ref(false)
 const tokenNumberFormatter = new Intl.NumberFormat()
 const percentNumberFormatter = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 2 })
 const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
