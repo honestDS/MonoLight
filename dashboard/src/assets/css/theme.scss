@@ -48,6 +48,26 @@
   --color-indigo-300: rgb(var(--color-indigo-300-rgb));
   --color-indigo-400: rgb(var(--color-indigo-400-rgb));
 
+  /* 圆角基础令牌：组件圆角统一引用此处，保留现有视觉尺寸。 */
+  --radius-none: 0;
+  --radius-3: 3px;
+  --radius-4: 4px;
+  --radius-5: 5px;
+  --radius-6: 6px;
+  --radius-7: 7px;
+  --radius-8: 8px;
+  --radius-9: 9px;
+  --radius-10: 10px;
+  --radius-11: 11px;
+  --radius-12: 12px;
+  --radius-13: 13px;
+  --radius-14: 14px;
+  --radius-15: 15px;
+  --radius-16: 16px;
+  --radius-18: 18px;
+  --radius-circle: 50%;
+  --radius-pill: 999px;
+
   /* 品牌色 */
   --color-primary: var(--color-slate-800);
   --color-primary-light: var(--color-slate-700);
@@ -109,7 +129,7 @@
   --glass-surface-shadow:
     0 12px 32px rgba(var(--color-slate-900-rgb), 0.09),
     inset 0 0 0 1px rgba(var(--color-slate-400-rgb), 0.08);
-  --glass-surface-radius: 12px;
+  --glass-surface-radius: var(--radius-12);
   --glass-surface-backdrop-filter: blur(18px) saturate(160%);
 
   --color-app-page-bg: #eef2f7;
