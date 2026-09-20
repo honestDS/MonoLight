@@ -65,6 +65,7 @@
   --radius-15: 15px;
   --radius-16: 16px;
   --radius-18: 18px;
+  --radius-28: 28px;
   --radius-circle: 50%;
   --radius-pill: 999px;
 
@@ -129,7 +130,9 @@
   --glass-surface-shadow:
     0 12px 32px rgba(var(--color-slate-900-rgb), 0.09),
     inset 0 0 0 1px rgba(var(--color-slate-400-rgb), 0.08);
-  --glass-surface-radius: var(--radius-12);
+  --glass-surface-radius: var(--radius-6);
+  --radius-chat: var(--glass-surface-radius);
+  --radius-chat-input: var(--radius-28);
   --glass-surface-backdrop-filter: blur(18px) saturate(160%);
 
   --color-app-page-bg: #eef2f7;

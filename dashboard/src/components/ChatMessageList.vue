@@ -100,25 +100,31 @@
               >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
             </template>
           </div>
-          <el-collapse v-model="collapseModel" :class="['tool-round-collapse', getToolGroupStateClass(msg)]">
+          <el-collapse v-model="collapseModel" class="tool-round-collapse">
             <el-collapse-item :name="msg.id">
               <template #title>
-                <span :class="['tool-round-title', getToolGroupStateClass(msg)]">{{ getToolGroupTitle(msg) }}</span>
+                <span class="tool-round-title">
+                  <span class="tool-round-label">{{ $t('chat.tool_activity') }}</span>
+                  <span v-if="msg.pairs.length > 1" class="tool-round-count">{{ $t('chat.tool_count', { count: msg.pairs.length }) }}</span>
+                  <span :class="['tool-round-status', getToolGroupStateClass(msg)]">{{ getToolGroupStatus(msg) }}</span>
+                </span>
               </template>
               <el-collapse v-model="collapseModel" class="tool-pair-collapse">
                 <el-collapse-item
                   v-for="pair in msg.pairs"
                   :key="pair.id"
                   :name="`${msg.id}_${pair.id}`"
-                  :class="{ 'has-result': pair.resultMessage }"
                 >
                   <template #title>
-                    <span :class="pair.resultMessage ? 'tool-result-title' : 'tool-call-title'">
-                      {{ getToolPairTitle(pair) }}
+                    <span class="tool-pair-title">
+                      <span class="tool-pair-name">{{ getToolPairTitle(pair) }}</span>
+                      <span :class="['tool-pair-status', pair.resultMessage ? 'is-result' : 'is-call']">
+                        {{ $t(pair.resultMessage ? 'chat.tool_status_returned' : 'chat.tool_status_calling') }}
+                      </span>
                     </span>
                   </template>
                   <div v-if="pair.toolCall" class="tool-call-content">
-                    <div class="tool-detail-title">{{ $t('chat.tool_call', { name: getToolCallName(pair.toolCall) }) }}</div>
+                    <div class="tool-detail-title tool-detail-title--call">{{ $t('chat.tool_arguments') }}</div>
                     <VirtualizedCode
                       :ref="el => setCodeRef(`${msg.id}_${pair.id}_call`, el)"
                       :content="getToolCallArguments(pair.toolCall)"
@@ -126,7 +132,7 @@
                     />
                   </div>
                   <div v-if="pair.resultMessage" class="tool-result-content">
-                    <div class="tool-detail-title">{{ $t('chat.tool_result', { name: getToolPairName(pair) }) }}</div>
+                    <div class="tool-detail-title tool-detail-title--result">{{ $t('chat.tool_output') }}</div>
                     <VirtualizedCode
                       :ref="el => setCodeRef(`${msg.id}_${pair.id}_result`, el)"
                       :content="getToolResultContent(pair.resultMessage)"
@@ -952,11 +958,9 @@ const scrollToBottom = async (behavior = 'auto', restoreFollow = true) => {
 
 const getToolPairName = pair => pair.toolCall ? getToolCallName(pair.toolCall) : getToolResultName(pair.resultMessage)
 const getToolPairTitle = pair => t('chat.tool', { name: getToolPairName(pair) })
-const getToolGroupStateClass = group => group.latestEvent?.type === 'result' ? 'is-result' : 'is-call'
-const getToolGroupTitle = (group) => {
-  if (!group.latestEvent) return t('chat.tool_activity')
-  return t(group.latestEvent.type === 'result' ? 'chat.tool_result' : 'chat.tool_call', { name: getToolPairName(group.latestEvent.pair) })
-}
+const isToolGroupReturned = group => Boolean(group?.pairs?.length) && group.pairs.every(pair => pair.resultMessage)
+const getToolGroupStateClass = group => isToolGroupReturned(group) ? 'is-result' : 'is-call'
+const getToolGroupStatus = group => t(isToolGroupReturned(group) ? 'chat.tool_status_returned' : 'chat.tool_status_calling')
 
 const setCodeRef = (id, element) => {
   if (element) codeRefs.set(id, element)

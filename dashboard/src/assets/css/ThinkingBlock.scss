@@ -3,12 +3,12 @@
   overflow: hidden;
   border-top: 0;
   border-bottom: 0;
-  border-radius: var(--radius-8);
+  border-radius: var(--radius-chat);
 
   :deep(.el-collapse-item) {
     overflow: hidden;
     background: #f4f4f5;
-    border-radius: var(--radius-8);
+    border-radius: var(--radius-chat);
   }
 
   :deep(.el-collapse-item__header),

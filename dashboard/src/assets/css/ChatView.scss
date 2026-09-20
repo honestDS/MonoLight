@@ -70,7 +70,7 @@
   cursor: pointer;
   background: rgba(var(--color-white-rgb), 0.42);
   border: 1px solid rgba(var(--color-slate-400-rgb), 0.12);
-  border-radius: var(--radius-8);
+  border-radius: var(--radius-chat);
   transition: color 0.18s ease, background-color 0.18s ease;
 
   &:hover {
