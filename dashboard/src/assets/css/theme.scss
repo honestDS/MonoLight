@@ -134,6 +134,9 @@
   --radius-chat: var(--glass-surface-radius);
   --radius-chat-input: var(--radius-28);
   --glass-surface-backdrop-filter: blur(18px) saturate(160%);
+  --chat-metadata-surface-background: rgba(var(--color-white-rgb), 0.94);
+  --chat-metadata-surface-border: rgba(var(--color-slate-400-rgb), 0.18);
+  --chat-metadata-surface-shadow: 0 10px 28px rgba(var(--color-slate-900-rgb), 0.11);
 
   --color-app-page-bg: #eef2f7;
   --color-chat-user-bubble-bg: #172033;
@@ -156,4 +159,6 @@
     rgba(var(--color-slate-800-rgb), 0.76)
   );
   --glass-surface-border: rgba(var(--color-slate-400-rgb), 0.2);
+  --chat-metadata-surface-background: rgba(var(--color-slate-900-rgb), 0.94);
+  --chat-metadata-surface-border: rgba(var(--color-slate-400-rgb), 0.26);
 }
