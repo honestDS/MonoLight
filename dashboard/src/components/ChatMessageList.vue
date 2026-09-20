@@ -381,6 +381,7 @@ import {
 import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
 import { getReasoningCollapseName, resolveChatActivityNotice } from '../utils/chatPresentation.js'
+import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -399,7 +400,9 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
-const requestMetadataCollapsed = ref(false)
+const storedRequestMetadataCollapsed = getClientSetting('requestMetadataCollapsed', true)
+const requestMetadataCollapsed = ref(typeof storedRequestMetadataCollapsed === 'boolean' ? storedRequestMetadataCollapsed : true)
+watch(requestMetadataCollapsed, value => setClientSetting('requestMetadataCollapsed', value))
 const tokenNumberFormatter = new Intl.NumberFormat()
 const percentNumberFormatter = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 2 })
 const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
