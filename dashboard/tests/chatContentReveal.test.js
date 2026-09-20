@@ -4,7 +4,8 @@ import test from 'node:test'
 import {
   shouldDeferChatContent,
   shouldExposeChatContent,
-  shouldReleaseChatContent
+  shouldReleaseChatContent,
+  shouldReturnToWelcomeAfterSessionDelete
 } from '../src/utils/chatContentReveal.js'
 
 test('new-session to existing-session transition defers content until the welcome exit finishes', () => {
@@ -53,5 +54,25 @@ test('only the current input-area transform transition releases deferred content
     deferredSessionId: 'session-a',
     currentSessionId: 'session-b',
     propertyName: 'transform'
+  }), false)
+})
+
+test('deleting the active session returns the chat to the welcome state only after a successful delete', () => {
+  assert.equal(shouldReturnToWelcomeAfterSessionDelete({
+    deleted: true,
+    deletedSessionId: 'session-a',
+    currentSessionId: 'session-a'
+  }), true)
+
+  assert.equal(shouldReturnToWelcomeAfterSessionDelete({
+    deleted: true,
+    deletedSessionId: 'session-a',
+    currentSessionId: 'session-b'
+  }), false)
+
+  assert.equal(shouldReturnToWelcomeAfterSessionDelete({
+    deleted: false,
+    deletedSessionId: 'session-a',
+    currentSessionId: 'session-a'
   }), false)
 })

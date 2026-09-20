@@ -13,3 +13,14 @@ export const shouldReleaseChatContent = ({
   && deferredSessionId === currentSessionId
   && propertyName === 'transform'
 )
+
+export const shouldReturnToWelcomeAfterSessionDelete = ({
+  deleted,
+  deletedSessionId,
+  currentSessionId
+}) => Boolean(
+  deleted
+  && deletedSessionId
+  && currentSessionId
+  && deletedSessionId === currentSessionId
+)
