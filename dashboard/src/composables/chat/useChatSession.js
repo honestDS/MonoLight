@@ -12,6 +12,7 @@ import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMe
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
+import { shouldReturnToWelcomeAfterSessionDelete } from '../../utils/chatContentReveal.js'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
@@ -1263,6 +1264,18 @@ export function useChatSession() {
     chatState.loading.value = false
   }
 
+  const handleDeleteSession = async (sessionId, name, options = {}) => {
+    const deleted = await sessionManager.handleDeleteSession(sessionId, name, options)
+    if (shouldReturnToWelcomeAfterSessionDelete({
+      deleted,
+      deletedSessionId: sessionId,
+      currentSessionId: sessionManager.currentSessionId.value
+    })) {
+      createNewSession()
+    }
+    return deleted
+  }
+
   // ==================== 滚动事件 ====================
   
   /**
@@ -1357,7 +1370,7 @@ export function useChatSession() {
     
     // 方法 - 会话
     loadSessions: sessionManager.loadSessions,
-    handleDeleteSession: sessionManager.handleDeleteSession,
+    handleDeleteSession,
     selectSession,
     createNewSession,
     reloadCurrentSessionHistory,
