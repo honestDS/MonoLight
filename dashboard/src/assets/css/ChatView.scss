@@ -70,7 +70,7 @@
   cursor: pointer;
   background: rgba(var(--color-white-rgb), 0.42);
   border: 1px solid rgba(var(--color-slate-400-rgb), 0.12);
-  border-radius: 8px;
+  border-radius: var(--radius-8);
   transition: color 0.18s ease, background-color 0.18s ease;
 
   &:hover {
@@ -132,7 +132,7 @@
   flex: 0 0 auto;
   border: 2px solid rgba(var(--color-sky-300-rgb), 0.28);
   border-top-color: var(--color-sky-400);
-  border-radius: 50%;
+  border-radius: var(--radius-circle);
   animation: activity-status-spin 0.8s linear infinite;
 }
 
@@ -176,7 +176,7 @@
   padding: 16px;
   box-sizing: border-box;
   border: 1px solid #e6a23c;
-  border-radius: 14px;
+  border-radius: var(--radius-14);
   background: #fffdf6;
 }
 
@@ -334,7 +334,7 @@
   color: #5b4a1f;
   background: #fffaf0;
   border: 1px solid #e6a23c;
-  border-radius: 14px;
+  border-radius: var(--radius-14);
 }
 
 .guidance-card-header {

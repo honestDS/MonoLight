@@ -3,12 +3,12 @@
   overflow: hidden;
   border-top: 0;
   border-bottom: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-8);
 
   :deep(.el-collapse-item) {
     overflow: hidden;
     background: #f4f4f5;
-    border-radius: 8px;
+    border-radius: var(--radius-8);
   }
 
   :deep(.el-collapse-item__header),
@@ -22,12 +22,12 @@
     padding: 0 12px;
     color: #747b85;
     border-bottom: 0;
-    border-radius: 0;
+    border-radius: var(--radius-none);
   }
 
   :deep(.el-collapse-item__wrap) {
     border-bottom: 0;
-    border-radius: 0;
+    border-radius: var(--radius-none);
   }
 
   :deep(.el-collapse-item__content) {
@@ -44,7 +44,7 @@
 .thinking-block-indicator {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: var(--radius-circle);
   background: currentColor;
   animation: thinking-block-pulse 1.2s ease-in-out infinite;
 }
