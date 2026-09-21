@@ -115,7 +115,7 @@
               <template #title><span>{{ $t('common.menu.support') }}</span></template>
             </el-menu-item>
           </el-menu>
-          <small class="sidebar-copyright">&copy; 2026 MonoLight LLM Admin. All rights reserved.</small>
+          <small class="sidebar-copyright">&copy; 2026 MonoLight. All rights reserved.</small>
         </div>
       </el-aside>
       <el-container>

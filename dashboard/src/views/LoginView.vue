@@ -67,7 +67,7 @@
         </el-form>
 
         <div class="login-copyright">
-          <span>MonoLight © 2026</span>
+          <span>&copy; 2026 MonoLight. All rights reserved.</span>
           <div class="footer-links">
             <a href="#">Policy</a>
             <a href="#">Terms</a>
