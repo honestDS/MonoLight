@@ -220,7 +220,7 @@ body {
 
 /* 侧边栏底部区域 */
 .sidebar-footer {
-  padding: 10px;
+  padding: 10px 10px 12px;
   border-top: 1px solid var(--color-sidebar-border);
   margin-top: auto;
 
@@ -233,6 +233,18 @@ body {
     justify-content: center;
     border-radius: var(--radius-9);
   }
+}
+
+.sidebar-copyright {
+  display: block;
+  color: var(--color-sidebar-text);
+  font-size: 9px;
+  line-height: 1;
+  text-align: center;
+}
+
+.sidebar.is-collapsed .sidebar-copyright {
+  display: none;
 }
 
 /* 底部菜单 */
@@ -465,31 +477,11 @@ body {
   flex-direction: column;
   min-height: calc(100vh - 64px);
 }
-.app-main.app-main--memories { padding-bottom: 80px; }
 .app-main.app-main--chat {
   min-height: 0;
   padding: 14px;
   overflow: hidden;
   scrollbar-gutter: stable;
-}
-
-.app-main.app-main--chat .app-footer {
-  display: none;
-}
-
-/* 页脚 */
-.app-footer {
-  position: fixed;
-  bottom: 0;
-  left: var(--sidebar-current-width);
-  right: 0;
-  padding: 16px 24px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  border-top: 1px solid var(--color-border-light);
-  background: var(--color-primary);
-  z-index: 1000;
 }
 
 @media (max-width: 1180px) {

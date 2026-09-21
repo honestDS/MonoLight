@@ -17,6 +17,7 @@
   margin-bottom: 10px;
   overflow: hidden;
   pointer-events: auto;
+  box-shadow: var(--glass-surface-shadow), 0 18px 44px rgba(var(--color-slate-900-rgb), 0.14);
   transform-origin: bottom right;
 }
 

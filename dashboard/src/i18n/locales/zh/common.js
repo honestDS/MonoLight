@@ -24,7 +24,7 @@ export default {
   unknown_error: '未知错误',
   network_request_failed: '网络请求失败',
   menu: {
-    chat: '智能交互',
+    chat: '聊天',
     users: '用户管理',
     memories: '长期记忆',
     knowledge_base: '知识库管理',
