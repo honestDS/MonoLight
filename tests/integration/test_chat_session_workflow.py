@@ -23,6 +23,7 @@ from app.models.message import Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
+from app.models.session_todo import SessionTodoPlan
 from app.providers.database import get_db
 
 
@@ -51,6 +52,7 @@ async def chat_session_database(tmp_path) -> AsyncGenerator[AsyncSession]:
                     PromptLibrary.__table__,
                     Profile.__table__,
                     ChatSession.__table__,
+                    SessionTodoPlan.__table__,
                     Message.__table__,
                 ],
             )
@@ -130,6 +132,58 @@ def _build_app(db: AsyncSession, auth_state: dict[str, object]) -> FastAPI:
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user] = override_get_current_user
     return app
+
+
+@pytest.mark.asyncio
+async def test_session_todo_api_reads_current_plan_and_enforces_owner(
+    chat_session_database: AsyncSession,
+) -> None:
+    session = ChatSession(
+        session_id="todo-session-1",
+        uid="user-1",
+        source="http",
+        reply_target_source="http",
+    )
+    plan = SessionTodoPlan(
+        session_id=session.session_id,
+        uid=session.uid,
+        revision=3,
+        todos=[
+            {"content": "inspect layout", "status": "completed"},
+            {"content": "build todo panel", "status": "in_progress"},
+        ],
+    )
+    chat_session_database.add_all([session, plan])
+    await chat_session_database.commit()
+
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/api/v1/chat/sessions/todo",
+            params={"session_id": session.session_id},
+        )
+        assert response.status_code == 200
+        assert response.json()["data"] == {
+            "revision": 3,
+            "todos": [
+                {"content": "inspect layout", "status": "completed"},
+                {"content": "build todo panel", "status": "in_progress"},
+            ],
+        }
+
+        auth_state["uid"] = "user-2"
+        forbidden = await client.get(
+            "/api/v1/chat/sessions/todo",
+            params={"session_id": session.session_id},
+        )
+        assert forbidden.status_code == 200
+        assert forbidden.json()["code"] == 403
+        assert forbidden.json()["message"] == t(ERR_SESSION_NO_PERMISSION)
 
 
 @pytest.mark.asyncio

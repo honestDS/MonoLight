@@ -1,23 +1,99 @@
 /* 全局色彩定义与主题方案 */
 
 :root {
-  /* 品牌色 */
-  --color-primary: #1e293b;
-  --color-primary-light: #334155;
-  --color-primary-dark: #0f172a;
+  /* 基础色板：组件样式只引用这里的颜色变量，不再分散硬编码。 */
+  --color-white-rgb: 255, 255, 255;
+  --color-slate-950-rgb: 2, 6, 23;
+  --color-slate-900-rgb: 15, 23, 42;
+  --color-slate-800-rgb: 30, 41, 59;
+  --color-slate-700-rgb: 51, 65, 85;
+  --color-slate-600-rgb: 71, 85, 105;
+  --color-slate-500-rgb: 100, 116, 139;
+  --color-slate-400-rgb: 148, 163, 184;
+  --color-slate-300-rgb: 203, 213, 225;
+  --color-slate-200-rgb: 226, 232, 240;
+  --color-slate-100-rgb: 241, 245, 249;
+  --color-slate-50-rgb: 248, 250, 252;
+  --color-sky-50-rgb: 240, 249, 255;
+  --color-sky-100-rgb: 224, 242, 254;
+  --color-sky-200-rgb: 186, 230, 253;
+  --color-sky-300-rgb: 125, 211, 252;
+  --color-sky-400-rgb: 56, 189, 248;
+  --color-sky-500-rgb: 14, 165, 233;
+  --color-blue-400-rgb: 96, 165, 250;
+  --color-blue-500-rgb: 59, 130, 246;
+  --color-indigo-300-rgb: 165, 180, 252;
+  --color-indigo-400-rgb: 129, 140, 248;
+  --color-indigo-500-rgb: 99, 102, 241;
 
-  /* 侧边栏主题色 - 深色主题 */
-  --color-sidebar-bg: #0f172a;
-  --color-sidebar-border: #1e293b;
-  --color-sidebar-text: #94a3b8;
-  --color-sidebar-title: #f8fafc;
-  --color-sidebar-active: #60a5fa;
-  --color-sidebar-hover: #1e293b;
+  --color-white: rgb(var(--color-white-rgb));
+  --color-slate-950: rgb(var(--color-slate-950-rgb));
+  --color-slate-900: rgb(var(--color-slate-900-rgb));
+  --color-slate-800: rgb(var(--color-slate-800-rgb));
+  --color-slate-700: rgb(var(--color-slate-700-rgb));
+  --color-slate-600: rgb(var(--color-slate-600-rgb));
+  --color-slate-500: rgb(var(--color-slate-500-rgb));
+  --color-slate-400: rgb(var(--color-slate-400-rgb));
+  --color-slate-300: rgb(var(--color-slate-300-rgb));
+  --color-slate-200: rgb(var(--color-slate-200-rgb));
+  --color-slate-100: rgb(var(--color-slate-100-rgb));
+  --color-slate-50: rgb(var(--color-slate-50-rgb));
+  --color-sky-50: rgb(var(--color-sky-50-rgb));
+  --color-sky-100: rgb(var(--color-sky-100-rgb));
+  --color-sky-200: rgb(var(--color-sky-200-rgb));
+  --color-sky-300: rgb(var(--color-sky-300-rgb));
+  --color-sky-400: rgb(var(--color-sky-400-rgb));
+  --color-sky-500: rgb(var(--color-sky-500-rgb));
+  --color-blue-400: rgb(var(--color-blue-400-rgb));
+  --color-blue-500: rgb(var(--color-blue-500-rgb));
+  --color-indigo-300: rgb(var(--color-indigo-300-rgb));
+  --color-indigo-400: rgb(var(--color-indigo-400-rgb));
+
+  /* 圆角基础令牌：组件圆角统一引用此处，保留现有视觉尺寸。 */
+  --radius-none: 0;
+  --radius-3: 3px;
+  --radius-4: 4px;
+  --radius-5: 5px;
+  --radius-6: 6px;
+  --radius-7: 7px;
+  --radius-8: 8px;
+  --radius-9: 9px;
+  --radius-10: 10px;
+  --radius-11: 11px;
+  --radius-12: 12px;
+  --radius-13: 13px;
+  --radius-14: 14px;
+  --radius-15: 15px;
+  --radius-16: 16px;
+  --radius-18: 18px;
+  --radius-28: 28px;
+  --radius-circle: 50%;
+  --radius-pill: 999px;
+
+  /* 品牌色 */
+  --color-primary: var(--color-slate-800);
+  --color-primary-light: var(--color-slate-700);
+  --color-primary-dark: var(--color-slate-900);
+
+  /* 侧边栏主题色 - 浅色主题 */
+  --color-sidebar-bg: var(--color-white);
+  --color-sidebar-border: var(--color-slate-200);
+  --color-sidebar-text: var(--color-slate-600);
+  --color-sidebar-title: var(--color-slate-900);
+  --color-sidebar-active: var(--color-blue-500);
+  --color-sidebar-hover: var(--color-slate-100);
+  --color-sidebar-active-bg-start: rgba(var(--color-blue-500-rgb), 0.12);
+  --color-sidebar-active-bg-end: rgba(var(--color-blue-500-rgb), 0.05);
+  --color-sidebar-active-shadow: rgba(var(--color-blue-500-rgb), 0.28);
+  --color-sidebar-gradient-start: var(--color-white);
+  --color-sidebar-popper-bg: var(--color-white);
+  --color-sidebar-active-text: var(--color-blue-500);
 
   /* 状态色 */
   --color-success: #67c23a;
   --color-warning: #e6a23c;
   --color-danger: #f56c6c;
+  --color-danger-soft: #fff1f2;
   --color-info: #909399;
 
   /* 文字色 */
@@ -31,15 +107,45 @@
   --color-bg-base: #ffffff;
   --color-bg-page: #f5f7fa;
 
-  /* 登录页面颜色 - 与侧边栏深色主题统一 */
-  --color-login-bg-page: #f1f5f9;
-  --color-login-bg-box: #ffffff;
-  --color-login-bg-left: #0f172a;
-  --color-login-gradient-start: #1e293b;
-  --color-login-shadow-dark: #0f172a;
-  --color-login-shadow-light: #334155;
-  --color-login-text-muted: #64748b;
-  --color-login-text-light: #94a3b8;
+  /* 登录页面颜色 */
+  --color-login-bg-page: var(--color-slate-100);
+  --color-login-bg-box: var(--color-white);
+  --color-login-bg-left: var(--color-slate-900);
+  --color-login-gradient-start: var(--color-slate-800);
+  --color-login-gradient-deep: #090f1b;
+  --color-login-gradient-end: #17243a;
+  --color-login-shadow-dark: var(--color-slate-900);
+  --color-login-shadow-light: var(--color-slate-700);
+  --color-login-text-muted: var(--color-slate-500);
+  --color-login-text-light: var(--color-slate-400);
+  --color-login-surface: var(--color-white);
+  --color-login-surface-soft: var(--color-slate-50);
+  --color-login-border-strong: rgba(var(--color-slate-500-rgb), 0.34);
+  --color-login-text: var(--color-slate-900);
+  --color-login-text-secondary: var(--color-slate-500);
+
+  /* 可复用玻璃表面：提示、浮层与后续弹窗共用。 */
+  --glass-surface-background: linear-gradient(
+    135deg,
+    rgba(var(--color-white-rgb), 0.72),
+    rgba(var(--color-slate-100-rgb), 0.52)
+  );
+  --glass-surface-border: rgba(var(--color-white-rgb), 0.74);
+  --glass-surface-shadow:
+    0 12px 32px rgba(var(--color-slate-900-rgb), 0.09),
+    inset 0 0 0 1px rgba(var(--color-slate-400-rgb), 0.08);
+  --glass-surface-radius: var(--radius-6);
+  --radius-chat: var(--glass-surface-radius);
+  --radius-chat-input: var(--radius-28);
+  --glass-surface-backdrop-filter: blur(18px) saturate(160%);
+  --chat-metadata-surface-background: rgba(var(--color-white-rgb), 0.94);
+  --chat-metadata-surface-border: rgba(var(--color-slate-400-rgb), 0.18);
+  --chat-metadata-surface-shadow: 0 10px 28px rgba(var(--color-slate-900-rgb), 0.11);
+
+  --color-app-page-bg: #eef2f7;
+  --color-chat-user-bubble-bg: #172033;
+  --color-chat-assistant-text: #263244;
+  --color-chat-control-hover-bg: #e8eef5;
 }
 
 /* 未来暗黑模式预留 */
@@ -51,4 +157,12 @@
   --color-bg-base: #141414;
   --color-bg-page: #000000;
   --color-border-base: #4c4d4f;
+  --glass-surface-background: linear-gradient(
+    135deg,
+    rgba(var(--color-slate-900-rgb), 0.84),
+    rgba(var(--color-slate-800-rgb), 0.76)
+  );
+  --glass-surface-border: rgba(var(--color-slate-400-rgb), 0.2);
+  --chat-metadata-surface-background: rgba(var(--color-slate-900-rgb), 0.94);
+  --chat-metadata-surface-border: rgba(var(--color-slate-400-rgb), 0.26);
 }

@@ -9,6 +9,7 @@ from app.core.constants import (
     ERR_SESSION_NO_PERMISSION,
     ERR_SESSION_READ_ONLY,
 )
+from app.core.crud.session.todo import session_todo_crud
 from app.core.exceptions import ForbiddenException
 from app.core.utils import session as session_utils
 from app.models.message import ChatCompletionRequest
@@ -141,6 +142,57 @@ async def test_http_adapter_rejects_external_session_before_llm_work(monkeypatch
     assert response["choices"][0]["message"]["content"] == "该会话来自外部消息平台，网页端仅允许查看"
     assert profile_calls == []
     assert enqueue_calls == []
+
+
+@pytest.mark.asyncio
+async def test_http_non_stream_response_includes_latest_session_todo(monkeypatch):
+    async def ensure_writable(db, *, session_id, uid):
+        return None
+
+    async def resolve_profile(db, *, uid, session_id):
+        return SimpleNamespace(id=1)
+
+    async def validate_message(*args, **kwargs):
+        return None
+
+    async def submit_message(*args, **kwargs):
+        return (
+            SimpleNamespace(id=1),
+            SimpleNamespace(id=7, execution_state={}),
+            "running",
+            [],
+        )
+
+    async def wait_for_result(work_id):
+        assert work_id == 7
+        return {"choices": []}
+
+    async def get_plan(db, *, uid, session_id):
+        assert uid == "user-1"
+        assert session_id == "session-1"
+        return SimpleNamespace(
+            revision=5,
+            todos=[{"content": "verify", "status": "in_progress"}],
+        )
+
+    monkeypatch.setattr(chat_web_adapter, "ensure_web_session_writable", ensure_writable)
+    monkeypatch.setattr(chat_web_adapter, "resolve_profile_for_session", resolve_profile)
+    monkeypatch.setattr(chat_web_adapter.ChatDispatcher, "validate_initial_message_before_save", validate_message)
+    monkeypatch.setattr(chat_web_adapter.session_reply_queue_manager, "submit_user_message", submit_message)
+    monkeypatch.setattr(chat_web_adapter.session_reply_queue_manager, "wait_for_result", wait_for_result)
+    monkeypatch.setattr(session_todo_crud, "get_by_session_id", get_plan)
+
+    response = await chat_web_adapter.web_chat_adapter.chat(
+        db=FakeDb(),
+        message="web message",
+        uid="user-1",
+        session_id="session-1",
+    )
+
+    assert response["session_todo"] == {
+        "revision": 5,
+        "todos": [{"content": "verify", "status": "in_progress"}],
+    }
 
 
 @pytest.mark.asyncio

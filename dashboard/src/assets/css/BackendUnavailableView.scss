@@ -8,7 +8,7 @@
   padding: clamp(1.5rem, 5vw, 4rem);
   box-sizing: border-box;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--radius-none);
   background:
     radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.7), transparent 48%),
     #edf2f7;
@@ -19,7 +19,7 @@
   padding: clamp(2rem, 5vw, 3rem);
   background-color: #ffffff;
   border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 16px;
+  border-radius: var(--radius-16);
   box-shadow: 0 16px 40px rgba(71, 85, 105, 0.12);
 }
 
@@ -29,7 +29,7 @@
   justify-content: center;
   color: #c96f73;
   background-color: #fff0f1;
-  border-radius: 50%;
+  border-radius: var(--radius-circle);
 }
 
 .backend-unavailable-view :deep(.under-construction__extra) {
@@ -47,7 +47,7 @@
 
   .backend-unavailable-view :deep(.under-construction__content) {
     padding: 1.5rem 1.25rem;
-    border-radius: 12px;
+    border-radius: var(--radius-12);
     box-shadow: 0 10px 24px rgba(71, 85, 105, 0.1);
   }
 }

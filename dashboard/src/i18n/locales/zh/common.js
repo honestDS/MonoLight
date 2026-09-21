@@ -12,6 +12,8 @@ export default {
   delete_failed: '删除失败',
   action_failed: '操作失败',
   logout: '退出登录',
+  collapse_sidebar: '收起侧边栏',
+  expand_sidebar: '展开侧边栏',
   total_items: '共 {total} 条',
   no_data: '暂无数据',
   empty_content: '暂无内容',
@@ -22,7 +24,7 @@ export default {
   unknown_error: '未知错误',
   network_request_failed: '网络请求失败',
   menu: {
-    chat: '智能交互',
+    chat: '聊天',
     users: '用户管理',
     memories: '长期记忆',
     knowledge_base: '知识库管理',

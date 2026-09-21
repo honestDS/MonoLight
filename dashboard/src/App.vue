@@ -2,8 +2,16 @@
   <el-config-provider :locale="locale">
     <div id="app">
       <router-view v-if="isStandalonePage"></router-view>
-    <el-container v-else class="app-wrapper">
-      <el-aside width="220px" class="sidebar">
+    <el-container
+      v-else
+      class="app-wrapper"
+      :class="{ 'is-sidebar-collapsed': isSidebarCollapsed }"
+    >
+      <el-aside
+        width="var(--sidebar-current-width)"
+        class="sidebar"
+        :class="{ 'is-collapsed': isSidebarCollapsed }"
+      >
         <div class="logo-container">
           <img class="logo-image" :src="logoImage" alt="" aria-hidden="true">
           <div class="logo-content">
@@ -11,27 +19,58 @@
             <span class="logo-version">MonoLight v0.1</span>
           </div>
         </div>
+        <el-tooltip
+          :content="$t(isSidebarCollapsed ? 'common.expand_sidebar' : 'common.collapse_sidebar')"
+          :disabled="isCollapsedSubmenuOpen"
+          placement="right"
+        >
+          <button
+            type="button"
+            class="sidebar-collapse-button"
+            :aria-label="$t(isSidebarCollapsed ? 'common.expand_sidebar' : 'common.collapse_sidebar')"
+            @click="handleSidebarToggle"
+          >
+            <el-icon
+              class="sidebar-collapse-arrow"
+              :class="{ 'is-collapsed': isSidebarCollapsed }"
+            >
+              <ArrowLeft />
+            </el-icon>
+          </button>
+        </el-tooltip>
         <el-menu
           :default-active="$route.path"
+          :collapse="isSidebarCollapsed"
+          :collapse-transition="false"
+          :popper-offset="-4"
+          popper-class="sidebar-menu-tooltip"
           router
-          class="side-menu">
+          class="side-menu"
+          @open="handleSidebarSubmenuOpen"
+          @close="handleSidebarSubmenuClose">
           <el-menu-item index="/">
-            <span>{{ $t('common.menu.chat') }}</span>
+            <el-icon><ChatDotRound /></el-icon>
+            <template #title><span>{{ $t('common.menu.chat') }}</span></template>
           </el-menu-item>
           <el-menu-item index="/users">
-            <span>{{ $t('common.menu.users') }}</span>
+            <el-icon><User /></el-icon>
+            <template #title><span>{{ $t('common.menu.users') }}</span></template>
           </el-menu-item>
           <el-menu-item index="/memories">
-            <span>{{ $t('common.menu.memories') }}</span>
+            <el-icon><Collection /></el-icon>
+            <template #title><span>{{ $t('common.menu.memories') }}</span></template>
           </el-menu-item>
           <el-menu-item index="/scheduled-tasks">
-            <span>{{ $t('common.menu.scheduled_tasks') }}</span>
+            <el-icon><Clock /></el-icon>
+            <template #title><span>{{ $t('common.menu.scheduled_tasks') }}</span></template>
           </el-menu-item>
           <el-menu-item index="/knowledge-base">
-            <span>{{ $t('common.menu.knowledge_base') }}</span>
+            <el-icon><Reading /></el-icon>
+            <template #title><span>{{ $t('common.menu.knowledge_base') }}</span></template>
           </el-menu-item>
-          <el-sub-menu index="/system">
+          <el-sub-menu index="/system" popper-class="sidebar-submenu-popper">
             <template #title>
+              <el-icon><Setting /></el-icon>
               <span>{{ $t('common.menu.system') }}</span>
             </template>
             <el-menu-item index="/profiles">
@@ -47,8 +86,9 @@
               <span>{{ $t('common.menu.prompts') }}</span>
             </el-menu-item>
           </el-sub-menu>
-          <el-sub-menu index="/logs">
+          <el-sub-menu index="/logs" popper-class="sidebar-submenu-popper">
             <template #title>
+              <el-icon><Document /></el-icon>
               <span>{{ $t('common.menu.logs') }}</span>
             </template>
             <el-menu-item index="/logs/realtime">
@@ -62,15 +102,20 @@
         <div class="sidebar-footer">
           <el-menu
             :default-active="$route.path"
+            :collapse="isSidebarCollapsed"
+            :collapse-transition="false"
             router
             class="side-menu-footer">
             <el-menu-item index="/docs">
-              <span>{{ $t('common.menu.docs') }}</span>
+              <el-icon><Tickets /></el-icon>
+              <template #title><span>{{ $t('common.menu.docs') }}</span></template>
             </el-menu-item>
             <el-menu-item index="/support">
-              <span>{{ $t('common.menu.support') }}</span>
+              <el-icon><Service /></el-icon>
+              <template #title><span>{{ $t('common.menu.support') }}</span></template>
             </el-menu-item>
           </el-menu>
+          <small class="sidebar-copyright">&copy; 2026 MonoLight LLM Admin. All rights reserved.</small>
         </div>
       </el-aside>
       <el-container>
@@ -93,13 +138,15 @@
           </div>
 
         </el-header>
-        <el-main class="app-main" :class="{ 'app-main--memories': $route.path === '/memories' }">
+        <el-main
+          class="app-main"
+          :class="{
+            'app-main--chat': $route.path === '/'
+          }"
+        >
           <transition name="fade" mode="out-in">
             <router-view></router-view>
           </transition>
-          <div class="app-footer">
-              <span>&copy; 2026 MonoLight LLM Admin. All rights reserved.</span>
-            </div>
           </el-main>
         </el-container>
       </el-container>
@@ -127,7 +174,9 @@ export default {
   data() {
     return {
       githubIcon,
-      logoImage
+      logoImage,
+      isSidebarCollapsed: false,
+      isCollapsedSubmenuOpen: false
     }
   },
 
@@ -145,6 +194,18 @@ export default {
     }
   },
   methods: {
+    handleSidebarToggle() {
+      this.isSidebarCollapsed = !this.isSidebarCollapsed
+      this.isCollapsedSubmenuOpen = false
+    },
+    handleSidebarSubmenuOpen() {
+      if (this.isSidebarCollapsed) {
+        this.isCollapsedSubmenuOpen = true
+      }
+    },
+    handleSidebarSubmenuClose() {
+      this.isCollapsedSubmenuOpen = false
+    },
     logout() {
       localStorage.removeItem('token')
       this.$router.push('/login')

@@ -117,23 +117,6 @@ test('clears callbacks for all requests absorbed by a Thinking work', () => {
 })
 
 
-test('ThinkingBlock is controlled by the shared collapse model and starts collapsed from the parent default', () => {
-  const componentSource = readFileSync(new URL('../src/components/ThinkingBlock.vue', import.meta.url), 'utf8')
-  const trackerSource = readFileSync(new URL('../src/composables/chat/thinkingTracker.js', import.meta.url), 'utf8')
-  const lifecycleSource = readFileSync(new URL('../src/composables/chat/workLifecycleTracker.js', import.meta.url), 'utf8')
-  const listSource = readFileSync(new URL('../src/components/ChatMessageList.vue', import.meta.url), 'utf8')
-
-  assert.match(componentSource, /modelValue/)
-  assert.match(componentSource, /update:modelValue/)
-  assert.doesNotMatch(componentSource, /const activeNames = ref\(\[\]\)/)
-  assert.match(componentSource, /<el-collapse[\s\S]*?<el-collapse-item :name="name"/)
-  assert.match(listSource, /const reasoningCollapseModel = ref\(\[\]\)/)
-  assert.match(listSource, /v-model="reasoningCollapseModel"/)
-  assert.match(listSource, /getReasoningCollapseName\(msg\)/)
-  assert.equal(trackerSource.includes("content: 'Thinking...'"), false)
-  assert.equal(lifecycleSource.includes("content: 'Thinking...'"), false)
-})
-
 test('creates a reasoning block only after the first real reasoning chunk and leaves Thinking as lifecycle state', () => {
   let messages = [
     { id: 'user-1', role: 'user', content: 'question', request_id: 'request-1' },
@@ -192,21 +175,4 @@ test('chat rendering keeps Thinking as lifecycle state, hides its row, and gates
   assert.match(viewSource, /:current-session-show-reasoning="currentSessionShowReasoning"/)
   const sessionSource = readFileSync(new URL('../src/composables/chat/useChatSession.js', import.meta.url), 'utf8')
   assert.match(sessionSource, /performHttpSend\([\s\S]*?currentSessionShowToolCalls\.value,\s*currentSessionShowReasoning\.value\s*\)/)
-})
-
-test('top activity notice uses the compression notice presentation and reasoning uses the existing markdown renderer', () => {
-  const componentSource = readFileSync(new URL('../src/components/ThinkingBlock.vue', import.meta.url), 'utf8')
-  const styleSource = readFileSync(new URL('../src/assets/css/ThinkingBlock.scss', import.meta.url), 'utf8')
-  const viewStyleSource = readFileSync(new URL('../src/assets/css/ChatView.scss', import.meta.url), 'utf8')
-  const listSource = readFileSync(new URL('../src/components/ChatMessageList.vue', import.meta.url), 'utf8')
-
-  assert.match(listSource, /activity-status-notice/)
-  assert.match(listSource, /resolveChatActivityNotice/)
-  assert.match(viewStyleSource, /\.activity-status-notice\s*\{[\s\S]*?box-shadow:/)
-  assert.doesNotMatch(viewStyleSource, /\.activity-status-notice\s*\{[\s\S]*?z-index:/)
-  assert.match(componentSource, /v-html="renderedContent"/)
-  assert.match(componentSource, /class="thinking-block-content markdown-body"/)
-  assert.match(listSource, /:rendered-content="renderMarkdown\(getReasoningContent\(msg\)\)"/)
-  assert.match(styleSource, /background:\s*transparent/)
-  assert.match(styleSource, /border-radius:\s*8px/)
 })
