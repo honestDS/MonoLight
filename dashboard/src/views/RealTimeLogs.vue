@@ -207,14 +207,12 @@ const connectWebSocket = () => {
 
 onMounted(() => {
   connectWebSocket()
-  document.body.classList.add('is-terminal-page')
 })
 
 onUnmounted(() => {
   isUnmounted = true
   if (ws) ws.close()
   if (flushTimer) clearTimeout(flushTimer)
-  document.body.classList.remove('is-terminal-page')
 })
 </script>
 

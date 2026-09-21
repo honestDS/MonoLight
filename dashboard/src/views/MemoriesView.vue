@@ -1,5 +1,5 @@
 <template>
-  <div class="memory-view">
+  <div class="view-container memory-view">
     <section class="settings-panel">
       <div class="section-heading">
         <div class="section-heading-content">
