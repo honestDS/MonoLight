@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.adapters.base import BaseChatAdapter
 from app.core.audit.confirmation import build_confirmation_update_events
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_SESSION_ID_REQUIRED
+from app.core.crud.session.todo import session_todo_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
@@ -167,6 +168,16 @@ class WebChatAdapter(BaseChatAdapter):
                 request_id=request_id,
             )
             llm_response = await session_reply_queue_manager.wait_for_result(work.id)
+            if isinstance(llm_response, dict):
+                plan = await session_todo_crud.get_by_session_id(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                )
+                llm_response["session_todo"] = {
+                    "revision": plan.revision if plan else 0,
+                    "todos": [dict(item) for item in plan.todos] if plan else [],
+                }
             if isinstance(llm_response, dict) and confirmation_update_events:
                 final_confirmation_update_events = await _load_final_confirmation_update_events(db, confirmation_update_events, work)
                 events_to_merge = confirmation_update_events if final_confirmation_update_events is None else final_confirmation_update_events

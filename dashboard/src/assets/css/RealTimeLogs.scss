@@ -1,14 +1,8 @@
-body.is-terminal-page {
-  .app-main {
-    padding: 0 !important;
-  }
-}
-
 .terminal-view {
-  height: calc(100% - 47px);
   width: 100%;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   background: #1e1e1e;
   color: #d4d4d4;
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
@@ -17,6 +11,7 @@ body.is-terminal-page {
 
 .terminal-toolbar {
   height: 35px;
+  flex-shrink: 0;
   background: #2d2d2d;
   display: flex;
   align-items: center;
@@ -93,6 +88,7 @@ body.is-terminal-page {
 
 .terminal-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 10px;
   background: #1e1e1e;

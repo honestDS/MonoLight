@@ -29,13 +29,16 @@ export function useDeleteConfirm(
         await apiDelete(id)
         ElMessage.success(mergedOptions.successMessage || t('common.delete_success'))
         onSuccess?.()
+        return true
       } catch (err) {
         ElMessage.error(err.message || mergedOptions.errorMessage || t('common.delete_failed'))
+        return false
       }
     } catch (err) {
       if (err !== 'cancel') {
         ElMessage.error(err.message || t('common.action_failed'))
       }
+      return false
     }
   }
 

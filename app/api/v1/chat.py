@@ -35,11 +35,13 @@ from app.core.constants import (
     MSG_SESSION_CLEARED,
     MSG_SESSION_GUIDANCE_CREATED,
     MSG_SESSION_LIST_SUCCESS,
+    MSG_SESSION_TODO_SUCCESS,
     MSG_SESSION_UPDATED,
     MSG_TITLE_GENERATED,
 )
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
+from app.core.crud.session.todo import session_todo_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.dispatcher import ChatDispatcher, format_exception_message
@@ -321,6 +323,32 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
             }
         )
     return StandardResponse.success(data=data, message=MSG_SESSION_LIST_SUCCESS)
+
+
+@router.get("/sessions/todo")
+async def get_session_todo(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
+    session = await session_crud.get_by_session_id(db, session_id)
+    if not session:
+        return StandardResponse.error(code=404, message=ERR_SESSION_NOT_FOUND)
+    if not is_admin and session.uid != uid:
+        return StandardResponse.error(code=403, message=ERR_SESSION_NO_PERMISSION)
+
+    plan = await session_todo_crud.get_by_session_id(
+        db,
+        uid=session.uid,
+        session_id=session_id,
+    )
+    data = {
+        "revision": plan.revision if plan else 0,
+        "todos": [dict(item) for item in plan.todos] if plan else [],
+    }
+    return StandardResponse.success(data=data, message=MSG_SESSION_TODO_SUCCESS)
 
 
 @router.post("/sessions/delete")

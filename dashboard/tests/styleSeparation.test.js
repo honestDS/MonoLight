@@ -11,8 +11,11 @@ const STYLE_BLOCK_PATTERN = /<style\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/
 const STYLE_SOURCE_ATTRIBUTE = /(?:^|\s)src\s*=\s*(["'])[^"']*\.(?:css|scss)(?:[?#][^"']*)?\1(?=\s|$)/i;
 const STYLE_MODULE_DIRECTIVES_ONLY =
   /^\s*(?:@(?:import|use|forward)\b(?:[^;"'{}]+|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')*;\s*)+$/;
+const BORDER_RADIUS_DECLARATION = /\bborder-radius\s*:\s*([^;]+);/gi;
+const BORDER_RADIUS_VARIABLE = /^var\(--(?:radius-|glass-surface-radius)/;
+const JAVASCRIPT_BORDER_RADIUS = /\bborderRadius\s*:/g;
 
-async function findVueFiles(directory) {
+async function findSourceFiles(directory, predicate) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
 
@@ -20,8 +23,8 @@ async function findVueFiles(directory) {
     const entryPath = path.join(directory, entry.name);
 
     if (entry.isDirectory()) {
-      files.push(...await findVueFiles(entryPath));
-    } else if (entry.isFile() && entry.name.endsWith('.vue')) {
+      files.push(...await findSourceFiles(entryPath, predicate));
+    } else if (entry.isFile() && predicate(entry.name)) {
       files.push(entryPath);
     }
   }
@@ -37,7 +40,7 @@ function isSeparatedStyle(attributes, content) {
 }
 
 test('style blocks are externalized', async () => {
-  const vueFiles = await findVueFiles(sourceDirectory);
+  const vueFiles = await findSourceFiles(sourceDirectory, (name) => name.endsWith('.vue'));
   const violations = [];
   let styleBlockCount = 0;
 
@@ -68,6 +71,42 @@ test('style blocks are externalized', async () => {
     violations.length,
     0,
     `Found styles that must be externalized:\n${violations.join('\n')}`,
+  );
+});
+
+test('border radius values are centralized in theme.scss', async () => {
+  const styleExtensions = new Set(['.css', '.scss', '.vue', '.js']);
+  const sourceFiles = await findSourceFiles(sourceDirectory, (name) => styleExtensions.has(path.extname(name)));
+  const themeFile = path.join(sourceDirectory, 'assets', 'css', 'theme.scss');
+  const violations = [];
+
+  for (const sourceFile of sourceFiles) {
+    if (sourceFile === themeFile) {
+      continue;
+    }
+
+    const source = await readFile(sourceFile, 'utf8');
+    const relativePath = path.relative(sourceDirectory, sourceFile).split(path.sep).join('/');
+
+    for (const match of source.matchAll(BORDER_RADIUS_DECLARATION)) {
+      const value = match[1].trim();
+
+      if (!BORDER_RADIUS_VARIABLE.test(value)) {
+        const line = source.slice(0, match.index).split('\n').length;
+        violations.push(`${relativePath}:${line} uses border-radius ${value}. Use a radius variable from theme.scss.`);
+      }
+    }
+
+    for (const match of source.matchAll(JAVASCRIPT_BORDER_RADIUS)) {
+      const line = source.slice(0, match.index).split('\n').length;
+      violations.push(`${relativePath}:${line} uses borderRadius in script/template code. Move the radius to theme-backed styles.`);
+    }
+  }
+
+  assert.equal(
+    violations.length,
+    0,
+    `Found radius values outside theme.scss:\n${violations.join('\n')}`,
   );
 });
 

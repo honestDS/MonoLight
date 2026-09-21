@@ -844,6 +844,7 @@ async def _run_audited_interactive_dispatch(
     multimodal_capabilities=None,
     summary_calls_target=None,
     trim_calls_target=None,
+    persist_todo_snapshot_handler=None,
 ):
     profile = SimpleNamespace(id=1)
     audit_configured = audit_results is not None or audit_result is not None
@@ -1103,7 +1104,7 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(
         interactive_tools_module,
         "persist_session_todo_snapshot_on_tool_results",
-        persist_todo_snapshot,
+        persist_todo_snapshot_handler or persist_todo_snapshot,
     )
     monkeypatch.setattr(interactive_tools_module, "audit_tool_round", audit_round)
     monkeypatch.setattr(interactive_tools_module.audit_crud, "claim_passed_for_execution", claim_execution)
@@ -1166,6 +1167,53 @@ async def _run_audited_interactive_dispatch(
             show_tool_calls=show_tool_calls,
         )
     return response, unknown_calls
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_todo_update_even_when_tool_output_is_hidden(monkeypatch):
+    tool_call = InternalToolCall(
+        id="call-todo",
+        name="manage_todo",
+        arguments={"operation": "read"},
+    )
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(current_tool_call, *args, **kwargs):
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=current_tool_call.id,
+            content='{"status":"success","operation":"read","revision":2,"todos":[{"content":"verify","status":"in_progress"}]}',
+        )
+
+    async def persist_todo_snapshot(_db, *, uid, session_id, tool_results):
+        assert uid == "user-1"
+        assert session_id == "session-1"
+        assert len(tool_results) == 1
+        return '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"verify","status":"in_progress"}]}</current_session_todo_snapshot>'
+
+    events, _unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        stream_dispatch=True,
+        show_tool_calls=False,
+        tool_call=tool_call,
+        persist_todo_snapshot_handler=persist_todo_snapshot,
+    )
+
+    todo_events = [event for event in events if event.get("type") == "todo_update"]
+    assert len(todo_events) == 1
+    assert todo_events[0] == {
+        "type": "todo_update",
+        "session_id": "session-1",
+        "revision": 2,
+        "todos": [{"content": "verify", "status": "in_progress"}],
+        "request_id": "request-1",
+    }
+    assert all(event.get("type") != "tool_end" for event in events)
 
 
 @pytest.mark.asyncio

@@ -1,31 +1,72 @@
 <template>
   <div class="message-list-wrapper">
-    <div
-      class="llm-request-metadata"
-      role="status"
-      :aria-label="$t('chat.llm_request_metadata_label')"
-    >
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.input_tokens') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
-      </span>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.total_output') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.total_output_tokens ?? llmRequestMetadata?.output_tokens) }}</strong>
-      </span>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.cache_hit_rate') }}</span>
-        <strong>{{ formatCacheHitRate(llmRequestMetadata?.cache_hit_rate) }}</strong>
-      </span>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.context_limit') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
-      </span>
-      <span class="llm-request-metadata-item">
-        <span>{{ $t('chat.max_output') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.max_output_tokens) }}</strong>
-      </span>
-    </div>
+    <Transition name="request-metadata-fade">
+      <div
+        v-if="showRequestMetadata"
+        :class="['llm-request-metadata', 'glass-surface', { 'is-collapsed': requestMetadataCollapsed }]"
+      >
+        <div
+          id="llm-request-metadata-content"
+          class="llm-request-metadata-content"
+          role="status"
+          :aria-hidden="requestMetadataCollapsed"
+          :aria-label="$t('chat.llm_request_metadata_label')"
+        >
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.input_tokens') }}</span>
+            <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
+          </span>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.total_output') }}</span>
+            <strong>{{ formatTokenCount(llmRequestMetadata?.total_output_tokens ?? llmRequestMetadata?.output_tokens) }}</strong>
+          </span>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.cache_hit_rate') }}</span>
+            <strong>{{ formatCacheHitRate(llmRequestMetadata?.cache_hit_rate) }}</strong>
+          </span>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.context_limit') }}</span>
+            <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
+          </span>
+          <span class="llm-request-metadata-item">
+            <span>{{ $t('chat.max_output') }}</span>
+            <strong>{{ formatTokenCount(llmRequestMetadata?.max_output_tokens) }}</strong>
+          </span>
+        </div>
+        <div class="request-metadata-actions">
+          <span class="request-metadata-collapsed-label" aria-hidden="true">
+            {{ $t('chat.request_metadata_short_label') }}
+          </span>
+          <el-tooltip
+            v-if="currentSessionInfo"
+            :content="formatSessionTooltip(currentSessionInfo)"
+            placement="bottom"
+            :show-after="100"
+            popper-class="session-info-tooltip"
+          >
+            <el-icon class="session-info-icon"><InfoFilled /></el-icon>
+          </el-tooltip>
+          <el-tooltip
+            :content="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
+            placement="bottom"
+            :show-after="300"
+          >
+            <button
+              type="button"
+              class="request-metadata-toggle"
+              :aria-label="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
+              :aria-expanded="!requestMetadataCollapsed"
+              aria-controls="llm-request-metadata-content"
+              @click="requestMetadataCollapsed = !requestMetadataCollapsed"
+            >
+              <el-icon class="request-metadata-toggle-icon" :class="{ 'is-expanded': !requestMetadataCollapsed }">
+                <ArrowDown />
+              </el-icon>
+            </button>
+          </el-tooltip>
+        </div>
+      </div>
+    </Transition>
     <VList
       :key="currentSessionId || '__new_session__'"
       ref="virtualList"
@@ -88,25 +129,31 @@
               >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
             </template>
           </div>
-          <el-collapse v-model="collapseModel" :class="['tool-round-collapse', getToolGroupStateClass(msg)]">
+          <el-collapse v-model="collapseModel" class="tool-round-collapse">
             <el-collapse-item :name="msg.id">
               <template #title>
-                <span :class="['tool-round-title', getToolGroupStateClass(msg)]">{{ getToolGroupTitle(msg) }}</span>
+                <span class="tool-round-title">
+                  <span class="tool-round-label">{{ $t('chat.tool_activity') }}</span>
+                  <span v-if="msg.pairs.length > 1" class="tool-round-count">{{ $t('chat.tool_count', { count: msg.pairs.length }) }}</span>
+                  <span :class="['tool-round-status', getToolGroupStateClass(msg)]">{{ getToolGroupStatus(msg) }}</span>
+                </span>
               </template>
               <el-collapse v-model="collapseModel" class="tool-pair-collapse">
                 <el-collapse-item
                   v-for="pair in msg.pairs"
                   :key="pair.id"
                   :name="`${msg.id}_${pair.id}`"
-                  :class="{ 'has-result': pair.resultMessage }"
                 >
                   <template #title>
-                    <span :class="pair.resultMessage ? 'tool-result-title' : 'tool-call-title'">
-                      {{ getToolPairTitle(pair) }}
+                    <span class="tool-pair-title">
+                      <span class="tool-pair-name">{{ getToolPairTitle(pair) }}</span>
+                      <span :class="['tool-pair-status', pair.resultMessage ? 'is-result' : 'is-call']">
+                        {{ $t(pair.resultMessage ? 'chat.tool_status_returned' : 'chat.tool_status_calling') }}
+                      </span>
                     </span>
                   </template>
                   <div v-if="pair.toolCall" class="tool-call-content">
-                    <div class="tool-detail-title">{{ $t('chat.tool_call', { name: getToolCallName(pair.toolCall) }) }}</div>
+                    <div class="tool-detail-title tool-detail-title--call">{{ $t('chat.tool_arguments') }}</div>
                     <VirtualizedCode
                       :ref="el => setCodeRef(`${msg.id}_${pair.id}_call`, el)"
                       :content="getToolCallArguments(pair.toolCall)"
@@ -114,7 +161,7 @@
                     />
                   </div>
                   <div v-if="pair.resultMessage" class="tool-result-content">
-                    <div class="tool-detail-title">{{ $t('chat.tool_result', { name: getToolPairName(pair) }) }}</div>
+                    <div class="tool-detail-title tool-detail-title--result">{{ $t('chat.tool_output') }}</div>
                     <VirtualizedCode
                       :ref="el => setCodeRef(`${msg.id}_${pair.id}_result`, el)"
                       :content="getToolResultContent(pair.resultMessage)"
@@ -276,7 +323,7 @@
         </div>
       </template>
     </VList>
-    <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
+    <div v-if="!currentSessionId && messages.length === 0 && !hideEmptyTip" class="empty-chat">
       <p>{{ $t('chat.empty_chat_tip') }}</p>
     </div>
     <Transition name="new-message-indicator">
@@ -295,7 +342,7 @@
       <div
         v-if="activityNotice"
         :key="activityNotice.type"
-        class="activity-status-notice"
+        class="activity-status-notice glass-surface"
         role="status"
         aria-live="polite"
       >
@@ -311,7 +358,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
-import { WarningFilled } from '@element-plus/icons-vue'
+import { ArrowDown, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github.css'
@@ -333,7 +380,8 @@ import {
 } from '../utils'
 import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
-import { getReasoningCollapseName, resolveChatActivityNotice } from '../utils/chatPresentation.js'
+import { getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../utils/chatPresentation.js'
+import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -345,14 +393,27 @@ const props = defineProps({
   historyLoading: { type: Boolean, default: false },
   initialHistoryLoaded: { type: Boolean, default: true },
   contextSummarizing: { type: Boolean, default: false },
-  llmRequestMetadata: { type: Object, default: null }
+  llmRequestMetadata: { type: Object, default: null },
+  currentSessionInfo: { type: Object, default: null },
+  showRequestMetadata: { type: Boolean, default: true },
+  hideEmptyTip: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
+const storedRequestMetadataCollapsed = getClientSetting('requestMetadataCollapsed', true)
+const requestMetadataCollapsed = ref(typeof storedRequestMetadataCollapsed === 'boolean' ? storedRequestMetadataCollapsed : true)
+watch(requestMetadataCollapsed, value => setClientSetting('requestMetadataCollapsed', value))
 const tokenNumberFormatter = new Intl.NumberFormat()
 const percentNumberFormatter = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 2 })
 const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
 const formatCacheHitRate = value => Number.isFinite(value) ? percentNumberFormatter.format(value) : '-'
+const formatSessionTooltip = (info) => {
+  if (!info) return ''
+  return [
+    `${t('chat.session_last_active')}: ${info.last_active || '-'}`,
+    `${t('chat.session_created_at')}: ${info.created_at || '-'}`
+  ].join('\n')
+}
 const pendingAuditDecisions = ref(new Set())
 const auditDecisionStatuses = ref(new Map())
 const auditCountdownNow = ref(Date.now())
@@ -590,9 +651,8 @@ let visibilityFrameId = null
 const isIncomingMessage = message => message.type === 'tool_group' || (
   message.role !== 'thinking' && (message.role !== 'user' || props.currentSessionReadOnly)
 )
-const isLlmOutputMessage = message => message.type === 'tool_group' || ['assistant', 'tool'].includes(message.role)
 const isFollowableIncomingMessage = message => (
-  isLlmOutputMessage(message) || (props.currentSessionReadOnly && message.role === 'user')
+  isFollowableLlmOutput(message) || (props.currentSessionReadOnly && message.role === 'user')
 )
 const OUTPUT_FOLLOW_BOTTOM_TOLERANCE = 24
 let messageListAtBottom = true
@@ -870,11 +930,13 @@ const handleVirtualScroll = (offset) => {
     (offsetChanged && !isProgrammaticScrollInProgress())
   )
   const atBottom = updateMessageListBottomState(currentOffset)
-  if (userScrolled) setOutputFollowState(atBottom)
+  if (userScrolled) {
+    setOutputFollowState(atBottom)
+    scrollListeners.forEach(listener => listener(offset))
+  }
   if (hasValidOffset) lastVirtualScrollOffset = currentOffset
 
   refreshLatestLlmMessageVisibility()
-  scrollListeners.forEach(listener => listener(offset))
   scheduleUnreadVisibilityCheck()
 }
 const captureScrollAnchor = () => {
@@ -930,11 +992,9 @@ const scrollToBottom = async (behavior = 'auto', restoreFollow = true) => {
 
 const getToolPairName = pair => pair.toolCall ? getToolCallName(pair.toolCall) : getToolResultName(pair.resultMessage)
 const getToolPairTitle = pair => t('chat.tool', { name: getToolPairName(pair) })
-const getToolGroupStateClass = group => group.latestEvent?.type === 'result' ? 'is-result' : 'is-call'
-const getToolGroupTitle = (group) => {
-  if (!group.latestEvent) return t('chat.tool_activity')
-  return t(group.latestEvent.type === 'result' ? 'chat.tool_result' : 'chat.tool_call', { name: getToolPairName(group.latestEvent.pair) })
-}
+const isToolGroupReturned = group => Boolean(group?.pairs?.length) && group.pairs.every(pair => pair.resultMessage)
+const getToolGroupStateClass = group => isToolGroupReturned(group) ? 'is-result' : 'is-call'
+const getToolGroupStatus = group => t(isToolGroupReturned(group) ? 'chat.tool_status_returned' : 'chat.tool_status_calling')
 
 const setCodeRef = (id, element) => {
   if (element) codeRefs.set(id, element)

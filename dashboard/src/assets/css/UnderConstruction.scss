@@ -8,7 +8,7 @@
   box-sizing: border-box;
   background-color: #ffffff;
   border: 1px solid #e6ebf2;
-  border-radius: 8px;
+  border-radius: var(--radius-8);
   color: #1f2d3d;
   text-align: center;
 }
@@ -27,7 +27,7 @@
   width: 88px;
   height: 88px;
   margin-bottom: 24px;
-  border-radius: 50%;
+  border-radius: var(--radius-circle);
   background-color: #eef4fb;
   color: #35658f;
   font-size: 44px;
