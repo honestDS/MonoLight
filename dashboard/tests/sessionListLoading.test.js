@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 const chatViewSource = readFileSync(new URL('../src/views/ChatView.vue', import.meta.url), 'utf8')
+const chatStyles = readFileSync(new URL('../src/assets/css/chat.scss', import.meta.url), 'utf8')
 const sessionManagerSource = readFileSync(new URL('../src/composables/chat/useSessionManager.js', import.meta.url), 'utf8')
 const chatSessionSource = readFileSync(new URL('../src/composables/chat/useChatSession.js', import.meta.url), 'utf8')
 
@@ -10,6 +11,30 @@ const loadSessionLoadingModule = () => import('../src/composables/chat/sessionLi
 
 test('session list renders a loading indicator from the backend is_loading field', () => {
   assert.match(chatViewSource, /v-if="session\.is_loading"/)
+})
+
+test('session loading indicator is rendered beside the session title instead of the delete action', () => {
+  const titleStart = chatViewSource.indexOf('class="session-title"')
+  const titleEnd = chatViewSource.indexOf('</div>', titleStart)
+  const titleBlock = chatViewSource.slice(titleStart, titleEnd)
+  const actionsStart = chatViewSource.indexOf('class="session-actions"')
+  const actionsEnd = chatViewSource.indexOf('</div>', actionsStart)
+  const actionsBlock = chatViewSource.slice(actionsStart, actionsEnd)
+
+  assert.notEqual(titleStart, -1)
+  assert.match(titleBlock, /session-loading-indicator/)
+  assert.doesNotMatch(actionsBlock, /session-loading-indicator/)
+})
+
+test('session loading indicator stays immediately beside the visible title text', () => {
+  assert.match(
+    chatStyles,
+    /\.session-content\s*\{[\s\S]*?\.session-title\s*\{[\s\S]*?display:\s*inline-flex;[\s\S]*?max-width:\s*100%;[\s\S]*?gap:\s*6px;/
+  )
+  assert.match(
+    chatStyles,
+    /\.session-content\s*\{[\s\S]*?\.session-title-text\s*\{[\s\S]*?flex:\s*0 1 auto;[\s\S]*?text-overflow:\s*ellipsis;/
+  )
 })
 
 test('session loading poller keeps refreshing while any session is loading and stops when all finish', async () => {

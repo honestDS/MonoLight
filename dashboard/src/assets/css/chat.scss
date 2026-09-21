@@ -9,7 +9,7 @@
 .sessions-sidebar {
   width: 232px;
   flex-shrink: 0;
-  background: var(--color-slate-50);
+  background: #FFF;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -168,27 +168,27 @@
     }
 
     &:hover {
-      background: rgba(var(--color-slate-900-rgb), 0.04);
+      background: var(--color-sidebar-hover);
 
       .session-title {
-        color: var(--color-slate-900);
+        color: var(--color-sidebar-title);
       }
     }
 
     &.active {
       background: linear-gradient(
         90deg,
-        rgba(var(--color-sky-400-rgb), 0.14),
-        rgba(var(--color-blue-400-rgb), 0.07)
+        var(--color-sidebar-active-bg-start),
+        var(--color-sidebar-active-bg-end)
       );
 
       &::before {
-        background: var(--color-sky-300);
-        box-shadow: 0 0 12px rgba(var(--color-sky-400-rgb), 0.32);
+        background: var(--color-sidebar-active);
+        box-shadow: 0 0 12px var(--color-sidebar-active-shadow);
       }
 
       .session-title {
-        color: var(--color-slate-900);
+        color: var(--color-sidebar-active-text);
       }
     }
 
@@ -197,15 +197,24 @@
       min-width: 0;
 
       .session-title {
+        display: inline-flex;
+        align-items: center;
+        max-width: 100%;
         min-width: 0;
         margin-bottom: 4px;
+        gap: 6px;
         font-size: 13px;
         line-height: 18px;
-        color: var(--color-slate-800);
-        white-space: nowrap;
+        color: var(--color-sidebar-text);
+        font-weight: 500;
+      }
+
+      .session-title-text {
+        flex: 0 1 auto;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
-        font-weight: 500;
+        white-space: nowrap;
       }
 
       .session-source {
@@ -278,7 +287,10 @@
           opacity 0.18s ease,
           background-color 0.18s ease,
           color 0.18s ease;
-
+        svg{
+          width:0.9em;
+          height: 0.9em;
+        }
         &:hover {
           background: var(--color-danger-soft);
           color: var(--color-danger);
@@ -532,6 +544,10 @@
         }
       }
 
+      &.ai .content.tool-call-message {
+        border-radius: var(--radius-chat);
+      }
+
       &.background-system {
         align-items: center;
         max-width: 72%;
@@ -552,7 +568,7 @@
           background: var(--color-slate-50);
           color: var(--color-slate-600);
           border: 1px solid rgba(var(--color-slate-400-rgb), 0.2);
-          border-radius: var(--radius-14);
+          border-radius: var(--radius-chat);
           box-shadow: none;
         }
       }
@@ -570,6 +586,7 @@
           background: #fef0f0;
           color: #f56c6c;
           border: 1px solid #fbc4c4;
+          border-radius: var(--radius-chat);
         }
       }
 

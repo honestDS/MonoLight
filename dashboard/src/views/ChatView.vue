@@ -44,29 +44,31 @@
             >
               <div class="session-content">
                 <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
-                  <template v-if="typingSessionId === session.session_id">
-                    <span
-                      v-for="(char, index) in session.title"
-                      :key="index"
-                      class="typing-char"
-                    >{{ char }}</span>
-                  </template>
-                  <template v-else>
-                    {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
-                  </template>
+                  <span class="session-title-text">
+                    <template v-if="typingSessionId === session.session_id">
+                      <span
+                        v-for="(char, index) in session.title"
+                        :key="index"
+                        class="typing-char"
+                      >{{ char }}</span>
+                    </template>
+                    <template v-else>
+                      {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
+                    </template>
+                  </span>
+                  <span
+                    v-if="session.is_loading"
+                    class="session-loading-indicator"
+                    :title="$t('chat.session_reply_in_progress')"
+                    role="status"
+                    aria-live="polite"
+                  ></span>
                 </div>
                 <div class="session-meta" :title="`${$t('chat.session_source')}: ${session.source || '-'}`">
                   <span v-if="session.source" class="session-source">{{ session.source }}</span>
                 </div>
               </div>
               <div class="session-actions">
-                <div
-                  v-if="session.is_loading"
-                  class="session-loading-indicator"
-                  :title="$t('chat.session_reply_in_progress')"
-                  role="status"
-                  aria-live="polite"
-                ></div>
                 <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
               </div>
             </div>

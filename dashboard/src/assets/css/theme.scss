@@ -75,16 +75,19 @@
   --color-primary-light: var(--color-slate-700);
   --color-primary-dark: var(--color-slate-900);
 
-  /* 侧边栏主题色 - 深色主题 */
-  --color-sidebar-bg: var(--color-slate-900);
-  --color-sidebar-border: var(--color-slate-800);
-  --color-sidebar-text: var(--color-slate-400);
-  --color-sidebar-title: var(--color-slate-50);
-  --color-sidebar-active: var(--color-blue-400);
-  --color-sidebar-hover: var(--color-slate-800);
-  --color-sidebar-gradient-start: #0b1220;
-  --color-sidebar-popper-bg: #111c2f;
-  --color-sidebar-active-text: #dff7ff;
+  /* 侧边栏主题色 - 浅色主题 */
+  --color-sidebar-bg: var(--color-white);
+  --color-sidebar-border: var(--color-slate-200);
+  --color-sidebar-text: var(--color-slate-600);
+  --color-sidebar-title: var(--color-slate-900);
+  --color-sidebar-active: var(--color-blue-500);
+  --color-sidebar-hover: var(--color-slate-100);
+  --color-sidebar-active-bg-start: rgba(var(--color-blue-500-rgb), 0.12);
+  --color-sidebar-active-bg-end: rgba(var(--color-blue-500-rgb), 0.05);
+  --color-sidebar-active-shadow: rgba(var(--color-blue-500-rgb), 0.28);
+  --color-sidebar-gradient-start: var(--color-white);
+  --color-sidebar-popper-bg: var(--color-white);
+  --color-sidebar-active-text: var(--color-blue-500);
 
   /* 状态色 */
   --color-success: #67c23a;
@@ -104,7 +107,7 @@
   --color-bg-base: #ffffff;
   --color-bg-page: #f5f7fa;
 
-  /* 登录页面颜色 - 与侧边栏深色主题统一 */
+  /* 登录页面颜色 */
   --color-login-bg-page: var(--color-slate-100);
   --color-login-bg-box: var(--color-white);
   --color-login-bg-left: var(--color-slate-900);
