@@ -48,11 +48,11 @@
     -webkit-backdrop-filter: none;
 
     .request-metadata-actions {
-      margin-left: auto;
+      top: 5px;
       width: auto;
       height: 34px;
       box-sizing: border-box;
-      padding: 0 4px 0 24px;
+      padding: 0 0 0 18px;
       gap: 2px;
       background: var(--chat-metadata-surface-background);
       border: 1px solid var(--chat-metadata-surface-border);
@@ -65,8 +65,8 @@
     }
 
     .request-metadata-toggle {
-      flex-basis: 34px;
-      width: 34px;
+      flex-basis: 44px;
+      width: 44px;
       height: 34px;
       color: var(--color-slate-700);
 
@@ -86,13 +86,6 @@
 
 .llm-request-metadata:not(.is-collapsed) .llm-request-metadata-content {
   margin-right: 76px;
-}
-
-.llm-request-metadata:not(.is-collapsed) .request-metadata-actions {
-  position: absolute;
-  top: 0;
-  right: 4px;
-  height: 44px;
 }
 
 .llm-request-metadata-content {
@@ -135,6 +128,9 @@
 }
 
 .request-metadata-actions {
+  position: absolute;
+  top: 0;
+  right: 4px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
