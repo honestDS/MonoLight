@@ -37,3 +37,64 @@ test('new message indicator is horizontally centered instead of right aligned', 
   assert.match(indicatorPositioning, /margin-left:\s*-21px;/)
   assert.doesNotMatch(indicatorPositioning, /right:\s*18px;/)
 })
+
+test('special chat message surfaces use the shared chat radius while normal bubbles keep their shape', async () => {
+  const [chatStyles, chatViewStyles, thinkingStyles] = await Promise.all([
+    readDashboardSource('src/assets/css/chat.scss'),
+    readDashboardSource('src/assets/css/ChatView.scss'),
+    readDashboardSource('src/assets/css/ThinkingBlock.scss')
+  ])
+
+  assert.match(chatStyles, /&\.user\s*\{[\s\S]*?border-radius:\s*var\(--radius-16\) var\(--radius-16\) var\(--radius-5\) var\(--radius-16\);/)
+  assert.match(chatStyles, /&\.ai\s*\{[\s\S]*?border-radius:\s*var\(--radius-16\) var\(--radius-16\) var\(--radius-16\) var\(--radius-5\);/)
+  assert.match(chatStyles, /&\.background-system\s*\{[\s\S]*?\.content\s*\{[\s\S]*?border-radius:\s*var\(--radius-chat\);/)
+  assert.match(
+    chatStyles,
+    /&\.error\s*\{[\s\S]*?\.content\s*\{[\s\S]*?border-radius:\s*var\(--radius-chat\);/
+  )
+  assert.match(chatStyles, /&\.ai \.content\.tool-call-message\s*\{[\s\S]*?border-radius:\s*var\(--radius-chat\);/)
+  assert.match(chatStyles, /\.tool-round-collapse\s*\{[\s\S]*?border-radius:\s*var\(--radius-chat\);/)
+  assert.match(
+    chatViewStyles,
+    /\.message-item\.guidance \.guidance-card\s*\{[\s\S]*?border-radius:\s*var\(--radius-chat\);/
+  )
+  assert.match(chatViewStyles, /\.audit-confirmation-card\s*\{[\s\S]*?border-radius:\s*var\(--radius-chat\);/)
+  assert.match(thinkingStyles, /\.thinking-block\s*\{[\s\S]*?border-radius:\s*var\(--radius-chat\);/)
+})
+
+test('app sidebar menu states mirror session item geometry using sidebar palette tokens', async () => {
+  const [appStyles, themeStyles] = await Promise.all([
+    readDashboardSource('src/assets/css/app.scss'),
+    readDashboardSource('src/assets/css/theme.scss')
+  ])
+
+  assert.match(appStyles, /\.el-menu-item,\s*\n\s*\.el-sub-menu__title\s*\{[\s\S]*?margin:\s*3px 8px;[\s\S]*?border-radius:\s*var\(--radius-6\);/)
+  assert.match(appStyles, /\.el-menu-item\.is-active\s*\{[\s\S]*?background:\s*linear-gradient\([\s\S]*?var\(--color-sidebar-active-bg-start\)[\s\S]*?var\(--color-sidebar-active-bg-end\)[\s\S]*?\) !important;/)
+  assert.match(appStyles, /\.el-menu-item:hover\s*\{[\s\S]*?background-color:\s*var\(--color-sidebar-hover\) !important;/)
+  assert.match(appStyles, /\.el-menu-item\.is-active::before[\s\S]*?background:\s*var\(--color-sidebar-active\);[\s\S]*?box-shadow:\s*0 0 12px var\(--color-sidebar-active-shadow\);/)
+  assert.match(themeStyles, /--color-sidebar-active-bg-start:\s*rgba\(var\(--color-blue-500-rgb\),\s*0\.12\);/)
+  assert.match(themeStyles, /--color-sidebar-active-bg-end:\s*rgba\(var\(--color-blue-500-rgb\),\s*0\.05\);/)
+})
+
+test('sidebar collapse button uses sidebar palette without border or shadow', async () => {
+  const appStyles = await readDashboardSource('src/assets/css/app.scss')
+
+  assert.match(
+    appStyles,
+    /\.sidebar-collapse-button\s*\{[\s\S]*?color:\s*var\(--color-sidebar-text\);[\s\S]*?background:\s*transparent;[\s\S]*?border:\s*none;[\s\S]*?box-shadow:\s*none;/
+  )
+  assert.match(
+    appStyles,
+    /\.sidebar-collapse-button:hover\s*\{[\s\S]*?color:\s*var\(--color-sidebar-title\);[\s\S]*?background:\s*var\(--color-sidebar-hover\);/
+  )
+})
+
+test('session item states use the same palette as the app sidebar', async () => {
+  const chatStyles = await readDashboardSource('src/assets/css/chat.scss')
+
+  assert.match(chatStyles, /\.session-item\s*\{[\s\S]*?&:hover\s*\{[\s\S]*?background:\s*var\(--color-sidebar-hover\);/)
+  assert.match(chatStyles, /&\.active\s*\{[\s\S]*?var\(--color-sidebar-active-bg-start\)[\s\S]*?var\(--color-sidebar-active-bg-end\)/)
+  assert.match(chatStyles, /&\.active\s*\{[\s\S]*?&::before\s*\{[\s\S]*?background:\s*var\(--color-sidebar-active\);[\s\S]*?box-shadow:\s*0 0 12px var\(--color-sidebar-active-shadow\);/)
+  assert.match(chatStyles, /\.session-title\s*\{[\s\S]*?color:\s*var\(--color-sidebar-text\);/)
+  assert.match(chatStyles, /&\.active\s*\{[\s\S]*?\.session-title\s*\{[\s\S]*?color:\s*var\(--color-sidebar-active-text\);/)
+})
