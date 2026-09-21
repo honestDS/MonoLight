@@ -1,5 +1,6 @@
 MESSAGES = {
     "MSG_SESSION_LIST_SUCCESS": "会话列表获取成功",
+    "MSG_SESSION_TODO_SUCCESS": "会话任务清单获取成功",
     "MSG_SESSION_GUIDANCE_CREATED": "引导消息已添加",
     "ERR_SESSION_NOT_FOUND": "会话未找到或已删除",
     "MSG_SESSION_CLEARED": "已成功清理会话 {session_id} 的全部历史记录",

@@ -28,6 +28,7 @@ const lifecycleEventTypes = new Set([
   'turn_end',
   'tool_start',
   'tool_end',
+  'todo_update',
   'done',
   'error',
   'proactive_reply'
@@ -94,6 +95,7 @@ export function useChatTransport() {
       onReasoning,
       onToolStart,
       onToolEnd,
+      onTodoUpdate,
       onComplete,
       onError,
       onSessionId,
@@ -219,6 +221,11 @@ export function useChatTransport() {
       if (scrollToBottom) {
         scrollToBottom()
       }
+      return
+    }
+
+    if (type === 'todo_update') {
+      if (onTodoUpdate) onTodoUpdate(data)
       return
     }
 
@@ -357,8 +364,7 @@ export function useChatTransport() {
 
   // ==================== 发送方法 ====================
 
-  const httpSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, callbacks = {} }) => {
-    const finalCallbacks = { ...callbacks, requestId, sessionId }
+  const httpSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning }) => {
     const payload = {
       message,
       session_id: sessionId || null,
@@ -374,11 +380,8 @@ export function useChatTransport() {
     if (!sessionId && showReasoning === false) {
       payload.show_reasoning = false
     }
-    if (!sessionId) {
-      const res = await chatApi.completions({ ...payload, stream: false })
-      return res.data
-    }
-    return chatApi.completionsStream(payload, event => handleWsMessage(event, finalCallbacks))
+    const res = await chatApi.completions({ ...payload, stream: false })
+    return res.data
   }
 
   const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, callbacks = {} }) => {

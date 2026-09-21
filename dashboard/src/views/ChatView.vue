@@ -286,8 +286,9 @@
           </div>
         </div>
       </div>
-    </div>
 
+      <SessionTodoPanel :plan="currentTodoPlan" />
+    </div>
   </div>
 </template>
 
@@ -297,6 +298,7 @@ import { ElMessage } from 'element-plus'
 import { Delete, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
+import SessionTodoPanel from '../components/SessionTodoPanel.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
 import { fileApi, chatApi, profileApi } from '../api'
 import {
@@ -455,7 +457,8 @@ const {
   initialHistoryLoaded,
   newSessionProfileOverrideId,
   currentSessionShowToolCalls,
-  currentSessionShowReasoning
+  currentSessionShowReasoning,
+  currentTodoPlan
 } = chat
 
 const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(

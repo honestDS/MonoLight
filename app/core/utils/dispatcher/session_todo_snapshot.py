@@ -13,6 +13,7 @@ __all__ = [
     "append_session_todo_snapshot",
     "load_current_session_todo_snapshot",
     "measure_session_todo_snapshot_tokens",
+    "parse_session_todo_snapshot",
     "persist_session_todo_snapshot_on_tool_results",
     "strip_session_todo_snapshot",
     "strip_session_todo_snapshots",
@@ -20,6 +21,32 @@ __all__ = [
 
 _SNAPSHOT_OPEN = "<current_session_todo_snapshot>"
 _SNAPSHOT_CLOSE = "</current_session_todo_snapshot>"
+
+
+def parse_session_todo_snapshot(snapshot: str | None) -> dict[str, object] | None:
+    if not isinstance(snapshot, str) or not snapshot.startswith(_SNAPSHOT_OPEN) or not snapshot.endswith(_SNAPSHOT_CLOSE):
+        return None
+    payload_text = snapshot[len(_SNAPSHOT_OPEN) : -len(_SNAPSHOT_CLOSE)]
+    try:
+        payload = json.loads(payload_text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    revision = payload.get("revision")
+    todos = payload.get("todos")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision <= 0 or not isinstance(todos, list):
+        return None
+    normalized_todos: list[dict[str, str]] = []
+    for todo in todos:
+        if not isinstance(todo, dict):
+            return None
+        content = todo.get("content")
+        status = todo.get("status")
+        if not isinstance(content, str) or not isinstance(status, str):
+            return None
+        normalized_todos.append({"content": content, "status": status})
+    return {"revision": revision, "todos": normalized_todos}
 
 
 def _serialize_todo_snapshot(plan: SessionTodoPlan) -> str | None:

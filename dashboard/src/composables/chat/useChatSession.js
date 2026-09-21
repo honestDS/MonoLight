@@ -11,6 +11,11 @@ import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './work
 import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMessages } from './auditConfirmationState.js'
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
+import {
+  mergeTodoPlan,
+  normalizeTodoPlan,
+  readTodoPlanFromTransport
+} from '../../utils/todoPresentation.js'
 import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
 import { shouldReturnToWelcomeAfterSessionDelete } from '../../utils/chatContentReveal.js'
 import { chatApi } from '../../api'
@@ -138,6 +143,46 @@ export function useChatSession() {
   
   // 2. 会话管理
   const sessionManager = useSessionManager()
+  const currentTodoPlan = ref(null)
+  const skipTodoInitialLoadSessionIds = new Set()
+  let todoLoadVersion = 0
+
+  const applyTodoPlan = (plan, sessionId = sessionManager.currentSessionId.value) => {
+    if (!sessionId || sessionId !== sessionManager.currentSessionId.value) return
+    currentTodoPlan.value = mergeTodoPlan(currentTodoPlan.value, plan)
+  }
+
+  const applyTodoTransportPayload = (payload, sessionId = payload?.session_id || sessionManager.currentSessionId.value) => {
+    const plan = readTodoPlanFromTransport(payload)
+    if (plan) applyTodoPlan(plan, sessionId)
+  }
+
+  const markNewSessionTodoKnownEmpty = (sessionId) => {
+    if (sessionId) skipTodoInitialLoadSessionIds.add(sessionId)
+  }
+
+  watch(
+    () => sessionManager.currentSessionId.value,
+    async (sessionId) => {
+      const requestVersion = ++todoLoadVersion
+      currentTodoPlan.value = null
+      if (!sessionId) return
+      if (skipTodoInitialLoadSessionIds.delete(sessionId)) {
+        currentTodoPlan.value = normalizeTodoPlan(null)
+        return
+      }
+      try {
+        const response = await chatApi.sessionTodo(sessionId)
+        if (requestVersion !== todoLoadVersion || sessionId !== sessionManager.currentSessionId.value) return
+        applyTodoPlan(response.data?.data, sessionId)
+      } catch {
+        if (requestVersion === todoLoadVersion && sessionId === sessionManager.currentSessionId.value) {
+          currentTodoPlan.value = null
+        }
+      }
+    },
+    { immediate: true }
+  )
   const isContextSummarizing = computed(() => contextSummaryWorkKeys.value.size > 0)
   const currentSession = computed(() =>
     sessionManager.sessions.value.find(
@@ -314,6 +359,9 @@ export function useChatSession() {
       }))
     },
     onLlmRequestMetadata: event => updateLlmRequestMetadata(event, isCurrentRequestSession),
+    onTodoUpdate: event => {
+      if (isCurrentRequestSession()) applyTodoTransportPayload(event)
+    },
     onWorkFinished: event => {
       refreshSessionLoadingState()
       applyLifecycleEvent(workLifecycleTracker.finishWorkLifecycle, event, isCurrentRequestSession)
@@ -617,6 +665,19 @@ export function useChatSession() {
     })
   }
 
+  const applyNonStreamSessionEvents = (response) => {
+    const events = Array.isArray(response?.session_events) ? response.session_events : []
+    for (const event of events) {
+      if (event?.type === 'audit_confirmation_status') {
+        applyAuditConfirmationStatus(event)
+      } else if (event?.type === 'audit_tool_results_update') {
+        applyAuditToolResultsUpdate(event)
+      } else if (event?.type === 'todo_update') {
+        applyTodoTransportPayload(event)
+      }
+    }
+  }
+
   // ==================== 核心发送方法 ====================
 
   /**
@@ -721,7 +782,6 @@ export function useChatSession() {
    */
   const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true) => {
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
-    let finalResponseProcessed = false
     try {
       const response = await transport.httpSend({
         message: text,
@@ -730,42 +790,7 @@ export function useChatSession() {
         requestId,
         profileOverrideId,
         showToolCalls,
-        showReasoning,
-        callbacks: {
-          ...createLifecycleCallbacks(isCurrentRequestSession),
-          completeBeforeWorkFinished: true,
-          onAuditConfirmationStatus: applyAuditConfirmationStatus,
-          onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
-          onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
-            if (eventType === 'turn_end' || data?.type !== 'done' || !isCurrentRequestSession()) return
-            if (!shouldProcessCompletedWork(data)) {
-              finalResponseProcessed = true
-              return
-            }
-            const responseData = data.response || data
-            const completedResponse = {
-              ...responseData,
-              ...(responseData?.work_id == null && data.work_id != null ? { work_id: data.work_id } : {}),
-              ...(responseData?.response_id == null && data.response_id != null ? { response_id: data.response_id } : {}),
-              ...(responseData?.message_id == null && data.message_id != null ? { message_id: data.message_id } : {}),
-              ...(responseData?.files == null && data.files != null ? { files: data.files } : {})
-            }
-            processAiResponse(completedResponse, null, requestIdParam || requestId)
-            finalResponseProcessed = true
-          },
-          onContextSummaryStart: (data) => {
-            if (isCurrentRequestSession()) {
-              if (!contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
-                contextSummaryTracker.startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
-              }
-            }
-          },
-          onContextSummaryEnd: (data) => {
-            if (isCurrentRequestSession() && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
-              contextSummaryTracker.endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
-            }
-          }
-        }
+        showReasoning
       })
 
       // 处理后端生成的 UUID (新建会话模式)
@@ -775,6 +800,7 @@ export function useChatSession() {
         console.log('HTTP 模式同步新会话 ID 并触发标题生成:', newId)
         
         // 1. 设置当前会话 ID (静默选择)
+        markNewSessionTodoKnownEmpty(newId)
         selectNewSession({
           session_id: newId,
           title: t('chat.default_title'),
@@ -798,6 +824,8 @@ export function useChatSession() {
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
 
+      applyTodoTransportPayload(response, requestSessionId)
+
       if (response.llm_request_metadata) {
         updateLlmRequestMetadata({
           ...response.llm_request_metadata,
@@ -809,10 +837,12 @@ export function useChatSession() {
         startHttpHistoryBackgroundTaskSync(requestSessionId)
       }
 
+      applyNonStreamSessionEvents(response)
       const auditConfirmation = parseAuditConfirmationResponse(response)
-      if (!finalResponseProcessed && shouldProcessCompletedWork(response)) {
+      if (shouldProcessCompletedWork(response)) {
         processAiResponse(response, null, requestId)
       }
+      finishRequestLifecycle(requestId, isCurrentRequestSession)
       if (auditConfirmation) {
         chatState.loading.value = false
       }
@@ -998,6 +1028,7 @@ export function useChatSession() {
         requestSessionId = newSessionId
         console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
         // 1. 更新本地状态（静默同步）
+        markNewSessionTodoKnownEmpty(newSessionId)
         selectNewSession({
           session_id: newSessionId,
           title: t('chat.default_title'),
@@ -1361,6 +1392,7 @@ export function useChatSession() {
     currentSession,
     currentSessionShowToolCalls,
     currentSessionShowReasoning,
+    currentTodoPlan,
     isCurrentSessionReadOnly,
     externalSessionAutoPullEnabled,
     

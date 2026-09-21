@@ -324,6 +324,7 @@
 }
 
 .chat-main {
+  position: relative;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -668,8 +669,9 @@
 
   .new-message-indicator {
     position: absolute;
-    right: 18px;
+    left: 50%;
     bottom: 18px;
+    margin-left: -21px;
     z-index: 14;
     display: inline-flex;
     width: 42px;

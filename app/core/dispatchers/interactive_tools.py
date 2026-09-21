@@ -15,6 +15,7 @@ from app.core.constants import (
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
+    MANAGE_TODO_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.dispatchers.interactive_state import InteractiveDispatchState
@@ -30,7 +31,10 @@ from app.core.utils.dispatcher.process_single_tool import (
     prevalidate_tool_round,
 )
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
-from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
+from app.core.utils.dispatcher.session_todo_snapshot import (
+    parse_session_todo_snapshot,
+    persist_session_todo_snapshot_on_tool_results,
+)
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
@@ -55,6 +59,32 @@ __all__ = [
 class AuditExecutionStatePersistenceError(ServerException):
     def __init__(self, cause: str) -> None:
         super().__init__(message=ERR_AUDIT_EXECUTION_CLAIM_FAILED, cause=cause)
+
+
+async def _persist_and_emit_session_todo_update(
+    state: InteractiveDispatchState,
+    *,
+    ai_msg: InternalMessage,
+    tool_results: list[InternalMessage],
+) -> None:
+    snapshot = await persist_session_todo_snapshot_on_tool_results(
+        state.db,
+        uid=state.uid,
+        session_id=state.session_id,
+        tool_results=tool_results,
+    )
+    if state.stream_event_callback is None or not any(tool_call.name == MANAGE_TODO_TOOL_NAME for tool_call in ai_msg.tool_calls):
+        return
+    plan = parse_session_todo_snapshot(snapshot)
+    if plan is None:
+        plan = {"revision": 0, "todos": []}
+    await state.stream_event_callback(
+        {
+            "type": "todo_update",
+            "session_id": state.session_id,
+            **plan,
+        }
+    )
 
 
 async def handle_interactive_tool_round(
@@ -108,10 +138,9 @@ async def handle_interactive_tool_round(
                     state.turn_messages,
                 )
             )
-        await persist_session_todo_snapshot_on_tool_results(
-            state.db,
-            uid=state.uid,
-            session_id=state.session_id,
+        await _persist_and_emit_session_todo_update(
+            state,
+            ai_msg=ai_msg,
             tool_results=stored_tool_results,
         )
         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
@@ -154,10 +183,9 @@ async def handle_interactive_tool_round(
                     profile_id=state.profile.id,
                     tool_results=audit_round.tool_results,
                 )
-                await persist_session_todo_snapshot_on_tool_results(
-                    state.db,
-                    uid=state.uid,
-                    session_id=state.session_id,
+                await _persist_and_emit_session_todo_update(
+                    state,
+                    ai_msg=ai_msg,
                     tool_results=stored_tool_results,
                 )
                 for stored_tool_result in stored_tool_results:
@@ -206,10 +234,9 @@ async def handle_interactive_tool_round(
                     uid=state.uid,
                     session_id=state.session_id,
                 )
-                await persist_session_todo_snapshot_on_tool_results(
-                    state.db,
-                    uid=state.uid,
-                    session_id=state.session_id,
+                await _persist_and_emit_session_todo_update(
+                    state,
+                    ai_msg=ai_msg,
                     tool_results=stored_tool_results,
                 )
                 for stored_tool_result in stored_tool_results:
@@ -240,10 +267,9 @@ async def handle_interactive_tool_round(
                 state.current_turn = 0
                 await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
                 return None
-            await persist_session_todo_snapshot_on_tool_results(
-                state.db,
-                uid=state.uid,
-                session_id=state.session_id,
+            await _persist_and_emit_session_todo_update(
+                state,
+                ai_msg=ai_msg,
                 tool_results=stored_tool_results,
             )
             for tool_result, stored_tool_result in zip(audit_round.tool_results, stored_tool_results, strict=True):
@@ -284,10 +310,9 @@ async def handle_interactive_tool_round(
                             "response_id": response_id,
                         }
                     )
-            await persist_session_todo_snapshot_on_tool_results(
-                state.db,
-                uid=state.uid,
-                session_id=state.session_id,
+            await _persist_and_emit_session_todo_update(
+                state,
+                ai_msg=ai_msg,
                 tool_results=stored_tool_results,
             )
         if audit_round.confirmation_payload is not None:
@@ -397,10 +422,9 @@ async def handle_interactive_tool_round(
                                 "response_id": response_id,
                             }
                         )
-                await persist_session_todo_snapshot_on_tool_results(
-                    state.db,
-                    uid=state.uid,
-                    session_id=state.session_id,
+                await _persist_and_emit_session_todo_update(
+                    state,
+                    ai_msg=ai_msg,
                     tool_results=stored_tool_results,
                 )
                 await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
@@ -498,10 +522,9 @@ async def handle_interactive_tool_round(
             )
             completed_tool_count += 1
             if completed_tool_count == len(tasks):
-                await persist_session_todo_snapshot_on_tool_results(
-                    state.db,
-                    uid=state.uid,
-                    session_id=state.session_id,
+                await _persist_and_emit_session_todo_update(
+                    state,
+                    ai_msg=ai_msg,
                     tool_results=stored_tool_results,
                 )
             if audit_execution_checkpoint_state is not None and (queued_task_id is not None or terminal_session_id is not None):
