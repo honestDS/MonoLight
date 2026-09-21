@@ -1,0 +1,254 @@
+﻿.session-todo-anchor {
+  position: absolute;
+  right: 16px;
+  bottom: 18px;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.session-todo-drawer {
+  display: flex;
+  flex-direction: column;
+  width: min(300px, calc(100cqw - 28px));
+  max-height: min(52cqh, 420px);
+  margin-bottom: 10px;
+  overflow: hidden;
+  pointer-events: auto;
+  transform-origin: bottom right;
+}
+
+.session-todo-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 50px;
+  padding: 11px 13px 9px;
+  box-sizing: border-box;
+  border-bottom: 1px solid rgba(var(--color-slate-400-rgb), 0.12);
+}
+
+.session-todo-heading {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 8px;
+}
+
+.session-todo-heading-icon {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--color-slate-500);
+  font-size: 16px;
+}
+
+.session-todo-title {
+  min-width: 0;
+  color: var(--color-slate-900);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.session-todo-count {
+  color: var(--color-slate-500);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.session-todo-progress {
+  flex: 0 0 2px;
+  height: 2px;
+  overflow: hidden;
+  background: rgba(var(--color-slate-400-rgb), 0.16);
+}
+
+.session-todo-progress-value {
+  display: block;
+  height: 100%;
+  background: var(--color-sky-400);
+  transition: width 0.2s ease;
+}
+
+.session-todo-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-slate-300) transparent;
+}
+
+.session-todo-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 7px 7px 10px;
+  list-style: none;
+}
+
+.session-todo-item {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: start;
+  min-height: 36px;
+  padding: 8px;
+  gap: 8px;
+  color: var(--color-slate-700);
+  border-radius: var(--radius-6);
+
+  &.is-in_progress {
+    color: var(--color-slate-900);
+    background: rgba(var(--color-sky-100-rgb), 0.52);
+
+    .session-todo-status-icon {
+      color: var(--color-sky-500);
+    }
+  }
+
+  &.is-completed {
+    color: var(--color-slate-500);
+
+    .session-todo-status-icon {
+      color: var(--color-success);
+    }
+
+    .session-todo-content {
+      text-decoration: line-through;
+      text-decoration-thickness: 1px;
+      text-decoration-color: rgba(var(--color-slate-500-rgb), 0.5);
+    }
+  }
+}
+
+.session-todo-status-icon {
+  margin-top: 2px;
+  color: var(--color-slate-400);
+  font-size: 15px;
+}
+
+.session-todo-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.session-todo-status-label {
+  padding-top: 1px;
+  color: var(--color-slate-500);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.session-todo-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  box-sizing: border-box;
+  color: var(--color-slate-700);
+  cursor: pointer;
+  pointer-events: auto;
+  background: var(--chat-metadata-surface-background);
+  border: 1px solid var(--chat-metadata-surface-border);
+  border-radius: var(--radius-circle);
+  box-shadow: var(--chat-metadata-surface-shadow);
+  backdrop-filter: var(--glass-surface-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-surface-backdrop-filter);
+  touch-action: manipulation;
+  transition:
+    color 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+
+  &:hover {
+    color: var(--color-slate-900);
+    border-color: rgba(var(--color-slate-500-rgb), 0.32);
+    transform: translateY(-1px);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-sky-400);
+    outline-offset: 2px;
+  }
+}
+
+.session-todo-trigger-icon {
+  font-size: 18px;
+}
+
+.session-todo-trigger-count {
+  position: absolute;
+  top: -6px;
+  right: -7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  color: var(--color-white);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  background: var(--color-slate-900);
+  border: 2px solid var(--color-white);
+  border-radius: var(--radius-pill);
+}
+
+.todo-drawer-enter-active,
+.todo-drawer-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.todo-drawer-enter-from,
+.todo-drawer-leave-to {
+  opacity: 0;
+  transform: translateY(10px) scale(0.98);
+}
+
+@media (max-width: 700px) {
+  .session-todo-anchor {
+    right: 10px;
+    bottom: 12px;
+  }
+
+  .session-todo-drawer {
+    width: min(292px, calc(100cqw - 20px));
+    max-height: min(48cqh, 360px);
+    margin-bottom: 8px;
+  }
+
+  .session-todo-trigger {
+    width: 44px;
+    height: 44px;
+  }
+
+  .session-todo-item {
+    grid-template-columns: 18px minmax(0, 1fr);
+  }
+
+  .session-todo-status-label {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-todo-trigger,
+  .session-todo-progress-value,
+  .todo-drawer-enter-active,
+  .todo-drawer-leave-active {
+    transition: none;
+  }
+}
