@@ -380,7 +380,7 @@ import {
 } from '../utils'
 import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
-import { getReasoningCollapseName, resolveChatActivityNotice } from '../utils/chatPresentation.js'
+import { getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../utils/chatPresentation.js'
 import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
 
 const props = defineProps({
@@ -651,9 +651,8 @@ let visibilityFrameId = null
 const isIncomingMessage = message => message.type === 'tool_group' || (
   message.role !== 'thinking' && (message.role !== 'user' || props.currentSessionReadOnly)
 )
-const isLlmOutputMessage = message => message.type === 'tool_group' || ['assistant', 'tool'].includes(message.role)
 const isFollowableIncomingMessage = message => (
-  isLlmOutputMessage(message) || (props.currentSessionReadOnly && message.role === 'user')
+  isFollowableLlmOutput(message) || (props.currentSessionReadOnly && message.role === 'user')
 )
 const OUTPUT_FOLLOW_BOTTOM_TOLERANCE = 24
 let messageListAtBottom = true

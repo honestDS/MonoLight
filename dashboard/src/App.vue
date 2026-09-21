@@ -115,6 +115,7 @@
               <template #title><span>{{ $t('common.menu.support') }}</span></template>
             </el-menu-item>
           </el-menu>
+          <small class="sidebar-copyright">&copy; 2026 MonoLight LLM Admin. All rights reserved.</small>
         </div>
       </el-aside>
       <el-container>
@@ -140,16 +141,12 @@
         <el-main
           class="app-main"
           :class="{
-            'app-main--memories': $route.path === '/memories',
             'app-main--chat': $route.path === '/'
           }"
         >
           <transition name="fade" mode="out-in">
             <router-view></router-view>
           </transition>
-          <div class="app-footer">
-              <span>&copy; 2026 MonoLight LLM Admin. All rights reserved.</span>
-            </div>
           </el-main>
         </el-container>
       </el-container>

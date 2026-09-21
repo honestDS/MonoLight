@@ -21,3 +21,7 @@ export const resolveChatActivityNotice = ({ contextSummarizing = false, thinking
   if (historyLoading) return 'history_loading'
   return null
 }
+
+export const isFollowableLlmOutput = message => (
+  message?.type === 'tool_group' || ['assistant', 'tool', 'reasoning'].includes(message?.role)
+)

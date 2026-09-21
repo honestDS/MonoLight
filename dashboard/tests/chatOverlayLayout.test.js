@@ -26,6 +26,15 @@ test('in-progress todo icon uses a defined blue theme color', async () => {
   )
 })
 
+test('expanded todo drawer adds an elevated shadow above the shared glass surface', async () => {
+  const todoStyles = await readDashboardSource('src/assets/css/SessionTodoPanel.scss')
+
+  assert.match(
+    todoStyles,
+    /\.session-todo-drawer\s*\{[\s\S]*?box-shadow:\s*var\(--glass-surface-shadow\),\s*0 18px 44px rgba\(var\(--color-slate-900-rgb\),\s*0\.14\);/
+  )
+})
+
 test('new message indicator is horizontally centered instead of right aligned', async () => {
   const chatStyles = await readDashboardSource('src/assets/css/chat.scss')
   const indicatorStart = chatStyles.indexOf('.new-message-indicator {')
@@ -81,11 +90,11 @@ test('sidebar collapse button uses sidebar palette without border or shadow', as
 
   assert.match(
     appStyles,
-    /\.sidebar-collapse-button\s*\{[\s\S]*?color:\s*var\(--color-sidebar-text\);[\s\S]*?background:\s*transparent;[\s\S]*?border:\s*none;[\s\S]*?box-shadow:\s*none;/
+    /\.sidebar-collapse-button\s*\{[\s\S]*?color:\s*var\(--color-sidebar-text\);[\s\S]*?border:\s*none;[\s\S]*?box-shadow:\s*none;/
   )
   assert.match(
     appStyles,
-    /\.sidebar-collapse-button:hover\s*\{[\s\S]*?color:\s*var\(--color-sidebar-title\);[\s\S]*?background:\s*var\(--color-sidebar-hover\);/
+    /\.sidebar-collapse-button:hover\s*\{[\s\S]*?color:\s*var\(--color-sidebar-active\);/
   )
 })
 
@@ -97,4 +106,22 @@ test('session item states use the same palette as the app sidebar', async () => 
   assert.match(chatStyles, /&\.active\s*\{[\s\S]*?&::before\s*\{[\s\S]*?background:\s*var\(--color-sidebar-active\);[\s\S]*?box-shadow:\s*0 0 12px var\(--color-sidebar-active-shadow\);/)
   assert.match(chatStyles, /\.session-title\s*\{[\s\S]*?color:\s*var\(--color-sidebar-text\);/)
   assert.match(chatStyles, /&\.active\s*\{[\s\S]*?\.session-title\s*\{[\s\S]*?color:\s*var\(--color-sidebar-active-text\);/)
+})
+
+test('app copyright lives in the sidebar footer without a standalone footer surface', async () => {
+  const [appSource, appStyles] = await Promise.all([
+    readDashboardSource('src/App.vue'),
+    readDashboardSource('src/assets/css/app.scss')
+  ])
+
+  assert.doesNotMatch(appSource, /class="app-footer"/)
+  assert.match(
+    appSource,
+    /class="sidebar-footer"[\s\S]*?class="sidebar-copyright"[\s\S]*?2026 MonoLight LLM Admin\. All rights reserved\./
+  )
+  assert.doesNotMatch(appStyles, /\.app-footer\s*\{/)
+
+  const copyrightRule = appStyles.match(/\.sidebar-copyright\s*\{([\s\S]*?)\}/)?.[1] || ''
+  assert.match(copyrightRule, /color:\s*var\(--color-sidebar-text\);/)
+  assert.doesNotMatch(copyrightRule, /background(?:-color)?:/)
 })
