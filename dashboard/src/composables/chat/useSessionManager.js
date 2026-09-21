@@ -5,6 +5,8 @@ import { chatApi } from '../../api'
 import { useDeleteConfirm } from '../useDeleteConfirm'
 import { PAGE_SIZE } from '../../constants'
 import i18n from '../../i18n'
+import { resolveHistoryRequest } from './historyPagination.js'
+import { formatSessionActivityTime } from './sessionActivity.js'
 import { createSessionListLoadingPoller } from './sessionListLoading.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
@@ -102,27 +104,20 @@ export function useSessionManager() {
     const requestedGeneration = sessionGeneration
     historyLoading.value = true
     try {
-      const pages = []
-      const pagesToLoad = Math.max(1, pageCount)
-
-      for (let index = 0; index < pagesToLoad && hasMore.value; index += 1) {
-        const page = currentPage.value
-        const res = await chatApi.sessionsHistory(requestedSessionId, page, PAGE_SIZE)
-        if (requestedGeneration !== sessionGeneration || requestedSessionId !== currentSessionId.value) {
-          return []
-        }
-
-        const historyData = res.data?.data || []
-        if (historyData.length > 0) {
-          pages.unshift(historyData)
-          currentPage.value = page + 1
-        }
-        if (historyData.length < PAGE_SIZE) {
-          hasMore.value = false
-        }
+      const request = resolveHistoryRequest(currentPage.value, pageCount, PAGE_SIZE)
+      const res = await chatApi.sessionsHistory(requestedSessionId, request.page, request.size)
+      if (requestedGeneration !== sessionGeneration || requestedSessionId !== currentSessionId.value) {
+        return []
       }
 
-      return pages.flat()
+      const historyData = res.data?.data || []
+      if (historyData.length > 0) {
+        currentPage.value = request.nextPage
+      }
+      if (historyData.length < request.size) {
+        hasMore.value = false
+      }
+      return historyData
     } catch (err) {
       if (requestedGeneration === sessionGeneration && requestedSessionId === currentSessionId.value) {
         ElMessage.error(err.message || t('chat.load_history_failed'))
@@ -171,9 +166,7 @@ export function useSessionManager() {
   ) => {
     if (!sessionId) return
     
-    // 格式化当前时间为 YYYY-MM-DD HH:mm:ss (与后端保持一致)
-    const now = new Date()
-    const lastActive = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+    const lastActive = formatSessionActivityTime()
 
     try {
       const res = await chatApi.generateTitle({

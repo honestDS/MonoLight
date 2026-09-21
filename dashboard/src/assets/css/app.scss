@@ -489,9 +489,8 @@ body {
 }
 .el-main.app-main.app-main--chat {
   min-height: 0;
-  padding: 14px;
+  padding: 0;
   overflow: hidden;
-  scrollbar-gutter: stable;
 }
 
 @media (max-width: 1180px) {
