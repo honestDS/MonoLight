@@ -5,20 +5,23 @@
 ## 顶层目录
 
 ```text
-Monoligh/
+Monolight/
 ├── app/                    # FastAPI 后端源码
 ├── dashboard/              # Vue 管理与聊天前端源码
 ├── data/                   # 运行期持久化数据
+├── docs/                   # 项目展示图片等文档资源
 ├── scripts/                # 数据库迁移与维护脚本
 ├── temp/                   # 运行期临时文件
 ├── tests/                  # 后端自动化测试
+├── .github/                # GitHub Issue 模板与仓库协作配置
 ├── .env                    # 本地运行配置
 ├── .gitattributes          # Git 属性配置
 ├── .gitignore              # Git 忽略配置
 ├── ARCHITECTURE.md         # 项目架构说明
 ├── DEVELOPMENT_GUIDE.md    # 开发规范
 ├── LICENSE                 # 项目许可证
-├── README.md               # 项目说明
+├── README.md               # 英文项目说明
+├── README_ZH.md            # 中文项目说明
 ├── logo.jpg                # 项目 Logo
 ├── main.py                 # Web 应用入口
 ├── start.py                # 多进程启动协调
@@ -33,6 +36,7 @@ Monoligh/
 
 ```text
 app/
+├── __init__.py             # 应用包标识
 ├── static/
 │   └── dashboard/           # 随发布包分发并由 FastAPI 托管的 Vue 生产构建产物
 ├── adapters/               # 外部对话与消息平台适配
@@ -149,6 +153,7 @@ app/core/
 ├── session_notifier.py     # 会话事件通知
 ├── session_source.py       # 会话来源信息
 ├── setup.py                # 系统初始化应用服务
+├── setup_session.py        # 初始化会话令牌签发与校验
 ├── system_secrets.py       # 系统密钥管理
 └── validation.py           # 通用输入校验
 ```
@@ -469,7 +474,8 @@ app/core/dispatchers/
 app/core/embedding/
 ├── __init__.py             # 嵌入能力导出
 ├── common.py               # 嵌入共用组件
-└── knowledge_base.py       # 知识库嵌入服务
+├── knowledge_base.py       # 知识库嵌入服务
+└── knowledge_base_runtime.py # 知识库当前生效嵌入与集合快照解析
 
 app/core/rerank/
 ├── __init__.py             # 重排能力导出
@@ -508,20 +514,56 @@ app/core/tools/
 
 app/core/utils/
 ├── dispatcher/             # 对话分发辅助
+│   ├── __init__.py         # 分发辅助包标识
+│   ├── append_new_user_messages.py # 追加当前轮新增用户消息
+│   ├── channel_call.py     # 模型渠道调用与回退
+│   ├── context_summary_checkpoint.py # 上下文总结检查点应用
+│   ├── fetch_and_merge_new_user_messages.py # 拉取并合并新增用户消息
+│   ├── handle_parallel_tool_limit.py # 并行工具调用上限处理
+│   ├── helpers.py          # 分发共用辅助
+│   ├── inject_system_prompt.py # 系统提示构建与注入
+│   ├── mark_initial_message_processed.py # 初始消息处理状态更新
+│   ├── markdown_instruction.py # 运行时文本与输出指令组装
+│   ├── prepare_messages.py # 模型请求消息准备
+│   ├── process_markdown_response.py # Markdown 响应处理
+│   ├── process_single_tool.py # 单工具校验与执行
+│   ├── save_assistant_message.py # 助手消息持久化
+│   ├── save_initial_message.py # 初始消息持久化
+│   ├── save_message.py     # 通用消息持久化
+│   ├── save_tool_response.py # 工具结果持久化
+│   ├── session_todo_snapshot.py # Todo 快照持久化与模型上下文恢复
+│   ├── truncate_tool_result.py # 工具结果预算截断
+│   ├── user_input_batch.py # 用户输入批次结构
+│   └── validate_profile_and_cfg.py # Profile 配置校验
 ├── context_summary/        # 上下文总结辅助
+│   ├── __init__.py         # 上下文总结能力导出
+│   ├── boundary.py         # 总结触发边界解析
+│   ├── cleanup.py          # 总结阶段与过期数据清理
+│   ├── common.py           # 总结共用状态、统计与选择辅助
+│   ├── history.py          # 持久化历史与摘要片段读取统计
+│   ├── merge.py            # 已完成摘要片段分组与合并
+│   ├── model_call.py       # 上下文总结模型调用
+│   ├── pipeline.py         # 有界分片总结管线
+│   ├── reduction.py        # 分层归约与摘要精炼
+│   ├── selection.py        # 上下文总结模型选择
+│   ├── service.py          # 总结生命周期与持久化协调
+│   ├── snapshot.py         # 总结快照构建与历史轮次读取
+│   ├── split.py            # 超长消息与轮次分片
+│   ├── stage.py            # 总结阶段生成与状态管理
+│   └── user_message_block.py # 被总结覆盖的用户消息块处理
 ├── assistant_files.py      # 助手文件辅助
 ├── background_task_result.py # 后台任务结果辅助
 ├── channel_profile_sync.py # 渠道与 Profile 同步辅助
 ├── config.py               # 配置读取辅助
 ├── context_budget.py       # 上下文预算辅助
 ├── context_messages.py     # 上下文消息辅助
+├── database_integrity.py   # 数据库完整性错误识别辅助
 ├── http_proxy.py           # HTTP 代理辅助
 ├── message_assembler.py    # 消息组装辅助
 ├── message_parser.py       # 消息解析辅助
 ├── model_request_headers.py # 模型请求头辅助
 ├── operation_directories.py # 文件系统目录辅助
 ├── request_token_baseline.py # 请求令牌统计辅助
-├── session_todo_snapshot.py # Todo 快照读取、模型上下文后缀持久化、总结隔离与请求重挂载
 ├── session.py              # 会话辅助
 ├── system.py               # 系统信息辅助
 ├── text_splitter.py        # 文本切分辅助
@@ -577,6 +619,7 @@ app/models/
 
 ```text
 app/providers/
+├── __init__.py             # Provider 包标识
 ├── database/
 │   ├── __init__.py         # 数据库能力导出
 │   ├── bootstrap.py        # 数据库初始化
@@ -673,6 +716,7 @@ dashboard/src/views/
 ├── RealTimeLogs.vue        # 实时日志页面
 ├── ScheduledTasksView.vue  # 定时任务管理页面
 ├── SetupView.vue           # 系统初始化页面
+├── UnderConstructionView.vue # 通用建设中占位页面
 └── UsersView.vue           # 用户管理页面
 ```
 
