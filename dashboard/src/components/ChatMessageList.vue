@@ -930,11 +930,13 @@ const handleVirtualScroll = (offset) => {
     (offsetChanged && !isProgrammaticScrollInProgress())
   )
   const atBottom = updateMessageListBottomState(currentOffset)
-  if (userScrolled) setOutputFollowState(atBottom)
+  if (userScrolled) {
+    setOutputFollowState(atBottom)
+    scrollListeners.forEach(listener => listener(offset))
+  }
   if (hasValidOffset) lastVirtualScrollOffset = currentOffset
 
   refreshLatestLlmMessageVisibility()
-  scrollListeners.forEach(listener => listener(offset))
   scheduleUnreadVisibilityCheck()
 }
 const captureScrollAnchor = () => {

@@ -7,6 +7,7 @@ import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
 import { createContextSummaryTracker } from './contextSummaryTracker.js'
 import { createHistoryMergeTracker } from './historyMergeTracker.js'
+import { withSessionActivity } from './sessionActivity.js'
 import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
 import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMessages } from './auditConfirmationState.js'
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
@@ -286,16 +287,17 @@ export function useChatSession() {
   }
   const selectNewSession = (session) => {
     historyMergeTracker.invalidate()
-    const sessionIndex = sessionManager.sessions.value.findIndex(item => item.session_id === session.session_id)
+    const activeSession = withSessionActivity(session)
+    const sessionIndex = sessionManager.sessions.value.findIndex(item => item.session_id === activeSession.session_id)
     if (sessionIndex === -1) {
-      sessionManager.sessions.value.unshift(session)
+      sessionManager.sessions.value.unshift(activeSession)
     } else {
       sessionManager.sessions.value[sessionIndex] = {
         ...sessionManager.sessions.value[sessionIndex],
-        ...session
+        ...activeSession
       }
     }
-    sessionManager.selectSession(session, null, false, false)
+    sessionManager.selectSession(activeSession, null, false, false)
   }
 
   const applyLifecycleEvent = (updateMessages, event, isCurrentRequestSession) => {

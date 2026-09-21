@@ -594,7 +594,7 @@ const handleCreateNewSession = () => {
   createNewSession()
 }
 
-const handleWelcomeExitTransitionEnd = (event) => {
+const handleWelcomeExitTransitionEnd = async (event) => {
   if (!shouldReleaseChatContent({
     deferredSessionId: deferredContentSessionId.value,
     currentSessionId: currentSessionId.value,
@@ -602,6 +602,8 @@ const handleWelcomeExitTransitionEnd = (event) => {
   })) return
 
   deferredContentSessionId.value = null
+  await nextTick()
+  await messageList.value?.scrollToBottom('auto')
 }
 
 const guidanceSubmitting = ref(false)
