@@ -86,8 +86,12 @@ test('app sidebar menu states mirror session item geometry using sidebar palette
 })
 
 test('sidebar collapse button uses sidebar palette without border or shadow', async () => {
+  const appSource = await readDashboardSource('src/App.vue')
   const appStyles = await readDashboardSource('src/assets/css/app.scss')
 
+  assert.match(appSource, /class="sidebar-panel-icon"[\s\S]*?<rect[\s\S]*?<path d="M9 3v18"/)
+  assert.match(appSource, /v-if="isSidebarCollapsed"[\s\S]*?class="sidebar-logo-expand-button"[\s\S]*?@click="handleSidebarToggle"/)
+  assert.match(appSource, /v-if="!isSidebarCollapsed"[\s\S]*?class="sidebar-collapse-button"/)
   assert.match(
     appStyles,
     /\.sidebar-collapse-button\s*\{[\s\S]*?color:\s*var\(--color-sidebar-text\);[\s\S]*?border:\s*none;[\s\S]*?box-shadow:\s*none;/
@@ -95,6 +99,14 @@ test('sidebar collapse button uses sidebar palette without border or shadow', as
   assert.match(
     appStyles,
     /\.sidebar-collapse-button:hover\s*\{[\s\S]*?color:\s*var\(--color-sidebar-active\);/
+  )
+  assert.match(
+    appStyles,
+    /\.sidebar-logo-expand-button:hover \.logo-image,[\s\S]*?\.sidebar-logo-expand-button:focus-visible \.logo-image\s*\{[\s\S]*?opacity:\s*0;/
+  )
+  assert.match(
+    appStyles,
+    /\.sidebar-logo-expand-button:hover \.sidebar-logo-expand-icon,[\s\S]*?\.sidebar-logo-expand-button:focus-visible \.sidebar-logo-expand-icon\s*\{[\s\S]*?opacity:\s*1;/
   )
 })
 
@@ -124,5 +136,8 @@ test('app copyright lives in the sidebar footer without a standalone footer surf
 
   const copyrightRule = appStyles.match(/\.sidebar-copyright\s*\{([\s\S]*?)\}/)?.[1] || ''
   assert.match(copyrightRule, /color:\s*var\(--color-sidebar-text\);/)
+  assert.match(copyrightRule, /border-top:\s*1px solid var\(--color-sidebar-border\);/)
+  assert.match(copyrightRule, /margin-top:\s*10px;/)
+  assert.match(copyrightRule, /padding-top:\s*10px;/)
   assert.doesNotMatch(copyrightRule, /background(?:-color)?:/)
 })
