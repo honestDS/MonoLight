@@ -10,6 +10,10 @@ const chatStyles = readFileSync(
   new URL('../src/assets/css/chat.scss', import.meta.url),
   'utf8'
 )
+const chatViewSource = readFileSync(
+  new URL('../src/views/ChatView.vue', import.meta.url),
+  'utf8'
+)
 
 test('chat page fills app main without a reserved scrollbar gutter', () => {
   const chatMainRule = appStyles.match(/\.el-main\.app-main\.app-main--chat\s*\{([\s\S]*?)\}/)?.[1] || ''
@@ -31,5 +35,16 @@ test('session list and conversation share one container with a light divider', (
   assert.match(
     chatStyles,
     /\.chat-main\s*\{[\s\S]*?border:\s*none;[\s\S]*?border-radius:\s*var\(--radius-none\);[\s\S]*?box-shadow:\s*none;/
+  )
+})
+
+test('session groups animate measured height for both collapse and expand', () => {
+  assert.match(chatViewSource, /<Transition[\s\S]*?@enter="handleSessionGroupEnter"[\s\S]*?@leave="handleSessionGroupLeave"/)
+  assert.match(chatViewSource, /v-show="!collapsedGroups\.has\(group\.key\)"[\s\S]*?class="session-group-body"/)
+  assert.match(chatViewSource, /const handleSessionGroupEnter = \(element\) => \{[\s\S]*?element\.scrollHeight/)
+  assert.match(chatViewSource, /const handleSessionGroupLeave = \(element\) => \{[\s\S]*?element\.style\.height = '0px'/)
+  assert.match(
+    chatStyles,
+    /\.session-group-body\s*\{[\s\S]*?overflow:\s*hidden;[\s\S]*?transition:\s*height 0\.28s ease, opacity 0\.2s ease;/
   )
 })

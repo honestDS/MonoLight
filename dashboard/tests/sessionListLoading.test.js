@@ -13,6 +13,14 @@ test('session list renders a loading indicator from the backend is_loading field
   assert.match(chatViewSource, /v-if="session\.is_loading"/)
 })
 
+test('session refresh uses the Element Plus icon and only rotates while loading', () => {
+  assert.match(chatViewSource, /class="sidebar-icon refresh-icon"[\s\S]*?:class="\{ loading: sessionsLoading \}"/)
+  assert.match(chatViewSource, /<Refresh class="refresh-icon-glyph" aria-hidden="true" \/>/)
+  assert.match(chatViewSource, /\bRefresh\b[^\n]*from '@element-plus\/icons-vue'/)
+  assert.match(chatStyles, /&\.loading \.refresh-icon-glyph\s*\{\s*animation: refresh-icon-rotate 1s linear infinite;/)
+  assert.doesNotMatch(chatStyles, /assets\/svg\/refresh\.svg/)
+})
+
 test('session loading indicator is rendered beside the session title instead of the delete action', () => {
   const titleStart = chatViewSource.indexOf('class="session-title"')
   const titleEnd = chatViewSource.indexOf('</div>', titleStart)
