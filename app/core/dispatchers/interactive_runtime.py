@@ -140,7 +140,9 @@ async def dispatch_interactive(
         while True:
             try:
                 state.cfg = await validate_profile_and_cfg(db, profile)
-                state.memory_enabled = bool(getattr(getattr(state.cfg, "memory", None), "enabled", False))
+                memory_config = getattr(state.cfg, "memory", None)
+                state.memory_enabled = bool(getattr(memory_config, "enabled", False))
+                state.memory_precheck_enabled = state.memory_enabled and bool(getattr(memory_config, "precheck_enabled", True))
                 if not state.memory_enabled:
                     state.checkpoint_state.memory_recall_boundary_message_id = None
                     state.checkpoint_state.memory_recall_status = None
@@ -220,7 +222,7 @@ async def dispatch_interactive(
                         if state.memory_enabled:
                             update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
 
-                    if state.memory_enabled and memory_recall_needs_precheck(state.checkpoint_state):
+                    if state.memory_precheck_enabled and memory_recall_needs_precheck(state.checkpoint_state):
                         state.checkpoint_state.memory_recall_status = "pending"
                         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
                         memory_recall_result = await run_memory_recall_precheck(
@@ -245,8 +247,6 @@ async def dispatch_interactive(
                                 stream_event_callback=stream_event_callback,
                                 show_tool_calls=show_tool_calls,
                                 expose_tool_call_content=expose_tool_call_content,
-                                context_summary_callback=context_summary_lifecycle_callback,
-                                context_summary_checker=context_summary_work_validity_checker,
                                 allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
                                 latest_llm_request_metadata=state.latest_llm_request_metadata,
                                 total_output_tokens=state.checkpoint_state.total_output_tokens,

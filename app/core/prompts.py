@@ -24,6 +24,10 @@ LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT = """[Long-term memory recall correctio
 Return exactly one structured tool call to manage_memory_and_knowledge. The query is a concise, normalized long-term-memory retrieval expression containing only the entities, topics, and stable background relevant to the current user request. The knowledge_query is a separate concise document-retrieval query that preserves the factual question and document-search intent for managed knowledge and user knowledge-base documents. Do not copy the full user message into either field, and do not reuse the stable-memory query when the document query should be phrased differently. Remove request actions such as remember and save from query. Do not output a keyword list or add unconfirmed or inferred facts. Return no assistant prose or refusal. The operation must be recall. Do not call create, update, or delete, and do not invoke any other operation or tool.
 [End long-term memory recall correction]"""
 
+LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT = """[Memory lookup before reply]
+Return exactly one manage_memory_and_knowledge tool call with operation recall. Build concise query and knowledge_query values only from the supplied summary, recent conversation, and current user message. Return no assistant prose and do not perform any write operation.
+[End memory lookup before reply]"""
+
 BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT = "The background task has completed, but the proactive reply attempted unsupported tool calls and they were ignored."
 
 BACKGROUND_TASK_QUEUED_PROMPT = "Tool {tool_name} has been queued as a background task and will reply proactively after completion."

@@ -41,6 +41,8 @@ export default {
   long_term_memory_settings: '长期记忆设置',
   long_term_memory_enabled: '启用长期记忆',
   long_term_memory_enabled_hint: '开启后，系统会在对话中检索并使用当前用户的长期记忆。',
+  memory_precheck_enabled: '记忆预检',
+  memory_precheck_enabled_hint: '启用后，系统会在开始回答前先查找与当前消息有关的长期记忆、聊天记录和知识内容。关闭后会更快开始回答，但可能少用到这些已有内容。',
   memory_storage_not_configured: '长期记忆存储尚未配置，相关设置保存后暂不会生效。',
   memory_settings_unavailable: '当前用户的记忆设置加载失败，已禁用自动整理设置和保存，请刷新后重试。',
   memory_top_k: '记忆返回数量',

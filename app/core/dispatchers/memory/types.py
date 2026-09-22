@@ -8,7 +8,6 @@ from app.models.message import InternalMessage
 
 MemoryRecallStatus = Literal["completed", "failed"]
 StreamEventCallback = Callable[[dict[str, Any]], Awaitable[None]]
-ContextSummaryCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -33,8 +32,6 @@ class MemoryRecallContext:
     stream_event_callback: StreamEventCallback | None = None
     show_tool_calls: bool = True
     expose_tool_call_content: bool = True
-    context_summary_callback: ContextSummaryCallback | None = None
-    context_summary_checker: Callable[[], Awaitable[bool]] | None = None
     latest_llm_request_metadata: dict[str, Any] | None = None
     total_output_tokens: int = 0
     session_total_output_tokens: int | None = None
@@ -94,7 +91,6 @@ def build_result(
 
 
 __all__ = [
-    "ContextSummaryCallback",
     "MemoryRecallContext",
     "MemoryRecallPrecheckResult",
     "MemoryRecallStatus",

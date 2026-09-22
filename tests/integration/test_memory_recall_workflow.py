@@ -208,11 +208,6 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", memory_recall_session_factory)
     monkeypatch.setattr(longterm_memory_module, "AsyncSessionLocal", memory_recall_session_factory)
 
-    async def identity_summary_checkpoint(_db, **kwargs):
-        return kwargs["messages"]
-
-    monkeypatch.setattr(memory_request_module, "apply_context_summary_checkpoint", identity_summary_checkpoint)
-
     embedding_calls = 0
     vector_query_calls = 0
 
@@ -257,6 +252,10 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         nonlocal llm_calls
         llm_calls += 1
         assert [tool["function"]["name"] for tool in kwargs["tools"]] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME]
+        assert kwargs["max_tokens"] == 256
+        assert kwargs["temperature"] == 0.0
+        assert "top_p" not in kwargs
+        assert "reasoning_effort" not in kwargs
         return SimpleNamespace(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
@@ -329,6 +328,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         first_context = build_context(db)
         first = await run_memory_recall_precheck(first_context)
         assert first.status == "completed"
+        assert first.chat_params == chat_params
         assert [message.role for message in first.turn_messages] == [MessageRole.ASSISTANT, MessageRole.TOOL]
         tool_payload = json.loads(first.turn_messages[-1].content)
         assert tool_payload["items"][0]["memory_id"] == memory_id

@@ -61,6 +61,7 @@ export const defaultProfileConfigs = () => ({
   },
   memory: {
     enabled: false,
+    precheck_enabled: true,
     embedding_channel_id: null,
     embedding_model_id: null,
     top_k: 5,
