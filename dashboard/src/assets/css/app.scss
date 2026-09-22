@@ -1,16 +1,16 @@
-﻿/* 鍏ㄥ眬鍙橀噺 */
+/* 全局变量 */
 :root {
   --el-font-size-base: 15px !important;
 }
 
-/* 鍩虹鏍峰紡 */
+/* 基础样式 */
 body {
   margin: 0;
   background-color: var(--color-app-page-bg);
-  font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "寰蒋闆呴粦", Arial, sans-serif;
+  font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", Arial, sans-serif;
 }
 
-/* 渚ц竟鏍?*/
+/* 侧边栏 */
 .el-aside.sidebar {
   overflow: visible !important;
 }
@@ -18,15 +18,16 @@ body {
 .sidebar {
   background: var(--color-sidebar-bg) !important;
   position: relative;
+  z-index: 10;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--color-sidebar-border) !important;
+  border-right: 1px solid var(--color-sidebar-separator) !important;
   overflow: visible;
-  box-shadow: none !important;
+  box-shadow: 6px 0 18px var(--color-sidebar-shadow) !important;
   transition: width 0.22s ease;
 }
 
-/* Logo 鍖哄煙 */
+/* Logo 区域 */
 .logo-container {
   height: 85px;
   padding: 22px 18px 20px;
@@ -155,7 +156,7 @@ body {
   opacity: 1;
 }
 
-/* 鑿滃崟 */
+/* 菜单 */
 .side-menu {
   --el-menu-bg-color: transparent;
   --el-menu-text-color: var(--color-sidebar-text);
@@ -204,7 +205,7 @@ body {
     font-size: 18px;
   }
 
-  /* 鑿滃崟椤规牱寮?*/
+  /* 菜单项样式 */
   .el-menu-item,
   .el-sub-menu__title {
     position: relative;
@@ -231,7 +232,7 @@ body {
     color: var(--color-sidebar-title) !important;
   }
 
-  /* 瀛愯彍鍗曟牱寮?*/
+  /* 子菜单样式 */
   .el-sub-menu {
     .el-sub-menu__title {
       &:hover {
@@ -254,7 +255,7 @@ body {
     background-color: transparent !important;
   }
 
-  /* 瀛愯彍鍗曢」缂╄繘 */
+  /* 子菜单项缩进 */
   .el-menu--inline .el-menu-item {
     padding-left: 30px !important;
     color: var(--color-slate-500);
@@ -262,7 +263,7 @@ body {
   }
 }
 
-/* 渚ц竟鏍忓簳閮ㄥ尯鍩?*/
+/* 侧边栏底部区域 */
 .sidebar-footer {
   padding: 10px 10px 12px;
   border-top: 1px solid var(--color-sidebar-border);
@@ -294,7 +295,7 @@ body {
   display: none;
 }
 
-/* 搴曢儴鑿滃崟 */
+/* 底部菜单 */
 .side-menu-footer {
   --el-menu-bg-color: transparent;
   --el-menu-text-color: var(--color-sidebar-text);
@@ -414,7 +415,7 @@ body {
   box-shadow: 0 0 12px var(--color-sidebar-active-shadow);
 }
 
-/* 鍏ㄥ眬甯冨眬 */
+/* 全局布局 */
 .app-wrapper {
   --sidebar-expanded-width: 236px;
   --sidebar-collapsed-width: 72px;
@@ -632,6 +633,6 @@ body {
   padding-left: 8px;
 }
 
-/* 杩囨浮鍔ㄧ敾 */
+/* 过渡动画 */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }

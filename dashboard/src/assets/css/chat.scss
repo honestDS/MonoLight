@@ -71,13 +71,22 @@
         }
 
         &.loading {
-          animation: refresh-icon-rotate 1s linear infinite;
           pointer-events: none;
         }
       }
 
       .refresh-icon {
-        // 复用 .sidebar-icon 基础样式
+        &.loading .refresh-icon-glyph {
+          animation: refresh-icon-rotate 1s linear infinite;
+        }
+
+        .refresh-icon-glyph {
+          display: block;
+          width: 16px;
+          height: 16px;
+          flex: 0 0 16px;
+          transform-origin: 50% 50%;
+        }
       }
     }
   }
@@ -104,7 +113,7 @@
     justify-content: space-between;
     gap: 8px;
     margin: 10px 5px 5px;
-    padding: 5px 8px;
+    padding: 8px;
     font-size: 11px;
     font-weight: 650;
     color: var(--color-slate-400);
@@ -148,6 +157,8 @@
 
   .session-group-body {
     overflow: hidden;
+    opacity: 1;
+    transition: height 0.28s ease, opacity 0.2s ease;
   }
 
   .session-item {
@@ -329,6 +340,11 @@
   @media (prefers-reduced-motion: reduce) {
     .session-loading-indicator {
       animation: none;
+    }
+
+    .session-group-body,
+    .session-group-title .session-group-chevron {
+      transition: none;
     }
   }
 
@@ -1041,7 +1057,7 @@
   }
 
   100% {
-    transform: rotate(360deg);
+    transform: rotate(-360deg);
   }
 }
 
