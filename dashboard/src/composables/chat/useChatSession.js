@@ -245,29 +245,6 @@ export function useChatSession() {
     const source = currentSession.value?.source
     return Boolean(source && !['http', 'ws'].includes(source))
   })
-  const externalSessionAutoPullSessionIds = ref(new Set())
-  const externalSessionAutoPullEnabled = computed({
-    get: () => {
-      const sessionId = sessionManager.currentSessionId.value
-      return Boolean(
-        sessionId
-        && isCurrentSessionReadOnly.value
-        && externalSessionAutoPullSessionIds.value.has(sessionId)
-      )
-    },
-    set: (enabled) => {
-      const sessionId = sessionManager.currentSessionId.value
-      if (!sessionId || !isCurrentSessionReadOnly.value) return
-
-      const nextSessionIds = new Set(externalSessionAutoPullSessionIds.value)
-      if (enabled) {
-        nextSessionIds.add(sessionId)
-      } else {
-        nextSessionIds.delete(sessionId)
-      }
-      externalSessionAutoPullSessionIds.value = nextSessionIds
-    }
-  })
 
   // 3. 通信层
   const transport = useChatTransport()
@@ -504,20 +481,13 @@ export function useChatSession() {
   let backgroundTaskSessionId = null
   let httpHistorySyncVersion = 0
 
-  const canSyncCurrentSessionHistory = () => (
-    (!isCurrentSessionReadOnly.value && transport.transportMode.value === 'http')
-    || (isCurrentSessionReadOnly.value && externalSessionAutoPullEnabled.value)
-  )
+  const canSyncCurrentSessionHistory = () => !isCurrentSessionReadOnly.value && transport.transportMode.value === 'http'
 
   const shouldContinuouslySyncCurrentSessionHistory = () => {
     const sessionId = sessionManager.currentSessionId.value
-    return Boolean(sessionId) && (
-      (isCurrentSessionReadOnly.value && externalSessionAutoPullEnabled.value) || (
-        !isCurrentSessionReadOnly.value
-        && transport.transportMode.value === 'http'
-        && backgroundTaskSessionId === sessionId
-      )
-    )
+    return Boolean(sessionId)
+      && canSyncCurrentSessionHistory()
+      && backgroundTaskSessionId === sessionId
   }
 
   const stopHttpHistorySync = () => {
@@ -612,7 +582,7 @@ export function useChatSession() {
   }
 
   watch(
-    () => [transport.transportMode.value, sessionManager.currentSessionId.value, isCurrentSessionReadOnly.value, externalSessionAutoPullEnabled.value],
+    () => [transport.transportMode.value, sessionManager.currentSessionId.value, isCurrentSessionReadOnly.value],
     async ([, sessionId]) => {
       stopHttpHistorySync()
       if (!canSyncCurrentSessionHistory() || !sessionId) return
@@ -1555,7 +1525,6 @@ export function useChatSession() {
     currentSessionShowReasoning,
     currentTodoPlan,
     isCurrentSessionReadOnly,
-    externalSessionAutoPullEnabled,
     
     // 状态 - 通信相关
     transportMode: transport.transportMode,
