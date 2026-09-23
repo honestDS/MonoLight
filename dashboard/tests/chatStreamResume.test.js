@@ -3,11 +3,13 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
+  applyResumedTurnEnd,
   createSessionReconnectHandler,
   getInitialResumeLoading,
   resumeSessionStream,
   shouldResumeSessionStream
 } from '../src/composables/chat/streamResume.js'
+import { mergeAssistantResponseIntoList } from '../src/utils/assistantResponseIdentity.js'
 
 const useChatSessionSource = readFileSync(
   new URL('../src/composables/chat/useChatSession.js', import.meta.url),
@@ -197,6 +199,40 @@ test('session reconnect handler resumes with persisted history cursors only', as
   assert.deepEqual(resumeArgs, [session, [{ id: 0 }, { id: 7 }]])
 })
 
+test('resume turn_end binds a streamed reply to its persisted message before history refresh', () => {
+  const streamedReply = {
+    id: 'assistant-response-1',
+    role: 'assistant',
+    content: 'final reply',
+    response_id: 'response-1',
+    request_id: 'request-1',
+    work_id: 7,
+    turn: 2
+  }
+
+  const bridged = applyResumedTurnEnd([streamedReply], {
+    type: 'turn_end',
+    content: 'final reply',
+    message_id: 91,
+    response_id: 'response-1',
+    work_id: 7,
+    turn: 2,
+    finish_reason: 'stop'
+  }, 'request-1')
+
+  assert.equal(bridged.length, 1)
+  assert.equal(bridged[0].db_id, '91')
+  assert.equal(bridged[0].response_id, 'response-1')
+
+  const mergedWithHistory = mergeAssistantResponseIntoList(bridged, {
+    id: 91,
+    role: 'assistant',
+    content: 'final reply'
+  })
+  assert.equal(mergedWithHistory.length, 1)
+  assert.equal(mergedWithHistory[0].content, 'final reply')
+})
+
 test('useChatSession wires and clears the session reconnect handler', () => {
   assert.match(
     useChatSessionSource,
@@ -213,5 +249,9 @@ test('useChatSession wires and clears the session reconnect handler', () => {
   assert.doesNotMatch(
     useChatSessionSource,
     /const selectSession\s*=\s*\(session\)\s*=>\s*\{[\s\S]*?chatState\.loading\.value\s*=\s*shouldResumeSessionStream/
+  )
+  assert.match(
+    useChatSessionSource,
+    /resumeSelectedSessionStream[\s\S]*?onComplete\s*:\s*\(data[\s\S]*?eventType[\s\S]*?eventType\s*===\s*['"]turn_end['"][\s\S]*?applyResumedTurnEnd/
   )
 })
