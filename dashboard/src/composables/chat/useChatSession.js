@@ -7,7 +7,7 @@ import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
 import { createContextSummaryTracker } from './contextSummaryTracker.js'
 import { createHistoryMergeTracker } from './historyMergeTracker.js'
-import { createSessionReconnectHandler, resumeSessionStream, getInitialResumeLoading } from './streamResume.js'
+import { applyResumedTurnEnd, createSessionReconnectHandler, resumeSessionStream, getInitialResumeLoading } from './streamResume.js'
 import { withSessionActivity } from './sessionActivity.js'
 import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
 import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMessages } from './auditConfirmationState.js'
@@ -757,7 +757,13 @@ export function useChatSession() {
         if (!currentSessionShowToolCalls.value) return
         messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestId, workId)
       },
-      onComplete: () => mergeResumedHistory(),
+      onComplete: (data, _thinkingId, requestId, eventType) => {
+        if (!isCurrentSession()) return
+        if (eventType === 'turn_end') {
+          chatState.messages.value = applyResumedTurnEnd(chatState.messages.value, data, requestId)
+        }
+        mergeResumedHistory()
+      },
       onResumeComplete: () => {
         refreshSessionLoadingState()
         mergeResumedHistory()
