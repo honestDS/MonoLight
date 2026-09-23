@@ -124,7 +124,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         base_url: str,
         model_id: str,
         messages: list[InternalMessage],
-        temperature: float = 0.7,
+        temperature: float | None = None,
         max_tokens: int = 0,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
@@ -138,9 +138,11 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         payload = {
             "model": model_id,
             "messages": self.to_provider(messages),
-            "temperature": temperature,
             "stream": False,
         }
+
+        if temperature is not None:
+            payload["temperature"] = temperature
 
         if tools:
             payload["tools"] = tools
@@ -173,7 +175,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         base_url: str,
         model_id: str,
         messages: list[InternalMessage],
-        temperature: float = 0.7,
+        temperature: float | None = None,
         max_tokens: int = 0,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
@@ -186,10 +188,11 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         payload = {
             "model": model_id,
             "messages": self.to_provider(messages),
-            "temperature": temperature,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice

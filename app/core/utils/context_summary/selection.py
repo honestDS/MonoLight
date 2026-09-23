@@ -6,6 +6,7 @@ from app.core.channel_router import select_channel
 from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.llm_request_params import build_context_summary_generation_params
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import ChannelConfig, ModelUsage, resolve_model_protocol
 
@@ -21,7 +22,7 @@ class ContextSummaryModelSnapshot:
     priority: int
     context_window_tokens: int
     max_output_tokens: int
-    temperature: float
+    temperature: float | None
     top_p: float | None
     safety_margin_tokens: int
     input_budget_tokens: int
@@ -55,25 +56,30 @@ async def select_context_summary_model(
 
     channel, model_entry, rule = selection
     chat_params = resolve_chat_params(model_entry, channel_config)
+    protocol = resolve_model_protocol(model_entry)
     context_window_tokens = chat_params["context_window_k"] * CONTEXT_WINDOW_TOKENS_PER_K
     task_max_output_tokens = min(1024, max(256, context_window_tokens // 16))
-    configured_max_tokens = chat_params["max_tokens"]
-    max_output_tokens = min(task_max_output_tokens, configured_max_tokens) if configured_max_tokens > 0 else task_max_output_tokens
+    generation_params = build_context_summary_generation_params(
+        model_entry=model_entry,
+        protocol=protocol,
+        max_output_tokens=task_max_output_tokens,
+    )
+    max_output_tokens = generation_params["max_tokens"]
     normalized_safety_margin = max(safety_margin_tokens, 0)
 
     return ContextSummaryModelSnapshot(
         channel_id=channel.id,
         channel_name=channel.name,
         model_id=model_entry["model_id"],
-        protocol=resolve_model_protocol(model_entry),
+        protocol=protocol,
         base_url=channel.base_url,
         api_key=channel.get_decrypted_api_key(),
         priority=rule.priority,
         context_window_tokens=context_window_tokens,
         max_output_tokens=max_output_tokens,
-        temperature=chat_params["temperature"],
-        top_p=chat_params["top_p"],
-        reasoning_effort=chat_params.get("reasoning_effort"),
+        temperature=generation_params.get("temperature"),
+        top_p=generation_params.get("top_p"),
+        reasoning_effort=generation_params.get("reasoning_effort"),
         safety_margin_tokens=normalized_safety_margin,
         input_budget_tokens=max(
             1,

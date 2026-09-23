@@ -44,8 +44,9 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(
                 "max_tokens": configured_max_tokens,
                 "temperature": 0.35,
                 "top_p": 0.8,
+                "reasoning_effort": "max",
                 "usage": "CHAT",
-                "protocol": "OPENAI",
+                "protocol": "OPENAI_RESPONSES",
                 "advanced_settings": {
                     "custom_headers": {"User-Agent": "SummaryClient/1.0"},
                 },
@@ -68,14 +69,15 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(
         channel_id=7,
         channel_name="summary-channel",
         model_id="summary-model",
-        protocol="openai",
+        protocol="openai_responses",
         base_url="https://example.invalid",
         api_key="secret",
         priority=3,
         context_window_tokens=8000,
         max_output_tokens=expected_max_output_tokens,
-        temperature=0.35,
-        top_p=0.8,
+        temperature=None,
+        top_p=None,
+        reasoning_effort="low",
         safety_margin_tokens=256,
         input_budget_tokens=8000 - expected_max_output_tokens - 256,
         http_proxy="http://proxy.example.com:8080",
@@ -110,14 +112,15 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
         channel_id=7,
         channel_name="summary-channel",
         model_id="summary-model",
-        protocol="openai",
+        protocol="openai_responses",
         base_url="https://example.invalid",
         api_key="secret",
         priority=3,
         context_window_tokens=8192,
         max_output_tokens=512,
-        temperature=0.35,
-        top_p=0.8,
+        temperature=None,
+        top_p=None,
+        reasoning_effort="low",
         safety_margin_tokens=256,
         input_budget_tokens=7424,
         http_proxy="http://proxy.example.com:8080",
@@ -138,10 +141,11 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
     assert len(request["messages"]) == 1
     assert request["messages"][0].role == MessageRole.USER
     assert request["messages"][0].content == "summarize this history"
-    assert request["temperature"] == 0.35
-    assert request["top_p"] == 0.8
+    assert request["reasoning_effort"] == "low"
+    assert "temperature" not in request
+    assert "top_p" not in request
     assert request["max_tokens"] == 512
-    assert request["protocol"] == "openai"
+    assert request["protocol"] == "openai_responses"
     assert request["timeout"] == CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
     assert request["http_proxy"] == "http://proxy.example.com:8080"
     assert request["custom_headers"] == {"user-agent": "SummaryClient/1.0"}

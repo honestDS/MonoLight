@@ -67,7 +67,6 @@ Image, audio, and video understanding, as well as image generation, are optional
 
 - For continuous conversations, the real input token count returned by the previous API call is used as the baseline for estimating the next turn incrementally. Runtime instructions are attached only to the latest user message in each turn and are moved from the previous user message to the newest one across turns. As a result, the next-turn incremental estimate may retain the previous runtime-instruction tokens, slightly overestimating usage and triggering context summarization earlier than necessary. Once the model returns actual usage, the UI is corrected using the real value. MonoLight currently avoids extra probing requests for calibration in order to prevent additional token usage.
 - The audit system only reviews the script directly executed in the current operation. It does not recursively track and audit other scripts that the entry script indirectly calls, imports, or launches. Recursive auditing has no clear natural boundary and can cause very large token consumption for large projects, so chained auditing is currently unsupported.
-- [ ] Automatic sidebar scrolling in the frontend has a compatibility issue in Firefox and is scheduled for a future fix.
 
 ## 2. Interaction Entry Points
 

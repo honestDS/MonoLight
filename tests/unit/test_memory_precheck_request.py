@@ -1,9 +1,14 @@
 from app.core.constants import (
     MEMORY_RECALL_PRECHECK_HISTORY_USER_ROUNDS,
     MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
+    SESSION_TITLE_MAX_OUTPUT_TOKENS,
 )
 from app.core.dispatchers.memory.request import build_precheck_request_messages
-from app.core.utils.llm_request_params import build_memory_recall_precheck_generation_params
+from app.core.utils.llm_request_params import (
+    build_context_summary_generation_params,
+    build_memory_recall_precheck_generation_params,
+    build_session_title_generation_params,
+)
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import LongTermMemoryConfig
 
@@ -73,4 +78,64 @@ def test_precheck_generation_params_force_small_output_and_clean_optional_fields
     assert chat_completions_params == {
         "reasoning_effort": "low",
         "max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
+    }
+
+
+def test_internal_task_generation_params_share_reasoning_cleanup_semantics():
+    title_params = build_session_title_generation_params(
+        model_entry={"reasoning_effort": "max", "max_tokens": 128},
+        protocol="openai_responses",
+    )
+    assert title_params == {
+        "reasoning_effort": "low",
+        "max_tokens": 128,
+    }
+
+    plain_title_params = build_session_title_generation_params(
+        model_entry={"reasoning_effort": None, "temperature": 0.35, "max_tokens": 20480},
+        protocol="openai",
+    )
+    assert plain_title_params == {
+        "temperature": 0.35,
+        "max_tokens": SESSION_TITLE_MAX_OUTPUT_TOKENS,
+    }
+
+    summary_params = build_context_summary_generation_params(
+        model_entry={"reasoning_effort": None, "temperature": 0.8, "max_tokens": 4096},
+        protocol="openai_responses",
+        max_output_tokens=1024,
+    )
+    assert summary_params == {
+        "temperature": 0.8,
+        "max_tokens": 1024,
+    }
+
+
+def test_internal_task_generation_params_preserve_disabled_reasoning_without_sampling_params():
+    precheck_params = build_memory_recall_precheck_generation_params(
+        model_entry={"reasoning_effort": "none", "temperature": 0.8},
+        protocol="openai",
+    )
+    assert precheck_params == {
+        "reasoning_effort": "none",
+        "max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
+    }
+
+    title_params = build_session_title_generation_params(
+        model_entry={"reasoning_effort": " NONE ", "temperature": 0.35},
+        protocol="openai_responses",
+    )
+    assert title_params == {
+        "reasoning_effort": "none",
+        "max_tokens": SESSION_TITLE_MAX_OUTPUT_TOKENS,
+    }
+
+    summary_params = build_context_summary_generation_params(
+        model_entry={"reasoning_effort": "none", "temperature": 0.8},
+        protocol="openai_responses",
+        max_output_tokens=1024,
+    )
+    assert summary_params == {
+        "reasoning_effort": "none",
+        "max_tokens": 1024,
     }
