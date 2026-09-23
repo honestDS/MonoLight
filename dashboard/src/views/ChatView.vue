@@ -489,7 +489,6 @@ const {
   transportMode,
   attachments,
   isCurrentSessionReadOnly,
-  externalSessionAutoPullEnabled,
   isContextSummarizing,
   llmRequestMetadata,
   historyLoading,
