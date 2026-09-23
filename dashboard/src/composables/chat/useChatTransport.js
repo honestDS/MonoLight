@@ -30,6 +30,7 @@ const lifecycleEventTypes = new Set([
   'tool_end',
   'todo_update',
   'done',
+  'resume_complete',
   'error',
   'proactive_reply'
 ])
@@ -60,9 +61,25 @@ export function useChatTransport() {
   // 并发请求回调映射管理: requestId -> callbacks
   const callbacksMap = new Map()
   let sessionEventCallbacks = null
+  let reconnectHandler = null
 
   // 注册唯一持久的消息分发器，支持多请求并行分发
   wsManager.onMessage((data) => {
+    if (data.type === 'connection_closed') {
+      wsConnected.value = false
+      callbacksMap.clear()
+      sessionEventCallbacks = null
+      return
+    }
+
+    if (data.type === 'connection_reopened') {
+      wsConnected.value = true
+      if (reconnectHandler) {
+        void Promise.resolve().then(() => reconnectHandler()).catch(console.error)
+      }
+      return
+    }
+
     const requestId = hasIdentity(data.request_id)
       ? data.request_id
       : getEventRequestIds(data).find(eventRequestId => callbacksMap.has(eventRequestId)) || 'default'
@@ -97,6 +114,7 @@ export function useChatTransport() {
       onToolEnd,
       onTodoUpdate,
       onComplete,
+      onResumeComplete,
       onError,
       onSessionId,
       onProactiveReply,
@@ -113,6 +131,7 @@ export function useChatTransport() {
       onWorkFinished,
       deferAgentLoopOutput = false,
       completeBeforeWorkFinished = false,
+      deferLoadingUntilResumeComplete = false,
       scrollToBottom,
       setLoading,
       requestId: currentRequestId
@@ -242,12 +261,19 @@ export function useChatTransport() {
         complete()
       }
       getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-      if (setLoading) {
+      if (setLoading && !deferLoadingUntilResumeComplete) {
         setLoading(false)
       }
       if (scrollToBottom) {
         scrollToBottom()
       }
+      return
+    }
+
+    if (type === 'resume_complete') {
+      if (onResumeComplete) onResumeComplete(data)
+      if (setLoading) setLoading(false)
+      if (scrollToBottom) scrollToBottom()
       return
     }
 
@@ -318,7 +344,7 @@ export function useChatTransport() {
         onError(errorMessage, null, requestId, errorEvent)
       }
       getEventRequestIds(errorEvent).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-      if (setLoading) {
+      if (setLoading && !deferLoadingUntilResumeComplete) {
         setLoading(false)
       }
       return
@@ -340,7 +366,7 @@ export function useChatTransport() {
         if (onWorkFinished) onWorkFinished(errorEvent)
         if (onError) onError(content, null, requestId, errorEvent)
         getEventRequestIds(errorEvent).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-        if (setLoading) setLoading(false)
+        if (setLoading && !deferLoadingUntilResumeComplete) setLoading(false)
         return
       }
 
@@ -348,7 +374,7 @@ export function useChatTransport() {
         if (onWorkFinished) onWorkFinished(data)
         if (onComplete) onComplete(data, null, requestId)
         getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-        if (setLoading) setLoading(false)
+        if (setLoading && !deferLoadingUntilResumeComplete) setLoading(false)
         if (scrollToBottom) scrollToBottom()
       }
     }
@@ -432,6 +458,35 @@ export function useChatTransport() {
     return true
   }
 
+  const resumeSession = async ({ sessionId, historyMessageId = 0, callbacks = {} }) => {
+    if (!sessionId) return false
+
+    const token = localStorage.getItem('token')
+    if (!token) throw new Error(t('chat.not_logged_in'))
+
+    const finalCallbacks = { ...callbacks, sessionId }
+    sessionEventCallbacks = finalCallbacks
+
+    if (!wsManager.isConnected.value) {
+      try {
+        await wsManager.connect(token)
+        wsConnected.value = true
+      } catch (e) {
+        console.error('WebSocket恢复连接失败:', e)
+        ElMessage.error(t('chat.ws_connect_failed'))
+        if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
+        return false
+      }
+    }
+
+    if (!wsManager.sendMessage({ type: 'resume', session_id: sessionId, history_message_id: historyMessageId })) {
+      ElMessage.error(t('chat.ws_message_send_failed'))
+      if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
+      return false
+    }
+    return true
+  }
+
   const send = async (options) => {
     if (transportMode.value === 'ws') {
       return wsSend(options)
@@ -467,15 +522,21 @@ export function useChatTransport() {
     return false
   }
 
+  const setReconnectHandler = (callback) => {
+    reconnectHandler = typeof callback === 'function' ? callback : null
+  }
+
   return {
     transportMode,
     wsConnected,
     disconnectWebSocket,
     httpSend,
     wsSend,
+    resumeSession,
     send,
     setTransportMode,
     initWebSocket,
+    setReconnectHandler,
     wsManager
   }
 }

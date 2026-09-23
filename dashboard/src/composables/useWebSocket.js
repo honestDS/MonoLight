@@ -18,73 +18,126 @@ export function useWebSocket() {
     // 存储 token 用于重连
     let storedToken = ''
     let connectionGeneration = 0
+    let reconnectPending = false
+    let connectionPromise = null
+    let connectionReject = null
     
     // 连接 WebSocket
     const connect = (token) => {
-        return new Promise((resolve, reject) => {
-            storedToken = token
-            const generation = ++connectionGeneration
-            const socket = chatApi.createWebSocket(token)
-            ws.value = socket
-            
-            socket.onopen = () => {
-                if (generation !== connectionGeneration || ws.value !== socket) return
-                console.log('WebSocket connected')
-                isConnected.value = true
-                reconnectAttempts.value = 0  // 重置重连计数
-                resolve()
-            }
-            
-            socket.onmessage = (event) => {
-                if (generation !== connectionGeneration || ws.value !== socket) return
-                try {
-                    // 尝试解析 JSON
-                    const data = JSON.parse(event.data)
-                    messageHandlers.forEach(handler => handler(data))
-                } catch (e) {
-                    // 如果不是 JSON，当作文本处理
-                    console.log('WebSocket text message:', event.data)
-                    messageHandlers.forEach(handler => handler({ type: 'raw', data: event.data }))
-                }
-            }
-            
-            socket.onerror = (error) => {
-                if (generation !== connectionGeneration || ws.value !== socket) return
-                console.error('WebSocket error:', error)
-                isConnected.value = false
-                reject(error)
-            }
-            
-            socket.onclose = (event) => {
-                if (generation !== connectionGeneration || ws.value !== socket) return
-                console.log('WebSocket closed', event.code, event.reason)
-                isConnected.value = false
-                // 检查是否是正常关闭 (code 1000 = CLOSE_NORMAL, 1001 = GOING_AWAY)
-                const isNormalClose = event.code === 1000 || event.code === 1001
-                // 通知上层连接已断开（如果有回调）
-                if (!isNormalClose) {
-                    messageHandlers.forEach(handler => handler({ type: 'connection_closed' }))
-                }
-                // 检查是否是用户主动断开
-                const isUserInitiated = reconnectAttempts.value >= MAX_RECONNECT_ATTEMPTS
-                // 自动重连逻辑（非正常关闭且非用户主动断开）
-                if (!isNormalClose && !isUserInitiated && storedToken) {
-                    reconnectAttempts.value++
-                    console.log(`WebSocket reconnecting... attempt ${reconnectAttempts.value}`)
-                    setTimeout(() => {
-                        connect(storedToken)
-                    }, RECONNECT_INTERVAL)
-                } else if (isUserInitiated && !isNormalClose) {
-                    // 只有在非正常关闭且重连失败时才显示错误
-                    ElMessage.warning(t('common.ws_disconnected'))
-                }
-            }
+        if (ws.value && ws.value.readyState === WebSocket.OPEN && isConnected.value) {
+            return Promise.resolve()
+        }
+        if (connectionPromise) {
+            return connectionPromise
+        }
+
+        storedToken = token
+        const generation = ++connectionGeneration
+        let resolveConnection
+        let rejectConnection
+        const pendingConnection = new Promise((resolve, reject) => {
+            resolveConnection = resolve
+            rejectConnection = reject
         })
+        connectionPromise = pendingConnection
+        connectionReject = rejectConnection
+
+        let socket
+        try {
+            socket = chatApi.createWebSocket(token)
+        } catch (error) {
+            connectionPromise = null
+            connectionReject = null
+            rejectConnection(error)
+            return pendingConnection
+        }
+        ws.value = socket
+
+        socket.onopen = () => {
+            if (generation !== connectionGeneration || ws.value !== socket) return
+            console.log('WebSocket connected')
+            isConnected.value = true
+            reconnectAttempts.value = 0  // 重置重连计数
+            if (reconnectPending) {
+                reconnectPending = false
+                messageHandlers.forEach(handler => handler({ type: 'connection_reopened' }))
+            }
+            if (connectionPromise === pendingConnection) {
+                connectionPromise = null
+                connectionReject = null
+            }
+            resolveConnection()
+        }
+
+        socket.onmessage = (event) => {
+            if (generation !== connectionGeneration || ws.value !== socket) return
+            try {
+                // 尝试解析 JSON
+                const data = JSON.parse(event.data)
+                messageHandlers.forEach(handler => handler(data))
+            } catch (e) {
+                // 如果不是 JSON，当作文本处理
+                console.log('WebSocket text message:', event.data)
+                messageHandlers.forEach(handler => handler({ type: 'raw', data: event.data }))
+            }
+        }
+
+        socket.onerror = (error) => {
+            if (generation !== connectionGeneration || ws.value !== socket) return
+            console.error('WebSocket error:', error)
+            isConnected.value = false
+            if (connectionPromise === pendingConnection) {
+                connectionPromise = null
+                connectionReject = null
+            }
+            rejectConnection(error)
+        }
+
+        socket.onclose = (event) => {
+            if (generation !== connectionGeneration || ws.value !== socket) return
+            console.log('WebSocket closed', event.code, event.reason)
+            isConnected.value = false
+            if (connectionPromise === pendingConnection) {
+                connectionPromise = null
+                connectionReject = null
+                rejectConnection(event)
+            }
+            // 检查是否是正常关闭 (code 1000 = CLOSE_NORMAL, 1001 = GOING_AWAY)
+            const isNormalClose = event.code === 1000 || event.code === 1001
+            if (!isNormalClose) {
+                reconnectPending = true
+            }
+            // 通知上层连接已断开（如果有回调）
+            if (!isNormalClose) {
+                messageHandlers.forEach(handler => handler({ type: 'connection_closed' }))
+            }
+            // 检查是否是用户主动断开
+            const isUserInitiated = reconnectAttempts.value >= MAX_RECONNECT_ATTEMPTS
+            // 自动重连逻辑（非正常关闭且非用户主动断开）
+            if (!isNormalClose && !isUserInitiated && storedToken) {
+                reconnectAttempts.value++
+                console.log(`WebSocket reconnecting... attempt ${reconnectAttempts.value}`)
+                setTimeout(() => {
+                    connect(storedToken)
+                }, RECONNECT_INTERVAL)
+            } else if (isUserInitiated && !isNormalClose) {
+                // 只有在非正常关闭且重连失败时才显示错误
+                ElMessage.warning(t('common.ws_disconnected'))
+            }
+        }
+        return pendingConnection
     }
     
     // 断开连接
     const disconnect = () => {
+        if (connectionPromise) {
+            const rejectConnection = connectionReject
+            connectionPromise = null
+            connectionReject = null
+            rejectConnection?.(t('common.ws_disconnected'))
+        }
         storedToken = ''
+        reconnectPending = false
         connectionGeneration += 1
         reconnectAttempts.value = MAX_RECONNECT_ATTEMPTS  // 阻止自动重连
         if (ws.value) {
