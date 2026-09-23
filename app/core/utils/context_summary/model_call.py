@@ -10,15 +10,18 @@ async def call_context_summary_model(
     model: ContextSummaryModelSnapshot,
     prompt: str,
 ) -> str | None:
+    generation_params = {
+        "max_tokens": model.max_output_tokens,
+        **({"temperature": model.temperature} if model.temperature is not None else {}),
+        **({"top_p": model.top_p} if model.top_p is not None else {}),
+        **({"reasoning_effort": model.reasoning_effort} if model.reasoning_effort is not None else {}),
+    }
     response = await LLMClient.generate(
         api_key=model.api_key,
         base_url=model.base_url,
         model_id=model.model_id,
         messages=[InternalMessage(role=MessageRole.USER, content=prompt)],
-        temperature=model.temperature,
-        top_p=model.top_p,
-        reasoning_effort=model.reasoning_effort,
-        max_tokens=model.max_output_tokens,
+        **generation_params,
         protocol=model.protocol,
         timeout=CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
         http_proxy=model.http_proxy,

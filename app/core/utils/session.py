@@ -9,8 +9,9 @@ from app.core.log import channel_log_extra, get_logger
 from app.core.profile_selection import resolve_profile_for_session
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.core.session_source import is_web_session_source
-from app.core.utils.dispatcher.helpers import format_exception_message, resolve_chat_params
+from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.llm_request_params import build_session_title_generation_params
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
@@ -43,13 +44,10 @@ async def generate_session_title(
     base_url: str,
     model_id: str,
     protocol: str,
-    max_tokens: int = 200,
+    model_entry: dict,
     raise_on_error: bool = False,
     http_proxy: str | None = None,
     custom_headers: dict[str, str] | None = None,
-    temperature: float = 0.7,
-    top_p: float | None = None,
-    reasoning_effort: str | None = None,
 ) -> str | None:
     """
     异步生成会话标题并保存到数据库
@@ -65,6 +63,10 @@ async def generate_session_title(
 
         # 构造起名专用消息列表
         messages = [InternalMessage(role=MessageRole.USER, content=SESSION_TITLE_PROMPT.format(message=first_message))]
+        generation_params = build_session_title_generation_params(
+            model_entry=model_entry,
+            protocol=protocol,
+        )
 
         # 调用 LLM 生成标题
         response = await LLMClient.generate(
@@ -72,10 +74,7 @@ async def generate_session_title(
             base_url=base_url,
             model_id=model_id,
             messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            reasoning_effort=reasoning_effort,
-            max_tokens=max_tokens,
+            **generation_params,
             protocol=protocol,
             http_proxy=http_proxy,
             custom_headers=custom_headers,
@@ -147,7 +146,6 @@ async def generate_session_title_for_selected_profile(
         while selection:
             channel, model_entry, rule = selection
             try:
-                chat_params = resolve_chat_params(model_entry, chat_channel)
                 return await generate_session_title(
                     uid=uid,
                     session_id=session_id,
@@ -156,10 +154,7 @@ async def generate_session_title_for_selected_profile(
                     base_url=channel.base_url,
                     model_id=model_entry["model_id"],
                     protocol=resolve_model_protocol(model_entry),
-                    max_tokens=model_entry.get("max_tokens") or 200,
-                    temperature=chat_params["temperature"],
-                    top_p=chat_params["top_p"],
-                    reasoning_effort=chat_params.get("reasoning_effort"),
+                    model_entry=model_entry,
                     raise_on_error=True,
                     http_proxy=get_channel_http_proxy(channel),
                     custom_headers=get_model_custom_headers(model_entry),
