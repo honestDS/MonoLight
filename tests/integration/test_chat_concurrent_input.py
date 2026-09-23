@@ -1,13 +1,16 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from fastapi import WebSocketDisconnect
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
 import app.providers.database as database_provider
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
+from app.api.v1 import chat as chat_api
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.dispatcher import ChatDispatcher
@@ -486,3 +489,160 @@ async def test_streamed_foreground_failure_is_terminal_after_persisted_output(
     assert failed.attempt_count == 1
     assert [event.event["type"] for event in persisted_events] == ["input_dequeued", "agent_loop_start", "content"]
     assert len(sent_events) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completed_before_resume", [False, True])
+async def test_websocket_resume_preserves_history_gap_and_drains_completed_stream(
+    concurrent_queue_session_factory,
+    monkeypatch,
+    completed_before_resume,
+):
+    factory = concurrent_queue_session_factory
+    monkeypatch.setattr(database_provider, "AsyncSessionLocal", factory)
+    monkeypatch.setattr(chat_api, "AsyncSessionLocal", factory)
+
+    async def runtime_settings(*args, **kwargs):
+        return SimpleNamespace(log_locale="zh")
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(chat_api.system_setting_crud, "get_runtime_settings", runtime_settings)
+    monkeypatch.setattr(chat_api.session_notifier, "register", noop)
+    monkeypatch.setattr(chat_api.session_notifier, "unregister", noop)
+    async with factory() as db:
+        db.add(ChatSession(session_id="resume-session", uid="owner", profile_id=1, source="ws"))
+        db.add(Message(id=101, session_id="resume-session", uid="owner", profile_id=1, role=MessageRole.ASSISTANT, content="already visible"))
+        work = SessionReplyWorkItem(
+            uid="owner",
+            session_id="resume-session",
+            profile_id=1,
+            sequence_no=1,
+            work_type="foreground_reply",
+            source_type="user_message",
+            source_id="100",
+            dedupe_key="resume-work",
+            status=SessionReplyWorkStatus.RUNNING,
+            execution_state={"response": {"content": "finished", "history": []}},
+        )
+        db.add(work)
+        await db.commit()
+        await db.refresh(work)
+        work_id = work.id
+        history = await chat_api.get_session_history(
+            session_id="resume-session",
+            page=1,
+            size=40,
+            db=db,
+            current_user=SimpleNamespace(uid="owner"),
+        )
+        history_ids = [item.id for item in history.data]
+        assert history_ids == [101]
+
+        db.add(Message(id=102, session_id="resume-session", uid="owner", profile_id=1, role=MessageRole.ASSISTANT, content="gap reply"))
+        events = [
+            {"type": "reasoning", "content": "old reasoning", "response_id": "old"},
+            {"type": "turn_end", "message_id": 101, "response_id": "old"},
+            {"type": "reasoning", "content": "gap reasoning", "response_id": "gap"},
+            {"type": "content", "content": "gap reply", "response_id": "gap"},
+            {"type": "turn_end", "message_id": 102, "response_id": "gap"},
+            {"type": "tool_start", "tool_call_id": "tool-1", "response_id": "gap", "name": "test", "arguments": {}},
+            {"type": "tool_end", "tool_call_id": "tool-1", "response_id": "gap", "result": "result"},
+            *[{"type": "content", "content": str(index), "response_id": "last"} for index in range(120)],
+        ]
+        for sequence, event in enumerate(events, 1):
+            db.add(
+                SessionReplyStreamEvent(
+                    work_id=work_id,
+                    sequence_no=sequence,
+                    event={**event, "session_id": "resume-session", "work_id": work_id, "event_sequence_no": sequence},
+                )
+            )
+        if completed_before_resume:
+            work.status = SessionReplyWorkStatus.SUCCEEDED
+            db.add(work)
+        await db.commit()
+
+        following = SessionReplyWorkItem(
+            uid="owner",
+            session_id="resume-session",
+            profile_id=1,
+            sequence_no=2,
+            work_type="foreground_reply",
+            source_type="user_message",
+            source_id="103",
+            dedupe_key="following-resume-work",
+            status=SessionReplyWorkStatus.SUCCEEDED,
+            execution_state={"response": {"content": "following reply", "history": []}},
+        )
+        db.add(Message(id=104, session_id="resume-session", uid="owner", profile_id=1, role=MessageRole.ASSISTANT, content="following reply"))
+        db.add(following)
+        await db.flush()
+        db.add(
+            SessionReplyStreamEvent(
+                work_id=following.id,
+                sequence_no=1,
+                event={"type": "turn_end", "session_id": "resume-session", "work_id": following.id, "message_id": 104},
+            )
+        )
+        await db.commit()
+
+    class Socket:
+        query_params = {}
+
+        def __init__(self):
+            self.sent = []
+            self.requested = False
+            self.finished = asyncio.Event()
+
+        async def accept(self):
+            pass
+
+        async def receive_json(self):
+            if not self.requested:
+                self.requested = True
+                return {"type": "resume", "session_id": "resume-session", "history_message_id": max(history_ids)}
+            await self.finished.wait()
+            raise WebSocketDisconnect(code=1000)
+
+        async def send_json(self, event):
+            self.sent.append(event)
+            if event.get("content") == "119" and not completed_before_resume:
+                async with factory() as db:
+                    current = await db.get(SessionReplyWorkItem, work_id)
+                    current.status = SessionReplyWorkStatus.SUCCEEDED
+                    db.add(current)
+                    await db.commit()
+            if event["type"] == "resume_complete":
+                self.finished.set()
+
+    socket = Socket()
+    await asyncio.wait_for(chat_api.chat_websocket(socket, SimpleNamespace(uid="owner")), timeout=5)
+    assert all(event.get("content") != "old reasoning" for event in socket.sent)
+    assert any(event.get("content") == "gap reasoning" for event in socket.sent)
+    assert any(event.get("message_id") == 102 for event in socket.sent)
+    assert [event["content"] for event in socket.sent if event.get("response_id") == "last"] == [str(index) for index in range(120)]
+    assert [event["type"] for event in socket.sent].count("done") == 2
+    assert any(event.get("message_id") == 104 for event in socket.sent)
+    assert socket.sent[-1]["type"] == "resume_complete"
+    async with factory() as db:
+        works = list((await db.execute(select(SessionReplyWorkItem))).scalars().all())
+        assert len(works) == 2
+
+    assert [
+        event
+        async for event in session_reply_queue_manager.wait_for_session_stream(
+            uid="owner",
+            session_id="resume-session",
+            history_message_id=104,
+        )
+    ] == []
+    assert [
+        event
+        async for event in session_reply_queue_manager.wait_for_session_stream(
+            uid="another-user",
+            session_id="resume-session",
+            history_message_id=0,
+        )
+    ] == []

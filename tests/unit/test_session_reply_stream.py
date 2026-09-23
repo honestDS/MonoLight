@@ -1123,6 +1123,9 @@ async def test_http_adapter_merges_confirmation_updates_into_non_stream_response
     async def validate_message(*_args, **_kwargs):
         return None
 
+    async def get_todo(*_args, **_kwargs):
+        return None
+
     async def enqueue_message(*_args, **_kwargs):
         return SimpleNamespace(id=1), work, "approved", confirmation_update_events
 
@@ -1153,6 +1156,7 @@ async def test_http_adapter_merges_confirmation_updates_into_non_stream_response
     monkeypatch.setattr(chat_web_module, "ensure_web_session_writable", ensure_writable)
     monkeypatch.setattr(chat_web_module, "resolve_profile_for_session", get_profile)
     monkeypatch.setattr(chat_web_module.ChatDispatcher, "validate_initial_message_before_save", validate_message)
+    monkeypatch.setattr(chat_web_module.session_todo_crud, "get_by_session_id", get_todo)
     monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "submit_user_message", enqueue_message)
     monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "wait_for_result", wait_for_result)
     monkeypatch.setattr(chat_web_module, "async_sessionmaker", create_final_session_factory)
@@ -1282,10 +1286,10 @@ async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monk
             return False
 
     async def resolve_merged_target(db, work_id: int):
-        return states.pop(0)
+        return states.pop(0) if len(states) > 1 else states[0]
 
     async def list_after_sequence(db, *, work_id: int, after_sequence_no: int):
-        return stream_events.pop(0)
+        return stream_events.pop(0) if stream_events else []
 
     async def no_sleep(delay: float) -> None:
         return None
@@ -1844,6 +1848,8 @@ async def test_wait_for_stream_switches_merged_target_without_replay_before_term
                     event={"type": "content", "content": "first", "response_id": "response-final"},
                 ),
             ]
+        if after_sequence_no == 4:
+            return []
         late_unmerged_request_ids.append("request-3")
         return [
             SimpleNamespace(
@@ -1875,8 +1881,8 @@ async def test_wait_for_stream_switches_merged_target_without_replay_before_term
 
     yielded = await asyncio.wait_for(collect_stream(), timeout=1)
 
-    assert resolve_calls == [7, 8]
-    assert stream_queries == [(8, 0), (8, 2)]
+    assert resolve_calls == [7, 8, 8]
+    assert stream_queries == [(8, 0), (8, 2), (8, 4)]
     assert [event["type"] for event in yielded] == [
         "input_dequeued",
         "content",

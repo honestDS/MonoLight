@@ -24,6 +24,7 @@ from app.core.constants import (
     ERR_INTERNAL_SERVER_ERROR,
     ERR_NO_VALID_CHANNEL,
     ERR_SESSION_GUIDANCE_EXTERNAL_ONLY,
+    ERR_SESSION_ID_REQUIRED,
     ERR_SESSION_NO_PERMISSION,
     ERR_SESSION_NOT_FOUND,
     ERR_SESSION_READ_ONLY,
@@ -238,6 +239,57 @@ async def _run_websocket_chat(
     finally:
         if state.stream_task is running_task:
             state.stream_task = None
+
+
+async def _run_websocket_resume(
+    websocket: WebSocket,
+    state: _WebSocketChatState,
+    uid: str,
+    session_id: str,
+    history_message_id: int = 0,
+) -> None:
+    running_task = asyncio.current_task()
+    try:
+        async for response in session_reply_queue_manager.wait_for_session_stream(
+            uid=uid,
+            session_id=session_id,
+            history_message_id=history_message_id,
+        ):
+            if session_id != state.current_session_id:
+                continue
+            if not _event_matches_session(response, session_id):
+                continue
+            await websocket.send_json(response)
+
+    except RuntimeError as exc:
+        if not ("websocket.send" in str(exc) and "websocket.close" in str(exc)):
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_RUNTIME_ERROR", error=str(exc)))
+    except Exception:
+        logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
+        if session_id == state.current_session_id:
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": t(ERR_INTERNAL_SERVER_ERROR),
+                        "session_id": session_id,
+                    }
+                )
+            except Exception:
+                pass
+    finally:
+        if state.stream_task is running_task:
+            state.stream_task = None
+        if session_id == state.current_session_id:
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "resume_complete",
+                        "session_id": session_id,
+                    }
+                )
+            except Exception:
+                pass
 
 
 @router.post("/completions")
@@ -648,6 +700,53 @@ async def chat_websocket(
 
             # 接收 JSON 消息
             data = receive_task.result()
+            if data.get("type") == "resume":
+                session_id = data.get("session_id")
+                if not session_id:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": t(ERR_SESSION_ID_REQUIRED),
+                            "session_id": state.current_session_id,
+                        }
+                    )
+                    continue
+
+                try:
+                    async with AsyncSessionLocal() as db:
+                        await ensure_web_session_writable(
+                            db,
+                            session_id=session_id,
+                            uid=uid,
+                        )
+                except BaseBusinessException as exc:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": t(exc.message, **exc.kwargs),
+                            "session_id": session_id,
+                        }
+                    )
+                    continue
+
+                old_session_id = state.current_session_id
+                if old_session_id and old_session_id != session_id:
+                    await session_notifier.unregister(uid, old_session_id, state.notifier_queue)
+
+                state.current_session_id = session_id
+                await _cancel_websocket_stream_task(state)
+                await session_notifier.register(uid, session_id, state.notifier_queue)
+                state.stream_task = asyncio.create_task(
+                    _run_websocket_resume(
+                        websocket,
+                        state,
+                        uid,
+                        session_id,
+                        history_message_id=data.get("history_message_id") if type(data.get("history_message_id")) is int and data["history_message_id"] >= 0 else 0,
+                    )
+                )
+                continue
+
             message = data.get("message")
             session_id = data.get("session_id")
             attachments = data.get("attachments")

@@ -14,6 +14,7 @@ from app.core.utils.time import get_local_time
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
+    SESSION_REPLY_ACTIVE_STATUSES,
     SESSION_REPLY_TERMINAL_STATUSES,
     SessionReplySequence,
     SessionReplySourceType,
@@ -45,6 +46,40 @@ class CRUDSessionReplyWorkItem:
 
     async def get_by_dedupe_key(self, db: AsyncSession, dedupe_key: str) -> SessionReplyWorkItem | None:
         result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.dedupe_key == dedupe_key))
+        return result.scalars().first()
+
+    async def get_next_for_session_resume(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        history_message_id: int,
+        after_sequence_no: int,
+    ) -> SessionReplyWorkItem | None:
+        unseen_turn = exists(
+            select(SessionReplyStreamEvent.id).where(
+                SessionReplyStreamEvent.work_id == SessionReplyWorkItem.id,
+                SessionReplyStreamEvent.event["type"].as_string() == "turn_end",
+                SessionReplyStreamEvent.event["message_id"].as_integer() > history_message_id,
+            )
+        )
+        result = await db.execute(
+            select(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.sequence_no > after_sequence_no,
+                SessionReplyWorkItem.status != SessionReplyWorkStatus.MERGED,
+                or_(
+                    SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+                    SessionReplyWorkItem.result_message_id > history_message_id,
+                    unseen_turn,
+                ),
+            )
+            .order_by(SessionReplyWorkItem.sequence_no, SessionReplyWorkItem.id)
+            .limit(1)
+        )
         return result.scalars().first()
 
     async def allocate_sequence_no(self, db: AsyncSession, session_id: str) -> int:

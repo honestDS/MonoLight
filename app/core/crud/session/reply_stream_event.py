@@ -48,6 +48,16 @@ class CRUDSessionReplyStreamEvent:
         result = await db.execute(select(func.max(SessionReplyStreamEvent.sequence_no)).where(SessionReplyStreamEvent.work_id == work_id))
         return int(result.scalar() or 0)
 
+    async def get_latest_resume_boundary_sequence(self, db: AsyncSession, *, work_id: int, history_message_id: int) -> int:
+        result = await db.execute(
+            select(func.max(SessionReplyStreamEvent.sequence_no)).where(
+                SessionReplyStreamEvent.work_id == work_id,
+                SessionReplyStreamEvent.event["type"].as_string() == "turn_end",
+                SessionReplyStreamEvent.event["message_id"].as_integer() <= history_message_id,
+            )
+        )
+        return int(result.scalar() or 0)
+
     async def has_events(self, db: AsyncSession, *, work_id: int) -> bool:
         result = await db.execute(select(SessionReplyStreamEvent.id).where(SessionReplyStreamEvent.work_id == work_id).limit(1))
         return result.scalar() is not None

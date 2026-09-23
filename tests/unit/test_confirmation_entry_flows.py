@@ -56,6 +56,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.session_todo import SessionTodoPlan
 
 
 @pytest_asyncio.fixture
@@ -70,6 +71,7 @@ async def db_session() -> AsyncSession:
         AuditExecutionRecord.__table__,
         AuditToolResultVersion.__table__,
         ChatSession.__table__,
+        SessionTodoPlan.__table__,
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
     ]
@@ -98,6 +100,7 @@ async def concurrent_confirmation_session_factory(tmp_path):
         AuditExecutionRecord.__table__,
         AuditToolResultVersion.__table__,
         ChatSession.__table__,
+        SessionTodoPlan.__table__,
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
     ]
