@@ -103,6 +103,7 @@ export const chatApi = {
   updateSessionSetting: (sessionId, settings) => request.post('/chat/sessions/setting', { session_id: sessionId, ...settings }),
   // 后台任务列表
   backgroundTasks: (params) => request.get('/chat/background-tasks', { params }),
+  backgroundTaskPendingActivity: (sessionId) => request.get('/chat/background-tasks/pending-activity', { params: { session_id: sessionId } }),
   replyWorkStatus: (workId) => request.get(`/chat/reply-works/${encodeURIComponent(workId)}`),
 }
 

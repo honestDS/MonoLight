@@ -647,6 +647,21 @@ async def list_background_tasks(
     return StandardResponse.success(data=data, message=MSG_BACKGROUND_TASK_LIST_SUCCESS)
 
 
+@router.get("/background-tasks/pending-activity")
+async def get_background_task_pending_activity(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    has_pending_activity = await background_task_crud.has_pending_user_activity(
+        db,
+        uid=uid,
+        session_id=session_id,
+    )
+    return StandardResponse.success(data={"has_pending_activity": has_pending_activity})
+
+
 @router.get("/background-tasks/{task_id}")
 async def get_background_task(
     task_id: int,

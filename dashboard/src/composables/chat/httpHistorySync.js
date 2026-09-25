@@ -1,15 +1,8 @@
-const hasUnfinishedBackgroundTask = tasks => tasks.some(task => {
-  const status = String(task?.status || '').toLowerCase()
-  const replyStatus = String(task?.reply_status || '').toLowerCase()
-  return ['pending', 'running'].includes(status)
-    || ['pending', 'running'].includes(replyStatus)
-})
-
 export const createHttpHistorySyncController = ({
   getSessionId,
   canSync,
   isLoading,
-  fetchBackgroundTasks,
+  fetchPendingActivity,
   mergeLatestHistory,
   intervalMs = 2000,
   schedule = setTimeout,
@@ -40,24 +33,36 @@ export const createHttpHistorySyncController = ({
 
   const sync = async () => {
     const sessionId = getSessionId()
-    if (!canSync() || !sessionId || isLoading() || syncing) return
+    if (
+      !canSync()
+      || !sessionId
+      || trackedSessionId !== sessionId
+      || syncing
+    ) return
+
+    if (isLoading()) return
 
     const syncVersion = version
     syncing = true
     try {
-      const response = await fetchBackgroundTasks(sessionId)
+      const hasPendingActivity = await fetchPendingActivity(sessionId)
       if (
         syncVersion !== version
         || !canSync()
         || sessionId !== getSessionId()
+        || trackedSessionId !== sessionId
       ) return
 
-      const tasks = response?.data?.data || []
-      if (hasUnfinishedBackgroundTask(tasks)) {
-        trackedSessionId = sessionId
-      } else {
+      if (hasPendingActivity) return
+
+      await mergeLatestHistory(sessionId)
+      if (
+        syncVersion === version
+        && canSync()
+        && sessionId === getSessionId()
+        && trackedSessionId === sessionId
+      ) {
         trackedSessionId = null
-        await mergeLatestHistory(sessionId)
       }
     } catch (error) {
       onError(error)
@@ -98,6 +103,7 @@ export const createHttpHistorySyncController = ({
     const sessionId = getSessionId()
     if (!canSync() || !sessionId) return
 
+    trackedSessionId = sessionId
     const syncVersion = version
     await sync()
     if (syncVersion === version && shouldContinue()) {

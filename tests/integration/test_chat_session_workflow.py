@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -19,8 +20,10 @@ from app.core.constants import (
 )
 from app.core.i18n import t
 from app.core.security import get_current_user
+from app.core.utils.time import get_local_time
 from app.handler import register_handlers
 from app.models.audit import AuditConfirmationClaim, AuditRecord
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.channel import ModelChannel
 from app.models.message import Message, MessageRole, MessageType
 from app.models.profile import Profile
@@ -70,6 +73,7 @@ async def chat_session_database(tmp_path) -> AsyncGenerator[AsyncSession]:
                     AuditConfirmationClaim.__table__,
                     SessionReplySequence.__table__,
                     SessionReplyWorkItem.__table__,
+                    BackgroundTask.__table__,
                 ],
             )
         )
@@ -849,3 +853,93 @@ async def test_http_reply_work_status_resolves_merged_work_and_enforces_owner(
         assert forbidden.status_code == 404
         assert forbidden.json()["code"] == 404
         assert forbidden.json()["message"] == t("ERR_SESSION_REPLY_WORK_NOT_FOUND")
+
+
+@pytest.mark.asyncio
+async def test_background_task_pending_activity_is_not_limited_by_task_history_page(
+    chat_session_database: AsyncSession,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    session = ChatSession(
+        session_id="background-activity-session",
+        uid="user-1",
+        profile_id=primary_profile.id,
+        source="http",
+        reply_target_source="http",
+    )
+    chat_session_database.add(session)
+    base_time = get_local_time() - timedelta(minutes=5)
+    pending_task = BackgroundTask(
+        uid="user-1",
+        session_id=session.session_id,
+        profile_id=primary_profile.id,
+        tool_call_id="pending-task",
+        tool_name="test_tool",
+        status=BackgroundTaskStatus.RUNNING,
+        arguments={},
+        auto_reply=True,
+        reply_status=BackgroundTaskReplyStatus.PENDING,
+        created_at=base_time,
+    )
+    chat_session_database.add(pending_task)
+    for index in range(25):
+        chat_session_database.add(
+            BackgroundTask(
+                uid="user-1",
+                session_id=session.session_id,
+                profile_id=primary_profile.id,
+                tool_call_id=f"finished-{index}",
+                tool_name="test_tool",
+                status=BackgroundTaskStatus.SUCCEEDED,
+                arguments={},
+                result={"ok": True},
+                auto_reply=True,
+                reply_status=BackgroundTaskReplyStatus.SUCCEEDED,
+                created_at=base_time + timedelta(seconds=index + 1),
+            )
+        )
+    await chat_session_database.commit()
+    await chat_session_database.refresh(pending_task)
+
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        first_page = await client.get(
+            "/api/v1/chat/background-tasks",
+            params={"session_id": session.session_id, "page": 1, "size": 20},
+        )
+        assert first_page.status_code == 200
+        assert pending_task.id not in {item["id"] for item in first_page.json()["data"]}
+
+        active = await client.get(
+            "/api/v1/chat/background-tasks/pending-activity",
+            params={"session_id": session.session_id},
+        )
+        assert active.status_code == 200
+        assert active.json()["data"] == {"has_pending_activity": True}
+
+        pending_task.status = BackgroundTaskStatus.SUCCEEDED
+        pending_task.reply_status = BackgroundTaskReplyStatus.RUNNING
+        chat_session_database.add(pending_task)
+        await chat_session_database.commit()
+
+        pending_reply = await client.get(
+            "/api/v1/chat/background-tasks/pending-activity",
+            params={"session_id": session.session_id},
+        )
+        assert pending_reply.json()["data"] == {"has_pending_activity": True}
+
+        pending_task.reply_status = BackgroundTaskReplyStatus.SUCCEEDED
+        chat_session_database.add(pending_task)
+        await chat_session_database.commit()
+
+        completed = await client.get(
+            "/api/v1/chat/background-tasks/pending-activity",
+            params={"session_id": session.session_id},
+        )
+        assert completed.json()["data"] == {"has_pending_activity": False}

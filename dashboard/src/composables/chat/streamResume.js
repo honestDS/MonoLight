@@ -36,6 +36,21 @@ export const shouldResumeSessionStream = ({ session, transportMode }) => {
 export const getInitialResumeLoading = ({ session, transportMode }) =>
   shouldResumeSessionStream({ session, transportMode }) && session?.is_loading === true
 
+export const getHistoryMessageCursor = messages => {
+  if (!Array.isArray(messages)) return 0
+
+  const databaseIds = messages
+    .map(message => Number(message?.db_id))
+    .filter(messageId => Number.isSafeInteger(messageId) && messageId >= 0)
+  const candidateIds = databaseIds.length > 0
+    ? databaseIds
+    : messages
+        .map(message => Number(message?.id))
+        .filter(messageId => Number.isSafeInteger(messageId) && messageId >= 0)
+
+  return candidateIds.reduce((latestId, messageId) => Math.max(latestId, messageId), 0)
+}
+
 export const resumeSessionStream = async ({
   session, latestSession = session, transportMode, isCurrentSession, setLoading, resume
 }) => {

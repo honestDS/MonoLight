@@ -6,35 +6,34 @@ export const persistSessionTransportMode = async ({
   sessionId,
   mode,
   sessions,
-  getCurrentSessionId,
-  getCurrentTransportMode = () => mode,
-  updateSessionSetting,
-  applyTransportMode
+  updateSessionSetting
 }) => {
-  const previousSession = sessions.find(session => session.session_id === sessionId)
-  const previousMode = previousSession?.source
+  const session = sessions.find(item => item.session_id === sessionId)
+  const previousMode = session?.source
 
   try {
     await updateSessionSetting(sessionId, { transport_mode: mode })
-
-    const session = sessions.find(item => item.session_id === sessionId)
     if (session) session.source = mode
-    if (getCurrentSessionId() === sessionId) {
-      await applyTransportMode(mode)
-    }
   } catch (error) {
-    const session = sessions.find(item => item.session_id === sessionId)
     if (session && previousMode !== undefined) {
       session.source = previousMode
     }
-    if (getCurrentSessionId() === sessionId) {
-      const restoreMode = previousMode === 'http' || previousMode === 'ws'
-        ? previousMode
-        : getCurrentTransportMode()
-      await applyTransportMode(restoreMode)
-    }
     throw error
   }
+}
+
+export const activateSelectedSessionTransportMode = async ({
+  session,
+  mode,
+  historyData,
+  applyTransportMode,
+  resumeStream
+}) => {
+  await applyTransportMode(mode)
+  if (mode === 'ws' && session?.session_id) {
+    await resumeStream(session, historyData)
+  }
+  return mode
 }
 
 export const resumeSelectedSessionByTransport = async ({

@@ -316,8 +316,8 @@ test('HTTP background task recovery is rediscovered after switching away and bac
   const scheduled = []
   const cancelled = []
   const taskStates = new Map([
-    ['session-a', [{ status: 'running' }]],
-    ['session-b', []]
+    ['session-a', true],
+    ['session-b', false]
   ])
   const fetches = []
   const mergedSessions = []
@@ -327,9 +327,9 @@ test('HTTP background task recovery is rediscovered after switching away and bac
     getSessionId: () => currentSessionId,
     canSync: () => true,
     isLoading: () => false,
-    fetchBackgroundTasks: async sessionId => {
+    fetchPendingActivity: async sessionId => {
       fetches.push(sessionId)
-      return { data: { data: taskStates.get(sessionId) || [] } }
+      return taskStates.get(sessionId) === true
     },
     mergeLatestHistory: async sessionId => {
       mergedSessions.push(sessionId)
@@ -364,7 +364,7 @@ test('HTTP background task recovery is rediscovered after switching away and bac
   assert.equal(controller.isTracking('session-a'), true)
   assert.equal(scheduled.length, 1)
 
-  taskStates.set('session-a', [{ status: 'succeeded', reply_status: 'succeeded' }])
+  taskStates.set('session-a', false)
   const nextPoll = scheduled.shift()
   await nextPoll()
 
@@ -373,7 +373,6 @@ test('HTTP background task recovery is rediscovered after switching away and bac
   assert.equal(controller.isTracking('session-a'), false)
   assert.equal(scheduled.length, 0)
 })
-
 
 test('HTTP background task recovery ignores a stale result after the selected session changes', async () => {
   const { createHttpHistorySyncController } = await import('../src/composables/chat/httpHistorySync.js')
@@ -390,10 +389,10 @@ test('HTTP background task recovery ignores a stale result after the selected se
     getSessionId: () => currentSessionId,
     canSync: () => true,
     isLoading: () => false,
-    fetchBackgroundTasks: async sessionId => {
+    fetchPendingActivity: async sessionId => {
       fetches.push(sessionId)
       if (sessionId === 'session-a') return sessionAResponse
-      return { data: { data: [] } }
+      return false
     },
     mergeLatestHistory: async sessionId => {
       mergedSessions.push(sessionId)
@@ -411,7 +410,7 @@ test('HTTP background task recovery ignores a stale result after the selected se
   const staleSync = controller.handleSessionChanged()
   currentSessionId = 'session-b'
   await controller.handleSessionChanged()
-  resolveSessionA({ data: { data: [{ status: 'running' }] } })
+  resolveSessionA(true)
   await staleSync
 
   assert.deepEqual(fetches, ['session-a', 'session-b'])
@@ -419,6 +418,47 @@ test('HTTP background task recovery ignores a stale result after the selected se
   assert.equal(controller.isTracking('session-a'), false)
   assert.equal(controller.isTracking('session-b'), false)
   assert.equal(scheduled.length, 0)
+})
+
+test('HTTP background task recovery retries after a transient activity lookup failure', async () => {
+  const { createHttpHistorySyncController } = await import('../src/composables/chat/httpHistorySync.js')
+  const scheduled = []
+  const errors = []
+  let attempts = 0
+
+  const controller = createHttpHistorySyncController({
+    getSessionId: () => 'session-a',
+    canSync: () => true,
+    isLoading: () => false,
+    fetchPendingActivity: async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('temporary failure')
+      return true
+    },
+    mergeLatestHistory: async () => {},
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    },
+    onError: error => {
+      errors.push(error.message)
+    }
+  })
+
+  await controller.handleSessionChanged()
+  assert.equal(attempts, 1)
+  assert.deepEqual(errors, ['temporary failure'])
+  assert.equal(controller.isTracking('session-a'), true)
+  assert.equal(scheduled.length, 1)
+
+  await scheduled.shift()()
+  assert.equal(attempts, 2)
+  assert.equal(controller.isTracking('session-a'), true)
+  assert.equal(scheduled.length, 1)
 })
 
 test('disposed session loading poller does not restart after an in-flight refresh resolves', async () => {
