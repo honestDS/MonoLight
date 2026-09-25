@@ -19,6 +19,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue import manager_result as manager_result_module
+from app.core.session_reply_queue import manager_submission as manager_submission_module
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.time import get_local_time
@@ -424,3 +425,200 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
     assert final_message.role == MessageRole.ASSISTANT
     assert final_message.content == "confirmed tool completed"
     assert any(event.get("source") == "confirmed_tool_execution" for event in delivered_events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_audit_status", "expected_message_type", "expected_work_type", "expected_decision"),
+    [
+        pytest.param(
+            "approve",
+            AuditRecordStatus.EXECUTING,
+            MessageType.AUDIT_DECISION,
+            SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            "approve",
+            id="approve",
+        ),
+        pytest.param(
+            "reject",
+            AuditRecordStatus.REJECTED,
+            MessageType.AUDIT_DECISION,
+            SessionReplyWorkType.FOREGROUND_REPLY,
+            "reject",
+            id="reject",
+        ),
+        pytest.param(
+            "invalid confirmation",
+            AuditRecordStatus.CANCELLED,
+            MessageType.TEXT,
+            SessionReplyWorkType.FOREGROUND_REPLY,
+            None,
+            id="invalid-input",
+        ),
+    ],
+)
+async def test_web_submit_duplicate_request_id_does_not_repeat_confirmation_decision_or_enqueue(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    message: str,
+    expected_audit_status: AuditRecordStatus,
+    expected_message_type: MessageType,
+    expected_work_type: SessionReplyWorkType,
+    expected_decision: str | None,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async def resolve_profile(db: AsyncSession, *, uid: str, session_id: str):
+        profile = await db.get(Profile, 1)
+        assert profile is not None and profile.uid == uid and session_id == "session-confirmation"
+        return profile
+
+    async def validate_initial(*_args, **_kwargs) -> None:
+        return None
+
+    async def ensure_writable(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr("app.adapters.chat_web.resolve_profile_for_session", resolve_profile)
+    monkeypatch.setattr("app.adapters.chat_web.ChatDispatcher.validate_initial_message_before_save", validate_initial)
+    monkeypatch.setattr("app.adapters.chat_web.ensure_web_session_writable", ensure_writable)
+
+    async def capture_session_event(_uid: str, _session_id: str, _event_payload: dict) -> None:
+        return None
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", capture_session_event)
+
+    request_id = "confirmation-submit-duplicate"
+    expire_call_count = 0
+    original_expire_confirmation = manager_submission_module.expire_confirmation_by_session
+
+    async def expire_before_idempotent_reservation(db: AsyncSession, *, uid: str, session_id: str) -> int:
+        nonlocal expire_call_count
+        expire_call_count += 1
+        provisional_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == session_id,
+                        Message.uid == uid,
+                        Message.dedupe_key.like("http:%"),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert provisional_messages == []
+        return await original_expire_confirmation(db, uid=uid, session_id=session_id)
+
+    monkeypatch.setattr(
+        manager_submission_module,
+        "expire_confirmation_by_session",
+        expire_before_idempotent_reservation,
+    )
+
+    async with confirmation_workflow_session_factory() as first_db:
+        first_response = await web_chat_adapter.submit(
+            first_db,
+            message,
+            attachments=[],
+            uid="owner",
+            session_id="session-confirmation",
+            request_id=request_id,
+        )
+
+    async def load_state():
+        async with confirmation_workflow_session_factory() as db:
+            record = await db.get(AuditRecord, audit_record_id)
+            messages = list(
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.session_id == "session-confirmation",
+                            Message.uid == "owner",
+                            Message.role == MessageRole.USER,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            works = list(
+                (
+                    await db.execute(
+                        select(SessionReplyWorkItem).where(
+                            SessionReplyWorkItem.session_id == "session-confirmation",
+                            SessionReplyWorkItem.uid == "owner",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert record is not None
+            return record, messages, works
+
+    first_record, first_messages, first_works = await load_state()
+    first_audit_state = (
+        first_record.status,
+        first_record.decision,
+        first_record.decision_message_id,
+        first_record.decision_raw_message,
+        first_record.decided_by,
+        first_record.execution_claim_token,
+        first_record.error_reason,
+        first_record.completed_at,
+        first_record.updated_at,
+    )
+
+    async with confirmation_workflow_session_factory() as second_db:
+        second_response = await web_chat_adapter.submit(
+            second_db,
+            message,
+            attachments=[],
+            uid="owner",
+            session_id="session-confirmation",
+            request_id=request_id,
+        )
+
+    second_record, second_messages, second_works = await load_state()
+
+    assert expire_call_count == 1
+    assert first_response["request_id"] == second_response["request_id"] == request_id
+    assert first_response["work_id"] == second_response["work_id"]
+    assert second_response["session_events"] == []
+    assert first_record.status == expected_audit_status
+    if expected_decision is None:
+        assert first_record.decision is None
+    else:
+        assert first_record.decision is not None and first_record.decision.value == expected_decision
+    assert (
+        second_record.status,
+        second_record.decision,
+        second_record.decision_message_id,
+        second_record.decision_raw_message,
+        second_record.decided_by,
+        second_record.execution_claim_token,
+        second_record.error_reason,
+        second_record.completed_at,
+        second_record.updated_at,
+    ) == first_audit_state
+
+    assert len(first_messages) == len(second_messages) == 1
+    message_row = first_messages[0]
+    assert message_row.type == expected_message_type
+    assert message_row.content == message
+    assert len(first_works) == len(second_works) == 1
+    work = first_works[0]
+    assert work.id == first_response["work_id"] == second_response["work_id"] == second_works[0].id
+    assert work.work_type == expected_work_type
+    assert work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    if expected_work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
+        assert work.source_id == str(audit_record_id)
+        assert work.execution_state["decision_message_id"] == message_row.id
+    else:
+        assert work.source_id == str(message_row.id)

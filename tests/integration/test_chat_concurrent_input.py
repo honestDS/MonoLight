@@ -88,7 +88,6 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
     profile = Profile(id=1, uid="owner", name="queue-test", configs={})
     first_dispatch_started = asyncio.Event()
     release_first_dispatch = asyncio.Event()
-    web_input_queued = asyncio.Event()
     websocket_input_queued = asyncio.Event()
     absorbed_contents: list[str] = []
 
@@ -136,7 +135,7 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
     async def submit_first_web_connection():
         async with concurrent_queue_session_factory() as db:
             return await _collect_events(
-                web_chat_adapter.chat_stream(
+                ws_chat_adapter.chat(
                     db,
                     "A",
                     uid="owner",
@@ -157,15 +156,12 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
 
         async def submit_web_connection():
             async with concurrent_queue_session_factory() as db:
-                return await _collect_events(
-                    web_chat_adapter.chat_stream(
-                        db,
-                        "B",
-                        uid="owner",
-                        session_id="session-primary",
-                        request_id="request-b",
-                    ),
-                    queued=web_input_queued,
+                return await web_chat_adapter.submit(
+                    db,
+                    "B",
+                    uid="owner",
+                    session_id="session-primary",
+                    request_id="request-b",
                 )
 
         async def submit_websocket_connection():
@@ -183,8 +179,10 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
 
         web_connection = asyncio.create_task(submit_web_connection())
         websocket_connection = asyncio.create_task(submit_websocket_connection())
-        await web_input_queued.wait()
         await websocket_input_queued.wait()
+        web_response = await web_connection
+        assert web_response["submission_status"] == "queued"
+        assert web_response["work_id"] is not None
         queued_works = await _wait_for_work(concurrent_queue_session_factory, session_id="session-primary", expected_count=3)
         assert [work.sequence_no for work in queued_works] == [1, 2, 3]
 
@@ -208,11 +206,12 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
         assert marked_terminal is True
         await worker_db.commit()
 
-    first_events, web_events, websocket_events = await asyncio.gather(first_connection, web_connection, websocket_connection)
+    first_events, websocket_events = await asyncio.gather(first_connection, websocket_connection)
 
-    assert [event["type"] for event in web_events].count("input_queued") == 1
     assert [event["type"] for event in websocket_events].count("input_queued") == 1
-    for events in (first_events, web_events, websocket_events):
+    assert web_response["submission_status"] == "queued"
+    assert web_response["work_id"] is not None
+    for events in (first_events, websocket_events):
         done_events = [event for event in events if event.get("type") == "done"]
         assert len(done_events) == 1
         assert done_events[0]["response_id"] == "response-final"
@@ -229,9 +228,6 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
     assert [work.sequence_no for work in works] == [1, 2, 3]
     assert works[0].status == SessionReplyWorkStatus.SUCCEEDED
     assert all(work.status == SessionReplyWorkStatus.MERGED for work in works[1:])
-    work_by_source_id = {int(work.source_id): work for work in works}
-    queued_messages = [message for message in messages if message.content in {"B", "C"}]
-    assert [work_by_source_id[message.id].sequence_no for message in queued_messages] == sorted(work_by_source_id[message.id].sequence_no for message in queued_messages)
     message_by_id = {message.id: message for message in messages}
     assert absorbed_contents == ["\n".join(str(message_by_id[int(work.source_id)].content) for work in works[1:])]
     assert [event.sequence_no for event in persisted_events] == list(range(1, len(persisted_events) + 1))

@@ -1216,17 +1216,24 @@ async def test_websocket_adapter_approval_reaches_confirmed_execution_work(db_se
 
     await refresh_record(db_session, record)
     works = await list_work(db_session)
-    assert [event["type"] for event in events] == ["audit_confirmation_status", "audit_tool_results_update", "done"]
-    assert events[0]["session_id"] == "session-1"
-    assert events[0]["audit_record_id"] == record.id
-    assert events[0]["status"] == AuditRecordStatus.EXECUTING.value
-    assert events[0]["request_id"] == "request-1"
+    assert [event["type"] for event in events] == ["input_accepted", "audit_confirmation_status", "audit_tool_results_update", "done"]
+    assert events[0] == {
+        "type": "input_accepted",
+        "session_id": "session-1",
+        "request_id": "request-1",
+        "work_id": works[0].id,
+        "submission_status": "approved",
+    }
     assert events[1]["session_id"] == "session-1"
     assert events[1]["audit_record_id"] == record.id
+    assert events[1]["status"] == AuditRecordStatus.EXECUTING.value
     assert events[1]["request_id"] == "request-1"
-    direct_tool_result = InternalMessage.model_validate_json(events[1]["messages"][0]["content"])
+    assert events[2]["session_id"] == "session-1"
+    assert events[2]["audit_record_id"] == record.id
+    assert events[2]["request_id"] == "request-1"
+    direct_tool_result = InternalMessage.model_validate_json(events[2]["messages"][0]["content"])
     assert json.loads(direct_tool_result.content)["status"] == AuditRecordStatus.EXECUTING.value
-    assert events[2] == {
+    assert events[3] == {
         "type": "done",
         "session_id": "session-1",
         "response": {"work_id": works[0].id},
@@ -1302,15 +1309,22 @@ async def test_websocket_route_active_task_appends_approval_through_unified_subm
     assert len(works) == 1
     assert works[0].work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
     assert works[0].status == SessionReplyWorkStatus.READY_FOR_LLM
-    assert [event["type"] for event in websocket.sent] == ["audit_confirmation_status", "audit_tool_results_update"]
-    assert websocket.sent[0]["session_id"] == session_id
-    assert websocket.sent[0]["audit_record_id"] == record.id
-    assert websocket.sent[0]["status"] == AuditRecordStatus.EXECUTING.value
-    assert websocket.sent[0]["request_id"] == "approval-request"
+    assert [event["type"] for event in websocket.sent] == ["input_accepted", "audit_confirmation_status", "audit_tool_results_update"]
+    assert websocket.sent[0] == {
+        "type": "input_accepted",
+        "session_id": session_id,
+        "request_id": "approval-request",
+        "work_id": works[0].id,
+        "submission_status": "approved",
+    }
     assert websocket.sent[1]["session_id"] == session_id
     assert websocket.sent[1]["audit_record_id"] == record.id
+    assert websocket.sent[1]["status"] == AuditRecordStatus.EXECUTING.value
     assert websocket.sent[1]["request_id"] == "approval-request"
-    direct_tool_result = InternalMessage.model_validate_json(websocket.sent[1]["messages"][0]["content"])
+    assert websocket.sent[2]["session_id"] == session_id
+    assert websocket.sent[2]["audit_record_id"] == record.id
+    assert websocket.sent[2]["request_id"] == "approval-request"
+    direct_tool_result = InternalMessage.model_validate_json(websocket.sent[2]["messages"][0]["content"])
     assert json.loads(direct_tool_result.content)["status"] == AuditRecordStatus.EXECUTING.value
 
 

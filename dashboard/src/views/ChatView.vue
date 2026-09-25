@@ -72,8 +72,8 @@
                       aria-live="polite"
                     ></span>
                   </div>
-                  <div class="session-meta" :title="`${$t('chat.session_source')}: ${session.source || '-'}`">
-                    <span v-if="session.source" class="session-source">{{ session.source }}</span>
+                  <div class="session-meta" :title="`${$t('chat.session_source')}: ${formatSessionSource(session.source) || '-'}`">
+                    <span v-if="session.source" class="session-source">{{ formatSessionSource(session.source) }}</span>
                   </div>
                 </div>
                 <div class="session-actions">
@@ -110,6 +110,15 @@
       />
 
       <div class="input-area" @transitionend.self="handleWelcomeExitTransitionEnd">
+        <el-alert
+          v-if="transportFallbackNotice"
+          class="transport-fallback-alert"
+          type="warning"
+          show-icon
+          :title="transportFallbackNotice"
+          @close="clearTransportFallbackNotice"
+        />
+
         <!-- 新建会话 / 无会话时的欢迎区 -->
         <div class="welcome-hero" :class="{ 'is-exiting': sessionEngaged }">
           <h1 class="welcome-greeting">{{ $t('chat.welcome_greeting') }}</h1>
@@ -209,7 +218,7 @@
                       <span class="more-option-label">{{ $t('chat.more_options_non_stream') }} / {{ $t('chat.more_options_stream') }}</span>
                       <el-radio-group
                         :model-value="isWsModeComputed ? 'stream' : 'non_stream'"
-                        :disabled="isCurrentSessionReadOnly"
+                        :disabled="isCurrentSessionReadOnly || modeSettingSubmitting || transportModeChangeBlocked"
                         size="small"
                         @update:model-value="val => handleModeChange(val === 'stream')"
                       >
@@ -285,7 +294,7 @@
                     type="primary"
                     @click="send"
                     :loading="isCurrentSessionReadOnly && guidanceSubmitting"
-                    :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || !inputMsg.trim() : !inputMsg.trim() && attachments.length === 0"
+                    :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || !inputMsg.trim() : modeSettingSubmitting || (!inputMsg.trim() && attachments.length === 0)"
                     class="action-btn"
                     circle
                   >
@@ -326,6 +335,12 @@ import {
 } from '../utils/chatContentReveal'
 
 const { t } = useI18n()
+
+const formatSessionSource = (source) => {
+  if (source === 'http') return t('chat.session_source_http')
+  if (source === 'ws') return t('chat.session_source_ws')
+  return source
+}
 
 const chat = useChatSession()
 const profiles = ref([])
@@ -468,9 +483,6 @@ const toggleMarkdown = async (val) => {
   }
 }
 
-// 本地流式模式状态（从 transportMode 计算）
-const isWsMode = ref(true)
-
 // 计算属性：根据 transportMode 计算当前是否为流式模式
 const isWsModeComputed = computed(() => transportMode.value === 'ws')
 
@@ -487,6 +499,9 @@ const {
   activeCollapse,
   currentSession,
   transportMode,
+  modeSettingSubmitting,
+  transportModeChangeBlocked,
+  transportFallbackNotice,
   attachments,
   isCurrentSessionReadOnly,
   isContextSummarizing,
@@ -609,6 +624,7 @@ const {
   reloadCurrentSessionHistory,
   send: originalSend,
   setTransportMode,
+  clearTransportFallbackNotice,
   disconnectWebSocket,
   handleScroll
 } = chat
@@ -646,6 +662,8 @@ const guidanceSubmitting = ref(false)
 
 // 拦截发送，发送完成后清空列表
 const send = async () => {
+  if (modeSettingSubmitting.value) return
+
   if (isCurrentSessionReadOnly.value) {
     const content = inputMsg.value.trim()
     const sessionId = currentSessionId.value
@@ -720,13 +738,18 @@ const handleAuditDecision = async ({ decision }) => {
 
 // 通信模式切换
 const handleModeChange = async (val) => {
+  if (modeSettingSubmitting.value) return
+
   if (isCurrentSessionReadOnly.value) {
     ElMessage.warning(t('chat.external_session_read_only'))
     return
   }
+  if (transportModeChangeBlocked.value) {
+    ElMessage.warning(t('chat.transport_change_blocked'))
+    return
+  }
 
   const mode = val ? 'ws' : 'http'
-  isWsMode.value = val
   await setTransportMode(mode)
 }
 

@@ -402,6 +402,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         session_activity_stmt = select(
             Message.session_id.label("session_id"),
             func.max(Message.created_at).label("last_active"),
+            func.max(Message.id).label("latest_message_id"),
             Message.uid.label("uid"),
         )
         if not is_admin:
@@ -420,6 +421,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             select(
                 ChatSession.session_id,
                 last_active,
+                session_activity.c.latest_message_id,
                 is_loading,
                 ChatSession.uid,
                 User.username,

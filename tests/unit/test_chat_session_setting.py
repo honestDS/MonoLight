@@ -99,6 +99,31 @@ def test_session_setting_rejects_reserved_reply_target_source():
         )
 
 
+@pytest.mark.parametrize(
+    ("transport_mode", "is_valid"),
+    [
+        ("http", True),
+        ("ws", True),
+        ("", False),
+        ("WS", False),
+        ("ftp", False),
+    ],
+)
+def test_session_setting_transport_mode_accepts_only_http_or_ws(transport_mode, is_valid):
+    if is_valid:
+        request = chat_api.SessionSettingRequest(
+            session_id="session-1",
+            transport_mode=transport_mode,
+        )
+        assert request.transport_mode == transport_mode
+    else:
+        with pytest.raises(ValidationError):
+            chat_api.SessionSettingRequest(
+                session_id="session-1",
+                transport_mode=transport_mode,
+            )
+
+
 @pytest.mark.asyncio
 async def test_http_adapter_rejects_external_session_before_llm_work(monkeypatch):
     profile_calls = []

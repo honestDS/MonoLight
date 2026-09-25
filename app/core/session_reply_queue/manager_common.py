@@ -23,6 +23,7 @@ __all__ = [
     "merge_work_request_ids",
     "is_submission_queued",
     "get_tool_call_visibility",
+    "build_input_accepted_event",
     "build_input_queued_event",
     "build_foreground_message_dedupe_key",
     "build_session_reply_work_identity",
@@ -67,6 +68,21 @@ def merge_work_request_ids(
 
 def is_submission_queued(submission_status: str) -> bool:
     return submission_status == "queued" or submission_status.endswith("_and_queued")
+
+
+def build_input_accepted_event(
+    session_id: str,
+    request_id: str,
+    work_id: int | None,
+    submission_status: str,
+) -> dict[str, Any]:
+    return {
+        "type": "input_accepted",
+        "session_id": session_id,
+        "request_id": request_id,
+        "work_id": work_id,
+        "submission_status": submission_status,
+    }
 
 
 def get_tool_call_visibility(session: Any | None, source: str) -> tuple[bool, bool]:

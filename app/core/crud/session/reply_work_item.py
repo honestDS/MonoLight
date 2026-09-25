@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, or_, true, update
+from sqlalchemy import and_, delete, exists, func, or_, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -47,6 +47,109 @@ class CRUDSessionReplyWorkItem:
     async def get_by_dedupe_key(self, db: AsyncSession, dedupe_key: str) -> SessionReplyWorkItem | None:
         result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.dedupe_key == dedupe_key))
         return result.scalars().first()
+
+    async def get_by_input_message(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        message_id: int,
+    ) -> SessionReplyWorkItem | None:
+        result = await db.execute(
+            select(SessionReplyWorkItem).where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                or_(
+                    and_(
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.FOREGROUND_REPLY,
+                        SessionReplyWorkItem.source_type == SessionReplySourceType.USER_MESSAGE,
+                        SessionReplyWorkItem.source_id == str(message_id),
+                    ),
+                    and_(
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                        SessionReplyWorkItem.execution_state["decision_message_id"].as_integer() == message_id,
+                    ),
+                ),
+            )
+        )
+        return result.scalars().first()
+
+    async def has_active_interactive_work(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+    ) -> bool:
+        result = await db.execute(
+            select(SessionReplyWorkItem.id)
+            .where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.work_type.in_(
+                    [
+                        SessionReplyWorkType.FOREGROUND_REPLY,
+                        SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                    ]
+                ),
+                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+            )
+            .limit(1)
+        )
+        return result.scalar() is not None
+
+    async def list_recent_http_for_sessions(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_ids: list[str],
+        limit_per_session: int = 30,
+    ) -> list[SessionReplyWorkItem]:
+        if not session_ids:
+            return []
+
+        common_conditions = [
+            SessionReplyWorkItem.uid == uid,
+            SessionReplyWorkItem.session_id.in_(session_ids),
+            SessionReplyWorkItem.work_type.in_(
+                [
+                    SessionReplyWorkType.FOREGROUND_REPLY,
+                    SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                ]
+            ),
+            SessionReplyWorkItem.execution_state["message_source"].as_string() == "http",
+        ]
+        terminal_ranked = (
+            select(
+                SessionReplyWorkItem.id.label("work_id"),
+                func.row_number()
+                .over(
+                    partition_by=SessionReplyWorkItem.session_id,
+                    order_by=SessionReplyWorkItem.sequence_no.desc(),
+                )
+                .label("terminal_row_number"),
+            )
+            .where(
+                *common_conditions,
+                SessionReplyWorkItem.status.in_(SESSION_REPLY_TERMINAL_STATUSES),
+                SessionReplyWorkItem.updated_at >= get_local_time() - timedelta(hours=24),
+            )
+            .subquery()
+        )
+        result = await db.execute(
+            select(SessionReplyWorkItem)
+            .where(
+                *common_conditions,
+                or_(
+                    SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+                    SessionReplyWorkItem.id.in_(select(terminal_ranked.c.work_id).where(terminal_ranked.c.terminal_row_number <= limit_per_session)),
+                ),
+            )
+            .order_by(SessionReplyWorkItem.session_id.desc(), SessionReplyWorkItem.sequence_no.desc())
+        )
+        return list(result.scalars().all())
 
     async def get_next_for_session_resume(
         self,

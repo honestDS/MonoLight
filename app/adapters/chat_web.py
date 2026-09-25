@@ -1,6 +1,5 @@
 import json
 import time
-from collections.abc import AsyncGenerator
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -15,9 +14,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.profile_selection import resolve_profile_for_session
 from app.core.session_reply_queue.manager import (
-    build_input_queued_event,
     build_session_reply_work_event_id,
-    is_submission_queued,
     session_reply_queue_manager,
 )
 from app.core.utils.session import ensure_web_session_writable
@@ -81,7 +78,7 @@ class WebChatAdapter(BaseChatAdapter):
     async def send_session_event(self, uid: str, session_id: str, event: dict[str, Any]) -> None:
         logger.bind(uid=uid, session_id=session_id, event_type=event.get("type")).debug("Web adapter session event persisted for polling")
 
-    async def chat_stream(
+    async def submit(
         self,
         db: AsyncSession,
         message: str | list[dict[str, Any]],
@@ -89,53 +86,36 @@ class WebChatAdapter(BaseChatAdapter):
         session_id: str,
         attachments: list[str] | None = None,
         request_id: str | None = None,
-    ) -> AsyncGenerator[dict[str, Any]]:
+    ) -> dict[str, Any]:
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
-        try:
-            await ensure_web_session_writable(
-                db,
-                session_id=session_id,
-                uid=uid,
-            )
-            profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id)
-            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
-            _initial_message, work, submission_status, confirmation_update_events = await session_reply_queue_manager.submit_user_message(
-                db,
-                uid=uid,
-                session_id=session_id,
-                profile=profile,
-                message=message,
-                attachments=attachments,
-                source="http",
-                stream_requested=True,
-                context_summary_events_requested=True,
-                request_id=request_id,
-            )
-            for event in confirmation_update_events:
-                yield event
-            if request_id and is_submission_queued(submission_status):
-                yield build_input_queued_event(session_id, request_id, work.id, submission_status)
-            async for event in session_reply_queue_manager.wait_for_stream(work.id):
-                if event.get("type") == "done":
-                    response = event.get("response")
-                    if isinstance(response, dict) and _response_has_background_tasks(response):
-                        response["has_background_tasks"] = True
-                        response["background_task_poll_interval"] = 2
-                yield event
-        except BaseBusinessException as e:
-            yield {
-                "type": "error",
-                "message": t(e.message, default=e.message, **e.kwargs),
-                "session_id": session_id,
-            }
-        except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).error(t("LOG_ADAPTER_WEB_UNEXPECTED_ERROR", error=str(e)), exc_info=True)
-            yield {
-                "type": "error",
-                "message": t(ERR_LLM_UNEXPECTED_ERROR),
-                "session_id": session_id,
-            }
+        await ensure_web_session_writable(
+            db,
+            session_id=session_id,
+            uid=uid,
+        )
+        profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id)
+        await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+        _initial_message, work, submission_status, confirmation_update_events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile=profile,
+            message=message,
+            attachments=attachments,
+            source="http",
+            stream_requested=False,
+            context_summary_events_requested=False,
+            request_id=request_id,
+            idempotent_http_request=True,
+        )
+        return {
+            "session_id": session_id,
+            "request_id": request_id,
+            "work_id": work.id,
+            "submission_status": submission_status,
+            "session_events": confirmation_update_events or [],
+        }
 
     async def chat(
         self,
