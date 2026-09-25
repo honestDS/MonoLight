@@ -1,87 +1,136 @@
 <template>
   <div class="chat-view-container">
-    <!-- 左侧会话列表侧边栏 -->
-    <div class="sessions-sidebar">
-      <div class="sidebar-header">
-        <span>{{ $t('chat.sessions_title') }}</span>
-        <div class="sidebar-actions">
-          <el-icon
-            class="sidebar-icon"
-            :title="$t('chat.new_session_title')"
-            @click.stop="handleCreateNewSession"
-          ><Plus /></el-icon>
-          <el-icon
-            class="sidebar-icon refresh-icon"
-            :class="{ loading: sessionsLoading }"
-            :title="$t('chat.refresh_sessions')"
-            @click.stop="loadSessions"
-          ><Refresh /></el-icon>
-        </div>
-      </div>
-      <div class="sessions-list">
-        <template v-for="group in groupedSessions" :key="group.key">
-          <div
-            :class="['session-group-title', { 'is-collapsed': collapsedGroups.has(group.key) }]"
-            role="button"
-            tabindex="0"
-            @click="toggleGroup(group.key)"
-            @keydown.enter.prevent="toggleGroup(group.key)"
-            @keydown.space.prevent="toggleGroup(group.key)"
+    <!-- 聊天主区域 -->
+    <div class="chat-main" :class="{ 'is-welcome': !sessionEngaged }">
+      <!-- 会话入口：左上角浮动控制组 + 按需展开的覆盖式会话面板 -->
+      <div
+        v-click-outside="closeSessionsPanel"
+        class="chat-side-controls"
+        @keydown.esc="closeSessionsPanel"
+      >
+        <div class="chat-side-trigger-group">
+          <el-tooltip
+            :content="$t(sessionsPanelOpen ? 'chat.collapse_sessions' : 'chat.expand_sessions')"
+            placement="bottom-start"
+            :show-after="300"
           >
-            <span class="session-group-title-text">{{ group.label }}</span>
-            <el-icon class="session-group-chevron"><ArrowDown /></el-icon>
-          </div>
-          <div
-            :class="['session-group-body', { 'is-collapsed': collapsedGroups.has(group.key) }]"
-          >
-            <div
-              v-for="session in group.sessions"
-              v-show="!collapsedGroups.has(group.key)"
-              :key="session.session_id"
-              :data-session-id="session.session_id"
-              :class="['session-item', { active: currentSessionId === session.session_id }]"
-              @click="handleSelectSession(session)"
+            <button
+              type="button"
+              class="chat-side-trigger"
+              :class="{ 'is-active': sessionsPanelOpen }"
+              :aria-expanded="sessionsPanelOpen"
+              aria-controls="chat-sessions-panel"
+              :aria-label="$t(sessionsPanelOpen ? 'chat.collapse_sessions' : 'chat.expand_sessions')"
+              @click="toggleSessionsPanel"
             >
-              <div class="session-content">
-                <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
-                  <span class="session-title-text">
-                    <template v-if="typingSessionId === session.session_id">
-                      <span
-                        v-for="(char, index) in session.title"
-                        :key="index"
-                        class="typing-char"
-                      >{{ char }}</span>
-                    </template>
-                    <template v-else>
-                      {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
-                    </template>
-                  </span>
-                  <span
-                    v-if="session.is_loading"
-                    class="session-loading-indicator"
-                    :title="$t('chat.session_reply_in_progress')"
-                    role="status"
-                    aria-live="polite"
-                  ></span>
-                </div>
-                <div class="session-meta" :title="`${$t('chat.session_source')}: ${session.source || '-'}`">
-                  <span v-if="session.source" class="session-source">{{ session.source }}</span>
-                </div>
+              <el-icon><ChatLineSquare /></el-icon>
+            </button>
+          </el-tooltip>
+          <span class="chat-side-trigger-divider" aria-hidden="true"></span>
+          <el-tooltip
+            :content="$t('chat.new_session_title')"
+            placement="bottom-start"
+            :show-after="300"
+          >
+            <button
+              type="button"
+              class="chat-side-trigger"
+              :aria-label="$t('chat.new_session_title')"
+              @click="handleCreateNewSession"
+            >
+              <el-icon><Plus /></el-icon>
+            </button>
+          </el-tooltip>
+        </div>
+
+        <Transition name="sessions-panel">
+          <div
+            v-show="sessionsPanelOpen"
+            id="chat-sessions-panel"
+            class="sessions-panel glass-surface"
+            role="region"
+            :aria-label="$t('chat.sessions_title')"
+          >
+            <div class="sidebar-header">
+              <span>{{ $t('chat.sessions_title') }}</span>
+              <div class="sidebar-actions">
+                <el-icon
+                  class="sidebar-icon"
+                  :title="$t('chat.new_session_title')"
+                  @click.stop="handleCreateNewSession"
+                ><Plus /></el-icon>
+                <el-icon
+                  class="sidebar-icon refresh-icon"
+                  :class="{ loading: sessionsLoading }"
+                  :title="$t('chat.refresh_sessions')"
+                  @click.stop="loadSessions"
+                ><Refresh /></el-icon>
               </div>
-              <div class="session-actions">
-                <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
+            </div>
+            <div class="sessions-list">
+              <template v-for="group in groupedSessions" :key="group.key">
+                <div
+                  :class="['session-group-title', { 'is-collapsed': collapsedGroups.has(group.key) }]"
+                  role="button"
+                  tabindex="0"
+                  @click="toggleGroup(group.key)"
+                  @keydown.enter.prevent="toggleGroup(group.key)"
+                  @keydown.space.prevent="toggleGroup(group.key)"
+                >
+                  <span class="session-group-title-text">{{ group.label }}</span>
+                  <el-icon class="session-group-chevron"><ArrowDown /></el-icon>
+                </div>
+                <div
+                  :class="['session-group-body', { 'is-collapsed': collapsedGroups.has(group.key) }]"
+                >
+                  <div
+                    v-for="session in group.sessions"
+                    v-show="!collapsedGroups.has(group.key)"
+                    :key="session.session_id"
+                    :data-session-id="session.session_id"
+                    :class="['session-item', { active: currentSessionId === session.session_id }]"
+                    @click="handleSelectSession(session)"
+                  >
+                    <div class="session-content">
+                      <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
+                        <span class="session-title-text">
+                          <template v-if="typingSessionId === session.session_id">
+                            <span
+                              v-for="(char, index) in session.title"
+                              :key="index"
+                              class="typing-char"
+                            >{{ char }}</span>
+                          </template>
+                          <template v-else>
+                            {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
+                          </template>
+                        </span>
+                        <span
+                          v-if="session.is_loading"
+                          class="session-loading-indicator"
+                          :title="$t('chat.session_reply_in_progress')"
+                          role="status"
+                          aria-live="polite"
+                        ></span>
+                      </div>
+                      <div class="session-meta" :title="`${$t('chat.session_source')}: ${session.source || '-'}`">
+                        <span v-if="session.source" class="session-source">{{ session.source }}</span>
+                      </div>
+                    </div>
+                    <div class="session-actions">
+                      <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <div v-if="groupedSessions.length === 0 && !sessionsLoading" class="empty-tip">
+                {{ $t('chat.no_sessions') }}
               </div>
             </div>
           </div>
-        </template>
-        <div v-if="groupedSessions.length === 0 && !sessionsLoading" class="empty-tip">
-          {{ $t('chat.no_sessions') }}
-        </div>
+        </Transition>
       </div>
-    </div>
 
-    <!-- 右侧聊天区域 -->
-    <div class="chat-main" :class="{ 'is-welcome': !sessionEngaged }">
       <ChatMessageList
         ref="messageList"
         v-model:active-collapse="activeCollapse"
@@ -296,8 +345,8 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Delete, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
+import { ElMessage, ClickOutside as vClickOutside } from 'element-plus'
+import { ChatLineSquare, Delete, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import SessionTodoPanel from '../components/SessionTodoPanel.vue'
@@ -353,6 +402,15 @@ const currentSessionEnableMarkdown = computed({
     }
   }
 })
+
+// 覆盖式会话面板开关状态：默认收起，选中会话、点击面板外部或按下 Esc 时收起
+const sessionsPanelOpen = ref(false)
+const toggleSessionsPanel = () => {
+  sessionsPanelOpen.value = !sessionsPanelOpen.value
+}
+const closeSessionsPanel = () => {
+  sessionsPanelOpen.value = false
+}
 
 // 折叠的会话分组 key（today / yesterday / earlier）
 const collapsedGroups = ref(new Set())
@@ -578,6 +636,7 @@ const {
 } = chat
 
 const handleSelectSession = (session) => {
+  closeSessionsPanel()
   const sessionId = session?.session_id
   const shouldDefer = shouldDeferChatContent({
     wasWelcome: !sessionEngaged.value,
@@ -590,6 +649,7 @@ const handleSelectSession = (session) => {
 }
 
 const handleCreateNewSession = () => {
+  closeSessionsPanel()
   deferredContentSessionId.value = null
   createNewSession()
 }
