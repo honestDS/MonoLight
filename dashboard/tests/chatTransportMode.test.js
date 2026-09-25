@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { sendHttpNonStream } from '../src/composables/chat/chatTransportRuntime.js'
 import {
+  activateSelectedSessionTransportMode,
   persistSessionTransportMode,
   resolveSessionTransportMode,
   resumeSelectedSessionByTransport
 } from '../src/composables/chat/sessionTransportMode.js'
+import { getHistoryMessageCursor } from '../src/composables/chat/streamResume.js'
 
 test('http transport sends a real non-stream request', async () => {
   const requests = []
@@ -63,7 +65,7 @@ test('http transport includes new-session display settings without changing pers
   })
 })
 
-test('persistSessionTransportMode persists the selected mode before applying it to the active session', async () => {
+test('persistSessionTransportMode persists the selected mode without owning runtime activation', async () => {
   const sessions = [{ session_id: 'session-1', source: 'ws' }]
   const calls = []
 
@@ -71,44 +73,79 @@ test('persistSessionTransportMode persists the selected mode before applying it 
     sessionId: 'session-1',
     mode: 'http',
     sessions,
-    getCurrentSessionId: () => 'session-1',
     updateSessionSetting: async (sessionId, payload) => {
       calls.push(['persist', sessionId, payload])
-    },
-    applyTransportMode: async mode => {
-      calls.push(['apply', mode])
     }
   })
 
-  assert.deepEqual(calls, [
-    ['persist', 'session-1', { transport_mode: 'http' }],
-    ['apply', 'http']
-  ])
+  assert.deepEqual(calls, [['persist', 'session-1', { transport_mode: 'http' }]])
   assert.equal(sessions[0].source, 'http')
 })
 
 test('persistSessionTransportMode rolls back the local mode when persistence fails', async () => {
   const sessions = [{ session_id: 'session-1', source: 'ws' }]
-  const appliedModes = []
 
   await assert.rejects(
     persistSessionTransportMode({
       sessionId: 'session-1',
       mode: 'http',
       sessions,
-      getCurrentSessionId: () => 'session-1',
       updateSessionSetting: async () => {
         throw new Error('persist failed')
-      },
-      applyTransportMode: async mode => {
-        appliedModes.push(mode)
       }
     }),
     /persist failed/
   )
 
   assert.equal(sessions[0].source, 'ws')
-  assert.deepEqual(appliedModes, ['ws'])
+})
+
+test('activating websocket mode immediately subscribes the selected session with the persisted history cursor', async () => {
+  const calls = []
+  const session = { session_id: 'session-1', source: 'ws' }
+  const historyData = [
+    { id: 1710000000000, db_id: 40 },
+    { id: 1710000000001, db_id: 41 },
+    { id: 42 }
+  ]
+
+  const result = await activateSelectedSessionTransportMode({
+    session,
+    mode: 'ws',
+    historyData,
+    applyTransportMode: async mode => {
+      calls.push(['apply', mode])
+    },
+    resumeStream: async (selectedSession, messages) => {
+      calls.push(['resume', selectedSession.session_id, getHistoryMessageCursor(messages)])
+    }
+  })
+
+  assert.equal(result, 'ws')
+  assert.deepEqual(calls, [
+    ['apply', 'ws'],
+    ['resume', 'session-1', 41]
+  ])
+  assert.equal(getHistoryMessageCursor([{ id: 40 }, { id: 42 }]), 42)
+})
+
+test('activating HTTP mode changes transport without starting a websocket subscription', async () => {
+  const calls = []
+
+  const result = await activateSelectedSessionTransportMode({
+    session: { session_id: 'session-1', source: 'http' },
+    mode: 'http',
+    historyData: [{ id: 10 }],
+    applyTransportMode: async mode => {
+      calls.push(['apply', mode])
+    },
+    resumeStream: async () => {
+      calls.push(['resume'])
+    }
+  })
+
+  assert.equal(result, 'http')
+  assert.deepEqual(calls, [['apply', 'http']])
 })
 
 test('selected sessions resume through their persisted transport mode', async () => {

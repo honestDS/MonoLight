@@ -7,13 +7,13 @@ import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
 import { createContextSummaryTracker } from './contextSummaryTracker.js'
 import { createHistoryMergeTracker } from './historyMergeTracker.js'
-import { applyResumedTurnEnd, createSessionReconnectHandler, resumeSessionStream, getInitialResumeLoading } from './streamResume.js'
+import { applyResumedTurnEnd, createSessionReconnectHandler, getHistoryMessageCursor, getInitialResumeLoading, resumeSessionStream } from './streamResume.js'
 import { withSessionActivity } from './sessionActivity.js'
 import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
 import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMessages } from './auditConfirmationState.js'
 import { hasHttpResultMessage, shouldFetchHttpWorkStatus } from './sessionListLoading.js'
 import { createHttpHistorySyncController } from './httpHistorySync.js'
-import { persistSessionTransportMode, resolveSessionTransportMode, resumeSelectedSessionByTransport } from './sessionTransportMode.js'
+import { activateSelectedSessionTransportMode, persistSessionTransportMode, resolveSessionTransportMode, resumeSelectedSessionByTransport } from './sessionTransportMode.js'
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import {
@@ -312,11 +312,18 @@ export function useChatSession() {
         sessionId,
         mode,
         sessions: sessionManager.sessions.value,
-        getCurrentSessionId: () => sessionManager.currentSessionId.value,
-        getCurrentTransportMode: () => transport.transportMode.value,
-        updateSessionSetting: (targetSessionId, payload) => chatApi.updateSessionSetting(targetSessionId, payload),
-        applyTransportMode: targetMode => transport.setTransportMode(targetMode, transport.disconnectWebSocket)
+        updateSessionSetting: (targetSessionId, payload) => chatApi.updateSessionSetting(targetSessionId, payload)
       })
+      if (sessionManager.currentSessionId.value === sessionId) {
+        const session = sessionManager.sessions.value.find(item => item.session_id === sessionId)
+        await activateSelectedSessionTransportMode({
+          session,
+          mode,
+          historyData: chatState.messages.value,
+          applyTransportMode: targetMode => transport.setTransportMode(targetMode, transport.disconnectWebSocket),
+          resumeStream: resumeSelectedSessionStream
+        })
+      }
       clearTransportFallbackNotice()
       return true
     } catch (error) {
@@ -566,11 +573,10 @@ export function useChatSession() {
     getSessionId: () => sessionManager.currentSessionId.value,
     canSync: canSyncCurrentSessionHistory,
     isLoading: () => chatState.loading.value,
-    fetchBackgroundTasks: sessionId => chatApi.backgroundTasks({
-      session_id: sessionId,
-      page: 1,
-      size: 20
-    }),
+    fetchPendingActivity: async sessionId => {
+      const response = await chatApi.backgroundTaskPendingActivity(sessionId)
+      return response.data?.data?.has_pending_activity === true
+    },
     mergeLatestHistory: mergeLatestSessionHistory,
     intervalMs: HTTP_HISTORY_FAST_SYNC_INTERVAL_MS,
     onError: err => {
@@ -1111,7 +1117,7 @@ export function useChatSession() {
         setLoading: value => { chatState.loading.value = value },
         resume: () => transport.resumeSession({
           sessionId,
-          historyMessageId: Math.max(0, ...historyData.map(message => message.id)),
+          historyMessageId: getHistoryMessageCursor(historyData),
           callbacks
         })
       })
