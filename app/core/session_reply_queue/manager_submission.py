@@ -1,5 +1,8 @@
+import hashlib
+import json
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.confirmation_common import ConfirmationDecision
@@ -17,11 +20,14 @@ from app.core.audit.confirmation_results import (
 from app.core.constants import (
     ERR_AUDIT_CONFIRMATION_INVALID_INPUT,
     ERR_AUDIT_HIGH_RISK_CONFIRMATION_INVALID_INPUT,
+    ERR_CHAT_REQUEST_ID_CONFLICT,
+    ERR_CHAT_REQUEST_WORK_UNAVAILABLE,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
+from app.core.exceptions import ParameterException
 from app.core.i18n import get_current_locale, t
 from app.models.audit import AuditRecordStatus
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
@@ -59,8 +65,104 @@ class SessionReplySubmission:
         has_quote: bool = False,
         request_id: str | None = None,
         additional_system_prompt: str | None = None,
+        idempotent_http_request: bool = False,
     ) -> tuple[InternalMessage, SessionReplyWorkItem, str, list[dict[str, Any]]]:
+        profile_id = profile.id if profile and profile.id else -1
+        serialized_message = _serialize_message_content(message)
+        request_digest = hashlib.sha256(
+            json.dumps([uid, session_id, request_id], separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        idempotent_dedupe_key = f"http:{request_digest[:58]}"
+
+        def validate_idempotent_message(message_row: Message) -> None:
+            if (
+                message_row.uid != uid
+                or message_row.session_id != session_id
+                or message_row.content != serialized_message
+                or (message_row.attachments or []) != (attachments or [])
+            ):
+                raise ParameterException(ERR_CHAT_REQUEST_ID_CONFLICT)
+
+        async def existing_idempotent_submission(
+            message_row: Message,
+        ) -> tuple[InternalMessage, SessionReplyWorkItem, str, list[dict[str, Any]]]:
+            validate_idempotent_message(message_row)
+            if message_row.id is None:
+                raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
+            existing_work = await session_reply_work_item_crud.get_by_input_message(
+                db,
+                uid=uid,
+                session_id=session_id,
+                message_id=message_row.id,
+            )
+            if existing_work is None:
+                raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
+            return (
+                InternalMessage(
+                    id=message_row.id,
+                    role=MessageRole.USER,
+                    content=message_row.content,
+                    attachments=message_row.attachments,
+                    guidance_prompt=message_row.guidance_prompt,
+                    created_at=message_row.created_at.timestamp(),
+                ),
+                existing_work,
+                await self._resolve_submission_status(
+                    db,
+                    existing_work,
+                    immediate_status="accepted",
+                ),
+                [],
+            )
+
+        async def reserve_idempotent_message() -> tuple[Message, bool]:
+            existing_message_row = await message_crud.get_by_dedupe_key(db, idempotent_dedupe_key)
+            if existing_message_row is not None:
+                message_row = existing_message_row
+                message_was_existing = True
+            else:
+                # Keep the creator flag across the unique-key race instead of
+                # inferring it from the row returned after an insert conflict.
+                message_row = Message(
+                    session_id=session_id,
+                    uid=uid,
+                    role=MessageRole.USER,
+                    type=MessageType.TEXT,
+                    content=serialized_message,
+                    attachments=attachments,
+                    profile_id=profile_id,
+                    is_processed=False,
+                    dedupe_key=idempotent_dedupe_key,
+                )
+                try:
+                    async with db.begin_nested():
+                        db.add(message_row)
+                        await db.flush()
+                except IntegrityError:
+                    message_row = await message_crud.get_by_dedupe_key(db, idempotent_dedupe_key)
+                    if message_row is None:
+                        raise
+                    message_was_existing = True
+                else:
+                    await db.refresh(message_row)
+                    message_was_existing = False
+            validate_idempotent_message(message_row)
+            return message_row, message_was_existing
+
+        idempotent_message_row: Message | None = None
+        idempotent_message_was_existing = False
+        if idempotent_http_request:
+            existing_message_row = await message_crud.get_by_dedupe_key(db, idempotent_dedupe_key)
+            if existing_message_row is not None:
+                return await existing_idempotent_submission(existing_message_row)
+
         await expire_confirmation_by_session(db, uid=uid, session_id=session_id)
+
+        if idempotent_http_request:
+            idempotent_message_row, idempotent_message_was_existing = await reserve_idempotent_message()
+            if idempotent_message_was_existing:
+                return await existing_idempotent_submission(idempotent_message_row)
+
         cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
         current_confirmation = await audit_crud.get_current_confirmation(db, uid=uid, session_id=session_id)
         if current_confirmation is None:
@@ -76,6 +178,7 @@ class SessionReplySubmission:
                 context_summary_events_requested=context_summary_events_requested,
                 request_id=request_id,
                 additional_system_prompt=cleaned_additional_system_prompt or None,
+                **({"persisted_message_row": idempotent_message_row} if idempotent_message_row is not None else {}),
             )
             submission_status = await self._resolve_submission_status(
                 db,
@@ -98,16 +201,24 @@ class SessionReplySubmission:
         if decision == ConfirmationDecision.REJECT:
             profile_id = profile.id if profile and profile.id else -1
             decision_raw_message = message if isinstance(message, str) else _serialize_message_content(message)
-            message_row = Message(
-                session_id=session_id,
-                uid=uid,
-                role=MessageRole.USER,
-                type=MessageType.AUDIT_DECISION,
-                content=decision_raw_message,
-                attachments=None,
-                profile_id=profile_id,
-                is_processed=False,
-            )
+            message_row = idempotent_message_row
+            if message_row is None:
+                message_row = Message(
+                    session_id=session_id,
+                    uid=uid,
+                    role=MessageRole.USER,
+                    type=MessageType.AUDIT_DECISION,
+                    content=decision_raw_message,
+                    attachments=None,
+                    profile_id=profile_id,
+                    is_processed=False,
+                )
+            else:
+                message_row.type = MessageType.AUDIT_DECISION
+                message_row.content = decision_raw_message
+                message_row.attachments = None
+                message_row.profile_id = profile_id
+                message_row.is_processed = False
             db.add(message_row)
             await db.flush()
             await audit_crud.close_pending(
@@ -119,6 +230,7 @@ class SessionReplySubmission:
                 decision_message_id=message_row.id,
                 decision_raw_message=decision_raw_message,
                 decided_by=current_confirmation.operator_username,
+                **({"commit": False} if idempotent_http_request else {}),
             )
             await update_confirmation_tool_results_for_decision(
                 db,
@@ -127,7 +239,11 @@ class SessionReplySubmission:
                 decision=decision,
                 raw_message=decision_raw_message,
             )
-            await update_confirmation_message_status(db, audit_record_id=current_confirmation_id)
+            await update_confirmation_message_status(
+                db,
+                audit_record_id=current_confirmation_id,
+                **({"commit": False} if idempotent_http_request else {}),
+            )
             initial_message, work = await self._enqueue_foreground_message(
                 db,
                 uid=uid,
@@ -158,16 +274,24 @@ class SessionReplySubmission:
 
         if decision is None:
             profile_id = profile.id if profile and profile.id else -1
-            message_row = Message(
-                session_id=session_id,
-                uid=uid,
-                role=MessageRole.USER,
-                type=MessageType.TEXT,
-                content=_serialize_message_content(message),
-                attachments=attachments,
-                profile_id=profile_id,
-                is_processed=False,
-            )
+            message_row = idempotent_message_row
+            if message_row is None:
+                message_row = Message(
+                    session_id=session_id,
+                    uid=uid,
+                    role=MessageRole.USER,
+                    type=MessageType.TEXT,
+                    content=_serialize_message_content(message),
+                    attachments=attachments,
+                    profile_id=profile_id,
+                    is_processed=False,
+                )
+            else:
+                message_row.type = MessageType.TEXT
+                message_row.content = _serialize_message_content(message)
+                message_row.attachments = attachments
+                message_row.profile_id = profile_id
+                message_row.is_processed = False
             db.add(message_row)
             try:
                 await db.flush()
@@ -221,16 +345,24 @@ class SessionReplySubmission:
 
         profile_id = profile.id if profile and profile.id else -1
         decision_raw_message = message if isinstance(message, str) else _serialize_message_content(message)
-        message_row = Message(
-            session_id=session_id,
-            uid=uid,
-            role=MessageRole.USER,
-            type=MessageType.AUDIT_DECISION,
-            content=decision_raw_message,
-            attachments=None,
-            profile_id=profile_id,
-            is_processed=True,
-        )
+        message_row = idempotent_message_row
+        if message_row is None:
+            message_row = Message(
+                session_id=session_id,
+                uid=uid,
+                role=MessageRole.USER,
+                type=MessageType.AUDIT_DECISION,
+                content=decision_raw_message,
+                attachments=None,
+                profile_id=profile_id,
+                is_processed=True,
+            )
+        else:
+            message_row.type = MessageType.AUDIT_DECISION
+            message_row.content = decision_raw_message
+            message_row.attachments = None
+            message_row.profile_id = profile_id
+            message_row.is_processed = True
         db.add(message_row)
         await db.flush()
         claimed_record, claim_token = await audit_crud.claim_pending_for_execution(
@@ -247,6 +379,47 @@ class SessionReplySubmission:
             # The competing transaction already consumed this confirmation. Its
             # rollback removed the provisional decision message, so persist the
             # original input once as ordinary foreground work without parsing it again.
+            if idempotent_http_request:
+                message_row = idempotent_message_row
+                message_was_existing = idempotent_message_was_existing
+                if message_row is None:
+                    message_row, message_was_existing = await reserve_idempotent_message()
+                if message_row.id is not None:
+                    existing_work = await session_reply_work_item_crud.get_by_input_message(
+                        db,
+                        uid=uid,
+                        session_id=session_id,
+                        message_id=message_row.id,
+                    )
+                    if existing_work is not None:
+                        return (
+                            InternalMessage(
+                                id=message_row.id,
+                                role=MessageRole.USER,
+                                content=message_row.content,
+                                attachments=message_row.attachments,
+                                guidance_prompt=message_row.guidance_prompt,
+                                created_at=message_row.created_at.timestamp(),
+                            ),
+                            existing_work,
+                            await self._resolve_submission_status(
+                                db,
+                                existing_work,
+                                immediate_status="accepted",
+                            ),
+                            [],
+                        )
+                    if message_was_existing:
+                        raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
+                message_row.type = MessageType.TEXT
+                message_row.content = _serialize_message_content(message)
+                message_row.attachments = attachments
+                message_row.profile_id = profile_id
+                message_row.is_processed = False
+                db.add(message_row)
+                await db.flush()
+            else:
+                message_row = None
             initial_message, work = await self._enqueue_foreground_message(
                 db,
                 uid=uid,
@@ -259,6 +432,7 @@ class SessionReplySubmission:
                 context_summary_events_requested=context_summary_events_requested,
                 request_id=request_id,
                 additional_system_prompt=cleaned_additional_system_prompt or None,
+                **({"persisted_message_row": message_row} if message_row is not None else {}),
             )
             submission_status = await self._resolve_submission_status(
                 db,

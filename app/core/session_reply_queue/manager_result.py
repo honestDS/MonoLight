@@ -1,12 +1,15 @@
 import asyncio
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.constants import (
     ERR_SESSION_REPLY_WORK_ENDED,
     ERR_SESSION_REPLY_WORK_NOT_FOUND,
 )
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import t
 from app.models.message import Message
 from app.models.session_reply_work_item import (
@@ -28,6 +31,38 @@ __all__ = [
 
 
 class SessionReplyResult:
+    async def get_work_status(self, db: AsyncSession, work_id: int, *, uid: str) -> dict:
+        original_work = await session_reply_work_item_crud.get(db, work_id)
+        if original_work is None or original_work.uid != uid:
+            raise ResourceNotFoundException(ERR_SESSION_REPLY_WORK_NOT_FOUND)
+
+        work = await session_reply_work_item_crud.resolve_merged_target(db, work_id)
+        if work is None or work.uid != uid:
+            raise ResourceNotFoundException(ERR_SESSION_REPLY_WORK_NOT_FOUND)
+
+        response = None
+        if work.status == SessionReplyWorkStatus.SUCCEEDED:
+            execution_response = (work.execution_state or {}).get("response")
+            if isinstance(execution_response, dict):
+                response = build_identified_work_response(work, execution_response)
+
+        error = None
+        if work.status == SessionReplyWorkStatus.FAILED:
+            error = await _get_work_failure_content(db, work)
+        elif work.status == SessionReplyWorkStatus.CANCELLED:
+            error = work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status)
+
+        return {
+            "work_id": work_id,
+            "resolved_work_id": work.id,
+            "session_id": work.session_id,
+            "status": work.status.value,
+            "request_ids": get_work_request_ids(work),
+            "result_message_id": work.result_message_id,
+            "response": response,
+            "error": error,
+        }
+
     async def wait_for_session_stream(self, *, uid: str, session_id: str, history_message_id: int = 0):
         from app.providers.database import AsyncSessionLocal
 

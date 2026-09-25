@@ -1,8 +1,8 @@
 import asyncio
-import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Literal
 
 from fastapi import (
     APIRouter,
@@ -13,14 +13,15 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.responses import StreamingResponse
 
-from app.adapters.chat_web import web_chat_adapter
+from app.adapters.chat_web import _response_has_background_tasks, web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.core.channel_router import select_channel
 from app.core.constants import (
     ERR_BACKGROUND_TASK_NOT_FOUND,
     ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED,
+    ERR_CHAT_REQUEST_ID_REQUIRED,
+    ERR_CHAT_STREAM_NOT_SUPPORTED,
     ERR_INTERNAL_SERVER_ERROR,
     ERR_NO_VALID_CHANNEL,
     ERR_SESSION_GUIDANCE_EXTERNAL_ONLY,
@@ -28,6 +29,7 @@ from app.core.constants import (
     ERR_SESSION_NO_PERMISSION,
     ERR_SESSION_NOT_FOUND,
     ERR_SESSION_READ_ONLY,
+    ERR_SESSION_TRANSPORT_CHANGE_ACTIVE,
     GUIDANCE_MESSAGE_PREFIX,
     GUIDANCE_MESSAGE_SUFFIX,
     MSG_BACKGROUND_TASK_DETAIL_SUCCESS,
@@ -41,12 +43,13 @@ from app.core.constants import (
     MSG_TITLE_GENERATED,
 )
 from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.session.todo import session_todo_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.dispatcher import ChatDispatcher, format_exception_message
-from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException
+from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException, ParameterException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import normalize_locale
@@ -61,7 +64,13 @@ from app.core.profile_validation import get_validated_profile_for_assignment
 from app.core.security import get_current_user
 from app.core.session_cleanup import delete_session_data
 from app.core.session_notifier import session_notifier
-from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
+from app.core.session_reply_queue.manager import (
+    build_input_accepted_event,
+    build_input_queued_event,
+    get_work_request_ids,
+    is_submission_queued,
+    session_reply_queue_manager,
+)
 from app.core.session_source import default_show_tool_calls_for_source
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
@@ -97,25 +106,6 @@ def _event_matches_session(event: object, session_id: str | None, *, require_ses
     return event_session_id == session_id
 
 
-async def _http_event_stream(
-    db: AsyncSession,
-    message: str | None,
-    uid: str | None,
-    session_id: str,
-    attachments: list | None,
-    request_id: str | None,
-):
-    async for event in web_chat_adapter.chat_stream(
-        db=db,
-        message=message,
-        uid=uid,
-        session_id=session_id,
-        attachments=attachments,
-        request_id=request_id,
-    ):
-        yield json.dumps(event, ensure_ascii=False) + "\n"
-
-
 async def _create_new_web_session_with_profile_override(
     db: AsyncSession,
     session_id: str,
@@ -124,8 +114,9 @@ async def _create_new_web_session_with_profile_override(
     profile_override_id: int | None,
     show_tool_calls: bool | None = None,
     show_reasoning: bool | None = None,
+    force_create: bool = False,
 ) -> None:
-    if profile_override_id is None and show_tool_calls is None and show_reasoning is None:
+    if not force_create and profile_override_id is None and show_tool_calls is None and show_reasoning is None:
         return
 
     existing_session = await session_crud.get_by_session_id(db, session_id)
@@ -299,9 +290,12 @@ async def chat_completions(
 ):
     uid = getattr(current_user, "uid", None)
 
+    if request.stream:
+        return StandardResponse.error(code=400, message=ERR_CHAT_STREAM_NOT_SUPPORTED)
+
     # 如果 session_id 为空，直接生成并返回，由前端发起二次请求
     if not request.session_id:
-        new_session_id = str(uuid.uuid4())
+        new_session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"monolight:http:{uid}:{request.request_id}")) if request.request_id else str(uuid.uuid4())
         await _create_new_web_session_with_profile_override(
             db,
             session_id=new_session_id,
@@ -310,6 +304,7 @@ async def chat_completions(
             profile_override_id=request.profile_override_id,
             show_tool_calls=request.show_tool_calls,
             show_reasoning=request.show_reasoning,
+            force_create=True,
         )
         return LLMResponse(
             choices=[
@@ -322,22 +317,10 @@ async def chat_completions(
             history=[],
         ).model_dump()
 
-    if request.stream:
-        return StreamingResponse(
-            _http_event_stream(
-                db,
-                request.message,
-                uid,
-                request.session_id,
-                request.attachments,
-                request.request_id,
-            ),
-            media_type="application/x-ndjson",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+    if not request.request_id:
+        raise ParameterException(ERR_CHAT_REQUEST_ID_REQUIRED)
 
-    # 使用适配器处理对话请求
-    return await web_chat_adapter.chat(
+    data = await web_chat_adapter.submit(
         db=db,
         message=request.message,
         uid=uid,
@@ -345,6 +328,29 @@ async def chat_completions(
         attachments=request.attachments,
         request_id=request.request_id,
     )
+    return StandardResponse.success(data=data)
+
+
+@router.get("/reply-works/{work_id}")
+async def get_reply_work_status(
+    work_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    status = await session_reply_queue_manager.get_work_status(db, work_id, uid=uid)
+    response = status.get("response")
+    if isinstance(response, dict):
+        session_id = status["session_id"]
+        plan = await session_todo_crud.get_by_session_id(db, uid=uid, session_id=session_id)
+        response["session_todo"] = {
+            "revision": plan.revision if plan else 0,
+            "todos": [dict(item) for item in plan.todos] if plan else [],
+        }
+        if _response_has_background_tasks(response):
+            response["has_background_tasks"] = True
+            response["background_task_poll_interval"] = 2
+    return StandardResponse.success(data=status)
 
 
 @router.get("/sessions/list")
@@ -352,6 +358,24 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
     sessions = await message_crud.get_user_sessions(db, uid=uid, is_admin=is_admin)
+    session_ids = [row.session_id for row in sessions if row.uid == uid]
+    works = await session_reply_work_item_crud.list_recent_http_for_sessions(
+        db,
+        uid=uid,
+        session_ids=session_ids,
+    )
+    reply_works_by_session: dict[str, list[dict]] = {}
+    for work in works:
+        reply_works_by_session.setdefault(work.session_id, []).append(
+            {
+                "work_id": work.id,
+                "status": work.status.value,
+                "request_ids": get_work_request_ids(work),
+                "result_message_id": work.result_message_id,
+                "merged_into_id": work.merged_into_id,
+                "sequence_no": work.sequence_no,
+            }
+        )
 
     data = []
     for row in sessions:
@@ -360,6 +384,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "session_id": row.session_id,
                 "uid": row.uid,
                 "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
+                "latest_message_id": row.latest_message_id,
                 "is_loading": bool(row.is_loading),
                 "username": row.username,
                 "title": row.title,
@@ -371,6 +396,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "source": row.source or "http",
                 "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
                 "llm_request_metadata": row.llm_request_metadata,
+                "reply_works": reply_works_by_session.get(row.session_id, []),
             }
         )
     return StandardResponse.success(data=data, message=MSG_SESSION_LIST_SUCCESS)
@@ -429,6 +455,7 @@ class SessionSettingRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: str
+    transport_mode: Literal["http", "ws"] | None = None
     enable_markdown: bool | None = None
     show_tool_calls: bool | None = None
     show_reasoning: bool | None = None
@@ -497,9 +524,18 @@ async def update_session_setting(
 
     if not is_admin and session.uid != uid:
         return StandardResponse.error(message=ERR_SESSION_NO_PERMISSION)
-    if request.enable_markdown is not None and session.source not in {"http", "ws"}:
+    if (request.enable_markdown is not None or request.transport_mode is not None) and session.source not in {"http", "ws"}:
         return StandardResponse.error(code=403, message=ERR_SESSION_READ_ONLY)
 
+    if request.transport_mode is not None:
+        current_transport_mode = session.source or "http"
+        if request.transport_mode != current_transport_mode and await session_reply_work_item_crud.has_active_interactive_work(
+            db,
+            uid=session.uid,
+            session_id=session.session_id,
+        ):
+            return StandardResponse.error(code=409, message=ERR_SESSION_TRANSPORT_CHANGE_ACTIVE)
+        session.source = request.transport_mode
     if request.enable_markdown is not None:
         session.enable_markdown = request.enable_markdown
     if request.show_tool_calls is not None:
@@ -865,6 +901,15 @@ async def chat_websocket(
                             source="ws",
                             request_id=request_id,
                         )
+                        if request_id:
+                            await websocket.send_json(
+                                build_input_accepted_event(
+                                    session_id,
+                                    request_id,
+                                    work.id,
+                                    submission_status,
+                                )
+                            )
                         for event in confirmation_update_events:
                             if request_id and isinstance(event, dict) and "request_id" not in event:
                                 event = {**event, "request_id": request_id}

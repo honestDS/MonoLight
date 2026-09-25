@@ -11,6 +11,9 @@ import { applyResumedTurnEnd, createSessionReconnectHandler, resumeSessionStream
 import { withSessionActivity } from './sessionActivity.js'
 import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
 import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMessages } from './auditConfirmationState.js'
+import { hasHttpResultMessage, shouldFetchHttpWorkStatus } from './sessionListLoading.js'
+import { createHttpHistorySyncController } from './httpHistorySync.js'
+import { persistSessionTransportMode, resolveSessionTransportMode, resumeSelectedSessionByTransport } from './sessionTransportMode.js'
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import {
@@ -136,6 +139,37 @@ export function useChatSession() {
   const workLifecycleTracker = createWorkLifecycleTracker()
   const historyMergeTracker = createHistoryMergeTracker()
   const initialHistoryLoaded = ref(true)
+  const pendingHttpRequests = new Map()
+  const observedHttpWorkStatuses = new Map()
+  const observedHttpLatestMessageIds = new Map()
+  const fetchingHttpWorks = new Set()
+  const resolvedHttpWorks = new Set()
+  let httpPollingStateVersion = 0
+
+  const normalizeHttpIdentity = value => (
+    value === undefined || value === null || value === '' ? null : String(value)
+  )
+
+  const trackHttpSubmission = (requestId, sessionId, workId = null) => {
+    const normalizedRequestId = normalizeHttpIdentity(requestId)
+    const normalizedSessionId = normalizeHttpIdentity(sessionId)
+    if (!normalizedRequestId || !normalizedSessionId) return
+
+    const previous = pendingHttpRequests.get(normalizedRequestId)
+    pendingHttpRequests.set(normalizedRequestId, {
+      sessionId: normalizedSessionId,
+      workId: normalizeHttpIdentity(workId) || previous?.workId || null
+    })
+  }
+
+  const resetHttpPollingState = () => {
+    httpPollingStateVersion += 1
+    pendingHttpRequests.clear()
+    observedHttpWorkStatuses.clear()
+    observedHttpLatestMessageIds.clear()
+    fetchingHttpWorks.clear()
+    resolvedHttpWorks.clear()
+  }
   
   // 默认 Markdown 开关状态（用于未选择会话时）
   const enableMarkdownDefault = ref(false)
@@ -248,6 +282,50 @@ export function useChatSession() {
 
   // 3. 通信层
   const transport = useChatTransport()
+  const modeSettingSubmitting = ref(false)
+  const transportFallbackNotice = ref('')
+  const transportModeChangeBlocked = computed(() => (
+    Boolean(chatState.loading.value || currentSession.value?.is_loading)
+  ))
+  const clearTransportFallbackNotice = () => {
+    transportFallbackNotice.value = ''
+  }
+
+  const setTransportMode = async (mode, { notifyError = true } = {}) => {
+    if (modeSettingSubmitting.value) return false
+
+    const sessionId = sessionManager.currentSessionId.value
+    if (!sessionId) {
+      await transport.setTransportMode(mode, transport.disconnectWebSocket)
+      clearTransportFallbackNotice()
+      return true
+    }
+    if (isCurrentSessionReadOnly.value) return false
+
+    const previousSession = sessionManager.sessions.value.find(session => session.session_id === sessionId)
+    const previousMode = previousSession?.source
+    if (previousMode === mode) return true
+
+    modeSettingSubmitting.value = true
+    try {
+      await persistSessionTransportMode({
+        sessionId,
+        mode,
+        sessions: sessionManager.sessions.value,
+        getCurrentSessionId: () => sessionManager.currentSessionId.value,
+        getCurrentTransportMode: () => transport.transportMode.value,
+        updateSessionSetting: (targetSessionId, payload) => chatApi.updateSessionSetting(targetSessionId, payload),
+        applyTransportMode: targetMode => transport.setTransportMode(targetMode, transport.disconnectWebSocket)
+      })
+      clearTransportFallbackNotice()
+      return true
+    } catch (error) {
+      if (notifyError) ElMessage.error(error.message || t('chat.setting_failed'))
+      return false
+    } finally {
+      modeSettingSubmitting.value = false
+    }
+  }
 
   // 4. 消息处理
   const messageProcessor = useMessageProcessor()
@@ -326,6 +404,12 @@ export function useChatSession() {
   }
 
   const createLifecycleCallbacks = isCurrentRequestSession => ({
+    onInputAccepted: () => {
+      refreshSessionLoadingState()
+      if (transportFallbackNotice.value === t('chat.ws_submission_unknown')) {
+        clearTransportFallbackNotice()
+      }
+    },
     onInputQueued: event => {
       refreshSessionLoadingState()
       applyLifecycleEvent(workLifecycleTracker.markInputQueued, event, isCurrentRequestSession)
@@ -476,130 +560,40 @@ export function useChatSession() {
     }
   }
 
-  let httpHistorySyncTimer = null
-  let isHttpHistorySyncing = false
-  let backgroundTaskSessionId = null
-  let httpHistorySyncVersion = 0
-
   const canSyncCurrentSessionHistory = () => !isCurrentSessionReadOnly.value && transport.transportMode.value === 'http'
 
-  const shouldContinuouslySyncCurrentSessionHistory = () => {
-    const sessionId = sessionManager.currentSessionId.value
-    return Boolean(sessionId)
-      && canSyncCurrentSessionHistory()
-      && backgroundTaskSessionId === sessionId
-  }
-
-  const stopHttpHistorySync = () => {
-    httpHistorySyncVersion += 1
-    if (httpHistorySyncTimer !== null) {
-      clearTimeout(httpHistorySyncTimer)
-      httpHistorySyncTimer = null
-    }
-    isHttpHistorySyncing = false
-    backgroundTaskSessionId = null
-  }
-
-  const syncCurrentHttpSessionHistory = async () => {
-    const sessionId = sessionManager.currentSessionId.value
-    if (
-      !canSyncCurrentSessionHistory()
-      || !sessionId
-      || chatState.loading.value
-      || isHttpHistorySyncing
-    ) return
-
-    const syncVersion = httpHistorySyncVersion
-    isHttpHistorySyncing = true
-    try {
-      await mergeLatestSessionHistory(sessionId)
-      if (
-        syncVersion !== httpHistorySyncVersion
-        || !canSyncCurrentSessionHistory()
-        || sessionId !== sessionManager.currentSessionId.value
-        || backgroundTaskSessionId !== sessionId
-      ) return
-
-      const response = await chatApi.backgroundTasks({
-        session_id: sessionId,
-        page: 1,
-        size: 20
-      })
-      if (
-        syncVersion !== httpHistorySyncVersion
-        || !canSyncCurrentSessionHistory()
-        || sessionId !== sessionManager.currentSessionId.value
-      ) return
-
-      const tasks = response.data?.data || []
-      const hasUnfinishedTasks = tasks.some(task =>
-        ['pending', 'running'].includes(String(task.status || '').toLowerCase())
-        || ['pending', 'running'].includes(String(task.reply_status || '').toLowerCase())
-      )
-      if (!hasUnfinishedTasks) {
-        backgroundTaskSessionId = null
-        await mergeLatestSessionHistory(sessionId)
-      }
-    } catch (err) {
+  const httpHistorySync = createHttpHistorySyncController({
+    getSessionId: () => sessionManager.currentSessionId.value,
+    canSync: canSyncCurrentSessionHistory,
+    isLoading: () => chatState.loading.value,
+    fetchBackgroundTasks: sessionId => chatApi.backgroundTasks({
+      session_id: sessionId,
+      page: 1,
+      size: 20
+    }),
+    mergeLatestHistory: mergeLatestSessionHistory,
+    intervalMs: HTTP_HISTORY_FAST_SYNC_INTERVAL_MS,
+    onError: err => {
       console.error('HTTP session history synchronization failed:', err)
-    } finally {
-      if (syncVersion === httpHistorySyncVersion) {
-        isHttpHistorySyncing = false
-      }
     }
-  }
+  })
 
-  const scheduleNextHttpHistorySync = () => {
-    if (httpHistorySyncTimer !== null) {
-      clearTimeout(httpHistorySyncTimer)
-      httpHistorySyncTimer = null
-    }
-
-    const sessionId = sessionManager.currentSessionId.value
-    if (!shouldContinuouslySyncCurrentSessionHistory() || !sessionId) return
-
-    const syncVersion = httpHistorySyncVersion
-
-    httpHistorySyncTimer = setTimeout(async () => {
-      if (syncVersion !== httpHistorySyncVersion) return
-      httpHistorySyncTimer = null
-      await syncCurrentHttpSessionHistory()
-      if (syncVersion === httpHistorySyncVersion) {
-        scheduleNextHttpHistorySync()
-      }
-    }, HTTP_HISTORY_FAST_SYNC_INTERVAL_MS)
-  }
-
-  const startHttpHistoryBackgroundTaskSync = (sessionId) => {
-    if (
-      transport.transportMode.value !== 'http'
-      || !sessionId
-      || sessionId !== sessionManager.currentSessionId.value
-    ) return
-
-    backgroundTaskSessionId = sessionId
-    scheduleNextHttpHistorySync()
-  }
+  const stopHttpHistorySync = httpHistorySync.stop
+  const startHttpHistoryBackgroundTaskSync = httpHistorySync.start
 
   watch(
     () => [transport.transportMode.value, sessionManager.currentSessionId.value, isCurrentSessionReadOnly.value],
-    async ([, sessionId]) => {
-      stopHttpHistorySync()
-      if (!canSyncCurrentSessionHistory() || !sessionId) return
-
-      const syncVersion = httpHistorySyncVersion
-      await syncCurrentHttpSessionHistory()
-      if (syncVersion === httpHistorySyncVersion && shouldContinuouslySyncCurrentSessionHistory()) {
-        scheduleNextHttpHistorySync()
-      }
-    },
+    () => httpHistorySync.handleSessionChanged(),
     { immediate: true }
   )
 
   onScopeDispose(() => {
     stopHttpHistorySync()
+    resetHttpPollingState()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
+    sessionManager.setSessionsUpdatedCallback(null)
+    sessionManager.setPendingSubmissionCallback(null)
     transport.setReconnectHandler(null)
   })
 
@@ -652,6 +646,339 @@ export function useChatSession() {
       }
     }
   }
+
+  const isCurrentWritableHttpSession = sessionId => (
+    transport.transportMode.value === 'http'
+    && normalizeHttpIdentity(sessionManager.currentSessionId.value) === normalizeHttpIdentity(sessionId)
+    && !isCurrentSessionReadOnly.value
+  )
+
+  const getPendingHttpRequestIdsForWork = (sessionId, workId, requestIds) => {
+    const normalizedSessionId = normalizeHttpIdentity(sessionId)
+    const normalizedWorkId = normalizeHttpIdentity(workId)
+    const normalizedRequestIds = new Set(
+      (Array.isArray(requestIds) ? requestIds : [])
+        .map(normalizeHttpIdentity)
+        .filter(Boolean)
+    )
+    const matchedRequestIds = new Set(normalizedRequestIds)
+
+    for (const [requestId, pending] of pendingHttpRequests) {
+      if (pending?.sessionId !== normalizedSessionId) continue
+      if (pending.workId === normalizedWorkId || normalizedRequestIds.has(requestId)) {
+        matchedRequestIds.add(requestId)
+      }
+    }
+
+    return matchedRequestIds
+  }
+
+  const hasPendingHttpRequestForWork = (sessionId, workId, requestIds) => {
+    const normalizedSessionId = normalizeHttpIdentity(sessionId)
+    const normalizedWorkId = normalizeHttpIdentity(workId)
+    const normalizedRequestIds = new Set(
+      (Array.isArray(requestIds) ? requestIds : [])
+        .map(normalizeHttpIdentity)
+        .filter(Boolean)
+    )
+
+    for (const [requestId, pending] of pendingHttpRequests) {
+      if (pending?.sessionId !== normalizedSessionId) continue
+      if (pending.workId === normalizedWorkId || normalizedRequestIds.has(requestId)) return true
+    }
+    return false
+  }
+
+  const finishHttpWorkLifecycle = ({ sessionId, workId, resolvedWorkId, requestIds }) => {
+    const normalizedSessionId = normalizeHttpIdentity(sessionId)
+    const normalizedWorkId = normalizeHttpIdentity(workId)
+    const normalizedResolvedWorkId = normalizeHttpIdentity(resolvedWorkId)
+    const relatedRequestIds = getPendingHttpRequestIdsForWork(
+      normalizedSessionId,
+      normalizedWorkId,
+      requestIds
+    )
+    const lifecycleWorkId = normalizedResolvedWorkId || normalizedWorkId
+
+    if (isCurrentWritableHttpSession(normalizedSessionId)) {
+      const lifecycleEvent = {
+        ...(lifecycleWorkId ? { work_id: lifecycleWorkId } : {}),
+        request_ids: Array.from(relatedRequestIds)
+      }
+      chatState.messages.value = workLifecycleTracker.finishWorkLifecycle(
+        chatState.messages.value,
+        lifecycleEvent
+      )
+      for (const requestId of relatedRequestIds) {
+        chatState.messages.value = workLifecycleTracker.finishWorkLifecycle(
+          chatState.messages.value,
+          { request_ids: [requestId] }
+        )
+      }
+    }
+
+    for (const [requestId, pending] of pendingHttpRequests) {
+      if (pending?.sessionId !== normalizedSessionId) continue
+      if (
+        relatedRequestIds.has(requestId)
+        || pending.workId === normalizedWorkId
+        || pending.workId === normalizedResolvedWorkId
+      ) {
+        pendingHttpRequests.delete(requestId)
+      }
+    }
+
+    return relatedRequestIds
+  }
+
+  const maybeMergeHttpSessionHistory = (sessionId, latestMessageId) => {
+    const normalizedSessionId = normalizeHttpIdentity(sessionId)
+    if (
+      !normalizedSessionId
+      || latestMessageId === undefined
+      || latestMessageId === null
+      || latestMessageId === ''
+      || (typeof latestMessageId === 'string' && latestMessageId.trim() === '')
+      || !initialHistoryLoaded.value
+      || !isCurrentWritableHttpSession(normalizedSessionId)
+    ) return
+
+    const normalizedLatestMessageId = Number(latestMessageId)
+    if (!Number.isSafeInteger(normalizedLatestMessageId)) return
+
+    const previousLatestMessageId = observedHttpLatestMessageIds.get(normalizedSessionId)
+    const baselineLatestMessageId = previousLatestMessageId === undefined
+      ? chatState.messages.value.reduce((maxId, message) => {
+          const dbId = Number(message?.db_id)
+          return Number.isSafeInteger(dbId) && dbId >= 0 ? Math.max(maxId, dbId) : maxId
+        }, 0)
+      : previousLatestMessageId
+    if (normalizedLatestMessageId <= baselineLatestMessageId) return
+
+    observedHttpLatestMessageIds.set(normalizedSessionId, normalizedLatestMessageId)
+
+    void mergeLatestSessionHistory(normalizedSessionId).catch(err => {
+      console.error('HTTP session list history merge failed:', err)
+    })
+  }
+
+  const applyHttpWorkStatus = (work, statusData, sessionId) => {
+    const workId = normalizeHttpIdentity(work?.work_id)
+    const normalizedSessionId = normalizeHttpIdentity(sessionId)
+    if (!workId || !statusData || !isCurrentWritableHttpSession(normalizedSessionId)) return null
+
+    const resultSessionId = normalizeHttpIdentity(statusData.session_id)
+    if (resultSessionId && resultSessionId !== normalizedSessionId) return null
+
+    const status = String(statusData.status || '').toLowerCase()
+    if (['ready_for_llm', 'running', 'waiting_external_work'].includes(status)) {
+      observedHttpWorkStatuses.delete(workId)
+      return { active: true }
+    }
+    if (!['succeeded', 'failed', 'cancelled'].includes(status)) {
+      observedHttpWorkStatuses.delete(workId)
+      return null
+    }
+
+    const response = statusData.response
+    const resolvedWorkId = normalizeHttpIdentity(statusData.resolved_work_id) || workId
+    const requestIds = Array.isArray(statusData.request_ids)
+      ? statusData.request_ids
+      : work?.request_ids
+    const relatedRequestIds = getPendingHttpRequestIdsForWork(
+      normalizedSessionId,
+      workId,
+      requestIds
+    )
+    const requestId = Array.isArray(response?.request_ids) && response.request_ids.length > 0
+      ? response.request_ids[0]
+      : relatedRequestIds.values().next().value || null
+
+    if (status === 'succeeded') {
+      if (response && typeof response === 'object') {
+        applyTodoTransportPayload(response, normalizedSessionId)
+        if (response.llm_request_metadata) {
+          updateLlmRequestMetadata({
+            ...response.llm_request_metadata,
+            session_id: response.llm_request_metadata.session_id || normalizedSessionId
+          }, () => isCurrentWritableHttpSession(normalizedSessionId))
+        }
+        if (response.has_background_tasks) {
+          startHttpHistoryBackgroundTaskSync(normalizedSessionId)
+        }
+        applyNonStreamSessionEvents(response)
+        if (shouldProcessCompletedWork(response)) {
+          processAiResponse(response, null, requestId)
+        }
+      }
+    } else {
+      const errorMessage = statusData.error || response?.error || t('chat.send_failed')
+      const resultAlreadyInHistory = hasHttpResultMessage(
+        chatState.messages.value,
+        statusData.result_message_id
+      )
+      const inserted = resultAlreadyInHistory
+        ? false
+        : messageProcessor.processStreamError(
+            chatState.messages,
+            errorMessage,
+            null,
+            requestId,
+            resolvedWorkId,
+            null,
+            statusData.result_message_id
+          )
+      if (inserted) ElMessage.error(errorMessage)
+    }
+
+    finishHttpWorkLifecycle({
+      sessionId: normalizedSessionId,
+      workId,
+      resolvedWorkId,
+      requestIds: Array.from(relatedRequestIds)
+    })
+    resolvedHttpWorks.add(workId)
+    resolvedHttpWorks.add(resolvedWorkId)
+    return {
+      active: false,
+      terminal: true,
+      succeeded: status === 'succeeded',
+      resultMessageId: statusData.result_message_id
+    }
+  }
+
+  const fetchHttpWorkStatus = async (work, sessionId) => {
+    const workId = normalizeHttpIdentity(work?.work_id)
+    const normalizedSessionId = normalizeHttpIdentity(sessionId)
+    if (
+      !workId
+      || !isCurrentWritableHttpSession(normalizedSessionId)
+      || fetchingHttpWorks.has(workId)
+      || resolvedHttpWorks.has(workId)
+    ) return null
+
+    const stateVersion = httpPollingStateVersion
+    fetchingHttpWorks.add(workId)
+    try {
+      const res = await chatApi.replyWorkStatus(workId)
+      if (
+        stateVersion !== httpPollingStateVersion
+        || !isCurrentWritableHttpSession(normalizedSessionId)
+        || !initialHistoryLoaded.value
+      ) return null
+
+      const statusData = res.data?.data
+      if (!statusData) throw new Error('Missing reply work status')
+      const result = applyHttpWorkStatus(work, statusData, normalizedSessionId)
+      if (result?.active || !result?.terminal) {
+        observedHttpWorkStatuses.delete(workId)
+      }
+      return result
+    } catch {
+      if (stateVersion === httpPollingStateVersion) {
+        observedHttpWorkStatuses.delete(workId)
+        if (isCurrentWritableHttpSession(normalizedSessionId)) {
+          ElMessage.error(t('chat.result_sync_failed'))
+        }
+      }
+      return null
+    } finally {
+      fetchingHttpWorks.delete(workId)
+    }
+  }
+
+  const processHttpSessionSnapshot = async (sessions) => {
+    if (
+      !Array.isArray(sessions)
+      || transport.transportMode.value !== 'http'
+      || !sessionManager.currentSessionId.value
+      || isCurrentSessionReadOnly.value
+    ) return
+
+    const sessionId = normalizeHttpIdentity(sessionManager.currentSessionId.value)
+    const session = sessions.find(item => normalizeHttpIdentity(item?.session_id) === sessionId)
+    if (!session) return
+
+    maybeMergeHttpSessionHistory(sessionId, session.latest_message_id)
+
+    const works = Array.isArray(session.reply_works) ? session.reply_works : []
+    const activeStatuses = ['ready_for_llm', 'running', 'waiting_external_work']
+    let hasActiveResult = false
+    for (const work of works) {
+      const workId = normalizeHttpIdentity(work?.work_id)
+      const status = String(work?.status || '').toLowerCase()
+      if (!workId || !status) continue
+
+      const previousStatus = observedHttpWorkStatuses.get(workId)
+      const hasPendingRequest = hasPendingHttpRequestForWork(
+        sessionId,
+        workId,
+        work.request_ids
+      )
+      if (
+        (initialHistoryLoaded.value || activeStatuses.includes(status))
+        && !(status === 'merged' && session.is_loading === true && activeStatuses.includes(previousStatus))
+      ) {
+        observedHttpWorkStatuses.set(workId, status)
+      }
+
+      if (!shouldFetchHttpWorkStatus({
+        status,
+        previousStatus,
+        hasPendingRequest,
+        historyLoaded: initialHistoryLoaded.value,
+        sessionLoading: session.is_loading,
+        resolved: resolvedHttpWorks.has(workId),
+        fetching: fetchingHttpWorks.has(workId)
+      })) continue
+
+      const result = await fetchHttpWorkStatus(work, sessionId)
+      if (result?.active) hasActiveResult = true
+      if (
+        result?.succeeded
+        && initialHistoryLoaded.value
+        && normalizeHttpIdentity(sessionManager.currentSessionId.value) === sessionId
+      ) {
+        await mergeLatestSessionHistory(sessionId)
+      }
+    }
+
+    if (!isCurrentWritableHttpSession(sessionId)) return
+    const currentSnapshot = sessionManager.sessions.value.find(
+      item => normalizeHttpIdentity(item?.session_id) === sessionId
+    )
+    if (currentSnapshot) {
+      chatState.loading.value = Boolean(currentSnapshot.is_loading) || hasActiveResult
+    }
+  }
+
+  const handleSessionsUpdated = sessions => {
+    try {
+      void processHttpSessionSnapshot(sessions).catch(err => {
+        console.error('HTTP session list work processing failed:', err)
+      })
+    } catch (err) {
+      console.error('HTTP session list update callback failed:', err)
+    }
+  }
+
+  sessionManager.setSessionsUpdatedCallback(handleSessionsUpdated)
+  sessionManager.setPendingSubmissionCallback(() => transport.transportMode.value === 'http' && [...pendingHttpRequests.values()].some(p => p.sessionId === normalizeHttpIdentity(sessionManager.currentSessionId.value)))
+
+  watch(
+    () => transport.transportMode.value,
+    (nextMode, previousMode) => {
+      if (nextMode === 'http' && previousMode !== 'http') {
+        if (!sessionManager.currentSessionId.value || isCurrentSessionReadOnly.value) return
+        resetHttpPollingState()
+        void sessionManager.refreshSessionLoadingState().catch(err => {
+          console.error('HTTP session snapshot refresh after transport mode switch failed:', err)
+        })
+      } else if (nextMode === 'ws') {
+        resetHttpPollingState()
+      }
+    }
+  )
 
   const resumeSelectedSessionStream = async (session, historyData = []) => {
     const sessionId = session?.session_id
@@ -929,7 +1256,8 @@ export function useChatSession() {
           enable_markdown: enableMarkdownDefault.value,
           show_tool_calls: showToolCalls,
           show_reasoning: showReasoning,
-          profile_override_id: profileOverrideId
+          profile_override_id: profileOverrideId,
+          source: 'http'
         })
         
         // 同步新建会话的 Markdown 设置
@@ -946,47 +1274,63 @@ export function useChatSession() {
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
 
-      applyTodoTransportPayload(response, requestSessionId)
+      if (!requestSessionId) throw new Error(t('chat.send_failed'))
 
-      if (response.llm_request_metadata) {
-        updateLlmRequestMetadata({
-          ...response.llm_request_metadata,
-          session_id: response.llm_request_metadata.session_id || response.session_id
-        }, isCurrentRequestSession)
-      }
+      const responseSessionId = normalizeHttpIdentity(response?.session_id)
+      const currentSessionId = normalizeHttpIdentity(sessionManager.currentSessionId.value)
+      const workId = normalizeHttpIdentity(response?.work_id)
+      if (
+        !workId
+        || !responseSessionId
+        || responseSessionId !== normalizeHttpIdentity(requestSessionId)
+        || responseSessionId !== currentSessionId
+      ) throw new Error('Invalid HTTP submission acknowledgement')
 
-      if (response.has_background_tasks) {
-        startHttpHistoryBackgroundTaskSync(requestSessionId)
-      }
-
+      trackHttpSubmission(requestId, requestSessionId, workId)
       applyNonStreamSessionEvents(response)
-      const auditConfirmation = parseAuditConfirmationResponse(response)
-      if (shouldProcessCompletedWork(response)) {
-        processAiResponse(response, null, requestId)
+
+      const submissionStatus = String(response?.submission_status || '').toLowerCase()
+      if (submissionStatus.includes('queued')) {
+        chatState.messages.value = workLifecycleTracker.markInputQueued(
+          chatState.messages.value,
+          { request_id: requestId, work_id: workId, session_id: requestSessionId }
+        )
+      } else {
+        chatState.messages.value = workLifecycleTracker.markInputsDequeued(
+          chatState.messages.value,
+          { request_ids: [requestId], work_id: workId, session_id: requestSessionId }
+        )
       }
-      finishRequestLifecycle(requestId, isCurrentRequestSession)
-      if (auditConfirmation) {
-        chatState.loading.value = false
-      }
+      void sessionManager.refreshSessionLoadingState()
 
     } catch (err) {
       if (requestSessionId !== sessionManager.currentSessionId.value) return
-      finishRequestLifecycle(requestId, isCurrentRequestSession)
-      ElMessage.error(err.message || t('chat.send_failed'))
-    } finally {
-      contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
-      if (requestSessionId === sessionManager.currentSessionId.value) {
-        try {
-          await mergeLatestSessionHistory(requestSessionId)
-        } catch (err) {
-          console.error('HTTP response history refresh failed:', err)
-        }
-        // 检查当前是否还有排队的请求（通过判断是否还有 thinking）
-        const hasThinking = chatState.messages.value.some(m => m.role === 'thinking')
-        if (!hasThinking) {
+
+      const hasBusinessRejection = Boolean(err?.response?.data?.code)
+      if (!requestSessionId || hasBusinessRejection) {
+        finishRequestLifecycle(requestId, isCurrentRequestSession)
+        ElMessage.error(err.message || t('chat.send_failed'))
+        if (!chatState.messages.value.some(message => message.role === 'thinking')) {
           chatState.loading.value = false
         }
+        return
       }
+
+      trackHttpSubmission(requestId, requestSessionId)
+      const normalizedRequestId = normalizeHttpIdentity(requestId)
+      chatState.messages.value = chatState.messages.value.filter(message => {
+        if (message?.role !== 'thinking') return true
+        const messageRequestIds = [
+          message.request_id,
+          ...(Array.isArray(message.request_ids) ? message.request_ids : [])
+        ].map(normalizeHttpIdentity)
+        return !messageRequestIds.includes(normalizedRequestId)
+      })
+      if (!chatState.messages.value.some(message => message.role === 'thinking')) {
+        chatState.loading.value = false
+      }
+      ElMessage.warning(t('chat.submit_outcome_unknown'))
+      void sessionManager.refreshSessionLoadingState()
     }
   }
 
@@ -1157,7 +1501,8 @@ export function useChatSession() {
           enable_markdown: enableMarkdownDefault.value,
           show_tool_calls: showToolCalls,
           show_reasoning: showReasoning,
-          profile_override_id: newProfileOverrideId
+          profile_override_id: newProfileOverrideId,
+          source: 'ws'
         })
         
         // 同步新建会话的 Markdown 设置
@@ -1352,15 +1697,23 @@ export function useChatSession() {
       }
     }
     
-    const handleWsSendFailure = () => {
+    const handleWsSendFailure = async () => {
       contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
       if (!isCurrentRequestSession()) return
+
       finishRequestLifecycle(requestId, isCurrentRequestSession)
-      ElMessage.error(t('chat.ws_send_failed'))
       if (!chatState.messages.value.some(message => message.role === 'thinking')) {
         chatState.loading.value = false
       }
-      transport.setTransportMode('http')
+
+      const switched = await setTransportMode('http', { notifyError: false })
+      if (!switched) {
+        transportFallbackNotice.value = t('chat.ws_fallback_blocked')
+        return
+      }
+
+      transportFallbackNotice.value = t('chat.ws_fallback_retrying')
+      await httpSend(text, attachmentsToSent, userMsgId)
     }
 
     try {
@@ -1374,10 +1727,19 @@ export function useChatSession() {
         showReasoning,
         callbacks
       })
-      if (!sent) handleWsSendFailure()
+      if (!sent) {
+        await handleWsSendFailure()
+        return
+      }
+
+      const acknowledgement = await transport.waitForSubmissionAcknowledgement(requestId)
+      if (acknowledgement.status === 'unknown') {
+        transportFallbackNotice.value = t('chat.ws_submission_unknown')
+        void sessionManager.refreshSessionLoadingState()
+      }
     } catch (e) {
       console.error('WebSocket发送失败:', e)
-      handleWsSendFailure()
+      await handleWsSendFailure()
     }
   }
 
@@ -1385,11 +1747,15 @@ export function useChatSession() {
   
   // 选择会话；session 为会话对象
   const selectSession = (session) => {
+    clearTransportFallbackNotice()
+    resetHttpPollingState()
     historyMergeTracker.invalidate()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     chatState.messages.value = workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = false
     sessionManager.selectSession(session, transport.disconnectWebSocket, true, false)
+    const sessionTransportMode = resolveSessionTransportMode(session)
+    transport.setTransportMode(sessionTransportMode, transport.disconnectWebSocket)
     sessionManager.resetPagination()
     const loadingRefreshPromise = sessionManager.refreshSessionLoadingState().catch(err => {
       console.error('Session loading state refresh before WebSocket resume failed:', err)
@@ -1403,13 +1769,23 @@ export function useChatSession() {
       console.error('Session history load before WebSocket resume failed:', err)
     })
     void Promise.all([historyLoadPromise, loadingRefreshPromise])
-      .then(([historyData]) => resumeSelectedSessionStream(session, historyData))
+      .then(([historyData]) => resumeSelectedSessionByTransport({
+        session,
+        historyData,
+        transportMode: transport.transportMode.value,
+        getCurrentSessionId: () => sessionManager.currentSessionId.value,
+        sessions: sessionManager.sessions.value,
+        processHttpSessionSnapshot,
+        resumeStream: resumeSelectedSessionStream
+      }))
   }
 
   /**
    * 新建会话
    */
   const createNewSession = () => {    
+    clearTransportFallbackNotice()
+    resetHttpPollingState()
     historyMergeTracker.invalidate()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     chatState.messages.value = workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
@@ -1529,6 +1905,9 @@ export function useChatSession() {
     // 状态 - 通信相关
     transportMode: transport.transportMode,
     wsConnected: transport.wsConnected,
+    modeSettingSubmitting,
+    transportModeChangeBlocked,
+    transportFallbackNotice,
     
     // 方法 - 会话
     loadSessions: sessionManager.loadSessions,
@@ -1544,7 +1923,8 @@ export function useChatSession() {
     wsSend,
     initWebSocket: transport.initWebSocket,
     disconnectWebSocket: transport.disconnectWebSocket,
-    setTransportMode: (mode) => transport.setTransportMode(mode, transport.disconnectWebSocket),
+    setTransportMode,
+    clearTransportFallbackNotice,
     
     // 工具函数
     formatTimestamp,

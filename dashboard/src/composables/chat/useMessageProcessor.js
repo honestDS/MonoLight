@@ -401,9 +401,12 @@ export function useMessageProcessor() {
   }
 
   // 处理流式下的业务错误事件
-  const processStreamError = (messagesRef, errorMessage, thinkingId, requestId = null, workId = null, eventId = null) => {
+  const processStreamError = (messagesRef, errorMessage, thinkingId, requestId = null, workId = null, eventId = null, messageId = null) => {
+    const normalizedMessageId = Number(messageId)
+    const hasMessageId = Number.isSafeInteger(normalizedMessageId) && normalizedMessageId > 0
     const alreadyHandled = messagesRef.value.some(message =>
       message.role === 'err' && (
+        (hasMessageId && Number(message.db_id) === normalizedMessageId) ||
         (eventId && message.event_id === eventId) ||
         (workId && message.work_id === workId)
       )
@@ -417,7 +420,8 @@ export function useMessageProcessor() {
       created_at: Date.now() / 1000,
       ...(requestId ? { request_id: requestId } : {}),
       ...(workId ? { work_id: workId } : {}),
-      ...(eventId ? { event_id: eventId } : {})
+      ...(eventId ? { event_id: eventId } : {}),
+      ...(hasMessageId ? { db_id: normalizedMessageId } : {})
     }
     const lastRelatedIdx = findLastRelatedStreamMessageIndex(messagesRef.value, workId, requestId)
     if (lastRelatedIdx !== -1) {

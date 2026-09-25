@@ -32,6 +32,8 @@ export function useSessionManager() {
 
   // 加载历史记录的回调（由外部注入）
   let loadHistoryCallback = null
+  let sessionsUpdatedCallback = null
+  let pendingSubmissionCallback = null
 
   // ==================== 会话管理方法 ====================
   
@@ -40,11 +42,22 @@ export function useSessionManager() {
     loadHistoryCallback = callback
   }
 
+  const setSessionsUpdatedCallback = (callback) => {
+    sessionsUpdatedCallback = callback
+  }
+
+  const setPendingSubmissionCallback = (callback) => {
+    pendingSubmissionCallback = callback
+  }
+
   const fetchSessions = async ({ showLoading = false, silentError = false } = {}) => {
     if (showLoading) sessionsLoading.value = true
     try {
       const res = await chatApi.sessionsList()
       sessions.value = res.data.data || []
+      if (sessionsUpdatedCallback) {
+        sessionsUpdatedCallback(sessions.value)
+      }
     } catch (err) {
       if (!silentError) {
         ElMessage.error(err.message || t('chat.load_sessions_failed'))
@@ -56,7 +69,8 @@ export function useSessionManager() {
   }
 
   const sessionLoadingPoller = createSessionListLoadingPoller({
-    refreshSessions: () => fetchSessions({ silentError: true })
+    refreshSessions: () => fetchSessions({ silentError: true }),
+    hasPendingSubmissions: () => Boolean(pendingSubmissionCallback?.())
   })
 
   /**
@@ -70,7 +84,11 @@ export function useSessionManager() {
 
   const refreshSessionLoadingState = () => sessionLoadingPoller.refreshNow()
 
-  onScopeDispose(() => sessionLoadingPoller.dispose())
+  onScopeDispose(() => {
+    sessionsUpdatedCallback = null
+    pendingSubmissionCallback = null
+    sessionLoadingPoller.dispose()
+  })
 
   // 使用删除确认组合式函数
   const { handleDelete: handleDeleteSession } = useDeleteConfirm(chatApi.deleteSession, loadSessions)
@@ -233,6 +251,8 @@ export function useSessionManager() {
     sessionCreating,
     // 方法
     setLoadHistoryCallback,
+    setSessionsUpdatedCallback,
+    setPendingSubmissionCallback,
     loadSessions,
     refreshSessionLoadingState,
     selectSession,

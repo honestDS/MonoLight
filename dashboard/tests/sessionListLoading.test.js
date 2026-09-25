@@ -4,10 +4,193 @@ import test from 'node:test'
 
 const chatViewSource = readFileSync(new URL('../src/views/ChatView.vue', import.meta.url), 'utf8')
 const chatStyles = readFileSync(new URL('../src/assets/css/chat.scss', import.meta.url), 'utf8')
-const sessionManagerSource = readFileSync(new URL('../src/composables/chat/useSessionManager.js', import.meta.url), 'utf8')
-const chatSessionSource = readFileSync(new URL('../src/composables/chat/useChatSession.js', import.meta.url), 'utf8')
 
 const loadSessionLoadingModule = () => import('../src/composables/chat/sessionListLoading.js')
+
+test('HTTP work recovery fetches a terminal result after observing the work in progress and reuses persisted failures', async () => {
+  const { hasHttpResultMessage, shouldFetchHttpWorkStatus } = await loadSessionLoadingModule()
+
+  assert.equal(shouldFetchHttpWorkStatus({
+    status: 'running',
+    previousStatus: undefined,
+    hasPendingRequest: false,
+    historyLoaded: true,
+    sessionLoading: true,
+    resolved: false,
+    fetching: false
+  }), false)
+
+  assert.equal(shouldFetchHttpWorkStatus({
+    status: 'failed',
+    previousStatus: 'running',
+    hasPendingRequest: false,
+    historyLoaded: true,
+    sessionLoading: false,
+    resolved: false,
+    fetching: false
+  }), true)
+
+  const history = [
+    { role: 'user', db_id: 40, content: 'question' },
+    { role: 'err', db_id: 41, content: 'worker failed' }
+  ]
+  assert.equal(hasHttpResultMessage(history, 41), true)
+  assert.equal(hasHttpResultMessage(history, '41'), true)
+  assert.equal(hasHttpResultMessage(history, 42), false)
+})
+
+test('shouldFetchHttpWorkStatus uses the observed work state to decide whether to fetch', async () => {
+  const { shouldFetchHttpWorkStatus } = await loadSessionLoadingModule()
+  const cases = [
+    {
+      name: 'does not fetch an initially completed old work',
+      input: {
+        status: 'succeeded',
+        previousStatus: undefined,
+        hasPendingRequest: false,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: false,
+        fetching: false
+      },
+      expected: false
+    },
+    {
+      name: 'does not fetch before history is loaded',
+      input: {
+        status: 'succeeded',
+        previousStatus: 'running',
+        hasPendingRequest: true,
+        historyLoaded: false,
+        sessionLoading: false,
+        resolved: false,
+        fetching: false
+      },
+      expected: false
+    },
+    {
+      name: 'fetches a pending request that succeeded',
+      input: {
+        status: 'succeeded',
+        previousStatus: undefined,
+        hasPendingRequest: true,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: false,
+        fetching: false
+      },
+      expected: true
+    },
+    {
+      name: 'fetches a pending request that failed',
+      input: {
+        status: 'failed',
+        previousStatus: undefined,
+        hasPendingRequest: true,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: false,
+        fetching: false
+      },
+      expected: true
+    },
+    {
+      name: 'fetches an observed active work that succeeded',
+      input: {
+        status: 'succeeded',
+        previousStatus: 'running',
+        hasPendingRequest: false,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: false,
+        fetching: false
+      },
+      expected: true
+    },
+    {
+      name: 'does not fetch merged work while the session is loading',
+      input: {
+        status: 'merged',
+        previousStatus: 'running',
+        hasPendingRequest: true,
+        historyLoaded: true,
+        sessionLoading: true,
+        resolved: false,
+        fetching: false
+      },
+      expected: false
+    },
+    {
+      name: 'fetches merged work after the session becomes idle',
+      input: {
+        status: 'merged',
+        previousStatus: 'running',
+        hasPendingRequest: false,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: false,
+        fetching: false
+      },
+      expected: true
+    },
+    {
+      name: 'does not fetch an already resolved work',
+      input: {
+        status: 'succeeded',
+        previousStatus: 'running',
+        hasPendingRequest: true,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: true,
+        fetching: false
+      },
+      expected: false
+    },
+    {
+      name: 'does not fetch work that is already being fetched',
+      input: {
+        status: 'succeeded',
+        previousStatus: 'running',
+        hasPendingRequest: true,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: false,
+        fetching: true
+      },
+      expected: false
+    },
+    {
+      name: 'does not fetch a non-terminal work',
+      input: {
+        status: 'running',
+        previousStatus: undefined,
+        hasPendingRequest: true,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: false,
+        fetching: false
+      },
+      expected: false
+    },
+    {
+      name: 'does not fetch a malformed status',
+      input: {
+        status: null,
+        previousStatus: 'running',
+        hasPendingRequest: true,
+        historyLoaded: true,
+        sessionLoading: false,
+        resolved: false,
+        fetching: false
+      },
+      expected: false
+    }
+  ]
+
+  for (const { name, input, expected } of cases) {
+    assert.equal(shouldFetchHttpWorkStatus(input), expected, name)
+  }
+})
 
 test('session list renders a loading indicator from the backend is_loading field', () => {
   assert.match(chatViewSource, /v-if="session\.is_loading"/)
@@ -128,14 +311,115 @@ test('session loading poller follows loading state from an already loaded sessio
   assert.equal(poller.isPolling(), false)
 })
 
-test('session loading state is wired through the session manager and work lifecycle', () => {
-  assert.match(sessionManagerSource, /createSessionListLoadingPoller/)
-  assert.match(sessionManagerSource, /sessionLoadingPoller\.sync\(nextSessions\)/)
-  assert.match(sessionManagerSource, /refreshSessionLoadingState/)
-  assert.match(chatSessionSource, /onInputQueued:[\s\S]*?refreshSessionLoadingState\(\)/)
-  assert.match(chatSessionSource, /onWorkFinished:[\s\S]*?refreshSessionLoadingState\(\)/)
+test('HTTP background task recovery is rediscovered after switching away and back to the session', async () => {
+  const { createHttpHistorySyncController } = await import('../src/composables/chat/httpHistorySync.js')
+  const scheduled = []
+  const cancelled = []
+  const taskStates = new Map([
+    ['session-a', [{ status: 'running' }]],
+    ['session-b', []]
+  ])
+  const fetches = []
+  const mergedSessions = []
+  let currentSessionId = 'session-a'
+
+  const controller = createHttpHistorySyncController({
+    getSessionId: () => currentSessionId,
+    canSync: () => true,
+    isLoading: () => false,
+    fetchBackgroundTasks: async sessionId => {
+      fetches.push(sessionId)
+      return { data: { data: taskStates.get(sessionId) || [] } }
+    },
+    mergeLatestHistory: async sessionId => {
+      mergedSessions.push(sessionId)
+    },
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      cancelled.push(callback)
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    }
+  })
+
+  await controller.handleSessionChanged()
+  assert.deepEqual(fetches, ['session-a'])
+  assert.equal(controller.isTracking('session-a'), true)
+  assert.equal(scheduled.length, 1)
+
+  currentSessionId = 'session-b'
+  await controller.handleSessionChanged()
+  assert.deepEqual(fetches, ['session-a', 'session-b'])
+  assert.equal(controller.isTracking('session-a'), false)
+  assert.equal(scheduled.length, 0)
+  assert.deepEqual(mergedSessions, ['session-b'])
+  assert.equal(cancelled.length, 1)
+
+  currentSessionId = 'session-a'
+  await controller.handleSessionChanged()
+  assert.deepEqual(fetches, ['session-a', 'session-b', 'session-a'])
+  assert.equal(controller.isTracking('session-a'), true)
+  assert.equal(scheduled.length, 1)
+
+  taskStates.set('session-a', [{ status: 'succeeded', reply_status: 'succeeded' }])
+  const nextPoll = scheduled.shift()
+  await nextPoll()
+
+  assert.deepEqual(fetches, ['session-a', 'session-b', 'session-a', 'session-a'])
+  assert.deepEqual(mergedSessions, ['session-b', 'session-a'])
+  assert.equal(controller.isTracking('session-a'), false)
+  assert.equal(scheduled.length, 0)
 })
 
+
+test('HTTP background task recovery ignores a stale result after the selected session changes', async () => {
+  const { createHttpHistorySyncController } = await import('../src/composables/chat/httpHistorySync.js')
+  let currentSessionId = 'session-a'
+  let resolveSessionA
+  const sessionAResponse = new Promise(resolve => {
+    resolveSessionA = resolve
+  })
+  const fetches = []
+  const mergedSessions = []
+  const scheduled = []
+
+  const controller = createHttpHistorySyncController({
+    getSessionId: () => currentSessionId,
+    canSync: () => true,
+    isLoading: () => false,
+    fetchBackgroundTasks: async sessionId => {
+      fetches.push(sessionId)
+      if (sessionId === 'session-a') return sessionAResponse
+      return { data: { data: [] } }
+    },
+    mergeLatestHistory: async sessionId => {
+      mergedSessions.push(sessionId)
+    },
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    }
+  })
+
+  const staleSync = controller.handleSessionChanged()
+  currentSessionId = 'session-b'
+  await controller.handleSessionChanged()
+  resolveSessionA({ data: { data: [{ status: 'running' }] } })
+  await staleSync
+
+  assert.deepEqual(fetches, ['session-a', 'session-b'])
+  assert.deepEqual(mergedSessions, ['session-b'])
+  assert.equal(controller.isTracking('session-a'), false)
+  assert.equal(controller.isTracking('session-b'), false)
+  assert.equal(scheduled.length, 0)
+})
 
 test('disposed session loading poller does not restart after an in-flight refresh resolves', async () => {
   const { createSessionListLoadingPoller } = await loadSessionLoadingModule()
@@ -198,4 +482,191 @@ test('session loading poller performs a trailing refresh when refreshNow is requ
   assert.equal(refreshCount, 2)
   assert.equal(scheduled.length, 1)
   assert.equal(poller.isPolling(), true)
+})
+
+test('session loading poller keeps a bounded fallback refresh while submissions remain pending', async () => {
+  const { createSessionListLoadingPoller } = await loadSessionLoadingModule()
+  const scheduled = []
+  let refreshCount = 0
+
+  const poller = createSessionListLoadingPoller({
+    refreshSessions: async () => {
+      refreshCount += 1
+      return [{ session_id: 'a', is_loading: false }]
+    },
+    hasPendingSubmissions: () => true,
+    maxPendingIdleRefreshes: 2,
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    }
+  })
+
+  await poller.refreshNow()
+  assert.equal(refreshCount, 1)
+  assert.equal(scheduled.length, 1)
+
+  await scheduled.shift()()
+  assert.equal(refreshCount, 2)
+  assert.equal(scheduled.length, 1)
+
+  await scheduled.shift()()
+  assert.equal(refreshCount, 3)
+  assert.equal(scheduled.length, 0)
+  assert.equal(poller.isPolling(), false)
+})
+
+test('session loading poller resets the pending fallback budget when submissions disappear', async () => {
+  const { createSessionListLoadingPoller } = await loadSessionLoadingModule()
+  const scheduled = []
+  let pending = true
+  let refreshCount = 0
+
+  const poller = createSessionListLoadingPoller({
+    refreshSessions: async () => {
+      refreshCount += 1
+      return [{ session_id: 'a', is_loading: false }]
+    },
+    hasPendingSubmissions: () => pending,
+    maxPendingIdleRefreshes: 1,
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    }
+  })
+
+  await poller.refreshNow()
+  assert.equal(scheduled.length, 1)
+
+  pending = false
+  await scheduled.shift()()
+  assert.equal(refreshCount, 2)
+  assert.equal(scheduled.length, 0)
+  assert.equal(poller.isPolling(), false)
+
+  pending = true
+  poller.sync([{ session_id: 'a', is_loading: false }])
+  assert.equal(scheduled.length, 1)
+
+  await scheduled.shift()()
+  assert.equal(refreshCount, 3)
+  assert.equal(scheduled.length, 0)
+  assert.equal(poller.isPolling(), false)
+})
+
+test('session loading poller resumes for real loading after the pending fallback limit', async () => {
+  const { createSessionListLoadingPoller } = await loadSessionLoadingModule()
+  const scheduled = []
+  let pending = true
+  let refreshCount = 0
+
+  const poller = createSessionListLoadingPoller({
+    refreshSessions: async () => {
+      refreshCount += 1
+      return [{ session_id: 'a', is_loading: false }]
+    },
+    hasPendingSubmissions: () => pending,
+    maxPendingIdleRefreshes: 1,
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    }
+  })
+
+  await poller.refreshNow()
+  await scheduled.shift()()
+  assert.equal(refreshCount, 2)
+  assert.equal(scheduled.length, 0)
+  assert.equal(poller.isPolling(), false)
+
+  poller.sync([{ session_id: 'a', is_loading: true }])
+  assert.equal(scheduled.length, 1)
+
+  pending = false
+  await scheduled.shift()()
+  assert.equal(refreshCount, 3)
+  assert.equal(scheduled.length, 0)
+  assert.equal(poller.isPolling(), false)
+})
+
+test('session loading poller does not schedule a pending fallback when its limit is zero', async () => {
+  const { createSessionListLoadingPoller } = await loadSessionLoadingModule()
+  const scheduled = []
+  let refreshCount = 0
+
+  const poller = createSessionListLoadingPoller({
+    refreshSessions: async () => {
+      refreshCount += 1
+      return [{ session_id: 'a', is_loading: false }]
+    },
+    hasPendingSubmissions: () => true,
+    maxPendingIdleRefreshes: 0,
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    }
+  })
+
+  await poller.refreshNow()
+  assert.equal(refreshCount, 1)
+  assert.equal(scheduled.length, 0)
+  assert.equal(poller.isPolling(), false)
+
+  await poller.refreshNow()
+  assert.equal(refreshCount, 2)
+  assert.equal(scheduled.length, 0)
+  assert.equal(poller.isPolling(), false)
+})
+
+test('disposed session loading poller ignores a queued pending fallback callback', async () => {
+  const { createSessionListLoadingPoller } = await loadSessionLoadingModule()
+  const scheduled = []
+  let cancelCount = 0
+  let refreshCount = 0
+
+  const poller = createSessionListLoadingPoller({
+    refreshSessions: async () => {
+      refreshCount += 1
+      return [{ session_id: 'a', is_loading: false }]
+    },
+    hasPendingSubmissions: () => true,
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      cancelCount += 1
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    }
+  })
+
+  await poller.refreshNow()
+  const queuedCallback = scheduled[0]
+  poller.dispose()
+  poller.dispose()
+
+  assert.equal(cancelCount, 1)
+  assert.equal(scheduled.length, 0)
+
+  await queuedCallback()
+  assert.equal(refreshCount, 1)
+  assert.equal(scheduled.length, 0)
+  assert.equal(poller.isPolling(), false)
 })

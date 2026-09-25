@@ -22,6 +22,12 @@
   position: relative;
 }
 
+.transport-fallback-alert {
+  width: var(--chat-input-width);
+  margin: 0 auto 10px;
+  box-sizing: border-box;
+}
+
 .llm-request-metadata {
   position: absolute;
   top: 0;

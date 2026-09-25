@@ -6,6 +6,7 @@ import { useWebSocket } from '../useWebSocket'
 import i18n from '../../i18n'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { getStreamEventIdentity } from './streamEventIdentity.js'
+import { sendHttpNonStream } from './chatTransportRuntime.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -18,6 +19,7 @@ const isWsErrorPayload = (data) => {
 }
 
 const lifecycleEventTypes = new Set([
+  'input_accepted',
   'input_queued',
   'input_dequeued',
   'agent_loop_start',
@@ -60,13 +62,59 @@ export function useChatTransport() {
 
   // 并发请求回调映射管理: requestId -> callbacks
   const callbacksMap = new Map()
+  const submissionAcknowledgements = new Map()
   let sessionEventCallbacks = null
   let reconnectHandler = null
+
+  const resolveSubmissionAcknowledgement = (requestId, status, data = null) => {
+    if (!hasIdentity(requestId)) return
+    const entry = submissionAcknowledgements.get(requestId)
+    if (!entry || entry.status !== 'pending') return
+    entry.status = status
+    entry.data = data
+    entry.resolve({ status, data })
+  }
+
+  const createSubmissionAcknowledgement = (requestId) => {
+    if (!hasIdentity(requestId)) return
+    let resolve
+    const promise = new Promise(resolvePromise => {
+      resolve = resolvePromise
+    })
+    submissionAcknowledgements.set(requestId, {
+      status: 'pending',
+      data: null,
+      promise,
+      resolve
+    })
+  }
+
+  const waitForSubmissionAcknowledgement = async (requestId, timeoutMs = 5000) => {
+    if (!hasIdentity(requestId)) return { status: 'unknown', data: null }
+    const entry = submissionAcknowledgements.get(requestId)
+    if (!entry) return { status: 'unknown', data: null }
+    if (entry.status !== 'pending') {
+      submissionAcknowledgements.delete(requestId)
+      return { status: entry.status, data: entry.data }
+    }
+
+    let timeoutId
+    const timeoutResult = new Promise(resolve => {
+      timeoutId = setTimeout(() => resolve({ status: 'unknown', data: null }), timeoutMs)
+    })
+    const result = await Promise.race([entry.promise, timeoutResult])
+    clearTimeout(timeoutId)
+    submissionAcknowledgements.delete(requestId)
+    return result
+  }
 
   // 注册唯一持久的消息分发器，支持多请求并行分发
   wsManager.onMessage((data) => {
     if (data.type === 'connection_closed') {
       wsConnected.value = false
+      for (const requestId of submissionAcknowledgements.keys()) {
+        resolveSubmissionAcknowledgement(requestId, 'unknown')
+      }
       callbacksMap.clear()
       sessionEventCallbacks = null
       return
@@ -123,6 +171,7 @@ export function useChatTransport() {
       onAuditToolResultsUpdate,
       onContextSummaryStart,
       onContextSummaryEnd,
+      onInputAccepted,
       onInputQueued,
       onInputDequeued,
       onAgentLoopStart,
@@ -155,6 +204,12 @@ export function useChatTransport() {
 
     if (type === 'llm_request_metadata') {
       if (onLlmRequestMetadata) onLlmRequestMetadata(data)
+      return
+    }
+
+    if (type === 'input_accepted') {
+      resolveSubmissionAcknowledgement(requestId, 'accepted', data)
+      if (onInputAccepted) onInputAccepted(data)
       return
     }
 
@@ -339,6 +394,7 @@ export function useChatTransport() {
         ...(hasIdentity(data.request_id) || !hasIdentity(requestId) ? {} : { request_id: requestId })
       })
       console.error('WebSocket业务错误:', errorMessage)
+      resolveSubmissionAcknowledgement(requestId, 'rejected', errorEvent)
       if (onWorkFinished) onWorkFinished(errorEvent)
       if (onError) {
         onError(errorMessage, null, requestId, errorEvent)
@@ -363,6 +419,7 @@ export function useChatTransport() {
           ...data,
           ...(hasIdentity(data.request_id) || !hasIdentity(requestId) ? {} : { request_id: requestId })
         })
+        resolveSubmissionAcknowledgement(requestId, 'rejected', errorEvent)
         if (onWorkFinished) onWorkFinished(errorEvent)
         if (onError) onError(content, null, requestId, errorEvent)
         getEventRequestIds(errorEvent).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
@@ -390,25 +447,10 @@ export function useChatTransport() {
 
   // ==================== 发送方法 ====================
 
-  const httpSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning }) => {
-    const payload = {
-      message,
-      session_id: sessionId || null,
-      attachments: attachments || null,
-      request_id: requestId
-    }
-    if (profileOverrideId !== null && profileOverrideId !== undefined) {
-      payload.profile_override_id = profileOverrideId
-    }
-    if (!sessionId && showToolCalls === false) {
-      payload.show_tool_calls = false
-    }
-    if (!sessionId && showReasoning === false) {
-      payload.show_reasoning = false
-    }
-    const res = await chatApi.completions({ ...payload, stream: false })
-    return res.data
-  }
+  const httpSend = async options => sendHttpNonStream({
+    api: chatApi,
+    ...options
+  })
 
   const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, callbacks = {} }) => {
     const token = localStorage.getItem('token')
@@ -418,6 +460,7 @@ export function useChatTransport() {
     sessionEventCallbacks = finalCallbacks
     if (requestId) {
       callbacksMap.set(requestId, finalCallbacks)
+      createSubmissionAcknowledgement(requestId)
     }
 
     if (!wsManager.isConnected.value) {
@@ -426,9 +469,11 @@ export function useChatTransport() {
         wsConnected.value = true
       } catch (e) {
         console.error('WebSocket连接失败:', e)
-        ElMessage.error(t('chat.ws_connect_failed'))
-        transportMode.value = 'http'
-        if (requestId) callbacksMap.delete(requestId)
+        resolveSubmissionAcknowledgement(requestId, 'not_sent')
+        if (requestId) {
+          callbacksMap.delete(requestId)
+          submissionAcknowledgements.delete(requestId)
+        }
         return false
       }
     }
@@ -451,8 +496,11 @@ export function useChatTransport() {
     }
 
     if (!wsManager.sendMessage(wsData)) {
-      ElMessage.error(t('chat.ws_message_send_failed'))
-      if (requestId) callbacksMap.delete(requestId)
+      resolveSubmissionAcknowledgement(requestId, 'not_sent')
+      if (requestId) {
+        callbacksMap.delete(requestId)
+        submissionAcknowledgements.delete(requestId)
+      }
       return false
     }
     return true
@@ -537,6 +585,7 @@ export function useChatTransport() {
     setTransportMode,
     initWebSocket,
     setReconnectHandler,
+    waitForSubmissionAcknowledgement,
     wsManager
   }
 }
