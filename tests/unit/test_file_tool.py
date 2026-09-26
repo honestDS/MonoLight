@@ -25,8 +25,11 @@ def test_file_tool_schema_exposes_general_file_operations():
     function = FILE_TOOL_SCHEMA["function"]
 
     assert function["name"] == "file_tool"
-    assert function["parameters"]["properties"]["operation"]["enum"] == ["read", "write", "replace", "find"]
+    assert function["parameters"]["properties"]["operation"]["enum"] == ["read", "write", "edit", "patch", "grep"]
     assert function["parameters"]["required"] == ["operation", "path"]
+    assert "literal" in function["parameters"]["properties"]["new_text"]["description"].lower()
+    assert "\\n" in function["parameters"]["properties"]["new_text"]["description"]
+    assert "unified-diff" in function["parameters"]["properties"]["patch"]["description"].lower()
 
 
 def test_profile_config_migrates_legacy_write_file_enablement():
@@ -36,17 +39,20 @@ def test_profile_config_migrates_legacy_write_file_enablement():
 
 
 @pytest.mark.asyncio
-async def test_file_tool_read_requires_explicit_line_range_and_returns_requested_page(tmp_path):
+async def test_file_tool_read_defaults_to_first_page_and_returns_pagination_metadata(tmp_path):
     source = tmp_path / "notes.txt"
     source.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
     executor = _executor(tmp_path)
 
-    missing_range = json.loads(await executor.execute(operation="read", path=str(source)))
+    default_page = json.loads(await executor.execute(operation="read", path=str(source)))
     result = json.loads(await executor.execute(operation="read", path=str(source), start_line=2, end_line=3))
 
-    assert missing_range["status"] == "failed"
-    assert "start_line" in missing_range["error"]
-    assert "end_line" in missing_range["error"]
+    assert default_page["status"] == "success"
+    assert default_page["start_line"] == 1
+    assert default_page["end_line"] == 4
+    assert default_page["total_lines"] == 4
+    assert default_page["truncated"] is False
+    assert default_page["next_start_line"] is None
     assert result == {
         "status": "success",
         "operation": "read",
@@ -54,6 +60,8 @@ async def test_file_tool_read_requires_explicit_line_range_and_returns_requested
         "start_line": 2,
         "end_line": 3,
         "total_lines": 4,
+        "truncated": True,
+        "next_start_line": 4,
         "content": "2: two\n3: three",
     }
 
@@ -73,18 +81,17 @@ async def test_file_tool_write_is_full_overwrite_and_preserves_relative_workspac
 
 
 @pytest.mark.asyncio
-async def test_file_tool_replace_requires_exact_target_count_and_does_not_write_on_mismatch(tmp_path):
-    target = tmp_path / "replace.txt"
+async def test_file_tool_edit_requires_unique_literal_target_and_does_not_write_on_mismatch(tmp_path):
+    target = tmp_path / "edit.txt"
     target.write_text("alpha = 1\nalpha = 2\n", encoding="utf-8")
     executor = _executor(tmp_path)
 
     result = json.loads(
         await executor.execute(
-            operation="replace",
+            operation="edit",
             path=str(target),
-            pattern=r"alpha = \d",
-            replacement="beta = 3",
-            expected_replacements=1,
+            old_text="alpha",
+            new_text="beta",
         )
     )
 
@@ -94,46 +101,239 @@ async def test_file_tool_replace_requires_exact_target_count_and_does_not_write_
 
 
 @pytest.mark.asyncio
-async def test_file_tool_replace_reports_replaced_target_lines(tmp_path):
-    target = tmp_path / "replace.txt"
-    target.write_text("header\nvalue = old\ntail\n", encoding="utf-8")
+async def test_file_tool_edit_treats_backslash_sequences_as_literal_and_preserves_crlf(tmp_path):
+    target = tmp_path / "edit.py"
+    target.write_bytes(b'header\r\nvalue = "old"\r\ntail\r\n')
     executor = _executor(tmp_path)
 
     result = json.loads(
         await executor.execute(
-            operation="replace",
+            operation="edit",
             path=str(target),
-            pattern=r"value = (?P<value>old)",
-            replacement=r"value = new-\g<value>",
-            expected_replacements=1,
+            old_text='value = "old"',
+            new_text='value = "line1\\nline2"',
         )
     )
 
     assert result["status"] == "success"
     assert result["replaced"] == 1
-    assert result["targets"] == [{"start_line": 2, "end_line": 2, "content": "2: value = new-old"}]
-    assert target.read_text(encoding="utf-8") == "header\nvalue = new-old\ntail\n"
+    assert result["targets"] == [{"start_line": 2, "end_line": 2, "content": '2: value = "line1\\nline2"'}]
+    assert target.read_bytes() == b'header\r\nvalue = "line1\\nline2"\r\ntail\r\n'
 
 
 @pytest.mark.asyncio
-async def test_file_tool_find_returns_each_regex_match_with_five_lines_of_context(tmp_path):
-    target = tmp_path / "find.txt"
-    lines = [f"line {index}" for index in range(1, 21)]
-    lines[6] = "MATCH first"
-    lines[15] = "MATCH second"
-    target.write_text("\n".join(lines), encoding="utf-8")
+async def test_file_tool_edit_replace_all_updates_every_literal_match(tmp_path):
+    target = tmp_path / "edit.txt"
+    target.write_text("alpha = 1\nalpha = 2\n", encoding="utf-8")
     executor = _executor(tmp_path)
 
-    result = json.loads(await executor.execute(operation="find", path=str(target), pattern=r"MATCH \w+"))
+    result = json.loads(
+        await executor.execute(
+            operation="edit",
+            path=str(target),
+            old_text="alpha",
+            new_text="beta",
+            replace_all=True,
+        )
+    )
 
     assert result["status"] == "success"
-    assert result["match_count"] == 2
-    assert [(item["start_line"], item["context_start_line"], item["context_end_line"]) for item in result["matches"]] == [
-        (7, 2, 12),
-        (16, 11, 20),
-    ]
-    assert "7: MATCH first" in result["matches"][0]["content"]
-    assert "16: MATCH second" in result["matches"][1]["content"]
+    assert result["replaced"] == 2
+    assert target.read_text(encoding="utf-8") == "beta = 1\nbeta = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_file_tool_patch_applies_multiple_hunks_and_keeps_backslashes_literal(tmp_path):
+    target = tmp_path / "patch.py"
+    target.write_text('def first():\n    return "old"\n\ndef second():\n    return "old"\n', encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    result = json.loads(
+        await executor.execute(
+            operation="patch",
+            path=str(target),
+            patch="""@@
+ def first():
+-    return "old"
++    return "line1\\nline2"
+@@
+ def second():
+-    return "old"
++    return "new"
+""",
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["hunks_applied"] == 2
+    assert target.read_text(encoding="utf-8") == 'def first():\n    return "line1\\nline2"\n\ndef second():\n    return "new"\n'
+
+
+@pytest.mark.asyncio
+async def test_file_tool_patch_is_atomic_when_later_hunk_does_not_match(tmp_path):
+    target = tmp_path / "patch.py"
+    original = "first old\nsecond old\n"
+    target.write_text(original, encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    result = json.loads(
+        await executor.execute(
+            operation="patch",
+            path=str(target),
+            patch="""@@
+-first old
++first new
+@@
+-missing
++second new
+""",
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "hunk_not_found"
+    assert result["hunk_index"] == 2
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_file_tool_patch_ignores_final_patch_line_terminator_when_matching(tmp_path):
+    target = tmp_path / "patch.py"
+    target.write_text("before\nold\nafter\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    result = json.loads(
+        await executor.execute(
+            operation="patch",
+            path=str(target),
+            patch="@@\n-old\n+new\n",
+        )
+    )
+
+    assert result["status"] == "success"
+    assert target.read_text(encoding="utf-8") == "before\nnew\nafter\n"
+
+
+@pytest.mark.asyncio
+async def test_file_tool_patch_rejects_ambiguous_hunk_without_writing(tmp_path):
+    target = tmp_path / "patch.py"
+    original = "old\nmiddle\nold\n"
+    target.write_text(original, encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    result = json.loads(
+        await executor.execute(
+            operation="patch",
+            path=str(target),
+            patch="@@\n-old\n+new",
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "hunk_ambiguous"
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_file_tool_patch_returns_structured_parse_failure(tmp_path):
+    target = tmp_path / "patch.py"
+    target.write_text("old\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    result = json.loads(
+        await executor.execute(
+            operation="patch",
+            path=str(target),
+            patch="@@\n?old",
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "line_prefix_invalid"
+    assert result["line_number"] == 2
+    assert target.read_text(encoding="utf-8") == "old\n"
+
+
+@pytest.mark.asyncio
+async def test_file_tool_patch_preserves_utf8_bom_and_crlf(tmp_path):
+    target = tmp_path / "patch.py"
+    target.write_bytes(b"\xef\xbb\xbfbefore\r\nold\r\nafter\r\n")
+    executor = _executor(tmp_path)
+
+    result = json.loads(
+        await executor.execute(
+            operation="patch",
+            path=str(target),
+            patch="@@\n old\n-after\n+changed",
+        )
+    )
+
+    assert result["status"] == "success"
+    assert target.read_bytes() == b"\xef\xbb\xbfbefore\r\nold\r\nchanged\r\n"
+
+
+@pytest.mark.asyncio
+async def test_file_tool_grep_searches_file_or_directory_with_filters_and_context(tmp_path):
+    source_dir = tmp_path / "src"
+    nested_dir = source_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    one = source_dir / "one.py"
+    two = nested_dir / "two.py"
+    ignored = source_dir / "ignored.txt"
+    one.write_text("before\nNeedle first\nafter\n", encoding="utf-8")
+    two.write_text("before\nneedle second\nafter\n", encoding="utf-8")
+    ignored.write_text("needle ignored\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    directory_result = json.loads(
+        await executor.execute(
+            operation="grep",
+            path=str(source_dir),
+            pattern=r"needle",
+            include=["*.py"],
+            ignore_case=True,
+            context_lines=1,
+            max_results=10,
+        )
+    )
+    file_result = json.loads(
+        await executor.execute(
+            operation="grep",
+            path=str(one),
+            pattern=r"Needle",
+            context_lines=0,
+        )
+    )
+
+    assert directory_result["status"] == "success"
+    assert directory_result["files_scanned"] == 2
+    assert directory_result["matched_file_count"] == 2
+    assert directory_result["match_count"] == 2
+    assert directory_result["truncated"] is False
+    assert all(item["context_start_line"] == 1 and item["context_end_line"] == 3 for item in directory_result["matches"])
+    assert file_result["files_scanned"] == 1
+    assert file_result["matched_file_count"] == 1
+    assert file_result["match_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_file_tool_grep_allows_workspace_root_with_dot_path(tmp_path):
+    executor = _executor(tmp_path, allowed_operation_dirs=[])
+    target = executor.user_temp_dir / "root.py"
+    target.write_text("needle\n", encoding="utf-8")
+
+    result = json.loads(
+        await executor.execute(
+            operation="grep",
+            path=".",
+            pattern="needle",
+            include=["*.py"],
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["path"] == str(executor.user_temp_dir.resolve())
+    assert result["match_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -180,7 +380,7 @@ async def test_file_tool_rejects_relative_symlink_escape(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_file_tool_large_find_result_is_truncated_by_unified_tool_dispatch(tmp_path):
+async def test_file_tool_large_grep_result_is_truncated_by_unified_tool_dispatch(tmp_path):
     target = tmp_path / "large.txt"
     target.write_text("\n".join(f"MATCH {index} " + "x" * 120 for index in range(300)), encoding="utf-8")
     cfg = ProfileConfig.model_validate(
@@ -192,7 +392,7 @@ async def test_file_tool_large_find_result_is_truncated_by_unified_tool_dispatch
         }
     )
     profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
-    tool_call = SimpleNamespace(id="call-1", name="file_tool", arguments={"operation": "find", "path": str(target), "pattern": "MATCH"})
+    tool_call = SimpleNamespace(id="call-1", name="file_tool", arguments={"operation": "grep", "path": str(target), "pattern": "MATCH"})
 
     direct_executor = FileToolExecutor(project_root=str(tmp_path), uid="user-1")
     direct_executor.set_config(cfg)

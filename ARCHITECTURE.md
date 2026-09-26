@@ -499,7 +499,17 @@ app/core/tools/
 ├── __init__.py             # 工具注册入口
 ├── base.py                 # 工具抽象
 ├── cancel_background_task.py # 后台任务工具
-├── file_tool.py            # 通用文本文件操作工具
+├── file_tool/              # 通用文本文件操作工具
+│   ├── __init__.py         # 工具能力导出
+│   ├── executor.py         # 单一 file_tool 执行入口
+│   ├── schema.py           # read/write/edit/patch/grep 工具协议
+│   ├── paths.py            # 工作区与允许目录路径边界
+│   ├── text.py             # UTF-8、BOM、换行与行号公共能力
+│   ├── read.py             # 有界分页读取
+│   ├── write.py            # 完整文件写入
+│   ├── edit.py             # 字面文本精确编辑
+│   ├── patch.py            # 多 hunk 补丁解析与原子应用
+│   └── grep.py             # 文件或目录正则搜索
 ├── firecrawl_scrape.py     # 网页抓取工具
 ├── firecrawl_search.py     # 网页搜索工具
 ├── image_generation.py     # 图像生成工具
