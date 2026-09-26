@@ -107,14 +107,10 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 BackgroundTask.uid == uid,
                 BackgroundTask.session_id == session_id,
                 or_(
-                    BackgroundTask.status.in_(
-                        [BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]
-                    ),
+                    BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
                     and_(
                         BackgroundTask.auto_reply.is_(True),
-                        BackgroundTask.reply_status.in_(
-                            [BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]
-                        ),
+                        BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
                     ),
                 ),
             )

@@ -367,11 +367,14 @@ async def test_profile_create_and_update_sync_memory_organization_with_user_stor
         )
         invalid_create_payload = _assert_standard(invalid_create, 422)
         assert invalid_create_payload["data"] is None
-        assert await profile_crud.get_by_name(
-            db_session,
-            "profile-legacy-knowledge-recall-invalid",
-            uid="user-a",
-        ) is None
+        assert (
+            await profile_crud.get_by_name(
+                db_session,
+                "profile-legacy-knowledge-recall-invalid",
+                uid="user-a",
+            )
+            is None
+        )
 
         create_response = await client.post(
             "/api/v1/profiles/create",

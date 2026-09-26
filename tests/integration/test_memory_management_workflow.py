@@ -642,11 +642,14 @@ async def test_memory_maintenance_workflow_reindexes_migrates_and_retries_collec
             json={"dedupe_key": "maintenance-cleanup-invalid"},
         )
         _assert_standard(invalid_cleanup_retry, 409)
-        assert await memory_job_crud.get_by_dedupe_key(
-            db_session,
-            uid="user-a",
-            dedupe_key="maintenance-cleanup-invalid",
-        ) is None
+        assert (
+            await memory_job_crud.get_by_dedupe_key(
+                db_session,
+                uid="user-a",
+                dedupe_key="maintenance-cleanup-invalid",
+            )
+            is None
+        )
 
         cleanup_retry = _assert_standard(
             await client.post(

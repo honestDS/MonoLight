@@ -4,7 +4,11 @@ from dataclasses import dataclass
 
 import tiktoken
 
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
+from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    TOOL_RESULT_COMPACT_TRUNCATION_NOTICE,
+    TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE,
+)
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.context_budget import build_context_request_budget, measure_context_request_usage
@@ -17,21 +21,17 @@ def _get_truncation_notice() -> str:
     return t("MSG_TOOL_RESULT_TRUNCATED")
 
 
-_COMPACT_TRUNCATION_NOTICE = "truncated"
-_MINIMAL_TRUNCATION_NOTICE = "cut"
-
-
 def _fit_truncation_notice_to_token_budget(encoding, limit_tokens: int) -> tuple[str, int]:
     for notice in (
         _get_truncation_notice(),
-        _COMPACT_TRUNCATION_NOTICE,
-        _MINIMAL_TRUNCATION_NOTICE,
+        TOOL_RESULT_COMPACT_TRUNCATION_NOTICE,
+        TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE,
     ):
         notice_token_ids = encoding.encode(notice, disallowed_special=())
         if len(notice_token_ids) <= limit_tokens:
             return notice, len(notice_token_ids)
 
-    minimal_token_ids = encoding.encode(_MINIMAL_TRUNCATION_NOTICE, disallowed_special=())
+    minimal_token_ids = encoding.encode(TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE, disallowed_special=())
     fitted_token_ids = minimal_token_ids[:limit_tokens]
     return encoding.decode(fitted_token_ids), len(fitted_token_ids)
 
@@ -39,13 +39,13 @@ def _fit_truncation_notice_to_token_budget(encoding, limit_tokens: int) -> tuple
 def _fit_truncation_notice_to_estimated_budget(limit_tokens: int) -> tuple[str, int]:
     for notice in (
         _get_truncation_notice(),
-        _COMPACT_TRUNCATION_NOTICE,
-        _MINIMAL_TRUNCATION_NOTICE,
+        TOOL_RESULT_COMPACT_TRUNCATION_NOTICE,
+        TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE,
     ):
         notice_tokens = max(1, _estimate_tokens_by_chars(notice))
         if notice_tokens <= limit_tokens:
             return notice, notice_tokens
-    return _MINIMAL_TRUNCATION_NOTICE, 1
+    return TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE, 1
 
 
 @dataclass(frozen=True)
