@@ -7,6 +7,7 @@ import tiktoken
 from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.context_budget import build_context_request_budget, measure_context_request_usage
 from app.models.message import InternalMessage
 
 logger = get_logger(__name__)
@@ -31,6 +32,36 @@ class ToolMessagesTruncationStats:
     removed_chars: int
 
 
+def calculate_tool_result_round_budget_tokens(
+    *,
+    messages: list[InternalMessage],
+    context_window_k: int,
+    max_tokens: int,
+    tools: list[dict] | None,
+    required_input_tokens_override: int | None = None,
+) -> int:
+    if isinstance(required_input_tokens_override, int) and not isinstance(required_input_tokens_override, bool) and required_input_tokens_override >= 0:
+        budget = build_context_request_budget(
+            context_window_k=context_window_k,
+            max_tokens=max_tokens,
+        )
+        required_input_tokens = required_input_tokens_override
+    else:
+        usage = measure_context_request_usage(
+            messages=messages,
+            context_window_k=context_window_k,
+            max_tokens=max_tokens,
+            tools=tools,
+        )
+        budget = usage.budget
+        required_input_tokens = usage.required_input_tokens
+
+    hard_input_limit = budget.context_window_tokens - budget.output_tokens - budget.safety_margin_tokens
+    remaining_input_tokens = max(hard_input_limit - required_input_tokens, 0)
+    # 工具结果最多使用当前剩余上下文的一半，给模型下一轮继续分析、缩小查询范围或再次调用工具预留空间。
+    return max(1, remaining_input_tokens // 2)
+
+
 def _estimate_tokens_by_chars(text: str) -> int:
     c_coeff = float(os.getenv("TOKEN_COEFF_CHINESE", 1.5))
     o_coeff = float(os.getenv("TOKEN_COEFF_OTHER", 0.3))
@@ -39,7 +70,13 @@ def _estimate_tokens_by_chars(text: str) -> int:
     return int(chinese_count * c_coeff + other_count * o_coeff)
 
 
-def truncate_tool_result_with_stats(content: str, context_window_k: int, limit_tokens: int | None = None) -> ToolResultTruncation:
+def truncate_tool_result_with_stats(
+    content: str,
+    context_window_k: int,
+    limit_tokens: int | None = None,
+    *,
+    include_notice: bool = True,
+) -> ToolResultTruncation:
     """对单条工具响应做 token 级截断，并返回截断统计信息。
 
     默认按上下文窗口一半截断；传入 limit_tokens 时按显式预算截断。
@@ -58,13 +95,16 @@ def truncate_tool_result_with_stats(content: str, context_window_k: int, limit_t
 
         truncation_notice = _get_truncation_notice()
         notice_tokens = len(encoding.encode(truncation_notice, disallowed_special=()))
-        if notice_tokens < limit_tokens:
+        if not include_notice:
+            truncated_body = encoding.decode(token_ids[:limit_tokens])
+            truncated_content = truncated_body
+        elif notice_tokens < limit_tokens:
             body_limit_tokens = max(1, limit_tokens - notice_tokens)
             truncated_body = encoding.decode(token_ids[:body_limit_tokens])
             truncated_content = truncated_body + truncation_notice
         else:
-            truncated_body = encoding.decode(token_ids[:limit_tokens])
-            truncated_content = truncated_body
+            truncated_body = ""
+            truncated_content = truncation_notice
         final_tokens = len(encoding.encode(truncated_content, disallowed_special=()))
         return ToolResultTruncation(
             content=truncated_content,
@@ -80,18 +120,21 @@ def truncate_tool_result_with_stats(content: str, context_window_k: int, limit_t
         truncation_notice = _get_truncation_notice()
         notice_tokens = _estimate_tokens_by_chars(truncation_notice)
         original_tokens = _estimate_tokens_by_chars(content)
-        if notice_tokens < limit_tokens:
-            char_limit = max(1, int((limit_tokens - notice_tokens) / avg_coeff))
-            append_notice = True
-        else:
+        if not include_notice:
             char_limit = max(1, int(limit_tokens / avg_coeff))
-            append_notice = False
-
-        if len(content) <= char_limit:
-            return ToolResultTruncation(content=content, truncated=False, original_tokens=original_tokens, final_tokens=original_tokens, removed_chars=0)
-
-        truncated_body = content[:char_limit]
-        truncated_content = truncated_body + truncation_notice if append_notice else truncated_body
+            if len(content) <= char_limit:
+                return ToolResultTruncation(content=content, truncated=False, original_tokens=original_tokens, final_tokens=original_tokens, removed_chars=0)
+            truncated_body = content[:char_limit]
+            truncated_content = truncated_body
+        elif notice_tokens < limit_tokens:
+            char_limit = max(1, int((limit_tokens - notice_tokens) / avg_coeff))
+            if len(content) <= char_limit:
+                return ToolResultTruncation(content=content, truncated=False, original_tokens=original_tokens, final_tokens=original_tokens, removed_chars=0)
+            truncated_body = content[:char_limit]
+            truncated_content = truncated_body + truncation_notice
+        else:
+            truncated_body = ""
+            truncated_content = truncation_notice
         return ToolResultTruncation(
             content=truncated_content,
             truncated=True,
@@ -198,6 +241,7 @@ def truncate_longterm_memory_recall_result_for_budget(
                     content,
                     context_window_k,
                     limit_tokens=per_content_budget,
+                    include_notice=False,
                 )
                 item["content"] = content_stats.content
                 if content_stats.truncated:

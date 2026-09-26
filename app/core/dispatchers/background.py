@@ -62,6 +62,7 @@ from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
+from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole
@@ -528,6 +529,12 @@ class BackgroundDispatcherMixin:
                         for tool_call in ai_msg.tool_calls
                     ]
                 else:
+                    tool_result_round_budget_tokens = calculate_tool_result_round_budget_tokens(
+                        messages=materialize_user_environment_prompts(messages),
+                        context_window_k=chat_params["context_window_k"],
+                        max_tokens=chat_params["max_tokens"],
+                        tools=tools,
+                    )
                     tool_responses = await asyncio.gather(
                         *[
                             process_single_tool_with_isolated_db(
@@ -542,6 +549,7 @@ class BackgroundDispatcherMixin:
                                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                                 context_window_k=chat_params["context_window_k"],
                                 tool_call_count=len(ai_msg.tool_calls),
+                                tool_result_round_budget_tokens=tool_result_round_budget_tokens,
                                 allow_background_submission=False,
                                 dispatch_mode="background",
                                 dispatch_source=reply_source,

@@ -10,6 +10,7 @@ from app.core.dispatchers.stream import StreamDispatcherMixin
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.tools import TOOL_EXECUTOR_MAP, tool_requires_audit
+from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
 def _assert_source_order(source: str, *markers: str) -> None:
@@ -34,6 +35,7 @@ def test_interactive_stream_and_non_stream_share_audited_execution_entrypoint():
         interactive_tools_source,
         "prevalidate_tool_round(",
         "audit_tool_round(",
+        "calculate_tool_result_round_budget_tokens(",
         "_execute_isolated_tool_call(",
     )
     assert "process_single_tool_with_isolated_db(" in inspect.getsource(interactive_helpers_module._execute_isolated_tool_call)
@@ -52,6 +54,7 @@ def test_background_entrypoint_prechecks_before_batch_audit_and_execution():
         "validate_background_proactive_tool_calls(",
         "prevalidate_tool_round(",
         "audit_tool_round(",
+        "calculate_tool_result_round_budget_tokens(",
         "process_single_tool_with_isolated_db(",
     )
 
@@ -61,6 +64,7 @@ def test_confirmed_entrypoint_reaudits_changed_files_before_precheck_and_executi
     _assert_source_order(
         source,
         "audit_tool_round(",
+        "_resolve_confirmed_tool_result_round_budget_tokens(",
         "prevalidate_tool_round(",
         "process_single_tool(",
         "_dispatch_interactive_work(",
@@ -75,3 +79,34 @@ def test_confirmed_tool_result_budget_reuses_last_model_context_window():
 
     assert executor_confirmed_module._resolve_confirmed_tool_context_window_k(session) == 1050
     assert executor_confirmed_module._resolve_confirmed_tool_context_window_k(SimpleNamespace(llm_request_metadata=None)) == 4
+
+
+def test_confirmed_tool_result_budget_uses_provider_input_plus_confirmed_tool_call(monkeypatch):
+    session = SimpleNamespace(
+        llm_request_metadata={
+            "context_window_tokens": 250_000,
+            "max_output_tokens": 20_480,
+            "input_tokens": 185_765,
+            "input_tokens_source": "provider",
+        }
+    )
+    confirmed_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[
+            InternalToolCall(
+                id="call-confirmed",
+                name="execute_shell",
+                arguments={"command": "git diff", "execution_mode": "non_interactive"},
+            )
+        ],
+    )
+    monkeypatch.setattr(executor_confirmed_module, "estimate_tokens", lambda _text: 5_000)
+    monkeypatch.setattr(executor_confirmed_module, "message_token_text", lambda _message: "confirmed-tool-call")
+
+    budget_tokens = executor_confirmed_module._resolve_confirmed_tool_result_round_budget_tokens(
+        session,
+        confirmed_message,
+        tools=[],
+    )
+
+    assert budget_tokens == (250_000 - 20_480 - 256 - 190_765) // 2

@@ -315,6 +315,7 @@ class _ParallelToolExecutionContext:
     allowed_knowledge_base_ids: list[int]
     context_window_k: int
     tool_call_count: int
+    tool_result_round_budget_tokens: int
     context_summary_boundary_message_id: int | None
     source_message_id: int | None = None
 
@@ -337,6 +338,7 @@ async def _execute_isolated_tool_call(
                 allowed_knowledge_base_ids=context.allowed_knowledge_base_ids,
                 context_window_k=context.context_window_k,
                 tool_call_count=context.tool_call_count,
+                tool_result_round_budget_tokens=context.tool_result_round_budget_tokens,
                 context_summary_boundary_message_id=context.context_summary_boundary_message_id,
                 source_message_id=context.source_message_id,
             )

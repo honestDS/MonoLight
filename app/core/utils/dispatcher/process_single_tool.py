@@ -399,6 +399,7 @@ def _truncate_knowledge_base_query_result_for_budget(
                 content,
                 context_window_k,
                 limit_tokens=per_item_budget,
+                include_notice=False,
             )
             safe_item["content"] = content_stats.content
             removed_chars += content_stats.removed_chars
@@ -509,6 +510,7 @@ async def process_single_tool(
     tool_call_count: int = 1,
     allow_background_submission: bool = True,
     *,
+    tool_result_round_budget_tokens: int | None = None,
     context_summary_boundary_message_id: int | None = None,
     source_message_id: int | None = None,
     dispatch_mode: DispatchMode = "interactive",
@@ -624,7 +626,10 @@ async def process_single_tool(
         tool_call_id=tool_call.id,
         content=cmd_result,
     )
-    tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
+    if tool_result_round_budget_tokens is None:
+        tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
+    else:
+        tool_result_round_budget_tokens = max(1, tool_result_round_budget_tokens)
     tool_result_budget_tokens = max(1, tool_result_round_budget_tokens // max(1, tool_call_count))
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
         tool_msg.content, truncation_stats = truncate_longterm_memory_recall_result_for_budget(
