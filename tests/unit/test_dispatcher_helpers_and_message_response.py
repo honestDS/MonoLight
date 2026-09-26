@@ -213,6 +213,67 @@ async def test_channel_call_context_length_error_uses_existing_channel_fallback(
 
 
 @pytest.mark.asyncio
+async def test_channel_call_context_length_recovery_retries_current_channel_before_fallback(monkeypatch):
+    db = _TrackingSession()
+    channel_1 = SimpleNamespace(
+        id=1,
+        name="channel-1",
+        base_url="https://example.invalid",
+        get_decrypted_api_key=lambda: "secret-1",
+    )
+    channel_2 = SimpleNamespace(
+        id=2,
+        name="channel-2",
+        base_url="https://example.invalid",
+        get_decrypted_api_key=lambda: "secret-2",
+    )
+    selections = []
+    model_calls = []
+    recovery_calls = []
+
+    async def select_channel(*_args, **kwargs):
+        excluded = kwargs.get("excluded_priorities")
+        selections.append(excluded)
+        if excluded == {1}:
+            return channel_2, {"model_id": "model-2", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
+        if excluded == {1, 2}:
+            return None
+        return channel_1, {"model_id": "model-1", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
+
+    async def generate(**kwargs):
+        model_calls.append(kwargs["model_id"])
+        if len(model_calls) <= 2:
+            raise LLMContextLengthException(provider_message="context length exceeded")
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"),
+            model=kwargs["model_id"],
+        )
+
+    async def recover(chat_params):
+        recovery_calls.append(dict(chat_params))
+        return True
+
+    monkeypatch.setattr(channel_call, "select_channel", select_channel)
+    monkeypatch.setattr(channel_call.LLMClient, "generate", generate)
+
+    response, *_ = await channel_call.generate_chat_with_fallback(
+        db,
+        chat_channel=SimpleNamespace(rules=[], chat_timeout=30),
+        request_builder=lambda _params: [InternalMessage(role=MessageRole.USER, content="hello")],
+        call_context="test",
+        cursor_key="profile:CHAT",
+        uid="user-1",
+        session_id="session-1",
+        context_length_recovery_callback=recover,
+    )
+
+    assert response.model == "model-2"
+    assert model_calls == ["model-1", "model-1", "model-2"]
+    assert selections == [None, {1}]
+    assert len(recovery_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_channel_call_context_length_error_is_returned_when_no_fallback_channel(monkeypatch):
     db = _TrackingSession()
     channel = SimpleNamespace(

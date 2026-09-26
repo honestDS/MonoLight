@@ -171,6 +171,33 @@ class BackgroundDispatcherMixin:
                 allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
             tools = profile_tools or None
 
+        async def recover_context_length(chat_params, *, active_tools, target_messages=None):
+            nonlocal messages
+            if not (initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0):
+                return False
+            recovery_messages = messages if target_messages is None else target_messages
+            recovered_messages = await apply_context_summary_checkpoint(
+                db,
+                session_id=session_id,
+                uid=uid,
+                profile=profile,
+                cfg=cfg,
+                messages=recovery_messages,
+                trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+                fixed_upper_message_id=initial_fixed_upper_message_id,
+                context_window_k=chat_params["context_window_k"],
+                max_tokens=chat_params["max_tokens"],
+                tools=active_tools,
+                allow_incremental_input_estimate=False,
+                force=True,
+            )
+            if recovered_messages == recovery_messages:
+                return False
+            recovery_messages[:] = recovered_messages
+            if target_messages is None:
+                messages = recovery_messages
+            return True
+
         async def build_initial_request(chat_params):
             nonlocal messages
             if submission_context is None:
@@ -242,6 +269,10 @@ class BackgroundDispatcherMixin:
             session_id=session_id,
             tools=tools,
             request_metadata_callback=request_metadata_callback,
+            context_length_recovery_callback=partial(
+                recover_context_length,
+                active_tools=tools,
+            ),
         )
         ai_msg = response.message
 
@@ -282,6 +313,11 @@ class BackgroundDispatcherMixin:
                 tools=None,
                 require_content=True,
                 request_metadata_callback=request_metadata_callback,
+                context_length_recovery_callback=partial(
+                    recover_context_length,
+                    active_tools=None,
+                    target_messages=messages,
+                ),
             )
             ai_msg = corrected_response.message
             if ai_msg.tool_calls:
@@ -329,6 +365,11 @@ class BackgroundDispatcherMixin:
                     session_id=session_id,
                     tools=tools,
                     request_metadata_callback=request_metadata_callback,
+                    context_length_recovery_callback=partial(
+                        recover_context_length,
+                        active_tools=tools,
+                        target_messages=correction_context_messages,
+                    ),
                 )
                 ai_msg = retry_response.message
                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
@@ -368,6 +409,11 @@ class BackgroundDispatcherMixin:
                         tools=None,
                         require_content=True,
                         request_metadata_callback=request_metadata_callback,
+                        context_length_recovery_callback=partial(
+                            recover_context_length,
+                            active_tools=None,
+                            target_messages=text_only_context_messages,
+                        ),
                     )
                     ai_msg = text_only_response.message
                     if ai_msg.tool_calls:
@@ -657,6 +703,10 @@ class BackgroundDispatcherMixin:
             tools=None,
             require_content_or_tools=False,
             request_metadata_callback=request_metadata_callback,
+            context_length_recovery_callback=partial(
+                recover_context_length,
+                active_tools=None,
+            ),
         )
         final_msg = final_response.message
         if final_msg.tool_calls:
@@ -696,6 +746,11 @@ class BackgroundDispatcherMixin:
                 tools=None,
                 require_content_or_tools=True,
                 request_metadata_callback=request_metadata_callback,
+                context_length_recovery_callback=partial(
+                    recover_context_length,
+                    active_tools=None,
+                    target_messages=final_correction_context_messages,
+                ),
             )
             final_msg = corrected_response.message
             if final_msg.tool_calls:

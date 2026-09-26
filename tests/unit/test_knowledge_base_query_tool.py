@@ -273,3 +273,27 @@ def test_structured_truncation_removes_managed_write_identity(monkeypatch) -> No
     assert "knowledge_id" not in item
     assert "knowledge_expected_version" not in item
     assert "llm_maintainable" not in item
+
+
+def test_structured_truncation_falls_back_to_budget_safe_marker_when_minimal_json_does_not_fit() -> None:
+    result = json.dumps(
+        {
+            "items": [
+                {
+                    "source": "managed",
+                    "content": "managed-body-" * 2000,
+                    "knowledge_type": "managed",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+    truncated, stats = process_single_tool_module._truncate_knowledge_base_query_result_for_budget(
+        result,
+        context_window_k=1,
+        budget_tokens=1,
+    )
+
+    assert stats.truncated_count == 1
+    assert truncated == "cut"

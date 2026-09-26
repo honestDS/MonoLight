@@ -218,6 +218,7 @@ async def _ensure_context_summary(
     required_input_tokens_override: int | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle: ContextSummaryLifecycle,
+    force: bool = False,
 ) -> ContextSummaryState:
     await ensure_context_summary_work_valid(work_validity_checker)
     state = await get_context_summary_state(db, session_id=session_id, uid=uid)
@@ -318,8 +319,8 @@ async def _ensure_context_summary(
             history_tokens_override=history_tokens,
             history_message_count_override=history_message_count,
         )
-    threshold_reached = usage["required_tokens"] >= usage["summary_trigger_tokens"]
-    check_result = "triggered" if threshold_reached else "skipped"
+    threshold_reached = force or usage["required_tokens"] >= usage["summary_trigger_tokens"]
+    check_result = "forced" if force else ("triggered" if threshold_reached else "skipped")
     logger.bind(
         uid=uid,
         session_id=session_id,
@@ -507,9 +508,7 @@ async def _ensure_context_summary(
                 raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
         compressed_tokens = max(1, estimate_tokens(compressed or ""))
         candidate_summary = compressed
-        insufficient_refinement_progress = (
-            previous_candidate_tokens - compressed_tokens < CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS
-        )
+        insufficient_refinement_progress = previous_candidate_tokens - compressed_tokens < CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS
 
     if final_usage["required_tokens"] > final_usage["compression_goal_tokens"]:
         logger.bind(
@@ -613,6 +612,7 @@ async def ensure_context_summary(
     required_input_tokens_override: int | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle_event_callback: ContextSummaryLifecycleCallback | None = None,
+    force: bool = False,
 ) -> ContextSummaryState:
     lifecycle = ContextSummaryLifecycle(event_callback=lifecycle_event_callback)
     try:
@@ -636,6 +636,7 @@ async def ensure_context_summary(
             required_input_tokens_override=required_input_tokens_override,
             work_validity_checker=work_validity_checker,
             lifecycle=lifecycle,
+            force=force,
         )
     finally:
         if lifecycle.event_started:
