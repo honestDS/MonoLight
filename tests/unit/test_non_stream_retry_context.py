@@ -22,7 +22,7 @@ from app.core.terminal.schemas import (
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.markdown_instruction import build_max_output_tokens_instruction
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 
@@ -157,7 +157,7 @@ async def test_context_length_forces_summary_on_current_channel_before_fallback(
         attempts.append(kwargs["model_id"])
         if len(attempts) == 1:
             raise LLMContextLengthException(provider_message="maximum context length exceeded")
-        return SimpleNamespace(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"))
+        return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model=kwargs["model_id"], usage={})
 
     async def generate_stream_response(**kwargs):
         response = await generate_response(**kwargs)
@@ -866,7 +866,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
         model_requests.append(kwargs)
         if kwargs["model_id"] == "model-1":
             raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR")
-        return SimpleNamespace(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"))
+        return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model=kwargs["model_id"], usage={})
 
     async def save_assistant(db, session_id, uid, profile_id, ai_msg, dedupe_key=None, created_at=None):
         saved_created_at.append(created_at)

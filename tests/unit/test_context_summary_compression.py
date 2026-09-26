@@ -148,4 +148,3 @@ async def test_summary_refinement_stops_when_token_reduction_is_too_small(monkey
     assert len(generated_calls) == 3
     assert update_calls == []
     assert all("Further compress the summary below" in generated_calls[index]["messages"][0].content for index in (1, 2))
-

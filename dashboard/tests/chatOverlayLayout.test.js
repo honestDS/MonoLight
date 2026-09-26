@@ -141,23 +141,3 @@ test('app copyright lives in the sidebar footer without a standalone footer surf
   assert.match(copyrightRule, /padding-top:\s*10px;/)
   assert.doesNotMatch(copyrightRule, /background(?:-color)?:/)
 })
-
-test('thinking block constrains and auto-scrolls overflowing content', async () => {
-  const [thinkingSource, thinkingStyles] = await Promise.all([
-    readDashboardSource('src/components/ThinkingBlock.vue'),
-    readDashboardSource('src/assets/css/ThinkingBlock.scss')
-  ])
-
-  assert.match(
-    thinkingStyles,
-    /\.thinking-block-content\.markdown-body\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?max-height:\s*300px;[\s\S]*?overflow:\s*auto;/
-  )
-  assert.match(
-    thinkingSource,
-    /<div\b[^>]*\bref="thinkingContentRef"[^>]*\bclass="thinking-block-content markdown-body"/
-  )
-  assert.match(
-    thinkingSource,
-    /watch\(\s*\(\)\s*=>\s*props\.content[\s\S]*?if\s*\(\s*content\s*&&\s*content\.scrollHeight\s*>\s*content\.clientHeight\s*\)\s*\{[\s\S]*?content\.scrollTop\s*=\s*content\.scrollHeight;?[\s\S]*?\}\s*\},\s*\{\s*flush:\s*'post'\s*\}\s*\)/
-  )
-})

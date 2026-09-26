@@ -79,15 +79,15 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
                         "description": "Send a file",
                         "parameters": {"type": "object", "properties": {}},
                     },
-                }
-                ,{
+                },
+                {
                     "type": "function",
                     "function": {
                         "name": MANAGE_TODO_TOOL_NAME,
                         "description": "Todo",
                         "parameters": {"type": "object", "properties": {}},
                     },
-                }
+                },
             ],
             None,
         )

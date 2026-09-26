@@ -69,18 +69,11 @@ class SessionReplySubmission:
     ) -> tuple[InternalMessage, SessionReplyWorkItem, str, list[dict[str, Any]]]:
         profile_id = profile.id if profile and profile.id else -1
         serialized_message = _serialize_message_content(message)
-        request_digest = hashlib.sha256(
-            json.dumps([uid, session_id, request_id], separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        request_digest = hashlib.sha256(json.dumps([uid, session_id, request_id], separators=(",", ":")).encode("utf-8")).hexdigest()
         idempotent_dedupe_key = f"http:{request_digest[:58]}"
 
         def validate_idempotent_message(message_row: Message) -> None:
-            if (
-                message_row.uid != uid
-                or message_row.session_id != session_id
-                or message_row.content != serialized_message
-                or (message_row.attachments or []) != (attachments or [])
-            ):
+            if message_row.uid != uid or message_row.session_id != session_id or message_row.content != serialized_message or (message_row.attachments or []) != (attachments or []):
                 raise ParameterException(ERR_CHAT_REQUEST_ID_CONFLICT)
 
         async def existing_idempotent_submission(

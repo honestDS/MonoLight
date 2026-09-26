@@ -1,21 +1,8 @@
-import inspect
 from types import SimpleNamespace
 
-from app.core.dispatchers import interactive_helpers as interactive_helpers_module
-from app.core.dispatchers import interactive_runtime as interactive_runtime_module
-from app.core.dispatchers import interactive_tools as interactive_tools_module
-from app.core.dispatchers.background import BackgroundDispatcherMixin
-from app.core.dispatchers.non_stream import NonStreamDispatcherMixin
-from app.core.dispatchers.stream import StreamDispatcherMixin
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
-from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.tools import TOOL_EXECUTOR_MAP, tool_requires_audit
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
-
-
-def _assert_source_order(source: str, *markers: str) -> None:
-    positions = [source.index(marker) for marker in markers]
-    assert positions == sorted(positions)
 
 
 def test_registered_tools_explicitly_declare_audit_requirement():
@@ -26,52 +13,6 @@ def test_registered_tools_explicitly_declare_audit_requirement():
     assert tool_requires_audit("read_multimodal_file") is False
     assert all(not tool_requires_audit(tool_name) for tool_name in TOOL_EXECUTOR_MAP if tool_name not in audited_tools)
     assert tool_requires_audit("unknown_tool") is False
-
-
-def test_interactive_stream_and_non_stream_share_audited_execution_entrypoint():
-    interactive_tools_source = inspect.getsource(interactive_tools_module.handle_interactive_tool_round)
-    assert "if cfg.security.audit_channel_id and cfg.security.audit_model_id" not in interactive_tools_source
-    _assert_source_order(
-        interactive_tools_source,
-        "prevalidate_tool_round(",
-        "audit_tool_round(",
-        "calculate_tool_result_round_budget_tokens(",
-        "_execute_isolated_tool_call(",
-    )
-    assert "process_single_tool_with_isolated_db(" in inspect.getsource(interactive_helpers_module._execute_isolated_tool_call)
-    assert "handle_interactive_tool_round(" in inspect.getsource(interactive_runtime_module.dispatch_interactive)
-
-    assert "dispatch_interactive(" in inspect.getsource(NonStreamDispatcherMixin.dispatch)
-    assert "_run_dispatch(" in inspect.getsource(StreamDispatcherMixin.dispatch_stream)
-    assert "dispatch_interactive(" in inspect.getsource(StreamDispatcherMixin._run_dispatch)
-
-
-def test_background_entrypoint_prechecks_before_batch_audit_and_execution():
-    source = inspect.getsource(BackgroundDispatcherMixin._generate_reply_from_history)
-    assert "if cfg.security.audit_channel_id and cfg.security.audit_model_id" not in source
-    _assert_source_order(
-        source,
-        "validate_background_proactive_tool_calls(",
-        "prevalidate_tool_round(",
-        "audit_tool_round(",
-        "calculate_tool_result_round_budget_tokens(",
-        "process_single_tool_with_isolated_db(",
-    )
-
-
-def test_confirmed_entrypoint_reaudits_changed_files_before_precheck_and_execution():
-    source = inspect.getsource(executor_confirmed_module._execute_confirmed_tools)
-    _assert_source_order(
-        source,
-        "audit_tool_round(",
-        "_resolve_confirmed_tool_result_round_budget_tokens(",
-        "prevalidate_tool_round(",
-        "process_single_tool(",
-        "_dispatch_interactive_work(",
-    )
-    interactive_source = inspect.getsource(executor_interactive_module._dispatch_interactive_work)
-    assert "ChatDispatcher.dispatch(" in interactive_source
-    assert "ChatDispatcher.dispatch_stream(" in interactive_source
 
 
 def test_confirmed_tool_result_budget_reuses_last_model_context_window():

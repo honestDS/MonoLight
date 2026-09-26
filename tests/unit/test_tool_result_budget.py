@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from app.core.constants import TOOL_RESULT_COMPACT_TRUNCATION_NOTICE, TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE
 from app.core.dispatchers import interactive_tools as interactive_tools_module
 from app.core.utils.dispatcher import truncate_tool_result as truncate_tool_result_module
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
@@ -152,7 +153,7 @@ def test_truncated_tool_result_uses_budget_safe_notice_when_full_notice_does_not
     )
 
     assert result.truncated is True
-    assert result.content == "cut"
+    assert result.content == TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE
     assert result.final_tokens <= 1
 
 
@@ -171,7 +172,7 @@ def test_truncated_tool_result_fallback_uses_budget_safe_notice_when_full_notice
     )
 
     assert result.truncated is True
-    assert result.content == "cut"
+    assert result.content == TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE
     assert result.final_tokens <= 1
 
 
@@ -186,7 +187,19 @@ def test_parallel_tiny_tool_budgets_do_not_expand_from_truncation_notices():
         session_id="session-1",
     )
 
-    assert all(message.content == "cut" for message in messages)
+    assert all(message.content == TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE for message in messages)
+
+
+def test_compact_truncation_notice_is_shorter_than_full_notice(monkeypatch):
+    monkeypatch.setattr(truncate_tool_result_module, "_get_truncation_notice", lambda: "[TRUNCATED]")
+
+    result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        "x" * 100,
+        context_window_k=1,
+        limit_tokens=2,
+    )
+
+    assert result.content == TOOL_RESULT_COMPACT_TRUNCATION_NOTICE
 
 
 def test_tool_result_round_budget_never_becomes_non_positive(monkeypatch):
