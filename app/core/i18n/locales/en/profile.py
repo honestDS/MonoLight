@@ -44,7 +44,7 @@ MESSAGES = {
     "ERR_KB_NOT_FOUND_FOR_QUERY": "Knowledge base not found",
     "ERR_KB_NOT_IN_PROFILE": "No permission to query knowledge bases that do not belong to the current profile",
     "TOOL_EXECUTE_SHELL_LABEL": "Execute Shell",
-    "TOOL_WRITE_FILE_LABEL": "Write File",
+    "TOOL_FILE_TOOL_LABEL": "File Operations",
     "TOOL_FIRECRAWL_SEARCH_LABEL": "Firecrawl Search",
     "TOOL_FIRECRAWL_SCRAPE_LABEL": "Firecrawl Scrape",
     "TOOL_SEND_FILE_TO_USER_LABEL": "Send File to User",

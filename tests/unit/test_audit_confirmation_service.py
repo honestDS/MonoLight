@@ -15,11 +15,11 @@ from app.core.audit.service import (
     _audit_read_token_budget,
     _audit_read_tool_message,
     _call_auditor,
-    _collect_append_file_snapshots,
+    _collect_file_mutation_snapshots,
     _file_checks_are_sufficient,
     _file_snapshots_from_reads,
+    _fit_audit_file_tool_payload_to_context,
     _fit_audit_read_result_to_context,
-    _fit_audit_write_file_payload_to_context,
     _parse_results,
     _read_for_audit_sync,
     _requires_confirmation_from_evidence,
@@ -49,7 +49,7 @@ def _profile_config() -> ProfileConfig:
                 "audit_model_id": "audit-model",
             },
             "tool": {
-                "enabled_tools": ["execute_shell", "write_file"],
+                "enabled_tools": ["execute_shell", "file_tool"],
             },
             "other": {},
         }
@@ -95,11 +95,13 @@ def test_audit_prompt_requires_script_content_evidence():
     assert "must never be capped at 7 merely because it is a script" in AUDIT_BATCH_PROMPT
     assert "platform mismatch, insufficient permission, or another environmental condition may prevent them from succeeding" in AUDIT_BATCH_PROMPT
     assert "score 7 is appropriate when the uncertainty cannot be narrowed" in AUDIT_BATCH_PROMPT
-    assert "writes, overwrites, or appends a script, source code, or loadable configuration" in AUDIT_BATCH_PROMPT
+    assert "file_tool call with operation=write or operation=replace" in AUDIT_BATCH_PROMPT
+    assert "creates or modifies a script, source code, or loadable configuration" in AUDIT_BATCH_PROMPT
     assert "must be scored 8-10" in AUDIT_BATCH_PROMPT
     assert "prepares the file on disk and does not execute its contents" in AUDIT_BATCH_PROMPT
     assert "Score the preparation of high-risk content" in AUDIT_BATCH_PROMPT
     assert "argument_evidence.content" in AUDIT_BATCH_PROMPT
+    assert "argument_evidence.pattern and argument_evidence.replacement for operation=replace" in AUDIT_BATCH_PROMPT
     assert "remaining content was not reviewed" in AUDIT_BATCH_PROMPT
     assert "You receive every complete tool call" not in AUDIT_BATCH_PROMPT
     assert "explicit_script_paths" not in AUDIT_BATCH_PROMPT
@@ -271,14 +273,14 @@ async def test_missing_audit_configuration_skips_round_without_side_effects(monk
     monkeypatch.setattr(service.audit_crud, "create_preparing", unexpected_call)
     monkeypatch.setattr(service, "_call_auditor", unexpected_call)
     monkeypatch.setattr(service, "persist_prepared_audit_round", unexpected_call)
-    monkeypatch.setattr(service, "_collect_append_file_snapshots", unexpected_snapshot)
+    monkeypatch.setattr(service, "_collect_file_mutation_snapshots", unexpected_snapshot)
 
     result = await audit_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[
             InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"}),
-            InternalToolCall(id="call-2", name="write_file", arguments={"file_path": "result.txt", "content": "ok"}),
+            InternalToolCall(id="call-2", name="file_tool", arguments={"operation": "write", "path": "result.txt", "content": "ok"}),
         ],
         source_assistant_message_id=1,
         uid="u1",
@@ -310,7 +312,7 @@ async def test_configured_audit_skips_safe_tool_round_without_side_effects(monke
     monkeypatch.setattr(service.audit_crud, "create_preparing", unexpected_call)
     monkeypatch.setattr(service, "_call_auditor", unexpected_call)
     monkeypatch.setattr(service, "persist_prepared_audit_round", unexpected_call)
-    monkeypatch.setattr(service, "_collect_append_file_snapshots", unexpected_snapshot)
+    monkeypatch.setattr(service, "_collect_file_mutation_snapshots", unexpected_snapshot)
     monkeypatch.setattr(service, "build_tool_round_integrity_snapshot", unexpected_snapshot)
 
     result = await audit_tool_round(
@@ -413,8 +415,8 @@ async def test_same_round_file_write_conflict_blocks_without_confirmation(monkey
         FakeDb(),
         cfg=_profile_config(),
         tool_calls=[
-            InternalToolCall(id="call-1", name="write_file", arguments={"file_path": "result.txt", "content": "first"}),
-            InternalToolCall(id="call-2", name="write_file", arguments={"file_path": "result.txt", "content": "second"}),
+            InternalToolCall(id="call-1", name="file_tool", arguments={"operation": "write", "path": "result.txt", "content": "first"}),
+            InternalToolCall(id="call-2", name="file_tool", arguments={"operation": "replace", "path": "result.txt", "pattern": "x", "replacement": "y", "expected_replacements": 1}),
         ],
         source_assistant_message_id=1,
         uid="u1",
@@ -778,20 +780,20 @@ def test_audit_max_input_tokens_uses_proportional_safety_margin_with_minimum():
     assert _audit_max_input_tokens({"context_window_k": 1, "max_tokens": 512}) == 1000 - 512 - 256
 
 
-def test_small_write_file_audit_payload_is_unchanged_without_argument_evidence():
+def test_small_file_tool_write_audit_payload_is_unchanged_without_argument_evidence():
     payload = {
         "confirmation_threshold": 5,
         "working_directory": "C:/audit",
         "tool_calls": [
             {
                 "tool_call_id": "call-1",
-                "tool_name": "write_file",
-                "arguments": {"file_path": "note.txt", "content": "short content"},
+                "tool_name": "file_tool",
+                "arguments": {"operation": "write", "path": "note.txt", "content": "short content"},
             }
         ],
     }
 
-    adapted_payload = _fit_audit_write_file_payload_to_context(
+    adapted_payload = _fit_audit_file_tool_payload_to_context(
         "audit",
         payload,
         {"context_window_k": 2, "max_tokens": 256},
@@ -802,7 +804,7 @@ def test_small_write_file_audit_payload_is_unchanged_without_argument_evidence()
     assert "argument_evidence" not in adapted_payload["tool_calls"][0]
 
 
-def test_large_write_file_audit_payload_uses_prefix_evidence_within_input_budget():
+def test_large_file_tool_write_audit_payload_uses_prefix_evidence_within_input_budget():
     content = 'write this escaped value: \\"\\n' * 2000
     payload = {
         "confirmation_threshold": 5,
@@ -810,14 +812,14 @@ def test_large_write_file_audit_payload_uses_prefix_evidence_within_input_budget
         "tool_calls": [
             {
                 "tool_call_id": "call-1",
-                "tool_name": "write_file",
-                "arguments": {"file_path": "note.txt", "content": content},
+                "tool_name": "file_tool",
+                "arguments": {"operation": "write", "path": "note.txt", "content": content},
             }
         ],
     }
     chat_params = {"context_window_k": 2, "max_tokens": 256}
 
-    adapted_payload = _fit_audit_write_file_payload_to_context("audit", payload, chat_params)
+    adapted_payload = _fit_audit_file_tool_payload_to_context("audit", payload, chat_params)
     adapted_call = adapted_payload["tool_calls"][0]
     adapted_content = adapted_call["arguments"]["content"]
     evidence = adapted_call["argument_evidence"]["content"]
@@ -841,25 +843,25 @@ def test_large_write_file_audit_payload_uses_prefix_evidence_within_input_budget
     assert request_tokens <= _audit_max_input_tokens(chat_params)
 
 
-def test_multiple_write_file_payloads_preserve_short_content_and_fairly_truncate_long_content():
+def test_multiple_file_tool_write_payloads_preserve_short_content_and_fairly_truncate_long_content():
     short_content = "short content " * 10
     long_content = "long content " * 4000
     payload = {
         "tool_calls": [
             {
                 "tool_call_id": "short",
-                "tool_name": "write_file",
-                "arguments": {"file_path": "short.txt", "content": short_content},
+                "tool_name": "file_tool",
+                "arguments": {"operation": "write", "path": "short.txt", "content": short_content},
             },
             {
                 "tool_call_id": "long",
-                "tool_name": "write_file",
-                "arguments": {"file_path": "long.txt", "content": long_content},
+                "tool_name": "file_tool",
+                "arguments": {"operation": "write", "path": "long.txt", "content": long_content},
             },
         ]
     }
 
-    adapted_payload = _fit_audit_write_file_payload_to_context(
+    adapted_payload = _fit_audit_file_tool_payload_to_context(
         "audit",
         payload,
         {"context_window_k": 2, "max_tokens": 256},
@@ -872,8 +874,40 @@ def test_multiple_write_file_payloads_preserve_short_content_and_fairly_truncate
     assert long_call["argument_evidence"]["content"]["truncated"] is True
 
 
+def test_large_file_tool_replace_audit_payload_bounds_pattern_and_replacement():
+    pattern = "old-value-" * 3000
+    replacement = "new-value-" * 3000
+    payload = {
+        "tool_calls": [
+            {
+                "tool_call_id": "replace",
+                "tool_name": "file_tool",
+                "arguments": {
+                    "operation": "replace",
+                    "path": "note.txt",
+                    "pattern": pattern,
+                    "replacement": replacement,
+                    "expected_replacements": 1,
+                },
+            }
+        ]
+    }
+
+    adapted_payload = _fit_audit_file_tool_payload_to_context(
+        "audit",
+        payload,
+        {"context_window_k": 2, "max_tokens": 256},
+    )
+    adapted_call = adapted_payload["tool_calls"][0]
+
+    assert pattern.startswith(adapted_call["arguments"]["pattern"])
+    assert replacement.startswith(adapted_call["arguments"]["replacement"])
+    assert adapted_call["argument_evidence"]["pattern"]["truncated"] is True
+    assert adapted_call["argument_evidence"]["replacement"]["truncated"] is True
+
+
 @pytest.mark.asyncio
-async def test_call_auditor_sends_adapted_write_file_payload(monkeypatch, tmp_path):
+async def test_call_auditor_sends_adapted_file_tool_payload(monkeypatch, tmp_path):
     import app.core.audit.service as service
 
     cfg = _profile_config()
@@ -920,8 +954,8 @@ async def test_call_auditor_sends_adapted_write_file_payload(monkeypatch, tmp_pa
             {
                 "tool_call_id": "call-1",
                 "turn_index": 0,
-                "tool_name": "write_file",
-                "arguments": {"file_path": "note.txt", "content": content},
+                "tool_name": "file_tool",
+                "arguments": {"operation": "write", "path": "note.txt", "content": content},
             }
         ],
     }
@@ -937,7 +971,7 @@ async def test_call_auditor_sends_adapted_write_file_payload(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_pending_summary_sends_adapted_write_file_payload(monkeypatch, tmp_path):
+async def test_pending_summary_sends_adapted_file_tool_payload(monkeypatch, tmp_path):
     import app.core.audit.service as service
 
     cfg = _profile_config()
@@ -975,7 +1009,7 @@ async def test_pending_summary_sends_adapted_write_file_payload(monkeypatch, tmp
     )
     monkeypatch.setattr(service.LLMClient, "generate", generate)
 
-    tool_calls = [{"id": "call-1", "name": "write_file", "arguments": {"file_path": "note.txt", "content": content}}]
+    tool_calls = [{"id": "call-1", "name": "file_tool", "arguments": {"operation": "write", "path": "note.txt", "content": content}}]
     await _summarize_pending(FakeDb(), cfg, tool_calls, working_directory=tmp_path)
 
     sent_payload = json.loads(calls[0]["messages"][1].content)
@@ -1027,39 +1061,39 @@ def test_audit_read_result_fits_escaped_json_within_input_budget():
     assert fitted_result["size"] == read_result["size"]
 
 
-def test_append_file_snapshot_records_missing_target_and_ignores_non_append_or_outside_paths(tmp_path):
+def test_replace_file_snapshot_records_missing_target_and_ignores_write_or_outside_paths(tmp_path):
     calls = [
-        InternalToolCall(id="append", name="write_file", arguments={"file_path": "nested/new.txt", "content": "new", "append": True}),
-        InternalToolCall(id="overwrite", name="write_file", arguments={"file_path": "overwrite.txt", "content": "new", "append": False}),
-        InternalToolCall(id="outside", name="write_file", arguments={"file_path": "../outside.txt", "content": "new", "append": True}),
+        InternalToolCall(id="replace", name="file_tool", arguments={"operation": "replace", "path": "nested/new.txt", "pattern": "old", "replacement": "new", "expected_replacements": 1}),
+        InternalToolCall(id="write", name="file_tool", arguments={"operation": "write", "path": "overwrite.txt", "content": "new"}),
+        InternalToolCall(id="outside", name="file_tool", arguments={"operation": "replace", "path": "../outside.txt", "pattern": "old", "replacement": "new", "expected_replacements": 1}),
     ]
 
-    snapshots = _collect_append_file_snapshots(calls, tmp_path)
+    snapshots = _collect_file_mutation_snapshots(calls, tmp_path, [])
 
-    snapshot = snapshots["append"][0]
+    snapshot = snapshots["replace"][0]
     assert snapshot["absolute_path"] == str((tmp_path / "nested" / "new.txt").resolve())
     assert snapshot["exists"] is False
     assert snapshot["status"] == "missing"
     assert snapshot["size"] is None
     assert snapshot["sha256"] is None
-    assert "overwrite" not in snapshots
+    assert "write" not in snapshots
     assert "outside" not in snapshots
 
 
-def test_append_file_snapshot_records_missing_target_before_workspace_exists(tmp_path):
+def test_replace_file_snapshot_records_missing_target_before_workspace_exists(tmp_path):
     workspace = tmp_path / "temp_new_user"
-    tool_call = InternalToolCall(id="append", name="write_file", arguments={"file_path": "nested/new.txt", "content": "new", "append": True})
+    tool_call = InternalToolCall(id="replace", name="file_tool", arguments={"operation": "replace", "path": "nested/new.txt", "pattern": "old", "replacement": "new", "expected_replacements": 1})
 
-    snapshots = _collect_append_file_snapshots([tool_call], workspace)
+    snapshots = _collect_file_mutation_snapshots([tool_call], workspace, [])
 
-    snapshot = snapshots["append"][0]
+    snapshot = snapshots["replace"][0]
     assert workspace.exists() is False
     assert snapshot["absolute_path"] == str(workspace / "nested" / "new.txt")
     assert snapshot["exists"] is False
     assert snapshot["file_type"] == "missing"
 
 
-def test_append_file_snapshot_preserves_link_type_and_resolved_path(tmp_path):
+def test_replace_file_snapshot_preserves_link_type_and_resolved_path(tmp_path):
     target = tmp_path / "target.txt"
     target.write_text("content", encoding="utf-8")
     link = tmp_path / "link.txt"
@@ -1068,8 +1102,8 @@ def test_append_file_snapshot_preserves_link_type_and_resolved_path(tmp_path):
     except OSError as exc:
         pytest.skip(f"当前系统不允许创建测试链接: {exc}")
 
-    tool_call = InternalToolCall(id="call-1", name="write_file", arguments={"file_path": "link.txt", "content": "append", "append": True})
-    snapshots = _collect_append_file_snapshots([tool_call], tmp_path)
+    tool_call = InternalToolCall(id="call-1", name="file_tool", arguments={"operation": "replace", "path": "link.txt", "pattern": "content", "replacement": "new", "expected_replacements": 1})
+    snapshots = _collect_file_mutation_snapshots([tool_call], tmp_path, [])
 
     snapshot = snapshots[tool_call.id][0]
     assert snapshot["absolute_path"] == str(link)
@@ -1369,18 +1403,18 @@ def test_unstable_read_failures_require_confirmation_without_persisted_snapshot(
     assert _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), [], [file_read], [])
 
 
-def test_append_file_snapshot_converts_integrity_errors_to_conservative_snapshot(monkeypatch, tmp_path):
+def test_replace_file_snapshot_converts_integrity_errors_to_conservative_snapshot(monkeypatch, tmp_path):
     import app.core.audit.service as service
 
     def fail_snapshot(*_args, **_kwargs):
         raise PermissionError("permission denied")
 
     monkeypatch.setattr(service, "create_file_integrity_snapshot", fail_snapshot)
-    call = InternalToolCall(id="append", name="write_file", arguments={"file_path": "target.txt", "content": "new", "append": True})
+    call = InternalToolCall(id="replace", name="file_tool", arguments={"operation": "replace", "path": "target.txt", "pattern": "old", "replacement": "new", "expected_replacements": 1})
 
-    snapshots = service._collect_append_file_snapshots([call], tmp_path)
+    snapshots = service._collect_file_mutation_snapshots([call], tmp_path, [])
 
-    snapshot = snapshots["append"][0]
+    snapshot = snapshots["replace"][0]
     assert snapshot["status"] == "unreadable"
     assert snapshot["file_type"] == "unknown"
     assert snapshot["exists"] is None
@@ -1728,7 +1762,7 @@ def test_tool_round_precheck_fails_entire_round_before_execution():
     cfg = _profile_config()
     calls = [
         SimpleNamespace(id="call-1", name="execute_shell", arguments={}),
-        SimpleNamespace(id="call-2", name="write_file", arguments={"file_path": "ok.txt", "content": "ok"}),
+        SimpleNamespace(id="call-2", name="file_tool", arguments={"operation": "write", "path": "ok.txt", "content": "ok"}),
     ]
 
     errors = prevalidate_tool_round(calls, cfg)

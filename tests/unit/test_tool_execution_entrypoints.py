@@ -7,7 +7,7 @@ from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 def test_registered_tools_explicitly_declare_audit_requirement():
     assert all(isinstance(executor_class.requires_audit, bool) for executor_class in TOOL_EXECUTOR_MAP.values())
-    audited_tools = {"execute_shell", "write_file", "terminal_write", "terminal_close"}
+    audited_tools = {"execute_shell", "file_tool", "terminal_write", "terminal_close"}
     assert {tool_name for tool_name in TOOL_EXECUTOR_MAP if tool_requires_audit(tool_name)} == audited_tools
     assert "read_multimodal_file" in TOOL_EXECUTOR_MAP
     assert tool_requires_audit("read_multimodal_file") is False

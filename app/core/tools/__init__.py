@@ -12,7 +12,7 @@ from app.models.knowledge_base import KnowledgeBaseType
 from app.models.profile import Profile
 
 from .cancel_background_task import CANCEL_BACKGROUND_TASK_TOOL_SCHEMA, CancelBackgroundTaskExecutor
-from .file_writer import FILE_WRITER_TOOL_SCHEMA, FileWriterExecutor
+from .file_tool import FILE_TOOL_SCHEMA, FileToolExecutor
 from .firecrawl_scrape import FIRECRAWL_SCRAPE_TOOL_SCHEMA, FirecrawlScrapeExecutor
 from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecutor
 from .image_generation import IMAGE_GENERATION_TOOL_SCHEMA, ImageGenerationExecutor
@@ -65,7 +65,7 @@ SYSTEM_BUILTIN_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in S
 # 可由 Profile 配置启用或禁用的常规工具 Schema
 CONFIGURABLE_TOOL_SCHEMAS = [
     SHELL_TOOL_SCHEMA,
-    FILE_WRITER_TOOL_SCHEMA,
+    FILE_TOOL_SCHEMA,
     FIRECRAWL_SEARCH_TOOL_SCHEMA,
     FIRECRAWL_SCRAPE_TOOL_SCHEMA,
     SEND_FILE_TO_USER_TOOL_SCHEMA,
@@ -103,7 +103,7 @@ ALL_TOOLS_SCHEMAS = CONFIGURABLE_TOOL_SCHEMAS
 # 工具名称与执行器类的映射
 TOOL_EXECUTOR_MAP = {
     SHELL_TOOL_SCHEMA["function"]["name"]: ShellExecutor,
-    FILE_WRITER_TOOL_SCHEMA["function"]["name"]: FileWriterExecutor,
+    FILE_TOOL_SCHEMA["function"]["name"]: FileToolExecutor,
     FIRECRAWL_SEARCH_TOOL_SCHEMA["function"]["name"]: FirecrawlSearchExecutor,
     FIRECRAWL_SCRAPE_TOOL_SCHEMA["function"]["name"]: FirecrawlScrapeExecutor,
     SEND_FILE_TO_USER_TOOL_SCHEMA["function"]["name"]: SendFileToUserExecutor,
@@ -218,7 +218,12 @@ def _get_enabled_tool_names(profile: Profile) -> set[str]:
         return set(get_registered_tool_names())
     if not isinstance(enabled_tools, list):
         return set()
-    return {name for name in enabled_tools if isinstance(name, str)}
+    normalized_names = set()
+    for name in enabled_tools:
+        if not isinstance(name, str):
+            continue
+        normalized_names.add("file_tool" if name == "write_file" else name)
+    return normalized_names
 
 
 def _is_memory_enabled(profile: Profile) -> bool:

@@ -1949,7 +1949,7 @@ async def test_interactive_audits_each_successive_tool_round_before_execution(mo
             ),
             InternalMessage(
                 role=MessageRole.ASSISTANT,
-                tool_calls=[InternalToolCall(id="call-2", name="write_file", arguments={"file_path": "note.txt", "content": "done"})],
+                tool_calls=[InternalToolCall(id="call-2", name="file_tool", arguments={"operation": "write", "path": "note.txt", "content": "done"})],
             ),
             InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
         ],
@@ -1957,10 +1957,10 @@ async def test_interactive_audits_each_successive_tool_round_before_execution(mo
     )
 
     assert response["choices"][0]["message"]["content"] == "finished"
-    assert tool_names == ["execute_shell", "write_file"]
+    assert tool_names == ["execute_shell", "file_tool"]
     assert [[tool_call.name for tool_call in tool_calls] for tool_calls in audit_calls] == [
         ["execute_shell"],
-        ["write_file"],
+        ["file_tool"],
     ]
     assert [checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] for checkpoint in checkpoints if SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint] == [
         {"audit_record_id": 42, "claim_token": "claim-token"},

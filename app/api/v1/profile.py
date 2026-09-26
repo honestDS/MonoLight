@@ -87,7 +87,7 @@ _MEMORY_STORE_UNSET = object()
 
 PROFILE_TOOL_OPTIONS = [
     {"value": "execute_shell", "label_key": "TOOL_EXECUTE_SHELL_LABEL"},
-    {"value": "write_file", "label_key": "TOOL_WRITE_FILE_LABEL"},
+    {"value": "file_tool", "label_key": "TOOL_FILE_TOOL_LABEL"},
     {"value": "firecrawl_search", "label_key": "TOOL_FIRECRAWL_SEARCH_LABEL"},
     {"value": "firecrawl_scrape", "label_key": "TOOL_FIRECRAWL_SCRAPE_LABEL"},
     {"value": "send_file_to_user", "label_key": "TOOL_SEND_FILE_TO_USER_LABEL"},
