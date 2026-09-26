@@ -17,6 +17,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
     SessionReplyWorkType,
 )
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -61,20 +62,7 @@ async def concurrent_session_factory(tmp_path) -> AsyncGenerator[async_sessionma
         finally:
             cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=[
-                    Profile.__table__,
-                    Message.__table__,
-                    ChatSession.__table__,
-                    SessionReplySequence.__table__,
-                    SessionReplyWorkItem.__table__,
-                    SessionReplyStreamEvent.__table__,
-                ],
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=[Profile.__table__, Message.__table__, ChatSession.__table__, SessionReplySequence.__table__, SessionReplyWorkItem.__table__, SessionReplyStreamEvent.__table__])
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as setup_session:
         setup_session.add(Profile(id=1, uid="user-1", name="queue-test", configs={}))

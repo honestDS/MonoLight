@@ -10,7 +10,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 from app.core.constants import ERR_MEMORY_OVER_LIMIT, MEMORY_CONTENT_MAX_TOKENS
 from app.core.crud.memory.job import memory_job_crud
@@ -57,6 +56,7 @@ from app.models.memory import (
     LongTermMemoryType,
 )
 from app.providers.database.time import get_database_time
+from tests.database_support import clone_sqlite_schema
 
 
 class _ImportSafePersistentClient:
@@ -215,13 +215,7 @@ async def memory_session_factory(tmp_path) -> AsyncIterator[async_sessionmaker[A
         f"sqlite+aiosqlite:///{database_path}",
         connect_args={"timeout": 30},
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=MEMORY_TABLES,
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=MEMORY_TABLES)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield session_factory

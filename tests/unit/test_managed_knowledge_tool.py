@@ -9,7 +9,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 from app.core import profile_deletion as profile_deletion_module
 from app.core.crud.profile.profile import profile_crud
@@ -42,6 +41,7 @@ from app.models.knowledge_base import (
 from app.models.memory import LongTermMemoryStore
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
+from tests.database_support import clone_sqlite_schema
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -72,13 +72,7 @@ async def managed_knowledge_tool_database(tmp_path) -> AsyncIterator[async_sessi
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=_TABLES,
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=_TABLES)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_summary import merge as context_summary_merge
@@ -19,6 +19,7 @@ from app.core.utils.context_summary.snapshot import build_context_summary_snapsh
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage, ContextSummaryStageStatus
 from app.models.message import Message, MessageRole
 from app.models.session import ChatSession
+from tests.database_support import clone_sqlite_schema
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
 
@@ -27,18 +28,7 @@ prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
 async def context_summary_database(tmp_path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     database_path = tmp_path / "context-summary-workflow.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=[
-                    ChatSession.__table__,
-                    Message.__table__,
-                    ContextSummaryStage.__table__,
-                    ContextSummaryFragment.__table__,
-                ],
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=[ChatSession.__table__, Message.__table__, ContextSummaryStage.__table__, ContextSummaryFragment.__table__])
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(context_summary_service, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(context_summary_stage, "AsyncSessionLocal", session_factory)

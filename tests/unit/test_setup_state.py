@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from app.core.constants import (
     ERR_SETUP_STATUS_NOT_INITIALIZED,
@@ -22,6 +22,7 @@ from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.models.system_setting import SystemSetting
 from app.models.user import User
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -32,8 +33,7 @@ async def setup_session_factory(tmp_path: Path) -> AsyncIterator[async_sessionma
         connect_args={"timeout": 30},
     )
     tables = [SystemSetting.__table__, User.__table__]
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=tables))
+    await clone_sqlite_schema(database_path, tables=tables)
 
     try:
         yield async_sessionmaker(engine, expire_on_commit=False)

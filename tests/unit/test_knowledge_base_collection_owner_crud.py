@@ -16,6 +16,7 @@ import app.models as exported_models
 from app.core.crud.knowledge.base import knowledge_base_collection_owner_crud
 from app.models import KnowledgeBaseCollectionOwner
 from app.models.knowledge_base import KnowledgeBase
+from tests.database_support import clone_sqlite_schema
 
 
 def _value_for_required_channel_column(column) -> object:
@@ -71,8 +72,7 @@ async def sqlite_database(tmp_path: Path) -> AsyncIterator[tuple[AsyncEngine, as
     def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+    await clone_sqlite_schema(database_path)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     await _seed_channel(session_factory)

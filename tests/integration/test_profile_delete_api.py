@@ -11,7 +11,6 @@ import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 import app.models  # noqa: F401
 from app.api.v1.profile import router
@@ -31,6 +30,7 @@ from app.models.profile import Profile
 from app.models.scheduled_task import ScheduledTask
 from app.models.session import ChatSession
 from app.providers.database import get_db
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -58,8 +58,7 @@ async def profile_delete_api(
         finally:
             cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+    await clone_sqlite_schema(database_path)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app = FastAPI()

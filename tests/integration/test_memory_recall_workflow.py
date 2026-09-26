@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 import app.core.dispatcher as dispatcher_module
 from app.core.dispatchers.memory import request as memory_request_module
@@ -39,6 +39,7 @@ from app.models.message import InternalMessage, InternalToolCall, Message, Messa
 from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -71,8 +72,7 @@ async def memory_recall_session_factory(tmp_path):
         LongTermMemoryStore.__table__,
         LongTermMemoryRecord.__table__,
     ]
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=tables))
+    await clone_sqlite_schema(tmp_path / "memory-recall-workflow.db", tables=tables)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
