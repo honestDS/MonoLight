@@ -70,7 +70,7 @@ export default {
   audit_high_risk_warning_title: 'High-risk operation confirmation',
   new_session: 'New Session',
   new_session_title: 'New session',
-  welcome_greeting: 'What can I help you with today?',
+  welcome_greeting: 'What shall we make today?',
   more_options: 'More options',
   more_options_upload: 'Upload files',
   more_options_markdown: 'Markdown',
