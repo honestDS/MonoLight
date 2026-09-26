@@ -123,32 +123,8 @@ async def generate_interactive_turn(
             )
             if pending_multimodal_message is not None:
                 request_messages.append(pending_multimodal_message)
-            request_messages = ContextManager.trim_messages_for_model_request(
-                messages=request_messages,
-                uid=state.uid,
-                session_id=state.session_id,
-                context_window_k=state.chat_params["context_window_k"],
-                max_tokens=state.chat_params["max_tokens"],
-                tools=current_tools,
-            )
             model_id = state.model_entry["model_id"]
             protocol = resolve_model_protocol(state.model_entry)
-            generation_kwargs = {
-                "api_key": state.chat_channel_obj.get_decrypted_api_key(),
-                "base_url": state.chat_channel_obj.base_url,
-                "model_id": model_id,
-                "messages": request_messages,
-                "temperature": state.chat_params["temperature"],
-                "top_p": state.chat_params["top_p"],
-                "reasoning_effort": state.chat_params.get("reasoning_effort"),
-                "max_tokens": state.chat_params["max_tokens"],
-                "tools": current_tools,
-                "tool_choice": tool_choice,
-                "protocol": protocol,
-                "timeout": state.chat_params["chat_timeout"],
-                "http_proxy": get_channel_http_proxy(state.chat_channel_obj),
-                "custom_headers": get_model_custom_headers(state.model_entry),
-            }
             previous_in_memory_llm_request_metadata = state.latest_llm_request_metadata
             session = None
             if hasattr(state.db, "execute"):
@@ -182,6 +158,31 @@ async def generate_interactive_turn(
                 context_summary_revision=context_summary_revision,
                 context_content_revision=context_content_revision,
             )
+            request_messages = ContextManager.trim_messages_for_model_request(
+                messages=request_messages,
+                uid=state.uid,
+                session_id=state.session_id,
+                context_window_k=state.chat_params["context_window_k"],
+                max_tokens=state.chat_params["max_tokens"],
+                tools=current_tools,
+                required_input_tokens_override=incremental_input_tokens,
+            )
+            generation_kwargs = {
+                "api_key": state.chat_channel_obj.get_decrypted_api_key(),
+                "base_url": state.chat_channel_obj.base_url,
+                "model_id": model_id,
+                "messages": request_messages,
+                "temperature": state.chat_params["temperature"],
+                "top_p": state.chat_params["top_p"],
+                "reasoning_effort": state.chat_params.get("reasoning_effort"),
+                "max_tokens": state.chat_params["max_tokens"],
+                "tools": current_tools,
+                "tool_choice": tool_choice,
+                "protocol": protocol,
+                "timeout": state.chat_params["chat_timeout"],
+                "http_proxy": get_channel_http_proxy(state.chat_channel_obj),
+                "custom_headers": get_model_custom_headers(state.model_entry),
+            }
             estimated_input_tokens = incremental_input_tokens if incremental_input_tokens is not None else estimate_request_context_tokens(request_messages, current_tools)
             generation_kwargs["request_context_tokens"] = estimated_input_tokens
             state.latest_llm_request_metadata = {

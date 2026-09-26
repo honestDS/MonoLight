@@ -1435,6 +1435,57 @@ async def test_interactive_accumulates_output_tokens_and_session_cache_metrics(m
 
 
 @pytest.mark.asyncio
+async def test_interactive_final_budget_check_uses_previous_provider_token_baseline(monkeypatch):
+    trim_calls = []
+    estimate_calls = []
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(tool_call, *args, **kwargs):
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content='{"status":"success"}')
+
+    def estimate_incremental(messages, tools, metadata, *, model_id, protocol, context_summary_revision, context_content_revision):
+        estimate_calls.append(
+            {
+                "metadata": metadata,
+                "model_id": model_id,
+                "protocol": protocol,
+                "context_summary_revision": context_summary_revision,
+                "context_content_revision": context_content_revision,
+            }
+        )
+        return None if len(estimate_calls) == 1 else 1234
+
+    monkeypatch.setattr(interactive_generation_module, "estimate_incremental_input_tokens", estimate_incremental)
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        response_usages=[
+            {"prompt_tokens": 1000, "completion_tokens": 10},
+            {"prompt_tokens": 1100, "completion_tokens": 20},
+        ],
+        trim_calls_target=trim_calls,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert unknown_calls == []
+    assert len(trim_calls) == 2
+    assert trim_calls[0].get("required_input_tokens_override") is None
+    assert trim_calls[1].get("required_input_tokens_override") == 1234
+    assert len(estimate_calls) == 2
+    assert estimate_calls[1]["metadata"]["input_tokens_source"] == "provider"
+    assert estimate_calls[1]["metadata"]["input_tokens"] == 1000
+    assert estimate_calls[1]["model_id"] == "model-1"
+    assert estimate_calls[1]["protocol"] == "openai"
+    assert estimate_calls[1]["context_summary_revision"] == 0
+    assert estimate_calls[1]["context_content_revision"] == 0
+
+
+@pytest.mark.asyncio
 async def test_interactive_preserves_output_tokens_when_first_usage_has_no_prompt_tokens(monkeypatch):
     events = []
 
