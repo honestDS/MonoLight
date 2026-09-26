@@ -51,10 +51,13 @@
 
 .thinking-block-content.markdown-body {
   padding: 8px;
+  box-sizing: border-box;
+  max-height: 300px;
   color: #606266;
   font-size: 13px;
   line-height: 1.65;
   overflow-wrap: anywhere;
+  overflow: auto;
   background: transparent;
 }
 
