@@ -199,6 +199,7 @@ def test_windows_selector_event_loop_factory_returns_closable_selector_loop():
 @pytest.mark.parametrize(
     ("command_builder", "module_name"),
     [
+        (start.build_general_command, "app.workers.general"),
         (start.build_message_platform_command, "app.workers.message_platform"),
         (start.build_background_task_command, "app.workers.background_task"),
         (start.build_memory_command, "app.workers.memory"),
@@ -212,6 +213,41 @@ def test_build_worker_command_starts_exactly_one_worker_process(command_builder,
         "-m",
         module_name,
     ]
+
+
+def test_build_initialize_command_uses_current_python_and_initialize_code():
+    assert start.build_initialize_command() == [
+        sys.executable,
+        "-c",
+        start.INITIALIZE_SYSTEM_CODE,
+    ]
+
+
+def test_run_system_initialization_runs_initialize_subprocess(monkeypatch):
+    environment = object()
+    calls = []
+
+    def run_process(command, *, env, check):
+        calls.append((command, env, check))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(start.subprocess, "run", run_process)
+
+    start.run_system_initialization(environment)
+
+    assert calls == [(start.build_initialize_command(), environment, False)]
+
+
+def test_run_system_initialization_raises_for_failed_initialize_subprocess(monkeypatch):
+    environment = object()
+
+    def run_process(command, *, env, check):
+        return subprocess.CompletedProcess(command, 23)
+
+    monkeypatch.setattr(start.subprocess, "run", run_process)
+
+    with pytest.raises(RuntimeError, match="23"):
+        start.run_system_initialization(environment)
 
 
 def test_report_process_started_includes_name_and_pid(capsys):
@@ -265,9 +301,8 @@ def test_run_initializes_system_before_starting_processes(monkeypatch):
     events = []
     process = ExitedProcess(return_code=1)
 
-    def run_coroutine(coroutine):
+    def run_system_initialization(environment):
         events.append("initialize")
-        coroutine.close()
 
     def start_process(*args, **kwargs):
         events.append("process")
@@ -275,7 +310,7 @@ def test_run_initializes_system_before_starting_processes(monkeypatch):
 
     monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=2))
     monkeypatch.setattr(start, "validate_dashboard_assets", lambda: events.append("dashboard"))
-    monkeypatch.setattr(start.asyncio, "run", run_coroutine)
+    monkeypatch.setattr(start, "run_system_initialization", run_system_initialization)
     monkeypatch.setattr(start.subprocess, "Popen", start_process)
     monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: None)
     monkeypatch.setattr(start, "report_access_url", lambda config: events.append("access_url"))
@@ -284,7 +319,7 @@ def test_run_initializes_system_before_starting_processes(monkeypatch):
     return_code = start.run()
 
     assert return_code == 1
-    assert events == ["dashboard", "initialize", "process", "process", "process", "process", "process", "process", "access_url"]
+    assert events == ["dashboard", "initialize", "process", "process", "process", "process", "access_url"]
 
 
 def test_run_rejects_missing_dashboard_before_initializing_or_starting_processes(tmp_path, monkeypatch):
@@ -296,9 +331,8 @@ def test_run_rejects_missing_dashboard_before_initializing_or_starting_processes
         events.append("dashboard")
         validate_dashboard_assets()
 
-    def run_coroutine(coroutine):
+    def run_system_initialization(environment):
         events.append("initialize")
-        coroutine.close()
 
     def start_process(*args, **kwargs):
         events.append("process")
@@ -307,7 +341,7 @@ def test_run_rejects_missing_dashboard_before_initializing_or_starting_processes
     monkeypatch.setattr(start, "DASHBOARD_INDEX_PATH", index_path)
     monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
     monkeypatch.setattr(start, "validate_dashboard_assets", validate_dashboard)
-    monkeypatch.setattr(start.asyncio, "run", run_coroutine)
+    monkeypatch.setattr(start, "run_system_initialization", run_system_initialization)
     monkeypatch.setattr(start.subprocess, "Popen", start_process)
 
     with pytest.raises(RuntimeError) as exc_info:
@@ -317,21 +351,20 @@ def test_run_rejects_missing_dashboard_before_initializing_or_starting_processes
     assert events == ["dashboard"]
 
 
-def test_run_propagates_system_secret_initialization_error_before_starting_processes(monkeypatch):
+def test_run_propagates_system_initialization_error_before_starting_processes(monkeypatch):
     popen_calls = []
 
-    def initialize_system_secrets():
-        raise RuntimeError("system secrets are invalid")
+    def run_system_initialization(environment):
+        raise RuntimeError("system initialization failed")
 
     def start_process(*args, **kwargs):
         popen_calls.append((args, kwargs))
 
     monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
-    monkeypatch.setattr(start, "load_dotenv", lambda: None)
-    monkeypatch.setattr(start, "initialize_system_secrets", initialize_system_secrets)
+    monkeypatch.setattr(start, "run_system_initialization", run_system_initialization)
     monkeypatch.setattr(start.subprocess, "Popen", start_process)
 
-    with pytest.raises(RuntimeError, match="system secrets are invalid"):
+    with pytest.raises(RuntimeError, match="system initialization failed"):
         start.run()
 
     assert popen_calls == []
@@ -501,11 +534,8 @@ def test_run_stops_children_and_restores_handlers_after_shutdown_signal(monkeypa
     reported_access_urls = []
     previous_handlers = {start.signal.SIGTERM: object()}
 
-    def run_coroutine(coroutine):
-        coroutine.close()
-
     monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
-    monkeypatch.setattr(start.asyncio, "run", run_coroutine)
+    monkeypatch.setattr(start, "run_system_initialization", lambda environment: None)
     monkeypatch.setattr(start.subprocess, "Popen", lambda *args, **kwargs: process)
     monkeypatch.setattr(start, "_install_shutdown_signal_handlers", lambda: previous_handlers)
     monkeypatch.setattr(start, "_restore_signal_handlers", restored_handlers.append)

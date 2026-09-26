@@ -15,27 +15,28 @@ logger = get_logger(__name__)
 MESSAGE_PLATFORM_WORKER_NAME = "message_platform"
 
 
+async def run_owned_message_platform_worker(owned_stop_event: asyncio.Event) -> None:
+    message_platform_polling_manager.start()
+    scheduled_task_scheduler.start()
+    logger.info("Background worker started")
+    try:
+        await owned_stop_event.wait()
+    finally:
+        await scheduled_task_scheduler.stop()
+        await message_platform_polling_manager.stop()
+        logger.info("Background worker stopped")
+
+
 async def run_message_platform_worker() -> None:
     stop_event = asyncio.Event()
     install_shutdown_signal_handlers(stop_event)
 
     await create_database_tables()
 
-    async def run_owned_worker(owned_stop_event: asyncio.Event) -> None:
-        message_platform_polling_manager.start()
-        scheduled_task_scheduler.start()
-        logger.info("Background worker started")
-        try:
-            await owned_stop_event.wait()
-        finally:
-            await scheduled_task_scheduler.stop()
-            await message_platform_polling_manager.stop()
-            logger.info("Background worker stopped")
-
     await run_with_worker_lease(
         MESSAGE_PLATFORM_WORKER_NAME,
         stop_event,
-        run_owned_worker,
+        run_owned_message_platform_worker,
     )
 
 

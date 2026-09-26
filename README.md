@@ -99,7 +99,7 @@ Development guide: [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md)
 
 ## Running the Services
 
-MonoLight consists of one Web service and five independent workers: the messaging-platform worker, background-task worker, long-term-memory worker, terminal worker, and session final-reply worker. The Web service can start multiple Web workers through `APP_WORKERS`. The five background workers use database leases to ensure that only one active instance of each worker type exists within the same database scope.
+MonoLight consists of one Web service and three default long-lived Worker processes: `general`, `memory`, and `terminal`. `general` hosts the messaging-platform, background-task, and session-reply roles as three independently leased roles. The Web service can start multiple Web workers through `APP_WORKERS`. `messaging-platform`, `background-task`, `session-reply`, and `terminal` retain their Worker leases, while `memory` retains its job-claiming and job-lease mechanisms. Existing exclusivity and failover semantics remain unchanged.
 
 ### Common Backend Setup
 
@@ -135,7 +135,7 @@ python start.py
 
 The Dashboard, API, and WebSocket endpoints are served by the same Web service and therefore remain same-origin in the browser. `start.py` does not build the frontend; it only validates that the prebuilt assets exist. After startup completes, the console prints the English `Dashboard access URL: ...` address.
 
-Before creating any child process, the launcher validates the prebuilt assets and system-key integrity, creates/migrates the database schema, and completes system initialization. Web services and all five workers are started only after every prerequisite succeeds. If a prerequisite fails, no child process is launched. After child processes are running, an abnormal exit from any process or a termination signal causes the launcher to clean up the remaining processes.
+The parent launcher first validates the prebuilt Dashboard assets. It then uses a short-lived initialization subprocess to validate system-key integrity, create/migrate the database schema, and complete system initialization. The Web service and all three long-lived Workers are started only after that subprocess succeeds. If a prerequisite fails, no Web service or long-lived Worker is started. After the long-lived processes are running, an abnormal exit from any process or a termination signal causes the launcher to clean up the remaining processes.
 
 ### Option 2: Separate Frontend and Backend Deployment
 
@@ -188,16 +188,16 @@ Then start the processes independently:
 
 ```bash
 python main.py
-python -m app.workers.message_platform
-python -m app.workers.background_task
+python -m app.workers.general
 python -m app.workers.memory
 python -m app.workers.terminal
-python -m app.workers.session_reply
 ```
+
+The original independent entry points `message_platform`, `background_task`, and `session_reply` remain available for targeted debugging. They use the same role leases as `general` and should not be started alongside `general` as part of the default deployment.
 
 ### Multi-instance Deployment
 
-All instances must connect to the same database. Background workers that do not acquire the lease remain on standby and automatically take over after the current lease holder exits or the lease expires.
+All instances must connect to the same database. The messaging-platform, background-task, and session-reply roles inside `general` continue to contend for their respective leases independently. A Worker that does not acquire its corresponding lease remains on standby and automatically takes over after the current lease holder exits or the lease expires.
 
 ## Automated Tests
 

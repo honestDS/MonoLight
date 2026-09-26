@@ -5,8 +5,10 @@ import pytest
 
 from app.core.terminal.manager import TerminalWorkerCoordinator
 from app.workers import background_task as background_task_worker
+from app.workers import general as general_worker
 from app.workers import memory as memory_worker
 from app.workers import message_platform as message_platform_worker
+from app.workers import session_reply as session_reply_worker
 from app.workers import signals
 from app.workers import terminal as terminal_worker
 
@@ -217,6 +219,142 @@ async def test_memory_worker_starts_and_stops_memory_and_knowledge_job_consumers
         "knowledge-stop",
         "memory-stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_reply_worker_starts_and_stops_consumer_inside_worker_lease(monkeypatch):
+    events = []
+    consumer_started = asyncio.Event()
+    captured_stop_event = None
+
+    async def create_tables():
+        events.append("tables")
+
+    def install_shutdown_signal_handlers(stop_event):
+        nonlocal captured_stop_event
+        captured_stop_event = stop_event
+
+    class FakeConsumer:
+        def start(self):
+            events.append("consumer-start")
+            consumer_started.set()
+
+        async def stop(self):
+            events.append("consumer-stop")
+
+    async def run_with_lease(worker_name, stop_event, run_owned_worker):
+        events.append(f"lease:{worker_name}")
+        await run_owned_worker(stop_event)
+
+    monkeypatch.setattr(session_reply_worker, "install_shutdown_signal_handlers", install_shutdown_signal_handlers)
+    monkeypatch.setattr(session_reply_worker, "create_database_tables", create_tables)
+    monkeypatch.setattr(session_reply_worker, "run_with_worker_lease", run_with_lease)
+    monkeypatch.setattr(session_reply_worker, "session_reply_consumer", FakeConsumer())
+
+    task = asyncio.create_task(session_reply_worker.run_session_reply_worker())
+    await asyncio.wait_for(consumer_started.wait(), timeout=1)
+    assert captured_stop_event is not None
+    captured_stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert events == [
+        "tables",
+        "lease:session_reply",
+        "consumer-start",
+        "consumer-stop",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_general_worker_runs_all_owned_workers_with_shared_stop_event(monkeypatch):
+    create_tables_calls = 0
+    signal_events = []
+    lease_calls = []
+    leases_ready = asyncio.Event()
+
+    async def create_tables():
+        nonlocal create_tables_calls
+        create_tables_calls += 1
+
+    def install_shutdown_signal_handlers(stop_event):
+        signal_events.append(stop_event)
+
+    async def run_with_lease(worker_name, stop_event, run_owned_worker):
+        lease_calls.append((worker_name, stop_event, run_owned_worker))
+        if len(lease_calls) == 3:
+            leases_ready.set()
+        await stop_event.wait()
+
+    monkeypatch.setattr(general_worker, "create_database_tables", create_tables)
+    monkeypatch.setattr(general_worker, "install_shutdown_signal_handlers", install_shutdown_signal_handlers)
+    monkeypatch.setattr(general_worker, "run_with_worker_lease", run_with_lease)
+
+    task = asyncio.create_task(general_worker.run_general_worker())
+    await asyncio.wait_for(leases_ready.wait(), timeout=1)
+
+    assert create_tables_calls == 1
+    assert len(signal_events) == 1
+    assert len(lease_calls) == 3
+    shared_stop_event = signal_events[0]
+    assert all(stop_event is shared_stop_event for _, stop_event, _ in lease_calls)
+    assert {worker_name for worker_name, _, _ in lease_calls} == {
+        "message_platform",
+        "background_task",
+        "session_reply",
+    }
+    callbacks = {worker_name: callback for worker_name, _, callback in lease_calls}
+    assert callbacks == {
+        "message_platform": message_platform_worker.run_owned_message_platform_worker,
+        "background_task": background_task_worker.run_owned_background_task_worker,
+        "session_reply": session_reply_worker.run_owned_session_reply_worker,
+    }
+
+    shared_stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_general_worker_stops_other_roles_when_one_lease_returns(monkeypatch):
+    entered_roles = []
+    stopped_roles = []
+    returned_roles = []
+    all_roles_entered = asyncio.Event()
+    signal_events = []
+
+    async def create_tables():
+        return None
+
+    def install_shutdown_signal_handlers(stop_event):
+        signal_events.append(stop_event)
+
+    async def run_with_lease(worker_name, stop_event, run_owned_worker):
+        entered_roles.append(worker_name)
+        if len(entered_roles) == 3:
+            all_roles_entered.set()
+        await all_roles_entered.wait()
+        if worker_name == "message_platform":
+            returned_roles.append(worker_name)
+            return
+        await stop_event.wait()
+        stopped_roles.append(worker_name)
+
+    monkeypatch.setattr(general_worker, "create_database_tables", create_tables)
+    monkeypatch.setattr(general_worker, "install_shutdown_signal_handlers", install_shutdown_signal_handlers)
+    monkeypatch.setattr(general_worker, "run_with_worker_lease", run_with_lease)
+
+    task = asyncio.create_task(general_worker.run_general_worker())
+    await asyncio.wait_for(all_roles_entered.wait(), timeout=1)
+    await asyncio.wait_for(task, timeout=1)
+
+    assert set(entered_roles) == {
+        "message_platform",
+        "background_task",
+        "session_reply",
+    }
+    assert returned_roles == ["message_platform"]
+    assert len(signal_events) == 1
+    assert signal_events[0].is_set()
+    assert set(stopped_roles) == {"background_task", "session_reply"}
 
 
 @pytest.mark.asyncio

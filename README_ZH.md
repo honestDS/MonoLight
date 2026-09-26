@@ -95,7 +95,7 @@ MonoLight 是面向多轮工具调用、上下文总结和持续任务执行设�
 
 ## 运行服务
 
-MonoLight 包含一个 Web 服务和五个独立 Worker：消息平台 Worker、后台任务 Worker、长期记忆 Worker、终端 Worker、会话最终回复 Worker。Web 服务可通过 `APP_WORKERS` 启动多个 Web Worker；五个后台 Worker 使用数据库租约，保证在同一数据库范围内每类 Worker 只有一个有效实例。
+MonoLight 包含一个 Web 服务和三个默认长期 Worker 进程：`general`、`memory`、`terminal`。`general` 承载消息平台、后台任务、会话回复三个独立租约角色；Web 服务可通过 `APP_WORKERS` 启动多个 Web Worker。消息平台、后台任务、会话回复和终端沿用各自 Worker 租约；`memory` 沿用作业认领与作业租约机制；原有互斥和接管语义不变。
 
 ### 共同后端准备
 
@@ -131,7 +131,7 @@ python start.py
 
 Dashboard、API 和 WebSocket 由同一 Web 服务提供，浏览器访问时保持同源。`start.py` 不执行前端构建，只校验预构建资源是否存在；完整启动后，控制台会打印英文 `Dashboard access URL: ...` 访问地址。
 
-启动器会在创建任何子进程前校验预构建资源和系统密钥完整性，完成数据库建表与迁移及系统初始化；全部成功后才启动 Web 服务和五个 Worker。任一前置步骤失败时不会启动子进程；子进程启动后如有任一进程异常退出或收到终止信号，启动器会清理其余进程。
+父启动器会先校验 Dashboard 预构建资源，再通过短生命周期子进程完成系统密钥完整性校验、数据库建表、迁移和系统初始化；全部成功后才启动 Web 服务和三个长期 Worker。任一前置步骤失败时不会启动 Web 服务或长期 Worker；长期进程启动后如有任一进程异常退出或收到终止信号，启动器会清理其余进程。
 
 ### 方式二：前后端分离部署
 
@@ -184,16 +184,16 @@ python -c "import asyncio; from start import initialize_system; asyncio.run(init
 
 ```bash
 python main.py
-python -m app.workers.message_platform
-python -m app.workers.background_task
+python -m app.workers.general
 python -m app.workers.memory
 python -m app.workers.terminal
-python -m app.workers.session_reply
 ```
+
+`message_platform`、`background_task`、`session_reply` 的原独立入口仍保留用于针对性调试；它们与 `general` 使用相同角色租约，不应作为默认部署重复启动。
 
 ### 多实例部署
 
-所有实例必须连接同一个数据库。未取得租约的后台 Worker 会保持待命，并在当前持有者退出或租约过期后自动接管。
+所有实例必须连接同一个数据库。`general` 内的消息平台、后台任务和会话回复三个角色仍分别争抢各自租约；未取得对应租约的 Worker 会保持待命，并在当前持有者退出或租约过期后自动接管。
 
 ## 自动化测试
 项目已接入自动化测试体系，涵盖单元测试、初始化逻辑测试以及 API 集成测试。

@@ -30,6 +30,7 @@ print(json.dumps({
         "main",
         "app.workers.message_platform",
         "app.workers.background_task",
+        "app.workers.general",
         "app.workers.memory",
         "app.workers.session_reply",
     ],
