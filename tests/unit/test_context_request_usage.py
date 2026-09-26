@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
 from app.core.context import ContextManager
 from app.core.exceptions import ParameterException
 from app.core.utils.context_budget import measure_context_request_usage
@@ -57,6 +57,84 @@ def test_complete_request_usage_counts_messages_tools_output_and_safety_with_sha
     assert usage.required_input_tokens == expected_system_tokens + expected_non_system_tokens + expected_tools_tokens
     assert usage.summary_trigger_tokens == expected_input_limit * 75 // 100
     assert usage.exceeds_hard_window == (usage.required_input_tokens > expected_input_limit)
+
+
+def _build_over_window_assistant_request():
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="stable system prompt"),
+        InternalMessage(id=1, role=MessageRole.USER, content="historical context " * 2000),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="final assistant response"),
+    ]
+    usage = measure_context_request_usage(
+        messages=messages,
+        context_window_k=1,
+        max_tokens=0,
+        tools=None,
+        safety_margin_tokens=0,
+    )
+    hard_input_limit = usage.budget.context_window_tokens - usage.budget.output_tokens - usage.budget.safety_margin_tokens
+    return messages, usage, hard_input_limit
+
+
+def test_final_request_accepts_hard_window_input_override_without_changing_messages():
+    messages, usage, hard_input_limit = _build_over_window_assistant_request()
+
+    assert usage.exceeds_hard_window
+    assert usage.required_input_tokens > hard_input_limit
+    original_contents = [message.content for message in messages]
+
+    request_messages = ContextManager.trim_messages_for_model_request(
+        messages=messages,
+        uid="user-1",
+        session_id="session-1",
+        context_window_k=1,
+        max_tokens=0,
+        tools=None,
+        safety_margin_tokens=0,
+        required_input_tokens_override=hard_input_limit,
+    )
+
+    assert [message.content for message in request_messages] == original_contents
+    assert [message.content for message in messages] == original_contents
+
+
+def test_final_request_rejects_input_override_above_hard_window_with_context_budget_error():
+    messages, usage, hard_input_limit = _build_over_window_assistant_request()
+
+    assert usage.exceeds_hard_window
+    with pytest.raises(ParameterException) as exc_info:
+        ContextManager.trim_messages_for_model_request(
+            messages=messages,
+            uid="user-1",
+            session_id="session-1",
+            context_window_k=1,
+            max_tokens=0,
+            tools=None,
+            safety_margin_tokens=0,
+            required_input_tokens_override=hard_input_limit + 1,
+        )
+
+    assert exc_info.value.message == ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
+
+
+@pytest.mark.parametrize("invalid_override", [True, -1], ids=["boolean_true", "negative"])
+def test_final_request_invalid_input_override_falls_back_to_local_full_estimate(invalid_override):
+    messages, usage, _ = _build_over_window_assistant_request()
+
+    assert usage.exceeds_hard_window
+    with pytest.raises(ParameterException) as exc_info:
+        ContextManager.trim_messages_for_model_request(
+            messages=messages,
+            uid="user-1",
+            session_id="session-1",
+            context_window_k=1,
+            max_tokens=0,
+            tools=None,
+            safety_margin_tokens=0,
+            required_input_tokens_override=invalid_override,
+        )
+
+    assert exc_info.value.message == ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
 
 
 def test_final_request_hard_window_check_rejects_without_sliding_history():
