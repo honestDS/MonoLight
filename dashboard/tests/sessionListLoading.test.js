@@ -461,6 +461,74 @@ test('HTTP background task recovery retries after a transient activity lookup fa
   assert.equal(scheduled.length, 1)
 })
 
+test('HTTP background task recovery keeps polling until bounded incremental history is fully merged', async () => {
+  const { createHttpHistorySyncController } = await import('../src/composables/chat/httpHistorySync.js')
+  const scheduled = []
+  let mergeCalls = 0
+
+  const controller = createHttpHistorySyncController({
+    getSessionId: () => 'session-a',
+    canSync: () => true,
+    isLoading: () => false,
+    fetchPendingActivity: async () => false,
+    mergeLatestHistory: async () => {
+      mergeCalls += 1
+      return { hasMore: mergeCalls === 1 }
+    },
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: callback => {
+      const index = scheduled.indexOf(callback)
+      if (index !== -1) scheduled.splice(index, 1)
+    }
+  })
+
+  await controller.handleSessionChanged()
+  assert.equal(mergeCalls, 1)
+  assert.equal(controller.isTracking('session-a'), true)
+  assert.equal(scheduled.length, 1)
+
+  await scheduled.shift()()
+  assert.equal(mergeCalls, 2)
+  assert.equal(controller.isTracking('session-a'), false)
+  assert.equal(scheduled.length, 0)
+})
+
+test('HTTP background task recovery initializes tracking before a loading session can skip polling work', async () => {
+  const { createHttpHistorySyncController } = await import('../src/composables/chat/httpHistorySync.js')
+  const scheduled = []
+  const tracked = []
+  let activityFetches = 0
+
+  const controller = createHttpHistorySyncController({
+    getSessionId: () => 'session-a',
+    canSync: () => true,
+    isLoading: () => true,
+    onTrackingStarted: sessionId => {
+      tracked.push(sessionId)
+    },
+    fetchPendingActivity: async () => {
+      activityFetches += 1
+      return true
+    },
+    mergeLatestHistory: async () => ({ hasMore: false }),
+    schedule: callback => {
+      scheduled.push(callback)
+      return callback
+    },
+    cancel: () => {}
+  })
+
+  await controller.handleSessionChanged()
+
+  assert.deepEqual(tracked, ['session-a'])
+  assert.equal(activityFetches, 0)
+  assert.equal(controller.isTracking('session-a'), true)
+  assert.equal(scheduled.length, 1)
+})
+
 test('disposed session loading poller does not restart after an in-flight refresh resolves', async () => {
   const { createSessionListLoadingPoller } = await loadSessionLoadingModule()
   const scheduled = []

@@ -2,7 +2,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import (
     APIRouter,
@@ -680,23 +680,26 @@ async def get_session_history(
     session_id: str,
     page: int = 1,
     size: int = 20,
+    after_id: Annotated[int | None, Query(ge=0)] = None,
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
-    offset = (page - 1) * size
     session = await session_crud.get_by_session_id(db, session_id)
+    include_tool_messages = session.show_tool_calls if session else True
+    offset = (page - 1) * size
     messages = await message_crud.get_history_paged(
         db,
         session_id=session_id,
         uid=uid,
         limit=size,
         offset=offset,
-        include_tool_messages=session.show_tool_calls if session else True,
+        after_id=after_id,
+        include_tool_messages=include_tool_messages,
     )
-
-    # 倒序取出，正序返回
-    messages.reverse()
+    if after_id is None:
+        # 倒序取出，正序返回
+        messages.reverse()
 
     data = [MessageResponse.model_validate(m) for m in messages]
     return StandardResponse.success(data=data, message=MSG_MESSAGE_LIST_SUCCESS)

@@ -386,17 +386,22 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         uid: str,
         limit: int = 20,
         offset: int = 0,
+        after_id: int | None = None,
         include_tool_messages: bool = True,
     ) -> list[Message]:
         """
-        用于前端分页加载会话历史记录
+        用于前端加载会话历史记录。
+        after_id 为空时按倒序偏移分页；提供 after_id 时按消息编号正序增量读取。
         """
         stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
         if not include_tool_messages:
             stmt = stmt.where(Message.type.notin_((MessageType.TOOL_CALL, MessageType.TOOL_RESULT)))
-        stmt = stmt.order_by(Message.created_at.desc()).limit(limit).offset(offset)
+        if after_id is not None:
+            stmt = stmt.where(Message.id > after_id).order_by(Message.id.asc()).limit(limit)
+        else:
+            stmt = stmt.order_by(Message.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
-        return result.scalars().all()
+        return list(result.scalars().all())
 
     async def get_user_sessions(self, db: AsyncSession, uid: str = None, is_admin: bool = False) -> list[Any]:
         session_activity_stmt = select(

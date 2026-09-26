@@ -7,6 +7,7 @@ import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
 import { createContextSummaryTracker } from './contextSummaryTracker.js'
 import { createHistoryMergeTracker } from './historyMergeTracker.js'
+import { getIncrementalHistoryCursor, syncIncrementalHistory } from './historyIncrementalSync.js'
 import { applyResumedTurnEnd, createSessionReconnectHandler, getHistoryMessageCursor, getInitialResumeLoading, resumeSessionStream } from './streamResume.js'
 import { withSessionActivity } from './sessionActivity.js'
 import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
@@ -14,6 +15,7 @@ import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMe
 import { hasHttpResultMessage, shouldFetchHttpWorkStatus } from './sessionListLoading.js'
 import { createHttpHistorySyncController } from './httpHistorySync.js'
 import { activateSelectedSessionTransportMode, persistSessionTransportMode, resolveSessionTransportMode, resumeSelectedSessionByTransport } from './sessionTransportMode.js'
+import { createTransportNotifier } from './transportNotifications.js'
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import {
@@ -29,6 +31,8 @@ import { truncateErrorMessage } from '../../utils/errorMessage.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 const HTTP_HISTORY_FAST_SYNC_INTERVAL_MS = 2000
+const HTTP_HISTORY_INCREMENTAL_PAGE_SIZE = 50
+const HTTP_HISTORY_INCREMENTAL_MAX_PAGES = 4
 
 const normalizeHistoryMessage = (message) => {
   const normalizedMessage = {
@@ -144,6 +148,8 @@ export function useChatSession() {
   const observedHttpLatestMessageIds = new Map()
   const fetchingHttpWorks = new Set()
   const resolvedHttpWorks = new Set()
+  const incrementalHistoryCursors = new Map()
+  let sessionScopeActive = true
   let httpPollingStateVersion = 0
 
   const normalizeHttpIdentity = value => (
@@ -282,22 +288,22 @@ export function useChatSession() {
 
   // 3. 通信层
   const transport = useChatTransport()
+  const transportNotifier = createTransportNotifier({
+    translate: t,
+    showMessage: options => ElMessage(options)
+  })
   const modeSettingSubmitting = ref(false)
-  const transportFallbackNotice = ref('')
   const transportModeChangeBlocked = computed(() => (
     Boolean(chatState.loading.value || currentSession.value?.is_loading)
   ))
-  const clearTransportFallbackNotice = () => {
-    transportFallbackNotice.value = ''
-  }
 
   const setTransportMode = async (mode, { notifyError = true } = {}) => {
     if (modeSettingSubmitting.value) return false
 
     const sessionId = sessionManager.currentSessionId.value
     if (!sessionId) {
-      await transport.setTransportMode(mode, transport.disconnectWebSocket)
-      clearTransportFallbackNotice()
+      await transport.setTransportMode(mode)
+      transportNotifier.close()
       return true
     }
     if (isCurrentSessionReadOnly.value) return false
@@ -320,11 +326,11 @@ export function useChatSession() {
           session,
           mode,
           historyData: chatState.messages.value,
-          applyTransportMode: targetMode => transport.setTransportMode(targetMode, transport.disconnectWebSocket),
+          applyTransportMode: targetMode => transport.setTransportMode(targetMode),
           resumeStream: resumeSelectedSessionStream
         })
       }
-      clearTransportFallbackNotice()
+      transportNotifier.close()
       return true
     } catch (error) {
       if (notifyError) ElMessage.error(error.message || t('chat.setting_failed'))
@@ -413,9 +419,6 @@ export function useChatSession() {
   const createLifecycleCallbacks = isCurrentRequestSession => ({
     onInputAccepted: () => {
       refreshSessionLoadingState()
-      if (transportFallbackNotice.value === t('chat.ws_submission_unknown')) {
-        clearTransportFallbackNotice()
-      }
     },
     onInputQueued: event => {
       refreshSessionLoadingState()
@@ -502,13 +505,8 @@ export function useChatSession() {
     await loadInitialSessionHistory(2)
   }
 
-  const mergeLatestSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
-    if (!sessionId || sessionId !== sessionManager.currentSessionId.value) return
-    const requestId = historyMergeTracker.begin()
-    const res = await chatApi.sessionsHistory(sessionId, 1, 20)
-    if (sessionId !== sessionManager.currentSessionId.value || !historyMergeTracker.isLatest(requestId)) return
-    const historyData = filterNewMessages(res.data?.data || [])
-    if (!historyData.length) return
+  const mergeSessionHistoryPage = historyData => {
+    if (!Array.isArray(historyData) || historyData.length === 0) return
 
     const existingKeys = new Set(chatState.messages.value.flatMap(m => [...getMessageDedupeKeys(m)]))
     let mergedMessages = [...chatState.messages.value]
@@ -567,17 +565,83 @@ export function useChatSession() {
     }
   }
 
-  const canSyncCurrentSessionHistory = () => !isCurrentSessionReadOnly.value && transport.transportMode.value === 'http'
+  const mergeLatestSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
+    if (!sessionId || sessionId !== sessionManager.currentSessionId.value || !initialHistoryLoaded.value) return
+
+    const requestId = historyMergeTracker.begin()
+    const response = await chatApi.sessionsHistory(sessionId, 1, 20)
+    if (
+      sessionId !== sessionManager.currentSessionId.value
+      || !historyMergeTracker.isLatest(requestId)
+    ) return
+    mergeSessionHistoryPage(filterNewMessages(response.data?.data || []))
+  }
+
+  const ensureIncrementalHistoryCursor = sessionId => {
+    if (!sessionId || incrementalHistoryCursors.has(sessionId)) return
+    incrementalHistoryCursors.set(
+      sessionId,
+      getIncrementalHistoryCursor(chatState.messages.value)
+    )
+  }
+
+  const syncIncrementalSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
+    if (!sessionId || sessionId !== sessionManager.currentSessionId.value) {
+      return { hasMore: false }
+    }
+    if (!initialHistoryLoaded.value) {
+      return { hasMore: true }
+    }
+
+    ensureIncrementalHistoryCursor(sessionId)
+    const requestId = historyMergeTracker.begin()
+    const isCurrentMerge = () => (
+      sessionScopeActive
+      && sessionId === sessionManager.currentSessionId.value
+      && historyMergeTracker.isLatest(requestId)
+    )
+    const result = await syncIncrementalHistory({
+      initialAfterId: getIncrementalHistoryCursor(
+        chatState.messages.value,
+        incrementalHistoryCursors.get(sessionId)
+      ),
+      pageSize: HTTP_HISTORY_INCREMENTAL_PAGE_SIZE,
+      maxPages: HTTP_HISTORY_INCREMENTAL_MAX_PAGES,
+      isCurrent: isCurrentMerge,
+      fetchPage: async ({ afterId, limit }) => {
+        const res = await chatApi.sessionsHistory(sessionId, 1, limit, { after_id: afterId })
+        return res.data?.data || []
+      },
+      mergePage: historyData => {
+        if (isCurrentMerge()) {
+          mergeSessionHistoryPage(filterNewMessages(historyData))
+        }
+      }
+    })
+    if (!isCurrentMerge()) return { hasMore: true }
+    if (!result.cancelled) {
+      incrementalHistoryCursors.set(sessionId, result.lastMessageId)
+    }
+    return result
+  }
+
+  const canSyncCurrentSessionHistory = () => (
+    sessionScopeActive
+    && initialHistoryLoaded.value
+    && !isCurrentSessionReadOnly.value
+    && transport.transportMode.value === 'http'
+  )
 
   const httpHistorySync = createHttpHistorySyncController({
     getSessionId: () => sessionManager.currentSessionId.value,
     canSync: canSyncCurrentSessionHistory,
     isLoading: () => chatState.loading.value,
+    onTrackingStarted: ensureIncrementalHistoryCursor,
     fetchPendingActivity: async sessionId => {
       const response = await chatApi.backgroundTaskPendingActivity(sessionId)
       return response.data?.data?.has_pending_activity === true
     },
-    mergeLatestHistory: mergeLatestSessionHistory,
+    mergeLatestHistory: syncIncrementalSessionHistory,
     intervalMs: HTTP_HISTORY_FAST_SYNC_INTERVAL_MS,
     onError: err => {
       console.error('HTTP session history synchronization failed:', err)
@@ -588,19 +652,28 @@ export function useChatSession() {
   const startHttpHistoryBackgroundTaskSync = httpHistorySync.start
 
   watch(
-    () => [transport.transportMode.value, sessionManager.currentSessionId.value, isCurrentSessionReadOnly.value],
+    () => [
+      transport.transportMode.value,
+      sessionManager.currentSessionId.value,
+      isCurrentSessionReadOnly.value,
+      initialHistoryLoaded.value
+    ],
     () => httpHistorySync.handleSessionChanged(),
     { immediate: true }
   )
 
   onScopeDispose(() => {
+    sessionScopeActive = false
+    transportNotifier.close()
     stopHttpHistorySync()
+    incrementalHistoryCursors.clear()
     resetHttpPollingState()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     sessionManager.setSessionsUpdatedCallback(null)
     sessionManager.setPendingSubmissionCallback(null)
     transport.setReconnectHandler(null)
+    transport.disconnectWebSocket()
   })
 
   const applyAuditConfirmationStatus = (data) => {
@@ -989,7 +1062,10 @@ export function useChatSession() {
   const resumeSelectedSessionStream = async (session, historyData = []) => {
     const sessionId = session?.session_id
     const latestSession = sessionManager.sessions.value.find(item => item.session_id === sessionId) || session
-    const isCurrentSession = () => sessionId === sessionManager.currentSessionId.value
+    const isCurrentSession = () => (
+      sessionScopeActive
+      && sessionId === sessionManager.currentSessionId.value
+    )
     if (!isCurrentSession()) return
 
     const mergeResumedHistory = () => {
@@ -1236,7 +1312,13 @@ export function useChatSession() {
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
   const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true) => {
-    const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
+    if (requestSessionId) {
+      ensureIncrementalHistoryCursor(requestSessionId)
+    }
+    const isCurrentRequestSession = () => (
+      sessionScopeActive
+      && requestSessionId === sessionManager.currentSessionId.value
+    )
     try {
       const response = await transport.httpSend({
         message: text,
@@ -1390,7 +1472,10 @@ export function useChatSession() {
     )
     const showToolCalls = currentSessionShowToolCalls.value
     const showReasoning = currentSessionShowReasoning.value
-    const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
+    const isCurrentRequestSession = () => (
+      sessionScopeActive
+      && requestSessionId === sessionManager.currentSessionId.value
+    )
 
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
     const callbacks = {
@@ -1714,11 +1799,11 @@ export function useChatSession() {
 
       const switched = await setTransportMode('http', { notifyError: false })
       if (!switched) {
-        transportFallbackNotice.value = t('chat.ws_fallback_blocked')
+        transportNotifier.show('fallback_blocked')
         return
       }
 
-      transportFallbackNotice.value = t('chat.ws_fallback_retrying')
+      transportNotifier.show('fallback_retrying')
       await httpSend(text, attachmentsToSent, userMsgId)
     }
 
@@ -1740,7 +1825,9 @@ export function useChatSession() {
 
       const acknowledgement = await transport.waitForSubmissionAcknowledgement(requestId)
       if (acknowledgement.status === 'unknown') {
-        transportFallbackNotice.value = t('chat.ws_submission_unknown')
+        if (isCurrentRequestSession()) {
+          transportNotifier.show('submission_unknown')
+        }
         void sessionManager.refreshSessionLoadingState()
       }
     } catch (e) {
@@ -1753,7 +1840,7 @@ export function useChatSession() {
   
   // 选择会话；session 为会话对象
   const selectSession = (session) => {
-    clearTransportFallbackNotice()
+    transportNotifier.close()
     resetHttpPollingState()
     historyMergeTracker.invalidate()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
@@ -1761,7 +1848,7 @@ export function useChatSession() {
     initialHistoryLoaded.value = false
     sessionManager.selectSession(session, transport.disconnectWebSocket, true, false)
     const sessionTransportMode = resolveSessionTransportMode(session)
-    transport.setTransportMode(sessionTransportMode, transport.disconnectWebSocket)
+    transport.setTransportMode(sessionTransportMode)
     sessionManager.resetPagination()
     const loadingRefreshPromise = sessionManager.refreshSessionLoadingState().catch(err => {
       console.error('Session loading state refresh before WebSocket resume failed:', err)
@@ -1790,13 +1877,13 @@ export function useChatSession() {
    * 新建会话
    */
   const createNewSession = () => {    
-    clearTransportFallbackNotice()
+    transportNotifier.close()
     resetHttpPollingState()
     historyMergeTracker.invalidate()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     chatState.messages.value = workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = true
-    transport.setTransportMode('ws', transport.disconnectWebSocket)
+    transport.setTransportMode('ws')
     sessionManager.createNewSession(transport.disconnectWebSocket)
     refreshSessionLoadingState()
     chatState.clearMessages()
@@ -1913,7 +2000,6 @@ export function useChatSession() {
     wsConnected: transport.wsConnected,
     modeSettingSubmitting,
     transportModeChangeBlocked,
-    transportFallbackNotice,
     
     // 方法 - 会话
     loadSessions: sessionManager.loadSessions,
@@ -1930,7 +2016,6 @@ export function useChatSession() {
     initWebSocket: transport.initWebSocket,
     disconnectWebSocket: transport.disconnectWebSocket,
     setTransportMode,
-    clearTransportFallbackNotice,
     
     // 工具函数
     formatTimestamp,

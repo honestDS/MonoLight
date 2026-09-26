@@ -854,6 +854,91 @@ async def test_http_reply_work_status_resolves_merged_work_and_enforces_owner(
 
 
 @pytest.mark.asyncio
+async def test_session_history_supports_forward_id_cursor_for_incremental_recovery(
+    chat_session_database: AsyncSession,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    session = ChatSession(
+        session_id="incremental-history-session",
+        uid="user-1",
+        profile_id=primary_profile.id,
+        source="http",
+        reply_target_source="http",
+        show_tool_calls=True,
+    )
+    chat_session_database.add(session)
+    await chat_session_database.flush()
+
+    messages = []
+    for index in range(45):
+        message = Message(
+            session_id=session.session_id,
+            uid="user-1",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content=f"message-{index + 1}",
+            profile_id=primary_profile.id,
+            is_processed=True,
+        )
+        chat_session_database.add(message)
+        messages.append(message)
+    await chat_session_database.commit()
+    first_message_id = messages[0].id
+    assert first_message_id is not None
+
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        legacy_page = await client.get(
+            "/api/v1/chat/sessions/history",
+            params={
+                "session_id": session.session_id,
+                "page": 1,
+                "size": 20,
+            },
+        )
+        assert legacy_page.status_code == 200
+        assert [item["id"] for item in legacy_page.json()["data"]] == [message.id for message in messages[25:45]]
+
+        first_page = await client.get(
+            "/api/v1/chat/sessions/history",
+            params={
+                "session_id": session.session_id,
+                "after_id": first_message_id,
+                "size": 20,
+            },
+        )
+        assert first_page.status_code == 200
+        first_page_data = first_page.json()["data"]
+        assert [item["id"] for item in first_page_data] == [message.id for message in messages[1:21]]
+
+        second_page = await client.get(
+            "/api/v1/chat/sessions/history",
+            params={
+                "session_id": session.session_id,
+                "after_id": first_page_data[-1]["id"],
+                "size": 20,
+            },
+        )
+        assert [item["id"] for item in second_page.json()["data"]] == [message.id for message in messages[21:41]]
+
+        third_page = await client.get(
+            "/api/v1/chat/sessions/history",
+            params={
+                "session_id": session.session_id,
+                "after_id": second_page.json()["data"][-1]["id"],
+                "size": 20,
+            },
+        )
+        assert [item["id"] for item in third_page.json()["data"]] == [message.id for message in messages[41:45]]
+
+
+@pytest.mark.asyncio
 async def test_background_task_pending_activity_is_not_limited_by_task_history_page(
     chat_session_database: AsyncSession,
 ) -> None:
