@@ -1,5 +1,3 @@
-from rank_bm25 import BM25Okapi
-
 from app.core.retrieval.schemas import RetrievalChunk, RetrievalHit
 from app.core.retrieval.tokenizer import tokenize_for_sparse_search
 
@@ -15,6 +13,8 @@ def bm25_search(query: str, chunks: list[RetrievalChunk], top_k: int) -> list[Re
     query_tokens = tokenize_for_sparse_search(query)
     if not query_tokens:
         return []
+
+    from rank_bm25 import BM25Okapi
 
     bm25 = BM25Okapi(tokenized_corpus)
     scores = bm25.get_scores(query_tokens)
