@@ -70,7 +70,7 @@ export default {
   audit_high_risk_warning_title: '高风险操作确认',
   new_session: '新建会话',
   new_session_title: '新建会话',
-  welcome_greeting: '你今天想做什么？',
+  welcome_greeting: '今天想一起做点什么',
   more_options: '更多选项',
   more_options_upload: '上传文件',
   more_options_markdown: 'MD 渲染',
