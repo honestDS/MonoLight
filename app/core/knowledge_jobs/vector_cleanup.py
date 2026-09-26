@@ -4,7 +4,6 @@ import hashlib
 import json
 from typing import Any
 
-from chromadb.errors import NotFoundError as ChromaNotFoundError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +24,10 @@ from app.core.knowledge_jobs.executor import (
 )
 from app.models.knowledge_base import KnowledgeJob, KnowledgeJobOperation, KnowledgeJobStatus
 from app.providers.database.time import get_database_time
-from app.providers.vector import async_delete_collection_items
+from app.providers.vector import (
+    async_delete_collection_items,
+    is_collection_not_found_error,
+)
 
 _CLEANUP_REASONS = frozenset({"staged", "superseded"})
 _CLEANUP_PARENT_OPERATIONS = frozenset(
@@ -217,10 +219,9 @@ async def execute_managed_vector_cleanup(
                 delete_ids,
                 batch_size=MANAGED_KNOWLEDGE_VECTOR_BATCH_SIZE,
             )
-        except ChromaNotFoundError:
-            pass
         except Exception as exc:
-            raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_DELETE_CLEANUP_FAILED)) from exc
+            if not is_collection_not_found_error(exc):
+                raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_DELETE_CLEANUP_FAILED)) from exc
     return KnowledgeJobExecutionResult(
         result={
             "source_job_id": payload["source_job_id"],

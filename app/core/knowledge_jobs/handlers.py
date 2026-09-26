@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chromadb.errors import NotFoundError as ChromaNotFoundError
-
 from app.core.constants import (
     ERR_KNOWLEDGE_JOB_CANCELLATION_REQUESTED,
     ERR_KNOWLEDGE_JOB_DELETE_CLEANUP_FAILED,
@@ -83,6 +81,7 @@ from app.providers.vector import (
     async_delete_collection_items,
     async_get_or_create_collection,
     async_upsert_collection_items,
+    is_collection_not_found_error,
 )
 
 
@@ -464,10 +463,9 @@ async def handle_managed_delete_cleanup(context: KnowledgeJobExecutionContext) -
                 list(snapshot.vector_item_ids),
                 batch_size=MANAGED_KNOWLEDGE_VECTOR_BATCH_SIZE,
             )
-        except ChromaNotFoundError:
-            pass
         except Exception as exc:
-            raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_DELETE_CLEANUP_FAILED)) from exc
+            if not is_collection_not_found_error(exc):
+                raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_DELETE_CLEANUP_FAILED)) from exc
 
     await context.checkpoint()
     async with context.session_factory() as db:

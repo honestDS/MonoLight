@@ -1,11 +1,8 @@
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
-
-import chromadb
-from chromadb.config import Settings
-from chromadb.errors import NotFoundError as ChromaNotFoundError
 
 from app.core.constants import (
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
@@ -13,14 +10,11 @@ from app.core.constants import (
     ERR_VECTOR_ITEM_LENGTH_MISMATCH,
 )
 from app.core.i18n import t
-from app.core.paths import CHROMA_DB_PATH, ensure_data_dirs
+from app.core.paths import CHROMA_DB_PATH
 
-ensure_data_dirs()
-
-chroma_client = chromadb.PersistentClient(
-    path=str(CHROMA_DB_PATH),
-    settings=Settings(anonymized_telemetry=False),
-)
+chroma_client = None
+ChromaNotFoundError = None
+_chroma_client_lock = Lock()
 
 
 async def _to_thread_and_wait(func, /, *args, **kwargs):
@@ -61,7 +55,31 @@ class CollectionValidationResult:
 
 
 def get_chroma_client():
-    return chroma_client
+    global chroma_client
+    if chroma_client is not None:
+        return chroma_client
+    with _chroma_client_lock:
+        if chroma_client is None:
+            import chromadb
+            from chromadb.config import Settings
+
+            from app.core.paths import ensure_data_dirs
+
+            ensure_data_dirs()
+            chroma_client = chromadb.PersistentClient(
+                path=str(CHROMA_DB_PATH),
+                settings=Settings(anonymized_telemetry=False),
+            )
+        return chroma_client
+
+
+def is_collection_not_found_error(exc: BaseException) -> bool:
+    error_type = ChromaNotFoundError
+    if error_type is None:
+        from chromadb.errors import NotFoundError
+
+        error_type = NotFoundError
+    return isinstance(exc, error_type)
 
 
 def _collection_metadata(metadata: dict[str, Any] | None = None, distance: str | None = None) -> dict[str, Any] | None:
@@ -75,24 +93,26 @@ def _collection_metadata(metadata: dict[str, Any] | None = None, distance: str |
 
 def create_collection(collection_name: str, metadata: dict[str, Any] | None = None, distance: str | None = None):
     collection_metadata = _collection_metadata(metadata, distance)
+    client = get_chroma_client()
     if collection_metadata is None:
-        return chroma_client.create_collection(name=collection_name)
-    return chroma_client.create_collection(name=collection_name, metadata=collection_metadata)
+        return client.create_collection(name=collection_name)
+    return client.create_collection(name=collection_name, metadata=collection_metadata)
 
 
 def get_or_create_collection(collection_name: str, metadata: dict[str, Any] | None = None, distance: str | None = None):
     collection_metadata = _collection_metadata(metadata, distance)
+    client = get_chroma_client()
     if collection_metadata is None:
-        return chroma_client.get_or_create_collection(name=collection_name)
-    return chroma_client.get_or_create_collection(name=collection_name, metadata=collection_metadata)
+        return client.get_or_create_collection(name=collection_name)
+    return client.get_or_create_collection(name=collection_name, metadata=collection_metadata)
 
 
 def get_collection(collection_name: str):
-    return chroma_client.get_collection(name=collection_name)
+    return get_chroma_client().get_collection(name=collection_name)
 
 
 def delete_collection(collection_name: str):
-    chroma_client.delete_collection(name=collection_name)
+    get_chroma_client().delete_collection(name=collection_name)
 
 
 def delete_collection_items(collection_name: str, ids: list[str]):
@@ -159,8 +179,10 @@ async def async_delete_collection(collection_name: str) -> None:
 async def async_delete_collection_if_exists(collection_name: str) -> bool:
     try:
         await _to_thread_and_wait(delete_collection, collection_name)
-    except ChromaNotFoundError:
-        return False
+    except Exception as exc:
+        if is_collection_not_found_error(exc):
+            return False
+        raise
     return True
 
 
@@ -280,8 +302,10 @@ def _validate_collection_sync(
         raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="sample_size"))
     try:
         collection = get_collection(collection_name)
-    except ChromaNotFoundError:
-        return CollectionValidationResult(exists=False, valid=False, errors=("collection_not_found",))
+    except Exception as exc:
+        if is_collection_not_found_error(exc):
+            return CollectionValidationResult(exists=False, valid=False, errors=("collection_not_found",))
+        raise
 
     count = collection.count()
     metadata = dict(collection.metadata or {})
