@@ -8,7 +8,7 @@
         class="chat-side-controls"
         @keydown.esc="closeSessionsPanel"
       >
-        <div class="chat-side-trigger-group">
+        <div class="chat-side-trigger-group glass-surface">
           <el-tooltip
             :content="$t(sessionsPanelOpen ? 'chat.collapse_sessions' : 'chat.expand_sessions')"
             placement="bottom-start"
