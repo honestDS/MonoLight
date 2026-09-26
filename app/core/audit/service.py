@@ -107,7 +107,7 @@ def _round_conflict_ids(
     writers: dict[str, list[str]] = {}
     for tool_call in tool_calls:
         arguments = tool_call.arguments or {}
-        if tool_call.name != "file_tool" or arguments.get("operation") not in {"write", "replace"}:
+        if tool_call.name != "file_tool" or arguments.get("operation") not in {"write", "edit", "patch"}:
             continue
         path = str(arguments.get("path", ""))
         try:
@@ -130,7 +130,7 @@ def _collect_file_mutation_snapshots(
     database_snapshots: dict[str, list[dict[str, Any]]] = {}
     for tool_call in tool_calls:
         arguments = tool_call.arguments or {}
-        if tool_call.name != "file_tool" or arguments.get("operation") != "replace":
+        if tool_call.name != "file_tool" or arguments.get("operation") not in {"edit", "patch"}:
             continue
         original_path = arguments.get("path")
         try:
@@ -222,9 +222,11 @@ def _fit_audit_file_tool_payload_to_context(
         operation = arguments.get("operation")
         if operation == "write":
             field_names = ("content",)
-        elif operation == "replace":
-            field_names = ("pattern", "replacement")
-        elif operation == "find":
+        elif operation == "edit":
+            field_names = ("old_text", "new_text")
+        elif operation == "patch":
+            field_names = ("patch",)
+        elif operation == "grep":
             field_names = ("pattern",)
         else:
             field_names = ()

@@ -31,7 +31,7 @@ from app.core.audit.service import (
 from app.core.constants import DEFAULT_CHAT_MAX_TOKENS, MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_ROUND_SKIPPED
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
-from app.core.prompts import AUDIT_BATCH_PROMPT
+from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditToolConclusion
@@ -95,13 +95,18 @@ def test_audit_prompt_requires_script_content_evidence():
     assert "must never be capped at 7 merely because it is a script" in AUDIT_BATCH_PROMPT
     assert "platform mismatch, insufficient permission, or another environmental condition may prevent them from succeeding" in AUDIT_BATCH_PROMPT
     assert "score 7 is appropriate when the uncertainty cannot be narrowed" in AUDIT_BATCH_PROMPT
-    assert "file_tool call with operation=write or operation=replace" in AUDIT_BATCH_PROMPT
+    assert "file_tool call with operation=write, operation=edit, or operation=patch" in AUDIT_BATCH_PROMPT
     assert "creates or modifies a script, source code, or loadable configuration" in AUDIT_BATCH_PROMPT
     assert "must be scored 8-10" in AUDIT_BATCH_PROMPT
     assert "prepares the file on disk and does not execute its contents" in AUDIT_BATCH_PROMPT
     assert "Score the preparation of high-risk content" in AUDIT_BATCH_PROMPT
     assert "argument_evidence.content" in AUDIT_BATCH_PROMPT
-    assert "argument_evidence.pattern and argument_evidence.replacement for operation=replace" in AUDIT_BATCH_PROMPT
+    assert "argument_evidence.old_text and argument_evidence.new_text for operation=edit" in AUDIT_BATCH_PROMPT
+    assert "argument_evidence.patch for operation=patch" in AUDIT_BATCH_PROMPT
+    assert "argument_evidence.pattern for operation=grep" in AUDIT_BATCH_PROMPT
+    assert "old_text and new_text for operation=edit" in AUDIT_SUMMARY_PROMPT
+    assert "patch for operation=patch" in AUDIT_SUMMARY_PROMPT
+    assert "pattern for operation=grep" in AUDIT_SUMMARY_PROMPT
     assert "remaining content was not reviewed" in AUDIT_BATCH_PROMPT
     assert "You receive every complete tool call" not in AUDIT_BATCH_PROMPT
     assert "explicit_script_paths" not in AUDIT_BATCH_PROMPT
@@ -416,7 +421,7 @@ async def test_same_round_file_write_conflict_blocks_without_confirmation(monkey
         cfg=_profile_config(),
         tool_calls=[
             InternalToolCall(id="call-1", name="file_tool", arguments={"operation": "write", "path": "result.txt", "content": "first"}),
-            InternalToolCall(id="call-2", name="file_tool", arguments={"operation": "replace", "path": "result.txt", "pattern": "x", "replacement": "y", "expected_replacements": 1}),
+            InternalToolCall(id="call-2", name="file_tool", arguments={"operation": "edit", "path": "result.txt", "old_text": "x", "new_text": "y"}),
         ],
         source_assistant_message_id=1,
         uid="u1",
@@ -874,22 +879,31 @@ def test_multiple_file_tool_write_payloads_preserve_short_content_and_fairly_tru
     assert long_call["argument_evidence"]["content"]["truncated"] is True
 
 
-def test_large_file_tool_replace_audit_payload_bounds_pattern_and_replacement():
-    pattern = "old-value-" * 3000
-    replacement = "new-value-" * 3000
+def test_large_file_tool_edit_and_patch_audit_payload_bounds_mutation_content():
+    old_text = "old-value-" * 3000
+    new_text = "new-value-" * 3000
+    patch = "@@\n-" + ("old-" * 3000) + "\n+" + ("new-" * 3000)
     payload = {
         "tool_calls": [
             {
-                "tool_call_id": "replace",
+                "tool_call_id": "edit",
                 "tool_name": "file_tool",
                 "arguments": {
-                    "operation": "replace",
+                    "operation": "edit",
                     "path": "note.txt",
-                    "pattern": pattern,
-                    "replacement": replacement,
-                    "expected_replacements": 1,
+                    "old_text": old_text,
+                    "new_text": new_text,
                 },
-            }
+            },
+            {
+                "tool_call_id": "patch",
+                "tool_name": "file_tool",
+                "arguments": {
+                    "operation": "patch",
+                    "path": "note.txt",
+                    "patch": patch,
+                },
+            },
         ]
     }
 
@@ -898,12 +912,14 @@ def test_large_file_tool_replace_audit_payload_bounds_pattern_and_replacement():
         payload,
         {"context_window_k": 2, "max_tokens": 256},
     )
-    adapted_call = adapted_payload["tool_calls"][0]
+    edit_call, patch_call = adapted_payload["tool_calls"]
 
-    assert pattern.startswith(adapted_call["arguments"]["pattern"])
-    assert replacement.startswith(adapted_call["arguments"]["replacement"])
-    assert adapted_call["argument_evidence"]["pattern"]["truncated"] is True
-    assert adapted_call["argument_evidence"]["replacement"]["truncated"] is True
+    assert old_text.startswith(edit_call["arguments"]["old_text"])
+    assert new_text.startswith(edit_call["arguments"]["new_text"])
+    assert edit_call["argument_evidence"]["old_text"]["truncated"] is True
+    assert edit_call["argument_evidence"]["new_text"]["truncated"] is True
+    assert patch.startswith(patch_call["arguments"]["patch"])
+    assert patch_call["argument_evidence"]["patch"]["truncated"] is True
 
 
 @pytest.mark.asyncio
@@ -1061,39 +1077,41 @@ def test_audit_read_result_fits_escaped_json_within_input_budget():
     assert fitted_result["size"] == read_result["size"]
 
 
-def test_replace_file_snapshot_records_missing_target_and_ignores_write_or_outside_paths(tmp_path):
+def test_file_edit_and_patch_snapshots_record_mutation_targets_and_ignore_write_or_outside_paths(tmp_path):
     calls = [
-        InternalToolCall(id="replace", name="file_tool", arguments={"operation": "replace", "path": "nested/new.txt", "pattern": "old", "replacement": "new", "expected_replacements": 1}),
+        InternalToolCall(id="edit", name="file_tool", arguments={"operation": "edit", "path": "nested/new.txt", "old_text": "old", "new_text": "new"}),
+        InternalToolCall(id="patch", name="file_tool", arguments={"operation": "patch", "path": "nested/patch.txt", "patch": "@@\n-old\n+new"}),
         InternalToolCall(id="write", name="file_tool", arguments={"operation": "write", "path": "overwrite.txt", "content": "new"}),
-        InternalToolCall(id="outside", name="file_tool", arguments={"operation": "replace", "path": "../outside.txt", "pattern": "old", "replacement": "new", "expected_replacements": 1}),
+        InternalToolCall(id="outside", name="file_tool", arguments={"operation": "edit", "path": "../outside.txt", "old_text": "old", "new_text": "new"}),
     ]
 
     snapshots = _collect_file_mutation_snapshots(calls, tmp_path, [])
 
-    snapshot = snapshots["replace"][0]
+    snapshot = snapshots["edit"][0]
     assert snapshot["absolute_path"] == str((tmp_path / "nested" / "new.txt").resolve())
     assert snapshot["exists"] is False
     assert snapshot["status"] == "missing"
     assert snapshot["size"] is None
     assert snapshot["sha256"] is None
+    assert snapshots["patch"][0]["absolute_path"] == str((tmp_path / "nested" / "patch.txt").resolve())
     assert "write" not in snapshots
     assert "outside" not in snapshots
 
 
-def test_replace_file_snapshot_records_missing_target_before_workspace_exists(tmp_path):
+def test_file_edit_snapshot_records_missing_target_before_workspace_exists(tmp_path):
     workspace = tmp_path / "temp_new_user"
-    tool_call = InternalToolCall(id="replace", name="file_tool", arguments={"operation": "replace", "path": "nested/new.txt", "pattern": "old", "replacement": "new", "expected_replacements": 1})
+    tool_call = InternalToolCall(id="edit", name="file_tool", arguments={"operation": "edit", "path": "nested/new.txt", "old_text": "old", "new_text": "new"})
 
     snapshots = _collect_file_mutation_snapshots([tool_call], workspace, [])
 
-    snapshot = snapshots["replace"][0]
+    snapshot = snapshots["edit"][0]
     assert workspace.exists() is False
     assert snapshot["absolute_path"] == str(workspace / "nested" / "new.txt")
     assert snapshot["exists"] is False
     assert snapshot["file_type"] == "missing"
 
 
-def test_replace_file_snapshot_preserves_link_type_and_resolved_path(tmp_path):
+def test_file_edit_snapshot_preserves_link_type_and_resolved_path(tmp_path):
     target = tmp_path / "target.txt"
     target.write_text("content", encoding="utf-8")
     link = tmp_path / "link.txt"
@@ -1102,7 +1120,7 @@ def test_replace_file_snapshot_preserves_link_type_and_resolved_path(tmp_path):
     except OSError as exc:
         pytest.skip(f"当前系统不允许创建测试链接: {exc}")
 
-    tool_call = InternalToolCall(id="call-1", name="file_tool", arguments={"operation": "replace", "path": "link.txt", "pattern": "content", "replacement": "new", "expected_replacements": 1})
+    tool_call = InternalToolCall(id="call-1", name="file_tool", arguments={"operation": "edit", "path": "link.txt", "old_text": "content", "new_text": "new"})
     snapshots = _collect_file_mutation_snapshots([tool_call], tmp_path, [])
 
     snapshot = snapshots[tool_call.id][0]
@@ -1403,18 +1421,18 @@ def test_unstable_read_failures_require_confirmation_without_persisted_snapshot(
     assert _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), [], [file_read], [])
 
 
-def test_replace_file_snapshot_converts_integrity_errors_to_conservative_snapshot(monkeypatch, tmp_path):
+def test_file_patch_snapshot_converts_integrity_errors_to_conservative_snapshot(monkeypatch, tmp_path):
     import app.core.audit.service as service
 
     def fail_snapshot(*_args, **_kwargs):
         raise PermissionError("permission denied")
 
     monkeypatch.setattr(service, "create_file_integrity_snapshot", fail_snapshot)
-    call = InternalToolCall(id="replace", name="file_tool", arguments={"operation": "replace", "path": "target.txt", "pattern": "old", "replacement": "new", "expected_replacements": 1})
+    call = InternalToolCall(id="patch", name="file_tool", arguments={"operation": "patch", "path": "target.txt", "patch": "@@\n-old\n+new"})
 
     snapshots = service._collect_file_mutation_snapshots([call], tmp_path, [])
 
-    snapshot = snapshots["replace"][0]
+    snapshot = snapshots["patch"][0]
     assert snapshot["status"] == "unreadable"
     assert snapshot["file_type"] == "unknown"
     assert snapshot["exists"] is None
