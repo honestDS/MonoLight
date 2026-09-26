@@ -21,9 +21,16 @@ export function useWebSocket() {
     let reconnectPending = false
     let connectionPromise = null
     let connectionReject = null
+    let reconnectTimer = null
+
+    const clearReconnectTimer = () => {
+        if (reconnectTimer === null) return
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+    }
     
     // 连接 WebSocket
-    const connect = (token) => {
+    const connect = (token, { preserveReconnectAttempts = false } = {}) => {
         if (ws.value && ws.value.readyState === WebSocket.OPEN && isConnected.value) {
             return Promise.resolve()
         }
@@ -31,6 +38,10 @@ export function useWebSocket() {
             return connectionPromise
         }
 
+        clearReconnectTimer()
+        if (!preserveReconnectAttempts) {
+            reconnectAttempts.value = 0
+        }
         storedToken = token
         const generation = ++connectionGeneration
         let resolveConnection
@@ -107,18 +118,19 @@ export function useWebSocket() {
             if (!isNormalClose) {
                 reconnectPending = true
             }
-            // 通知上层连接已断开（如果有回调）
-            if (!isNormalClose) {
-                messageHandlers.forEach(handler => handler({ type: 'connection_closed' }))
-            }
+            // 任何由远端触发、且仍属于当前 generation 的关闭都必须同步给上层。
+            // 手动 disconnect 会先推进 generation，因此不会走到这里。
+            messageHandlers.forEach(handler => handler({ type: 'connection_closed' }))
             // 检查是否是用户主动断开
             const isUserInitiated = reconnectAttempts.value >= MAX_RECONNECT_ATTEMPTS
             // 自动重连逻辑（非正常关闭且非用户主动断开）
             if (!isNormalClose && !isUserInitiated && storedToken) {
                 reconnectAttempts.value++
                 console.log(`WebSocket reconnecting... attempt ${reconnectAttempts.value}`)
-                setTimeout(() => {
-                    connect(storedToken)
+                reconnectTimer = setTimeout(() => {
+                    reconnectTimer = null
+                    if (generation !== connectionGeneration || !storedToken) return
+                    void connect(storedToken, { preserveReconnectAttempts: true }).catch(() => {})
                 }, RECONNECT_INTERVAL)
             } else if (isUserInitiated && !isNormalClose) {
                 // 只有在非正常关闭且重连失败时才显示错误
@@ -130,6 +142,7 @@ export function useWebSocket() {
     
     // 断开连接
     const disconnect = () => {
+        clearReconnectTimer()
         if (connectionPromise) {
             const rejectConnection = connectionReject
             connectionPromise = null

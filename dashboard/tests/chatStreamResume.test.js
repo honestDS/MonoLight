@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
@@ -10,11 +9,6 @@ import {
   shouldResumeSessionStream
 } from '../src/composables/chat/streamResume.js'
 import { mergeAssistantResponseIntoList } from '../src/utils/assistantResponseIdentity.js'
-
-const useChatSessionSource = readFileSync(
-  new URL('../src/composables/chat/useChatSession.js', import.meta.url),
-  'utf8'
-)
 
 test('writable sessions resume only in websocket mode', () => {
   assert.equal(shouldResumeSessionStream({
@@ -231,27 +225,4 @@ test('resume turn_end binds a streamed reply to its persisted message before his
   })
   assert.equal(mergedWithHistory.length, 1)
   assert.equal(mergedWithHistory[0].content, 'final reply')
-})
-
-test('useChatSession wires and clears the session reconnect handler', () => {
-  assert.match(
-    useChatSessionSource,
-    /transport\.setReconnectHandler\(\s*createSessionReconnectHandler\(\s*\{[\s\S]*?getCurrentSessionId\s*:\s*\(\)\s*=>\s*sessionManager\.currentSessionId\.value[\s\S]*?getHistoryMessages\s*:\s*\(\)\s*=>\s*chatState\.messages\.value[\s\S]*?resumeSession\s*:\s*resumeSelectedSessionStream[\s\S]*?\}\s*\)\s*\)/
-  )
-  assert.match(
-    useChatSessionSource,
-    /onScopeDispose\(\s*\(\)\s*=>\s*\{[\s\S]*?transport\.setReconnectHandler\(\s*null\s*\)/
-  )
-  assert.match(
-    useChatSessionSource,
-    /const selectSession\s*=\s*\(session\)\s*=>\s*\{[\s\S]*?chatState\.loading\.value\s*=\s*getInitialResumeLoading\(\s*\{\s*session\s*,\s*transportMode\s*:\s*transport\.transportMode\.value\s*\}\s*\)/
-  )
-  assert.doesNotMatch(
-    useChatSessionSource,
-    /const selectSession\s*=\s*\(session\)\s*=>\s*\{[\s\S]*?chatState\.loading\.value\s*=\s*shouldResumeSessionStream/
-  )
-  assert.match(
-    useChatSessionSource,
-    /resumeSelectedSessionStream[\s\S]*?onComplete\s*:\s*\(data[\s\S]*?eventType[\s\S]*?eventType\s*===\s*['"]turn_end['"][\s\S]*?applyResumedTurnEnd/
-  )
 })

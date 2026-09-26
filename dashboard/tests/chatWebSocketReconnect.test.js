@@ -27,6 +27,7 @@ const loadUseWebSocket = ({ sockets, timers }) => {
     'ElMessage',
     'i18n',
     'setTimeout',
+    'clearTimeout',
     'WebSocket',
     `${moduleSource}\nreturn useWebSocket`
   )(
@@ -41,7 +42,11 @@ const loadUseWebSocket = ({ sockets, timers }) => {
     { global: { t: key => key } },
     callback => {
       timers.push(callback)
-      return timers.length
+      return callback
+    },
+    callback => {
+      const index = timers.indexOf(callback)
+      if (index !== -1) timers.splice(index, 1)
     },
     { OPEN: 1 }
   )
@@ -78,6 +83,7 @@ const createTransportManager = () => {
   const handlers = []
   const sent = []
   const connectCalls = []
+  let disconnectCalls = 0
   const manager = {
     isConnected: { value: false },
     onMessage(handler) {
@@ -92,6 +98,7 @@ const createTransportManager = () => {
       manager.isConnected.value = true
     },
     disconnect() {
+      disconnectCalls += 1
       manager.isConnected.value = false
     },
     sendMessage(data) {
@@ -104,7 +111,14 @@ const createTransportManager = () => {
       handlers.forEach(handler => handler(data))
     }
   }
-  return { manager, sent, connectCalls }
+  return {
+    manager,
+    sent,
+    connectCalls,
+    get disconnectCalls() {
+      return disconnectCalls
+    }
+  }
 }
 
 class FakeWebSocket {
@@ -204,6 +218,64 @@ test('manual disconnect does not notify connection_reopened or schedule reconnec
   assert.equal(timers.length, 0)
 })
 
+test('remote normal close notifies transport state without scheduling reconnect', async () => {
+  const sockets = []
+  const timers = []
+  const useWebSocket = loadUseWebSocket({ sockets, timers })
+  const manager = useWebSocket()
+  const events = []
+  manager.onMessage(event => events.push(event.type))
+
+  const connected = manager.connect('token')
+  sockets[0].readyState = 1
+  sockets[0].onopen()
+  await connected
+
+  sockets[0].onclose({ code: 1000, reason: 'server shutdown' })
+
+  assert.equal(manager.isConnected.value, false)
+  assert.deepEqual(events, ['connection_closed'])
+  assert.equal(timers.length, 0)
+})
+
+test('manual disconnect cancels an already scheduled reconnect', async () => {
+  const sockets = []
+  const timers = []
+  const useWebSocket = loadUseWebSocket({ sockets, timers })
+  const manager = useWebSocket()
+
+  const connected = manager.connect('token')
+  sockets[0].readyState = 1
+  sockets[0].onopen()
+  await connected
+
+  sockets[0].onclose({ code: 1006, reason: 'abnormal' })
+  assert.equal(timers.length, 1)
+
+  manager.disconnect()
+  assert.equal(timers.length, 0)
+  assert.equal(sockets.length, 1)
+})
+
+test('a fresh websocket connection after manual disconnect gets a new reconnect budget', async () => {
+  const sockets = []
+  const timers = []
+  const useWebSocket = loadUseWebSocket({ sockets, timers })
+  const manager = useWebSocket()
+
+  const firstConnection = manager.connect('token')
+  sockets[0].readyState = 1
+  sockets[0].onopen()
+  await firstConnection
+  manager.disconnect()
+
+  const secondConnection = manager.connect('token')
+  sockets[1].onclose({ code: 1006, reason: 'failed before open' })
+  await assert.rejects(secondConnection)
+
+  assert.equal(timers.length, 1)
+})
+
 test('transport clears request callbacks and resumes the session after reconnect', async () => {
   const { manager, sent } = createTransportManager()
   const transport = loadUseChatTransport({ manager })()
@@ -243,6 +315,23 @@ test('transport clears request callbacks and resumes the session after reconnect
   assert.equal(oldRequestCompletions, 0)
 })
 
+test('a stale websocket reopened event cannot reactivate transport after switching to HTTP', async () => {
+  const transportManager = createTransportManager()
+  const transport = loadUseChatTransport({ manager: transportManager.manager })()
+  let reconnectCalls = 0
+  transport.setReconnectHandler(() => {
+    reconnectCalls += 1
+  })
+
+  await transport.setTransportMode('http')
+  transportManager.manager.emit({ type: 'connection_reopened' })
+  await Promise.resolve()
+
+  assert.equal(transport.transportMode.value, 'http')
+  assert.equal(transport.wsConnected.value, false)
+  assert.equal(reconnectCalls, 0)
+})
+
 test('selected HTTP sessions restore mode after remount without resuming a stream', async () => {
   const session = {
     session_id: 'http-session',
@@ -271,6 +360,84 @@ test('selected HTTP sessions restore mode after remount without resuming a strea
   assert.equal(resumeCalls, 0)
   assert.equal(httpManager.connectCalls.length, 0)
   assert.deepEqual(httpManager.sent, [])
+})
+
+test('switching to HTTP cancels an in-flight websocket resume before it can subscribe', async () => {
+  const transportManager = createTransportManager()
+  let resolveConnect
+  transportManager.manager.connect = () => {
+    transportManager.connectCalls.push(true)
+    return new Promise(resolve => {
+      resolveConnect = () => {
+        transportManager.manager.isConnected.value = true
+        resolve()
+      }
+    })
+  }
+  const transport = loadUseChatTransport({ manager: transportManager.manager })()
+
+  const resumePromise = transport.resumeSession({
+    sessionId: 'session-1',
+    historyMessageId: 7
+  })
+  await Promise.resolve()
+  assert.equal(transportManager.connectCalls.length, 1)
+
+  await transport.setTransportMode('http')
+  resolveConnect()
+
+  assert.equal(await resumePromise, false)
+  assert.equal(transport.transportMode.value, 'http')
+  assert.equal(transport.wsConnected.value, false)
+  assert.equal(transportManager.disconnectCalls, 1)
+  assert.deepEqual(transportManager.sent, [])
+})
+
+test('manual transport disposal invalidates an in-flight websocket send before it can submit', async () => {
+  const transportManager = createTransportManager()
+  let resolveConnect
+  transportManager.manager.connect = () => new Promise(resolve => {
+    resolveConnect = () => {
+      transportManager.manager.isConnected.value = true
+      resolve()
+    }
+  })
+  const transport = loadUseChatTransport({ manager: transportManager.manager })()
+
+  const sendPromise = transport.wsSend({
+    message: 'hello',
+    sessionId: 'session-1',
+    requestId: 'request-disposed'
+  })
+  await Promise.resolve()
+
+  transport.disconnectWebSocket()
+  resolveConnect()
+
+  assert.equal(await sendPromise, false)
+  assert.equal(transport.wsConnected.value, false)
+  assert.deepEqual(transportManager.sent, [])
+})
+
+test('switching to HTTP invalidates an in-flight websocket initialization', async () => {
+  const transportManager = createTransportManager()
+  let resolveConnect
+  transportManager.manager.connect = () => new Promise(resolve => {
+    resolveConnect = () => {
+      transportManager.manager.isConnected.value = true
+      resolve()
+    }
+  })
+  const transport = loadUseChatTransport({ manager: transportManager.manager })()
+
+  const initPromise = transport.initWebSocket()
+  await Promise.resolve()
+  await transport.setTransportMode('http')
+  resolveConnect()
+
+  assert.equal(await initPromise, false)
+  assert.equal(transport.wsConnected.value, false)
+  assert.equal(transport.transportMode.value, 'http')
 })
 
 test('selected WS sessions resume after remount when server source is persisted as WS', async () => {
@@ -379,4 +546,24 @@ test('WebSocket disconnect before submission acknowledgement is treated as unkno
     data: null
   })
   assert.equal(transport.transportMode.value, 'ws')
+})
+
+test('manual websocket disconnect resolves pending submission acknowledgement immediately', async () => {
+  const transportManager = createTransportManager()
+  const transport = loadUseChatTransport({ manager: transportManager.manager })()
+
+  assert.equal(await transport.wsSend({
+    message: 'hello',
+    sessionId: 'session-1',
+    requestId: 'request-manual-disconnect'
+  }), true)
+
+  const acknowledgementPromise = transport.waitForSubmissionAcknowledgement('request-manual-disconnect')
+  transport.disconnectWebSocket()
+
+  assert.deepEqual(await acknowledgementPromise, {
+    status: 'unknown',
+    data: null
+  })
+  assert.equal(transportManager.disconnectCalls, 1)
 })

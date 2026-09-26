@@ -65,6 +65,11 @@ export function useChatTransport() {
   const submissionAcknowledgements = new Map()
   let sessionEventCallbacks = null
   let reconnectHandler = null
+  let transportGeneration = 0
+  const isCurrentWebSocketOperation = generation => (
+    generation === transportGeneration
+    && transportMode.value === 'ws'
+  )
 
   const resolveSubmissionAcknowledgement = (requestId, status, data = null) => {
     if (!hasIdentity(requestId)) return
@@ -87,6 +92,13 @@ export function useChatTransport() {
       promise,
       resolve
     })
+  }
+
+  const settlePendingSubmissionsAsUnknown = () => {
+    for (const requestId of submissionAcknowledgements.keys()) {
+      resolveSubmissionAcknowledgement(requestId, 'unknown')
+    }
+    submissionAcknowledgements.clear()
   }
 
   const waitForSubmissionAcknowledgement = async (requestId, timeoutMs = 5000) => {
@@ -112,15 +124,17 @@ export function useChatTransport() {
   wsManager.onMessage((data) => {
     if (data.type === 'connection_closed') {
       wsConnected.value = false
-      for (const requestId of submissionAcknowledgements.keys()) {
-        resolveSubmissionAcknowledgement(requestId, 'unknown')
-      }
+      settlePendingSubmissionsAsUnknown()
       callbacksMap.clear()
       sessionEventCallbacks = null
       return
     }
 
     if (data.type === 'connection_reopened') {
+      if (transportMode.value !== 'ws') {
+        disconnectWebSocket()
+        return
+      }
       wsConnected.value = true
       if (reconnectHandler) {
         void Promise.resolve().then(() => reconnectHandler()).catch(console.error)
@@ -439,6 +453,8 @@ export function useChatTransport() {
 
   // 断开 WebSocket 连接
   const disconnectWebSocket = () => {
+    transportGeneration += 1
+    settlePendingSubmissionsAsUnknown()
     wsManager.disconnect()
     wsConnected.value = false
     callbacksMap.clear()
@@ -453,6 +469,8 @@ export function useChatTransport() {
   })
 
   const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, callbacks = {} }) => {
+    if (transportMode.value !== 'ws') return false
+    const operationGeneration = transportGeneration
     const token = localStorage.getItem('token')
     if (!token) throw new Error(t('chat.not_logged_in'))
 
@@ -466,8 +484,14 @@ export function useChatTransport() {
     if (!wsManager.isConnected.value) {
       try {
         await wsManager.connect(token)
-        wsConnected.value = true
       } catch (e) {
+        if (!isCurrentWebSocketOperation(operationGeneration)) {
+          if (requestId) {
+            callbacksMap.delete(requestId)
+            submissionAcknowledgements.delete(requestId)
+          }
+          return false
+        }
         console.error('WebSocket连接失败:', e)
         resolveSubmissionAcknowledgement(requestId, 'not_sent')
         if (requestId) {
@@ -477,6 +501,15 @@ export function useChatTransport() {
         return false
       }
     }
+
+    if (!isCurrentWebSocketOperation(operationGeneration)) {
+      if (requestId) {
+        callbacksMap.delete(requestId)
+        submissionAcknowledgements.delete(requestId)
+      }
+      return false
+    }
+    wsConnected.value = true
 
     const wsData = {
       type: 'chat',
@@ -507,7 +540,8 @@ export function useChatTransport() {
   }
 
   const resumeSession = async ({ sessionId, historyMessageId = 0, callbacks = {} }) => {
-    if (!sessionId) return false
+    if (!sessionId || transportMode.value !== 'ws') return false
+    const operationGeneration = transportGeneration
 
     const token = localStorage.getItem('token')
     if (!token) throw new Error(t('chat.not_logged_in'))
@@ -518,14 +552,23 @@ export function useChatTransport() {
     if (!wsManager.isConnected.value) {
       try {
         await wsManager.connect(token)
-        wsConnected.value = true
       } catch (e) {
+        if (!isCurrentWebSocketOperation(operationGeneration)) {
+          if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
+          return false
+        }
         console.error('WebSocket恢复连接失败:', e)
         ElMessage.error(t('chat.ws_connect_failed'))
         if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
         return false
       }
     }
+
+    if (!isCurrentWebSocketOperation(operationGeneration)) {
+      if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
+      return false
+    }
+    wsConnected.value = true
 
     if (!wsManager.sendMessage({ type: 'resume', session_id: sessionId, history_message_id: historyMessageId })) {
       ElMessage.error(t('chat.ws_message_send_failed'))
@@ -543,26 +586,28 @@ export function useChatTransport() {
     }
   }
 
-  const setTransportMode = async (mode, disconnectCallback = null) => {
+  const setTransportMode = async mode => {
     if (mode === 'ws' && transportMode.value !== 'ws') {
+      transportGeneration += 1
       transportMode.value = mode
-    } else if (mode === 'http' && transportMode.value !== 'http') {
-      if (wsConnected.value) {
-        if (disconnectCallback) disconnectCallback()
-        else disconnectWebSocket()
-      }
+    } else if (mode === 'http') {
+      disconnectWebSocket()
       transportMode.value = mode
     }
   }
 
   const initWebSocket = async () => {
+    if (transportMode.value !== 'ws') return false
+    const operationGeneration = transportGeneration
     const token = localStorage.getItem('token')
     if (token) {
       try {
         await wsManager.connect(token)
+        if (!isCurrentWebSocketOperation(operationGeneration)) return false
         wsConnected.value = true
         return true
       } catch (e) {
+        if (!isCurrentWebSocketOperation(operationGeneration)) return false
         console.error('Init WS failed:', e)
         return false
       }

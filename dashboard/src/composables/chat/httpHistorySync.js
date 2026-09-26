@@ -2,6 +2,7 @@ export const createHttpHistorySyncController = ({
   getSessionId,
   canSync,
   isLoading,
+  onTrackingStarted = () => {},
   fetchPendingActivity,
   mergeLatestHistory,
   intervalMs = 2000,
@@ -55,12 +56,13 @@ export const createHttpHistorySyncController = ({
 
       if (hasPendingActivity) return
 
-      await mergeLatestHistory(sessionId)
+      const mergeResult = await mergeLatestHistory(sessionId)
       if (
         syncVersion === version
         && canSync()
         && sessionId === getSessionId()
         && trackedSessionId === sessionId
+        && mergeResult?.hasMore !== true
       ) {
         trackedSessionId = null
       }
@@ -95,6 +97,7 @@ export const createHttpHistorySyncController = ({
   const start = sessionId => {
     if (!canSync() || !sessionId || sessionId !== getSessionId()) return
     trackedSessionId = sessionId
+    onTrackingStarted(sessionId)
     scheduleNext()
   }
 
@@ -104,6 +107,7 @@ export const createHttpHistorySyncController = ({
     if (!canSync() || !sessionId) return
 
     trackedSessionId = sessionId
+    onTrackingStarted(sessionId)
     const syncVersion = version
     await sync()
     if (syncVersion === version && shouldContinue()) {

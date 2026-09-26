@@ -110,15 +110,6 @@
       />
 
       <div class="input-area" @transitionend.self="handleWelcomeExitTransitionEnd">
-        <el-alert
-          v-if="transportFallbackNotice"
-          class="transport-fallback-alert"
-          type="warning"
-          show-icon
-          :title="transportFallbackNotice"
-          @close="clearTransportFallbackNotice"
-        />
-
         <!-- 新建会话 / 无会话时的欢迎区 -->
         <div class="welcome-hero" :class="{ 'is-exiting': sessionEngaged }">
           <h1 class="welcome-greeting">{{ $t('chat.welcome_greeting') }}</h1>
@@ -501,7 +492,6 @@ const {
   transportMode,
   modeSettingSubmitting,
   transportModeChangeBlocked,
-  transportFallbackNotice,
   attachments,
   isCurrentSessionReadOnly,
   isContextSummarizing,
@@ -624,7 +614,6 @@ const {
   reloadCurrentSessionHistory,
   send: originalSend,
   setTransportMode,
-  clearTransportFallbackNotice,
   disconnectWebSocket,
   handleScroll
 } = chat
