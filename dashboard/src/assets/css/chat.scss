@@ -28,12 +28,7 @@
   padding: 0 4px;
   box-sizing: border-box;
   gap: 2px;
-  background: var(--chat-metadata-surface-background);
-  border: 1px solid var(--chat-metadata-surface-border);
   border-radius: var(--radius-pill);
-  box-shadow: var(--chat-metadata-surface-shadow);
-  backdrop-filter: var(--glass-surface-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-surface-backdrop-filter);
 }
 
 .chat-side-trigger {
@@ -91,7 +86,6 @@
   overflow: hidden;
   transform-origin: top left;
 
-  // glass-surface 在全局样式中后于本文件加载，圆角覆写需要更高优先级
   &.glass-surface {
     border-radius: var(--radius-14);
   }
