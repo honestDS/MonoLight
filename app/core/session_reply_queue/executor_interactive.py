@@ -73,6 +73,27 @@ async def _persist_interactive_work_stream_event(
     return persisted_event
 
 
+async def _publish_newly_dequeued_request_ids(
+    db,
+    stream_state: _InteractiveWorkStreamEventState,
+) -> None:
+    work = stream_state.work
+    await db.refresh(work)
+    request_ids = [request_id for request_id in get_work_request_ids(work) if request_id not in stream_state.dequeued_request_ids]
+    if not request_ids:
+        return
+    await _persist_interactive_work_stream_event(
+        stream_state,
+        {
+            "type": "input_dequeued",
+            "session_id": work.session_id,
+            "work_id": work.id,
+            "request_ids": request_ids,
+        },
+    )
+    stream_state.dequeued_request_ids.update(request_ids)
+
+
 async def _publish_interactive_work_stream_event(
     db,
     stream_state: _InteractiveWorkStreamEventState,
@@ -80,19 +101,7 @@ async def _publish_interactive_work_stream_event(
 ) -> None:
     work = stream_state.work
     if event.get("type") == "agent_loop_start":
-        await db.refresh(work)
-        request_ids = [request_id for request_id in get_work_request_ids(work) if request_id not in stream_state.dequeued_request_ids]
-        if request_ids:
-            await _persist_interactive_work_stream_event(
-                stream_state,
-                {
-                    "type": "input_dequeued",
-                    "session_id": work.session_id,
-                    "work_id": work.id,
-                    "request_ids": request_ids,
-                },
-            )
-            stream_state.dequeued_request_ids.update(request_ids)
+        await _publish_newly_dequeued_request_ids(db, stream_state)
     persisted_event = await _persist_interactive_work_stream_event(stream_state, event)
 
     response_id = event.get("response_id")
@@ -129,12 +138,16 @@ async def _fetch_additional_foreground_user_messages(
     *,
     work: SessionReplyWorkItem,
     worker_id: str,
+    stream_state: _InteractiveWorkStreamEventState,
 ) -> UserInputBatch | None:
-    return await session_reply_queue_manager.absorb_contiguous_foreground_messages(
+    batch = await session_reply_queue_manager.absorb_contiguous_foreground_messages(
         db,
         work_id=work.id,
         worker_id=worker_id,
     )
+    if batch is not None:
+        await _publish_newly_dequeued_request_ids(db, stream_state)
+    return batch
 
 
 async def _check_interactive_work_validity(
@@ -229,6 +242,7 @@ async def _dispatch_interactive_work(
             db,
             work=work,
             worker_id=worker_id,
+            stream_state=stream_state,
         )
         if allow_additional_user_messages
         else None,

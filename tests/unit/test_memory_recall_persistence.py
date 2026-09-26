@@ -282,14 +282,10 @@ async def test_generate_commits_before_network_and_discards_stream_content(monke
 
 
 @pytest.mark.asyncio
-async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summary(monkeypatch):
-    context = _context(messages=[InternalMessage(id=10, role=MessageRole.USER, content="memory query secret")])
-    context.context_summary_callback = object()
-    summary_messages = [
-        InternalMessage(role=MessageRole.SYSTEM, content="summary result"),
-        InternalMessage(id=20, role=MessageRole.USER, content="retrieved memory body"),
-    ]
-    checkpoint_calls = []
+async def test_prepare_request_messages_exposes_only_memory_tool_without_triggering_new_summary(monkeypatch):
+    summary_message = InternalMessage(role=MessageRole.USER, content='<conversation_summary through_message_id="5">summary result</conversation_summary>')
+    current_message = InternalMessage(id=10, role=MessageRole.USER, content="memory query secret")
+    context = _context(messages=[summary_message, current_message])
     trim_calls = []
     token_calls = []
     session = SimpleNamespace(
@@ -301,10 +297,6 @@ async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summ
             "total_cached_tokens": 250,
         },
     )
-
-    async def apply_checkpoint(_db, **kwargs):
-        checkpoint_calls.append(kwargs)
-        return summary_messages
 
     def materialize(messages):
         return list(messages)
@@ -323,7 +315,6 @@ async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summ
     def baseline(*_args, **_kwargs):
         return {"token_fingerprint": "no-content"}
 
-    monkeypatch.setattr(request_module, "apply_context_summary_checkpoint", apply_checkpoint)
     monkeypatch.setattr(request_module, "materialize_user_environment_prompts", materialize)
     monkeypatch.setattr(request_module.ContextManager, "trim_messages_for_model_request", trim)
     monkeypatch.setattr(request_module.session_crud, "get_by_session_id", get_session)
@@ -338,11 +329,10 @@ async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summ
     )
 
     expected_tools = [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA]
-    assert context.messages is summary_messages
-    assert request_messages == summary_messages
-    assert checkpoint_calls[0]["tools"] == expected_tools
-    assert checkpoint_calls[0]["trigger_mode"].value == "user_message"
-    assert checkpoint_calls[0]["lifecycle_event_callback"] is context.context_summary_callback
+    assert context.messages == [summary_message, current_message]
+    assert request_messages[0].role == MessageRole.SYSTEM
+    assert request_messages[0].content == request_module.LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
+    assert request_messages[1:] == [summary_message, current_message]
     assert trim_calls[0]["tools"] == expected_tools
     assert token_calls[0][1] == expected_tools
     assert metadata["turn"] == 0

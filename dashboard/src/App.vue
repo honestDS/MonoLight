@@ -13,31 +13,66 @@
         :class="{ 'is-collapsed': isSidebarCollapsed }"
       >
         <div class="logo-container">
-          <img class="logo-image" :src="logoImage" alt="" aria-hidden="true">
+          <el-tooltip
+            v-if="isSidebarCollapsed"
+            :content="$t('common.expand_sidebar')"
+            placement="right"
+          >
+            <button
+              type="button"
+              class="sidebar-logo-expand-button"
+              :aria-label="$t('common.expand_sidebar')"
+              @click="handleSidebarToggle"
+            >
+              <img class="logo-image" :src="logoImage" alt="" aria-hidden="true">
+              <svg
+                class="sidebar-panel-icon sidebar-logo-expand-icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="3" width="18" height="18" rx="3" />
+                <path d="M9 3v18" />
+              </svg>
+            </button>
+          </el-tooltip>
+          <img v-else class="logo-image" :src="logoImage" alt="" aria-hidden="true">
           <div class="logo-content">
             <span class="logo-text">MonoLight</span>
             <span class="logo-version">MonoLight v0.1</span>
           </div>
-        </div>
-        <el-tooltip
-          :content="$t(isSidebarCollapsed ? 'common.expand_sidebar' : 'common.collapse_sidebar')"
-          :disabled="isCollapsedSubmenuOpen"
-          placement="right"
-        >
-          <button
-            type="button"
-            class="sidebar-collapse-button"
-            :aria-label="$t(isSidebarCollapsed ? 'common.expand_sidebar' : 'common.collapse_sidebar')"
-            @click="handleSidebarToggle"
+          <el-tooltip
+            v-if="!isSidebarCollapsed"
+            :content="$t('common.collapse_sidebar')"
+            :disabled="isCollapsedSubmenuOpen"
+            placement="right"
           >
-            <el-icon
-              class="sidebar-collapse-arrow"
-              :class="{ 'is-collapsed': isSidebarCollapsed }"
+            <button
+              type="button"
+              class="sidebar-collapse-button"
+              :aria-label="$t('common.collapse_sidebar')"
+              @click="handleSidebarToggle"
             >
-              <ArrowLeft />
-            </el-icon>
-          </button>
-        </el-tooltip>
+              <svg
+                class="sidebar-panel-icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="3" width="18" height="18" rx="3" />
+                <path d="M9 3v18" />
+              </svg>
+            </button>
+          </el-tooltip>
+        </div>
         <el-menu
           :default-active="$route.path"
           :collapse="isSidebarCollapsed"
@@ -115,7 +150,7 @@
               <template #title><span>{{ $t('common.menu.support') }}</span></template>
             </el-menu-item>
           </el-menu>
-          <small class="sidebar-copyright">&copy; 2026 MonoLight LLM Admin. All rights reserved.</small>
+          <small class="sidebar-copyright">&copy; 2026 MonoLight. All rights reserved.</small>
         </div>
       </el-aside>
       <el-container>

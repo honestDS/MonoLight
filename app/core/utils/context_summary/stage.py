@@ -229,6 +229,7 @@ def build_stage_identity(
             "max_output_tokens": model.max_output_tokens,
             "temperature": model.temperature,
             "top_p": model.top_p,
+            "reasoning_effort": model.reasoning_effort,
             "safety_margin_tokens": model.safety_margin_tokens,
         },
         sort_keys=True,

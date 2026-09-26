@@ -78,6 +78,8 @@
   /* 侧边栏主题色 - 浅色主题 */
   --color-sidebar-bg: var(--color-white);
   --color-sidebar-border: var(--color-slate-200);
+  --color-sidebar-separator: rgba(var(--color-slate-300-rgb), 0.88);
+  --color-sidebar-shadow: rgba(var(--color-slate-900-rgb), 0.08);
   --color-sidebar-text: var(--color-slate-600);
   --color-sidebar-title: var(--color-slate-900);
   --color-sidebar-active: var(--color-blue-500);

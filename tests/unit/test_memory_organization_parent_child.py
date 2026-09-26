@@ -12,7 +12,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 from app.core.crud.channel.channel import channel_crud
 from app.core.crud.memory.job import memory_job_crud
@@ -51,6 +50,7 @@ from app.models.memory import (
 )
 from app.models.message import InternalMessage, InternalResponse, MessageRole
 from app.providers.database.time import get_database_time
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -60,13 +60,7 @@ async def db_session(tmp_path) -> AsyncGenerator[AsyncSession]:
         f"sqlite+aiosqlite:///{database_path}",
         connect_args={"timeout": 30},
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=[ModelChannel.__table__, LongTermMemoryStore.__table__, LongTermMemoryMutationJob.__table__, LongTermMemoryRecord.__table__],
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=[ModelChannel.__table__, LongTermMemoryStore.__table__, LongTermMemoryMutationJob.__table__, LongTermMemoryRecord.__table__])
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:

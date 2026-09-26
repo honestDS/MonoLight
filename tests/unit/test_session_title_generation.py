@@ -19,7 +19,7 @@ class AsyncSessionContext:
 
 
 @pytest.mark.asyncio
-async def test_generate_session_title_passes_explicit_sampling_parameters(monkeypatch):
+async def test_generate_session_title_uses_internal_task_generation_params(monkeypatch):
     db = SimpleNamespace()
     generate = AsyncMock(
         return_value=InternalResponse(
@@ -40,16 +40,16 @@ async def test_generate_session_title_passes_explicit_sampling_parameters(monkey
         api_key="api-key",
         base_url="https://example.invalid",
         model_id="kimi-k2.6",
-        protocol="openai",
-        temperature=1,
-        top_p=None,
+        protocol="openai_responses",
+        model_entry={"reasoning_effort": "max", "max_tokens": 128},
     )
 
     assert title == "\u6807\u9898"
     kwargs = generate.await_args.kwargs
-    assert kwargs["temperature"] == 1
-    assert kwargs["top_p"] is None
-    assert kwargs["max_tokens"] == 200
+    assert kwargs["reasoning_effort"] == "low"
+    assert "temperature" not in kwargs
+    assert "top_p" not in kwargs
+    assert kwargs["max_tokens"] == 128
     create_or_update_title.assert_awaited_once_with(
         db=db,
         session_id="session-1",
@@ -59,7 +59,7 @@ async def test_generate_session_title_passes_explicit_sampling_parameters(monkey
 
 
 @pytest.mark.asyncio
-async def test_selected_profile_title_uses_model_sampling_parameters(monkeypatch):
+async def test_selected_profile_title_passes_model_capability_to_task_generation(monkeypatch):
     db = SimpleNamespace()
     channel = SimpleNamespace(
         base_url="https://example.invalid",
@@ -68,9 +68,10 @@ async def test_selected_profile_title_uses_model_sampling_parameters(monkeypatch
     )
     model_entry = {
         "model_id": "kimi-k2.6",
-        "protocol": "OPENAI",
+        "protocol": "OPENAI_RESPONSES",
         "temperature": 1,
         "top_p": 0.8,
+        "reasoning_effort": "max",
         "max_tokens": 128,
     }
     rule = SimpleNamespace(priority=1)
@@ -115,6 +116,9 @@ async def test_selected_profile_title_uses_model_sampling_parameters(monkeypatch
 
     assert title == "\u6807\u9898"
     kwargs = generate_title.await_args.kwargs
-    assert kwargs["temperature"] == 1
-    assert kwargs["top_p"] == 0.8
-    assert kwargs["max_tokens"] == 128
+    assert kwargs["model_entry"] == model_entry
+    assert kwargs["protocol"] == "openai_responses"
+    assert "temperature" not in kwargs
+    assert "top_p" not in kwargs
+    assert "reasoning_effort" not in kwargs
+    assert "max_tokens" not in kwargs

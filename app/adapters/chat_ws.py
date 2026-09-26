@@ -12,7 +12,12 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.profile_selection import resolve_profile_for_session
 from app.core.session_notifier import session_notifier
-from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
+from app.core.session_reply_queue.manager import (
+    build_input_accepted_event,
+    build_input_queued_event,
+    is_submission_queued,
+    session_reply_queue_manager,
+)
 from app.models.message import MessageRole
 from app.schemas.response import (
     FinishReason,
@@ -52,6 +57,13 @@ class WebSocketChatAdapter(BaseChatAdapter):
                 source="ws",
                 request_id=request_id,
             )
+            if request_id:
+                yield build_input_accepted_event(
+                    session_id,
+                    request_id,
+                    work.id,
+                    submission_status,
+                )
             for event in confirmation_update_events:
                 if request_id and isinstance(event, dict) and "request_id" not in event:
                     event = {**event, "request_id": request_id}

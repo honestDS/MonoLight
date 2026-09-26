@@ -41,6 +41,8 @@ export default {
   long_term_memory_settings: 'Long-term Memory Settings',
   long_term_memory_enabled: 'Enable Long-term Memory',
   long_term_memory_enabled_hint: 'When enabled, conversations can retrieve and use the current user\'s long-term memories.',
+  memory_precheck_enabled: 'Memory Check Before Reply',
+  memory_precheck_enabled_hint: 'When enabled, the system looks for related long-term memories, past chats, and saved knowledge before it starts answering. Turning it off can make replies start sooner, but some existing information may not be used automatically.',
   memory_storage_not_configured: 'Long-term memory storage is not configured, so these settings will not take effect yet.',
   memory_settings_unavailable: 'Memory settings for the current user could not be loaded. Auto organization and saving are disabled; refresh and try again.',
   memory_top_k: 'Memory Result Count',

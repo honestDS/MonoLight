@@ -3,11 +3,43 @@ const DEFAULT_POLL_INTERVAL_MS = 1500
 export const hasLoadingSessions = sessions =>
   Array.isArray(sessions) && sessions.some(session => session?.is_loading === true)
 
+export const hasHttpResultMessage = (messages, resultMessageId) => {
+  const normalizedResultMessageId = Number(resultMessageId)
+  if (!Number.isSafeInteger(normalizedResultMessageId) || normalizedResultMessageId <= 0) return false
+
+  return Array.isArray(messages) && messages.some(message => {
+    const dbId = Number(message?.db_id)
+    return Number.isSafeInteger(dbId) && dbId === normalizedResultMessageId
+  })
+}
+
+export const shouldFetchHttpWorkStatus = ({
+  status,
+  previousStatus,
+  hasPendingRequest,
+  historyLoaded,
+  sessionLoading,
+  resolved,
+  fetching
+}) => {
+  const terminalStatuses = ['merged', 'succeeded', 'failed', 'cancelled']
+  const activeStatuses = ['ready_for_llm', 'running', 'waiting_external_work']
+
+  return terminalStatuses.includes(status)
+    && historyLoaded
+    && !(status === 'merged' && sessionLoading === true)
+    && !resolved
+    && !fetching
+    && (hasPendingRequest || activeStatuses.includes(previousStatus))
+}
+
 export const createSessionListLoadingPoller = ({
   refreshSessions,
   intervalMs = DEFAULT_POLL_INTERVAL_MS,
   schedule = (callback, delay) => setTimeout(callback, delay),
-  cancel = timer => clearTimeout(timer)
+  cancel = timer => clearTimeout(timer),
+  hasPendingSubmissions = () => false,
+  maxPendingIdleRefreshes = 8
 }) => {
   if (typeof refreshSessions !== 'function') {
     throw new TypeError('refreshSessions must be a function')
@@ -17,6 +49,7 @@ export const createSessionListLoadingPoller = ({
   let refreshPromise = null
   let refreshRequested = false
   let disposed = false
+  let pendingIdleRefreshes = 0
 
   const stop = () => {
     if (timer === null) return
@@ -26,7 +59,16 @@ export const createSessionListLoadingPoller = ({
 
   const sync = sessions => {
     stop()
-    if (disposed || !hasLoadingSessions(sessions)) return
+    if (disposed) return
+
+    if (!hasLoadingSessions(sessions)) {
+      if (!hasPendingSubmissions()) {
+        pendingIdleRefreshes = 0
+        return
+      }
+      if (pendingIdleRefreshes >= maxPendingIdleRefreshes) return
+      pendingIdleRefreshes += 1
+    }
 
     timer = schedule(async () => {
       timer = null

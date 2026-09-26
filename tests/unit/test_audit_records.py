@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from app.core.audit.confirmation import ConfirmationDecision, notify_confirmation_tool_results, update_confirmation_message_status, update_confirmation_tool_results_for_decision
 from app.core.audit.integrity import build_tool_round_integrity_snapshot, serialize_tool_arguments, verify_persisted_tool_round, verify_tool_round_integrity
@@ -29,14 +29,14 @@ from app.models.audit import (
 )
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest.fixture
 async def audit_database(tmp_path):
     database_path = tmp_path / "audit.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}", connect_args={"timeout": 30})
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+    await clone_sqlite_schema(database_path)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield session_factory

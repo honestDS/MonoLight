@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import String, case, cast, delete, not_, update
+from sqlalchemy import String, and_, case, cast, delete, not_, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -93,6 +93,34 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             stmt = stmt.where(BackgroundTask.session_id == session_id)
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    async def has_pending_user_activity(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+    ) -> bool:
+        result = await db.execute(
+            select(BackgroundTask.id)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                or_(
+                    BackgroundTask.status.in_(
+                        [BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]
+                    ),
+                    and_(
+                        BackgroundTask.auto_reply.is_(True),
+                        BackgroundTask.reply_status.in_(
+                            [BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]
+                        ),
+                    ),
+                ),
+            )
+            .limit(1)
+        )
+        return result.scalar() is not None
 
     async def list_pending_replies(self, db: AsyncSession, *, limit: int = 100) -> list[BackgroundTask]:
         stmt = (

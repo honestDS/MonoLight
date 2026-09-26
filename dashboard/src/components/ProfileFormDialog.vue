@@ -62,13 +62,26 @@
                   {{ $t('profiles.long_term_memory_settings') }}
                   <HelpTooltip v-if="dialogType !== 'edit'" :content="$t('profiles.memory_embedding_create_hint')" />
                 </div>
-                <el-form-item>
-                  <template #label>
-                    {{ $t('profiles.long_term_memory_enabled') }}
-                    <HelpTooltip :content="$t('profiles.long_term_memory_enabled_hint')" />
-                  </template>
-                  <el-switch v-model="form.configs.memory.enabled"></el-switch>
-                </el-form-item>
+                <el-row :gutter="20">
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.long_term_memory_enabled') }}
+                        <HelpTooltip :content="$t('profiles.long_term_memory_enabled_hint')" />
+                      </template>
+                      <el-switch v-model="form.configs.memory.enabled"></el-switch>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.memory_precheck_enabled') }}
+                        <HelpTooltip :content="$t('profiles.memory_precheck_enabled_hint')" />
+                      </template>
+                      <el-switch v-model="form.configs.memory.precheck_enabled" :disabled="!form.configs.memory.enabled"></el-switch>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
                 <el-row :gutter="20">
                   <el-col :xs="24" :sm="12" :md="8">
                     <el-form-item>

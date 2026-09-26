@@ -1,12 +1,15 @@
 import asyncio
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.constants import (
     ERR_SESSION_REPLY_WORK_ENDED,
     ERR_SESSION_REPLY_WORK_NOT_FOUND,
 )
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import t
 from app.models.message import Message
 from app.models.session_reply_work_item import (
@@ -28,6 +31,72 @@ __all__ = [
 
 
 class SessionReplyResult:
+    async def get_work_status(self, db: AsyncSession, work_id: int, *, uid: str) -> dict:
+        original_work = await session_reply_work_item_crud.get(db, work_id)
+        if original_work is None or original_work.uid != uid:
+            raise ResourceNotFoundException(ERR_SESSION_REPLY_WORK_NOT_FOUND)
+
+        work = await session_reply_work_item_crud.resolve_merged_target(db, work_id)
+        if work is None or work.uid != uid:
+            raise ResourceNotFoundException(ERR_SESSION_REPLY_WORK_NOT_FOUND)
+
+        response = None
+        if work.status == SessionReplyWorkStatus.SUCCEEDED:
+            execution_response = (work.execution_state or {}).get("response")
+            if isinstance(execution_response, dict):
+                response = build_identified_work_response(work, execution_response)
+
+        error = None
+        if work.status == SessionReplyWorkStatus.FAILED:
+            error = await _get_work_failure_content(db, work)
+        elif work.status == SessionReplyWorkStatus.CANCELLED:
+            error = work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status)
+
+        return {
+            "work_id": work_id,
+            "resolved_work_id": work.id,
+            "session_id": work.session_id,
+            "status": work.status.value,
+            "request_ids": get_work_request_ids(work),
+            "result_message_id": work.result_message_id,
+            "response": response,
+            "error": error,
+        }
+
+    async def wait_for_session_stream(self, *, uid: str, session_id: str, history_message_id: int = 0):
+        from app.providers.database import AsyncSessionLocal
+
+        after_work_sequence_no = 0
+        while True:
+            async with AsyncSessionLocal() as db:
+                work = await session_reply_work_item_crud.get_next_for_session_resume(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    history_message_id=history_message_id,
+                    after_sequence_no=after_work_sequence_no,
+                )
+                resume_after_sequence_no = (
+                    await session_reply_stream_event_crud.get_latest_resume_boundary_sequence(
+                        db,
+                        work_id=work.id,
+                        history_message_id=history_message_id,
+                    )
+                    if work is not None and work.id is not None
+                    else 0
+                )
+            if work is None or work.id is None:
+                return
+
+            after_work_sequence_no = work.sequence_no
+            async for event in self.wait_for_stream(
+                work.id,
+                after_sequence_no=resume_after_sequence_no,
+                resume_mode=True,
+                history_message_id=history_message_id,
+            ):
+                yield event
+
     async def wait_for_result(self, work_id: int) -> dict[str, Any]:
         from app.providers.database import AsyncSessionLocal
 
@@ -50,11 +119,17 @@ class SessionReplyResult:
                     raise RuntimeError(work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status))
             await asyncio.sleep(WORK_RESULT_POLL_INTERVAL_SECONDS)
 
-    async def wait_for_stream(self, work_id: int):
+    async def wait_for_stream(
+        self,
+        work_id: int,
+        *,
+        after_sequence_no: int = 0,
+        resume_mode: bool = False,
+        history_message_id: int = 0,
+    ):
         from app.providers.database import AsyncSessionLocal
 
         target_work_id = work_id
-        after_sequence_no = 0
         while True:
             async with AsyncSessionLocal() as db:
                 work = await session_reply_work_item_crud.resolve_merged_target(db, target_work_id)
@@ -62,7 +137,15 @@ class SessionReplyResult:
                     raise RuntimeError(t(ERR_SESSION_REPLY_WORK_NOT_FOUND))
                 if work.id != target_work_id:
                     target_work_id = work.id
-                    after_sequence_no = 0
+                    after_sequence_no = (
+                        await session_reply_stream_event_crud.get_latest_resume_boundary_sequence(
+                            db,
+                            work_id=target_work_id,
+                            history_message_id=history_message_id,
+                        )
+                        if resume_mode
+                        else 0
+                    )
 
                 events = await session_reply_stream_event_crud.list_after_sequence(
                     db,
@@ -72,6 +155,9 @@ class SessionReplyResult:
                 for item in events:
                     after_sequence_no = item.sequence_no
                     yield item.event
+
+                if events:
+                    continue
 
                 if work.status == SessionReplyWorkStatus.SUCCEEDED:
                     response = (work.execution_state or {}).get("response")

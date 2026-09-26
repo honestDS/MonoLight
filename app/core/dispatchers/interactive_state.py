@@ -58,6 +58,7 @@ class InteractiveDispatchState:
     current_turn: int = 0
     cfg: Any = None
     memory_enabled: bool = False
+    memory_precheck_enabled: bool = False
     chat_channel: Any = None
     chat_cursor_key: str = ""
     chat_channel_obj: Any | None = None

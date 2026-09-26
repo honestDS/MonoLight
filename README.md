@@ -24,7 +24,7 @@ From everyday office tasks to server operations and complex automation workflows
 > The project is currently in an early stage of active development, and its architecture is still evolving rapidly. Pull Requests are not accepted for now. You are welcome to report issues or suggest improvements through Issues. Your feedback is highly valuable to us.
 
 ## 0. Current Progress
-- Long-term memory and knowledge base unification in progress since 2026-08-20
+- UI modernization
 
 ## 1. Core Features
 
@@ -67,7 +67,6 @@ Image, audio, and video understanding, as well as image generation, are optional
 
 - For continuous conversations, the real input token count returned by the previous API call is used as the baseline for estimating the next turn incrementally. Runtime instructions are attached only to the latest user message in each turn and are moved from the previous user message to the newest one across turns. As a result, the next-turn incremental estimate may retain the previous runtime-instruction tokens, slightly overestimating usage and triggering context summarization earlier than necessary. Once the model returns actual usage, the UI is corrected using the real value. MonoLight currently avoids extra probing requests for calibration in order to prevent additional token usage.
 - The audit system only reviews the script directly executed in the current operation. It does not recursively track and audit other scripts that the entry script indirectly calls, imports, or launches. Recursive auditing has no clear natural boundary and can cause very large token consumption for large projects, so chained auditing is currently unsupported.
-- [ ] Automatic sidebar scrolling in the frontend has a compatibility issue in Firefox and is scheduled for a future fix.
 
 ## 2. Interaction Entry Points
 
@@ -79,19 +78,14 @@ Image, audio, and video understanding, as well as image generation, are optional
 - Core
   - [ ] **Dynamic Skill loading**: Add hot-pluggable skills and online hot updates for the skill library.
   - [ ] **Full multimodal support**: Extend beyond image, text, and file transfer to support video, audio, and other multimedia upload and interaction workflows.
-  - [x] **SETUP mechanism**: Refactor and simplify secure deployment to provide a friendlier setup experience for users unfamiliar with Agent-related configuration.
   - [ ] **Agent-managed system configuration tools**: Allow system configuration files to be dynamically adjusted and managed through conversations with the LLM.
   - [ ] **WebUI analytics dashboard**: Provide real-time system health, user session data, model-call statistics, and other operational information for administrators.
-  - [ ] **Reasoning effort and chain-of-thought display support**: Allow users to configure reasoning effort and display reasoning content.
   - [ ] **Define a long-term memory storage standard**: Establish a general long-term memory storage format for data exchange with external systems.
   - [ ] **Long-term memory import/export**: Allow users to export long-term memory in a standard format and import it back from that format.
 - Extensions
   - [ ] **Modernized UI**: Refactor the project UI to better match modern design conventions and improve the overall user experience.
   - [ ] **Enterprise-grade audit system**: Build on the platform's existing dual-model audit mechanism to automatically generate and deliver enterprise-grade audit reports, then immediately delete temporary audit data from the server after delivery to reduce the risk of tampering or leakage.
   - [ ] **QQ messaging adapter**: Add messaging integration for the QQ platform.
-  - [ ] **Merge knowledge bases and long-term memory**:
-    This is an exploratory feature that requires further research and implementation.
-    The main idea is that "knowledge" can also be considered a form of "long-term memory." Merging them could reduce the number of tools and avoid confusing the LLM with similar tools.
   - [ ] **Sub-agent spawning by the primary agent**:
     This is an exploratory feature that requires further research and implementation.
     The main idea is for the primary agent to create temporary sub-agents for heavy workloads that can run concurrently, with the sub-agents operating under the primary agent's guidance.

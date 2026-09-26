@@ -6,6 +6,7 @@ import { useWebSocket } from '../useWebSocket'
 import i18n from '../../i18n'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { getStreamEventIdentity } from './streamEventIdentity.js'
+import { sendHttpNonStream } from './chatTransportRuntime.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -18,6 +19,7 @@ const isWsErrorPayload = (data) => {
 }
 
 const lifecycleEventTypes = new Set([
+  'input_accepted',
   'input_queued',
   'input_dequeued',
   'agent_loop_start',
@@ -30,6 +32,7 @@ const lifecycleEventTypes = new Set([
   'tool_end',
   'todo_update',
   'done',
+  'resume_complete',
   'error',
   'proactive_reply'
 ])
@@ -59,10 +62,86 @@ export function useChatTransport() {
 
   // 并发请求回调映射管理: requestId -> callbacks
   const callbacksMap = new Map()
+  const submissionAcknowledgements = new Map()
   let sessionEventCallbacks = null
+  let reconnectHandler = null
+  let transportGeneration = 0
+  const isCurrentWebSocketOperation = generation => (
+    generation === transportGeneration
+    && transportMode.value === 'ws'
+  )
+
+  const resolveSubmissionAcknowledgement = (requestId, status, data = null) => {
+    if (!hasIdentity(requestId)) return
+    const entry = submissionAcknowledgements.get(requestId)
+    if (!entry || entry.status !== 'pending') return
+    entry.status = status
+    entry.data = data
+    entry.resolve({ status, data })
+  }
+
+  const createSubmissionAcknowledgement = (requestId) => {
+    if (!hasIdentity(requestId)) return
+    let resolve
+    const promise = new Promise(resolvePromise => {
+      resolve = resolvePromise
+    })
+    submissionAcknowledgements.set(requestId, {
+      status: 'pending',
+      data: null,
+      promise,
+      resolve
+    })
+  }
+
+  const settlePendingSubmissionsAsUnknown = () => {
+    for (const requestId of submissionAcknowledgements.keys()) {
+      resolveSubmissionAcknowledgement(requestId, 'unknown')
+    }
+    submissionAcknowledgements.clear()
+  }
+
+  const waitForSubmissionAcknowledgement = async (requestId, timeoutMs = 5000) => {
+    if (!hasIdentity(requestId)) return { status: 'unknown', data: null }
+    const entry = submissionAcknowledgements.get(requestId)
+    if (!entry) return { status: 'unknown', data: null }
+    if (entry.status !== 'pending') {
+      submissionAcknowledgements.delete(requestId)
+      return { status: entry.status, data: entry.data }
+    }
+
+    let timeoutId
+    const timeoutResult = new Promise(resolve => {
+      timeoutId = setTimeout(() => resolve({ status: 'unknown', data: null }), timeoutMs)
+    })
+    const result = await Promise.race([entry.promise, timeoutResult])
+    clearTimeout(timeoutId)
+    submissionAcknowledgements.delete(requestId)
+    return result
+  }
 
   // 注册唯一持久的消息分发器，支持多请求并行分发
   wsManager.onMessage((data) => {
+    if (data.type === 'connection_closed') {
+      wsConnected.value = false
+      settlePendingSubmissionsAsUnknown()
+      callbacksMap.clear()
+      sessionEventCallbacks = null
+      return
+    }
+
+    if (data.type === 'connection_reopened') {
+      if (transportMode.value !== 'ws') {
+        disconnectWebSocket()
+        return
+      }
+      wsConnected.value = true
+      if (reconnectHandler) {
+        void Promise.resolve().then(() => reconnectHandler()).catch(console.error)
+      }
+      return
+    }
+
     const requestId = hasIdentity(data.request_id)
       ? data.request_id
       : getEventRequestIds(data).find(eventRequestId => callbacksMap.has(eventRequestId)) || 'default'
@@ -97,6 +176,7 @@ export function useChatTransport() {
       onToolEnd,
       onTodoUpdate,
       onComplete,
+      onResumeComplete,
       onError,
       onSessionId,
       onProactiveReply,
@@ -105,6 +185,7 @@ export function useChatTransport() {
       onAuditToolResultsUpdate,
       onContextSummaryStart,
       onContextSummaryEnd,
+      onInputAccepted,
       onInputQueued,
       onInputDequeued,
       onAgentLoopStart,
@@ -113,6 +194,7 @@ export function useChatTransport() {
       onWorkFinished,
       deferAgentLoopOutput = false,
       completeBeforeWorkFinished = false,
+      deferLoadingUntilResumeComplete = false,
       scrollToBottom,
       setLoading,
       requestId: currentRequestId
@@ -136,6 +218,12 @@ export function useChatTransport() {
 
     if (type === 'llm_request_metadata') {
       if (onLlmRequestMetadata) onLlmRequestMetadata(data)
+      return
+    }
+
+    if (type === 'input_accepted') {
+      resolveSubmissionAcknowledgement(requestId, 'accepted', data)
+      if (onInputAccepted) onInputAccepted(data)
       return
     }
 
@@ -242,12 +330,19 @@ export function useChatTransport() {
         complete()
       }
       getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-      if (setLoading) {
+      if (setLoading && !deferLoadingUntilResumeComplete) {
         setLoading(false)
       }
       if (scrollToBottom) {
         scrollToBottom()
       }
+      return
+    }
+
+    if (type === 'resume_complete') {
+      if (onResumeComplete) onResumeComplete(data)
+      if (setLoading) setLoading(false)
+      if (scrollToBottom) scrollToBottom()
       return
     }
 
@@ -313,12 +408,13 @@ export function useChatTransport() {
         ...(hasIdentity(data.request_id) || !hasIdentity(requestId) ? {} : { request_id: requestId })
       })
       console.error('WebSocket业务错误:', errorMessage)
+      resolveSubmissionAcknowledgement(requestId, 'rejected', errorEvent)
       if (onWorkFinished) onWorkFinished(errorEvent)
       if (onError) {
         onError(errorMessage, null, requestId, errorEvent)
       }
       getEventRequestIds(errorEvent).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-      if (setLoading) {
+      if (setLoading && !deferLoadingUntilResumeComplete) {
         setLoading(false)
       }
       return
@@ -337,10 +433,11 @@ export function useChatTransport() {
           ...data,
           ...(hasIdentity(data.request_id) || !hasIdentity(requestId) ? {} : { request_id: requestId })
         })
+        resolveSubmissionAcknowledgement(requestId, 'rejected', errorEvent)
         if (onWorkFinished) onWorkFinished(errorEvent)
         if (onError) onError(content, null, requestId, errorEvent)
         getEventRequestIds(errorEvent).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-        if (setLoading) setLoading(false)
+        if (setLoading && !deferLoadingUntilResumeComplete) setLoading(false)
         return
       }
 
@@ -348,7 +445,7 @@ export function useChatTransport() {
         if (onWorkFinished) onWorkFinished(data)
         if (onComplete) onComplete(data, null, requestId)
         getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-        if (setLoading) setLoading(false)
+        if (setLoading && !deferLoadingUntilResumeComplete) setLoading(false)
         if (scrollToBottom) scrollToBottom()
       }
     }
@@ -356,6 +453,8 @@ export function useChatTransport() {
 
   // 断开 WebSocket 连接
   const disconnectWebSocket = () => {
+    transportGeneration += 1
+    settlePendingSubmissionsAsUnknown()
     wsManager.disconnect()
     wsConnected.value = false
     callbacksMap.clear()
@@ -364,27 +463,14 @@ export function useChatTransport() {
 
   // ==================== 发送方法 ====================
 
-  const httpSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning }) => {
-    const payload = {
-      message,
-      session_id: sessionId || null,
-      attachments: attachments || null,
-      request_id: requestId
-    }
-    if (profileOverrideId !== null && profileOverrideId !== undefined) {
-      payload.profile_override_id = profileOverrideId
-    }
-    if (!sessionId && showToolCalls === false) {
-      payload.show_tool_calls = false
-    }
-    if (!sessionId && showReasoning === false) {
-      payload.show_reasoning = false
-    }
-    const res = await chatApi.completions({ ...payload, stream: false })
-    return res.data
-  }
+  const httpSend = async options => sendHttpNonStream({
+    api: chatApi,
+    ...options
+  })
 
   const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, callbacks = {} }) => {
+    if (transportMode.value !== 'ws') return false
+    const operationGeneration = transportGeneration
     const token = localStorage.getItem('token')
     if (!token) throw new Error(t('chat.not_logged_in'))
 
@@ -392,20 +478,38 @@ export function useChatTransport() {
     sessionEventCallbacks = finalCallbacks
     if (requestId) {
       callbacksMap.set(requestId, finalCallbacks)
+      createSubmissionAcknowledgement(requestId)
     }
 
     if (!wsManager.isConnected.value) {
       try {
         await wsManager.connect(token)
-        wsConnected.value = true
       } catch (e) {
+        if (!isCurrentWebSocketOperation(operationGeneration)) {
+          if (requestId) {
+            callbacksMap.delete(requestId)
+            submissionAcknowledgements.delete(requestId)
+          }
+          return false
+        }
         console.error('WebSocket连接失败:', e)
-        ElMessage.error(t('chat.ws_connect_failed'))
-        transportMode.value = 'http'
-        if (requestId) callbacksMap.delete(requestId)
+        resolveSubmissionAcknowledgement(requestId, 'not_sent')
+        if (requestId) {
+          callbacksMap.delete(requestId)
+          submissionAcknowledgements.delete(requestId)
+        }
         return false
       }
     }
+
+    if (!isCurrentWebSocketOperation(operationGeneration)) {
+      if (requestId) {
+        callbacksMap.delete(requestId)
+        submissionAcknowledgements.delete(requestId)
+      }
+      return false
+    }
+    wsConnected.value = true
 
     const wsData = {
       type: 'chat',
@@ -425,8 +529,50 @@ export function useChatTransport() {
     }
 
     if (!wsManager.sendMessage(wsData)) {
+      resolveSubmissionAcknowledgement(requestId, 'not_sent')
+      if (requestId) {
+        callbacksMap.delete(requestId)
+        submissionAcknowledgements.delete(requestId)
+      }
+      return false
+    }
+    return true
+  }
+
+  const resumeSession = async ({ sessionId, historyMessageId = 0, callbacks = {} }) => {
+    if (!sessionId || transportMode.value !== 'ws') return false
+    const operationGeneration = transportGeneration
+
+    const token = localStorage.getItem('token')
+    if (!token) throw new Error(t('chat.not_logged_in'))
+
+    const finalCallbacks = { ...callbacks, sessionId }
+    sessionEventCallbacks = finalCallbacks
+
+    if (!wsManager.isConnected.value) {
+      try {
+        await wsManager.connect(token)
+      } catch (e) {
+        if (!isCurrentWebSocketOperation(operationGeneration)) {
+          if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
+          return false
+        }
+        console.error('WebSocket恢复连接失败:', e)
+        ElMessage.error(t('chat.ws_connect_failed'))
+        if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
+        return false
+      }
+    }
+
+    if (!isCurrentWebSocketOperation(operationGeneration)) {
+      if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
+      return false
+    }
+    wsConnected.value = true
+
+    if (!wsManager.sendMessage({ type: 'resume', session_id: sessionId, history_message_id: historyMessageId })) {
       ElMessage.error(t('chat.ws_message_send_failed'))
-      if (requestId) callbacksMap.delete(requestId)
+      if (sessionEventCallbacks === finalCallbacks) sessionEventCallbacks = null
       return false
     }
     return true
@@ -440,31 +586,37 @@ export function useChatTransport() {
     }
   }
 
-  const setTransportMode = async (mode, disconnectCallback = null) => {
+  const setTransportMode = async mode => {
     if (mode === 'ws' && transportMode.value !== 'ws') {
+      transportGeneration += 1
       transportMode.value = mode
-    } else if (mode === 'http' && transportMode.value !== 'http') {
-      if (wsConnected.value) {
-        if (disconnectCallback) disconnectCallback()
-        else disconnectWebSocket()
-      }
+    } else if (mode === 'http') {
+      disconnectWebSocket()
       transportMode.value = mode
     }
   }
 
   const initWebSocket = async () => {
+    if (transportMode.value !== 'ws') return false
+    const operationGeneration = transportGeneration
     const token = localStorage.getItem('token')
     if (token) {
       try {
         await wsManager.connect(token)
+        if (!isCurrentWebSocketOperation(operationGeneration)) return false
         wsConnected.value = true
         return true
       } catch (e) {
+        if (!isCurrentWebSocketOperation(operationGeneration)) return false
         console.error('Init WS failed:', e)
         return false
       }
     }
     return false
+  }
+
+  const setReconnectHandler = (callback) => {
+    reconnectHandler = typeof callback === 'function' ? callback : null
   }
 
   return {
@@ -473,9 +625,12 @@ export function useChatTransport() {
     disconnectWebSocket,
     httpSend,
     wsSend,
+    resumeSession,
     send,
     setTransportMode,
     initWebSocket,
+    setReconnectHandler,
+    waitForSubmissionAcknowledgement,
     wsManager
   }
 }

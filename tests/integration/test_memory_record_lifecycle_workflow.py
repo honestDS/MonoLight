@@ -9,7 +9,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 import app.core.memory_jobs.handler_cleanup as memory_cleanup_handler
 import app.core.memory_jobs.handler_execution as memory_execution_handler
@@ -37,6 +37,7 @@ from app.models.memory import (
     LongTermMemoryStore,
 )
 from app.providers.database import get_db
+from tests.database_support import clone_sqlite_schema
 
 MEMORY_TABLES = [
     ModelChannel.__table__,
@@ -152,13 +153,7 @@ async def memory_lifecycle_runtime(
         finally:
             cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=MEMORY_TABLES,
-            )
-        )
+    await clone_sqlite_schema(tmp_path / "memory-record-lifecycle.db", tables=MEMORY_TABLES)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     backend = MemoryVectorBackend()

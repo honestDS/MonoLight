@@ -10,10 +10,11 @@ import chromadb
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from app.core import paths as app_paths
 from app.models import KnowledgeBaseCollectionOwner
+from tests.database_support import clone_sqlite_schema
 
 
 class _ImportSafePersistentClient:
@@ -33,8 +34,7 @@ with (
 async def sqlite_session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     database_path = tmp_path / "knowledge-base-collection-cleanup.sqlite"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+    await clone_sqlite_schema(database_path)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:

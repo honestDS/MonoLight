@@ -64,7 +64,7 @@
                   :class="{ loading: sessionsLoading }"
                   :title="$t('chat.refresh_sessions')"
                   @click.stop="loadSessions"
-                ><Refresh /></el-icon>
+                ><Refresh class="refresh-icon-glyph" aria-hidden="true" /></el-icon>
               </div>
             </div>
             <div class="sessions-list">
@@ -80,48 +80,57 @@
                   <span class="session-group-title-text">{{ group.label }}</span>
                   <el-icon class="session-group-chevron"><ArrowDown /></el-icon>
                 </div>
-                <div
-                  :class="['session-group-body', { 'is-collapsed': collapsedGroups.has(group.key) }]"
+                <Transition
+                  @before-enter="handleSessionGroupBeforeEnter"
+                  @enter="handleSessionGroupEnter"
+                  @after-enter="resetSessionGroupTransition"
+                  @before-leave="handleSessionGroupBeforeLeave"
+                  @leave="handleSessionGroupLeave"
+                  @after-leave="resetSessionGroupTransition"
                 >
                   <div
-                    v-for="session in group.sessions"
                     v-show="!collapsedGroups.has(group.key)"
-                    :key="session.session_id"
-                    :data-session-id="session.session_id"
-                    :class="['session-item', { active: currentSessionId === session.session_id }]"
-                    @click="handleSelectSession(session)"
+                    class="session-group-body"
                   >
-                    <div class="session-content">
-                      <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
-                        <span class="session-title-text">
-                          <template v-if="typingSessionId === session.session_id">
-                            <span
-                              v-for="(char, index) in session.title"
-                              :key="index"
-                              class="typing-char"
-                            >{{ char }}</span>
-                          </template>
-                          <template v-else>
-                            {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
-                          </template>
-                        </span>
-                        <span
-                          v-if="session.is_loading"
-                          class="session-loading-indicator"
-                          :title="$t('chat.session_reply_in_progress')"
-                          role="status"
-                          aria-live="polite"
-                        ></span>
+                    <div
+                      v-for="session in group.sessions"
+                      :key="session.session_id"
+                      :data-session-id="session.session_id"
+                      :class="['session-item', { active: currentSessionId === session.session_id }]"
+                      @click="handleSelectSession(session)"
+                    >
+                      <div class="session-content">
+                        <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
+                          <span class="session-title-text">
+                            <template v-if="typingSessionId === session.session_id">
+                              <span
+                                v-for="(char, index) in session.title"
+                                :key="index"
+                                class="typing-char"
+                              >{{ char }}</span>
+                            </template>
+                            <template v-else>
+                              {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
+                            </template>
+                          </span>
+                          <span
+                            v-if="session.is_loading"
+                            class="session-loading-indicator"
+                            :title="$t('chat.session_reply_in_progress')"
+                            role="status"
+                            aria-live="polite"
+                          ></span>
+                        </div>
+                        <div class="session-meta" :title="`${$t('chat.session_source')}: ${formatSessionSource(session.source) || '-'}`">
+                          <span v-if="session.source" class="session-source">{{ formatSessionSource(session.source) }}</span>
+                        </div>
                       </div>
-                      <div class="session-meta" :title="`${$t('chat.session_source')}: ${session.source || '-'}`">
-                        <span v-if="session.source" class="session-source">{{ session.source }}</span>
+                      <div class="session-actions">
+                        <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
                       </div>
-                    </div>
-                    <div class="session-actions">
-                      <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
                     </div>
                   </div>
-                </div>
+                </Transition>
               </template>
               <div v-if="groupedSessions.length === 0 && !sessionsLoading" class="empty-tip">
                 {{ $t('chat.no_sessions') }}
@@ -249,7 +258,7 @@
                       <span class="more-option-label">{{ $t('chat.more_options_non_stream') }} / {{ $t('chat.more_options_stream') }}</span>
                       <el-radio-group
                         :model-value="isWsModeComputed ? 'stream' : 'non_stream'"
-                        :disabled="isCurrentSessionReadOnly"
+                        :disabled="isCurrentSessionReadOnly || modeSettingSubmitting || transportModeChangeBlocked"
                         size="small"
                         @update:model-value="val => handleModeChange(val === 'stream')"
                       >
@@ -325,7 +334,7 @@
                     type="primary"
                     @click="send"
                     :loading="isCurrentSessionReadOnly && guidanceSubmitting"
-                    :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || !inputMsg.trim() : !inputMsg.trim() && attachments.length === 0"
+                    :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || !inputMsg.trim() : modeSettingSubmitting || (!inputMsg.trim() && attachments.length === 0)"
                     class="action-btn"
                     circle
                   >
@@ -366,6 +375,12 @@ import {
 } from '../utils/chatContentReveal'
 
 const { t } = useI18n()
+
+const formatSessionSource = (source) => {
+  if (source === 'http') return t('chat.session_source_http')
+  if (source === 'ws') return t('chat.session_source_ws')
+  return source
+}
 
 const chat = useChatSession()
 const profiles = ref([])
@@ -419,6 +434,34 @@ const toggleGroup = (key) => {
   if (next.has(key)) next.delete(key)
   else next.add(key)
   collapsedGroups.value = next
+}
+
+const handleSessionGroupBeforeEnter = (element) => {
+  element.style.height = '0px'
+  element.style.opacity = '0'
+}
+
+const handleSessionGroupEnter = (element) => {
+  const targetHeight = element.scrollHeight
+  void element.offsetHeight
+  element.style.height = `${targetHeight}px`
+  element.style.opacity = '1'
+}
+
+const handleSessionGroupBeforeLeave = (element) => {
+  element.style.height = `${element.scrollHeight}px`
+  element.style.opacity = '1'
+}
+
+const handleSessionGroupLeave = (element) => {
+  void element.offsetHeight
+  element.style.height = '0px'
+  element.style.opacity = '0'
+}
+
+const resetSessionGroupTransition = (element) => {
+  element.style.height = ''
+  element.style.opacity = ''
 }
 
 // 会话列表分组：今天 / 昨天 / 以前，按 last_active 降序
@@ -489,9 +532,6 @@ const toggleMarkdown = async (val) => {
   }
 }
 
-// 本地流式模式状态（从 transportMode 计算）
-const isWsMode = ref(true)
-
 // 计算属性：根据 transportMode 计算当前是否为流式模式
 const isWsModeComputed = computed(() => transportMode.value === 'ws')
 
@@ -508,9 +548,10 @@ const {
   activeCollapse,
   currentSession,
   transportMode,
+  modeSettingSubmitting,
+  transportModeChangeBlocked,
   attachments,
   isCurrentSessionReadOnly,
-  externalSessionAutoPullEnabled,
   isContextSummarizing,
   llmRequestMetadata,
   historyLoading,
@@ -670,6 +711,8 @@ const guidanceSubmitting = ref(false)
 
 // 拦截发送，发送完成后清空列表
 const send = async () => {
+  if (modeSettingSubmitting.value) return
+
   if (isCurrentSessionReadOnly.value) {
     const content = inputMsg.value.trim()
     const sessionId = currentSessionId.value
@@ -744,13 +787,18 @@ const handleAuditDecision = async ({ decision }) => {
 
 // 通信模式切换
 const handleModeChange = async (val) => {
+  if (modeSettingSubmitting.value) return
+
   if (isCurrentSessionReadOnly.value) {
     ElMessage.warning(t('chat.external_session_read_only'))
     return
   }
+  if (transportModeChangeBlocked.value) {
+    ElMessage.warning(t('chat.transport_change_blocked'))
+    return
+  }
 
   const mode = val ? 'ws' : 'http'
-  isWsMode.value = val
   await setTransportMode(mode)
 }
 

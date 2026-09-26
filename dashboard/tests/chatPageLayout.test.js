@@ -51,3 +51,14 @@ test('sessions overlay panel opens from the floating trigger and closes on selec
   assert.match(chatViewSource, /const handleSelectSession = \(session\) => \{\s*closeSessionsPanel\(\)/)
   assert.match(chatViewSource, /const handleCreateNewSession = \(\) => \{\s*closeSessionsPanel\(\)/)
 })
+
+test('session groups animate measured height for both collapse and expand', () => {
+  assert.match(chatViewSource, /<Transition[\s\S]*?@enter="handleSessionGroupEnter"[\s\S]*?@leave="handleSessionGroupLeave"/)
+  assert.match(chatViewSource, /v-show="!collapsedGroups\.has\(group\.key\)"[\s\S]*?class="session-group-body"/)
+  assert.match(chatViewSource, /const handleSessionGroupEnter = \(element\) => \{[\s\S]*?element\.scrollHeight/)
+  assert.match(chatViewSource, /const handleSessionGroupLeave = \(element\) => \{[\s\S]*?element\.style\.height = '0px'/)
+  assert.match(
+    chatStyles,
+    /\.session-group-body\s*\{[\s\S]*?overflow:\s*hidden;[\s\S]*?transition:\s*height 0\.28s ease, opacity 0\.2s ease;/
+  )
+})
