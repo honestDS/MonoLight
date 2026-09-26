@@ -94,6 +94,33 @@ def test_tool_result_round_budget_prefers_explicit_required_input_tokens(monkeyp
     assert budget_tokens == (250_000 - 20_480 - 256 - 190_000) // 2
 
 
+def test_tool_result_round_budget_falls_back_to_local_usage_when_provider_baseline_already_exceeds_window(monkeypatch):
+    usage = SimpleNamespace(
+        budget=SimpleNamespace(
+            context_window_tokens=250_000,
+            output_tokens=20_480,
+            safety_margin_tokens=256,
+        ),
+        required_input_tokens=175_849,
+    )
+    monkeypatch.setattr(
+        truncate_tool_result_module,
+        "measure_context_request_usage",
+        lambda **_kwargs: usage,
+    )
+
+    budget_tokens = truncate_tool_result_module.calculate_tool_result_round_budget_tokens(
+        messages=[],
+        context_window_k=250,
+        max_tokens=20_480,
+        tools=[],
+        required_input_tokens_override=352_375,
+        fallback_to_local_usage_on_overflow=True,
+    )
+
+    assert budget_tokens == (250_000 - 20_480 - 256 - 175_849) // 2
+
+
 def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(monkeypatch):
     state = SimpleNamespace(
         latest_llm_request_metadata={

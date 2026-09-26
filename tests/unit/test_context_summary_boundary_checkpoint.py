@@ -372,6 +372,72 @@ async def test_checkpoint_excludes_todo_from_summary_input_and_reattaches_latest
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(monkeypatch, db_session: AsyncSession):
+    captured = {}
+    todo_snapshot = '<current_session_todo_snapshot>{"revision":16,"todos":[{"content":"verify","status":"in_progress"}]}</current_session_todo_snapshot>'
+    session = ChatSession(
+        session_id="session-1",
+        uid="user-1",
+        context_summary_revision=1,
+        context_content_revision=0,
+    )
+    db_session.add(session)
+    await db_session.commit()
+
+    async def load_snapshot(_db, *, uid, session_id):
+        assert uid == "user-1"
+        assert session_id == "session-1"
+        return todo_snapshot
+
+    async def ensure_summary(_db, **kwargs):
+        captured.update(kwargs)
+        return ContextSummaryState(content=None, message_id=None)
+
+    def estimate_incremental(messages, tools, metadata, **kwargs):
+        captured["estimate_messages"] = messages
+        captured["estimate_metadata"] = metadata
+        captured["estimate_kwargs"] = kwargs
+        return 352_375
+
+    monkeypatch.setattr(checkpoint_module, "load_current_session_todo_snapshot", load_snapshot)
+    monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
+    monkeypatch.setattr(checkpoint_module, "estimate_incremental_input_tokens", estimate_incremental)
+
+    previous_metadata = {
+        "input_tokens": 344_000,
+        "input_tokens_source": "provider",
+    }
+    await checkpoint_module.apply_context_summary_checkpoint(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile=object(),
+        cfg=object(),
+        messages=[
+            InternalMessage(role=MessageRole.SYSTEM, content="system"),
+            InternalMessage(id=1, role=MessageRole.USER, content="old"),
+            InternalMessage(id=2, role=MessageRole.ASSISTANT, content="answer"),
+            InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content=f"result\n\n{todo_snapshot}"),
+            InternalMessage(id=4, role=MessageRole.USER, content="current"),
+        ],
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=4,
+        context_window_k=250,
+        max_tokens=20_480,
+        tools=[],
+        model_id="gpt-5.6-luna",
+        protocol="openai_responses",
+        previous_llm_request_metadata=previous_metadata,
+    )
+
+    assert captured["estimate_metadata"] is previous_metadata
+    assert captured["required_input_tokens_override"] == 352_375
+    assert captured["reserved_tokens"] > 0
+    assert any("current_session_todo_snapshot" in str(message.content) for message in captured["estimate_messages"])
+    assert all("current_session_todo_snapshot" not in str(message.content) for message in captured["fixed_request_messages"])
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_keeps_an_entire_merged_user_batch_after_its_earliest_physical_message(
     monkeypatch,
 ):

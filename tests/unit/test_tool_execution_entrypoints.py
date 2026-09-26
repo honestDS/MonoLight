@@ -51,3 +51,34 @@ def test_confirmed_tool_result_budget_uses_provider_input_plus_confirmed_tool_ca
     )
 
     assert budget_tokens == (250_000 - 20_480 - 256 - 190_765) // 2
+
+
+def test_confirmed_tool_result_budget_keeps_minimal_budget_when_provider_baseline_already_exceeds_window(monkeypatch):
+    session = SimpleNamespace(
+        llm_request_metadata={
+            "context_window_tokens": 250_000,
+            "max_output_tokens": 20_480,
+            "input_tokens": 352_375,
+            "input_tokens_source": "provider",
+        }
+    )
+    confirmed_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[
+            InternalToolCall(
+                id="call-confirmed",
+                name="execute_shell",
+                arguments={"command": "git diff", "execution_mode": "non_interactive"},
+            )
+        ],
+    )
+    monkeypatch.setattr(executor_confirmed_module, "estimate_tokens", lambda _text: 2_000)
+    monkeypatch.setattr(executor_confirmed_module, "message_token_text", lambda _message: "confirmed-tool-call")
+
+    budget_tokens = executor_confirmed_module._resolve_confirmed_tool_result_round_budget_tokens(
+        session,
+        confirmed_message,
+        tools=[],
+    )
+
+    assert budget_tokens == 1

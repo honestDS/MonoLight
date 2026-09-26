@@ -17,6 +17,7 @@ MESSAGES = {
     "ERR_CHAT_STREAM_NOT_SUPPORTED": "当前页面使用了已停用的发送方式，请刷新页面后重试",
     "ERR_CHAT_INPUT_TOO_LONG": "输入内容超过当前模型可用上下文预算，请缩短消息或降低输出长度后重试",
     "ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED": "当前模型上下文预算已被系统提示词、工具定义或输出长度占满，请调整 Profile 配置后重试",
+    "ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION": "当前请求上下文超过模型可用窗口，且无法通过历史摘要压缩到可用范围，请缩短当前输入、降低输出长度或调整 Profile 配置后重试",
     "ERR_BACKGROUND_TASK_NOT_FOUND": "后台任务不存在",
     "ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE": "后台任务配置文件不可用于当前用户。",
     "ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND": "定时任务配置文件不存在",

@@ -70,6 +70,7 @@ def calculate_tool_result_round_budget_tokens(
     max_tokens: int,
     tools: list[dict] | None,
     required_input_tokens_override: int | None = None,
+    fallback_to_local_usage_on_overflow: bool = False,
 ) -> int:
     if isinstance(required_input_tokens_override, int) and not isinstance(required_input_tokens_override, bool) and required_input_tokens_override >= 0:
         budget = build_context_request_budget(
@@ -77,6 +78,16 @@ def calculate_tool_result_round_budget_tokens(
             max_tokens=max_tokens,
         )
         required_input_tokens = required_input_tokens_override
+        hard_input_limit = budget.context_window_tokens - budget.output_tokens - budget.safety_margin_tokens
+        if required_input_tokens >= hard_input_limit and fallback_to_local_usage_on_overflow:
+            usage = measure_context_request_usage(
+                messages=messages,
+                context_window_k=context_window_k,
+                max_tokens=max_tokens,
+                tools=tools,
+            )
+            budget = usage.budget
+            required_input_tokens = usage.required_input_tokens
     else:
         usage = measure_context_request_usage(
             messages=messages,
