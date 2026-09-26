@@ -6,14 +6,14 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.constants import ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.dispatchers import interactive_helpers as interactive_helpers_module
 from app.core.dispatchers import interactive_runtime as interactive_runtime_module
 from app.core.dispatchers import interactive_tools as interactive_tools_module
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
-from app.core.exceptions import LLMException
+from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.terminal.schemas import (
     ShellInteractiveHandoffResult,
     TerminalOutputBufferState,
@@ -83,6 +83,162 @@ class _Logger:
 
     def error(self, message, **kwargs):
         return None
+
+
+def _context_length_generation_state(*, stream_event_callback=None):
+    return SimpleNamespace(
+        db=_Session(),
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        cfg=SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90)),
+        messages=[InternalMessage(id=1, role=MessageRole.USER, content="request")],
+        checkpoint_state=SimpleNamespace(
+            upper_message_id=1,
+            total_output_tokens=0,
+            session_total_input_tokens=0,
+            session_total_cached_tokens=0,
+            session_total_output_tokens=0,
+        ),
+        context_summary_work_validity_checker=None,
+        context_summary_lifecycle_callback=None,
+        chat_params={
+            "temperature": None,
+            "top_p": None,
+            "max_tokens": 512,
+            "chat_timeout": 60,
+            "context_window_k": 4,
+        },
+        model_entry={"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"},
+        chat_channel=object(),
+        chat_cursor_key="1:CHAT",
+        chat_channel_obj=_Channel(),
+        channel_rule=SimpleNamespace(priority=1),
+        latest_llm_request_metadata=None,
+        current_turn=1,
+        stream_event_callback=stream_event_callback,
+        request_metadata_callback=None,
+        expose_tool_call_content=True,
+        show_tool_calls=True,
+        dispatcher_mode="stream" if stream_event_callback is not None else "non_stream",
+        dispatch_logger=_Logger(),
+        img_understanding=False,
+        audio_understanding=False,
+        video_understanding=False,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_context_length_forces_summary_on_current_channel_before_fallback(monkeypatch, streaming):
+    events = []
+
+    async def stream_event_callback(event):
+        events.append(event)
+
+    state = _context_length_generation_state(
+        stream_event_callback=stream_event_callback if streaming else None,
+    )
+    attempts = []
+    summary_calls = []
+    selection_calls = []
+
+    async def apply_checkpoint(_db, **kwargs):
+        summary_calls.append(dict(kwargs))
+        if kwargs.get("force"):
+            return [InternalMessage(id=1, role=MessageRole.USER, content="compressed request")]
+        return kwargs["messages"]
+
+    async def select_channel(_db, _channel_config, _expected_usage, **kwargs):
+        selection_calls.append(set(kwargs.get("excluded_priorities") or set()))
+        raise AssertionError("successful same-channel recovery must not switch channels")
+
+    async def generate_response(**kwargs):
+        attempts.append(kwargs["model_id"])
+        if len(attempts) == 1:
+            raise LLMContextLengthException(provider_message="maximum context length exceeded")
+        return SimpleNamespace(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"))
+
+    async def generate_stream_response(**kwargs):
+        response = await generate_response(**kwargs)
+        await kwargs["on_content"]("ok")
+        return response
+
+    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_checkpoint)
+    monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)
+    monkeypatch.setattr(interactive_generation_module, "get_multimodal_from_entry", lambda _model_entry: (False, False, False))
+    monkeypatch.setattr(interactive_generation_module, "resolve_chat_params", lambda _model_entry, _channel: dict(state.chat_params))
+    monkeypatch.setattr(
+        interactive_generation_module.ContextManager,
+        "trim_messages_for_model_request",
+        lambda **kwargs: kwargs["messages"],
+    )
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
+    monkeypatch.setattr(
+        interactive_generation_module.LLMClient,
+        "generate_with_stream_callback",
+        generate_stream_response,
+    )
+
+    result = await interactive_generation_module.generate_interactive_turn(
+        state,
+        current_tools=[],
+        response_id="response-1",
+    )
+
+    assert result.message.content == "ok"
+    assert attempts == ["model-1", "model-1"]
+    assert sum(1 for call in summary_calls if call.get("force")) == 1
+    assert selection_calls == []
+    assert state.messages[0].content == "compressed request"
+
+
+@pytest.mark.asyncio
+async def test_context_length_failed_summary_falls_through_each_channel_then_raises_i18n(monkeypatch):
+    state = _context_length_generation_state()
+    attempts = []
+    summary_calls = []
+    selection_calls = []
+
+    async def apply_checkpoint(_db, **kwargs):
+        summary_calls.append(dict(kwargs))
+        return kwargs["messages"]
+
+    async def select_channel(_db, _channel_config, _expected_usage, **kwargs):
+        excluded = set(kwargs.get("excluded_priorities") or set())
+        selection_calls.append(excluded)
+        if excluded == {1}:
+            return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
+        if excluded == {1, 2}:
+            return _Channel(), {"model_id": "model-3", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=3)
+        return None
+
+    async def generate_response(**kwargs):
+        attempts.append(kwargs["model_id"])
+        raise LLMContextLengthException(provider_message="maximum context length exceeded")
+
+    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_checkpoint)
+    monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)
+    monkeypatch.setattr(interactive_generation_module, "get_multimodal_from_entry", lambda _model_entry: (False, False, False))
+    monkeypatch.setattr(interactive_generation_module, "resolve_chat_params", lambda _model_entry, _channel: dict(state.chat_params))
+    monkeypatch.setattr(
+        interactive_generation_module.ContextManager,
+        "trim_messages_for_model_request",
+        lambda **kwargs: kwargs["messages"],
+    )
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
+
+    with pytest.raises(LLMContextLengthException) as exc_info:
+        await interactive_generation_module.generate_interactive_turn(
+            state,
+            current_tools=[],
+            response_id="response-1",
+        )
+
+    assert attempts == ["model-1", "model-2", "model-3"]
+    assert sum(1 for call in summary_calls if call.get("force")) == 3
+    assert selection_calls == [{1}, {1, 2}, {1, 2, 3}]
+    assert exc_info.value.message == ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH
 
 
 @pytest.mark.asyncio

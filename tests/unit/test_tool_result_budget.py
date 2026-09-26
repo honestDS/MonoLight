@@ -142,7 +142,7 @@ def test_interactive_tool_budget_uses_local_fallback_without_provider_usage():
     assert interactive_tools_module._resolve_tool_result_required_input_tokens(state, ai_msg) is None
 
 
-def test_truncated_tool_result_keeps_notice_when_budget_is_smaller_than_notice(monkeypatch):
+def test_truncated_tool_result_uses_budget_safe_notice_when_full_notice_does_not_fit(monkeypatch):
     monkeypatch.setattr(truncate_tool_result_module, "_get_truncation_notice", lambda: "[TRUNCATED]")
 
     result = truncate_tool_result_module.truncate_tool_result_with_stats(
@@ -152,10 +152,11 @@ def test_truncated_tool_result_keeps_notice_when_budget_is_smaller_than_notice(m
     )
 
     assert result.truncated is True
-    assert result.content == "[TRUNCATED]"
+    assert result.content == "cut"
+    assert result.final_tokens <= 1
 
 
-def test_truncated_tool_result_fallback_keeps_notice_when_budget_is_smaller_than_notice(monkeypatch):
+def test_truncated_tool_result_fallback_uses_budget_safe_notice_when_full_notice_does_not_fit(monkeypatch):
     monkeypatch.setattr(truncate_tool_result_module, "_get_truncation_notice", lambda: "[TRUNCATED]")
     monkeypatch.setattr(
         truncate_tool_result_module.tiktoken,
@@ -170,7 +171,22 @@ def test_truncated_tool_result_fallback_keeps_notice_when_budget_is_smaller_than
     )
 
     assert result.truncated is True
-    assert result.content == "[TRUNCATED]"
+    assert result.content == "cut"
+    assert result.final_tokens <= 1
+
+
+def test_parallel_tiny_tool_budgets_do_not_expand_from_truncation_notices():
+    messages = [InternalMessage(role=MessageRole.TOOL, tool_call_id=f"call-{index}", content="x" * 100) for index in range(20)]
+
+    truncate_tool_result_module.truncate_tool_messages_for_budget(
+        messages,
+        context_window_k=1,
+        budget_tokens=20,
+        uid="user-1",
+        session_id="session-1",
+    )
+
+    assert all(message.content == "cut" for message in messages)
 
 
 def test_tool_result_round_budget_never_becomes_non_positive(monkeypatch):

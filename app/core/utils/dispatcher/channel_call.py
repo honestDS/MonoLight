@@ -10,7 +10,7 @@ from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_LLM_EMPTY_RESPONSE,
 )
-from app.core.exceptions import ApiKeyException, LLMException
+from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 
 ChatRequestBuilder = Callable[[dict[str, Any]], list[InternalMessage] | Awaitable[list[InternalMessage]]]
 RequestMetadataCallback = Callable[[dict[str, Any]], Awaitable[None]]
+ContextLengthRecoveryCallback = Callable[[dict[str, Any]], bool | Awaitable[bool]]
 
 
 async def _resolve_request_messages(builder: ChatRequestBuilder, chat_params: dict[str, Any]) -> list[InternalMessage]:
@@ -51,8 +52,10 @@ async def generate_chat_with_fallback(
     require_content_or_tools: bool = True,
     require_content: bool = False,
     request_metadata_callback: RequestMetadataCallback | None = None,
+    context_length_recovery_callback: ContextLengthRecoveryCallback | None = None,
 ) -> tuple[InternalResponse, ModelChannel, dict[str, Any], ChannelRule, dict[str, Any]]:
     excluded_priorities: set[int] = set()
+    context_length_recovery_priorities: set[int] = set()
     selection = await select_channel(db, chat_channel, "CHAT", call_context=call_context, cursor_key=cursor_key)
     if not selection:
         raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
@@ -107,7 +110,19 @@ async def generate_chat_with_fallback(
         except ApiKeyException:
             raise
         except LLMException as exc:
-            excluded_priorities.add(channel_rule.priority)
+            current_priority = channel_rule.priority
+            if isinstance(exc, LLMContextLengthException) and context_length_recovery_callback is not None and current_priority not in context_length_recovery_priorities:
+                context_length_recovery_priorities.add(current_priority)
+                try:
+                    recovered = context_length_recovery_callback(chat_params)
+                    if hasattr(recovered, "__await__"):
+                        recovered = await recovered
+                except Exception:
+                    recovered = False
+                if recovered:
+                    continue
+
+            excluded_priorities.add(current_priority)
             logger.bind(
                 uid=uid,
                 session_id=session_id,
@@ -122,4 +137,6 @@ async def generate_chat_with_fallback(
                 cursor_key=cursor_key,
             )
             if not selection:
+                if isinstance(exc, LLMContextLengthException):
+                    raise LLMContextLengthException(provider_message=exc.provider_message) from exc
                 raise

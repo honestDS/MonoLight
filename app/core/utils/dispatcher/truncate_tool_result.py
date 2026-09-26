@@ -17,6 +17,37 @@ def _get_truncation_notice() -> str:
     return t("MSG_TOOL_RESULT_TRUNCATED")
 
 
+_COMPACT_TRUNCATION_NOTICE = "truncated"
+_MINIMAL_TRUNCATION_NOTICE = "cut"
+
+
+def _fit_truncation_notice_to_token_budget(encoding, limit_tokens: int) -> tuple[str, int]:
+    for notice in (
+        _get_truncation_notice(),
+        _COMPACT_TRUNCATION_NOTICE,
+        _MINIMAL_TRUNCATION_NOTICE,
+    ):
+        notice_token_ids = encoding.encode(notice, disallowed_special=())
+        if len(notice_token_ids) <= limit_tokens:
+            return notice, len(notice_token_ids)
+
+    minimal_token_ids = encoding.encode(_MINIMAL_TRUNCATION_NOTICE, disallowed_special=())
+    fitted_token_ids = minimal_token_ids[:limit_tokens]
+    return encoding.decode(fitted_token_ids), len(fitted_token_ids)
+
+
+def _fit_truncation_notice_to_estimated_budget(limit_tokens: int) -> tuple[str, int]:
+    for notice in (
+        _get_truncation_notice(),
+        _COMPACT_TRUNCATION_NOTICE,
+        _MINIMAL_TRUNCATION_NOTICE,
+    ):
+        notice_tokens = max(1, _estimate_tokens_by_chars(notice))
+        if notice_tokens <= limit_tokens:
+            return notice, notice_tokens
+    return _MINIMAL_TRUNCATION_NOTICE, 1
+
+
 @dataclass(frozen=True)
 class ToolResultTruncation:
     content: str
@@ -79,7 +110,7 @@ def truncate_tool_result_with_stats(
 ) -> ToolResultTruncation:
     """对单条工具响应做 token 级截断，并返回截断统计信息。
 
-    默认按上下文窗口一半截断；传入 limit_tokens 时按显式预算截断。
+    默认按上下文窗口一半截断；传入 limit_tokens 时按显式预算截断，截断提示本身也必须计入该预算。
     """
     if not content:
         return ToolResultTruncation(content=content, truncated=False, original_tokens=0, final_tokens=0, removed_chars=0)
@@ -93,13 +124,15 @@ def truncate_tool_result_with_stats(
         if original_tokens <= limit_tokens:
             return ToolResultTruncation(content=content, truncated=False, original_tokens=original_tokens, final_tokens=original_tokens, removed_chars=0)
 
-        truncation_notice = _get_truncation_notice()
-        notice_tokens = len(encoding.encode(truncation_notice, disallowed_special=()))
+        truncation_notice, notice_tokens = _fit_truncation_notice_to_token_budget(
+            encoding,
+            limit_tokens,
+        )
         if not include_notice:
             truncated_body = encoding.decode(token_ids[:limit_tokens])
             truncated_content = truncated_body
         elif notice_tokens < limit_tokens:
-            body_limit_tokens = max(1, limit_tokens - notice_tokens)
+            body_limit_tokens = limit_tokens - notice_tokens
             truncated_body = encoding.decode(token_ids[:body_limit_tokens])
             truncated_content = truncated_body + truncation_notice
         else:
@@ -117,8 +150,7 @@ def truncate_tool_result_with_stats(
         c_coeff = float(os.getenv("TOKEN_COEFF_CHINESE", 1.5))
         o_coeff = float(os.getenv("TOKEN_COEFF_OTHER", 0.3))
         avg_coeff = max((c_coeff + o_coeff) / 2, 0.1)
-        truncation_notice = _get_truncation_notice()
-        notice_tokens = _estimate_tokens_by_chars(truncation_notice)
+        truncation_notice, notice_tokens = _fit_truncation_notice_to_estimated_budget(limit_tokens)
         original_tokens = _estimate_tokens_by_chars(content)
         if not include_notice:
             char_limit = max(1, int(limit_tokens / avg_coeff))
@@ -139,7 +171,10 @@ def truncate_tool_result_with_stats(
             content=truncated_content,
             truncated=True,
             original_tokens=original_tokens,
-            final_tokens=_estimate_tokens_by_chars(truncated_content),
+            final_tokens=min(
+                limit_tokens,
+                max(1, _estimate_tokens_by_chars(truncated_content)),
+            ),
             removed_chars=max(len(content) - len(truncated_body), 0),
         )
 
@@ -270,6 +305,11 @@ def truncate_longterm_memory_recall_result_for_budget(
                 item.pop("knowledge_expected_version", None)
 
     final_value = compact()
+    if not fits(final_value):
+        return overall.content, ToolMessagesTruncationStats(
+            truncated_count=1,
+            removed_chars=overall.removed_chars,
+        )
     return final_value, ToolMessagesTruncationStats(
         truncated_count=1,
         removed_chars=max(len(result) - len(final_value), 0),

@@ -444,6 +444,16 @@ def _truncate_knowledge_base_query_result_for_budget(
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
+            minimal_stats = truncate_tool_result_with_stats(
+                minimal,
+                context_window_k,
+                limit_tokens=budget_tokens,
+            )
+            if minimal_stats.truncated:
+                return overall.content, ToolMessagesTruncationStats(
+                    truncated_count=1,
+                    removed_chars=overall.removed_chars,
+                )
             return minimal, ToolMessagesTruncationStats(
                 truncated_count=1,
                 removed_chars=max(removed_chars, len(result) - len(minimal)),

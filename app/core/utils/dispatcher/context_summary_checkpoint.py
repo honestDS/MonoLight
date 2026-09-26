@@ -50,6 +50,7 @@ async def apply_context_summary_checkpoint(
     previous_llm_request_metadata: dict | None = None,
     reserved_tokens: int = 0,
     allow_incremental_input_estimate: bool = True,
+    force: bool = False,
 ) -> list[InternalMessage]:
     todo_snapshot = None
     if isinstance(db, AsyncSession):
@@ -111,6 +112,7 @@ async def apply_context_summary_checkpoint(
         required_input_tokens_override=required_input_tokens_override,
         work_validity_checker=work_validity_checker,
         lifecycle_event_callback=lifecycle_event_callback,
+        force=force,
     )
 
     summary_message = state.as_message()

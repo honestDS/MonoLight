@@ -256,6 +256,44 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_context_summary_force_bypasses_threshold(monkeypatch):
+    selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        return 100
+
+    _patch_token_counter(monkeypatch, estimate_tokens)
+
+    state = await service_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(90),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+        force=True,
+    )
+
+    assert state == ContextSummaryState(
+        content="compressed history",
+        message_id=4,
+        revision=1,
+    )
+    assert len(selected_calls) == 1
+    assert len(update_calls) == 1
+    assert len(generated_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_context_summary_does_not_persist_candidate_that_misses_compression_goal(monkeypatch):
     _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
 

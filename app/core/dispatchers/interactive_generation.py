@@ -13,7 +13,7 @@ from app.core.constants import (
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_state import InteractiveDispatchState
-from app.core.exceptions import ApiKeyException, LLMException
+from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra
 from app.core.utils.context_summary import ContextSummaryTriggerMode
@@ -78,6 +78,7 @@ async def generate_interactive_turn(
     response_id: str,
 ) -> InteractiveGenerationResult:
     excluded_priorities: set[int] = set()
+    context_length_recovery_priorities: set[int] = set()
     emitted_agent_loop_start = False
     stream_state = _AgentLoopStreamState(
         callback=state.stream_event_callback,
@@ -304,7 +305,38 @@ async def generate_interactive_turn(
         except LLMException as exc:
             if stream_state.emitted_stream_content:
                 raise
-            excluded_priorities.add(state.channel_rule.priority)
+
+            current_priority = state.channel_rule.priority
+            if isinstance(exc, LLMContextLengthException) and current_priority not in context_length_recovery_priorities and state.checkpoint_state.upper_message_id is not None:
+                context_length_recovery_priorities.add(current_priority)
+                previous_messages = state.messages
+                try:
+                    recovered_messages = await apply_context_summary_checkpoint(
+                        state.db,
+                        session_id=state.session_id,
+                        uid=state.uid,
+                        profile=state.profile,
+                        cfg=state.cfg,
+                        messages=state.messages,
+                        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+                        fixed_upper_message_id=state.checkpoint_state.upper_message_id,
+                        context_window_k=state.chat_params["context_window_k"],
+                        max_tokens=state.chat_params["max_tokens"],
+                        tools=current_tools,
+                        work_validity_checker=state.context_summary_work_validity_checker,
+                        lifecycle_event_callback=state.context_summary_lifecycle_callback,
+                        model_id=state.model_entry["model_id"],
+                        protocol=resolve_model_protocol(state.model_entry),
+                        allow_incremental_input_estimate=False,
+                        force=True,
+                    )
+                except Exception:
+                    recovered_messages = previous_messages
+                if recovered_messages != previous_messages:
+                    state.messages = recovered_messages
+                    continue
+
+            excluded_priorities.add(current_priority)
             state.dispatch_logger.bind(
                 uid=state.uid,
                 session_id=state.session_id,
@@ -319,6 +351,8 @@ async def generate_interactive_turn(
                 cursor_key=state.chat_cursor_key,
             )
             if not selection:
+                if isinstance(exc, LLMContextLengthException):
+                    raise LLMContextLengthException(provider_message=exc.provider_message) from exc
                 raise
             previous_max_tokens = state.chat_params["max_tokens"]
             state.chat_channel_obj, state.model_entry, state.channel_rule = selection
