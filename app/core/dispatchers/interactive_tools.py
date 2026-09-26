@@ -22,9 +22,11 @@ from app.core.dispatchers.interactive_state import InteractiveDispatchState
 from app.core.exceptions import ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.utils.background_task_result import serialize_execution_summary
+from app.core.utils.context_messages import message_token_text
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import dump_output_history, extract_files_to_user
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
     get_queued_background_task_id,
@@ -35,6 +37,8 @@ from app.core.utils.dispatcher.session_todo_snapshot import (
     parse_session_todo_snapshot,
     persist_session_todo_snapshot_on_tool_results,
 )
+from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
@@ -54,6 +58,19 @@ __all__ = [
     "AuditExecutionStatePersistenceError",
     "handle_interactive_tool_round",
 ]
+
+
+def _resolve_tool_result_required_input_tokens(
+    state: InteractiveDispatchState,
+    ai_msg: InternalMessage,
+) -> int | None:
+    metadata = state.latest_llm_request_metadata
+    if not isinstance(metadata, dict) or metadata.get("input_tokens_source") != "provider":
+        return None
+    input_tokens = metadata.get("input_tokens")
+    if not isinstance(input_tokens, int) or isinstance(input_tokens, bool) or input_tokens <= 0:
+        return None
+    return input_tokens + max(0, estimate_tokens(message_token_text(ai_msg)))
 
 
 class AuditExecutionStatePersistenceError(ServerException):
@@ -457,6 +474,13 @@ async def handle_interactive_tool_round(
     # 执行状态未知并交给模型核实，而不会重新执行原工具。
     await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
 
+    tool_result_round_budget_tokens = calculate_tool_result_round_budget_tokens(
+        messages=materialize_user_environment_prompts(state.messages),
+        context_window_k=state.chat_params["context_window_k"],
+        max_tokens=state.chat_params["max_tokens"],
+        tools=state.tools,
+        required_input_tokens_override=_resolve_tool_result_required_input_tokens(state, ai_msg),
+    )
     parallel_tool_context = _ParallelToolExecutionContext(
         semaphore=asyncio.Semaphore(state.cfg.tool.executor_max_workers),
         active_tasks=state.active_tasks,
@@ -470,6 +494,7 @@ async def handle_interactive_tool_round(
         allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
         context_window_k=state.chat_params["context_window_k"],
         tool_call_count=len(ai_msg.tool_calls),
+        tool_result_round_budget_tokens=tool_result_round_budget_tokens,
         context_summary_boundary_message_id=state.checkpoint_state.upper_message_id,
         source_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
     )

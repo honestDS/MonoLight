@@ -38,6 +38,7 @@ class MemoryRecallContext:
     session_total_input_tokens: int = 0
     session_total_cached_tokens: int = 0
     allowed_knowledge_base_ids: list[int] = field(default_factory=list)
+    main_tools: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

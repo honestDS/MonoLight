@@ -42,7 +42,7 @@ def _assistant(call_id="call-1", message_id=None):
     )
 
 
-def _context(*, messages=None, turn_messages=None):
+def _context(*, messages=None, turn_messages=None, main_tools=None):
     channel = SimpleNamespace(
         base_url="https://example.invalid",
         chat_timeout=60,
@@ -71,6 +71,7 @@ def _context(*, messages=None, turn_messages=None):
             "chat_timeout": 60,
             "context_window_k": 4,
         },
+        main_tools=main_tools or [],
     )
 
 
@@ -159,6 +160,66 @@ async def test_save_and_execute_recall_orders_persistence_events_commit_and_isol
     assert context.messages[-1].role == MessageRole.TOOL
     assert context.turn_messages[-1].role == MessageRole.TOOL
     assert events == (["agent_loop_start", "turn_end", "tool_start", "tool_end"] if show_tool_calls else [])
+
+
+@pytest.mark.asyncio
+async def test_save_and_execute_recall_uses_main_context_remaining_budget(monkeypatch):
+    main_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_shell",
+                "description": "",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    context = _context(main_tools=main_tools)
+    assistant = _assistant(call_id="recall-call")
+    captured_budget_args = []
+    isolated_kwargs = []
+
+    async def save_assistant(*_args, **_kwargs):
+        assistant.id = 101
+        return SimpleNamespace(id=101)
+
+    def calculate_budget(**kwargs):
+        captured_budget_args.append(kwargs)
+        return 321
+
+    async def isolated(*_args, **kwargs):
+        isolated_kwargs.append(kwargs)
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="recall-call",
+            content=json.dumps({"items": []}),
+        )
+
+    async def save_tool(*args, **_kwargs):
+        stored = args[4].model_copy(update={"id": 102})
+        args[5].append(stored)
+        args[6].append(stored)
+        return stored
+
+    monkeypatch.setattr(persistence_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(persistence_module, "calculate_tool_result_round_budget_tokens", calculate_budget)
+    monkeypatch.setattr(persistence_module, "process_single_tool_with_isolated_db", isolated)
+    monkeypatch.setattr(persistence_module, "save_tool_response", save_tool)
+
+    await persistence_module.save_and_execute_recall(
+        context,
+        assistant,
+        assistant_key="assistant-key",
+        tool_key="tool-key",
+        response_id="response-id",
+    )
+
+    assert len(captured_budget_args) == 1
+    assert captured_budget_args[0]["messages"] == context.messages[:-1]
+    assert captured_budget_args[0]["context_window_k"] == 4
+    assert captured_budget_args[0]["max_tokens"] == 128
+    assert captured_budget_args[0]["tools"] == main_tools
+    assert isolated_kwargs[0]["tool_result_round_budget_tokens"] == 321
 
 
 def _row(

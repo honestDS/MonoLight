@@ -248,6 +248,7 @@ async def dispatch_interactive(
                                 show_tool_calls=show_tool_calls,
                                 expose_tool_call_content=expose_tool_call_content,
                                 allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
+                                main_tools=state.tools,
                                 latest_llm_request_metadata=state.latest_llm_request_metadata,
                                 total_output_tokens=state.checkpoint_state.total_output_tokens,
                                 session_total_output_tokens=state.checkpoint_state.session_total_output_tokens,

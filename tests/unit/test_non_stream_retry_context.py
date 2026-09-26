@@ -893,7 +893,16 @@ async def _run_audited_interactive_dispatch(
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def get_tools(db, current_profile):
-        return [SimpleNamespace(name=tool_call.name)], []
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "description": "",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ], []
 
     async def mark_initial_message_processed(db, initial_message_id):
         return None

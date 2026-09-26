@@ -16,8 +16,10 @@ from app.core.tools.longterm_memory import (
     validate_longterm_memory_arguments,
 )
 from app.core.utils.dispatcher.helpers import process_single_tool_with_isolated_db
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
+from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -212,6 +214,12 @@ async def save_and_execute_recall(
     append_once(context.turn_messages, assistant_message)
     await _emit_recall_event(context, tool_call, assistant_message, response_id)
     await context.db.commit()
+    tool_result_round_budget_tokens = calculate_tool_result_round_budget_tokens(
+        messages=materialize_user_environment_prompts(context.messages),
+        context_window_k=context.chat_params["context_window_k"],
+        max_tokens=context.chat_params["max_tokens"],
+        tools=context.main_tools,
+    )
     tool_result = await process_single_tool_with_isolated_db(
         tool_call,
         context.profile,
@@ -223,6 +231,7 @@ async def save_and_execute_recall(
         context.uid,
         allowed_knowledge_base_ids=context.allowed_knowledge_base_ids,
         context_window_k=context.chat_params["context_window_k"],
+        tool_result_round_budget_tokens=tool_result_round_budget_tokens,
         context_summary_boundary_message_id=context.upper_message_id,
         source_message_id=context.current_user_boundary_message_id,
     )

@@ -33,6 +33,7 @@ from app.core.session_reply_queue.executor_metadata import _generate_reply_with_
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import serialize_execution_summary
+from app.core.utils.context_messages import message_token_text
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
 from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
@@ -42,7 +43,9 @@ from app.core.utils.dispatcher.process_single_tool import (
 )
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
+from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem
@@ -56,6 +59,33 @@ def _resolve_confirmed_tool_context_window_k(session) -> int:
     if isinstance(context_window_tokens, int) and not isinstance(context_window_tokens, bool) and context_window_tokens > 0:
         return max(1, context_window_tokens // CONTEXT_WINDOW_TOKENS_PER_K)
     return 4
+
+
+def _resolve_confirmed_tool_result_round_budget_tokens(
+    session,
+    confirmed_message: InternalMessage,
+    *,
+    tools: list[dict],
+) -> int | None:
+    metadata = getattr(session, "llm_request_metadata", None)
+    if not isinstance(metadata, dict) or metadata.get("input_tokens_source") != "provider":
+        return None
+
+    input_tokens = metadata.get("input_tokens")
+    max_output_tokens = metadata.get("max_output_tokens")
+    if not isinstance(input_tokens, int) or isinstance(input_tokens, bool) or input_tokens <= 0:
+        return None
+    if not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool) or max_output_tokens < 0:
+        return None
+
+    required_input_tokens = input_tokens + max(0, estimate_tokens(message_token_text(confirmed_message)))
+    return calculate_tool_result_round_budget_tokens(
+        messages=[confirmed_message],
+        context_window_k=_resolve_confirmed_tool_context_window_k(session),
+        max_tokens=max_output_tokens,
+        tools=tools,
+        required_input_tokens_override=required_input_tokens,
+    )
 
 
 async def _source_invalid_confirmed_tool_response(
@@ -334,6 +364,11 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     detail_by_original_id = {detail.original_tool_call_id: detail for detail in details}
     confirmed_calls = [InternalToolCall(id=f"call_{uuid.uuid4().hex}", name=item.name, arguments=dict(item.arguments or {})) for item in source_tool_calls]
     confirmed_message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=confirmed_calls)
+    confirmed_tool_result_round_budget_tokens = _resolve_confirmed_tool_result_round_budget_tokens(
+        session,
+        confirmed_message,
+        tools=_tools,
+    )
     messages = [confirmed_message]
     turn_messages = [confirmed_message]
     replacement_state = _ConfirmedToolResultReplacementState(
@@ -420,6 +455,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                 context_window_k=confirmed_tool_context_window_k,
                 tool_call_count=len(confirmed_calls),
+                tool_result_round_budget_tokens=confirmed_tool_result_round_budget_tokens,
             )
             await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
             try:

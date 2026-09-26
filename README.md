@@ -24,7 +24,8 @@ From everyday office tasks to server operations and complex automation workflows
 > The project is currently in an early stage of active development, and its architecture is still evolving rapidly. Pull Requests are not accepted for now. You are welcome to report issues or suggest improvements through Issues. Your feedback is highly valuable to us.
 
 ## 0. Current Progress
-- UI modernization
+- Performance optimization
+- Skill support
 
 ## 1. Core Features
 
@@ -83,7 +84,6 @@ Image, audio, and video understanding, as well as image generation, are optional
   - [ ] **Define a long-term memory storage standard**: Establish a general long-term memory storage format for data exchange with external systems.
   - [ ] **Long-term memory import/export**: Allow users to export long-term memory in a standard format and import it back from that format.
 - Extensions
-  - [ ] **Modernized UI**: Refactor the project UI to better match modern design conventions and improve the overall user experience.
   - [ ] **Enterprise-grade audit system**: Build on the platform's existing dual-model audit mechanism to automatically generate and deliver enterprise-grade audit reports, then immediately delete temporary audit data from the server after delivery to reduce the risk of tampering or leakage.
   - [ ] **QQ messaging adapter**: Add messaging integration for the QQ platform.
   - [ ] **Sub-agent spawning by the primary agent**:
