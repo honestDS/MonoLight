@@ -22,6 +22,12 @@ WEB_START_TIMEOUT_SECONDS = 60.0
 PROCESS_STOP_TIMEOUT_SECONDS = 3.0
 PROCESS_KILL_TIMEOUT_SECONDS = 2.0
 PROCESS_POLL_INTERVAL_SECONDS = 0.05
+INITIALIZE_SYSTEM_CODE = """\
+import asyncio
+from start import initialize_system
+
+asyncio.run(initialize_system())
+"""
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -98,12 +104,26 @@ def build_web_command(config: StartConfig) -> list[str]:
     ]
 
 
+def build_initialize_command() -> list[str]:
+    return [sys.executable, "-c", INITIALIZE_SYSTEM_CODE]
+
+
+def run_system_initialization(child_environment: dict[str, str]) -> None:
+    result = subprocess.run(build_initialize_command(), env=child_environment, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"System initialization exited with code {result.returncode}")
+
+
 def build_message_platform_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.message_platform"]
 
 
 def build_background_task_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.background_task"]
+
+
+def build_general_command() -> list[str]:
+    return [sys.executable, "-m", "app.workers.general"]
 
 
 def build_memory_command() -> list[str]:
@@ -262,9 +282,9 @@ def _restore_signal_handlers(previous_handlers: dict[int, signal.Handlers]) -> N
 def run() -> int:
     config = load_start_config()
     validate_dashboard_assets()
-    asyncio.run(initialize_system())
-    process_options = _subprocess_options()
     child_environment = os.environ.copy()
+    run_system_initialization(child_environment)
+    process_options = _subprocess_options()
     processes: list[subprocess.Popen] = []
     previous_handlers = _install_shutdown_signal_handlers()
 
@@ -274,21 +294,15 @@ def run() -> int:
         report_process_started("Web", web_process)
 
         wait_for_web_service(web_process, config)
-        message_platform_process = subprocess.Popen(build_message_platform_command(), env=child_environment, **process_options)
-        processes.append(message_platform_process)
-        report_process_started("Message platform worker", message_platform_process)
-        background_task_process = subprocess.Popen(build_background_task_command(), env=child_environment, **process_options)
-        processes.append(background_task_process)
-        report_process_started("Background task worker", background_task_process)
+        general_process = subprocess.Popen(build_general_command(), env=child_environment, **process_options)
+        processes.append(general_process)
+        report_process_started("General worker", general_process)
         memory_process = subprocess.Popen(build_memory_command(), env=child_environment, **process_options)
         processes.append(memory_process)
         report_process_started("Memory worker", memory_process)
         terminal_process = subprocess.Popen(build_terminal_command(), env=child_environment, **process_options)
         processes.append(terminal_process)
         report_process_started("Terminal worker", terminal_process)
-        session_reply_process = subprocess.Popen(build_session_reply_command(), env=child_environment, **process_options)
-        processes.append(session_reply_process)
-        report_process_started("Session reply worker", session_reply_process)
         report_access_url(config)
 
         while True:

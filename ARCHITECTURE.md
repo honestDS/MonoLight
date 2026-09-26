@@ -54,16 +54,17 @@ app/
 
 ### 应用入口与 Worker
 
-`main.py` 提供 Web 应用入口，`start.py` 负责 Web 进程和独立后台进程的启动协调。
+`main.py` 提供 Web 应用入口；`start.py` 负责启动协调，先通过短生命周期初始化子进程完成系统初始化，再启动 Web 进程和长期后台进程。
 
 ```text
 app/workers/
 ├── __init__.py             # Worker 包标识
-├── background_task.py      # 通用后台任务 Worker
+├── general.py              # 消息平台、通用后台任务和会话回复三个独立租约角色的合并进程入口
+├── background_task.py      # 通用后台任务角色实现与独立调试入口（默认由 general 合并运行）
 ├── lease.py                # Worker 协调支持
 ├── memory.py               # 长期记忆与知识作业 Worker
-├── message_platform.py     # 消息平台与定时任务 Worker
-├── session_reply.py        # 会话回复 Worker
+├── message_platform.py     # 消息平台与定时任务角色实现与独立调试入口（默认由 general 合并运行）
+├── session_reply.py        # 会话回复角色实现与独立调试入口（默认由 general 合并运行）
 ├── terminal.py             # 交互终端 Worker
 └── signals.py              # Worker 进程信号支持
 ```
@@ -769,6 +770,7 @@ database / vector storage / external model services
 ## 进程边界
 
 - Web 进程同时承载 FastAPI 接口、WebSocket 接口、对话适配入口和预构建 Dashboard 静态资源。
-- 后台 Worker 进程承载通用任务、长期记忆作业、消息平台、会话回复和交互终端等独立能力。
+- 默认长期后台进程为 `general`、`memory` 和 `terminal` 三个；`general` 合并承载消息平台、通用后台任务和会话回复三个角色，三个角色仍分别使用原数据库租约，因此多实例互斥语义不变。
+- `memory` 与 `terminal` 继续作为独立长期进程运行，以保持资源和故障隔离。
 - Web 进程与 Worker 进程通过核心服务及持久化资源共享应用数据，不直接形成前端依赖。
 - 数据库、向量存储、日志、审计文件和临时文件构成运行期资源边界。

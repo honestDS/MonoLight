@@ -19,36 +19,37 @@ logger = get_logger(__name__)
 BACKGROUND_TASK_WORKER_NAME = "background_task"
 
 
+async def run_owned_background_task_worker(owned_stop_event: asyncio.Event) -> None:
+    await recover_pending_background_tasks()
+    await recover_pending_background_task_replies()
+
+    background_task_manager.start()
+    cleaner_tasks = [
+        asyncio.create_task(background_log_cleaner(7)),
+        asyncio.create_task(background_temp_cleaner()),
+        asyncio.create_task(background_context_summary_cleaner()),
+    ]
+    logger.info("Background task worker started")
+    try:
+        await owned_stop_event.wait()
+    finally:
+        await background_task_manager.stop()
+        for task in cleaner_tasks:
+            task.cancel()
+        await asyncio.gather(*cleaner_tasks, return_exceptions=True)
+        logger.info("Background task worker stopped")
+
+
 async def run_background_task_worker() -> None:
     stop_event = asyncio.Event()
     install_shutdown_signal_handlers(stop_event)
 
     await create_database_tables()
 
-    async def run_owned_worker(owned_stop_event: asyncio.Event) -> None:
-        await recover_pending_background_tasks()
-        await recover_pending_background_task_replies()
-
-        background_task_manager.start()
-        cleaner_tasks = [
-            asyncio.create_task(background_log_cleaner(7)),
-            asyncio.create_task(background_temp_cleaner()),
-            asyncio.create_task(background_context_summary_cleaner()),
-        ]
-        logger.info("Background task worker started")
-        try:
-            await owned_stop_event.wait()
-        finally:
-            await background_task_manager.stop()
-            for task in cleaner_tasks:
-                task.cancel()
-            await asyncio.gather(*cleaner_tasks, return_exceptions=True)
-            logger.info("Background task worker stopped")
-
     await run_with_worker_lease(
         BACKGROUND_TASK_WORKER_NAME,
         stop_event,
-        run_owned_worker,
+        run_owned_background_task_worker,
     )
 
 

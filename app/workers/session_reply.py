@@ -14,24 +14,25 @@ logger = get_logger(__name__)
 SESSION_REPLY_WORKER_NAME = "session_reply"
 
 
+async def run_owned_session_reply_worker(owned_stop_event: asyncio.Event) -> None:
+    session_reply_consumer.start()
+    logger.info("Session reply worker started")
+    try:
+        await owned_stop_event.wait()
+    finally:
+        await session_reply_consumer.stop()
+        logger.info("Session reply worker stopped")
+
+
 async def run_session_reply_worker() -> None:
     stop_event = asyncio.Event()
     install_shutdown_signal_handlers(stop_event)
     await create_database_tables()
 
-    async def run_owned_worker(owned_stop_event: asyncio.Event) -> None:
-        session_reply_consumer.start()
-        logger.info("Session reply worker started")
-        try:
-            await owned_stop_event.wait()
-        finally:
-            await session_reply_consumer.stop()
-            logger.info("Session reply worker stopped")
-
     await run_with_worker_lease(
         SESSION_REPLY_WORKER_NAME,
         stop_event,
-        run_owned_worker,
+        run_owned_session_reply_worker,
     )
 
 
