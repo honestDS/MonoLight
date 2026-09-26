@@ -46,13 +46,14 @@ from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
 from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
 from app.core.tools import tool_requires_audit
-from app.core.tools.file_writer import resolve_file_writer_target_path
+from app.core.tools.file_tool import resolve_file_tool_target_path
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA, read_text_file
 from app.core.tools.shell import ShellExecutor
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
+from app.core.utils.operation_directories import get_allowed_operation_dirs
 from app.core.utils.time import get_local_time
 from app.core.utils.tokenizer import estimate_tokens, truncate_text_to_tokens
 from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConclusion
@@ -98,14 +99,19 @@ def _tool_payload(tool_calls: list[InternalToolCall]) -> list[dict[str, Any]]:
     return [{"id": item.id, "name": item.name, "arguments": dict(item.arguments or {})} for item in tool_calls]
 
 
-def _round_conflict_ids(tool_calls: list[InternalToolCall], working_directory: Path) -> set[str]:
+def _round_conflict_ids(
+    tool_calls: list[InternalToolCall],
+    working_directory: Path,
+    allowed_operation_dirs: list[str],
+) -> set[str]:
     writers: dict[str, list[str]] = {}
     for tool_call in tool_calls:
-        if tool_call.name != "write_file":
+        arguments = tool_call.arguments or {}
+        if tool_call.name != "file_tool" or arguments.get("operation") not in {"write", "replace"}:
             continue
-        path = str((tool_call.arguments or {}).get("file_path", ""))
+        path = str(arguments.get("path", ""))
         try:
-            normalized = str(resolve_file_writer_target_path(path, working_directory))
+            normalized = str(resolve_file_tool_target_path(path, working_directory, allowed_operation_dirs))
         except (TypeError, ValueError):
             continue
         writers.setdefault(normalized, []).append(tool_call.id)
@@ -116,17 +122,19 @@ def _round_conflict_ids(tool_calls: list[InternalToolCall], working_directory: P
     return conflicts
 
 
-def _collect_append_file_snapshots(
+def _collect_file_mutation_snapshots(
     tool_calls: list[InternalToolCall],
     working_directory: Path,
+    allowed_operation_dirs: list[str],
 ) -> dict[str, list[dict[str, Any]]]:
     database_snapshots: dict[str, list[dict[str, Any]]] = {}
     for tool_call in tool_calls:
-        if tool_call.name != "write_file" or not bool((tool_call.arguments or {}).get("append")):
+        arguments = tool_call.arguments or {}
+        if tool_call.name != "file_tool" or arguments.get("operation") != "replace":
             continue
-        original_path = (tool_call.arguments or {}).get("file_path")
+        original_path = arguments.get("path")
         try:
-            resolve_file_writer_target_path(original_path, working_directory)
+            resolve_file_tool_target_path(original_path, working_directory, allowed_operation_dirs)
         except (TypeError, ValueError):
             continue
         try:
@@ -183,7 +191,7 @@ def _audit_max_input_tokens(chat_params: dict[str, Any]) -> int:
     )
 
 
-def _fit_audit_write_file_payload_to_context(
+def _fit_audit_file_tool_payload_to_context(
     system_prompt: str,
     payload: dict[str, Any],
     chat_params: dict[str, Any],
@@ -204,29 +212,42 @@ def _fit_audit_write_file_payload_to_context(
     tool_calls = adapted_payload.get("tool_calls")
     if not isinstance(tool_calls, list):
         return adapted_payload
-    write_contents: list[tuple[int, str, int, str]] = []
+    content_fields: list[tuple[int, str, str, int, str]] = []
     for index, tool_call in enumerate(tool_calls):
-        if not isinstance(tool_call, dict) or tool_call.get("tool_name", tool_call.get("name")) != "write_file":
+        if not isinstance(tool_call, dict) or tool_call.get("tool_name", tool_call.get("name")) != "file_tool":
             continue
         arguments = tool_call.get("arguments")
-        if isinstance(arguments, dict) and isinstance(arguments.get("content"), str):
-            content = arguments["content"]
-            content_bytes = content.encode("utf-8")
-            write_contents.append((index, content, len(content_bytes), hashlib.sha256(content_bytes).hexdigest()))
-    if not write_contents:
+        if not isinstance(arguments, dict):
+            continue
+        operation = arguments.get("operation")
+        if operation == "write":
+            field_names = ("content",)
+        elif operation == "replace":
+            field_names = ("pattern", "replacement")
+        elif operation == "find":
+            field_names = ("pattern",)
+        else:
+            field_names = ()
+        for field_name in field_names:
+            field_value = arguments.get(field_name)
+            if not isinstance(field_value, str):
+                continue
+            content_bytes = field_value.encode("utf-8")
+            content_fields.append((index, field_name, field_value, len(content_bytes), hashlib.sha256(content_bytes).hexdigest()))
+    if not content_fields:
         return adapted_payload
 
     def payload_with_content_limit(content_limit: int) -> dict[str, Any]:
         candidate_payload = copy.deepcopy(adapted_payload)
         candidate_calls = candidate_payload["tool_calls"]
-        for index, original_content, original_size, original_sha256 in write_contents:
+        for index, field_name, original_content, original_size, original_sha256 in content_fields:
             content_prefix, truncated = truncate_text_to_tokens(original_content, content_limit)
             tool_call = candidate_calls[index]
             arguments = tool_call["arguments"]
-            arguments["content"] = content_prefix
+            arguments[field_name] = content_prefix
             existing_evidence = tool_call.get("argument_evidence")
             argument_evidence = dict(existing_evidence) if isinstance(existing_evidence, dict) else {}
-            argument_evidence["content"] = {
+            argument_evidence[field_name] = {
                 "status": "ok",
                 "size": original_size,
                 "sha256": original_sha256,
@@ -241,7 +262,7 @@ def _fit_audit_write_file_payload_to_context(
         return empty_payload
 
     low = 0
-    high = max(max(estimate_tokens(content), 1) for _, content, _, _ in write_contents)
+    high = max(max(estimate_tokens(content), 1) for _, _, content, _, _ in content_fields)
     fitted_payload = empty_payload
     while low < high:
         candidate_limit = (low + high + 1) // 2
@@ -554,7 +575,7 @@ async def _call_auditor(
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(t(ERR_AUDIT_CHANNEL_UNAVAILABLE)) from exc
     chat_params = resolve_chat_params(model_entry, cfg.channel.chat_channel)
-    audit_payload = _fit_audit_write_file_payload_to_context(AUDIT_BATCH_PROMPT, request_payload, chat_params)
+    audit_payload = _fit_audit_file_tool_payload_to_context(AUDIT_BATCH_PROMPT, request_payload, chat_params)
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content=AUDIT_BATCH_PROMPT),
         InternalMessage(role=MessageRole.USER, content=json.dumps(audit_payload, ensure_ascii=False)),
@@ -633,7 +654,7 @@ async def _summarize_pending(
         "server_confirmation_reasons": server_confirmation_reasons or {},
     }
     summary_prompt = AUDIT_SUMMARY_PROMPT.format(audit_report_language=cfg.security.audit_report_language)
-    audit_payload = _fit_audit_write_file_payload_to_context(summary_prompt, summary_payload, chat_params)
+    audit_payload = _fit_audit_file_tool_payload_to_context(summary_prompt, summary_payload, chat_params)
     messages = [
         InternalMessage(
             role=MessageRole.SYSTEM,
@@ -712,11 +733,13 @@ async def audit_tool_round(
     audited_tool_call_id_set = set(audited_tool_call_ids)
     await cancel_confirmation_by_session(db, uid=uid, session_id=session_id, locale=cfg.security.audit_report_language)
     workdir = Path(working_directory or get_user_temp_dir(os.getcwd(), uid)).resolve(strict=False)
+    allowed_operation_dirs = get_allowed_operation_dirs(cfg)
     payload_calls = _tool_payload(tool_calls)
-    append_file_snapshots = await asyncio.to_thread(
-        _collect_append_file_snapshots,
+    file_mutation_snapshots = await asyncio.to_thread(
+        _collect_file_mutation_snapshots,
         audited_tool_calls,
         workdir,
+        allowed_operation_dirs,
     )
     server_confirmation_reasons: dict[str, list[dict[str, Any]]] = {}
     server_blocked_tool_call_ids: set[str] = set()
@@ -772,7 +795,7 @@ async def audit_tool_round(
     read_file_snapshots: dict[str, list[dict[str, Any]]] = {}
     high_risk_override = False
     try:
-        conflict_ids = _round_conflict_ids(audited_tool_calls, workdir)
+        conflict_ids = _round_conflict_ids(audited_tool_calls, workdir, allowed_operation_dirs)
         if conflict_ids:
             server_blocked_tool_call_ids.update(conflict_ids)
             response_context = {"local_block": "same-round file write conflict"}
@@ -894,7 +917,7 @@ async def audit_tool_round(
 
     details = []
     for index, (call_snapshot, result, conclusion) in enumerate(zip(snapshot.tool_calls, parsed_results, conclusions, strict=True)):
-        file_snapshots = [*append_file_snapshots.get(call_snapshot.tool_call_id, []), *read_file_snapshots.get(call_snapshot.tool_call_id, [])]
+        file_snapshots = [*file_mutation_snapshots.get(call_snapshot.tool_call_id, []), *read_file_snapshots.get(call_snapshot.tool_call_id, [])]
         details.append(
             {
                 "original_tool_call_id": call_snapshot.tool_call_id,

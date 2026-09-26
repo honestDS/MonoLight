@@ -59,14 +59,14 @@ def test_tool_call_integrity_is_stable_for_argument_key_order(tmp_path):
     common = {
         "tool_call_id": "call-1",
         "turn_index": 1,
-        "tool_name": "write_file",
+        "tool_name": "file_tool",
         "uid": "u1",
         "session_id": "session-1",
         "working_directory": tmp_path,
     }
 
-    first = build_tool_call_integrity_snapshot(arguments={"content": "value", "file_path": "a.txt"}, **common)
-    second = build_tool_call_integrity_snapshot(arguments={"file_path": "a.txt", "content": "value"}, **common)
+    first = build_tool_call_integrity_snapshot(arguments={"operation": "write", "content": "value", "path": "a.txt"}, **common)
+    second = build_tool_call_integrity_snapshot(arguments={"path": "a.txt", "content": "value", "operation": "write"}, **common)
 
     assert first.arguments_sha256 == second.arguments_sha256
     assert first.call_sha256 == second.call_sha256

@@ -227,8 +227,8 @@ def test_request_validation_keeps_persisted_tool_chain_unchanged():
             tool_calls=[
                 InternalToolCall(
                     id="call-1",
-                    name="write_file",
-                    arguments={"file_path": "generated.txt", "content": "file content " * 3000},
+                    name="file_tool",
+                    arguments={"operation": "write", "path": "generated.txt", "content": "file content " * 3000},
                 )
             ],
         ),

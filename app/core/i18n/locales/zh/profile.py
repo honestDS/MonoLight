@@ -44,7 +44,7 @@ MESSAGES = {
     "ERR_KB_NOT_FOUND_FOR_QUERY": "知识库不存在",
     "ERR_KB_NOT_IN_PROFILE": "无权查询不属于当前配置的知识库",
     "TOOL_EXECUTE_SHELL_LABEL": "执行 Shell",
-    "TOOL_WRITE_FILE_LABEL": "写入文件",
+    "TOOL_FILE_TOOL_LABEL": "文件操作",
     "TOOL_FIRECRAWL_SEARCH_LABEL": "Firecrawl 搜索",
     "TOOL_FIRECRAWL_SCRAPE_LABEL": "Firecrawl 抓取",
     "TOOL_SEND_FILE_TO_USER_LABEL": "发送文件给用户",

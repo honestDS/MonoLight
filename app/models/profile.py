@@ -106,7 +106,7 @@ class ToolConfig(BaseModel):
     enabled_tools: list[str] = PydanticField(
         default_factory=lambda: [
             "execute_shell",
-            "write_file",
+            "file_tool",
             "firecrawl_search",
             "firecrawl_scrape",
             "send_file_to_user",
@@ -117,7 +117,7 @@ class ToolConfig(BaseModel):
         ],
         description="允许向 LLM 暴露的工具名称列表",
     )
-    allowed_operation_dirs: list[str] = PydanticField(default_factory=list, description="send_file_to_user 和 read_multimodal_file 允许操作文件的安全目录白名单，目录必须使用绝对路径")
+    allowed_operation_dirs: list[str] = PydanticField(default_factory=list, description="file_tool、send_file_to_user 和 read_multimodal_file 允许操作文件的安全目录白名单，目录必须使用绝对路径")
     file_send_max_count: int = PydanticField(10, ge=1, le=100, description="send_file_to_user 单次最多允许发送的文件数量")
     file_send_max_single_size_mb: int = PydanticField(50, ge=1, le=1024, description="send_file_to_user 单个文件大小上限（MB）")
     file_send_max_total_size_mb: int = PydanticField(100, ge=1, le=4096, description="send_file_to_user 单次发送总大小上限（MB）")
@@ -287,6 +287,17 @@ class ProfileConfig(BaseModel):
         if not isinstance(normalized, dict):
             return normalized
 
+        tool = normalized.get("tool")
+        if isinstance(tool, dict) and isinstance(tool.get("enabled_tools"), list):
+            enabled_tools = []
+            for tool_name in tool["enabled_tools"]:
+                if not isinstance(tool_name, str):
+                    continue
+                normalized_name = "file_tool" if tool_name == "write_file" else tool_name
+                if normalized_name not in enabled_tools:
+                    enabled_tools.append(normalized_name)
+            tool["enabled_tools"] = enabled_tools
+
         memory = normalized.get("memory")
         if not isinstance(memory, dict):
             memory = {}
@@ -358,7 +369,7 @@ PROFILE_EXAMPLE = {
             "background_task_max_concurrency": 2,
             "scheduled_task_max_concurrency": 4,
             "firecrawl_api_key": "",
-            "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "read_multimodal_file"],
+            "enabled_tools": ["execute_shell", "file_tool", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "read_multimodal_file"],
             "allowed_operation_dirs": [],
             "file_send_max_count": 10,
             "file_send_max_single_size_mb": 50,

@@ -47,7 +47,7 @@ async def audit_database(tmp_path):
 def _tool_calls():
     return [
         {"id": "call-1", "name": "execute_shell", "arguments": {"command": "python entry.py"}},
-        {"id": "call-2", "name": "write_file", "arguments": {"file_path": "result.txt", "content": "value"}},
+        {"id": "call-2", "name": "file_tool", "arguments": {"operation": "write", "path": "result.txt", "content": "value"}},
     ]
 
 

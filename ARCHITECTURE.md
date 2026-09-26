@@ -499,7 +499,7 @@ app/core/tools/
 ├── __init__.py             # 工具注册入口
 ├── base.py                 # 工具抽象
 ├── cancel_background_task.py # 后台任务工具
-├── file_writer.py          # 文件写入工具
+├── file_tool.py            # 通用文本文件操作工具
 ├── firecrawl_scrape.py     # 网页抓取工具
 ├── firecrawl_search.py     # 网页搜索工具
 ├── image_generation.py     # 图像生成工具
