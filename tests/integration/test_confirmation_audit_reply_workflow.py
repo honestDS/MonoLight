@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 import app.providers.database as database_provider
 from app.adapters.chat_web import web_chat_adapter
@@ -45,6 +45,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkType,
 )
 from app.models.session_todo import SessionTodoPlan
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -80,8 +81,7 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
     ]
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=tables))
+    await clone_sqlite_schema(tmp_path / "confirmation-workflow.db", tables=tables)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield session_factory

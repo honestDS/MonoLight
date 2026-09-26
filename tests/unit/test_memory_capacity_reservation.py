@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 from app.core.constants import (
     ERR_MEMORY_CAPACITY_EXCEEDED,
@@ -43,6 +42,7 @@ from app.models.memory import (
     LongTermMemoryStore,
     LongTermMemoryType,
 )
+from tests.database_support import clone_sqlite_schema
 
 MEMORY_TABLES = [
     LongTermMemoryStore.__table__,
@@ -60,13 +60,7 @@ async def memory_database(tmp_path) -> AsyncIterator[async_sessionmaker[AsyncSes
         f"sqlite+aiosqlite:///{database_path}",
         connect_args={"timeout": 30},
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=MEMORY_TABLES,
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=MEMORY_TABLES)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:

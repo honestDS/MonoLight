@@ -57,6 +57,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkType,
 )
 from app.models.session_todo import SessionTodoPlan
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -104,8 +105,7 @@ async def concurrent_confirmation_session_factory(tmp_path):
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
     ]
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=tables))
+    await clone_sqlite_schema(tmp_path / "confirmation-concurrency.db", tables=tables)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as setup_session:
         setup_session.add(Profile(id=1, uid="owner", name="test", configs={}))

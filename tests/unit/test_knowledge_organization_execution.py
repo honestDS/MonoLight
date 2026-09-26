@@ -84,6 +84,7 @@ from app.models.prompt import PromptLibrary
 from app.providers.database.time import get_database_time
 from scripts import migration_20260910_add_knowledge_organization_stage as organization_stage_migration
 from scripts import migration_20260911_add_knowledge_organization_snapshot_items as organization_snapshot_item_migration
+from tests.database_support import clone_sqlite_schema
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -133,8 +134,7 @@ async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[As
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=_TABLES))
+    await clone_sqlite_schema(database_path, tables=_TABLES)
 
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:

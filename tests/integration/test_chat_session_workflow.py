@@ -9,7 +9,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from app.api.v1.chat import router
 from app.core.constants import (
@@ -39,6 +39,7 @@ from app.models.session_reply_work_item import (
 from app.models.session_todo import SessionTodoPlan
 from app.models.user import User
 from app.providers.database import get_db
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -57,26 +58,23 @@ async def chat_session_database(tmp_path) -> AsyncGenerator[AsyncSession]:
         finally:
             cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=[
-                    ModelChannel.__table__,
-                    PromptLibrary.__table__,
-                    Profile.__table__,
-                    ChatSession.__table__,
-                    SessionTodoPlan.__table__,
-                    Message.__table__,
-                    User.__table__,
-                    AuditRecord.__table__,
-                    AuditConfirmationClaim.__table__,
-                    SessionReplySequence.__table__,
-                    SessionReplyWorkItem.__table__,
-                    BackgroundTask.__table__,
-                ],
-            )
-        )
+    await clone_sqlite_schema(
+        tmp_path / "chat-session-workflow.db",
+        tables=[
+            ModelChannel.__table__,
+            PromptLibrary.__table__,
+            Profile.__table__,
+            ChatSession.__table__,
+            SessionTodoPlan.__table__,
+            Message.__table__,
+            User.__table__,
+            AuditRecord.__table__,
+            AuditConfirmationClaim.__table__,
+            SessionReplySequence.__table__,
+            SessionReplyWorkItem.__table__,
+            BackgroundTask.__table__,
+        ],
+    )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:

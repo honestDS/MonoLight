@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 import app.core.terminal.audit_lifecycle as terminal_audit_lifecycle_module
 import app.core.terminal.session_runtime_commands as terminal_runtime_commands_module
@@ -24,6 +23,7 @@ from app.models.audit import (
     AuditToolDetail,
 )
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
+from tests.database_support import clone_sqlite_schema
 
 
 def _patch_terminal_session_factory(monkeypatch: pytest.MonkeyPatch, session_factory) -> None:
@@ -51,8 +51,7 @@ async def terminal_audit_database(tmp_path):
         f"sqlite+aiosqlite:///{tmp_path / 'terminal-audit.db'}",
         connect_args={"timeout": 30},
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+    await clone_sqlite_schema(tmp_path / "terminal-audit.db")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield session_factory

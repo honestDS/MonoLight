@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from app.core.message_platforms import manager as manager_module
 from app.core.message_platforms import notifier as notifier_module
@@ -16,6 +16,7 @@ from app.models.message_platform_outbox import MessagePlatformOutbox, MessagePla
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
+from tests.database_support import clone_sqlite_schema
 
 
 class RecordingExternalHandler(MessagePlatformHandler):
@@ -61,19 +62,7 @@ async def outbox_session_factory(tmp_path) -> AsyncGenerator[async_sessionmaker[
         finally:
             cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=[
-                    PromptLibrary.__table__,
-                    Profile.__table__,
-                    ChatSession.__table__,
-                    MessagePlatform.__table__,
-                    MessagePlatformOutbox.__table__,
-                ],
-            )
-        )
+    await clone_sqlite_schema(tmp_path / "message-platform-outbox-workflow.db", tables=[PromptLibrary.__table__, Profile.__table__, ChatSession.__table__, MessagePlatform.__table__, MessagePlatformOutbox.__table__])
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as db:
         db.add(
