@@ -6,6 +6,11 @@ import pytest
 
 from app.core.constants import ERR_LLM_CONNECTION_FAILED, ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, ERR_LLM_EMPTY_RESPONSE
 from app.core.exceptions import LLMContextLengthException, LLMException
+from app.core.utils.llm_request_params import (
+    build_context_summary_generation_params,
+    build_memory_recall_precheck_generation_params,
+    build_session_title_generation_params,
+)
 from app.models.message import (
     FilePart,
     ImagePart,
@@ -329,15 +334,24 @@ async def test_chat_completions_generate_passes_reasoning_effort(monkeypatch) ->
 
     monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
 
-    await OpenAIChatCompletionsTransformer().generate(
+    generation_params = build_session_title_generation_params(
+        model_entry={"reasoning_effort": "high"},
+        protocol="openai",
+    )
+    await LLMClient.generate(
         api_key="key",
         base_url="https://example.invalid",
         model_id="gpt-test",
         messages=[InternalMessage(role=MessageRole.USER, content="Question")],
-        reasoning_effort="high",
+        **generation_params,
     )
 
-    assert sessions[0].post_calls[0]["kwargs"]["json"]["reasoning_effort"] == "high"
+    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    assert payload["reasoning_effort"] == "low"
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+    assert payload["max_tokens"] == generation_params["max_tokens"]
+    assert payload["max_tokens"] > 0
 
 
 @pytest.mark.asyncio
@@ -361,15 +375,25 @@ async def test_responses_generate_maps_reasoning_effort_to_reasoning_object(monk
 
     monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
 
-    await OpenAIResponsesTransformer().generate(
+    generation_params = build_context_summary_generation_params(
+        model_entry={"reasoning_effort": "xhigh"},
+        protocol="openai_responses",
+        max_output_tokens=512,
+    )
+    await LLMClient.generate(
         api_key="key",
         base_url="https://example.invalid",
         model_id="gpt-test",
         messages=[InternalMessage(role=MessageRole.USER, content="Question")],
-        reasoning_effort="xhigh",
+        protocol="openai_responses",
+        **generation_params,
     )
 
-    assert sessions[0].post_calls[0]["kwargs"]["json"]["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    assert payload["reasoning"] == {"effort": "low", "summary": "auto"}
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+    assert payload["max_output_tokens"] == generation_params["max_tokens"]
 
 
 @pytest.mark.asyncio
@@ -404,6 +428,87 @@ async def test_responses_generate_stream_creates_connector_with_ssl_disabled(mon
     assert len(connector_calls) == 1
     assert connector_calls[0]["ssl"] is False
     assert session_calls[0]["connector"] is connector
+
+
+@pytest.mark.parametrize("protocol", ("openai", "openai_responses"))
+@pytest.mark.asyncio
+async def test_generate_omits_unspecified_sampling_and_output_token_params(monkeypatch, protocol) -> None:
+    if protocol == "openai":
+        response_body = {
+            "id": "chatcmpl_1",
+            "model": "gpt-test",
+            "choices": [{"message": {"role": "assistant", "content": "Answer"}}],
+        }
+    else:
+        response_body = {
+            "id": "resp_1",
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "Answer"}]}],
+        }
+    response = _FakeAiohttpResponse(text=json.dumps(response_body))
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+
+    await LLMClient.generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Question")],
+        protocol=protocol,
+    )
+
+    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    for parameter in ("temperature", "top_p", "max_tokens", "max_output_tokens"):
+        assert parameter not in payload
+
+
+@pytest.mark.parametrize("protocol", ("openai", "openai_responses"))
+@pytest.mark.asyncio
+async def test_memory_recall_precheck_stream_does_not_backfill_sampling_params(monkeypatch, protocol) -> None:
+    response = _FakeAiohttpResponse(chunks=[b"data: [DONE]\n"])
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+
+    generation_params = build_memory_recall_precheck_generation_params(
+        model_entry={"reasoning_effort": "high"},
+        protocol=protocol,
+    )
+
+    async def discard_content(_content: str) -> None:
+        return None
+
+    await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Question")],
+        on_content=discard_content,
+        protocol=protocol,
+        **generation_params,
+    )
+
+    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+    if protocol == "openai":
+        assert payload["reasoning_effort"] == "low"
+        assert payload["max_tokens"] == generation_params["max_tokens"] > 0
+    else:
+        assert payload["reasoning"]["effort"] == "low"
+        assert payload["max_output_tokens"] == generation_params["max_tokens"] > 0
 
 
 @pytest.mark.asyncio

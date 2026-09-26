@@ -40,6 +40,7 @@ from app.models.knowledge_base import (
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from scripts import migration_20260910_add_knowledge_organization_stage as organization_migration
+from tests.database_support import clone_sqlite_schema
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -70,8 +71,7 @@ async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[As
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=_TABLES))
+    await clone_sqlite_schema(database_path, tables=_TABLES)
 
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:

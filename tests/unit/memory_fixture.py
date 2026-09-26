@@ -4,8 +4,8 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
+from tests.database_support import clone_sqlite_schema
 from tests.unit.memory_test_support import MEMORY_TABLES, MemoryVectorBackend
 
 
@@ -18,13 +18,7 @@ async def memory_session_factory(
         f"sqlite+aiosqlite:///{database_path}",
         connect_args={"timeout": 30},
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=MEMORY_TABLES,
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=MEMORY_TABLES)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield session_factory

@@ -156,6 +156,7 @@ def test_profile_config_memory_defaults_and_legacy_flat_fields() -> None:
     old_config = ProfileConfig.model_validate({})
 
     assert old_config.memory.enabled is False
+    assert old_config.memory.precheck_enabled is True
     assert old_config.memory.embedding_channel_id is None
     assert old_config.memory.embedding_model_id is None
     assert old_config.memory.top_k == 5
@@ -175,6 +176,7 @@ def test_profile_config_memory_defaults_and_legacy_flat_fields() -> None:
     flat_config = ProfileConfig.model_validate(
         {
             "memory_enabled": True,
+            "memory_precheck_enabled": False,
             "memory_embedding_channel_id": 17,
             "memory_embedding_model_id": "embed-v2",
             "memory_top_k": 7,
@@ -185,6 +187,7 @@ def test_profile_config_memory_defaults_and_legacy_flat_fields() -> None:
 
     assert flat_config.memory.model_dump() == {
         "enabled": True,
+        "precheck_enabled": False,
         "embedding_channel_id": 17,
         "embedding_model_id": "embed-v2",
         "top_k": 7,

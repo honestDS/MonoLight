@@ -2,19 +2,22 @@ import uuid
 from typing import Any
 
 from app.core.channel_router import select_channel
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
+from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    MEMORY_RECALL_PRECHECK_HISTORY_USER_ROUNDS,
+)
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
-from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
+from app.core.prompts import (
+    LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT,
+    LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT,
+)
 from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
     validate_longterm_memory_arguments,
 )
-from app.core.utils.context_summary import ContextSummaryTriggerMode
-from app.core.utils.dispatcher.context_summary_checkpoint import (
-    apply_context_summary_checkpoint,
-)
+from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.dispatcher.helpers import (
     get_multimodal_from_entry,
     reassemble_multimodal_messages,
@@ -25,6 +28,7 @@ from app.core.utils.dispatcher.markdown_instruction import (
     refresh_latest_user_max_output_tokens_instruction,
 )
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.llm_request_params import build_memory_recall_precheck_generation_params
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
     accumulate_session_cache_metrics,
@@ -39,6 +43,37 @@ from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
 from .types import MemoryRecallContext
+
+
+def build_precheck_request_messages(messages: list[InternalMessage]) -> list[InternalMessage]:
+    summary_messages = [message for message in messages if is_context_summary_message(message)]
+    latest_summary = [summary_messages[-1].model_copy(deep=True)] if summary_messages else []
+
+    dialogue: list[InternalMessage] = []
+    for message in messages:
+        if message.role not in {MessageRole.USER, MessageRole.ASSISTANT} or is_context_summary_message(message):
+            continue
+        if message.role == MessageRole.ASSISTANT and message.tool_calls and not _has_content(message.content):
+            continue
+        dialogue.append(
+            message.model_copy(
+                update={
+                    "reasoning_content": None,
+                    "provider_metadata": None,
+                    "tool_calls": None,
+                },
+                deep=True,
+            )
+        )
+    user_indexes = [index for index, message in enumerate(dialogue) if message.role == MessageRole.USER]
+    if not user_indexes:
+        recent_dialogue = dialogue
+    else:
+        history_user_count = min(MEMORY_RECALL_PRECHECK_HISTORY_USER_ROUNDS + 1, len(user_indexes))
+        start_index = user_indexes[-history_user_count]
+        recent_dialogue = dialogue[start_index:]
+
+    return [*latest_summary, *recent_dialogue]
 
 
 async def select_initial_channel(context: MemoryRecallContext) -> bool:
@@ -100,36 +135,24 @@ async def prepare_request_messages(
     *,
     is_main_context: bool,
 ) -> tuple[list[InternalMessage], dict[str, Any], str]:
-    if context.upper_message_id is not None:
-        await context.db.commit()
-        messages = await apply_context_summary_checkpoint(
-            context.db,
-            session_id=context.session_id,
-            uid=context.uid,
-            profile=context.profile,
-            cfg=context.cfg,
-            messages=messages,
-            trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
-            fixed_upper_message_id=context.upper_message_id,
-            context_window_k=context.chat_params["context_window_k"],
-            max_tokens=context.chat_params["max_tokens"],
-            tools=[MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
-            work_validity_checker=context.context_summary_checker,
-            lifecycle_event_callback=context.context_summary_callback,
-            model_id=context.model_entry["model_id"],
-            protocol=resolve_model_protocol(context.model_entry),
-            previous_llm_request_metadata=context.latest_llm_request_metadata,
-        )
-        if is_main_context:
-            context.messages = messages
-
-    request_messages = materialize_user_environment_prompts(messages)
+    precheck_messages = build_precheck_request_messages(messages) if is_main_context else messages
+    if is_main_context:
+        precheck_messages = [
+            InternalMessage(role=MessageRole.SYSTEM, content=LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT),
+            *precheck_messages,
+        ]
+    request_messages = materialize_user_environment_prompts(precheck_messages)
+    protocol = resolve_model_protocol(context.model_entry)
+    precheck_generation_params = build_memory_recall_precheck_generation_params(
+        model_entry=context.model_entry,
+        protocol=protocol,
+    )
     request_messages = ContextManager.trim_messages_for_model_request(
         messages=request_messages,
         uid=context.uid,
         session_id=context.session_id,
         context_window_k=context.chat_params["context_window_k"],
-        max_tokens=context.chat_params["max_tokens"],
+        max_tokens=precheck_generation_params["max_tokens"],
         tools=[MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
     )
     session = await session_crud.get_by_session_id(context.db, context.session_id)
@@ -171,7 +194,7 @@ async def prepare_request_messages(
             1,
             int(context.chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K,
         ),
-        "max_output_tokens": max(0, int(context.chat_params["max_tokens"])),
+        "max_output_tokens": max(0, int(precheck_generation_params["max_tokens"])),
         **build_request_token_baseline(
             request_messages,
             [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
@@ -199,17 +222,18 @@ async def generate(
     await context.db.commit()
     channel = context.chat_channel_obj
     model_entry = context.model_entry or {}
+    protocol = resolve_model_protocol(model_entry)
     generation_kwargs = {
         "api_key": channel.get_decrypted_api_key(),
         "base_url": channel.base_url,
         "model_id": model_entry["model_id"],
         "messages": request_messages,
-        "temperature": context.chat_params["temperature"],
-        "top_p": context.chat_params["top_p"],
-        "reasoning_effort": context.chat_params.get("reasoning_effort"),
-        "max_tokens": context.chat_params["max_tokens"],
+        **build_memory_recall_precheck_generation_params(
+            model_entry=model_entry,
+            protocol=protocol,
+        ),
         "tools": [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
-        "protocol": resolve_model_protocol(model_entry),
+        "protocol": protocol,
         "timeout": context.chat_params["chat_timeout"],
         "http_proxy": get_channel_http_proxy(channel),
         "custom_headers": get_model_custom_headers(model_entry),
@@ -270,7 +294,7 @@ def build_correction_messages(
     base_messages: list[InternalMessage],
     response: Any,
 ) -> list[InternalMessage]:
-    correction_messages = [message.model_copy(deep=True) for message in base_messages]
+    correction_messages = [message.model_copy(deep=True) for message in build_precheck_request_messages(base_messages)]
     response_message = getattr(response, "message", None)
     if isinstance(response_message, InternalMessage):
         correction_messages.append(response_message.model_copy(deep=True))

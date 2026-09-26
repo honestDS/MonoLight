@@ -11,7 +11,6 @@ import pytest_asyncio
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel
 
 from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.knowledge.managed import organization_lock_token_for_job
@@ -75,6 +74,7 @@ from app.models.knowledge_base import (
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.providers.database.time import get_database_time
+from tests.database_support import clone_sqlite_schema
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -106,8 +106,7 @@ async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[As
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=_TABLES))
+    await clone_sqlite_schema(database_path, tables=_TABLES)
 
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:

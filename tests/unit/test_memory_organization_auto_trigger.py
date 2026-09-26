@@ -11,7 +11,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 import app.core.crypto as crypto_module
 import app.core.memory_jobs.consumer as consumer_module
@@ -51,6 +50,7 @@ from app.models.memory import (
     LongTermMemoryStore,
 )
 from app.providers.database.time import get_database_time
+from tests.database_support import clone_sqlite_schema
 
 ORGANIZATION_TABLES = [
     ModelChannel.__table__,
@@ -72,13 +72,7 @@ async def memory_database(tmp_path: Path) -> AsyncIterator[async_sessionmaker[As
         f"sqlite+aiosqlite:///{database_path}",
         connect_args={"timeout": 30},
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=ORGANIZATION_TABLES,
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=ORGANIZATION_TABLES)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:

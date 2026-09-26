@@ -2,6 +2,9 @@ from .manager_common import (
     build_identified_work_response as build_identified_work_response,
 )
 from .manager_common import (
+    build_input_accepted_event as build_input_accepted_event,
+)
+from .manager_common import (
     build_input_queued_event as build_input_queued_event,
 )
 from .manager_common import (
@@ -23,6 +26,7 @@ from .manager_submission import SessionReplySubmission
 
 __all__ = [
     "build_identified_work_response",
+    "build_input_accepted_event",
     "build_input_queued_event",
     "build_session_reply_work_event_id",
     "build_session_reply_work_identity",

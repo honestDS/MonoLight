@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from app.api.v1 import chat as chat_api
 from app.core import log as log_module
@@ -19,6 +19,7 @@ from app.models.audit import AuditExecutionRecord, AuditExecutionStatus, AuditRe
 from app.models.background_task import BackgroundTask, BackgroundTaskResponse, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.providers.database.time import get_database_timestamp
+from tests.database_support import clone_sqlite_schema
 
 
 class SessionContext:
@@ -60,8 +61,7 @@ class CapturingToolLog:
 @pytest.fixture
 async def audit_task_database(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'background-audit.db'}")
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+    await clone_sqlite_schema(tmp_path / "background-audit.db")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield session_factory

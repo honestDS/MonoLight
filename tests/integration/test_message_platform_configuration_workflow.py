@@ -7,7 +7,6 @@ import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlmodel import SQLModel
 
 from app.api.v1.message_platforms import router
 from app.api.v1.users import check_admin_privilege
@@ -17,6 +16,7 @@ from app.models.message_platform import MessagePlatform
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.providers.database import get_db
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -35,18 +35,7 @@ async def message_platform_configuration_db(tmp_path) -> AsyncGenerator[AsyncSes
         finally:
             cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=[
-                    ModelChannel.__table__,
-                    PromptLibrary.__table__,
-                    Profile.__table__,
-                    MessagePlatform.__table__,
-                ],
-            )
-        )
+    await clone_sqlite_schema(tmp_path / "message-platform-configuration.db", tables=[ModelChannel.__table__, PromptLibrary.__table__, Profile.__table__, MessagePlatform.__table__])
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

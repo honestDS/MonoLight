@@ -171,6 +171,7 @@ class LongTermMemoryConfig(BaseModel):
     """长期记忆检索和嵌入模型配置。"""
 
     enabled: bool = PydanticField(False, description="是否启用长期记忆")
+    precheck_enabled: bool = PydanticField(True, description="是否在回答前自动查找相关记忆和知识")
     embedding_channel_id: int | None = PydanticField(None, gt=0, description="长期记忆嵌入渠道 ID")
     embedding_model_id: str | None = PydanticField(None, min_length=1, description="长期记忆嵌入模型 ID")
     top_k: int = PydanticField(5, ge=1, le=50, description="长期记忆最终返回数量")
@@ -185,7 +186,7 @@ class LongTermMemoryConfig(BaseModel):
         if not isinstance(data, dict):
             return data
         normalized = dict(data)
-        for field in ("enabled", "embedding_channel_id", "embedding_model_id", "top_k", "candidate_k", "result_max_chars"):
+        for field in ("enabled", "precheck_enabled", "embedding_channel_id", "embedding_model_id", "top_k", "candidate_k", "result_max_chars"):
             prefixed_name = f"memory_{field}"
             if field not in normalized and prefixed_name in normalized:
                 normalized[field] = normalized[prefixed_name]
@@ -265,6 +266,7 @@ class ProfileConfig(BaseModel):
             "other": ["context_summary_threshold_percent"],
             "memory": [
                 "enabled",
+                "precheck_enabled",
                 "embedding_channel_id",
                 "embedding_model_id",
                 "top_k",
@@ -273,6 +275,7 @@ class ProfileConfig(BaseModel):
                 "chat_history",
                 "knowledge",
                 "memory_enabled",
+                "memory_precheck_enabled",
                 "memory_embedding_channel_id",
                 "memory_embedding_model_id",
                 "memory_top_k",

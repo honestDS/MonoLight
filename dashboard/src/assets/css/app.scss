@@ -1,16 +1,16 @@
-﻿/* 鍏ㄥ眬鍙橀噺 */
+/* 全局变量 */
 :root {
   --el-font-size-base: 15px !important;
 }
 
-/* 鍩虹鏍峰紡 */
+/* 基础样式 */
 body {
   margin: 0;
   background-color: var(--color-app-page-bg);
-  font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "寰蒋闆呴粦", Arial, sans-serif;
+  font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", Arial, sans-serif;
 }
 
-/* 渚ц竟鏍?*/
+/* 侧边栏 */
 .el-aside.sidebar {
   overflow: visible !important;
 }
@@ -18,15 +18,16 @@ body {
 .sidebar {
   background: var(--color-sidebar-bg) !important;
   position: relative;
+  z-index: 10;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--color-sidebar-border) !important;
+  border-right: 1px solid var(--color-sidebar-separator) !important;
   overflow: visible;
-  box-shadow: none !important;
+  box-shadow: 6px 0 18px var(--color-sidebar-shadow) !important;
   transition: width 0.22s ease;
 }
 
-/* Logo 鍖哄煙 */
+/* Logo 区域 */
 .logo-container {
   height: 85px;
   padding: 22px 18px 20px;
@@ -73,29 +74,32 @@ body {
 }
 
 .sidebar-collapse-button {
-  position: absolute;
-  top: 50%;
-  right: -14px;
-  z-index: 30;
   display: inline-flex;
+  flex: 0 0 30px;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 56px;
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
   padding: 0;
   color: var(--color-sidebar-text);
   cursor: pointer;
-  background: #FFF;
-  border: 1px solid var(--color-sidebar-border);
-  border-left: none;
-  border-top-right-radius: 6px;
-  border-bottom-right-radius: 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-8);
   box-shadow: none;
-  transform: translateY(-50%);
+  transition: color 0.2s ease, background-color 0.2s ease;
+}
+
+.sidebar-panel-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
 }
 
 .sidebar-collapse-button:hover {
   color: var(--color-sidebar-active);
+  background: var(--color-sidebar-hover);
 }
 
 .sidebar-collapse-button:focus-visible {
@@ -103,17 +107,56 @@ body {
   outline-offset: 2px;
 }
 
-.sidebar-collapse-arrow {
-  font-size: 11px;
-  transform: rotate(0deg);
-  transition: transform 0.24s ease;
+.sidebar-logo-expand-button {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 4px;
+  color: var(--color-sidebar-text);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-11);
+  box-shadow: none;
+  transition: color 0.2s ease, background-color 0.2s ease;
 }
 
-.sidebar-collapse-arrow.is-collapsed {
-  transform: rotate(180deg);
+.sidebar-logo-expand-button:hover,
+.sidebar-logo-expand-button:focus-visible {
+  color: var(--color-sidebar-active);
+  background: var(--color-sidebar-hover);
 }
 
-/* 鑿滃崟 */
+.sidebar-logo-expand-button:focus-visible {
+  outline: 2px solid var(--color-sidebar-active);
+  outline-offset: 2px;
+}
+
+.sidebar-logo-expand-button .logo-image,
+.sidebar-logo-expand-icon {
+  transition: opacity 0.16s ease;
+}
+
+.sidebar-logo-expand-icon {
+  position: absolute;
+  opacity: 0;
+}
+
+.sidebar-logo-expand-button:hover .logo-image,
+.sidebar-logo-expand-button:focus-visible .logo-image {
+  opacity: 0;
+}
+
+.sidebar-logo-expand-button:hover .sidebar-logo-expand-icon,
+.sidebar-logo-expand-button:focus-visible .sidebar-logo-expand-icon {
+  opacity: 1;
+}
+
+/* 菜单 */
 .side-menu {
   --el-menu-bg-color: transparent;
   --el-menu-text-color: var(--color-sidebar-text);
@@ -162,7 +205,7 @@ body {
     font-size: 18px;
   }
 
-  /* 鑿滃崟椤规牱寮?*/
+  /* 菜单项样式 */
   .el-menu-item,
   .el-sub-menu__title {
     position: relative;
@@ -189,7 +232,7 @@ body {
     color: var(--color-sidebar-title) !important;
   }
 
-  /* 瀛愯彍鍗曟牱寮?*/
+  /* 子菜单样式 */
   .el-sub-menu {
     .el-sub-menu__title {
       &:hover {
@@ -212,7 +255,7 @@ body {
     background-color: transparent !important;
   }
 
-  /* 瀛愯彍鍗曢」缂╄繘 */
+  /* 子菜单项缩进 */
   .el-menu--inline .el-menu-item {
     padding-left: 30px !important;
     color: var(--color-slate-500);
@@ -220,7 +263,7 @@ body {
   }
 }
 
-/* 渚ц竟鏍忓簳閮ㄥ尯鍩?*/
+/* 侧边栏底部区域 */
 .sidebar-footer {
   padding: 10px 10px 12px;
   border-top: 1px solid var(--color-sidebar-border);
@@ -239,17 +282,20 @@ body {
 
 .sidebar-copyright {
   display: block;
+  margin-top: 10px;
+  padding-top: 10px;
   color: var(--color-sidebar-text);
   font-size: 9px;
   line-height: 1;
   text-align: center;
+  border-top: 1px solid var(--color-sidebar-border);
 }
 
 .sidebar.is-collapsed .sidebar-copyright {
   display: none;
 }
 
-/* 搴曢儴鑿滃崟 */
+/* 底部菜单 */
 .side-menu-footer {
   --el-menu-bg-color: transparent;
   --el-menu-text-color: var(--color-sidebar-text);
@@ -369,7 +415,7 @@ body {
   box-shadow: 0 0 12px var(--color-sidebar-active-shadow);
 }
 
-/* 鍏ㄥ眬甯冨眬 */
+/* 全局布局 */
 .app-wrapper {
   --sidebar-expanded-width: 236px;
   --sidebar-collapsed-width: 72px;
@@ -535,13 +581,13 @@ body {
 .sidebar.is-collapsed .logo-container {
   justify-content: center;
   gap: 0;
-  padding: 0 10px;
+  padding: 0 8px;
 }
 
 .sidebar.is-collapsed .logo-image {
-  width: 38px;
-  height: 38px;
-  flex-basis: 38px;
+  width: 32px;
+  height: 32px;
+  flex-basis: 32px;
   border-radius: var(--radius-11);
 }
 
@@ -587,6 +633,6 @@ body {
   padding-left: 8px;
 }
 
-/* 杩囨浮鍔ㄧ敾 */
+/* 过渡动画 */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }

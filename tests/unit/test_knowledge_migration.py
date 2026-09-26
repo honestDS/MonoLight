@@ -9,7 +9,6 @@ import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 import app.core.knowledge.embedding_migration as embedding_migration_module
 import app.core.knowledge_jobs.migration_build as migration_build_module
@@ -53,6 +52,7 @@ from app.models.knowledge_base import (
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.providers.database.time import get_database_time
+from tests.database_support import clone_sqlite_schema
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -82,13 +82,7 @@ async def migration_database(tmp_path) -> AsyncIterator[async_sessionmaker[Async
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=_TABLES,
-            )
-        )
+    await clone_sqlite_schema(database_path, tables=_TABLES)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:

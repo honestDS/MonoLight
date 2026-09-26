@@ -19,6 +19,7 @@ from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
 from app.models.system_setting import SystemSetting
 from app.models.user import User
+from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -61,19 +62,7 @@ async def setup_session_factory(
             cursor.close()
 
     try:
-        async with engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync_connection: SQLModel.metadata.create_all(
-                    sync_connection,
-                    tables=[
-                        SystemSetting.__table__,
-                        User.__table__,
-                        ModelChannel.__table__,
-                        PromptLibrary.__table__,
-                        Profile.__table__,
-                    ],
-                )
-            )
+        await clone_sqlite_schema(database_path, tables=[SystemSetting.__table__, User.__table__, ModelChannel.__table__, PromptLibrary.__table__, Profile.__table__])
 
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         async with session_factory() as session:

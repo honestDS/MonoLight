@@ -408,7 +408,7 @@ async def test_memory_recall_resume_completed_reuses_checkpoint_and_pending_retr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("memory_config", [_MISSING, SimpleNamespace(enabled=False)])
+@pytest.mark.parametrize("memory_config", [_MISSING, SimpleNamespace(enabled=False), SimpleNamespace(enabled=True, precheck_enabled=False)])
 async def test_memory_recall_is_not_prechecked_without_enabled_memory(monkeypatch, memory_config):
     cfg = _build_cfg(memory_config, max_turns=1) if memory_config is not _MISSING else _build_cfg(max_turns=1)
     request_log = []
