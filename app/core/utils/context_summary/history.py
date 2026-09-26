@@ -3,15 +3,15 @@ from collections.abc import AsyncIterator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH,
     ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED,
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
-    ERR_VALUE_MUST_BE_POSITIVE,
 )
 from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.context_summary.common import join_messages, serialize_message
-from app.core.utils.context_summary.pipeline import SummaryFragmentInput
+from app.core.utils.context_summary.pipeline import SummaryFragmentInput, SummaryFragmentPlan, build_balanced_fragment_plan
 from app.core.utils.context_summary.snapshot import CONTEXT_SUMMARY_SCAN_PAGE_SIZE, ContextSummarySnapshot, iter_persistent_summary_rounds
 from app.core.utils.context_summary.split import SummarySourceUnit, iter_round_source_units
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshots
@@ -171,18 +171,19 @@ async def iter_persistent_summary_source_units(
 async def iter_grouped_summary_source_units(
     units: AsyncIterator[SummarySourceUnit],
     *,
-    fragment_target_tokens: int,
+    plan: SummaryFragmentPlan,
     first_fragment_index: int = 0,
     existing_summary: str | None = None,
 ) -> AsyncIterator[SummaryFragmentInput]:
-    if fragment_target_tokens <= 0:
-        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="fragment_target_tokens"))
     if first_fragment_index < 0:
+        raise ValueError(t(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="first_fragment_index"))
+    if first_fragment_index > plan.fragment_count:
         raise ValueError(t(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="first_fragment_index"))
 
     fragment_index = 0
     pending_units: list[SummarySourceUnit] = []
     pending_tokens = 0
+    planned_unit_count = plan.unit_counts[0] if plan.unit_counts else 0
 
     def build_fragment() -> SummaryFragmentInput:
         return SummaryFragmentInput(
@@ -195,29 +196,33 @@ async def iter_grouped_summary_source_units(
         )
 
     async for unit in units:
-        if pending_units and pending_tokens + unit.token_count > fragment_target_tokens:
+        if fragment_index >= plan.fragment_count:
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH))
+        pending_units.append(unit)
+        pending_tokens += unit.token_count
+        if len(pending_units) == planned_unit_count:
+            if pending_tokens != plan.token_counts[fragment_index]:
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH))
             if fragment_index >= first_fragment_index:
                 yield build_fragment()
             fragment_index += 1
             pending_units = []
             pending_tokens = 0
+            if fragment_index < plan.fragment_count:
+                planned_unit_count = plan.unit_counts[fragment_index]
 
-        pending_units.append(unit)
-        pending_tokens += unit.token_count
-
-    if pending_units and fragment_index >= first_fragment_index:
-        yield build_fragment()
+    if pending_units or fragment_index != plan.fragment_count:
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH))
 
 
-async def count_summary_fragments(
+async def build_summary_fragment_plan(
     db: AsyncSession,
     *,
     session_id: str,
     uid: str,
     snapshot: ContextSummarySnapshot,
-    fragment_target_tokens: int,
     max_fragment_tokens: int,
-) -> int:
+) -> SummaryFragmentPlan:
     units = iter_persistent_summary_source_units(
         db,
         session_id=session_id,
@@ -225,13 +230,11 @@ async def count_summary_fragments(
         snapshot=snapshot,
         max_unit_tokens=max_fragment_tokens,
     )
-    fragment_count = 0
-    async for _fragment in iter_grouped_summary_source_units(
-        units,
-        fragment_target_tokens=fragment_target_tokens,
-    ):
-        fragment_count += 1
-    return fragment_count
+    unit_token_counts = [unit.token_count async for unit in units]
+    return build_balanced_fragment_plan(
+        unit_token_counts,
+        max_fragment_tokens=max_fragment_tokens,
+    )
 
 
 async def iter_summary_fragments(
@@ -241,7 +244,7 @@ async def iter_summary_fragments(
     uid: str,
     snapshot: ContextSummarySnapshot,
     existing_summary: str | None,
-    fragment_target_tokens: int,
+    plan: SummaryFragmentPlan,
     max_fragment_tokens: int,
     first_fragment_index: int = 0,
 ) -> AsyncIterator[SummaryFragmentInput]:
@@ -254,7 +257,7 @@ async def iter_summary_fragments(
     )
     async for fragment in iter_grouped_summary_source_units(
         units,
-        fragment_target_tokens=fragment_target_tokens,
+        plan=plan,
         first_fragment_index=first_fragment_index,
         existing_summary=existing_summary,
     ):

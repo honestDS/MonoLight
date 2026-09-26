@@ -1,8 +1,9 @@
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 
 from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_CHUNK_OVER_BUDGET,
     ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_EXCEEDED,
     ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH,
     ERR_CONTEXT_SUMMARY_FRAGMENT_DUPLICATED,
@@ -40,6 +41,16 @@ class SummaryFragmentResult:
 
 
 @dataclass(frozen=True)
+class SummaryFragmentPlan:
+    unit_counts: tuple[int, ...]
+    token_counts: tuple[int, ...]
+
+    @property
+    def fragment_count(self) -> int:
+        return len(self.unit_counts)
+
+
+@dataclass(frozen=True)
 class SummaryPipelineStats:
     max_active_tasks: int
     max_input_queue_size: int
@@ -54,15 +65,85 @@ ProcessFragment = Callable[
 PersistFragment = Callable[[SummaryFragmentResult], Awaitable[None]]
 
 
-def balanced_fragment_target_tokens(total_tokens: int, max_fragment_tokens: int) -> int:
-    if total_tokens <= 0:
-        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="total_tokens"))
+def build_balanced_fragment_plan(
+    unit_token_counts: Iterable[int],
+    *,
+    max_fragment_tokens: int,
+) -> SummaryFragmentPlan:
     if max_fragment_tokens <= 0:
         raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="max_fragment_tokens"))
-    fragment_count = max(1, (total_tokens + max_fragment_tokens - 1) // max_fragment_tokens)
-    return min(
-        max_fragment_tokens,
-        max(1, (total_tokens + fragment_count - 1) // fragment_count),
+
+    token_counts = tuple(unit_token_counts)
+    if not token_counts:
+        return SummaryFragmentPlan(unit_counts=(), token_counts=())
+    for token_count in token_counts:
+        if token_count <= 0:
+            raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="unit_token_count"))
+        if token_count > max_fragment_tokens:
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_CHUNK_OVER_BUDGET))
+
+    unit_count = len(token_counts)
+    next_fragment_start = [0] * unit_count
+    window_end = 0
+    window_tokens = 0
+    for window_start in range(unit_count):
+        while window_end < unit_count and window_tokens + token_counts[window_end] <= max_fragment_tokens:
+            window_tokens += token_counts[window_end]
+            window_end += 1
+        next_fragment_start[window_start] = window_end
+        window_tokens -= token_counts[window_start]
+
+    minimum_fragments_from = [0] * (unit_count + 1)
+    for index in range(unit_count - 1, -1, -1):
+        minimum_fragments_from[index] = 1 + minimum_fragments_from[next_fragment_start[index]]
+
+    fragment_count = minimum_fragments_from[0]
+    planned_unit_counts: list[int] = []
+    planned_token_counts: list[int] = []
+    start = 0
+    remaining_tokens = sum(token_counts)
+
+    for fragments_left in range(fragment_count, 1, -1):
+        dynamic_target = remaining_tokens / fragments_left
+        running_tokens = 0
+        best_end: int | None = None
+        best_tokens = 0
+        best_distance = float("inf")
+        latest_end = unit_count - (fragments_left - 1)
+
+        for end in range(start + 1, latest_end + 1):
+            running_tokens += token_counts[end - 1]
+            if running_tokens > max_fragment_tokens:
+                break
+            if minimum_fragments_from[end] > fragments_left - 1:
+                continue
+
+            distance = abs(running_tokens - dynamic_target)
+            if distance < best_distance or (distance == best_distance and running_tokens > best_tokens):
+                best_end = end
+                best_tokens = running_tokens
+                best_distance = distance
+
+            if running_tokens >= dynamic_target and best_end is not None:
+                break
+
+        if best_end is None:
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH))
+
+        planned_unit_counts.append(best_end - start)
+        planned_token_counts.append(best_tokens)
+        start = best_end
+        remaining_tokens -= best_tokens
+
+    final_tokens = remaining_tokens
+    if start >= unit_count or final_tokens > max_fragment_tokens:
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH))
+    planned_unit_counts.append(unit_count - start)
+    planned_token_counts.append(final_tokens)
+
+    return SummaryFragmentPlan(
+        unit_counts=tuple(planned_unit_counts),
+        token_counts=tuple(planned_token_counts),
     )
 
 

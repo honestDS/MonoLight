@@ -4,33 +4,105 @@ import pytest
 
 from app.core.constants import ERR_CONTEXT_SUMMARY_FRAGMENT_ORDER_INVALID
 from app.core.i18n import t
+from app.core.utils.context_summary.history import iter_grouped_summary_source_units
 from app.core.utils.context_summary.pipeline import (
     SummaryFragmentInput,
+    SummaryFragmentPlan,
     SummaryFragmentResult,
-    balanced_fragment_target_tokens,
+    build_balanced_fragment_plan,
     run_bounded_fragment_pipeline,
 )
+from app.core.utils.context_summary.split import SummarySourceUnit
 
 
-def test_balanced_fragment_target_uses_minimum_safe_fragment_count():
-    assert balanced_fragment_target_tokens(100, 30) == 25
-    assert balanced_fragment_target_tokens(91, 30) == 23
-    assert balanced_fragment_target_tokens(30, 30) == 30
+def test_balanced_fragment_plan_uses_minimum_fragment_count_without_tiny_tail():
+    plan = build_balanced_fragment_plan(
+        (40, 41, 1),
+        max_fragment_tokens=70,
+    )
+
+    assert plan == SummaryFragmentPlan(
+        unit_counts=(1, 2),
+        token_counts=(40, 42),
+    )
 
 
-@pytest.mark.parametrize(
-    ("total_tokens", "max_fragment_tokens"),
-    [(0, 10), (10, 0), (-1, 10), (10, -1)],
-)
-def test_balanced_fragment_target_rejects_invalid_budgets(
-    total_tokens,
-    max_fragment_tokens,
-):
+def test_balanced_fragment_plan_matches_observed_residual_tail_shape():
+    plan = build_balanced_fragment_plan(
+        (131343, 131541, 487),
+        max_fragment_tokens=246144,
+    )
+
+    assert plan.fragment_count == 2
+    assert plan.token_counts == (131343, 132028)
+
+
+def test_balanced_fragment_plan_respects_indivisible_units_when_theoretical_count_is_too_small():
+    plan = build_balanced_fragment_plan(
+        (6, 6, 6),
+        max_fragment_tokens=10,
+    )
+
+    assert plan.fragment_count == 3
+    assert plan.unit_counts == (1, 1, 1)
+    assert plan.token_counts == (6, 6, 6)
+
+
+@pytest.mark.parametrize("max_fragment_tokens", [0, -1])
+def test_balanced_fragment_plan_rejects_invalid_budget(max_fragment_tokens):
     with pytest.raises(ValueError):
-        balanced_fragment_target_tokens(
-            total_tokens,
-            max_fragment_tokens,
+        build_balanced_fragment_plan(
+            (10,),
+            max_fragment_tokens=max_fragment_tokens,
         )
+
+
+@pytest.mark.asyncio
+async def test_grouped_summary_source_units_follows_balanced_plan_without_splitting_units():
+    async def units():
+        for index, token_count in enumerate((40, 41, 1), start=1):
+            yield SummarySourceUnit(
+                message_start_id=index,
+                message_end_id=index,
+                token_count=token_count,
+                content=f"unit-{index}",
+            )
+
+    plan = build_balanced_fragment_plan(
+        (40, 41, 1),
+        max_fragment_tokens=70,
+    )
+    fragments = [
+        fragment
+        async for fragment in iter_grouped_summary_source_units(
+            units(),
+            plan=plan,
+            existing_summary="existing",
+        )
+    ]
+
+    assert [(fragment.message_start_id, fragment.message_end_id, fragment.token_count) for fragment in fragments] == [
+        (1, 1, 40),
+        (2, 3, 42),
+    ]
+    assert fragments[0].content == "unit-1"
+    assert fragments[0].existing_summary == "existing"
+    assert fragments[1].content == "unit-2\nunit-3"
+    assert fragments[1].existing_summary is None
+
+    resumed = [
+        fragment
+        async for fragment in iter_grouped_summary_source_units(
+            units(),
+            plan=plan,
+            first_fragment_index=1,
+            existing_summary="existing",
+        )
+    ]
+    assert [(fragment.fragment_index, fragment.message_start_id, fragment.message_end_id) for fragment in resumed] == [
+        (1, 2, 3),
+    ]
+    assert resumed[0].existing_summary is None
 
 
 @pytest.mark.asyncio

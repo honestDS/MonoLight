@@ -8,6 +8,7 @@ from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import stage as stage_module
 from app.core.utils.context_summary.common import ContextSummaryWorkInvalidError
 from app.core.utils.context_summary.merge import CompletedSummaryFragment
+from app.core.utils.context_summary.pipeline import SummaryFragmentPlan
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
 from app.models.context_summary_stage import (
@@ -39,6 +40,58 @@ def _summary_history() -> list[InternalMessage]:
     ]
 
 
+def test_fragment_stage_identity_changes_when_balanced_plan_changes():
+    snapshot = ContextSummarySnapshot(
+        expected_summary_message_id=10,
+        snapshot_before_id=21,
+        snapshot_max_message_id=20,
+        persistent_summary_target_id=20,
+        recent_round_start_ids=(),
+        frozen_user_message_ids=(),
+        recent_messages=(),
+    )
+    model = ContextSummaryModelSnapshot(
+        channel_id=1,
+        channel_name="summary-channel",
+        model_id="summary-model",
+        protocol="openai",
+        base_url="https://example.invalid",
+        api_key="secret",
+        priority=1,
+        context_window_tokens=2048,
+        max_output_tokens=256,
+        temperature=0.7,
+        top_p=None,
+        safety_margin_tokens=0,
+        input_budget_tokens=1792,
+    )
+
+    first = stage_module.build_stage_identity(
+        session_id="session-1",
+        uid="user-1",
+        snapshot=snapshot,
+        revision=3,
+        model=model,
+        fragment_plan=SummaryFragmentPlan(
+            unit_counts=(2, 2),
+            token_counts=(400, 400),
+        ),
+    )
+    second = stage_module.build_stage_identity(
+        session_id="session-1",
+        uid="user-1",
+        snapshot=snapshot,
+        revision=3,
+        model=model,
+        fragment_plan=SummaryFragmentPlan(
+            unit_counts=(1, 3),
+            token_counts=(300, 500),
+        ),
+    )
+
+    assert first[3] != second[3]
+
+
 def _patch_multifragment_completion_barrier(
     monkeypatch,
     *,
@@ -68,8 +121,11 @@ def _patch_multifragment_completion_barrier(
             input_budget_tokens=1792,
         )
 
-    async def count_fragments(*_args, **_kwargs):
-        return 2
+    async def build_fragment_plan(*_args, **_kwargs):
+        return SummaryFragmentPlan(
+            unit_counts=(1, 1),
+            token_counts=(500, 500),
+        )
 
     async def iter_fragments(*_args, **_kwargs):
         first_fragment_index = _kwargs.get("first_fragment_index", 0)
@@ -124,7 +180,7 @@ def _patch_multifragment_completion_barrier(
 
     monkeypatch.setattr(summary_module, "measure_persistent_history", measure_history)
     monkeypatch.setattr(summary_module, "select_context_summary_model", select_model)
-    monkeypatch.setattr(summary_module, "count_summary_fragments", count_fragments)
+    monkeypatch.setattr(summary_module, "build_summary_fragment_plan", build_fragment_plan)
     monkeypatch.setattr(summary_module, "iter_summary_fragments", iter_fragments)
     monkeypatch.setattr(summary_module, "call_context_summary_model", call_model)
     monkeypatch.setattr(stage_module.context_summary_stage_crud, "create_stage", create_stage)

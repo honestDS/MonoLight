@@ -35,15 +35,15 @@ from app.core.utils.context_summary.common import (
     ensure_context_summary_work_valid,
 )
 from app.core.utils.context_summary.history import (
-    count_summary_fragments,
+    build_summary_fragment_plan,
     iter_summary_fragments,
     measure_persistent_history,
 )
 from app.core.utils.context_summary.model_call import call_context_summary_model
 from app.core.utils.context_summary.pipeline import (
     SummaryFragmentInput,
+    SummaryFragmentPlan,
     SummaryFragmentResult,
-    balanced_fragment_target_tokens,
     run_bounded_fragment_pipeline,
 )
 from app.core.utils.context_summary.selection import (
@@ -212,7 +212,7 @@ def build_stage_identity(
     snapshot: ContextSummarySnapshot,
     revision: int,
     model: ContextSummaryModelSnapshot,
-    expected_fragment_count: int,
+    fragment_plan: SummaryFragmentPlan,
 ) -> tuple[int, str, str, str, str]:
     work_id, work_dedupe_key, snapshot_key = build_summary_work_identity(
         session_id=session_id,
@@ -236,7 +236,16 @@ def build_stage_identity(
         separators=(",", ":"),
     )
     model_key = hashlib.sha256(model_payload.encode("utf-8")).hexdigest()
-    stage_payload = f"{snapshot_key}:{model_key}:raw:{expected_fragment_count}"
+    fragment_plan_payload = json.dumps(
+        {
+            "unit_counts": fragment_plan.unit_counts,
+            "token_counts": fragment_plan.token_counts,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    fragment_plan_key = hashlib.sha256(fragment_plan_payload.encode("utf-8")).hexdigest()
+    stage_payload = f"{snapshot_key}:{model_key}:raw:{fragment_plan_key}"
     stage_key = hashlib.sha256(stage_payload.encode("utf-8")).hexdigest()
     return work_id, work_dedupe_key, snapshot_key, stage_key, model_key
 
@@ -351,18 +360,14 @@ async def generate_snapshot_summary_with_model(
     if max_fragment_tokens <= 0:
         raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="fragment"))
 
-    fragment_target_tokens = balanced_fragment_target_tokens(
-        total_tokens,
-        max_fragment_tokens,
-    )
-    expected_fragment_count = await count_summary_fragments(
+    fragment_plan = await build_summary_fragment_plan(
         db,
         session_id=session_id,
         uid=uid,
         snapshot=snapshot,
-        fragment_target_tokens=fragment_target_tokens,
         max_fragment_tokens=max_fragment_tokens,
     )
+    expected_fragment_count = fragment_plan.fragment_count
     if expected_fragment_count <= 0:
         raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_LAYER_UNSPLITTABLE))
 
@@ -377,7 +382,7 @@ async def generate_snapshot_summary_with_model(
         snapshot=snapshot,
         revision=existing_summary_revision,
         model=model,
-        expected_fragment_count=expected_fragment_count,
+        fragment_plan=fragment_plan,
     )
     stage = ContextSummaryStage(
         uid=uid,
@@ -468,7 +473,7 @@ async def generate_snapshot_summary_with_model(
         uid=uid,
         snapshot=snapshot,
         existing_summary=existing_summary,
-        fragment_target_tokens=fragment_target_tokens,
+        plan=fragment_plan,
         max_fragment_tokens=max_fragment_tokens,
         first_fragment_index=first_fragment_index,
     )

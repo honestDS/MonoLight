@@ -4,6 +4,7 @@ import pytest
 
 from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import stage as summary_module
+from app.core.utils.context_summary.pipeline import SummaryFragmentPlan
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.models.message import InternalMessage, MessageRole
 
@@ -31,7 +32,7 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
     primary_model = _model(priority=1, input_budget_tokens=700)
     fallback_model = _model(priority=2, input_budget_tokens=400)
     selection_calls: list[set[int]] = []
-    count_calls: list[tuple[int, int]] = []
+    plan_calls: list[int] = []
     created_stages = []
     failed_stage_keys: list[str] = []
     invalidated_stage_keys: list[str] = []
@@ -51,17 +52,19 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
             return fallback_model
         return None
 
-    async def count_fragments(*_args, **kwargs):
+    async def build_fragment_plan(*_args, **kwargs):
         max_fragment_tokens = kwargs["max_fragment_tokens"]
-        fragment_target_tokens = kwargs["fragment_target_tokens"]
-        count_calls.append((max_fragment_tokens, fragment_target_tokens))
-        return 2 if max_fragment_tokens > 400 else 4
+        plan_calls.append(max_fragment_tokens)
+        fragment_count = 2 if max_fragment_tokens > 400 else 4
+        return SummaryFragmentPlan(
+            unit_counts=tuple(1 for _ in range(fragment_count)),
+            token_counts=tuple(100 for _ in range(fragment_count)),
+        )
 
     async def iter_fragments(*_args, **kwargs):
-        fragment_target_tokens = kwargs["fragment_target_tokens"]
+        plan = kwargs["plan"]
         first_fragment_index = kwargs.get("first_fragment_index", 0)
-        fragment_count = 2 if fragment_target_tokens >= 500 else 4
-        for fragment_index in range(first_fragment_index, fragment_count):
+        for fragment_index in range(first_fragment_index, plan.fragment_count):
             yield summary_module.SummaryFragmentInput(
                 fragment_index=fragment_index,
                 message_start_id=fragment_index * 2 + 1,
@@ -111,7 +114,7 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
 
     monkeypatch.setattr(summary_module, "measure_persistent_history", measure_history)
     monkeypatch.setattr(summary_module, "select_context_summary_model", select_model)
-    monkeypatch.setattr(summary_module, "count_summary_fragments", count_fragments)
+    monkeypatch.setattr(summary_module, "build_summary_fragment_plan", build_fragment_plan)
     monkeypatch.setattr(summary_module, "iter_summary_fragments", iter_fragments)
     monkeypatch.setattr(summary_module, "call_context_summary_model", call_model)
     monkeypatch.setattr(summary_module.context_summary_stage_crud, "create_stage", create_stage)
@@ -164,7 +167,7 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
     assert result == "final summary"
     assert message_count == 8
     assert selection_calls == [set(), {1}]
-    assert count_calls == [(568, 500), (268, 250)]
+    assert plan_calls == [568, 268]
     assert len(created_stages) == 2
 
     primary_stage, fallback_stage = created_stages
