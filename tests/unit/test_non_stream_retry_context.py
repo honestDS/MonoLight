@@ -13,7 +13,7 @@ from app.core.dispatchers import interactive_runtime as interactive_runtime_modu
 from app.core.dispatchers import interactive_tools as interactive_tools_module
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
-from app.core.exceptions import LLMContextLengthException, LLMException
+from app.core.exceptions import ContextBudgetExceededException, LLMContextLengthException, LLMException
 from app.core.terminal.schemas import (
     ShellInteractiveHandoffResult,
     TerminalOutputBufferState,
@@ -188,6 +188,54 @@ async def test_context_length_forces_summary_on_current_channel_before_fallback(
 
     assert result.message.content == "ok"
     assert attempts == ["model-1", "model-1"]
+    assert sum(1 for call in summary_calls if call.get("force")) == 1
+    assert selection_calls == []
+    assert state.messages[0].content == "compressed request"
+
+
+@pytest.mark.asyncio
+async def test_local_context_budget_overflow_forces_summary_on_current_channel_before_provider_call(monkeypatch):
+    state = _context_length_generation_state()
+    summary_calls = []
+    trim_calls = 0
+    model_calls = []
+    selection_calls = []
+
+    async def apply_checkpoint(_db, **kwargs):
+        summary_calls.append(dict(kwargs))
+        if kwargs.get("force"):
+            return [InternalMessage(id=1, role=MessageRole.USER, content="compressed request")]
+        return kwargs["messages"]
+
+    def trim_messages_for_model_request(**kwargs):
+        nonlocal trim_calls
+        trim_calls += 1
+        if trim_calls == 1:
+            raise ContextBudgetExceededException()
+        return kwargs["messages"]
+
+    async def select_channel(_db, _channel_config, _expected_usage, **kwargs):
+        selection_calls.append(set(kwargs.get("excluded_priorities") or set()))
+        raise AssertionError("successful local budget recovery must not switch channels")
+
+    async def generate_response(**kwargs):
+        model_calls.append(kwargs["model_id"])
+        return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model=kwargs["model_id"], usage={})
+
+    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_checkpoint)
+    monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)
+    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", trim_messages_for_model_request)
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
+
+    result = await interactive_generation_module.generate_interactive_turn(
+        state,
+        current_tools=[],
+        response_id="response-1",
+    )
+
+    assert result.message.content == "ok"
+    assert trim_calls == 2
+    assert model_calls == ["model-1"]
     assert sum(1 for call in summary_calls if call.get("force")) == 1
     assert selection_calls == []
     assert state.messages[0].content == "compressed request"

@@ -17,6 +17,7 @@ MESSAGES = {
     "ERR_CHAT_STREAM_NOT_SUPPORTED": "This page is using a sending method that is no longer supported. Refresh the page and try again.",
     "ERR_CHAT_INPUT_TOO_LONG": "The input exceeds the available context budget of the current model. Please shorten the message or reduce the output length and try again.",
     "ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED": "The current model context budget is exhausted by system prompts, tool definitions, or output length. Please adjust the Profile configuration and try again.",
+    "ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION": "The current request exceeds the model context window and could not be reduced enough by history summarization. Shorten the current input, reduce the output length, or adjust the Profile configuration and try again.",
     "ERR_BACKGROUND_TASK_NOT_FOUND": "Background task not found",
     "ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE": "Background task profile is not available for user.",
     "ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND": "Scheduled task profile not found",

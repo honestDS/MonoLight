@@ -480,6 +480,7 @@ async def handle_interactive_tool_round(
         max_tokens=state.chat_params["max_tokens"],
         tools=state.tools,
         required_input_tokens_override=_resolve_tool_result_required_input_tokens(state, ai_msg),
+        fallback_to_local_usage_on_overflow=True,
     )
     parallel_tool_context = _ParallelToolExecutionContext(
         semaphore=asyncio.Semaphore(state.cfg.tool.executor_max_workers),

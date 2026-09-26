@@ -5,11 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
-    ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
     ERR_CHAT_INPUT_TOO_LONG,
 )
 from app.core.crud.session.message import message_crud
-from app.core.exceptions import ParameterException
+from app.core.exceptions import ContextBudgetExceededException, ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
@@ -204,7 +203,7 @@ class ContextManager:
             latest_msg = next((message for message in reversed(request_messages) if message.role != MessageRole.SYSTEM), None)
             if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and estimate_tokens(cls._message_token_text(latest_msg)) > budget.non_system_budget:
                 raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
-            raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
+            raise ContextBudgetExceededException()
 
         return request_messages
 

@@ -3,6 +3,7 @@ from typing import Any
 
 from app.core.constants import (
     ERR_API_KEY_CRYPTO_FAILED,
+    ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION,
     ERR_GENERIC_ERROR,
     ERR_INTERNAL_SERVER_ERROR,
     ERR_KB_NOT_FOUND,
@@ -79,6 +80,13 @@ class ResourceNotFoundException(BaseBusinessException):
 
 class ParameterException(BaseBusinessException):
     def __init__(self, message: str = ERR_VALIDATION_FAILED, code: int = 400, **kwargs):
+        super().__init__(code=code, message=message, **kwargs)
+
+
+class ContextBudgetExceededException(ParameterException):
+    """本地请求预算校验发现当前上下文需要先压缩。"""
+
+    def __init__(self, message: str = ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION, code: int = 400, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
 
 

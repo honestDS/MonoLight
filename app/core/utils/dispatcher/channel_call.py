@@ -10,7 +10,7 @@ from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_LLM_EMPTY_RESPONSE,
 )
-from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
+from app.core.exceptions import ApiKeyException, ContextBudgetExceededException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
@@ -109,9 +109,10 @@ async def generate_chat_with_fallback(
             return response, chat_channel_obj, model_entry, channel_rule, chat_params
         except ApiKeyException:
             raise
-        except LLMException as exc:
+        except (LLMException, ContextBudgetExceededException) as exc:
             current_priority = channel_rule.priority
-            if isinstance(exc, LLMContextLengthException) and context_length_recovery_callback is not None and current_priority not in context_length_recovery_priorities:
+            context_recovery_required = isinstance(exc, (LLMContextLengthException, ContextBudgetExceededException))
+            if context_recovery_required and context_length_recovery_callback is not None and current_priority not in context_length_recovery_priorities:
                 context_length_recovery_priorities.add(current_priority)
                 try:
                     recovered = context_length_recovery_callback(chat_params)

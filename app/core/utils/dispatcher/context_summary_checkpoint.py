@@ -77,7 +77,9 @@ async def apply_context_summary_checkpoint(
     fixed_request_messages = [*system_messages, *uncovered_messages]
 
     required_input_tokens_override = None
-    if allow_incremental_input_estimate and todo_snapshot is None and isinstance(model_id, str) and model_id.strip() and isinstance(protocol, str) and protocol.strip():
+    # Todo 快照作为新工具结果的一部分进入请求；同 ID 内容替换会提升 context_content_revision，
+    # 因此 provider 基线仍可由统一增量校验判断是否可复用，无需为 Todo 单独退回本地估算。
+    if allow_incremental_input_estimate and isinstance(model_id, str) and model_id.strip() and isinstance(protocol, str) and protocol.strip():
         session = await session_crud.get_by_session_id(db, session_id)
         if session is not None and hasattr(db, "refresh"):
             await db.refresh(session)

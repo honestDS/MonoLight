@@ -13,7 +13,7 @@ from app.core.constants import (
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_state import InteractiveDispatchState
-from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
+from app.core.exceptions import ApiKeyException, ContextBudgetExceededException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra
 from app.core.utils.context_summary import ContextSummaryTriggerMode
@@ -302,12 +302,13 @@ async def generate_interactive_turn(
             )
         except ApiKeyException:
             raise
-        except LLMException as exc:
+        except (LLMException, ContextBudgetExceededException) as exc:
             if stream_state.emitted_stream_content:
                 raise
 
             current_priority = state.channel_rule.priority
-            if isinstance(exc, LLMContextLengthException) and current_priority not in context_length_recovery_priorities and state.checkpoint_state.upper_message_id is not None:
+            context_recovery_required = isinstance(exc, (LLMContextLengthException, ContextBudgetExceededException))
+            if context_recovery_required and current_priority not in context_length_recovery_priorities and state.checkpoint_state.upper_message_id is not None:
                 context_length_recovery_priorities.add(current_priority)
                 previous_messages = state.messages
                 try:

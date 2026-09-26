@@ -2,9 +2,13 @@ import json
 
 import pytest
 
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
+from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
+    ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION,
+)
 from app.core.context import ContextManager
-from app.core.exceptions import ParameterException
+from app.core.exceptions import ContextBudgetExceededException, ParameterException
 from app.core.utils.context_budget import measure_context_request_usage
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.tokenizer import estimate_tokens
@@ -102,7 +106,7 @@ def test_final_request_rejects_input_override_above_hard_window_with_context_bud
     messages, usage, hard_input_limit = _build_over_window_assistant_request()
 
     assert usage.exceeds_hard_window
-    with pytest.raises(ParameterException) as exc_info:
+    with pytest.raises(ContextBudgetExceededException) as exc_info:
         ContextManager.trim_messages_for_model_request(
             messages=messages,
             uid="user-1",
@@ -114,7 +118,7 @@ def test_final_request_rejects_input_override_above_hard_window_with_context_bud
             required_input_tokens_override=hard_input_limit + 1,
         )
 
-    assert exc_info.value.message == ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
+    assert exc_info.value.message == ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION
 
 
 @pytest.mark.parametrize("invalid_override", [True, -1], ids=["boolean_true", "negative"])
@@ -122,7 +126,7 @@ def test_final_request_invalid_input_override_falls_back_to_local_full_estimate(
     messages, usage, _ = _build_over_window_assistant_request()
 
     assert usage.exceeds_hard_window
-    with pytest.raises(ParameterException) as exc_info:
+    with pytest.raises(ContextBudgetExceededException) as exc_info:
         ContextManager.trim_messages_for_model_request(
             messages=messages,
             uid="user-1",
@@ -134,6 +138,22 @@ def test_final_request_invalid_input_override_falls_back_to_local_full_estimate(
             required_input_tokens_override=invalid_override,
         )
 
+    assert exc_info.value.message == ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION
+
+
+def test_fixed_request_overhead_exhaustion_keeps_profile_configuration_error():
+    with pytest.raises(ParameterException) as exc_info:
+        ContextManager.trim_messages_for_model_request(
+            messages=[InternalMessage(role=MessageRole.SYSTEM, content="system")],
+            uid="user-1",
+            session_id="session-1",
+            context_window_k=1,
+            max_tokens=900,
+            tools=None,
+            safety_margin_tokens=100,
+        )
+
+    assert not isinstance(exc_info.value, ContextBudgetExceededException)
     assert exc_info.value.message == ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
 
 
