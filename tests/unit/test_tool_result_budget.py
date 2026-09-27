@@ -1,4 +1,7 @@
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from app.core.constants import TOOL_RESULT_COMPACT_TRUNCATION_NOTICE, TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE
 from app.core.dispatchers import interactive_tools as interactive_tools_module
@@ -168,6 +171,214 @@ def test_interactive_tool_budget_uses_local_fallback_without_provider_usage():
     )
 
     assert interactive_tools_module._resolve_tool_result_required_input_tokens(state, ai_msg) is None
+
+
+def test_untruncated_json_keeps_original_whitespace_and_real_token_stats():
+    content = (
+        json.dumps(
+            {"status": "ready", "items": ["first", "second"]},
+            ensure_ascii=False,
+            indent=4,
+        )
+        + "\n"
+    )
+    encoding = truncate_tool_result_module.tiktoken.get_encoding("cl100k_base")
+    original_tokens = len(encoding.encode(content, disallowed_special=()))
+    compact_tokens = len(
+        encoding.encode(
+            json.dumps(json.loads(content), ensure_ascii=False, separators=(",", ":")),
+            disallowed_special=(),
+        )
+    )
+
+    result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        content,
+        context_window_k=1,
+        limit_tokens=original_tokens,
+    )
+
+    assert compact_tokens < original_tokens
+    assert result.content == content
+    assert result.truncated is False
+    assert result.original_tokens == original_tokens
+    assert result.final_tokens == original_tokens
+
+
+def test_overlimit_json_preserves_prefix_fields_and_truncates_string_inside_json(monkeypatch):
+    notice = "[TRUNCATED]"
+    monkeypatch.setattr(truncate_tool_result_module, "_get_truncation_notice", lambda: notice)
+
+    payload = {
+        "status": "ready",
+        "request_id": "req-123",
+        "details": "prefix-" + "segment-" * 400,
+    }
+    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    encoding = truncate_tool_result_module.tiktoken.get_encoding("cl100k_base")
+    original_tokens = len(encoding.encode(content, disallowed_special=()))
+    fitting_prefix = "prefix-" + "segment-" * 8
+    fitting_content = json.dumps(
+        {
+            "status": "ready",
+            "request_id": "req-123",
+            "details": fitting_prefix + notice,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    limit_tokens = len(encoding.encode(fitting_content, disallowed_special=()))
+
+    result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        content,
+        context_window_k=1,
+        limit_tokens=limit_tokens,
+    )
+    truncated_payload = json.loads(result.content)
+
+    assert original_tokens > limit_tokens
+    assert result.truncated is True
+    assert result.original_tokens == original_tokens
+    assert result.final_tokens == len(encoding.encode(result.content, disallowed_special=()))
+    assert result.final_tokens <= limit_tokens
+    assert truncated_payload["status"] == "ready"
+    assert truncated_payload["request_id"] == "req-123"
+    assert truncated_payload["details"].startswith(fitting_prefix)
+    assert truncated_payload["details"].endswith(notice)
+    assert len(truncated_payload["details"]) < len(payload["details"])
+
+
+def test_overlimit_json_keeps_later_object_fields_when_earlier_value_is_large(monkeypatch):
+    notice = "[TRUNCATED]"
+    monkeypatch.setattr(truncate_tool_result_module, "_get_truncation_notice", lambda: notice)
+
+    payload = {
+        "stdout": "output-" * 400,
+        "stderr": "fatal warning",
+        "exit_code": 7,
+        "system_info": "windows",
+    }
+    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    encoding = truncate_tool_result_module.tiktoken.get_encoding("cl100k_base")
+    expected_tail = json.dumps(
+        {
+            "stdout": notice,
+            "stderr": payload["stderr"],
+            "exit_code": payload["exit_code"],
+            "system_info": payload["system_info"],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    limit_tokens = len(encoding.encode(expected_tail, disallowed_special=())) + 20
+
+    result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        content,
+        context_window_k=1,
+        limit_tokens=limit_tokens,
+    )
+    truncated_payload = json.loads(result.content)
+
+    assert result.truncated is True
+    assert list(truncated_payload) == list(payload)
+    assert truncated_payload["stdout"].endswith(notice)
+    assert truncated_payload["stderr"] == payload["stderr"]
+    assert truncated_payload["exit_code"] == payload["exit_code"]
+    assert truncated_payload["system_info"] == payload["system_info"]
+    assert result.final_tokens <= limit_tokens
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"value": "x" * 200},
+        ["x" * 200],
+        "x" * 200,
+        10**100,
+    ],
+)
+def test_tiny_json_budget_returns_parseable_json_for_each_value_shape(payload):
+    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    encoding = truncate_tool_result_module.tiktoken.get_encoding("cl100k_base")
+
+    result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        content,
+        context_window_k=1,
+        limit_tokens=1,
+    )
+
+    json.loads(result.content)
+    assert result.truncated is True
+    assert result.final_tokens == len(encoding.encode(result.content, disallowed_special=()))
+    assert result.final_tokens <= 1
+
+
+def test_json_truncation_fallback_uses_character_estimates_and_stays_parseable(monkeypatch):
+    notice = "[TRUNCATED]"
+    monkeypatch.setattr(
+        truncate_tool_result_module.tiktoken,
+        "get_encoding",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("tokenizer unavailable")),
+    )
+    monkeypatch.setattr(truncate_tool_result_module, "_get_truncation_notice", lambda: notice)
+
+    payload = {
+        "status": "ready",
+        "message": "前缀" + "中文内容" * 300,
+    }
+    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    original_tokens = truncate_tool_result_module._estimate_tokens_by_chars(content)
+    fitting_content = json.dumps(
+        {"status": "ready", "message": "前缀" + notice},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    limit_tokens = max(1, truncate_tool_result_module._estimate_tokens_by_chars(fitting_content))
+
+    result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        content,
+        context_window_k=1,
+        limit_tokens=limit_tokens,
+    )
+    truncated_payload = json.loads(result.content)
+
+    assert original_tokens > limit_tokens
+    assert result.truncated is True
+    assert truncated_payload["status"] == "ready"
+    assert notice in truncated_payload["message"]
+    assert result.original_tokens == original_tokens
+    assert result.final_tokens == truncate_tool_result_module._estimate_tokens_by_chars(result.content)
+    assert result.final_tokens <= limit_tokens
+
+
+def test_character_estimate_fallback_keeps_large_chinese_non_json_within_budget(monkeypatch):
+    notice = "[TRUNCATED]"
+    monkeypatch.setattr(
+        truncate_tool_result_module.tiktoken,
+        "get_encoding",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("tokenizer unavailable")),
+    )
+    monkeypatch.setattr(truncate_tool_result_module, "_get_truncation_notice", lambda: notice)
+
+    content = "这是大量中文内容，用于验证字符估算回退。" * 300
+    original_tokens = truncate_tool_result_module._estimate_tokens_by_chars(content)
+    limit_tokens = max(
+        truncate_tool_result_module._estimate_tokens_by_chars(notice) + 1,
+        original_tokens // 4,
+    )
+
+    result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        content,
+        context_window_k=1,
+        limit_tokens=limit_tokens,
+    )
+
+    assert original_tokens > limit_tokens
+    assert result.truncated is True
+    assert result.original_tokens == original_tokens
+    assert result.final_tokens == truncate_tool_result_module._estimate_tokens_by_chars(result.content)
+    assert result.final_tokens <= limit_tokens
+    assert notice in result.content
+    assert len(result.content) < len(content)
 
 
 def test_truncated_tool_result_uses_budget_safe_notice_when_full_notice_does_not_fit(monkeypatch):

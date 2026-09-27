@@ -21,12 +21,16 @@ def _get_truncation_notice() -> str:
     return t("MSG_TOOL_RESULT_TRUNCATED")
 
 
-def _fit_truncation_notice_to_token_budget(encoding, limit_tokens: int) -> tuple[str, int]:
-    for notice in (
+def _get_truncation_notices() -> tuple[str, ...]:
+    return (
         _get_truncation_notice(),
         TOOL_RESULT_COMPACT_TRUNCATION_NOTICE,
         TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE,
-    ):
+    )
+
+
+def _fit_truncation_notice_to_token_budget(encoding, limit_tokens: int) -> tuple[str, int]:
+    for notice in _get_truncation_notices():
         notice_token_ids = encoding.encode(notice, disallowed_special=())
         if len(notice_token_ids) <= limit_tokens:
             return notice, len(notice_token_ids)
@@ -36,16 +40,264 @@ def _fit_truncation_notice_to_token_budget(encoding, limit_tokens: int) -> tuple
     return encoding.decode(fitted_token_ids), len(fitted_token_ids)
 
 
-def _fit_truncation_notice_to_estimated_budget(limit_tokens: int) -> tuple[str, int]:
-    for notice in (
-        _get_truncation_notice(),
-        TOOL_RESULT_COMPACT_TRUNCATION_NOTICE,
-        TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE,
-    ):
-        notice_tokens = max(1, _estimate_tokens_by_chars(notice))
-        if notice_tokens <= limit_tokens:
-            return notice, notice_tokens
-    return TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE, 1
+def _serialize_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_structure_placeholder(value: object) -> str:
+    if isinstance(value, str):
+        return _serialize_json("")
+    if isinstance(value, list):
+        return "[]"
+    if isinstance(value, dict):
+        return "{}"
+    return _serialize_json(value)
+
+
+def _serialize_json_object(parts: list[tuple[str, str]]) -> str:
+    return "{" + ",".join(f"{key}:{item}" for key, item in parts) + "}"
+
+
+def _fit_json_child(
+    value: object,
+    prefix: str,
+    suffix: str,
+    limit_tokens: int,
+    count_tokens,
+    notices: tuple[str, ...],
+) -> str | None:
+    serialized = _serialize_json(value)
+    if count_tokens(prefix + serialized + suffix) <= limit_tokens:
+        return serialized
+
+    low = 1
+    high = limit_tokens
+    best: str | None = None
+    while low <= high:
+        child_limit = (low + high) // 2
+        child = _truncate_json_value(value, child_limit, count_tokens, notices)
+        if count_tokens(prefix + child + suffix) <= limit_tokens:
+            best = child
+            low = child_limit + 1
+        else:
+            high = child_limit - 1
+    return best
+
+
+def _truncate_json_string(
+    value: str,
+    limit_tokens: int,
+    count_tokens,
+    notices: tuple[str, ...],
+) -> str:
+    for notice in notices:
+        best = _serialize_json(notice)
+        if count_tokens(best) > limit_tokens:
+            continue
+
+        low = 0
+        high = len(value)
+        while low <= high:
+            length = (low + high) // 2
+            current = _serialize_json(value[:length] + notice)
+            if count_tokens(current) <= limit_tokens:
+                best = current
+                low = length + 1
+            else:
+                high = length - 1
+        return best
+    return _serialize_json("")
+
+
+def _truncate_json_value(value: object, limit_tokens: int, count_tokens, notices: tuple[str, ...]) -> str:
+    serialized = _serialize_json(value)
+    if count_tokens(serialized) <= limit_tokens:
+        return serialized
+
+    if isinstance(value, str):
+        return _truncate_json_string(value, limit_tokens, count_tokens, notices)
+
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            prefix = "[" + ",".join(parts) + ("," if parts else "")
+            full_item = _serialize_json(item)
+            if count_tokens(prefix + full_item + "]") <= limit_tokens:
+                parts.append(full_item)
+                continue
+            child = _fit_json_child(item, prefix, "]", limit_tokens, count_tokens, notices)
+            if child is None:
+                break
+            parts.append(child)
+            break
+        return "[" + ",".join(parts) + "]"
+
+    if isinstance(value, dict):
+        entries = [
+            (
+                _serialize_json(key),
+                item,
+                _json_structure_placeholder(item),
+                _serialize_json(item),
+            )
+            for key, item in value.items()
+        ]
+        parts = [(key, placeholder) for key, _item, placeholder, _full_item in entries]
+        if count_tokens(_serialize_json_object(parts)) > limit_tokens:
+            return "{}"
+
+        expandable = []
+        for index, (_key, _item, placeholder, full_item) in enumerate(entries):
+            if full_item == placeholder:
+                continue
+            extra_tokens = max(count_tokens(full_item) - count_tokens(placeholder), 0)
+            expandable.append((extra_tokens, index, full_item))
+
+        for _extra_tokens, index, full_item in sorted(expandable):
+            candidate_parts = list(parts)
+            candidate_parts[index] = (candidate_parts[index][0], full_item)
+            if count_tokens(_serialize_json_object(candidate_parts)) <= limit_tokens:
+                parts = candidate_parts
+
+        for index, (key, item, _placeholder, full_item) in enumerate(entries):
+            if parts[index][1] == full_item:
+                continue
+            prefix_parts = parts[:index]
+            suffix_parts = parts[index + 1 :]
+            prefix = "{" + ",".join(f"{part_key}:{part_value}" for part_key, part_value in prefix_parts)
+            if prefix_parts:
+                prefix += ","
+            prefix += key + ":"
+            suffix = ""
+            if suffix_parts:
+                suffix = "," + ",".join(f"{part_key}:{part_value}" for part_key, part_value in suffix_parts)
+            suffix += "}"
+            child = _fit_json_child(item, prefix, suffix, limit_tokens, count_tokens, notices)
+            if child is not None:
+                parts[index] = (key, child)
+
+        return _serialize_json_object(parts)
+
+    return "null"
+
+
+def _minimal_json_values(payload: object) -> tuple[str, ...]:
+    if isinstance(payload, dict):
+        return ("{}", "null", "[]", '""', "0", "false")
+    if isinstance(payload, list):
+        return ("[]", "null", "{}", '""', "0", "false")
+    if isinstance(payload, str):
+        return ('""', "null", "[]", "{}", "0", "false")
+    return ("null", '""', "[]", "{}", "0", "false")
+
+
+def _minimal_json_content(payload: object, limit_tokens: int, count_tokens) -> str:
+    for minimal in _minimal_json_values(payload):
+        try:
+            if count_tokens(minimal) <= limit_tokens:
+                return minimal
+        except Exception:
+            continue
+    return "null"
+
+
+def _truncate_json_content(
+    payload: object,
+    limit_tokens: int,
+    count_tokens,
+    notices: tuple[str, ...],
+) -> str:
+    compact = _serialize_json(payload)
+    if count_tokens(compact) <= limit_tokens:
+        return compact
+
+    candidate = _truncate_json_value(payload, limit_tokens, count_tokens, notices)
+    if count_tokens(candidate) <= limit_tokens:
+        return candidate
+    return _minimal_json_content(payload, limit_tokens, count_tokens)
+
+
+def _truncate_json_result(payload: object, limit_tokens: int, count_tokens) -> tuple[str, int]:
+    candidate: str | None = None
+    try:
+        notices = _get_truncation_notices()
+        candidate = _truncate_json_content(payload, limit_tokens, count_tokens, notices)
+    except Exception:
+        pass
+
+    candidates = ([candidate] if candidate is not None else []) + list(_minimal_json_values(payload))
+    for candidate in candidates:
+        try:
+            final_tokens = count_tokens(candidate)
+        except Exception:
+            continue
+        if final_tokens <= limit_tokens:
+            return candidate, final_tokens
+    return "null", count_tokens("null")
+
+
+def _truncate_text_with_encoding(
+    token_ids: list[int],
+    encoding,
+    limit_tokens: int,
+) -> tuple[str, str]:
+    truncation_notice, notice_tokens = _fit_truncation_notice_to_token_budget(
+        encoding,
+        limit_tokens,
+    )
+    if notice_tokens >= limit_tokens:
+        return truncation_notice, ""
+
+    def candidate(length: int) -> tuple[str, str]:
+        body = encoding.decode(token_ids[:length])
+        return body + truncation_notice, body
+
+    low = 0
+    high = len(token_ids)
+    best_content, best_body = candidate(0)
+    while low <= high:
+        length = (low + high) // 2
+        current_content, current_body = candidate(length)
+        final_tokens = len(encoding.encode(current_content, disallowed_special=()))
+        if final_tokens <= limit_tokens:
+            best_content, best_body = current_content, current_body
+            low = length + 1
+        else:
+            high = length - 1
+    return best_content, best_body
+
+
+def _truncate_text_with_estimate(
+    content: str,
+    limit_tokens: int,
+) -> tuple[str, str]:
+    truncation_notice = ""
+    notice_tokens = limit_tokens
+    for notice in _get_truncation_notices():
+        estimated_tokens = _estimate_tokens_by_chars(notice)
+        if max(1, estimated_tokens) <= limit_tokens:
+            truncation_notice = notice
+            notice_tokens = max(1, estimated_tokens)
+            break
+    if notice_tokens >= limit_tokens:
+        return truncation_notice, ""
+
+    def candidate(length: int) -> tuple[str, str]:
+        body = content[:length]
+        return body + truncation_notice, body
+
+    low = 0
+    high = len(content)
+    best_content, best_body = candidate(0)
+    while low <= high:
+        length = (low + high) // 2
+        current_content, current_body = candidate(length)
+        if _estimate_tokens_by_chars(current_content) <= limit_tokens:
+            best_content, best_body = current_content, current_body
+            low = length + 1
+        else:
+            high = length - 1
+    return best_content, best_body
 
 
 @dataclass(frozen=True)
@@ -116,8 +368,6 @@ def truncate_tool_result_with_stats(
     content: str,
     context_window_k: int,
     limit_tokens: int | None = None,
-    *,
-    include_notice: bool = True,
 ) -> ToolResultTruncation:
     """对单条工具响应做 token 级截断，并返回截断统计信息。
 
@@ -135,20 +385,33 @@ def truncate_tool_result_with_stats(
         if original_tokens <= limit_tokens:
             return ToolResultTruncation(content=content, truncated=False, original_tokens=original_tokens, final_tokens=original_tokens, removed_chars=0)
 
-        truncation_notice, notice_tokens = _fit_truncation_notice_to_token_budget(
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError, RecursionError):
+            pass
+        else:
+            try:
+                truncated_content, final_tokens = _truncate_json_result(
+                    payload,
+                    limit_tokens,
+                    lambda value: len(encoding.encode(value, disallowed_special=())),
+                )
+            except Exception:
+                truncated_content = "null"
+                final_tokens = len(encoding.encode(truncated_content, disallowed_special=()))
+            return ToolResultTruncation(
+                content=truncated_content,
+                truncated=True,
+                original_tokens=original_tokens,
+                final_tokens=final_tokens,
+                removed_chars=max(len(content) - len(truncated_content), 0),
+            )
+
+        truncated_content, truncated_body = _truncate_text_with_encoding(
+            token_ids,
             encoding,
             limit_tokens,
         )
-        if not include_notice:
-            truncated_body = encoding.decode(token_ids[:limit_tokens])
-            truncated_content = truncated_body
-        elif notice_tokens < limit_tokens:
-            body_limit_tokens = limit_tokens - notice_tokens
-            truncated_body = encoding.decode(token_ids[:body_limit_tokens])
-            truncated_content = truncated_body + truncation_notice
-        else:
-            truncated_body = ""
-            truncated_content = truncation_notice
         final_tokens = len(encoding.encode(truncated_content, disallowed_special=()))
         return ToolResultTruncation(
             content=truncated_content,
@@ -158,173 +421,43 @@ def truncate_tool_result_with_stats(
             removed_chars=max(len(content) - len(truncated_body), 0),
         )
     except Exception:
-        c_coeff = float(os.getenv("TOKEN_COEFF_CHINESE", 1.5))
-        o_coeff = float(os.getenv("TOKEN_COEFF_OTHER", 0.3))
-        avg_coeff = max((c_coeff + o_coeff) / 2, 0.1)
-        truncation_notice, notice_tokens = _fit_truncation_notice_to_estimated_budget(limit_tokens)
         original_tokens = _estimate_tokens_by_chars(content)
-        if not include_notice:
-            char_limit = max(1, int(limit_tokens / avg_coeff))
-            if len(content) <= char_limit:
-                return ToolResultTruncation(content=content, truncated=False, original_tokens=original_tokens, final_tokens=original_tokens, removed_chars=0)
-            truncated_body = content[:char_limit]
-            truncated_content = truncated_body
-        elif notice_tokens < limit_tokens:
-            char_limit = max(1, int((limit_tokens - notice_tokens) / avg_coeff))
-            if len(content) <= char_limit:
-                return ToolResultTruncation(content=content, truncated=False, original_tokens=original_tokens, final_tokens=original_tokens, removed_chars=0)
-            truncated_body = content[:char_limit]
-            truncated_content = truncated_body + truncation_notice
+        if original_tokens <= limit_tokens:
+            return ToolResultTruncation(content=content, truncated=False, original_tokens=original_tokens, final_tokens=original_tokens, removed_chars=0)
+
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError, RecursionError):
+            pass
         else:
-            truncated_body = ""
-            truncated_content = truncation_notice
+            try:
+                truncated_content, final_tokens = _truncate_json_result(
+                    payload,
+                    limit_tokens,
+                    _estimate_tokens_by_chars,
+                )
+            except Exception:
+                truncated_content = "null"
+                final_tokens = _estimate_tokens_by_chars(truncated_content)
+            return ToolResultTruncation(
+                content=truncated_content,
+                truncated=True,
+                original_tokens=original_tokens,
+                final_tokens=final_tokens,
+                removed_chars=max(len(content) - len(truncated_content), 0),
+            )
+
+        truncated_content, truncated_body = _truncate_text_with_estimate(
+            content,
+            limit_tokens,
+        )
         return ToolResultTruncation(
             content=truncated_content,
             truncated=True,
             original_tokens=original_tokens,
-            final_tokens=min(
-                limit_tokens,
-                max(1, _estimate_tokens_by_chars(truncated_content)),
-            ),
+            final_tokens=_estimate_tokens_by_chars(truncated_content),
             removed_chars=max(len(content) - len(truncated_body), 0),
         )
-
-
-def truncate_longterm_memory_recall_result_for_budget(
-    result: str,
-    *,
-    context_window_k: int,
-    budget_tokens: int,
-) -> tuple[str, ToolMessagesTruncationStats]:
-    overall = truncate_tool_result_with_stats(
-        result,
-        context_window_k,
-        limit_tokens=budget_tokens,
-    )
-    if not overall.truncated:
-        return result, ToolMessagesTruncationStats(truncated_count=0, removed_chars=0)
-
-    try:
-        payload = json.loads(result)
-    except (TypeError, ValueError):
-        return overall.content, ToolMessagesTruncationStats(
-            truncated_count=1,
-            removed_chars=overall.removed_chars,
-        )
-    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-        return overall.content, ToolMessagesTruncationStats(
-            truncated_count=1,
-            removed_chars=overall.removed_chars,
-        )
-
-    safe_payload = dict(payload)
-    safe_payload["items"] = [dict(item) for item in payload.get("items", []) if isinstance(item, dict)]
-    for section in ("knowledge_base", "chat_history"):
-        value = payload.get(section)
-        if isinstance(value, list):
-            safe_payload[section] = [dict(item) for item in value if isinstance(item, dict)]
-    safe_payload["truncated"] = True
-
-    original_contents: dict[tuple[str, int], str] = {}
-    for section in ("items", "knowledge_base", "chat_history"):
-        section_items = safe_payload.get(section)
-        if not isinstance(section_items, list):
-            continue
-        for index, item in enumerate(section_items):
-            content = item.get("content")
-            if isinstance(content, str) and content:
-                original_contents[(section, index)] = content
-                item["content"] = ""
-
-    def compact() -> str:
-        return json.dumps(
-            safe_payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-
-    def fits(value: str) -> bool:
-        return not truncate_tool_result_with_stats(
-            value,
-            context_window_k,
-            limit_tokens=budget_tokens,
-        ).truncated
-
-    def remove_last(section: str) -> bool:
-        section_items = safe_payload.get(section)
-        if not isinstance(section_items, list) or not section_items:
-            return False
-        section_items.pop()
-        count_field = f"{section}_omitted_count"
-        safe_payload[count_field] = int(safe_payload.get(count_field, 0)) + 1
-        return True
-
-    base = compact()
-    while not fits(base):
-        if remove_last("chat_history"):
-            pass
-        elif remove_last("knowledge_base"):
-            pass
-        else:
-            break
-        base = compact()
-
-    base_stats = truncate_tool_result_with_stats(
-        base,
-        context_window_k,
-        limit_tokens=budget_tokens,
-    )
-    surviving_contents = [(section, index, content) for (section, index), content in original_contents.items() if isinstance(safe_payload.get(section), list) and index < len(safe_payload[section])]
-    remaining_tokens = max(budget_tokens - base_stats.original_tokens - 4, 0)
-    per_content_budget = max(1, remaining_tokens // len(surviving_contents)) if surviving_contents and remaining_tokens else 0
-
-    if per_content_budget:
-        while True:
-            for section, index, content in surviving_contents:
-                item = safe_payload[section][index]
-                content_stats = truncate_tool_result_with_stats(
-                    content,
-                    context_window_k,
-                    limit_tokens=per_content_budget,
-                    include_notice=False,
-                )
-                item["content"] = content_stats.content
-                if content_stats.truncated:
-                    item["truncated"] = True
-                    if section == "knowledge_base" and item.get("source_type") == "managed_knowledge":
-                        item["llm_maintainable"] = False
-                        item.pop("knowledge_id", None)
-                        item.pop("knowledge_expected_version", None)
-            candidate = compact()
-            if fits(candidate):
-                return candidate, ToolMessagesTruncationStats(
-                    truncated_count=1,
-                    removed_chars=max(len(result) - len(candidate), 0),
-                )
-            if per_content_budget == 1:
-                break
-            per_content_budget = max(1, per_content_budget // 2)
-
-    if surviving_contents and not per_content_budget:
-        for section, index, _content in surviving_contents:
-            item = safe_payload[section][index]
-            item["truncated"] = True
-            if section == "knowledge_base" and item.get("source_type") == "managed_knowledge":
-                item["llm_maintainable"] = False
-                item.pop("knowledge_id", None)
-                item.pop("knowledge_expected_version", None)
-
-    final_value = compact()
-    if not fits(final_value):
-        return overall.content, ToolMessagesTruncationStats(
-            truncated_count=1,
-            removed_chars=overall.removed_chars,
-        )
-    return final_value, ToolMessagesTruncationStats(
-        truncated_count=1,
-        removed_chars=max(len(result) - len(final_value), 0),
-    )
 
 
 def truncate_tool_messages_for_budget(
@@ -333,7 +466,6 @@ def truncate_tool_messages_for_budget(
     budget_tokens: int,
     uid: str,
     session_id: str,
-    structured_recall_tool_call_ids: set[str] | None = None,
 ) -> ToolMessagesTruncationStats:
     if not tool_msgs:
         return ToolMessagesTruncationStats(truncated_count=0, removed_chars=0)
@@ -342,15 +474,6 @@ def truncate_tool_messages_for_budget(
     truncated_count = 0
     removed_chars = 0
     for msg in tool_msgs:
-        if structured_recall_tool_call_ids and msg.tool_call_id in structured_recall_tool_call_ids:
-            msg.content, stats = truncate_longterm_memory_recall_result_for_budget(
-                msg.content or "",
-                context_window_k=context_window_k,
-                budget_tokens=per_tool_budget,
-            )
-            truncated_count += stats.truncated_count
-            removed_chars += stats.removed_chars
-            continue
         truncation = truncate_tool_result_with_stats(
             msg.content or "",
             context_window_k,

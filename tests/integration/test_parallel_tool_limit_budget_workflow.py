@@ -215,8 +215,10 @@ def _read_tool_results(rows: list[Message], tool_calls: list[InternalToolCall]) 
 def _assert_tool_result_budget(tool_results: list[InternalMessage]) -> None:
     encoding = tiktoken.get_encoding("cl100k_base")
     for tool_result in tool_results[:5]:
-        assert '"status": "success"' in (tool_result.content or "")
-        assert '"operation": "read"' in (tool_result.content or "")
+        payload = json.loads(tool_result.content or "")
+        assert payload["status"] == "success"
+        assert payload["operation"] == "read"
+        assert isinstance(payload["content"], str)
         token_count = len(encoding.encode(tool_result.content or "", disallowed_special=()))
         assert 1400 <= token_count <= 1600
 

@@ -44,10 +44,7 @@ from app.core.tools import (
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.truncate_tool_result import (
-    ToolMessagesTruncationStats,
-    truncate_longterm_memory_recall_result_for_budget,
     truncate_tool_messages_for_budget,
-    truncate_tool_result_with_stats,
 )
 from app.models.message import (
     InternalMessage,
@@ -361,108 +358,6 @@ def _serialize_knowledge_base_query_log_result(result: str) -> str:
     return json.dumps(safe_payload, ensure_ascii=False, default=str)
 
 
-def _truncate_knowledge_base_query_result_for_budget(
-    result: str,
-    *,
-    context_window_k: int,
-    budget_tokens: int,
-) -> tuple[str, ToolMessagesTruncationStats]:
-    overall = truncate_tool_result_with_stats(
-        result,
-        context_window_k,
-        limit_tokens=budget_tokens,
-    )
-    if not overall.truncated:
-        return result, ToolMessagesTruncationStats(truncated_count=0, removed_chars=0)
-
-    try:
-        payload = json.loads(result)
-    except (TypeError, ValueError):
-        return overall.content, ToolMessagesTruncationStats(
-            truncated_count=1,
-            removed_chars=overall.removed_chars,
-        )
-    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-        return overall.content, ToolMessagesTruncationStats(
-            truncated_count=1,
-            removed_chars=overall.removed_chars,
-        )
-
-    items = [item for item in payload["items"] if isinstance(item, dict)]
-    per_item_budget = max(1, budget_tokens // max(len(items), 1) - 64)
-    safe_items: list[dict[str, Any]] = []
-    removed_chars = 0
-    for item in items:
-        safe_item = dict(item)
-        content = safe_item.get("content")
-        if isinstance(content, str):
-            content_stats = truncate_tool_result_with_stats(
-                content,
-                context_window_k,
-                limit_tokens=per_item_budget,
-                include_notice=False,
-            )
-            safe_item["content"] = content_stats.content
-            removed_chars += content_stats.removed_chars
-            if content_stats.truncated:
-                safe_item["truncated"] = True
-                if safe_item.get("knowledge_type") == "managed":
-                    safe_item.pop("knowledge_id", None)
-                    safe_item.pop("knowledge_expected_version", None)
-                    safe_item.pop("llm_maintainable", None)
-        safe_items.append(safe_item)
-
-    safe_payload = dict(payload)
-    safe_payload["items"] = safe_items
-    safe_payload["truncated"] = True
-    omitted_count = 0
-    while True:
-        if omitted_count:
-            safe_payload["omitted_count"] = omitted_count
-        compact = json.dumps(
-            safe_payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-        compact_stats = truncate_tool_result_with_stats(
-            compact,
-            context_window_k,
-            limit_tokens=budget_tokens,
-        )
-        if not compact_stats.truncated:
-            return compact, ToolMessagesTruncationStats(
-                truncated_count=1,
-                removed_chars=max(removed_chars, len(result) - len(compact)),
-            )
-        if not safe_items:
-            minimal = json.dumps(
-                {
-                    "items": [],
-                    "truncated": True,
-                    "omitted_count": len(items),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            minimal_stats = truncate_tool_result_with_stats(
-                minimal,
-                context_window_k,
-                limit_tokens=budget_tokens,
-            )
-            if minimal_stats.truncated:
-                return overall.content, ToolMessagesTruncationStats(
-                    truncated_count=1,
-                    removed_chars=overall.removed_chars,
-                )
-            return minimal, ToolMessagesTruncationStats(
-                truncated_count=1,
-                removed_chars=max(removed_chars, len(result) - len(minimal)),
-            )
-        safe_items.pop()
-        omitted_count += 1
-
-
 def prevalidate_tool_round_protocol(
     tool_calls: list[Any],
     cfg: ProfileConfig,
@@ -669,26 +564,13 @@ async def process_single_tool(
     else:
         tool_result_round_budget_tokens = max(1, tool_result_round_budget_tokens)
     tool_result_budget_tokens = max(1, tool_result_round_budget_tokens // max(1, tool_call_count))
-    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
-        tool_msg.content, truncation_stats = truncate_longterm_memory_recall_result_for_budget(
-            cmd_result,
-            context_window_k=context_window_k,
-            budget_tokens=tool_result_budget_tokens,
-        )
-    elif tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
-        tool_msg.content, truncation_stats = _truncate_knowledge_base_query_result_for_budget(
-            cmd_result,
-            context_window_k=context_window_k,
-            budget_tokens=tool_result_budget_tokens,
-        )
-    else:
-        truncation_stats = truncate_tool_messages_for_budget(
-            tool_msgs=[tool_msg],
-            context_window_k=context_window_k,
-            budget_tokens=tool_result_budget_tokens,
-            uid=uid,
-            session_id=session_id,
-        )
+    truncation_stats = truncate_tool_messages_for_budget(
+        tool_msgs=[tool_msg],
+        context_window_k=context_window_k,
+        budget_tokens=tool_result_budget_tokens,
+        uid=uid,
+        session_id=session_id,
+    )
     if truncation_stats.truncated_count:
         get_logger("dispatcher").bind(
             uid=uid,
