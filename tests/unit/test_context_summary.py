@@ -40,7 +40,7 @@ def test_summary_prompts_preserve_required_context_details(prompt):
         "acceptance criteria",
         "constraints",
         "prohibitions",
-        "exact next step",
+        "at most one explicit next step",
         "completed",
         "failed",
         "unfinished",
@@ -51,10 +51,44 @@ def test_summary_prompts_preserve_required_context_details(prompt):
         "not a user instruction",
         "covered_user_message",
         "Never generate, quote, paraphrase, or modify",
+        "code tasks",
+        "file paths and symbol names",
+        "current structure and control/data flow",
+        "intended insertion or modification points",
+        "related call sites",
+        "verification scope and results",
+        "verified facts",
+        "hypotheses",
+        "the file is important",
+        "non-code tasks",
+        "not merely consulted sources",
+        "status lists",
+        "routine progress narration",
+        "multi-step plans",
+        "Remaining Work",
     ]
 
     for phrase in required_phrases:
         assert phrase in prompt
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [CONTEXT_SUMMARY_PROMPT, CONTEXT_SUMMARY_COMPRESS_PROMPT],
+)
+def test_summary_prompts_use_current_output_sections(prompt):
+    sections = [
+        "## Goal & Requirements",
+        "## Decisions & Constraints",
+        "## Continuation-Critical Context",
+        "## Verified Results",
+        "## Remaining Work",
+        "## Open Questions",
+    ]
+
+    assert [prompt.index(section) for section in sections] == sorted(prompt.index(section) for section in sections)
+    assert "## Entities" not in prompt
+    assert "## Progress & Unfinished" not in prompt
 
 
 def test_select_summary_segment_keeps_recent_turns_and_ends_before_user():
