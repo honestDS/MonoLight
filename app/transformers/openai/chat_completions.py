@@ -118,6 +118,20 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             "message": message_metadata["message"],
         }
 
+    @classmethod
+    def build_input_token_payload(
+        cls,
+        *,
+        model_id: str,
+        messages: list[InternalMessage],
+        tools: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        del model_id
+        payload: dict[str, Any] = {"messages": cls.to_provider(messages)}
+        if tools:
+            payload["tools"] = tools
+        return payload
+
     async def generate(
         self,
         api_key: str,

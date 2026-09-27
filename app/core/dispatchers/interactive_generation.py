@@ -27,7 +27,13 @@ from app.core.utils.dispatcher.helpers import (
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
+from app.core.utils.token_calibration import (
+    INPUT_TOKEN_ESTIMATE_RAW_KEY,
+    build_token_calibration_metadata,
+    extract_token_calibration_factor,
+)
 from app.core.utils.request_token_baseline import (
+    MAIN_DIALOGUE_REQUEST_PURPOSE,
     accumulate_session_cache_metrics,
     build_provider_request_usage_metadata,
     build_request_token_baseline,
@@ -41,7 +47,7 @@ from app.core.utils.request_token_baseline import (
 from app.core.utils.time import get_local_time
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage
-from app.providers.llm.client import LLMClient, estimate_request_context_tokens
+from app.providers.llm.client import LLMClient
 
 from .interactive_helpers import (
     _AgentLoopStreamState,
@@ -159,6 +165,34 @@ async def generate_interactive_turn(
                 context_summary_revision=context_summary_revision,
                 context_content_revision=context_content_revision,
             )
+            api_key = state.chat_channel_obj.get_decrypted_api_key()
+            base_url = state.chat_channel_obj.base_url
+            http_proxy = get_channel_http_proxy(state.chat_channel_obj)
+            custom_headers = get_model_custom_headers(state.model_entry)
+            calibration_factor = extract_token_calibration_factor(
+                previous_input_token_baseline_metadata,
+                model_id=model_id,
+                protocol=protocol,
+            )
+            request_token_estimate = await LLMClient.estimate_request_input_tokens(
+                api_key=api_key,
+                base_url=base_url,
+                model_id=model_id,
+                messages=request_messages,
+                tools=current_tools,
+                protocol=protocol,
+                timeout=state.chat_params["chat_timeout"],
+                http_proxy=http_proxy,
+                custom_headers=custom_headers,
+                calibration_factor=calibration_factor,
+            )
+            if request_token_estimate.source == "provider_count":
+                estimated_input_tokens = request_token_estimate.input_tokens
+            elif incremental_input_tokens is not None:
+                estimated_input_tokens = incremental_input_tokens
+            else:
+                estimated_input_tokens = request_token_estimate.input_tokens
+
             request_messages = ContextManager.trim_messages_for_model_request(
                 messages=request_messages,
                 uid=state.uid,
@@ -166,11 +200,13 @@ async def generate_interactive_turn(
                 context_window_k=state.chat_params["context_window_k"],
                 max_tokens=state.chat_params["max_tokens"],
                 tools=current_tools,
-                required_input_tokens_override=incremental_input_tokens,
+                required_input_tokens_override=estimated_input_tokens,
+                model_id=model_id,
+                protocol=protocol,
             )
             generation_kwargs = {
-                "api_key": state.chat_channel_obj.get_decrypted_api_key(),
-                "base_url": state.chat_channel_obj.base_url,
+                "api_key": api_key,
+                "base_url": base_url,
                 "model_id": model_id,
                 "messages": request_messages,
                 "temperature": state.chat_params["temperature"],
@@ -181,15 +217,15 @@ async def generate_interactive_turn(
                 "tool_choice": tool_choice,
                 "protocol": protocol,
                 "timeout": state.chat_params["chat_timeout"],
-                "http_proxy": get_channel_http_proxy(state.chat_channel_obj),
-                "custom_headers": get_model_custom_headers(state.model_entry),
+                "request_context_tokens": estimated_input_tokens,
+                "http_proxy": http_proxy,
+                "custom_headers": custom_headers,
             }
-            estimated_input_tokens = incremental_input_tokens if incremental_input_tokens is not None else estimate_request_context_tokens(request_messages, current_tools)
-            generation_kwargs["request_context_tokens"] = estimated_input_tokens
             state.latest_llm_request_metadata = {
                 "type": "llm_request_metadata",
                 "turn": state.current_turn,
                 "response_id": response_id,
+                "request_purpose": MAIN_DIALOGUE_REQUEST_PURPOSE,
                 "input_tokens": estimated_input_tokens,
                 "input_tokens_source": "estimated",
                 "total_output_tokens": state.checkpoint_state.session_total_output_tokens,
@@ -209,6 +245,8 @@ async def generate_interactive_turn(
                     state.checkpoint_state.session_total_cached_tokens,
                 ),
             }
+            if request_token_estimate.raw_local_tokens is not None:
+                state.latest_llm_request_metadata[INPUT_TOKEN_ESTIMATE_RAW_KEY] = request_token_estimate.raw_local_tokens
             if state.stream_event_callback is not None:
                 await state.stream_event_callback(dict(state.latest_llm_request_metadata))
             await state.db.commit()
@@ -250,8 +288,19 @@ async def generate_interactive_turn(
                 state.checkpoint_state.session_total_output_tokens += provider_token_metrics["output_tokens"]
                 provider_token_metrics["output_tokens"] = state.checkpoint_state.total_output_tokens
                 provider_token_metrics["total_output_tokens"] = state.checkpoint_state.session_total_output_tokens
-            metadata_changed = any(state.latest_llm_request_metadata.get(field) != value for field, value in provider_token_metrics.items())
-            state.latest_llm_request_metadata.update(provider_token_metrics)
+            calibration_metadata = build_token_calibration_metadata(
+                previous_input_token_baseline_metadata,
+                model_id=model_id,
+                protocol=protocol,
+                raw_estimated_tokens=request_token_estimate.raw_local_tokens,
+                provider_input_tokens=provider_token_metrics.get("input_tokens"),
+            )
+            provider_metadata_updates = {
+                **provider_token_metrics,
+                **calibration_metadata,
+            }
+            metadata_changed = any(state.latest_llm_request_metadata.get(field) != value for field, value in provider_metadata_updates.items())
+            state.latest_llm_request_metadata.update(provider_metadata_updates)
             if state.request_metadata_callback is not None:
                 await state.request_metadata_callback({**state.latest_llm_request_metadata, **provider_request_usage_metadata})
             if metadata_changed and state.stream_event_callback is not None:

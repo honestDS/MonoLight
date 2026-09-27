@@ -444,6 +444,8 @@ async def process_single_tool(
     allow_background_submission: bool = True,
     *,
     tool_result_round_budget_tokens: int | None = None,
+    model_id: str | None = None,
+    protocol: str | None = None,
     context_summary_boundary_message_id: int | None = None,
     source_message_id: int | None = None,
     dispatch_mode: DispatchMode = "interactive",
@@ -570,6 +572,8 @@ async def process_single_tool(
         budget_tokens=tool_result_budget_tokens,
         uid=uid,
         session_id=session_id,
+        model_id=model_id,
+        protocol=protocol,
     )
     if truncation_stats.truncated_count:
         get_logger("dispatcher").bind(

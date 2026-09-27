@@ -26,9 +26,18 @@ async def measure_snapshot_history(
     uid: str,
     snapshot: ContextSummarySnapshot,
     use_request_token_text: bool = False,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> tuple[int, int]:
     token_text = message_token_text if use_request_token_text else serialize_message
-    history_tokens = sum(estimate_tokens(token_text(message)) for message in snapshot.recent_messages)
+    history_tokens = sum(
+        estimate_tokens(
+            token_text(message),
+            model_id=model_id,
+            protocol=protocol,
+        )
+        for message in snapshot.recent_messages
+    )
     history_message_count = len(snapshot.recent_messages)
     async for round_messages in iter_persistent_summary_rounds(
         db,
@@ -36,7 +45,14 @@ async def measure_snapshot_history(
         uid=uid,
         snapshot=snapshot,
     ):
-        history_tokens += sum(estimate_tokens(token_text(message)) for message in round_messages)
+        history_tokens += sum(
+            estimate_tokens(
+                token_text(message),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            for message in round_messages
+        )
         history_message_count += len(round_messages)
     return history_tokens, history_message_count
 
@@ -49,8 +65,14 @@ async def measure_complete_replacement_input(
     snapshot: ContextSummarySnapshot,
     existing_summary: str | None,
     page_size: int = CONTEXT_SUMMARY_SCAN_PAGE_SIZE,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> int:
-    total_tokens = estimate_tokens(existing_summary or "")
+    total_tokens = estimate_tokens(
+        existing_summary or "",
+        model_id=model_id,
+        protocol=protocol,
+    )
     target_id = snapshot.persistent_summary_target_id
     if target_id is None:
         return total_tokens
@@ -71,7 +93,14 @@ async def measure_complete_replacement_input(
             break
 
         parsed_page = strip_session_todo_snapshots(parse_db_messages_to_internal(page))
-        total_tokens += sum(estimate_tokens(message_token_text(message)) for message in parsed_page)
+        total_tokens += sum(
+            estimate_tokens(
+                message_token_text(message),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            for message in parsed_page
+        )
         if len(page) < page_size:
             break
         last_id = page[-1].id

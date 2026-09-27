@@ -4,6 +4,7 @@ from typing import Any
 from app.core.constants import ERR_PROVIDER_REQUEST_ID_INVALID
 from app.core.i18n import t
 from app.core.utils.context_messages import is_context_summary_message, message_token_text
+from app.core.utils.token_calibration import apply_token_calibration, extract_token_calibration_factor
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 
@@ -11,6 +12,8 @@ PROVIDER_REQUEST_ID_METADATA_KEY = "_provider_request_id"
 PROVIDER_INPUT_TOKENS_METADATA_KEY = "_provider_input_tokens"
 PROVIDER_CACHED_TOKENS_METADATA_KEY = "_provider_cached_tokens"
 PROVIDER_OUTPUT_TOKENS_METADATA_KEY = "_provider_output_tokens"
+REQUEST_PURPOSE_METADATA_KEY = "request_purpose"
+MAIN_DIALOGUE_REQUEST_PURPOSE = "main_dialogue"
 
 
 def _is_non_negative_int(value: Any) -> bool:
@@ -181,11 +184,24 @@ def _positive_message_ids(messages: list[InternalMessage]) -> list[int]:
     return [message.id for message in messages if _is_positive_int(message.id)]
 
 
-def _estimate_incremental_message_tokens(message: InternalMessage) -> int:
-    tokens = estimate_tokens(message_token_text(message))
+def _estimate_incremental_message_tokens(
+    message: InternalMessage,
+    *,
+    model_id: str,
+    protocol: str,
+) -> int:
+    tokens = estimate_tokens(
+        message_token_text(message),
+        model_id=model_id,
+        protocol=protocol,
+    )
     environment_prompt = message.environment_prompt
     if isinstance(environment_prompt, str) and environment_prompt and (not isinstance(message.content, str) or environment_prompt not in message.content):
-        tokens += estimate_tokens(environment_prompt)
+        tokens += estimate_tokens(
+            environment_prompt,
+            model_id=model_id,
+            protocol=protocol,
+        )
     return tokens
 
 
@@ -204,8 +220,20 @@ def build_request_token_baseline(
         "protocol": protocol,
         "context_summary_revision": context_summary_revision,
         "context_content_revision": context_content_revision,
-        "system_tokens": sum(estimate_tokens(message_token_text(message)) for message in messages if message.role == MessageRole.SYSTEM),
-        "tools_tokens": estimate_tokens(json.dumps(tools or [], ensure_ascii=False, separators=(",", ":"), default=str)),
+        "system_tokens": sum(
+            estimate_tokens(
+                message_token_text(message),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            for message in messages
+            if message.role == MessageRole.SYSTEM
+        ),
+        "tools_tokens": estimate_tokens(
+            json.dumps(tools or [], ensure_ascii=False, separators=(",", ":"), default=str),
+            model_id=model_id,
+            protocol=protocol,
+        ),
     }
     if message_ids:
         baseline["request_message_min_id"] = min(message_ids)
@@ -250,10 +278,23 @@ def estimate_incremental_input_tokens(
     if not current_ids or previous_max_id not in current_ids or min(current_ids) != previous_min_id:
         return None
 
-    incremental_tokens = input_tokens
+    incremental_local_tokens = 0
     for message in messages:
         if message.role == MessageRole.SYSTEM or is_context_summary_message(message):
             continue
         if (_is_positive_int(message.id) and message.id > previous_max_id) or message.id is None:
-            incremental_tokens += _estimate_incremental_message_tokens(message)
-    return incremental_tokens
+            incremental_local_tokens += _estimate_incremental_message_tokens(
+                message,
+                model_id=model_id,
+                protocol=protocol,
+            )
+
+    calibration_factor = extract_token_calibration_factor(
+        metadata,
+        model_id=model_id,
+        protocol=protocol,
+    )
+    return input_tokens + apply_token_calibration(
+        incremental_local_tokens,
+        calibration_factor,
+    )

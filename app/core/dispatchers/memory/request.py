@@ -43,6 +43,8 @@ from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
 from .types import MemoryRecallContext
 
+MEMORY_RECALL_REQUEST_PURPOSE = "memory_recall"
+
 
 def build_precheck_request_messages(messages: list[InternalMessage]) -> list[InternalMessage]:
     summary_messages = [message for message in messages if is_context_summary_message(message)]
@@ -186,6 +188,7 @@ async def prepare_request_messages(
         "type": "llm_request_metadata",
         "turn": 0,
         "response_id": response_id,
+        "request_purpose": MEMORY_RECALL_REQUEST_PURPOSE,
         "input_tokens": input_tokens,
         "input_tokens_source": "estimated",
         "total_output_tokens": context.session_total_output_tokens,

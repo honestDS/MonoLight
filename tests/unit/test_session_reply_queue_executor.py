@@ -344,6 +344,7 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
     assert response["history"][0]["content"] == "已取消"
     expected_request_metadata = {
         **request_metadata,
+        "request_purpose": "audit_auxiliary",
         "output_tokens": 0,
         "total_output_tokens": 0,
         "total_input_tokens": 0,
@@ -353,14 +354,7 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
         "work_sequence_no": 1,
     }
     assert response["llm_request_metadata"] == expected_request_metadata
-    assert metadata_updates == [
-        {
-            "session_id": "session-1",
-            "uid": "user-1",
-            "metadata": expected_request_metadata,
-            "commit": False,
-        }
-    ]
+    assert metadata_updates == []
     assert executor_common_module._event_for_work(work, response)["llm_request_metadata"] == expected_request_metadata
     assert captured["allow_tools"] is False
     assert captured["additional_system_prompt"] == "channel instruction"
@@ -1077,17 +1071,8 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
 
     expected_request_metadata = {
         **second_request_metadata,
+        "request_purpose": "background_summary",
         "output_tokens": 18,
-        "total_output_tokens": 200,
-        "total_input_tokens": 1000,
-        "total_cached_tokens": 250,
-        "cache_hit_rate": 0.25,
-        "work_id": 7,
-        "work_sequence_no": 1,
-    }
-    expected_first_request_metadata = {
-        **request_metadata,
-        "output_tokens": 7,
         "total_output_tokens": 200,
         "total_input_tokens": 1000,
         "total_cached_tokens": 250,
@@ -1099,15 +1084,7 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
     assert response["llm_request_metadata"] == expected_request_metadata
     assert response["llm_request_metadata"]["input_tokens"] == 456
     assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(0.25)
-    assert metadata_updates[-1] == {
-        "session_id": "session-1",
-        "uid": "user-1",
-        "metadata": expected_request_metadata,
-        "commit": False,
-    }
-    assert metadata_updates[0]["metadata"] == expected_first_request_metadata
-    assert metadata_updates[0]["metadata"]["cache_hit_rate"] == pytest.approx(0.25)
-    assert len(metadata_updates) == 2
+    assert metadata_updates == []
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1147,7 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
 
     expected_request_metadata = {
         **request_metadata,
+        "request_purpose": "scheduled_summary",
         "output_tokens": 21,
         "total_output_tokens": 200,
         "total_input_tokens": 1000,
@@ -1182,14 +1160,7 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
     assert response["llm_request_metadata"] == expected_request_metadata
     assert response["llm_request_metadata"]["input_tokens"] == 456
     assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(0.25)
-    assert metadata_updates == [
-        {
-            "session_id": "session-1",
-            "uid": "user-1",
-            "metadata": expected_request_metadata,
-            "commit": False,
-        }
-    ]
+    assert metadata_updates == []
 
 
 @pytest.mark.asyncio

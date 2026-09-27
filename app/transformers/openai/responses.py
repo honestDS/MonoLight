@@ -420,6 +420,46 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         raise LLMException(ERR_LLM_CONNECTION_FAILED, error=official_error, detail=response.get("error") or response)
 
     @classmethod
+    def build_input_token_payload(
+        cls,
+        *,
+        model_id: str,
+        messages: list[InternalMessage],
+        tools: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        del model_id
+        payload: dict[str, Any] = {"input": cls.to_provider(messages)}
+        if tools:
+            payload["tools"] = cls._convert_tools(tools)
+        return payload
+
+    async def count_input_tokens(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        input_payload: dict[str, Any],
+        timeout: float = 30.0,
+        http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
+    ) -> int | None:
+        headers = build_model_request_headers(api_key, custom_headers)
+        parsed = await self._post_json(
+            url=f"{base_url.rstrip('/')}/responses/input_tokens",
+            headers=headers,
+            payload={"model": model_id, **input_payload},
+            timeout=timeout,
+            http_proxy=http_proxy,
+            model_id=model_id,
+            base_url=base_url,
+        )
+        input_tokens = parsed.get("input_tokens")
+        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool) and input_tokens >= 0:
+            return input_tokens
+        return None
+
+    @classmethod
     def _request_payload(
         cls,
         *,

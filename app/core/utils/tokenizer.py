@@ -1,9 +1,23 @@
-import os
+﻿import os
 
 import tiktoken
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_DEFAULT_ENCODING = "cl100k_base"
+_OPENAI_PROTOCOLS = frozenset({"openai", "openai_responses"})
+_O200K_MODEL_PREFIXES = (
+    "gpt-5",
+    "gpt-4.5",
+    "gpt-4.1",
+    "gpt-4o",
+    "chatgpt-4o",
+    "o1",
+    "o3",
+    "o4",
+)
+_O200K_HARMONY_MODEL_PREFIXES = ("gpt-oss",)
 
 
 def _estimate_tokens_by_chars(text: str) -> int:
@@ -14,25 +28,58 @@ def _estimate_tokens_by_chars(text: str) -> int:
     return int(chinese_count * chinese_token_coefficient + other_count * other_token_coefficient)
 
 
-def estimate_tokens(text: str) -> int:
-    """
-    估算文本的 Token 数量。使用 tiktoken 进行更准确的估算，如果没有安装则回退到字符估算。
-    默认使用 gpt-3.5-turbo 的编码方式 (cl100k_base)。
-    """
+def resolve_token_encoding_name(
+    model_id: str | None = None,
+    *,
+    protocol: str | None = None,
+) -> str:
+    normalized_model = model_id.strip() if isinstance(model_id, str) else ""
+    if normalized_model:
+        try:
+            return tiktoken.encoding_name_for_model(normalized_model)
+        except KeyError:
+            pass
+
+    normalized_protocol = protocol.strip().lower() if isinstance(protocol, str) else ""
+    lowered_model = normalized_model.lower()
+    if normalized_protocol in _OPENAI_PROTOCOLS:
+        if lowered_model.startswith(_O200K_HARMONY_MODEL_PREFIXES):
+            return "o200k_harmony"
+        if lowered_model.startswith(_O200K_MODEL_PREFIXES):
+            return "o200k_base"
+    return _DEFAULT_ENCODING
+
+
+def estimate_tokens(
+    text: str,
+    *,
+    model_id: str | None = None,
+    protocol: str | None = None,
+    encoding_name: str | None = None,
+) -> int:
+    """Estimate text tokens with a model-aware tiktoken encoding when available."""
     if not text:
         return 0
 
     try:
-        # 使用 tiktoken 计算更准确的 token 数量 (基于 OpenAI 的 cl100k_base)
-        encoding = tiktoken.get_encoding("cl100k_base")
+        resolved_encoding_name = encoding_name or resolve_token_encoding_name(
+            model_id,
+            protocol=protocol,
+        )
+        encoding = tiktoken.get_encoding(resolved_encoding_name)
         return len(encoding.encode(text, disallowed_special=()))
     except Exception:
-        # 降级：如果 tiktoken 解析失败或未安装，使用更符合实际的预估值
-        # 一个汉字通常占 1~2 个 Token，一个英文单词通常占 1.3 个 Token（英文字母约为 0.25~0.3）
         return _estimate_tokens_by_chars(text)
 
 
-def truncate_text_to_tokens(text: str, max_tokens: int) -> tuple[str, bool]:
+def truncate_text_to_tokens(
+    text: str,
+    max_tokens: int,
+    *,
+    model_id: str | None = None,
+    protocol: str | None = None,
+    encoding_name: str | None = None,
+) -> tuple[str, bool]:
     """Return an original-text prefix that fits within the token budget."""
     if not text:
         return text, False
@@ -40,7 +87,11 @@ def truncate_text_to_tokens(text: str, max_tokens: int) -> tuple[str, bool]:
         return "", True
 
     try:
-        encoding = tiktoken.get_encoding("cl100k_base")
+        resolved_encoding_name = encoding_name or resolve_token_encoding_name(
+            model_id,
+            protocol=protocol,
+        )
+        encoding = tiktoken.get_encoding(resolved_encoding_name)
         token_ids = encoding.encode(text, disallowed_special=())
         if len(token_ids) <= max_tokens:
             return text, False
@@ -66,3 +117,4 @@ def truncate_text_to_tokens(text: str, max_tokens: int) -> tuple[str, bool]:
             else:
                 high = middle - 1
         return text[:low], True
+

@@ -12,6 +12,7 @@ from app.core.constants import (
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.context_budget import build_context_request_budget, measure_context_request_usage
+from app.core.utils.tokenizer import resolve_token_encoding_name
 from app.models.message import InternalMessage
 
 logger = get_logger(__name__)
@@ -323,11 +324,15 @@ def calculate_tool_result_round_budget_tokens(
     tools: list[dict] | None,
     required_input_tokens_override: int | None = None,
     fallback_to_local_usage_on_overflow: bool = False,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> int:
     if isinstance(required_input_tokens_override, int) and not isinstance(required_input_tokens_override, bool) and required_input_tokens_override >= 0:
         budget = build_context_request_budget(
             context_window_k=context_window_k,
             max_tokens=max_tokens,
+            model_id=model_id,
+            protocol=protocol,
         )
         required_input_tokens = required_input_tokens_override
         hard_input_limit = budget.context_window_tokens - budget.output_tokens - budget.safety_margin_tokens
@@ -337,6 +342,8 @@ def calculate_tool_result_round_budget_tokens(
                 context_window_k=context_window_k,
                 max_tokens=max_tokens,
                 tools=tools,
+                model_id=model_id,
+                protocol=protocol,
             )
             budget = usage.budget
             required_input_tokens = usage.required_input_tokens
@@ -346,6 +353,8 @@ def calculate_tool_result_round_budget_tokens(
             context_window_k=context_window_k,
             max_tokens=max_tokens,
             tools=tools,
+            model_id=model_id,
+            protocol=protocol,
         )
         budget = usage.budget
         required_input_tokens = usage.required_input_tokens
@@ -368,6 +377,9 @@ def truncate_tool_result_with_stats(
     content: str,
     context_window_k: int,
     limit_tokens: int | None = None,
+    *,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> ToolResultTruncation:
     """对单条工具响应做 token 级截断，并返回截断统计信息。
 
@@ -379,7 +391,12 @@ def truncate_tool_result_with_stats(
     limit_tokens = max(1, limit_tokens if limit_tokens is not None else (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
 
     try:
-        encoding = tiktoken.get_encoding("cl100k_base")
+        encoding = tiktoken.get_encoding(
+            resolve_token_encoding_name(
+                model_id,
+                protocol=protocol,
+            )
+        )
         token_ids = encoding.encode(content, disallowed_special=())
         original_tokens = len(token_ids)
         if original_tokens <= limit_tokens:
@@ -466,6 +483,8 @@ def truncate_tool_messages_for_budget(
     budget_tokens: int,
     uid: str,
     session_id: str,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> ToolMessagesTruncationStats:
     if not tool_msgs:
         return ToolMessagesTruncationStats(truncated_count=0, removed_chars=0)
@@ -478,6 +497,8 @@ def truncate_tool_messages_for_budget(
             msg.content or "",
             context_window_k,
             limit_tokens=per_tool_budget,
+            model_id=model_id,
+            protocol=protocol,
         )
         msg.content = truncation.content
         if truncation.truncated:
@@ -497,10 +518,21 @@ def truncate_tool_messages_for_budget(
     return ToolMessagesTruncationStats(truncated_count=truncated_count, removed_chars=removed_chars)
 
 
-def truncate_tool_result(content: str, context_window_k: int) -> tuple[str, bool]:
+def truncate_tool_result(
+    content: str,
+    context_window_k: int,
+    *,
+    model_id: str | None = None,
+    protocol: str | None = None,
+) -> tuple[str, bool]:
     """对单条工具响应做 token 级截断。
 
     返回 (处理后的内容, 是否发生截断)。
     """
-    result = truncate_tool_result_with_stats(content, context_window_k)
+    result = truncate_tool_result_with_stats(
+        content,
+        context_window_k,
+        model_id=model_id,
+        protocol=protocol,
+    )
     return result.content, result.truncated
