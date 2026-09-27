@@ -16,13 +16,14 @@ from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.executor_audit import _persist_work_audit_execution_binding
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.session_reply_queue.executor_interactive import _dispatch_interactive_work
-from app.core.session_reply_queue.executor_metadata import _generate_reply_with_request_metadata
+from app.core.session_reply_queue.executor_metadata import _generate_auxiliary_reply_with_request_metadata
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
 from app.models.background_task import BackgroundTask
 from app.models.message import InternalMessage, MessageRole
+from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import SessionReplyWorkItem
 
 __all__ = []
@@ -43,9 +44,10 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         profile = await profile_crud.get_with_relations(db, work.profile_id)
         if profile is None or profile.uid != work.uid:
             raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-        ai_msg, turn_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
+        ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
             db,
             work=work,
+            request_purpose=SessionReplyProviderRequestPurpose.AUDIT_AUXILIARY,
             uid=work.uid,
             session_id=work.session_id,
             profile=profile,
@@ -159,9 +161,10 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
     extra = task.extra if isinstance(task.extra, dict) else {}
     stored_boundary_message_id = extra.get("context_summary_user_boundary_message_id")
     initial_fixed_upper_message_id = stored_boundary_message_id if (isinstance(stored_boundary_message_id, int) and not isinstance(stored_boundary_message_id, bool) and stored_boundary_message_id > 0) else _fallback_last_frozen_user_message_id(submission_context)
-    ai_msg, turn_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
+    ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
         db,
         work=work,
+        request_purpose=SessionReplyProviderRequestPurpose.BACKGROUND_SUMMARY,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,
@@ -197,9 +200,10 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = ""
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND))
 
-    ai_msg, turn_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
+    ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
         db,
         work=work,
+        request_purpose=SessionReplyProviderRequestPurpose.SCHEDULED_SUMMARY,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,

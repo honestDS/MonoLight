@@ -18,7 +18,6 @@ from app.core.utils.request_token_baseline import (
     PROVIDER_INPUT_TOKENS_METADATA_KEY,
     PROVIDER_OUTPUT_TOKENS_METADATA_KEY,
     PROVIDER_REQUEST_ID_METADATA_KEY,
-    accumulate_session_cache_metrics,
     build_session_cache_metrics,
     extract_provider_request_usage,
     extract_session_cache_token_totals,
@@ -26,6 +25,7 @@ from app.core.utils.request_token_baseline import (
     merge_session_cache_token_totals,
 )
 from app.models.message import InternalMessage
+from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.providers.database import AsyncSessionLocal
 
@@ -71,6 +71,7 @@ async def _persist_session_reply_provider_usage(
     metadata: dict[str, Any],
     *,
     work: SessionReplyWorkItem,
+    request_purpose: SessionReplyProviderRequestPurpose,
 ) -> _ProviderUsagePersistenceResult | None:
     provider_usage = extract_provider_request_usage(metadata)
     if provider_usage is None:
@@ -91,6 +92,7 @@ async def _persist_session_reply_provider_usage(
             input_tokens=input_tokens,
             cached_tokens=cached_tokens,
             output_tokens=output_tokens,
+            request_purpose=request_purpose,
         )
         session = await session_crud.get_by_session_id_for_update(
             usage_db,
@@ -110,9 +112,13 @@ async def _persist_session_reply_provider_usage(
                 total_output_tokens=total_output_tokens,
             )
 
-        new_total_input_tokens = total_input_tokens + input_tokens
-        new_total_cached_tokens = total_cached_tokens + cached_tokens
-        new_total_output_tokens = total_output_tokens + output_tokens
+        new_total_input_tokens = total_input_tokens
+        new_total_cached_tokens = total_cached_tokens
+        new_total_output_tokens = total_output_tokens
+        if request_purpose.contributes_to_session_totals:
+            new_total_input_tokens += input_tokens
+            new_total_cached_tokens += cached_tokens
+            new_total_output_tokens += output_tokens
         incoming_metadata = _metadata_with_work_order(work, _without_provider_usage_fields(metadata))
         if _incoming_work_metadata_is_current(session, work, incoming_metadata):
             metadata_to_persist = incoming_metadata
@@ -147,8 +153,15 @@ async def _persist_session_reply_provider_usage_reliably(
     metadata: dict[str, Any],
     *,
     work: SessionReplyWorkItem,
+    request_purpose: SessionReplyProviderRequestPurpose,
 ) -> _ProviderUsagePersistenceResult | None:
-    operation = asyncio.create_task(_persist_session_reply_provider_usage(metadata, work=work))
+    operation = asyncio.create_task(
+        _persist_session_reply_provider_usage(
+            metadata,
+            work=work,
+            request_purpose=request_purpose,
+        )
+    )
     try:
         return await asyncio.shield(operation)
     except asyncio.CancelledError:
@@ -167,15 +180,23 @@ async def _persist_interactive_work_request_metadata(
     *,
     work: SessionReplyWorkItem,
 ) -> None:
-    await _persist_session_reply_provider_usage_reliably(metadata, work=work)
+    await _persist_session_reply_provider_usage_reliably(
+        metadata,
+        work=work,
+        request_purpose=SessionReplyProviderRequestPurpose.MAIN_DIALOGUE,
+    )
 
 
-async def _generate_reply_with_request_metadata(
+async def _generate_auxiliary_reply_with_request_metadata(
     db,
     *,
     work: SessionReplyWorkItem,
+    request_purpose: SessionReplyProviderRequestPurpose,
     **kwargs: Any,
 ) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]], dict[str, Any] | None]:
+    """Generate an auxiliary reply with an explicit provider-request purpose."""
+    if request_purpose.contributes_to_session_totals:
+        raise ValueError("auxiliary reply request purpose must not contribute to session totals")
     latest_request_metadata = None
     session_total_output_tokens = 0
     session_total_input_tokens = 0
@@ -206,14 +227,8 @@ async def _generate_reply_with_request_metadata(
         request_output_tokens = provider_usage[3] if provider_usage is not None else 0
         first_seen_provider_request = request_id is not None and request_id not in seen_provider_request_ids
         if provider_usage is None or first_seen_provider_request:
-            session_total_input_tokens, session_total_cached_tokens = accumulate_session_cache_metrics(
-                metadata,
-                total_input_tokens=session_total_input_tokens,
-                total_cached_tokens=session_total_cached_tokens,
-            )
             output_tokens = metadata.get("output_tokens")
             if isinstance(output_tokens, int) and not isinstance(output_tokens, bool) and output_tokens >= 0:
-                session_total_output_tokens += output_tokens
                 work_output_tokens += output_tokens
             if request_id is not None:
                 seen_provider_request_ids.add(request_id)
@@ -221,12 +236,17 @@ async def _generate_reply_with_request_metadata(
             work,
             {
                 **metadata,
+                **build_session_cache_metrics(session_total_input_tokens, session_total_cached_tokens),
                 "output_tokens": work_output_tokens,
                 "total_output_tokens": session_total_output_tokens,
             },
         )
         if provider_usage is not None:
-            result = await _persist_session_reply_provider_usage_reliably(ordered_metadata, work=work)
+            result = await _persist_session_reply_provider_usage_reliably(
+                ordered_metadata,
+                work=work,
+                request_purpose=request_purpose,
+            )
             if result is None:
                 raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_MISSING))
             session_total_input_tokens = result.total_input_tokens

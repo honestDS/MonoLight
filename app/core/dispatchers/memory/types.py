@@ -32,7 +32,7 @@ class MemoryRecallContext:
     stream_event_callback: StreamEventCallback | None = None
     show_tool_calls: bool = True
     expose_tool_call_content: bool = True
-    latest_llm_request_metadata: dict[str, Any] | None = None
+    latest_precheck_request_metadata: dict[str, Any] | None = None
     total_output_tokens: int = 0
     session_total_output_tokens: int | None = None
     session_total_input_tokens: int = 0
@@ -52,7 +52,6 @@ class MemoryRecallPrecheckResult:
     model_entry: dict[str, Any] | None
     channel_rule: Any | None
     chat_params: dict[str, Any]
-    latest_llm_request_metadata: dict[str, Any] | None
     total_output_tokens: int
     session_total_output_tokens: int | None
     session_total_input_tokens: int
@@ -82,7 +81,6 @@ def build_result(
         model_entry=context.model_entry,
         channel_rule=context.channel_rule,
         chat_params=context.chat_params,
-        latest_llm_request_metadata=context.latest_llm_request_metadata,
         total_output_tokens=context.total_output_tokens,
         session_total_output_tokens=context.session_total_output_tokens,
         session_total_input_tokens=context.session_total_input_tokens,
