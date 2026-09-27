@@ -819,7 +819,7 @@ async def test_background_without_audit_configuration_executes_tool_without_audi
         )
 
     async def generate_chat(*_args, **_kwargs):
-        return responses.pop(0), None, {}, None, {"context_window_k": 128, "max_tokens": 256, "chat_timeout": 30}
+        return responses.pop(0), None, {"model_id": "chat-model", "protocol": "OPENAI"}, None, {"context_window_k": 128, "max_tokens": 256, "chat_timeout": 30}
 
     async def process_tool(current_tool_call, *_args, **_kwargs):
         processed_calls.append(current_tool_call.id)
@@ -930,7 +930,7 @@ async def test_background_parallel_limit_persists_rejected_tool_results_and_fini
         )
 
     async def generate_chat(*_args, **_kwargs):
-        return responses.pop(0), None, {}, None, {"context_window_k": 128, "max_tokens": 256, "chat_timeout": 30}
+        return responses.pop(0), None, {"model_id": "chat-model", "protocol": "OPENAI"}, None, {"context_window_k": 128, "max_tokens": 256, "chat_timeout": 30}
 
     async def process_tool(current_tool_call, *_args, **_kwargs):
         processed_calls.append(current_tool_call.id)

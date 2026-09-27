@@ -2,7 +2,6 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.context import ContextManager
-from app.core.exceptions import ParameterException
 from app.core.prompts import (
     CONTEXT_SUMMARY_COMPRESS_PROMPT,
     CONTEXT_SUMMARY_PROMPT,
@@ -205,13 +204,10 @@ def test_summary_request_validation_preserves_full_message_sequence():
         InternalMessage(id=23, role=MessageRole.USER, content="latest question"),
     ]
 
-    request = ContextManager.trim_messages_for_model_request(
+    request = ContextManager.prepare_messages_for_model_request(
         messages=messages,
-        uid="user-1",
-        session_id="session-1",
         context_window_k=20,
         max_tokens=256,
-        tools=None,
         safety_margin_tokens=64,
     )
 
@@ -223,7 +219,7 @@ def test_summary_request_validation_preserves_full_message_sequence():
     assert request[-1].content == "latest question"
 
 
-def test_request_budget_rejects_instead_of_sliding_history():
+def test_request_validation_does_not_reject_local_estimate_or_slide_history():
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
         InternalMessage(id=1, role=MessageRole.USER, content="discardable old question " * 200),
@@ -236,17 +232,14 @@ def test_request_budget_rejects_instead_of_sliding_history():
     ]
 
     original_ids = [message.id for message in messages]
-    with pytest.raises(ParameterException):
-        ContextManager.trim_messages_for_model_request(
-            messages=messages,
-            uid="user-1",
-            session_id="session-1",
-            context_window_k=1,
-            max_tokens=256,
-            tools=None,
-            safety_margin_tokens=64,
-        )
+    request = ContextManager.prepare_messages_for_model_request(
+        messages=messages,
+        context_window_k=1,
+        max_tokens=256,
+        safety_margin_tokens=64,
+    )
 
+    assert [message.id for message in request] == original_ids
     assert [message.id for message in messages] == original_ids
 
 
@@ -276,13 +269,10 @@ def test_request_validation_keeps_persisted_tool_chain_unchanged():
         InternalMessage(id=5, role=MessageRole.USER, content="continue"),
     ]
 
-    request = ContextManager.trim_messages_for_model_request(
+    request = ContextManager.prepare_messages_for_model_request(
         messages=messages,
-        uid="user-1",
-        session_id="session-1",
         context_window_k=50,
         max_tokens=256,
-        tools=None,
         safety_margin_tokens=64,
     )
 

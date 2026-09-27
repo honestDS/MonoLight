@@ -43,7 +43,8 @@ test('new message indicator is horizontally centered instead of right aligned', 
 
   const indicatorPositioning = chatStyles.slice(indicatorStart, indicatorStart + 260)
   assert.match(indicatorPositioning, /left:\s*50%;/)
-  assert.match(indicatorPositioning, /margin-left:\s*-21px;/)
+  assert.match(indicatorPositioning, /width:\s*64px;/)
+  assert.match(indicatorPositioning, /margin-left:\s*-32px;/)
   assert.doesNotMatch(indicatorPositioning, /right:\s*18px;/)
 })
 

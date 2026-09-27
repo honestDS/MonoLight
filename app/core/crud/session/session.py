@@ -136,28 +136,22 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             return False
 
         optional_int_fields = (
-            "request_message_min_id",
-            "request_message_max_id",
+            "channel_id",
             "context_summary_revision",
             "context_content_revision",
-            "system_tokens",
-            "tools_tokens",
             "output_tokens",
             "total_output_tokens",
             "total_input_tokens",
             "total_cached_tokens",
             "cached_tokens",
-            "input_token_estimate_raw",
-            "input_token_calibration_estimated_total",
-            "input_token_calibration_provider_total",
-            "input_token_calibration_samples",
         )
         for field in optional_int_fields:
             if field not in metadata:
                 continue
             value = metadata[field]
-            minimum = 1 if field in {"request_message_min_id", "request_message_max_id"} else 0
-            if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                return False
+            if field == "channel_id" and value <= 0:
                 return False
             persisted_metadata[field] = value
 

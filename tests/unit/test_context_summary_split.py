@@ -10,7 +10,7 @@ from app.models.message import InternalMessage, MessageRole
 
 
 def test_message_within_budget_remains_single_source_unit(monkeypatch):
-    monkeypatch.setattr(split_module, "estimate_tokens", len)
+    monkeypatch.setattr(split_module, "estimate_tokens", lambda text, **_kwargs: len(text))
     message = InternalMessage(
         id=7,
         role=MessageRole.TOOL,
@@ -33,7 +33,7 @@ def test_message_within_budget_remains_single_source_unit(monkeypatch):
 
 
 def test_oversized_tool_result_is_split_into_bounded_ordered_parts(monkeypatch):
-    monkeypatch.setattr(split_module, "estimate_tokens", len)
+    monkeypatch.setattr(split_module, "estimate_tokens", lambda text, **_kwargs: len(text))
     message = InternalMessage(
         id=7,
         role=MessageRole.TOOL,
@@ -58,7 +58,7 @@ def test_oversized_tool_result_is_split_into_bounded_ordered_parts(monkeypatch):
 
 
 def test_message_chunk_metadata_must_fit_budget(monkeypatch):
-    monkeypatch.setattr(split_module, "estimate_tokens", len)
+    monkeypatch.setattr(split_module, "estimate_tokens", lambda text, **_kwargs: len(text))
     message = InternalMessage(
         id=7,
         role=MessageRole.TOOL,

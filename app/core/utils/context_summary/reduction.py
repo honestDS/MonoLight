@@ -35,6 +35,10 @@ from app.core.utils.context_summary.merge import (
     iter_completed_lower_stage_fragments,
     iter_lower_stage_merge_groups,
 )
+from app.core.utils.context_summary.model_call import (
+    estimate_context_summary_prompt_tokens,
+    estimate_context_summary_text_tokens,
+)
 from app.core.utils.context_summary.pipeline import (
     SummaryFragmentInput,
     SummaryFragmentResult,
@@ -45,7 +49,6 @@ from app.core.utils.context_summary.selection import (
     select_context_summary_model,
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
-from app.core.utils.tokenizer import estimate_tokens
 from app.models.context_summary_stage import (
     ContextSummaryFragment,
     ContextSummaryStage,
@@ -107,13 +110,20 @@ def build_reduction_stage_identity(
     return stage_key, model_key
 
 
-async def measure_completed_stage_tokens(stage: ContextSummaryStage) -> int:
+async def measure_completed_stage_tokens(
+    stage: ContextSummaryStage,
+    *,
+    model: ContextSummaryModelSnapshot,
+) -> int:
     total_tokens = 0
     async for fragment in iter_completed_lower_stage_fragments(
         work_dedupe_key=stage.work_dedupe_key,
         lower_stage_key=stage.stage_key,
     ):
-        total_tokens += max(1, estimate_tokens(fragment.content))
+        total_tokens += max(
+            1,
+            estimate_context_summary_text_tokens(model, fragment.content),
+        )
     return total_tokens
 
 
@@ -224,7 +234,7 @@ async def execute_reduction_stage(
             content="(none)",
         )
     )
-    max_group_tokens = model.input_budget_tokens - estimate_tokens(empty_prompt) - 32
+    max_group_tokens = model.input_budget_tokens - estimate_context_summary_prompt_tokens(model, empty_prompt) - 32
     if max_group_tokens <= 0:
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="reduction"))
 
@@ -232,6 +242,7 @@ async def execute_reduction_stage(
         work_dedupe_key=lower_stage.work_dedupe_key,
         lower_stage_key=lower_stage.stage_key,
         max_group_tokens=max_group_tokens,
+        token_counter=lambda text: estimate_context_summary_text_tokens(model, text),
     )
     if expected_fragment_count <= 0:
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_REDUCTION_NO_INPUT_GROUPS))
@@ -252,12 +263,13 @@ async def execute_reduction_stage(
         lower_stage_key=lower_stage.stage_key,
         max_group_tokens=max_group_tokens,
         first_group_index=first_fragment_index,
+        token_counter=lambda text: estimate_context_summary_text_tokens(model, text),
     )
 
     async def process_group(group: SummaryFragmentInput) -> SummaryFragmentResult:
         await ensure_context_summary_work_valid(work_validity_checker)
         prompt = merge_fragment_prompt(group)
-        if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
+        if not model.accepts_prompt_tokens(estimate_context_summary_prompt_tokens(model, prompt)):
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW, stage="reduction group"))
         generated = await call_fixed_summary_model(
             model=model,
@@ -269,7 +281,7 @@ async def execute_reduction_stage(
             message_start_id=group.message_start_id,
             message_end_id=group.message_end_id,
             content=generated,
-            token_count=estimate_tokens(generated),
+            token_count=estimate_context_summary_text_tokens(model, generated),
         )
 
     try:
@@ -285,7 +297,10 @@ async def execute_reduction_stage(
                 ),
             )
         await ensure_context_summary_work_valid(work_validity_checker)
-        lower_tokens = await measure_completed_stage_tokens(lower_stage)
+        lower_tokens = await measure_completed_stage_tokens(
+            lower_stage,
+            model=model,
+        )
         output_tokens = await measure_running_stage_tokens(stage)
         if output_tokens >= lower_tokens:
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED, stage="reduction"))
@@ -381,7 +396,7 @@ async def execute_refinement_stage(
     prompt = CONTEXT_SUMMARY_COMPRESS_PROMPT.format(
         summary=lower_fragment.content,
     )
-    prompt_tokens = estimate_tokens(prompt)
+    prompt_tokens = estimate_context_summary_prompt_tokens(model, prompt)
     if not model.accepts_prompt_tokens(prompt_tokens):
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW, stage="refinement"))
 
@@ -401,7 +416,10 @@ async def execute_refinement_stage(
             generated = await call_fixed_summary_model(
                 model=model,
                 prompt=prompt,
-                input_tokens=max(1, estimate_tokens(lower_fragment.content)),
+                input_tokens=max(
+                    1,
+                    estimate_context_summary_text_tokens(model, lower_fragment.content),
+                ),
             )
             await write_summary_fragment(
                 stage=stage,
@@ -410,12 +428,18 @@ async def execute_refinement_stage(
                     message_start_id=lower_fragment.message_start_id,
                     message_end_id=lower_fragment.message_end_id,
                     content=generated,
-                    token_count=max(1, estimate_tokens(generated)),
+                    token_count=max(
+                        1,
+                        estimate_context_summary_text_tokens(model, generated),
+                    ),
                 ),
             )
         await ensure_context_summary_work_valid(work_validity_checker)
         output_tokens = await measure_running_stage_tokens(stage)
-        lower_tokens = max(1, estimate_tokens(lower_fragment.content))
+        lower_tokens = max(
+            1,
+            estimate_context_summary_text_tokens(model, lower_fragment.content),
+        )
         if output_tokens >= lower_tokens:
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED, stage="refinement"))
         if not await mark_summary_stage_completed(stage=stage):

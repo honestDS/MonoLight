@@ -1,7 +1,6 @@
-﻿import pytest
+import pytest
 
 from app.core.utils import request_token_baseline as baseline_module
-from app.models.message import InternalMessage, MessageRole
 
 
 @pytest.mark.parametrize(
@@ -122,104 +121,62 @@ def test_extract_session_total_output_tokens(metadata, expected):
     assert baseline_module.extract_session_total_output_tokens(metadata) == expected
 
 
-def _metadata_for(messages, tools=None):
-    metadata = baseline_module.build_request_token_baseline(
-        messages,
-        tools,
-        model_id="grok-4.5",
-        protocol="openai",
-        context_summary_revision=2,
-        context_content_revision=3,
+def test_confirmed_provider_input_tokens_require_current_context_revision():
+    metadata = {
+        "channel_id": 7,
+        "input_tokens": 344_000,
+        "input_tokens_source": "provider",
+        "model_id": "gpt-5.6-luna",
+        "protocol": "openai_responses",
+        "context_summary_revision": 4,
+        "context_content_revision": 2,
+    }
+
+    assert (
+        baseline_module.extract_confirmed_provider_input_tokens(
+            metadata,
+            channel_id=7,
+            model_id="gpt-5.6-luna",
+            protocol="openai_responses",
+            context_summary_revision=4,
+            context_content_revision=2,
+        )
+        == 344_000
     )
-    metadata.update(
-        {
-            "input_tokens": 7500,
-            "input_tokens_source": "provider",
-        }
+    assert (
+        baseline_module.extract_confirmed_provider_input_tokens(
+            metadata,
+            channel_id=7,
+            model_id="gpt-5.6-luna",
+            protocol="openai_responses",
+            context_summary_revision=5,
+            context_content_revision=2,
+        )
+        is None
     )
-    return metadata
-
-
-def test_incremental_input_tokens_add_only_messages_after_provider_baseline(monkeypatch):
-    monkeypatch.setattr(baseline_module, "estimate_tokens", lambda text, **kwargs: len(text))
-    previous_messages = [
-        InternalMessage(role=MessageRole.SYSTEM, content="system"),
-        InternalMessage(id=1, role=MessageRole.USER, content="old user"),
-        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
-    ]
-    metadata = _metadata_for(previous_messages)
-    current_messages = [
-        *previous_messages,
-        InternalMessage(id=3, role=MessageRole.ASSISTANT, content="abc"),
-        InternalMessage(id=4, role=MessageRole.USER, content="xy", environment_prompt="env"),
-    ]
-
-    result = baseline_module.estimate_incremental_input_tokens(
-        current_messages,
-        None,
-        metadata,
-        model_id="grok-4.5",
-        protocol="openai",
-        context_summary_revision=2,
-        context_content_revision=3,
+    assert (
+        baseline_module.extract_confirmed_provider_input_tokens(
+            metadata,
+            channel_id=8,
+            model_id="gpt-5.6-luna",
+            protocol="openai_responses",
+            context_summary_revision=4,
+            context_content_revision=2,
+        )
+        is None
     )
-
-    assert result == 7500 + len("abc") + len("xy") + len("env")
-
-
-def test_incremental_input_tokens_falls_back_when_history_range_changes(monkeypatch):
-    monkeypatch.setattr(baseline_module, "estimate_tokens", lambda text, **kwargs: len(text))
-    previous_messages = [
-        InternalMessage(id=1, role=MessageRole.USER, content="old user"),
-        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
-    ]
-    metadata = _metadata_for(previous_messages)
-
-    result = baseline_module.estimate_incremental_input_tokens(
-        [
-            InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
-            InternalMessage(id=3, role=MessageRole.USER, content="new user"),
-        ],
-        None,
-        metadata,
-        model_id="grok-4.5",
-        protocol="openai",
-        context_summary_revision=2,
-        context_content_revision=3,
+    legacy_metadata = {key: value for key, value in metadata.items() if key != "channel_id"}
+    assert (
+        baseline_module.extract_confirmed_provider_input_tokens(
+            legacy_metadata,
+            channel_id=7,
+            model_id="gpt-5.6-luna",
+            protocol="openai_responses",
+            context_summary_revision=4,
+            context_content_revision=2,
+        )
+        is None
     )
-
-    assert result is None
-
-
-def test_incremental_input_tokens_falls_back_when_model_or_summary_changes(monkeypatch):
-    monkeypatch.setattr(baseline_module, "estimate_tokens", lambda text, **kwargs: len(text))
-    messages = [
-        InternalMessage(id=1, role=MessageRole.USER, content="old user"),
-        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
-    ]
-    metadata = _metadata_for(messages)
-
-    model_changed = baseline_module.estimate_incremental_input_tokens(
-        messages,
-        None,
-        metadata,
-        model_id="other-model",
-        protocol="openai",
-        context_summary_revision=2,
-        context_content_revision=3,
-    )
-    summary_changed = baseline_module.estimate_incremental_input_tokens(
-        messages,
-        None,
-        metadata,
-        model_id="grok-4.5",
-        protocol="openai",
-        context_summary_revision=3,
-        context_content_revision=3,
-    )
-
-    assert model_changed is None
-    assert summary_changed is None
 
 
 @pytest.mark.parametrize(
@@ -416,4 +373,3 @@ def test_provider_request_usage_metadata_ignores_estimated_input():
     assert metadata[baseline_module.PROVIDER_CACHED_TOKENS_METADATA_KEY] == 0
     assert metadata[baseline_module.PROVIDER_OUTPUT_TOKENS_METADATA_KEY] == 3
     assert baseline_module.extract_provider_request_usage(metadata) == ("request-2", 0, 0, 3)
-

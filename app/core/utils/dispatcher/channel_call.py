@@ -10,7 +10,7 @@ from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_LLM_EMPTY_RESPONSE,
 )
-from app.core.exceptions import ApiKeyException, ContextBudgetExceededException, LLMContextLengthException, LLMException
+from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
@@ -22,18 +22,23 @@ from app.core.utils.request_token_baseline import (
 )
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, resolve_model_protocol
 from app.models.message import InternalMessage, InternalResponse
-from app.providers.llm.client import LLMClient, estimate_request_context_tokens
+from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
 
 
-ChatRequestBuilder = Callable[[dict[str, Any]], list[InternalMessage] | Awaitable[list[InternalMessage]]]
+ChatRequestBuilder = Callable[[dict[str, Any], ModelChannel, dict[str, Any]], list[InternalMessage] | Awaitable[list[InternalMessage]]]
 RequestMetadataCallback = Callable[[dict[str, Any]], Awaitable[None]]
-ContextLengthRecoveryCallback = Callable[[dict[str, Any]], bool | Awaitable[bool]]
+ContextLengthRecoveryCallback = Callable[[dict[str, Any], ModelChannel, dict[str, Any]], bool | Awaitable[bool]]
 
 
-async def _resolve_request_messages(builder: ChatRequestBuilder, chat_params: dict[str, Any]) -> list[InternalMessage]:
-    request_messages = builder(chat_params)
+async def _resolve_request_messages(
+    builder: ChatRequestBuilder,
+    chat_params: dict[str, Any],
+    chat_channel_obj: ModelChannel,
+    model_entry: dict[str, Any],
+) -> list[InternalMessage]:
+    request_messages = builder(chat_params, chat_channel_obj, model_entry)
     if hasattr(request_messages, "__await__"):
         return await request_messages
     return request_messages
@@ -64,12 +69,12 @@ async def generate_chat_with_fallback(
         chat_channel_obj, model_entry, channel_rule = selection
         chat_params = resolve_chat_params(model_entry, chat_channel)
         try:
-            request_messages = await _resolve_request_messages(request_builder, chat_params)
-            estimated_input_tokens = 0
-            request_context_kwargs: dict[str, Any] = {}
-            if request_metadata_callback is not None:
-                estimated_input_tokens = estimate_request_context_tokens(request_messages, tools)
-                request_context_kwargs["request_context_tokens"] = estimated_input_tokens
+            request_messages = await _resolve_request_messages(
+                request_builder,
+                chat_params,
+                chat_channel_obj,
+                model_entry,
+            )
             await db.commit()
             provider_request_id = str(uuid.uuid4())
             response = await LLMClient.generate(
@@ -86,7 +91,6 @@ async def generate_chat_with_fallback(
                 timeout=chat_params["chat_timeout"],
                 http_proxy=get_channel_http_proxy(chat_channel_obj),
                 custom_headers=get_model_custom_headers(model_entry),
-                **request_context_kwargs,
             )
             ai_msg = response.message
             if request_metadata_callback is not None:
@@ -94,10 +98,13 @@ async def generate_chat_with_fallback(
                 await request_metadata_callback(
                     {
                         "type": "llm_request_metadata",
-                        "input_tokens": estimated_input_tokens,
-                        "input_tokens_source": "estimated",
+                        "input_tokens": provider_token_metrics.get("input_tokens", 0),
+                        "input_tokens_source": provider_token_metrics.get("input_tokens_source", "estimated"),
                         "context_window_tokens": max(1, int(chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K),
                         "max_output_tokens": max(0, int(chat_params["max_tokens"])),
+                        **({"channel_id": chat_channel_obj.id} if isinstance(chat_channel_obj.id, int) and not isinstance(chat_channel_obj.id, bool) and chat_channel_obj.id > 0 else {}),
+                        "model_id": model_entry["model_id"],
+                        "protocol": resolve_model_protocol(model_entry),
                         **provider_token_metrics,
                         **build_provider_request_usage_metadata(provider_request_id, provider_token_metrics),
                     }
@@ -109,13 +116,17 @@ async def generate_chat_with_fallback(
             return response, chat_channel_obj, model_entry, channel_rule, chat_params
         except ApiKeyException:
             raise
-        except (LLMException, ContextBudgetExceededException) as exc:
+        except LLMException as exc:
             current_priority = channel_rule.priority
-            context_recovery_required = isinstance(exc, (LLMContextLengthException, ContextBudgetExceededException))
+            context_recovery_required = isinstance(exc, LLMContextLengthException)
             if context_recovery_required and context_length_recovery_callback is not None and current_priority not in context_length_recovery_priorities:
                 context_length_recovery_priorities.add(current_priority)
                 try:
-                    recovered = context_length_recovery_callback(chat_params)
+                    recovered = context_length_recovery_callback(
+                        chat_params,
+                        chat_channel_obj,
+                        model_entry,
+                    )
                     if hasattr(recovered, "__await__"):
                         recovered = await recovered
                 except Exception:

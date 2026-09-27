@@ -122,7 +122,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
     def build_input_token_payload(
         cls,
         *,
-        model_id: str,
+        model_id: str | None,
         messages: list[InternalMessage],
         tools: list[dict[str, Any]] | None,
     ) -> dict[str, Any]:

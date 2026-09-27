@@ -5,24 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
-    ERR_CHAT_INPUT_TOO_LONG,
 )
 from app.core.crud.session.message import message_crud
-from app.core.exceptions import ContextBudgetExceededException, ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
-from app.core.utils.context_budget import (
-    ContextRequestBudget,
-    build_context_request_budget,
-    ensure_context_request_budget_available,
-    measure_context_request_usage,
-)
-from app.core.utils.context_messages import (
-    message_token_text,
-)
+from app.core.utils.context_budget import ensure_configured_request_capacity_available
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
     InternalMessage,
     Message,
@@ -49,8 +38,6 @@ def _is_background_tool_result_message(msg: InternalMessage) -> bool:
 
 
 class ContextManager:
-    _message_token_text = staticmethod(message_token_text)
-
     @classmethod
     async def _load_history_backward_by_id(
         cls,
@@ -125,97 +112,39 @@ class ContextManager:
         )
 
     @classmethod
-    def build_request_budget(
+    def validate_request_capacity(
         cls,
         context_window_k: int,
         max_tokens: int,
-        system_tokens: int = 0,
-        tools: list[dict] | None = None,
         safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
-        model_id: str | None = None,
-        protocol: str | None = None,
-    ) -> ContextRequestBudget:
-        return build_context_request_budget(
-            context_window_k=context_window_k,
-            max_tokens=max_tokens,
-            system_tokens=system_tokens,
-            tools=tools,
-            safety_margin_tokens=safety_margin_tokens,
-            model_id=model_id,
-            protocol=protocol,
-        )
-
-    @classmethod
-    def ensure_request_budget_available(cls, budget: ContextRequestBudget) -> None:
-        ensure_context_request_budget_available(budget)
-
-    @classmethod
-    def validate_latest_user_message_budget(
-        cls,
-        message: InternalMessage,
-        context_window_k: int,
-        max_tokens: int,
-        system_tokens: int = 0,
-        tools: list[dict] | None = None,
-        safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
-        model_id: str | None = None,
-        protocol: str | None = None,
     ) -> None:
-        budget = cls.build_request_budget(
+        ensure_configured_request_capacity_available(
             context_window_k=context_window_k,
             max_tokens=max_tokens,
-            system_tokens=system_tokens,
-            tools=tools,
             safety_margin_tokens=safety_margin_tokens,
-            model_id=model_id,
-            protocol=protocol,
         )
-        cls.ensure_request_budget_available(budget)
-        if message.role == MessageRole.USER and not message.tool_calls and estimate_tokens(cls._message_token_text(message), model_id=model_id, protocol=protocol) > budget.non_system_budget:
-            raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
 
     @classmethod
-    def trim_messages_for_model_request(
+    def prepare_messages_for_model_request(
         cls,
         messages: list[InternalMessage],
-        uid: str,
-        session_id: str,
         context_window_k: int,
         max_tokens: int,
-        tools: list[dict] | None = None,
         safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
-        additional_non_system_tokens: int = 0,
-        required_input_tokens_override: int | None = None,
-        model_id: str | None = None,
-        protocol: str | None = None,
     ) -> list[InternalMessage]:
         """
-        在每次模型请求前只校验完整请求预算，不修改消息内容或历史范围。
+        在每次模型请求前只校验静态配置容量，不根据本地 Token 估算拒绝请求。
 
         历史压缩由上下文总结机制负责；工具结果在当前工具轮结束时一次性定稿并持久化。
-        这里不得重新截断工具结果、替换工具链或滑动删除历史消息，以保持请求前缀稳定。
+        实际上下文是否超限由 Provider 响应裁决；这里不得重新截断工具结果、替换工具链、
+        滑动删除历史消息或根据估算值触发压缩，以保持请求前缀稳定。
         """
         request_messages = [msg.model_copy(deep=True) for msg in messages]
-        usage = measure_context_request_usage(
-            messages=request_messages,
+        ensure_configured_request_capacity_available(
             context_window_k=context_window_k,
             max_tokens=max_tokens,
-            tools=tools,
             safety_margin_tokens=safety_margin_tokens,
-            additional_non_system_tokens=additional_non_system_tokens,
-            model_id=model_id,
-            protocol=protocol,
         )
-        budget = usage.budget
-        cls.ensure_request_budget_available(budget)
-        effective_required_input_tokens = usage.required_input_tokens
-        if isinstance(required_input_tokens_override, int) and not isinstance(required_input_tokens_override, bool) and required_input_tokens_override >= 0:
-            effective_required_input_tokens = required_input_tokens_override
-        if effective_required_input_tokens > budget.context_window_tokens - budget.output_tokens - budget.safety_margin_tokens:
-            latest_msg = next((message for message in reversed(request_messages) if message.role != MessageRole.SYSTEM), None)
-            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and estimate_tokens(cls._message_token_text(latest_msg), model_id=model_id, protocol=protocol) > budget.non_system_budget:
-                raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
-            raise ContextBudgetExceededException()
 
         return request_messages
 

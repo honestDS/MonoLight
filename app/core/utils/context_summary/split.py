@@ -37,13 +37,22 @@ def _largest_fitting_prefix(
     *,
     content_builder,
     max_tokens: int,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> int:
     low = 1
     high = len(text)
     best = 0
     while low <= high:
         middle = (low + high) // 2
-        if estimate_tokens(content_builder(text[:middle])) <= max_tokens:
+        if (
+            estimate_tokens(
+                content_builder(text[:middle]),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            <= max_tokens
+        ):
             best = middle
             low = middle + 1
         else:
@@ -55,6 +64,8 @@ def split_oversized_message(
     message: InternalMessage,
     *,
     max_unit_tokens: int,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> Iterator[SummarySourceUnit]:
     if max_unit_tokens <= 0:
         raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="max_unit_tokens"))
@@ -62,7 +73,10 @@ def split_oversized_message(
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED))
 
     serialized = serialize_message(message)
-    serialized_tokens = max(1, estimate_tokens(serialized))
+    serialized_tokens = max(
+        1,
+        estimate_tokens(serialized, model_id=model_id, protocol=protocol),
+    )
     if serialized_tokens <= max_unit_tokens:
         yield SummarySourceUnit(
             message_start_id=message.id,
@@ -87,11 +101,16 @@ def split_oversized_message(
             remaining,
             content_builder=content_builder,
             max_tokens=max_unit_tokens,
+            model_id=model_id,
+            protocol=protocol,
         )
         if prefix_length <= 0:
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_CHUNK_METADATA_OVER_BUDGET))
         content = content_builder(remaining[:prefix_length])
-        token_count = max(1, estimate_tokens(content))
+        token_count = max(
+            1,
+            estimate_tokens(content, model_id=model_id, protocol=protocol),
+        )
         if token_count > max_unit_tokens:
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_CHUNK_OVER_BUDGET))
         yield SummarySourceUnit(
@@ -108,6 +127,8 @@ def iter_round_source_units(
     messages: list[InternalMessage],
     *,
     max_unit_tokens: int,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> Iterator[SummarySourceUnit]:
     if max_unit_tokens <= 0:
         raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="max_unit_tokens"))
@@ -116,4 +137,6 @@ def iter_round_source_units(
         yield from split_oversized_message(
             message,
             max_unit_tokens=max_unit_tokens,
+            model_id=model_id,
+            protocol=protocol,
         )

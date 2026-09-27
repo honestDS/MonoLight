@@ -5,10 +5,9 @@ import pytest
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
-    ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION,
 )
 from app.core.context import ContextManager
-from app.core.exceptions import ContextBudgetExceededException, ParameterException
+from app.core.exceptions import ParameterException
 from app.core.utils.context_budget import measure_context_request_usage
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.tokenizer import estimate_tokens
@@ -80,84 +79,37 @@ def _build_over_window_assistant_request():
     return messages, usage, hard_input_limit
 
 
-def test_final_request_accepts_hard_window_input_override_without_changing_messages():
+def test_final_request_does_not_use_local_token_estimate_as_hard_limit():
     messages, usage, hard_input_limit = _build_over_window_assistant_request()
 
     assert usage.exceeds_hard_window
     assert usage.required_input_tokens > hard_input_limit
     original_contents = [message.content for message in messages]
 
-    request_messages = ContextManager.trim_messages_for_model_request(
+    request_messages = ContextManager.prepare_messages_for_model_request(
         messages=messages,
-        uid="user-1",
-        session_id="session-1",
         context_window_k=1,
         max_tokens=0,
-        tools=None,
         safety_margin_tokens=0,
-        required_input_tokens_override=hard_input_limit,
     )
 
     assert [message.content for message in request_messages] == original_contents
     assert [message.content for message in messages] == original_contents
 
 
-def test_final_request_rejects_input_override_above_hard_window_with_context_budget_error():
-    messages, usage, hard_input_limit = _build_over_window_assistant_request()
-
-    assert usage.exceeds_hard_window
-    with pytest.raises(ContextBudgetExceededException) as exc_info:
-        ContextManager.trim_messages_for_model_request(
-            messages=messages,
-            uid="user-1",
-            session_id="session-1",
-            context_window_k=1,
-            max_tokens=0,
-            tools=None,
-            safety_margin_tokens=0,
-            required_input_tokens_override=hard_input_limit + 1,
-        )
-
-    assert exc_info.value.message == ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION
-
-
-@pytest.mark.parametrize("invalid_override", [True, -1], ids=["boolean_true", "negative"])
-def test_final_request_invalid_input_override_falls_back_to_local_full_estimate(invalid_override):
-    messages, usage, _ = _build_over_window_assistant_request()
-
-    assert usage.exceeds_hard_window
-    with pytest.raises(ContextBudgetExceededException) as exc_info:
-        ContextManager.trim_messages_for_model_request(
-            messages=messages,
-            uid="user-1",
-            session_id="session-1",
-            context_window_k=1,
-            max_tokens=0,
-            tools=None,
-            safety_margin_tokens=0,
-            required_input_tokens_override=invalid_override,
-        )
-
-    assert exc_info.value.message == ERR_CHAT_CONTEXT_REQUIRES_COMPRESSION
-
-
 def test_fixed_request_overhead_exhaustion_keeps_profile_configuration_error():
     with pytest.raises(ParameterException) as exc_info:
-        ContextManager.trim_messages_for_model_request(
+        ContextManager.prepare_messages_for_model_request(
             messages=[InternalMessage(role=MessageRole.SYSTEM, content="system")],
-            uid="user-1",
-            session_id="session-1",
             context_window_k=1,
             max_tokens=900,
-            tools=None,
             safety_margin_tokens=100,
         )
 
-    assert not isinstance(exc_info.value, ContextBudgetExceededException)
     assert exc_info.value.message == ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
 
 
-def test_final_request_hard_window_check_rejects_without_sliding_history():
+def test_final_request_keeps_full_history_even_when_local_estimate_exceeds_window():
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="stable system prompt"),
         InternalMessage(id=1, role=MessageRole.USER, content="discardable history " * 300),
@@ -168,20 +120,16 @@ def test_final_request_hard_window_check_rejects_without_sliding_history():
         InternalMessage(id=6, role=MessageRole.ASSISTANT, content="protected latest answer"),
         InternalMessage(id=7, role=MessageRole.USER, content="current request"),
     ]
-    tools = [{"type": "function", "function": {"name": "lookup", "description": "lookup tool"}}]
 
     original_contents = [message.content for message in messages]
-    with pytest.raises(ParameterException):
-        ContextManager.trim_messages_for_model_request(
-            messages=messages,
-            uid="user-1",
-            session_id="session-1",
-            context_window_k=1,
-            max_tokens=256,
-            tools=tools,
-            safety_margin_tokens=64,
-        )
+    request_messages = ContextManager.prepare_messages_for_model_request(
+        messages=messages,
+        context_window_k=1,
+        max_tokens=256,
+        safety_margin_tokens=64,
+    )
 
+    assert [message.content for message in request_messages] == original_contents
     assert [message.content for message in messages] == original_contents
 
 
@@ -210,35 +158,6 @@ def test_summary_threshold_and_hard_window_share_one_required_input_value():
     assert threshold_usage.required_input_tokens == hard_window_usage.required_input_tokens
     assert threshold_usage.budget == hard_window_usage.budget
     assert threshold_usage.summary_trigger_tokens * 2 <= hard_window_usage.summary_trigger_tokens + 1
-
-
-def test_final_request_budget_reserves_runtime_non_system_tokens():
-    messages = [
-        InternalMessage(role=MessageRole.SYSTEM, content="system"),
-        InternalMessage(role=MessageRole.USER, content="current request"),
-    ]
-
-    ContextManager.trim_messages_for_model_request(
-        messages=messages,
-        uid="user-1",
-        session_id="session-1",
-        context_window_k=1,
-        max_tokens=0,
-        tools=None,
-        safety_margin_tokens=0,
-    )
-
-    with pytest.raises(ParameterException):
-        ContextManager.trim_messages_for_model_request(
-            messages=messages,
-            uid="user-1",
-            session_id="session-1",
-            context_window_k=1,
-            max_tokens=0,
-            tools=None,
-            safety_margin_tokens=0,
-            additional_non_system_tokens=CONTEXT_WINDOW_TOKENS_PER_K,
-        )
 
 
 def test_final_request_budget_preserves_longterm_memory_recall_json():
@@ -303,13 +222,10 @@ def test_final_request_budget_preserves_longterm_memory_recall_json():
         ),
     ]
 
-    request_messages = ContextManager.trim_messages_for_model_request(
+    request_messages = ContextManager.prepare_messages_for_model_request(
         messages=messages,
-        uid="user-1",
-        session_id="session-1",
         context_window_k=20,
         max_tokens=256,
-        tools=None,
         safety_margin_tokens=64,
     )
 

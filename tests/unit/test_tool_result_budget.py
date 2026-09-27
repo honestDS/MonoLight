@@ -97,19 +97,14 @@ def test_tool_result_round_budget_prefers_explicit_required_input_tokens(monkeyp
     assert budget_tokens == (250_000 - 20_480 - 256 - 190_000) // 2
 
 
-def test_tool_result_round_budget_falls_back_to_local_usage_when_provider_baseline_already_exceeds_window(monkeypatch):
-    usage = SimpleNamespace(
-        budget=SimpleNamespace(
-            context_window_tokens=250_000,
-            output_tokens=20_480,
-            safety_margin_tokens=256,
-        ),
-        required_input_tokens=175_849,
-    )
+def test_tool_result_round_budget_keeps_provider_baseline_when_it_already_exceeds_window(monkeypatch):
+    def fail_local_estimate(**_kwargs):
+        raise AssertionError("provider-confirmed usage must not be replaced by a local estimate")
+
     monkeypatch.setattr(
         truncate_tool_result_module,
         "measure_context_request_usage",
-        lambda **_kwargs: usage,
+        fail_local_estimate,
     )
 
     budget_tokens = truncate_tool_result_module.calculate_tool_result_round_budget_tokens(
@@ -118,10 +113,9 @@ def test_tool_result_round_budget_falls_back_to_local_usage_when_provider_baseli
         max_tokens=20_480,
         tools=[],
         required_input_tokens_override=352_375,
-        fallback_to_local_usage_on_overflow=True,
     )
 
-    assert budget_tokens == (250_000 - 20_480 - 256 - 175_849) // 2
+    assert budget_tokens == 1
 
 
 def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(monkeypatch):
@@ -129,7 +123,8 @@ def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(mon
         latest_llm_request_metadata={
             "input_tokens": 185_765,
             "input_tokens_source": "provider",
-        }
+        },
+        model_entry={"model_id": "gpt-5.6-luna", "protocol": "OPENAI"},
     )
     ai_msg = InternalMessage(
         role=MessageRole.ASSISTANT,
@@ -142,7 +137,7 @@ def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(mon
         ],
     )
     monkeypatch.setattr(interactive_tools_module, "message_token_text", lambda _message: "tool-call")
-    monkeypatch.setattr(interactive_tools_module, "estimate_tokens", lambda _text: 5_000)
+    monkeypatch.setattr(interactive_tools_module, "estimate_tokens", lambda _text, **_kwargs: 5_000)
 
     required_input_tokens = interactive_tools_module._resolve_tool_result_required_input_tokens(
         state,
@@ -152,12 +147,17 @@ def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(mon
     assert required_input_tokens == 190_765
 
 
-def test_interactive_tool_budget_uses_local_fallback_without_provider_usage():
+def test_interactive_tool_budget_uses_provider_payload_local_fallback_without_provider_usage(monkeypatch):
+    messages = [InternalMessage(role=MessageRole.USER, content="request")]
+    tools = [{"type": "function", "function": {"name": "execute_shell"}}]
     state = SimpleNamespace(
         latest_llm_request_metadata={
             "input_tokens": 185_765,
             "input_tokens_source": "estimated",
-        }
+        },
+        model_entry={"model_id": "gpt-5.6-luna", "protocol": "OPENAI"},
+        messages=messages,
+        tools=tools,
     )
     ai_msg = InternalMessage(
         role=MessageRole.ASSISTANT,
@@ -170,7 +170,39 @@ def test_interactive_tool_budget_uses_local_fallback_without_provider_usage():
         ],
     )
 
-    assert interactive_tools_module._resolve_tool_result_required_input_tokens(state, ai_msg) is None
+    captured = {}
+
+    def estimate_request_input_tokens_locally(**kwargs):
+        captured.update(kwargs)
+        return 12_345
+
+    monkeypatch.setattr(
+        interactive_tools_module.LLMClient,
+        "estimate_request_input_tokens_locally",
+        estimate_request_input_tokens_locally,
+    )
+
+    assert interactive_tools_module._resolve_tool_result_required_input_tokens(state, ai_msg) == 12_345
+    assert captured["messages"][0].content == "request"
+    assert captured["tools"] == tools
+
+
+def test_tool_result_truncation_uses_model_specific_encoding():
+    content = "长期上下文 token estimation " * 200
+    encoding = truncate_tool_result_module.tiktoken.get_encoding("o200k_base")
+    expected_tokens = len(encoding.encode(content, disallowed_special=()))
+
+    result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        content,
+        context_window_k=100,
+        limit_tokens=expected_tokens,
+        model_id="gpt-5.6-luna",
+        protocol="openai",
+    )
+
+    assert result.truncated is False
+    assert result.original_tokens == expected_tokens
+    assert result.final_tokens == expected_tokens
 
 
 def test_untruncated_json_keeps_original_whitespace_and_real_token_stats():

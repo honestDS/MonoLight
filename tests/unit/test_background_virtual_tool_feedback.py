@@ -447,13 +447,10 @@ def test_virtual_tool_feedback_keeps_system_messages_at_beginning_after_trim():
         },
     )
 
-    trimmed = ContextManager.trim_messages_for_model_request(
+    trimmed = ContextManager.prepare_messages_for_model_request(
         messages=[system_msg, user_msg, *correction_messages],
-        uid="5c201bbc61a845dfbf728ca64de91497",
-        session_id="04e23f54-4a32-4f91-8f90-858464c99657",
         context_window_k=4,
         max_tokens=256,
-        tools=None,
     )
 
     system_indexes = [idx for idx, message in enumerate(trimmed) if message.role == MessageRole.SYSTEM]

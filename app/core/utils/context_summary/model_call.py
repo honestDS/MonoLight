@@ -1,8 +1,32 @@
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
-from app.providers.llm.client import LLMClient
+from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
 CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS = 600.0
+
+
+def estimate_context_summary_prompt_tokens(
+    model: ContextSummaryModelSnapshot,
+    prompt: str,
+) -> int:
+    return estimate_request_context_tokens(
+        [InternalMessage(role=MessageRole.USER, content=prompt)],
+        None,
+        model_id=model.model_id,
+        protocol=model.protocol,
+    )
+
+
+def estimate_context_summary_text_tokens(
+    model: ContextSummaryModelSnapshot,
+    text: str,
+) -> int:
+    return estimate_tokens(
+        text,
+        model_id=model.model_id,
+        protocol=model.protocol,
+    )
 
 
 async def call_context_summary_model(

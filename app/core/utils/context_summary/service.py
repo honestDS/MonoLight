@@ -15,7 +15,10 @@ from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT
-from app.core.utils.context_budget import measure_context_request_usage
+from app.core.utils.context_budget import (
+    calculate_context_summary_trigger_tokens,
+    measure_context_request_usage,
+)
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.context_summary.boundary import (
     ContextSummaryTriggerMode,
@@ -36,6 +39,7 @@ from app.core.utils.context_summary.history import (
     measure_complete_replacement_input,
     measure_snapshot_history,
 )
+from app.core.utils.context_summary.model_call import estimate_context_summary_prompt_tokens
 from app.core.utils.context_summary.selection import select_context_summary_model
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot
 from app.core.utils.context_summary.stage import (
@@ -53,6 +57,7 @@ from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage
 from app.models.profile import Profile, ProfileConfig
 from app.providers.database import AsyncSessionLocal
+from app.providers.llm.client import estimate_request_context_tokens
 
 logger = get_logger(__name__)
 
@@ -145,7 +150,6 @@ async def generate_summary_text(
 ) -> str | None:
     excluded_priorities: set[int] = set()
     call_context = "context_summary"
-    prompt_tokens = estimate_tokens(prompt)
 
     while True:
         await ensure_context_summary_work_valid(work_validity_checker)
@@ -161,6 +165,7 @@ async def generate_summary_text(
             await release_db_session(db)
             return None
 
+        prompt_tokens = estimate_context_summary_prompt_tokens(model, prompt)
         if not model.accepts_prompt_tokens(prompt_tokens):
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
@@ -215,7 +220,7 @@ async def _ensure_context_summary(
     trigger_mode: ContextSummaryTriggerMode | None = None,
     fixed_upper_message_id: int | None = None,
     fixed_request_messages: list[InternalMessage] | None = None,
-    required_input_tokens_override: int | None = None,
+    confirmed_input_tokens: int | None = None,
     model_id: str | None = None,
     protocol: str | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
@@ -236,6 +241,34 @@ async def _ensure_context_summary(
 
     if (trigger_mode is None) != (fixed_upper_message_id is None):
         raise ValueError(t(ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED))
+
+    threshold_percent = cfg.other.context_summary_threshold_percent
+    summary_trigger_tokens = calculate_context_summary_trigger_tokens(
+        context_window_k=context_window_k,
+        max_tokens=max_tokens,
+        threshold_percent=threshold_percent,
+        safety_margin_tokens=safety_margin_tokens,
+    )
+    normalized_confirmed_input_tokens = confirmed_input_tokens if isinstance(confirmed_input_tokens, int) and not isinstance(confirmed_input_tokens, bool) and confirmed_input_tokens > 0 else None
+    threshold_reached = force or (normalized_confirmed_input_tokens is not None and normalized_confirmed_input_tokens >= summary_trigger_tokens)
+    if not threshold_reached:
+        logger.bind(
+            uid=uid,
+            session_id=session_id,
+            check_result="skipped",
+            trigger_input_tokens=normalized_confirmed_input_tokens,
+            trigger_input_tokens_source="provider" if normalized_confirmed_input_tokens is not None else "unavailable",
+            summary_trigger_tokens=summary_trigger_tokens,
+            threshold_percent=threshold_percent,
+        ).debug(
+            "Context summary check: result={check_result}, provider_input={trigger_input_tokens}, trigger={summary_trigger_tokens}, threshold={threshold_percent}%",
+            check_result="skipped",
+            trigger_input_tokens=normalized_confirmed_input_tokens,
+            summary_trigger_tokens=summary_trigger_tokens,
+            threshold_percent=threshold_percent,
+        )
+        await release_db_session(db)
+        return state
 
     boundary = None
     if trigger_mode is not None and fixed_upper_message_id is not None:
@@ -275,9 +308,7 @@ async def _ensure_context_summary(
         protocol=protocol,
     )
     await ensure_context_summary_work_valid(combined_work_validity_checker)
-    threshold_percent = cfg.other.context_summary_threshold_percent
     request_usage = None
-    required_tokens_source = "full_estimate"
     if fixed_request_messages is not None:
         summary_message = state.as_message()
         summary_tokens = (
@@ -316,9 +347,6 @@ async def _ensure_context_summary(
             "threshold_percent": threshold_percent,
             "history_message_count": history_message_count,
         }
-        if isinstance(required_input_tokens_override, int) and not isinstance(required_input_tokens_override, bool) and required_input_tokens_override > 0:
-            usage["required_tokens"] = required_input_tokens_override
-            required_tokens_source = "previous_provider_plus_new"
     else:
         usage = calc_token_usage(
             messages=[],
@@ -335,8 +363,7 @@ async def _ensure_context_summary(
             model_id=model_id,
             protocol=protocol,
         )
-    threshold_reached = force or usage["required_tokens"] >= usage["summary_trigger_tokens"]
-    check_result = "forced" if force else ("triggered" if threshold_reached else "skipped")
+    check_result = "forced" if force else "triggered"
     logger.bind(
         uid=uid,
         session_id=session_id,
@@ -355,7 +382,8 @@ async def _ensure_context_summary(
         summary_trigger_tokens=usage["summary_trigger_tokens"],
         compression_goal_tokens=usage["compression_goal_tokens"],
         required_tokens=usage["required_tokens"],
-        required_tokens_source=required_tokens_source,
+        trigger_input_tokens=normalized_confirmed_input_tokens,
+        trigger_input_tokens_source="provider" if normalized_confirmed_input_tokens is not None else "unavailable",
         reserved_tokens=reserved_tokens,
         summary_tokens=usage["summary_tokens"],
         history_tokens=usage["history_tokens"],
@@ -363,13 +391,14 @@ async def _ensure_context_summary(
         tools_tokens=usage["tools_tokens"],
         history_message_count=usage["history_message_count"],
     ).debug(
-        "Context summary check: result={check_result}, required={required_tokens}, trigger={summary_trigger_tokens}, "
+        "Context summary check: result={check_result}, provider_input={trigger_input_tokens}, estimated_required={required_tokens}, trigger={summary_trigger_tokens}, "
         "goal={compression_goal_tokens}, threshold={threshold_percent}%, input_budget={input_budget}, "
         "output={output_tokens}, safety={safety_tokens}, reserved={reserved_tokens}, summary={summary_tokens}, "
         "history={history_tokens}, current={current_message_tokens}, tools={tools_tokens}, "
         "history_messages={history_message_count}",
         check_result=check_result,
         required_tokens=usage["required_tokens"],
+        trigger_input_tokens=normalized_confirmed_input_tokens,
         summary_trigger_tokens=usage["summary_trigger_tokens"],
         compression_goal_tokens=usage["compression_goal_tokens"],
         threshold_percent=threshold_percent,
@@ -383,10 +412,6 @@ async def _ensure_context_summary(
         tools_tokens=usage["tools_tokens"],
         history_message_count=usage["history_message_count"],
     )
-    if not threshold_reached:
-        await release_db_session(db)
-        return state
-
     if not snapshot.has_persistent_history and (not state.content or state.message_id is None):
         await release_db_session(db)
         return state
@@ -443,20 +468,21 @@ async def _ensure_context_summary(
                 *([candidate_summary_message] if candidate_summary_message is not None else []),
                 *recent_messages,
             ]
-            measured_final_usage = measure_context_request_usage(
-                messages=candidate_request_messages,
-                context_window_k=context_window_k,
-                max_tokens=max_tokens,
-                tools=tools,
-                safety_margin_tokens=safety_margin_tokens,
-                threshold_percent=threshold_percent,
-                additional_non_system_tokens=max(reserved_tokens, 0),
+            required_tokens = estimate_request_context_tokens(
+                candidate_request_messages,
+                tools,
                 model_id=model_id,
                 protocol=protocol,
+            ) + max(reserved_tokens, 0)
+            compression_goal_tokens = calculate_context_summary_trigger_tokens(
+                context_window_k=context_window_k,
+                max_tokens=max_tokens,
+                threshold_percent=threshold_percent,
+                safety_margin_tokens=safety_margin_tokens,
             )
             final_usage = {
-                "required_tokens": measured_final_usage.required_input_tokens,
-                "compression_goal_tokens": measured_final_usage.summary_trigger_tokens,
+                "required_tokens": required_tokens,
+                "compression_goal_tokens": compression_goal_tokens,
                 "summary_tokens": (
                     estimate_tokens(
                         message_token_text(candidate_summary_message),
@@ -488,7 +514,14 @@ async def _ensure_context_summary(
             raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
 
         refinement_attempts += 1
-        previous_candidate_tokens = max(1, estimate_tokens(candidate_summary or ""))
+        previous_candidate_tokens = max(
+            1,
+            estimate_tokens(
+                candidate_summary or "",
+                model_id=model_id,
+                protocol=protocol,
+            ),
+        )
         await ensure_context_summary_work_valid(combined_work_validity_checker)
         if completed_stage is not None:
             from app.core.utils.context_summary.reduction import (
@@ -534,7 +567,14 @@ async def _ensure_context_summary(
             if not compressed:
                 await release_db_session(db)
                 raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
-        compressed_tokens = max(1, estimate_tokens(compressed or ""))
+        compressed_tokens = max(
+            1,
+            estimate_tokens(
+                compressed or "",
+                model_id=model_id,
+                protocol=protocol,
+            ),
+        )
         candidate_summary = compressed
         insufficient_refinement_progress = previous_candidate_tokens - compressed_tokens < CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS
 
@@ -583,12 +623,17 @@ async def _ensure_context_summary(
     if not candidate_summary:
         await release_db_session(db)
         return state
-    if replacement_input_tokens is not None and estimate_tokens(candidate_summary) >= replacement_input_tokens:
+    candidate_tokens = estimate_tokens(
+        candidate_summary,
+        model_id=model_id,
+        protocol=protocol,
+    )
+    if replacement_input_tokens is not None and candidate_tokens >= replacement_input_tokens:
         logger.bind(
             uid=uid,
             session_id=session_id,
             replacement_input_tokens=replacement_input_tokens,
-            candidate_tokens=estimate_tokens(candidate_summary),
+            candidate_tokens=candidate_tokens,
         ).warning("Context summary candidate did not reduce its complete replacement input")
         await release_db_session(db)
         raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
@@ -598,7 +643,7 @@ async def _ensure_context_summary(
         session_id=session_id,
         summarized_through_message_id=target_message_id,
         summarized_message_count=summarized_message_count,
-        summary_tokens=estimate_tokens(candidate_summary),
+        summary_tokens=candidate_tokens,
     ).debug("Context summary generated:\n{summary}", summary=candidate_summary)
 
     await ensure_context_summary_work_valid(combined_work_validity_checker)
@@ -639,7 +684,7 @@ async def ensure_context_summary(
     trigger_mode: ContextSummaryTriggerMode | None = None,
     fixed_upper_message_id: int | None = None,
     fixed_request_messages: list[InternalMessage] | None = None,
-    required_input_tokens_override: int | None = None,
+    confirmed_input_tokens: int | None = None,
     model_id: str | None = None,
     protocol: str | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
@@ -665,7 +710,7 @@ async def ensure_context_summary(
             trigger_mode=trigger_mode,
             fixed_upper_message_id=fixed_upper_message_id,
             fixed_request_messages=fixed_request_messages,
-            required_input_tokens_override=required_input_tokens_override,
+            confirmed_input_tokens=confirmed_input_tokens,
             model_id=model_id,
             protocol=protocol,
             work_validity_checker=work_validity_checker,

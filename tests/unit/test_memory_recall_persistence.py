@@ -8,7 +8,6 @@ from app.core.dispatchers.memory import request as request_module
 from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
-    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
 )
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
 
@@ -348,7 +347,6 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
     current_message = InternalMessage(id=10, role=MessageRole.USER, content="memory query secret")
     context = _context(messages=[summary_message, current_message])
     trim_calls = []
-    token_calls = []
     session = SimpleNamespace(
         context_summary_revision=4,
         context_content_revision=6,
@@ -369,18 +367,9 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
     async def get_session(_db, _session_id):
         return session
 
-    def estimate(messages, tools):
-        token_calls.append((messages, tools))
-        return 321
-
-    def baseline(*_args, **_kwargs):
-        return {"token_fingerprint": "no-content"}
-
     monkeypatch.setattr(request_module, "materialize_user_environment_prompts", materialize)
-    monkeypatch.setattr(request_module.ContextManager, "trim_messages_for_model_request", trim)
+    monkeypatch.setattr(request_module.ContextManager, "prepare_messages_for_model_request", trim)
     monkeypatch.setattr(request_module.session_crud, "get_by_session_id", get_session)
-    monkeypatch.setattr(request_module, "estimate_request_context_tokens", estimate)
-    monkeypatch.setattr(request_module, "build_request_token_baseline", baseline)
     monkeypatch.setattr(request_module, "resolve_model_protocol", lambda _entry: "OPENAI")
 
     request_messages, metadata, response_id = await request_module.prepare_request_messages(
@@ -389,15 +378,14 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
         is_main_context=True,
     )
 
-    expected_tools = [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA]
     assert context.messages == [summary_message, current_message]
     assert request_messages[0].role == MessageRole.SYSTEM
     assert request_messages[0].content == request_module.LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
     assert request_messages[1:] == [summary_message, current_message]
-    assert trim_calls[0]["tools"] == expected_tools
-    assert token_calls[0][1] == expected_tools
+    assert set(trim_calls[0]) == {"messages", "context_window_k", "max_tokens"}
     assert metadata["turn"] == 0
-    assert metadata["input_tokens"] == 321
+    assert metadata["input_tokens"] == 0
+    assert metadata["input_tokens_source"] == "estimated"
     assert metadata["total_output_tokens"] == 8
     assert metadata["total_input_tokens"] == 1000
     assert metadata["total_cached_tokens"] == 250

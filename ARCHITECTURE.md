@@ -173,6 +173,7 @@ app/core/audit/
 ├── confirmation_projection.py # 确认状态的消息投影同步
 ├── confirmation_queries.py # 确认消息与结构化结果内部查询
 ├── confirmation_results.py # 待确认工具结果读取、替换与终态更新
+├── context_budget.py       # 审计模型请求预算与证据裁剪
 ├── integrity.py            # 审计完整性数据
 ├── persistence.py          # 审计持久化协调
 ├── service.py              # 审计应用服务
@@ -579,7 +580,7 @@ app/core/utils/
 ├── system.py               # 系统信息辅助
 ├── text_splitter.py        # 文本切分辅助
 ├── time.py                 # 时间辅助
-└── tokenizer.py            # 令牌统计辅助
+└── tokenizer.py            # 按模型标识选择编码的令牌统计辅助
 ```
 
 ### 多语言：`app/core/i18n/`
@@ -644,7 +645,8 @@ app/providers/
 │   └── client.py           # 图像生成客户端
 ├── llm/
 │   ├── __init__.py         # 大模型能力导出
-│   └── client.py           # 大模型客户端
+│   ├── client.py           # 大模型客户端
+│   └── token_estimation.py # Provider 请求载荷的本地 Token 估算
 ├── rerank/
 │   ├── __init__.py         # 重排能力导出
 │   └── client.py           # 重排模型客户端
@@ -654,6 +656,17 @@ app/providers/
 ```
 
 Provider 层隔离数据库、向量存储、语言模型、嵌入、重排和图像生成等外部依赖。
+
+### 模型输入 Token 计量
+
+模型输入 Token 明确区分“Provider 确认值”和“本地估算值”，两者不得互相冒充：
+
+- Provider 成功响应中的 `usage.input_tokens` 是主会话上下文占用、前端展示和主动总结阈值的权威来源。主动总结只复用同一 `channel_id + model_id + protocol` 且上下文版本未变化的最近一次 Provider 确认值；旧 metadata 没有渠道身份时不得复用，避免不同 NewAPI/OpenAI-compatible 渠道的同名 alias 串用。
+- 正式模型请求不会因为本地 Token 估算超过配置窗口而被拒绝或触发总结。若 Provider 明确返回上下文超限，则在当前渠道强制总结后重试；仅 `context_window - max_output - safety_margin <= 0` 这类与 Tokenizer 无关的静态配置错误会在本地直接拒绝。
+- 本地 Token 估算只用于发送前必须确定大小的内部链路，例如工具结果截断、审计载荷拟合、总结分片和压缩结果校验，不作为整个会话是否超限的事实来源。
+- `transformers` 负责把内部消息转换为实际 Provider 请求形态；`providers/llm/token_estimation.py` 对该 Provider 载荷做本地估算。审计完整请求拟合、工具结果预算和总结后的最终请求校验都复用这一口径，避免把 `reasoning_content`、`provider_metadata` 等不会发送的内部字段重复计入。
+- `core/utils/tokenizer.py` 只根据 `model_id` 选择 tiktoken 已知编码；协议只表示请求格式，不能用于推断真实模型厂商。对于 `gpt-5.6-*` 这类 tiktoken 前缀表已能表达、但点号版本名无法直接命中的名称，仅做名称归一化后再次交给 tiktoken 决策；无法确认的普通 alias 使用通用回退。
+- 不通过 OpenAI-compatible 协议猜测并调用厂商专有的预请求 Token 计数接口，也不维护“本地估算 / Provider usage”的历史校准系数；聚合网关后的真实 Provider 由对端响应负责给出最终 usage 和上下文超限结果。
 
 ## 接口数据与协议转换
 

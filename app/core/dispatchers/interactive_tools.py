@@ -39,11 +39,11 @@ from app.core.utils.dispatcher.session_todo_snapshot import (
     persist_session_todo_snapshot_on_tool_results,
 )
 from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
-from app.core.utils.token_calibration import apply_token_calibration, extract_token_calibration_factor
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
+from app.providers.llm.client import LLMClient
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 from .interactive_helpers import (
@@ -68,26 +68,23 @@ def _resolve_tool_result_required_input_tokens(
     ai_msg: InternalMessage,
 ) -> int | None:
     metadata = state.latest_llm_request_metadata
-    if not isinstance(metadata, dict) or metadata.get("input_tokens_source") != "provider":
-        return None
-    input_tokens = metadata.get("input_tokens")
-    if not isinstance(input_tokens, int) or isinstance(input_tokens, bool) or input_tokens <= 0:
-        return None
     model_id = state.model_entry["model_id"]
     protocol = resolve_model_protocol(state.model_entry)
-    calibration_factor = extract_token_calibration_factor(
-        metadata,
+    if isinstance(metadata, dict) and metadata.get("input_tokens_source") == "provider":
+        input_tokens = metadata.get("input_tokens")
+        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool) and input_tokens > 0:
+            incremental_tokens = estimate_tokens(
+                message_token_text(ai_msg),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            return input_tokens + max(0, incremental_tokens)
+
+    return LLMClient.estimate_request_input_tokens_locally(
         model_id=model_id,
+        messages=materialize_user_environment_prompts(state.messages),
+        tools=state.tools,
         protocol=protocol,
-    )
-    incremental_tokens = estimate_tokens(
-        message_token_text(ai_msg),
-        model_id=model_id,
-        protocol=protocol,
-    )
-    return input_tokens + apply_token_calibration(
-        max(0, incremental_tokens),
-        calibration_factor,
     )
 
 
@@ -558,7 +555,6 @@ async def handle_interactive_tool_round(
         max_tokens=state.chat_params["max_tokens"],
         tools=state.tools,
         required_input_tokens_override=_resolve_tool_result_required_input_tokens(state, ai_msg),
-        fallback_to_local_usage_on_overflow=True,
         model_id=state.model_entry["model_id"],
         protocol=resolve_model_protocol(state.model_entry),
     )

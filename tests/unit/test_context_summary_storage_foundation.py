@@ -231,24 +231,17 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "input_tokens_source": "provider",
             "context_window_tokens": 4096,
             "max_output_tokens": 512,
+            "channel_id": 7,
             "output_tokens": 77,
             "total_output_tokens": 567,
             "total_input_tokens": 1000,
             "total_cached_tokens": 325,
             "cached_tokens": 40,
             "cache_hit_rate": 0.325,
-            "request_message_min_id": 10,
-            "request_message_max_id": 20,
             "model_id": "grok-4.5",
             "protocol": "openai",
             "context_summary_revision": 2,
             "context_content_revision": 3,
-            "system_tokens": 50,
-            "tools_tokens": 60,
-            "input_token_estimate_raw": 200,
-            "input_token_calibration_estimated_total": 500,
-            "input_token_calibration_provider_total": 300,
-            "input_token_calibration_samples": 2,
         },
     )
     await db_session.refresh(session)
@@ -258,16 +251,9 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "input_tokens": 123,
         "context_window_tokens": 4096,
         "max_output_tokens": 512,
-        "request_message_min_id": 10,
-        "request_message_max_id": 20,
+        "channel_id": 7,
         "context_summary_revision": 2,
         "context_content_revision": 3,
-        "system_tokens": 50,
-        "tools_tokens": 60,
-        "input_token_estimate_raw": 200,
-        "input_token_calibration_estimated_total": 500,
-        "input_token_calibration_provider_total": 300,
-        "input_token_calibration_samples": 2,
         "output_tokens": 77,
         "total_output_tokens": 567,
         "total_input_tokens": 1000,
@@ -298,6 +284,17 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "context_window_tokens": 4096,
             "max_output_tokens": 512,
             "cache_hit_rate": 1.01,
+        },
+    )
+    invalid_channel_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": 123,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "channel_id": 0,
         },
     )
     invalid_total_output_updated = await session_crud.update_llm_request_metadata(
@@ -360,6 +357,7 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
 
     assert invalid_updated is False
     assert invalid_cache_hit_rate_updated is False
+    assert invalid_channel_updated is False
     assert invalid_total_output_updated is False
     assert invalid_total_output_bool_updated is False
     assert invalid_total_input_tokens_updated is False
@@ -369,16 +367,9 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "input_tokens": 123,
         "context_window_tokens": 4096,
         "max_output_tokens": 512,
-        "request_message_min_id": 10,
-        "request_message_max_id": 20,
+        "channel_id": 7,
         "context_summary_revision": 2,
         "context_content_revision": 3,
-        "system_tokens": 50,
-        "tools_tokens": 60,
-        "input_token_estimate_raw": 200,
-        "input_token_calibration_estimated_total": 500,
-        "input_token_calibration_provider_total": 300,
-        "input_token_calibration_samples": 2,
         "output_tokens": 77,
         "total_output_tokens": 567,
         "total_input_tokens": 1000,

@@ -1,18 +1,20 @@
-﻿import pytest
-
-from app.core.utils.token_calibration import (
-    apply_token_calibration,
-    build_token_calibration_metadata,
-    extract_token_calibration_factor,
-)
 from app.core.utils.tokenizer import estimate_tokens, resolve_token_encoding_name
 from app.models.message import InternalMessage, MessageRole
-from app.providers.llm.token_estimation import resolve_request_token_estimate
-from app.transformers.openai import OpenAIChatCompletionsTransformer
+from app.providers.llm.token_estimation import estimate_request_tokens_locally
+from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
-def test_modern_openai_model_uses_o200k_encoding():
+def test_modern_openai_model_uses_o200k_encoding_without_inferring_vendor_from_protocol():
     assert resolve_token_encoding_name("gpt-5.6-luna", protocol="openai") == "o200k_base"
+    assert resolve_token_encoding_name("gpt-5.6-luna", protocol="compatible_gateway") == "o200k_base"
+    assert resolve_token_encoding_name("gpt-4.5", protocol="openai") == "o200k_base"
+
+
+def test_unknown_gateway_alias_uses_generic_fallback_without_vendor_guessing():
+    assert resolve_token_encoding_name("main-model", protocol="openai") == "cl100k_base"
+    assert resolve_token_encoding_name("main-model", protocol="openai_responses") == "cl100k_base"
+    assert resolve_token_encoding_name("gpt-6.0-gateway", protocol="openai") == "cl100k_base"
+    assert resolve_token_encoding_name("gpt-6.0-custom", protocol="openai") == "cl100k_base"
 
 
 def test_legacy_openai_model_keeps_cl100k_encoding():
@@ -26,57 +28,6 @@ def test_model_aware_token_count_uses_resolved_encoding_for_modern_model():
         text,
         encoding_name="o200k_base",
     )
-
-
-def test_calibration_uses_same_model_and_protocol_provider_history():
-    metadata = {
-        "model_id": "gpt-5.6-luna",
-        "protocol": "openai",
-        "input_token_calibration_estimated_total": 500_000,
-        "input_token_calibration_provider_total": 300_000,
-        "input_token_calibration_samples": 1,
-    }
-
-    factor = extract_token_calibration_factor(
-        metadata,
-        model_id="gpt-5.6-luna",
-        protocol="openai",
-    )
-
-    assert factor == pytest.approx(0.6)
-    assert apply_token_calibration(500_000, factor) == 300_000
-
-
-def test_calibration_accumulates_provider_observations_and_resets_on_model_change():
-    previous = {
-        "model_id": "gpt-5.6-luna",
-        "protocol": "openai",
-        "input_token_calibration_estimated_total": 500,
-        "input_token_calibration_provider_total": 300,
-        "input_token_calibration_samples": 1,
-    }
-
-    accumulated = build_token_calibration_metadata(
-        previous,
-        model_id="gpt-5.6-luna",
-        protocol="openai",
-        raw_estimated_tokens=600,
-        provider_input_tokens=330,
-    )
-    reset = build_token_calibration_metadata(
-        previous,
-        model_id="other-model",
-        protocol="openai",
-        raw_estimated_tokens=600,
-        provider_input_tokens=330,
-    )
-
-    assert accumulated["input_token_calibration_estimated_total"] == 1100
-    assert accumulated["input_token_calibration_provider_total"] == 630
-    assert accumulated["input_token_calibration_samples"] == 2
-    assert reset["input_token_calibration_estimated_total"] == 600
-    assert reset["input_token_calibration_provider_total"] == 330
-    assert reset["input_token_calibration_samples"] == 1
 
 
 def test_chat_estimation_payload_matches_provider_shape_and_excludes_internal_metadata():
@@ -98,60 +49,49 @@ def test_chat_estimation_payload_matches_provider_shape_and_excludes_internal_me
     assert payload == {"messages": [{"role": "assistant", "content": "visible"}]}
 
 
-@pytest.mark.asyncio
-async def test_upstream_token_counter_has_priority_over_local_estimator():
-    class CountingTransformer:
-        @classmethod
-        def build_input_token_payload(cls, *, model_id, messages, tools):
-            return {"input": [{"role": "user", "content": "local"}]}
+def test_responses_estimation_payload_matches_provider_input_and_tool_shape():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Lookup",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
 
-        async def count_input_tokens(self, **kwargs):
-            return 321
-
-    estimate = await resolve_request_token_estimate(
-        CountingTransformer(),
-        api_key="key",
-        base_url="https://example.invalid/v1",
-        model_id="provider-model",
-        protocol="openai",
+    payload = OpenAIResponsesTransformer.build_input_token_payload(
+        model_id="gpt-5.6-luna",
         messages=[InternalMessage(role=MessageRole.USER, content="hello")],
-        tools=None,
-        timeout=10,
-        http_proxy=None,
-        custom_headers=None,
-        calibration_factor=0.5,
+        tools=tools,
     )
 
-    assert estimate.input_tokens == 321
-    assert estimate.source == "provider_count"
-    assert estimate.raw_local_tokens is None
+    assert payload["input"] == [{"role": "user", "content": "hello"}]
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "name": "lookup",
+            "description": "Lookup",
+            "parameters": {"type": "object", "properties": {}},
+            "strict": False,
+        }
+    ]
 
 
-@pytest.mark.asyncio
-async def test_local_provider_payload_estimate_applies_historical_calibration():
-    class LocalOnlyTransformer:
+def test_local_request_estimate_counts_transformed_provider_payload():
+    class LocalTransformer:
         @classmethod
         def build_input_token_payload(cls, *, model_id, messages, tools):
+            del model_id, messages, tools
             return {"input": [{"role": "user", "content": "hello world"}]}
 
-        async def count_input_tokens(self, **kwargs):
-            return None
-
-    estimate = await resolve_request_token_estimate(
-        LocalOnlyTransformer(),
-        api_key="key",
-        base_url="https://example.invalid/v1",
+    estimate = estimate_request_tokens_locally(
+        LocalTransformer(),
         model_id="gpt-5.6-luna",
         protocol="openai",
-        messages=[InternalMessage(role=MessageRole.USER, content="hello world")],
+        messages=[InternalMessage(role=MessageRole.USER, content="ignored internal message")],
         tools=None,
-        timeout=10,
-        http_proxy=None,
-        custom_headers=None,
-        calibration_factor=0.6,
     )
 
-    assert estimate.raw_local_tokens is not None
-    assert estimate.input_tokens == apply_token_calibration(estimate.raw_local_tokens, 0.6)
-    assert estimate.source == "local_payload_calibrated"
-
+    assert estimate > 0

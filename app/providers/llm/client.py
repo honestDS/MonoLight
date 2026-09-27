@@ -13,19 +13,24 @@ from app.core.constants import (
 )
 from app.core.exceptions import LLMException
 from app.core.log import get_logger
-from app.core.utils.tokenizer import estimate_tokens
-from app.providers.llm.token_estimation import RequestTokenEstimate, resolve_request_token_estimate
 from app.models.message import (
     InternalMessage,
     InternalResponse,
     InternalToolCall,
     MessageRole,
 )
+from app.providers.llm.token_estimation import (
+    estimate_request_tokens_locally,
+)
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 logger = get_logger(__name__)
 
 _OPENAI_STREAM_APPEND_STRING_METADATA_FIELDS = frozenset({"reasoning_content"})
+_CHAT_TRANSFORMERS = {
+    "openai": OpenAIChatCompletionsTransformer(),
+    "openai_responses": OpenAIResponsesTransformer(),
+}
 
 
 def _merge_metadata(
@@ -78,27 +83,16 @@ def estimate_request_context_tokens(
     model_id: str | None = None,
     protocol: str | None = None,
 ) -> int:
-    message_payload = [
-        message.model_dump(
-            mode="json",
-            exclude={"id", "attachments", "created_at", "environment_prompt", "guidance_prompt"},
-            exclude_none=True,
-        )
-        for message in messages
-    ]
-    serialized_context = json.dumps(
-        {
-            "messages": message_payload,
-            "tools": tools or [],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-        default=str,
-    )
-    return estimate_tokens(
-        serialized_context,
+    normalized_protocol = protocol.strip().lower() if isinstance(protocol, str) and protocol.strip() else "openai"
+    transformer = _CHAT_TRANSFORMERS.get(normalized_protocol)
+    if transformer is None:
+        raise LLMException(message=ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=normalized_protocol)
+    return estimate_request_tokens_locally(
+        transformer,
         model_id=model_id,
-        protocol=protocol,
+        protocol=normalized_protocol,
+        messages=messages,
+        tools=tools,
     )
 
 
@@ -118,16 +112,7 @@ def _log_request_context(
         role_counts[role] = role_counts.get(role, 0) + 1
     message_count = len(messages)
     tool_count = len(tools or [])
-    estimated_context_tokens = (
-        request_context_tokens
-        if isinstance(request_context_tokens, int) and not isinstance(request_context_tokens, bool) and request_context_tokens >= 0
-        else estimate_request_context_tokens(
-            messages,
-            tools,
-            model_id=model_id,
-            protocol=protocol,
-        )
-    )
+    request_context_token_count = request_context_tokens if isinstance(request_context_tokens, int) and not isinstance(request_context_tokens, bool) and request_context_tokens >= 0 else None
     logger.bind(
         model_id=model_id,
         protocol=protocol,
@@ -135,17 +120,17 @@ def _log_request_context(
         message_count=message_count,
         role_counts=role_counts,
         tool_count=tool_count,
-        estimated_context_tokens=estimated_context_tokens,
+        request_context_tokens=request_context_token_count,
         max_output_tokens=max_tokens,
     ).debug(
-        "LLM request context: model={model_id}, protocol={protocol}, streaming={streaming}, messages={message_count}, roles={role_counts}, tools={tool_count}, estimated_tokens={estimated_context_tokens}, max_output_tokens={max_tokens}",
+        "LLM request context: model={model_id}, protocol={protocol}, streaming={streaming}, messages={message_count}, roles={role_counts}, tools={tool_count}, request_context_tokens={request_context_tokens}, max_output_tokens={max_tokens}",
         model_id=model_id,
         protocol=protocol,
         streaming=streaming,
         message_count=message_count,
         role_counts=role_counts,
         tool_count=tool_count,
-        estimated_context_tokens=estimated_context_tokens,
+        request_context_tokens=request_context_token_count,
         max_tokens=max_tokens,
     )
 
@@ -366,10 +351,7 @@ class _StreamToolCallAssembler:
 
 
 class LLMClient:
-    _transformers = {
-        "openai": OpenAIChatCompletionsTransformer(),
-        "openai_responses": OpenAIResponsesTransformer(),
-    }
+    _transformers = _CHAT_TRANSFORMERS
 
     @staticmethod
     def normalize_tool_calls(tool_calls: list[InternalToolCall] | None) -> list[InternalToolCall] | None:
@@ -407,35 +389,23 @@ class LLMClient:
         )
 
     @classmethod
-    async def estimate_request_input_tokens(
+    def estimate_request_input_tokens_locally(
         cls,
         *,
-        api_key: str,
-        base_url: str,
         model_id: str,
         messages: list[InternalMessage],
         tools: list[dict[str, Any]] | None = None,
         protocol: str = "openai",
-        timeout: float = 30.0,
-        http_proxy: str | None = None,
-        custom_headers: dict[str, str] | None = None,
-        calibration_factor: float = 1.0,
-    ) -> RequestTokenEstimate:
+    ) -> int:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
             raise LLMException(message=ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
-        return await resolve_request_token_estimate(
+        return estimate_request_tokens_locally(
             transformer,
-            api_key=api_key,
-            base_url=base_url,
             model_id=model_id,
             protocol=protocol,
             messages=messages,
             tools=tools,
-            timeout=timeout,
-            http_proxy=http_proxy,
-            custom_headers=custom_headers,
-            calibration_factor=calibration_factor,
         )
 
     @classmethod

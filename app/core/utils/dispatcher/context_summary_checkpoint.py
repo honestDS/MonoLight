@@ -12,7 +12,7 @@ from app.core.utils.dispatcher.session_todo_snapshot import (
     measure_session_todo_snapshot_tokens,
     strip_session_todo_snapshots,
 )
-from app.core.utils.request_token_baseline import estimate_incremental_input_tokens
+from app.core.utils.request_token_baseline import extract_confirmed_provider_input_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile, ProfileConfig
 
@@ -45,11 +45,11 @@ async def apply_context_summary_checkpoint(
     tools: list[dict] | None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle_event_callback: Callable[[dict[str, object]], Awaitable[None]] | None = None,
+    channel_id: int | None = None,
     model_id: str | None = None,
     protocol: str | None = None,
     previous_llm_request_metadata: dict | None = None,
     reserved_tokens: int = 0,
-    allow_incremental_input_estimate: bool = True,
     force: bool = False,
 ) -> list[InternalMessage]:
     todo_snapshot = None
@@ -76,25 +76,30 @@ async def apply_context_summary_checkpoint(
     ]
     fixed_request_messages = [*system_messages, *uncovered_messages]
 
-    required_input_tokens_override = None
-    # Todo 快照作为新工具结果的一部分进入请求；同 ID 内容替换会提升 context_content_revision，
-    # 因此 provider 基线仍可由统一增量校验判断是否可复用，无需为 Todo 单独退回本地估算。
-    if allow_incremental_input_estimate and isinstance(model_id, str) and model_id.strip() and isinstance(protocol, str) and protocol.strip():
+    confirmed_input_tokens = None
+    if isinstance(channel_id, int) and not isinstance(channel_id, bool) and channel_id > 0 and isinstance(model_id, str) and model_id.strip() and isinstance(protocol, str) and protocol.strip():
         session = await session_crud.get_by_session_id(db, session_id)
         if session is not None and hasattr(db, "refresh"):
             await db.refresh(session)
-        metadata = previous_llm_request_metadata if isinstance(previous_llm_request_metadata, dict) and previous_llm_request_metadata.get("input_tokens_source") == "provider" else None
-        if metadata is None and session is not None:
-            metadata = session.llm_request_metadata
-        required_input_tokens_override = estimate_incremental_input_tokens(
-            messages,
-            tools,
-            metadata,
+        context_summary_revision = session.context_summary_revision if session is not None else 0
+        context_content_revision = session.context_content_revision if session is not None else 0
+        confirmed_input_tokens = extract_confirmed_provider_input_tokens(
+            previous_llm_request_metadata,
+            channel_id=channel_id,
             model_id=model_id,
             protocol=protocol,
-            context_summary_revision=session.context_summary_revision if session is not None else 0,
-            context_content_revision=session.context_content_revision if session is not None else 0,
+            context_summary_revision=context_summary_revision,
+            context_content_revision=context_content_revision,
         )
+        if confirmed_input_tokens is None and session is not None:
+            confirmed_input_tokens = extract_confirmed_provider_input_tokens(
+                session.llm_request_metadata,
+                channel_id=channel_id,
+                model_id=model_id,
+                protocol=protocol,
+                context_summary_revision=context_summary_revision,
+                context_content_revision=context_content_revision,
+            )
 
     state = await ensure_context_summary(
         db,
@@ -111,7 +116,7 @@ async def apply_context_summary_checkpoint(
         trigger_mode=trigger_mode,
         fixed_upper_message_id=fixed_upper_message_id,
         fixed_request_messages=fixed_request_messages,
-        required_input_tokens_override=required_input_tokens_override,
+        confirmed_input_tokens=confirmed_input_tokens,
         model_id=model_id,
         protocol=protocol,
         work_validity_checker=work_validity_checker,

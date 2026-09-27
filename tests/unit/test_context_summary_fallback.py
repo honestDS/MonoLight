@@ -130,8 +130,13 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
     monkeypatch.setattr(summary_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
         summary_module,
-        "estimate_tokens",
-        lambda content: 10 if content == "short summary" else 100,
+        "estimate_context_summary_prompt_tokens",
+        lambda _model, _content: 100,
+    )
+    monkeypatch.setattr(
+        summary_module,
+        "estimate_context_summary_text_tokens",
+        lambda _model, content: 10 if content == "short summary" else 100,
     )
 
     snapshot = summary_module.ContextSummarySnapshot(

@@ -882,7 +882,9 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
                 "temperature": 0,
                 "top_p": 1,
                 "chat_timeout": 30,
-            }
+            },
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
         )
         if inspect.isawaitable(request):
             request = await request
@@ -912,7 +914,7 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
     monkeypatch.setattr(background_module, "materialize_user_environment_prompts", fake_materialize)
     monkeypatch.setattr(
         background_module.ContextManager,
-        "trim_messages_for_model_request",
+        "prepare_messages_for_model_request",
         staticmethod(lambda **kwargs: kwargs["messages"]),
     )
     monkeypatch.setattr(background_module, "generate_chat_with_fallback", fake_generate)

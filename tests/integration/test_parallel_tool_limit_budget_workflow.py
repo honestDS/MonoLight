@@ -192,7 +192,7 @@ def _build_interactive_state(
         chat_channel=None,
         chat_cursor_key="",
         chat_channel_obj=None,
-        model_entry=None,
+        model_entry={"model_id": "parallel-budget-model", "protocol": "OPENAI"},
         channel_rule=None,
         chat_params={"context_window_k": 16, "max_tokens": 512},
         tools=[FILE_TOOL_SCHEMA],
@@ -340,7 +340,7 @@ async def test_background_parallel_tool_limit_budget_uses_executable_call_count(
         return (
             responses.pop(0),
             None,
-            {},
+            {"model_id": "parallel-budget-model", "protocol": "OPENAI"},
             None,
             {"context_window_k": 16, "max_tokens": 512, "chat_timeout": 30},
         )
