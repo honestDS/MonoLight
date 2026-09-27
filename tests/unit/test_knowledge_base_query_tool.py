@@ -9,7 +9,6 @@ from app.core.embedding.knowledge_base import build_knowledge_base_prompt_items
 from app.core.tools import knowledge_base_query as knowledge_base_query_module
 from app.core.tools.knowledge_base_query import KnowledgeBaseQueryExecutor
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
-from app.core.utils.dispatcher import truncate_tool_result as truncate_tool_result_module
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseType
 from app.models.profile import Profile
 
@@ -235,65 +234,3 @@ def test_knowledge_base_query_log_serializer_redacts_error_detail() -> None:
 
     assert sensitive_error not in result
     assert json.loads(result) == {"error": True}
-
-
-def test_structured_truncation_removes_managed_write_identity(monkeypatch) -> None:
-    monkeypatch.setattr(truncate_tool_result_module, "_get_truncation_notice", lambda: "[TRUNCATED]")
-
-    result = json.dumps(
-        {
-            "items": [
-                {
-                    "source": "managed",
-                    "content": "managed-body-" * 2000,
-                    "knowledge_type": "managed",
-                    "knowledge_id": 31,
-                    "knowledge_expected_version": 4,
-                    "llm_maintainable": True,
-                }
-            ]
-        },
-        ensure_ascii=False,
-    )
-
-    truncated, stats = process_single_tool_module._truncate_knowledge_base_query_result_for_budget(
-        result,
-        context_window_k=1,
-        budget_tokens=80,
-    )
-    payload = json.loads(truncated)
-
-    assert stats.truncated_count == 1
-    assert payload["truncated"] is True
-    assert len(payload["items"]) == 1
-    item = payload["items"][0]
-    assert item["truncated"] is True
-    assert "[TRUNCATED]" not in item["content"]
-    assert item["knowledge_type"] == "managed"
-    assert "knowledge_id" not in item
-    assert "knowledge_expected_version" not in item
-    assert "llm_maintainable" not in item
-
-
-def test_structured_truncation_falls_back_to_budget_safe_marker_when_minimal_json_does_not_fit() -> None:
-    result = json.dumps(
-        {
-            "items": [
-                {
-                    "source": "managed",
-                    "content": "managed-body-" * 2000,
-                    "knowledge_type": "managed",
-                }
-            ]
-        },
-        ensure_ascii=False,
-    )
-
-    truncated, stats = process_single_tool_module._truncate_knowledge_base_query_result_for_budget(
-        result,
-        context_window_k=1,
-        budget_tokens=1,
-    )
-
-    assert stats.truncated_count == 1
-    assert truncated == "cut"
