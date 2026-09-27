@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.constants import (
+    ERR_SESSION_REPLY_AUXILIARY_PURPOSE_CONTRIBUTES_TO_TOTALS,
     ERR_SESSION_REPLY_PROVIDER_USAGE_METADATA_UPDATE_FAILED,
     ERR_SESSION_REPLY_PROVIDER_USAGE_MISSING,
     ERR_SESSION_REPLY_PROVIDER_USAGE_SESSION_NOT_FOUND,
@@ -196,7 +197,7 @@ async def _generate_auxiliary_reply_with_request_metadata(
 ) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]], dict[str, Any] | None]:
     """Generate an auxiliary reply with an explicit provider-request purpose."""
     if request_purpose.contributes_to_session_totals:
-        raise ValueError("auxiliary reply request purpose must not contribute to session totals")
+        raise ValueError(t(ERR_SESSION_REPLY_AUXILIARY_PURPOSE_CONTRIBUTES_TO_TOTALS))
     latest_request_metadata = None
     session_total_output_tokens = 0
     session_total_input_tokens = 0

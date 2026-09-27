@@ -866,5 +866,134 @@ async def test_background_without_audit_configuration_executes_tool_without_audi
     assert files == []
 
 
+@pytest.mark.asyncio
+async def test_background_parallel_limit_persists_rejected_tool_results_and_finishes_reply(monkeypatch):
+    profile = SimpleNamespace(id=3)
+    cfg = SimpleNamespace(
+        channel=SimpleNamespace(chat_channel=object()),
+        security=SimpleNamespace(audit_channel_id=None, audit_model_id=None),
+        tool=SimpleNamespace(max_parallel_tools=5, enabled_tools=["send_file_to_user"]),
+    )
+    tool_calls = [
+        InternalToolCall(
+            id=f"call-{index}",
+            name="send_file_to_user",
+            arguments={} if index == 5 else {"files": [{"path": f"/tmp/generated-{index}.png"}]},
+        )
+        for index in range(8)
+    ]
+    responses = [
+        InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, tool_calls=tool_calls),
+            model="chat-model",
+        ),
+        InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"),
+            model="chat-model",
+        ),
+    ]
+    processed_calls = []
+    persisted_tool_results = []
+
+    async def get_user(*_args, **_kwargs):
+        return SimpleNamespace(username="tester")
+
+    async def validate_profile(*_args, **_kwargs):
+        return cfg
+
+    async def get_tools(*_args, **_kwargs):
+        return (
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "send_file_to_user",
+                        "description": "Send files",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "files": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {"path": {"type": "string"}},
+                                        "required": ["path"],
+                                    },
+                                },
+                            },
+                            "required": ["files"],
+                        },
+                    },
+                }
+            ],
+            None,
+        )
+
+    async def generate_chat(*_args, **_kwargs):
+        return responses.pop(0), None, {}, None, {"context_window_k": 128, "max_tokens": 256, "chat_timeout": 30}
+
+    async def process_tool(current_tool_call, *_args, **_kwargs):
+        processed_calls.append(current_tool_call.id)
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=current_tool_call.id,
+            content=json.dumps({"status": "success"}),
+        )
+
+    async def save_tool_response(_db, _session_id, _uid, _profile_id, tool_response, messages, turn_messages):
+        persisted_tool_results.append(tool_response.model_copy(deep=True))
+        messages.append(tool_response)
+        turn_messages.append(tool_response)
+        return tool_response
+
+    async def save(*_args, **_kwargs):
+        return None
+
+    async def persist_todo_snapshot(_db, *, uid, session_id, tool_results):
+        return None
+
+    monkeypatch.setattr(background_module.user_crud, "get_by_uid", get_user)
+    monkeypatch.setattr(background_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(background_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(background_module, "generate_chat_with_fallback", generate_chat)
+    monkeypatch.setattr(background_module, "process_single_tool_with_isolated_db", process_tool)
+    monkeypatch.setattr(background_module, "save_tool_response", save_tool_response)
+    monkeypatch.setattr(background_module, "save_assistant_message", save)
+    monkeypatch.setattr(background_module, "persist_session_todo_snapshot_on_tool_results", persist_todo_snapshot)
+
+    final_message, _turn_messages, files = await BackgroundDispatcherMixin._generate_reply_from_history(
+        object(),
+        uid="user-1",
+        session_id="session-1",
+        profile=profile,
+        call_context="background_task_proactive_reply",
+        allow_tools=True,
+    )
+
+    original_ids = [tool_call.id for tool_call in tool_calls]
+    persisted_ids = [tool_response.tool_call_id for tool_response in persisted_tool_results]
+    assert processed_calls == original_ids[:5]
+    assert all(tool_call_id not in processed_calls for tool_call_id in original_ids[5:])
+    assert len(persisted_ids) == 8
+    assert set(persisted_ids) == set(original_ids)
+    assert all(persisted_ids.count(tool_call_id) == 1 for tool_call_id in original_ids)
+
+    persisted_by_id = {tool_response.tool_call_id: tool_response for tool_response in persisted_tool_results}
+    for tool_call_id in original_ids[5:]:
+        tool_response = persisted_by_id[tool_call_id]
+        result = json.loads(tool_response.content)
+        assert tool_response.role == MessageRole.TOOL
+        assert tool_response.tool_call_id == tool_call_id
+        assert result["status"] == "failed"
+        assert result["error"] == "parallel_limit_exceeded"
+        assert result["requested"] == 8
+        assert result["limit"] == 5
+        assert result["executed"] is False
+
+    assert final_message.content == "后台总结"
+    assert files == []
+    assert responses == []
+
+
 async def _get_profile(_db, _profile_id):
     return _profile()

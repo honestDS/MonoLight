@@ -248,6 +248,7 @@ MESSAGES = {
     "ERR_SESSION_REPLY_WORK_NOT_FOUND": "Session reply work no longer exists",
     "ERR_SESSION_REPLY_WORK_ENDED": "Session reply work ended with status {status}",
     "ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED": "Final assistant message was not persisted",
+    "ERR_SESSION_REPLY_AUXILIARY_PURPOSE_CONTRIBUTES_TO_TOTALS": "Auxiliary reply request purpose must not contribute to session totals",
     "ERR_SESSION_REPLY_PROVIDER_USAGE_WORK_ID_INVALID": "Invalid session reply work ID",
     "ERR_SESSION_REPLY_PROVIDER_USAGE_SESSION_NOT_FOUND": "Session not found while persisting provider usage",
     "ERR_SESSION_REPLY_PROVIDER_USAGE_METADATA_UPDATE_FAILED": "Failed to update session metadata while persisting provider usage",

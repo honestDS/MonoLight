@@ -120,6 +120,7 @@ async def _seed_pending_confirmation(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     working_directory: Path,
+    include_parallel_limit_exceeded_call: bool = False,
 ) -> int:
     uid = "owner"
     session_id = "session-confirmation"
@@ -135,6 +136,24 @@ async def _seed_pending_confirmation(
             arguments={"command": "echo confirmed-2", "execution_mode": "non_interactive"},
         ),
     ]
+    parallel_limit_exceeded_call = InternalToolCall(
+        id="original-shell-call-over-limit",
+        name="execute_shell",
+        arguments={"command": "echo over-limit", "execution_mode": "non_interactive"},
+    )
+    source_tool_calls = [*tool_calls, parallel_limit_exceeded_call] if include_parallel_limit_exceeded_call else tool_calls
+    profile_configs = _profile_config()
+    if include_parallel_limit_exceeded_call:
+        profile_configs["tool"]["max_parallel_tools"] = len(tool_calls)
+    parallel_limit_exceeded_payload = {
+        "status": "failed",
+        "tool_name": parallel_limit_exceeded_call.name,
+        "error": "parallel_limit_exceeded",
+        "requested": len(source_tool_calls),
+        "limit": len(tool_calls),
+        "executed": False,
+        "message": f"Too many parallel tool calls. Requested: {len(source_tool_calls)}, Limit: {len(tool_calls)}.",
+    }
     integrity = build_tool_round_integrity_snapshot(
         tool_calls=[{"id": tool_call.id, "name": tool_call.name, "arguments": tool_call.arguments} for tool_call in tool_calls],
         uid=uid,
@@ -142,7 +161,7 @@ async def _seed_pending_confirmation(
         working_directory=working_directory,
     )
     async with session_factory() as db:
-        profile = Profile(id=1, uid=uid, name="confirmation workflow", configs=_profile_config())
+        profile = Profile(id=1, uid=uid, name="confirmation workflow", configs=profile_configs)
         db.add(profile)
         db.add(
             ChatSession(
@@ -174,7 +193,7 @@ async def _seed_pending_confirmation(
             profile_id=1,
             role=MessageRole.ASSISTANT,
             type=MessageType.TOOL_CALL,
-            content=InternalMessage(role=MessageRole.ASSISTANT, tool_calls=tool_calls).model_dump_json(exclude_none=True),
+            content=InternalMessage(role=MessageRole.ASSISTANT, tool_calls=source_tool_calls).model_dump_json(exclude_none=True),
             is_processed=True,
         )
         db.add(source)
@@ -213,6 +232,26 @@ async def _seed_pending_confirmation(
                 )
             )
         await db.flush()
+
+        if include_parallel_limit_exceeded_call:
+            await save_message(
+                db,
+                session_id,
+                uid,
+                MessageRole.TOOL,
+                MessageType.TOOL_RESULT,
+                InternalMessage(
+                    role=MessageRole.TOOL,
+                    tool_call_id=parallel_limit_exceeded_call.id,
+                    content=json.dumps(
+                        parallel_limit_exceeded_payload,
+                        ensure_ascii=False,
+                    ),
+                ),
+                1,
+                is_processed=True,
+                commit=False,
+            )
 
         pending_results = [
             InternalMessage(
@@ -275,6 +314,7 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
     audit_record_id = await _seed_pending_confirmation(
         confirmation_workflow_session_factory,
         working_directory=tmp_path,
+        include_parallel_limit_exceeded_call=True,
     )
 
     monkeypatch.setattr(database_provider, "AsyncSessionLocal", confirmation_workflow_session_factory)
@@ -341,6 +381,21 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
             "echo confirmed-1\n",
             "echo confirmed-2\n",
         ]
+        parallel_limit_rows = [row for row in persisted if row.type == MessageType.TOOL_RESULT and row.audit_record_id is None]
+        assert len(parallel_limit_rows) == 1
+        assert parallel_limit_rows[0].audit_tool_call_id is None
+        assert parallel_limit_rows[0].content_revision == 0
+        parallel_limit_result = InternalMessage.model_validate_json(parallel_limit_rows[0].content or "{}")
+        assert parallel_limit_result.tool_call_id == "original-shell-call-over-limit"
+        assert json.loads(parallel_limit_result.content or "{}") == {
+            "status": "failed",
+            "tool_name": "execute_shell",
+            "error": "parallel_limit_exceeded",
+            "requested": 3,
+            "limit": 2,
+            "executed": False,
+            "message": "Too many parallel tool calls. Requested: 3, Limit: 2.",
+        }
 
         await db.commit()
         metrics = {
@@ -450,8 +505,16 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
         messages = list((await db.execute(select(Message).where(Message.session_id == "session-confirmation").order_by(Message.id))).scalars().all())
         usage = (await db.execute(select(SessionReplyProviderUsage).where(SessionReplyProviderUsage.provider_request_id == "confirmed-continuation-request"))).scalars().one_or_none()
         session = await db.get(ChatSession, "session-confirmation")
+        source_message = await db.get(Message, record.source_assistant_message_id) if record is not None and record.source_assistant_message_id is not None else None
 
     assert record is not None
+    assert source_message is not None
+    source_internal = InternalMessage.model_validate_json(source_message.content or "{}")
+    assert [tool_call.id for tool_call in source_internal.tool_calls or []] == [
+        "original-shell-call-1",
+        "original-shell-call-2",
+        "original-shell-call-over-limit",
+    ]
     assert record.status == AuditRecordStatus.SUCCEEDED
     assert record.decision is not None and record.decision.value == "approve"
     assert record.decision_raw_message == "approve"
@@ -475,6 +538,21 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
         assert final_payload["status"] == "success"
         expected_command = "echo confirmed-1" if original_call_id.endswith("-1") else "echo confirmed-2"
         assert final_payload["stdout"] == f"{expected_command}\n"
+    parallel_limit_rows = [message for message in messages if message.type == MessageType.TOOL_RESULT and message.audit_record_id is None]
+    assert len(parallel_limit_rows) == 1
+    assert parallel_limit_rows[0].audit_tool_call_id is None
+    assert parallel_limit_rows[0].content_revision == 0
+    parallel_limit_result = InternalMessage.model_validate_json(parallel_limit_rows[0].content or "{}")
+    assert parallel_limit_result.tool_call_id == "original-shell-call-over-limit"
+    assert json.loads(parallel_limit_result.content or "{}") == {
+        "status": "failed",
+        "tool_name": "execute_shell",
+        "error": "parallel_limit_exceeded",
+        "requested": 3,
+        "limit": 2,
+        "executed": False,
+        "message": "Too many parallel tool calls. Requested: 3, Limit: 2.",
+    }
     final_message = next(message for message in messages if message.id == work.result_message_id)
     assert final_message.role == MessageRole.ASSISTANT
     assert final_message.content == "confirmed tool completed"

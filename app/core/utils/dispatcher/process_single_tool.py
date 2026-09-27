@@ -18,6 +18,7 @@ from app.core.constants import (
     ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
     ERR_TOOL_NOT_ENABLED,
     ERR_TOOL_NOT_REGISTERED,
+    ERR_TOOL_ROUND_PRECHECK_FAILED,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
 )
@@ -460,6 +461,33 @@ def _truncate_knowledge_base_query_result_for_budget(
             )
         safe_items.pop()
         omitted_count += 1
+
+
+def prevalidate_tool_round_protocol(
+    tool_calls: list[Any],
+    cfg: ProfileConfig,
+) -> dict[str, str]:
+    errors: dict[str, str] = {}
+    round_call_count = len(tool_calls)
+    max_parallel_tools = getattr(getattr(cfg, "tool", None), "max_parallel_tools", round_call_count)
+    for tool_call in tool_calls:
+        tool_name = tool_call.name
+        executor_cls = TOOL_EXECUTOR_MAP.get(tool_name)
+        round_execution_policy = getattr(executor_cls, "round_execution_policy", "parallel")
+        policy_is_unknown = round_execution_policy not in ("parallel", "exclusive", "atomic")
+        policy_is_exclusive = round_execution_policy == "exclusive" and round_call_count != 1
+        policy_is_atomic = round_execution_policy == "atomic" and round_call_count > max_parallel_tools
+        if policy_is_unknown or policy_is_exclusive or policy_is_atomic:
+            errors[tool_call.id] = json.dumps(
+                {
+                    "status": "failed",
+                    "tool_name": tool_name,
+                    "error": t(ERR_TOOL_ROUND_PRECHECK_FAILED),
+                    "round_execution_policy": round_execution_policy,
+                },
+                ensure_ascii=False,
+            )
+    return errors
 
 
 def prevalidate_tool_round(
