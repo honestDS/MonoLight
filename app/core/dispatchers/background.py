@@ -14,7 +14,6 @@ from app.core.constants import (
     ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN,
     ERR_BACKGROUND_TASK_NOT_FOUND,
     ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
-    ERR_BACKGROUND_TOO_MANY_TOOL_CALLS,
     ERR_LLM_EMPTY_RESPONSE,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
@@ -46,6 +45,7 @@ from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
+from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import (
     BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES,
     dump_background_proactive_history,
@@ -58,7 +58,10 @@ from app.core.utils.dispatcher.helpers import (
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
-from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
+from app.core.utils.dispatcher.process_single_tool import (
+    prevalidate_tool_round,
+    prevalidate_tool_round_protocol,
+)
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
@@ -439,24 +442,18 @@ class BackgroundDispatcherMixin:
             return ai_msg, turn_messages, []
 
         validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
-        if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-            raise LLMException(message=ERR_BACKGROUND_TOO_MANY_TOOL_CALLS, count=len(ai_msg.tool_calls))
-
         audit_round = None
         audit_claim_token = None
         audit_execution_ids: dict[str, int] = {}
-        precheck_errors = prevalidate_tool_round(
-            ai_msg.tool_calls,
-            cfg,
-            allow_background_submission=False,
-            tool_schemas=tools,
-        )
-        if precheck_errors:
+        stored_tool_responses: list[InternalMessage] = []
+        protocol_precheck_errors = prevalidate_tool_round_protocol(ai_msg.tool_calls, cfg)
+        precheck_errors: dict[str, str] = {}
+        if protocol_precheck_errors:
             tool_responses = [
                 InternalMessage(
                     role=MessageRole.TOOL,
                     tool_call_id=tool_call.id,
-                    content=precheck_errors.get(tool_call.id)
+                    content=protocol_precheck_errors.get(tool_call.id)
                     or json.dumps(
                         {
                             "status": "failed",
@@ -469,17 +466,60 @@ class BackgroundDispatcherMixin:
                 for tool_call in ai_msg.tool_calls
             ]
         else:
-            audit_round = await audit_tool_round(
-                db,
-                cfg=cfg,
-                tool_calls=ai_msg.tool_calls,
-                source_assistant_message_id=ai_msg.id,
-                uid=uid,
-                operator_username=username,
-                session_id=session_id,
-                source=reply_source,
-                language=get_current_locale(),
+            executable_tool_calls, rejected_tool_results = handle_parallel_tool_limit(
+                ai_msg.tool_calls,
+                cfg.tool.max_parallel_tools,
             )
+            precheck_errors = prevalidate_tool_round(
+                executable_tool_calls,
+                cfg,
+                allow_background_submission=False,
+                tool_schemas=tools,
+            )
+            if precheck_errors:
+                prefix_tool_responses = {
+                    tool_call.id: InternalMessage(
+                        role=MessageRole.TOOL,
+                        tool_call_id=tool_call.id,
+                        content=precheck_errors.get(tool_call.id)
+                        or json.dumps(
+                            {
+                                "status": "failed",
+                                "tool_name": tool_call.name,
+                                "error": t(ERR_TOOL_ROUND_PRECHECK_FAILED),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                    for tool_call in executable_tool_calls
+                }
+                rejected_tool_responses = {tool_result.tool_call_id: tool_result for tool_result in rejected_tool_results}
+                tool_responses = [prefix_tool_responses.get(tool_call.id) or rejected_tool_responses[tool_call.id] for tool_call in ai_msg.tool_calls]
+            else:
+                for rejected_tool_result in rejected_tool_results:
+                    stored_tool_responses.append(
+                        await save_tool_response(
+                            db,
+                            session_id,
+                            uid,
+                            profile.id,
+                            rejected_tool_result,
+                            messages,
+                            turn_messages,
+                        )
+                    )
+                audit_round = await audit_tool_round(
+                    db,
+                    cfg=cfg,
+                    tool_calls=executable_tool_calls,
+                    source_assistant_message_id=ai_msg.id,
+                    uid=uid,
+                    operator_username=username,
+                    session_id=session_id,
+                    source=reply_source,
+                    language=get_current_locale(),
+                )
+        if not protocol_precheck_errors and not precheck_errors:
             if audit_round is not None and not audit_round.may_execute:
                 tool_responses = list(audit_round.tool_results)
             else:
@@ -518,7 +558,7 @@ class BackgroundDispatcherMixin:
                                 raise
                         audit_details = await audit_crud.list_tool_details(db, audit_round.audit_record_id)
                         detail_by_call_id = {detail.original_tool_call_id: detail for detail in audit_details}
-                        for tool_call in ai_msg.tool_calls:
+                        for tool_call in executable_tool_calls:
                             detail = detail_by_call_id.get(tool_call.id)
                             if detail is None:
                                 audit_claim_token = None
@@ -535,7 +575,7 @@ class BackgroundDispatcherMixin:
                                 audit_claim_token = None
                                 break
                             audit_execution_ids[tool_call.id] = execution.id
-                claim_failed = audit_round is not None and (audit_claim_token is None or len(audit_execution_ids) != len(ai_msg.tool_calls))
+                claim_failed = audit_round is not None and (audit_claim_token is None or len(audit_execution_ids) != len(executable_tool_calls))
                 if claim_failed:
                     claim_closed = True
                     for execution_id in audit_execution_ids.values():
@@ -572,7 +612,7 @@ class BackgroundDispatcherMixin:
                                 ensure_ascii=False,
                             ),
                         )
-                        for tool_call in ai_msg.tool_calls
+                        for tool_call in executable_tool_calls
                     ]
                 else:
                     tool_result_round_budget_tokens = calculate_tool_result_round_budget_tokens(
@@ -594,13 +634,13 @@ class BackgroundDispatcherMixin:
                                 uid,
                                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                                 context_window_k=chat_params["context_window_k"],
-                                tool_call_count=len(ai_msg.tool_calls),
+                                tool_call_count=len(executable_tool_calls),
                                 tool_result_round_budget_tokens=tool_result_round_budget_tokens,
                                 allow_background_submission=False,
                                 dispatch_mode="background",
                                 dispatch_source=reply_source,
                             )
-                            for tool_call in ai_msg.tool_calls
+                            for tool_call in executable_tool_calls
                         ]
                     )
 
@@ -634,7 +674,7 @@ class BackgroundDispatcherMixin:
         files_to_user = extract_files_to_user(tool_responses)
         confirmation_message = None
         if audit_round is not None and audit_round.confirmation_payload is not None:
-            stored_tool_responses, confirmation_message = await persist_pending_confirmation_bundle(
+            audited_stored_tool_responses, confirmation_message = await persist_pending_confirmation_bundle(
                 db,
                 audit_record_id=audit_round.audit_record_id,
                 uid=uid,
@@ -644,10 +684,10 @@ class BackgroundDispatcherMixin:
                 confirmation_payload=audit_round.confirmation_payload,
                 dedupe_key=final_message_dedupe_key,
             )
-            messages.extend(stored_tool_responses)
-            turn_messages.extend(stored_tool_responses)
+            stored_tool_responses.extend(audited_stored_tool_responses)
+            messages.extend(audited_stored_tool_responses)
+            turn_messages.extend(audited_stored_tool_responses)
         else:
-            stored_tool_responses = []
             for tool_response in tool_responses:
                 stored_tool_responses.append(await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages))
 

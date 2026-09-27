@@ -11,6 +11,8 @@ from app.core.log import get_logger
 
 class BaseExecutor(abc.ABC):
     requires_audit: ClassVar[bool]
+    # 取值：parallel 可部分限额执行，exclusive 独占整轮，atomic 超限时禁止部分执行。
+    round_execution_policy: ClassVar[str] = "parallel"
 
     def __init__(self, project_root: str, uid: str = "default"):
         self.project_root = Path(project_root)

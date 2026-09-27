@@ -31,6 +31,7 @@ from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
     get_queued_background_task_id,
     prevalidate_tool_round,
+    prevalidate_tool_round_protocol,
 )
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.session_todo_snapshot import (
@@ -111,25 +112,12 @@ async def handle_interactive_tool_round(
     saved_msg,
     response_id: str,
 ) -> dict[str, Any] | None:
-    if len(ai_msg.tool_calls) > state.cfg.tool.max_parallel_tools:
-        await handle_parallel_tool_limit(
-            state.db,
-            state.session_id,
-            state.uid,
-            state.profile,
-            state.cfg,
-            ai_msg,
-            state.messages,
-            state.turn_messages,
-        )
-        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
-        return None
-
-    precheck_errors = prevalidate_tool_round(ai_msg.tool_calls, state.cfg, tool_schemas=state.tools)
-    if precheck_errors:
+    # 完整整轮协议预检必须先于部分限额执行，以保留独占/原子语义。
+    protocol_precheck_errors = prevalidate_tool_round_protocol(ai_msg.tool_calls, state.cfg)
+    if protocol_precheck_errors:
         stored_tool_results: list[InternalMessage] = []
         for tool_call in ai_msg.tool_calls:
-            content = precheck_errors.get(tool_call.id)
+            content = protocol_precheck_errors.get(tool_call.id)
             if content is None:
                 content = json.dumps(
                     {
@@ -163,6 +151,51 @@ async def handle_interactive_tool_round(
         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
         return None
 
+    executable_tool_calls, rejected_tool_results = handle_parallel_tool_limit(
+        ai_msg.tool_calls,
+        state.cfg.tool.max_parallel_tools,
+    )
+    precheck_errors = prevalidate_tool_round(executable_tool_calls, state.cfg, tool_schemas=state.tools)
+    if precheck_errors:
+        rejected_tool_results_by_id = {tool_result.tool_call_id: tool_result for tool_result in rejected_tool_results}
+        stored_tool_results: list[InternalMessage] = []
+        for tool_call in ai_msg.tool_calls:
+            tool_result = rejected_tool_results_by_id.get(tool_call.id)
+            if tool_result is None:
+                content = precheck_errors.get(tool_call.id)
+                if content is None:
+                    content = json.dumps(
+                        {
+                            "status": "failed",
+                            "tool_name": tool_call.name,
+                            "error": t(ERR_TOOL_ROUND_PRECHECK_FAILED),
+                        },
+                        ensure_ascii=False,
+                    )
+                tool_result = InternalMessage(
+                    role=MessageRole.TOOL,
+                    tool_call_id=tool_call.id,
+                    content=content,
+                )
+            stored_tool_results.append(
+                await save_tool_response(
+                    state.db,
+                    state.session_id,
+                    state.uid,
+                    state.profile.id,
+                    tool_result,
+                    state.messages,
+                    state.turn_messages,
+                )
+            )
+        await _persist_and_emit_session_todo_update(
+            state,
+            ai_msg=ai_msg,
+            tool_results=stored_tool_results,
+        )
+        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+        return None
+
     if state.stream_event_callback is not None and state.show_tool_calls:
         for tool_call_index, tool_call in enumerate(ai_msg.tool_calls):
             await state.stream_event_callback(
@@ -177,10 +210,38 @@ async def handle_interactive_tool_round(
                 }
             )
 
+    if rejected_tool_results:
+        stored_rejected_tool_results: list[InternalMessage] = []
+        for tool_result in rejected_tool_results:
+            stored_rejected_tool_results.append(
+                await save_tool_response(
+                    state.db,
+                    state.session_id,
+                    state.uid,
+                    state.profile.id,
+                    tool_result,
+                    state.messages,
+                    state.turn_messages,
+                )
+            )
+        for stored_tool_result in stored_rejected_tool_results:
+            tool_call = _find_tool_call_by_id(ai_msg.tool_calls, stored_tool_result.tool_call_id)
+            if state.stream_event_callback is not None and state.show_tool_calls:
+                await state.stream_event_callback(
+                    {
+                        "type": "tool_end",
+                        "name": tool_call.name if tool_call else "unknown",
+                        "result": stored_tool_result.content,
+                        "tool_call_id": stored_tool_result.tool_call_id,
+                        "response_id": response_id,
+                    }
+                )
+        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+
     audit_round = await audit_tool_round(
         state.db,
         cfg=state.cfg,
-        tool_calls=ai_msg.tool_calls,
+        tool_calls=executable_tool_calls,
         source_assistant_message_id=saved_msg.id,
         uid=state.uid,
         operator_username=state.username,
@@ -370,7 +431,7 @@ async def handle_interactive_tool_round(
             if claimed_record is not None and audit_claim_token is not None:
                 audit_details = await audit_crud.list_tool_details(state.db, audit_round.audit_record_id)
                 detail_by_call_id = {detail.original_tool_call_id: detail for detail in audit_details}
-                for tool_call in ai_msg.tool_calls:
+                for tool_call in executable_tool_calls:
                     detail = detail_by_call_id.get(tool_call.id)
                     if detail is None:
                         audit_claim_token = None
@@ -387,7 +448,7 @@ async def handle_interactive_tool_round(
                         audit_claim_token = None
                         break
                     audit_execution_ids[tool_call.id] = execution.id
-            if audit_claim_token is None or len(audit_execution_ids) != len(ai_msg.tool_calls):
+            if audit_claim_token is None or len(audit_execution_ids) != len(executable_tool_calls):
                 for execution_id in audit_execution_ids.values():
                     await audit_crud.finish_execution_attempt(
                         state.db,
@@ -405,7 +466,7 @@ async def handle_interactive_tool_round(
                     )
                     await update_confirmation_message_status(state.db, audit_record_id=audit_round.audit_record_id)
                 stored_tool_results: list[InternalMessage] = []
-                for tool_call in ai_msg.tool_calls:
+                for tool_call in executable_tool_calls:
                     tool_result = InternalMessage(
                         role=MessageRole.TOOL,
                         tool_call_id=tool_call.id,
@@ -494,12 +555,12 @@ async def handle_interactive_tool_round(
         uid=state.uid,
         allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
         context_window_k=state.chat_params["context_window_k"],
-        tool_call_count=len(ai_msg.tool_calls),
+        tool_call_count=len(executable_tool_calls),
         tool_result_round_budget_tokens=tool_result_round_budget_tokens,
         context_summary_boundary_message_id=state.checkpoint_state.upper_message_id,
         source_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
     )
-    tasks = [asyncio.create_task(_execute_isolated_tool_call(parallel_tool_context, tc)) for tc in ai_msg.tool_calls]
+    tasks = [asyncio.create_task(_execute_isolated_tool_call(parallel_tool_context, tc)) for tc in executable_tool_calls]
     stored_tool_results: list[InternalMessage] = []
     completed_tool_count = 0
     try:

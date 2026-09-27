@@ -39,6 +39,7 @@ from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
     get_queued_background_task_id,
     prevalidate_tool_round,
+    prevalidate_tool_round_protocol,
     process_single_tool,
 )
 from app.core.utils.dispatcher.save_message import save_message
@@ -190,23 +191,31 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     if source_valid:
         try:
             source_internal = InternalMessage.model_validate(json.loads(source_message.content or "{}"))
-            source_tool_calls = list(source_internal.tool_calls or [])
-            source_valid = verify_persisted_tool_round(
-                expected_round_sha256=record.round_arguments_hash,
-                expected_tool_calls=[
-                    {
-                        "original_tool_call_id": detail.original_tool_call_id,
-                        "turn_index": detail.turn_index,
-                        "tool_name": detail.tool_name,
-                        "arguments_hash": detail.arguments_hash,
-                    }
-                    for detail in details
-                ],
-                tool_calls=[{"id": item.id, "name": item.name, "arguments": item.arguments} for item in source_tool_calls],
-                uid=work.uid,
-                session_id=work.session_id,
-                working_directory=record.working_directory,
-            )
+            complete_source_tool_calls = list(source_internal.tool_calls or [])
+            source_call_ids = [tool_call.id for tool_call in complete_source_tool_calls]
+            detail_call_ids = [detail.original_tool_call_id for detail in details]
+            if len(source_call_ids) != len(set(source_call_ids)) or len(detail_call_ids) != len(set(detail_call_ids)) or not all(detail_call_id in source_call_ids for detail_call_id in detail_call_ids):
+                source_valid = False
+            else:
+                source_tool_calls_by_id = {tool_call.id: tool_call for tool_call in complete_source_tool_calls}
+                source_tool_calls = [source_tool_calls_by_id[detail_call_id] for detail_call_id in detail_call_ids]
+                source_internal = source_internal.model_copy(deep=True, update={"tool_calls": source_tool_calls})
+                source_valid = verify_persisted_tool_round(
+                    expected_round_sha256=record.round_arguments_hash,
+                    expected_tool_calls=[
+                        {
+                            "original_tool_call_id": detail.original_tool_call_id,
+                            "turn_index": detail.turn_index,
+                            "tool_name": detail.tool_name,
+                            "arguments_hash": detail.arguments_hash,
+                        }
+                        for detail in details
+                    ],
+                    tool_calls=[{"id": item.id, "name": item.name, "arguments": item.arguments} for item in source_tool_calls],
+                    uid=work.uid,
+                    session_id=work.session_id,
+                    working_directory=record.working_directory,
+                )
         except Exception:
             source_valid = False
 
@@ -397,7 +406,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             break
         executions_by_original_call_id[original_call.id] = execution
 
-    precheck_errors = prevalidate_tool_round(confirmed_calls, cfg, tool_schemas=_tools)
+    precheck_errors = prevalidate_tool_round_protocol(confirmed_calls, cfg)
+    if not precheck_errors:
+        precheck_errors = prevalidate_tool_round(confirmed_calls, cfg, tool_schemas=_tools)
     all_attempts_created = len(executions_by_original_call_id) == len(source_tool_calls)
     all_succeeded = all_attempts_created and not precheck_errors
     execution_round_status = None
