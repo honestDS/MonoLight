@@ -42,7 +42,15 @@ MonoLight is more than a chat interface or a thin wrapper around one-off tool ca
 - **Multi-user support and data isolation**: Supports users and roles while isolating session data between users. Each IM integration account can also be bound to a specific user and Profile.
 - **Self-hosting and data ownership**: Supports SQLite and MySQL, scaling from local personal deployment to multi-user environments. Model channels, prompts, and runtime data remain under the deployer's control.
 
-## Model Runtime Requirements
+## Runtime Requirements
+
+### Server Configuration
+
+| Item | Minimum Requirement | Recommended Configuration |
+| --- | --- | --- |
+| Server configuration | 2 CPU cores / 2 GB RAM | 2 CPU cores / 8 GB RAM |
+
+### Model Configuration
 
 MonoLight is designed for multi-turn tool use, context summarization, and continuous task execution. Its model requirements are therefore higher than those of a typical chat application. The "minimum requirements" below indicate the baseline for using the core Agent capabilities with reasonable completeness, not merely for basic conversation.
 
