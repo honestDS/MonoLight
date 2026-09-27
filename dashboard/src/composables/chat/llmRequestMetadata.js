@@ -71,4 +71,3 @@ export const mergeLlmRequestMetadata = (currentMetadata, metadata) => {
   }
   return nextMetadata
 }
-

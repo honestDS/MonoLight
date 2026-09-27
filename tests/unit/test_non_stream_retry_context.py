@@ -13,7 +13,7 @@ from app.core.dispatchers import interactive_runtime as interactive_runtime_modu
 from app.core.dispatchers import interactive_tools as interactive_tools_module
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
-from app.core.exceptions import ContextBudgetExceededException, LLMContextLengthException, LLMException
+from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.terminal.schemas import (
     ShellInteractiveHandoffResult,
     TerminalOutputBufferState,
@@ -170,7 +170,7 @@ async def test_context_length_forces_summary_on_current_channel_before_fallback(
     monkeypatch.setattr(interactive_generation_module, "resolve_chat_params", lambda _model_entry, _channel: dict(state.chat_params))
     monkeypatch.setattr(
         interactive_generation_module.ContextManager,
-        "trim_messages_for_model_request",
+        "prepare_messages_for_model_request",
         lambda **kwargs: kwargs["messages"],
     )
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
@@ -188,54 +188,6 @@ async def test_context_length_forces_summary_on_current_channel_before_fallback(
 
     assert result.message.content == "ok"
     assert attempts == ["model-1", "model-1"]
-    assert sum(1 for call in summary_calls if call.get("force")) == 1
-    assert selection_calls == []
-    assert state.messages[0].content == "compressed request"
-
-
-@pytest.mark.asyncio
-async def test_local_context_budget_overflow_forces_summary_on_current_channel_before_provider_call(monkeypatch):
-    state = _context_length_generation_state()
-    summary_calls = []
-    trim_calls = 0
-    model_calls = []
-    selection_calls = []
-
-    async def apply_checkpoint(_db, **kwargs):
-        summary_calls.append(dict(kwargs))
-        if kwargs.get("force"):
-            return [InternalMessage(id=1, role=MessageRole.USER, content="compressed request")]
-        return kwargs["messages"]
-
-    def trim_messages_for_model_request(**kwargs):
-        nonlocal trim_calls
-        trim_calls += 1
-        if trim_calls == 1:
-            raise ContextBudgetExceededException()
-        return kwargs["messages"]
-
-    async def select_channel(_db, _channel_config, _expected_usage, **kwargs):
-        selection_calls.append(set(kwargs.get("excluded_priorities") or set()))
-        raise AssertionError("successful local budget recovery must not switch channels")
-
-    async def generate_response(**kwargs):
-        model_calls.append(kwargs["model_id"])
-        return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model=kwargs["model_id"], usage={})
-
-    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_checkpoint)
-    monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)
-    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", trim_messages_for_model_request)
-    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
-
-    result = await interactive_generation_module.generate_interactive_turn(
-        state,
-        current_tools=[],
-        response_id="response-1",
-    )
-
-    assert result.message.content == "ok"
-    assert trim_calls == 2
-    assert model_calls == ["model-1"]
     assert sum(1 for call in summary_calls if call.get("force")) == 1
     assert selection_calls == []
     assert state.messages[0].content == "compressed request"
@@ -271,7 +223,7 @@ async def test_context_length_failed_summary_falls_through_each_channel_then_rai
     monkeypatch.setattr(interactive_generation_module, "resolve_chat_params", lambda _model_entry, _channel: dict(state.chat_params))
     monkeypatch.setattr(
         interactive_generation_module.ContextManager,
-        "trim_messages_for_model_request",
+        "prepare_messages_for_model_request",
         lambda **kwargs: kwargs["messages"],
     )
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
@@ -487,7 +439,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     )
     monkeypatch.setattr(
         interactive_generation_module.ContextManager,
-        "trim_messages_for_model_request",
+        "prepare_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
@@ -514,7 +466,6 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     assert len(checkpoint_calls) == len(model_requests)
     assert [call["fixed_upper_message_id"] for call in checkpoint_calls] == [1, 1]
     assert all(call.get("reserved_tokens", 0) == 0 for call in checkpoint_calls)
-    assert all(call.get("allow_incremental_input_estimate", True) is True for call in checkpoint_calls)
     for request_messages in model_requests:
         assert [message.role for message in request_messages] == [
             MessageRole.USER,
@@ -627,7 +578,7 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
     )
     monkeypatch.setattr(
         interactive_generation_module.ContextManager,
-        "trim_messages_for_model_request",
+        "prepare_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
     monkeypatch.setattr(
@@ -804,7 +755,7 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
     )
     monkeypatch.setattr(
         interactive_generation_module.ContextManager,
-        "trim_messages_for_model_request",
+        "prepare_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
@@ -973,7 +924,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     )
     monkeypatch.setattr(
         interactive_generation_module.ContextManager,
-        "trim_messages_for_model_request",
+        "prepare_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
@@ -1280,7 +1231,7 @@ async def _run_audited_interactive_dispatch(
             summary_calls_target.append(dict(kwargs))
         return kwargs["messages"]
 
-    def trim_messages_for_model_request(**kwargs):
+    def prepare_messages_for_model_request(**kwargs):
         if trim_calls_target is not None:
             trim_calls_target.append(dict(kwargs))
         return kwargs["messages"]
@@ -1288,7 +1239,7 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(interactive_runtime_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_context_summary_checkpoint)
     monkeypatch.setattr(interactive_generation_module, "materialize_user_environment_prompts", materialize_environment_prompt)
-    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", trim_messages_for_model_request)
+    monkeypatch.setattr(interactive_generation_module.ContextManager, "prepare_messages_for_model_request", prepare_messages_for_model_request)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
     monkeypatch.setattr(interactive_runtime_module, "save_assistant_message", save_assistant)
@@ -1648,29 +1599,14 @@ async def test_interactive_accumulates_output_tokens_and_session_cache_metrics(m
 
 
 @pytest.mark.asyncio
-async def test_interactive_final_budget_check_uses_previous_provider_token_baseline(monkeypatch):
+async def test_interactive_final_request_does_not_use_local_token_baseline_for_hard_limit(monkeypatch):
     trim_calls = []
-    estimate_calls = []
 
     async def save_checkpoint(_checkpoint):
         return None
 
     async def process_tool(tool_call, *args, **kwargs):
         return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content='{"status":"success"}')
-
-    def estimate_incremental(messages, tools, metadata, *, model_id, protocol, context_summary_revision, context_content_revision):
-        estimate_calls.append(
-            {
-                "metadata": metadata,
-                "model_id": model_id,
-                "protocol": protocol,
-                "context_summary_revision": context_summary_revision,
-                "context_content_revision": context_content_revision,
-            }
-        )
-        return None if len(estimate_calls) == 1 else 1234
-
-    monkeypatch.setattr(interactive_generation_module, "estimate_incremental_input_tokens", estimate_incremental)
 
     response, unknown_calls = await _run_audited_interactive_dispatch(
         monkeypatch,
@@ -1687,15 +1623,7 @@ async def test_interactive_final_budget_check_uses_previous_provider_token_basel
     assert response["choices"][0]["message"]["content"] == "finished"
     assert unknown_calls == []
     assert len(trim_calls) == 2
-    assert trim_calls[0].get("required_input_tokens_override") is None
-    assert trim_calls[1].get("required_input_tokens_override") == 1234
-    assert len(estimate_calls) == 2
-    assert estimate_calls[1]["metadata"]["input_tokens_source"] == "provider"
-    assert estimate_calls[1]["metadata"]["input_tokens"] == 1000
-    assert estimate_calls[1]["model_id"] == "model-1"
-    assert estimate_calls[1]["protocol"] == "openai"
-    assert estimate_calls[1]["context_summary_revision"] == 0
-    assert estimate_calls[1]["context_content_revision"] == 0
+    assert all(set(call) == {"messages", "context_window_k", "max_tokens"} for call in trim_calls)
 
 
 @pytest.mark.asyncio

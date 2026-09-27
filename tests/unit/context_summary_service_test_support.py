@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT, CONTEXT_SUMMARY_PROMPT
@@ -18,10 +19,38 @@ from app.models.message import InternalMessage, MessageRole
 
 
 def _patch_token_counter(monkeypatch, token_counter):
-    monkeypatch.setattr(common_module, "estimate_tokens", token_counter)
-    monkeypatch.setattr(history_module, "estimate_tokens", token_counter)
-    monkeypatch.setattr(service_module, "estimate_tokens", token_counter)
-    monkeypatch.setattr(stage_module, "estimate_tokens", token_counter)
+    def scoped_token_counter(content, **_kwargs):
+        return token_counter(content)
+
+    def request_token_counter(messages, tools, **_kwargs):
+        message_tokens = sum(scoped_token_counter(serialize_message(message)) for message in messages)
+        tool_tokens = scoped_token_counter(json.dumps(tools, ensure_ascii=False, separators=(",", ":"))) if tools else 0
+        return message_tokens + tool_tokens
+
+    monkeypatch.setattr(common_module, "estimate_tokens", scoped_token_counter)
+    monkeypatch.setattr(history_module, "estimate_tokens", scoped_token_counter)
+    monkeypatch.setattr(service_module, "estimate_tokens", scoped_token_counter)
+    monkeypatch.setattr(service_module, "estimate_request_context_tokens", request_token_counter)
+    monkeypatch.setattr(
+        stage_module,
+        "estimate_context_summary_prompt_tokens",
+        lambda _model, content: scoped_token_counter(content),
+    )
+    monkeypatch.setattr(
+        stage_module,
+        "estimate_context_summary_text_tokens",
+        lambda _model, content: scoped_token_counter(content),
+    )
+    monkeypatch.setattr(
+        reduction_module,
+        "estimate_context_summary_prompt_tokens",
+        lambda _model, content: scoped_token_counter(content),
+    )
+    monkeypatch.setattr(
+        reduction_module,
+        "estimate_context_summary_text_tokens",
+        lambda _model, content: scoped_token_counter(content),
+    )
 
 
 def _summary_cfg(threshold_percent: int = 90) -> SimpleNamespace:
@@ -161,7 +190,7 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
             profile=profile,
             cfg=cfg,
             prompt=prompt,
-            input_tokens=sum(max(1, stage_module.estimate_tokens(serialize_message(message))) for message in conversation_messages),
+            input_tokens=sum(max(1, service_module.estimate_tokens(serialize_message(message))) for message in conversation_messages),
             safety_margin_tokens=safety_margin_tokens,
         )
         return stage_module.GeneratedSummaryResult(
@@ -189,7 +218,7 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
             ),
             input_tokens=max(
                 1,
-                stage_module.estimate_tokens(lower_stage.content),
+                service_module.estimate_tokens(lower_stage.content),
             ),
             safety_margin_tokens=safety_margin_tokens,
         )

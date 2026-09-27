@@ -196,8 +196,13 @@ def _patch_multifragment_completion_barrier(
     monkeypatch.setattr(summary_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
         summary_module,
-        "estimate_tokens",
-        lambda content: 10 if str(content).startswith("summary-") else 100,
+        "estimate_context_summary_prompt_tokens",
+        lambda _model, _content: 100,
+    )
+    monkeypatch.setattr(
+        summary_module,
+        "estimate_context_summary_text_tokens",
+        lambda _model, content: 10 if str(content).startswith("summary-") else 100,
     )
     return events
 
@@ -354,13 +359,28 @@ def test_fragment_replacement_tokens_include_existing_persistent_summary(
         content="newly eligible history",
         existing_summary="existing persistent summary",
     )
+    model = ContextSummaryModelSnapshot(
+        channel_id=1,
+        channel_name="summary-channel",
+        model_id="summary-model",
+        protocol="openai",
+        base_url="https://example.invalid",
+        api_key="secret",
+        priority=1,
+        context_window_tokens=2048,
+        max_output_tokens=256,
+        temperature=0.7,
+        top_p=None,
+        safety_margin_tokens=0,
+        input_budget_tokens=1792,
+    )
     monkeypatch.setattr(
         stage_module,
-        "estimate_tokens",
-        lambda content: 920 if content == fragment.existing_summary else 0,
+        "estimate_context_summary_text_tokens",
+        lambda _model, content: 920 if content == fragment.existing_summary else 0,
     )
 
-    assert stage_module.fragment_replacement_input_tokens(fragment) == 960
+    assert stage_module.fragment_replacement_input_tokens(fragment, model=model) == 960
 
 
 def test_context_summary_exception_detail_expands_task_group_and_cause():
@@ -502,8 +522,13 @@ async def test_refinement_stage_keeps_direct_lower_stage_range_and_completion_ba
     )
     monkeypatch.setattr(
         reduction_module,
-        "estimate_tokens",
-        lambda content: 100 if content == "long lower summary" else 10,
+        "estimate_context_summary_prompt_tokens",
+        lambda _model, _content: 10,
+    )
+    monkeypatch.setattr(
+        reduction_module,
+        "estimate_context_summary_text_tokens",
+        lambda _model, content: 100 if content == "long lower summary" else 10,
     )
 
     stage = await reduction_module.execute_refinement_stage(
@@ -599,8 +624,13 @@ async def test_refinement_stage_invalidates_recovered_non_reducing_fragment(
     monkeypatch.setattr(stage_module, "invalidate_summary_stage", invalidate_stage)
     monkeypatch.setattr(
         reduction_module,
-        "estimate_tokens",
-        lambda content: 100 if content == "long lower summary" else 10,
+        "estimate_context_summary_prompt_tokens",
+        lambda _model, _content: 10,
+    )
+    monkeypatch.setattr(
+        reduction_module,
+        "estimate_context_summary_text_tokens",
+        lambda _model, content: 100 if content == "long lower summary" else 10,
     )
 
     with pytest.raises(RuntimeError) as exc_info:

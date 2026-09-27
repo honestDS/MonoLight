@@ -103,7 +103,9 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
                 "temperature": 0,
                 "top_p": 1,
                 "chat_timeout": 30,
-            }
+            },
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
         )
         if hasattr(request_messages, "__await__"):
             request_messages = await request_messages
@@ -116,8 +118,8 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         )
         return (
             responses.pop(0),
-            None,
-            {},
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
             None,
             {
                 "context_window_k": 128,
@@ -254,7 +256,9 @@ async def test_tools_disabled_reply_corrects_illegal_tool_calls_without_persisti
                 "temperature": 0,
                 "top_p": 1,
                 "chat_timeout": 30,
-            }
+            },
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
         )
         if hasattr(request_messages, "__await__"):
             request_messages = await request_messages
@@ -269,8 +273,8 @@ async def test_tools_disabled_reply_corrects_illegal_tool_calls_without_persisti
         )
         return (
             responses.pop(0),
-            None,
-            {},
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
             None,
             {
                 "context_window_k": 128,

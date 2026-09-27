@@ -9,17 +9,19 @@ import pytest
 
 from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.core.audit.confirmation import ConfirmationDecision, is_confirmation_candidate, message_has_quote, parse_confirmation_decision
-from app.core.audit.service import (
+from app.core.audit.context_budget import (
     AUDIT_READ_TEXT_FILE_TOOL_SCHEMA,
-    _audit_max_input_tokens,
-    _audit_read_token_budget,
-    _audit_read_tool_message,
+    build_read_tool_message,
+    fit_file_tool_payload_to_context,
+    fit_read_result_to_context,
+    max_input_tokens,
+    read_token_budget,
+)
+from app.core.audit.service import (
     _call_auditor,
     _collect_file_mutation_snapshots,
     _file_checks_are_sufficient,
     _file_snapshots_from_reads,
-    _fit_audit_file_tool_payload_to_context,
-    _fit_audit_read_result_to_context,
     _parse_results,
     _read_for_audit_sync,
     _requires_confirmation_from_evidence,
@@ -768,21 +770,21 @@ def test_truncated_file_check_with_matching_metadata_does_not_require_confirmati
     assert _requires_confirmation_from_evidence(tool_call, snapshots, [{**read, "status": "unreadable", "content": None}], [valid_check])
 
 
-def test_audit_read_token_budget_shrinks_as_messages_grow():
+def testread_token_budget_shrinks_as_messages_grow():
     chat_params = {"context_window_k": 8, "max_tokens": 512}
     messages = [InternalMessage(role=MessageRole.SYSTEM, content="audit")]
 
-    initial_budget, initial_context_tokens = _audit_read_token_budget(messages, chat_params)
+    initial_budget, initial_context_tokens = read_token_budget(messages, chat_params)
     messages.append(InternalMessage(role=MessageRole.USER, content="evidence " * 500))
-    later_budget, later_context_tokens = _audit_read_token_budget(messages, chat_params)
+    later_budget, later_context_tokens = read_token_budget(messages, chat_params)
 
     assert later_context_tokens > initial_context_tokens
     assert later_budget < initial_budget
 
 
-def test_audit_max_input_tokens_uses_proportional_safety_margin_with_minimum():
-    assert _audit_max_input_tokens({"context_window_k": 8, "max_tokens": 512}) == 8000 - 512 - 800
-    assert _audit_max_input_tokens({"context_window_k": 1, "max_tokens": 512}) == 1000 - 512 - 256
+def testmax_input_tokens_uses_proportional_safety_margin_with_minimum():
+    assert max_input_tokens({"context_window_k": 8, "max_tokens": 512}) == 8000 - 512 - 800
+    assert max_input_tokens({"context_window_k": 1, "max_tokens": 512}) == 1000 - 512 - 256
 
 
 def test_small_file_tool_write_audit_payload_is_unchanged_without_argument_evidence():
@@ -798,7 +800,7 @@ def test_small_file_tool_write_audit_payload_is_unchanged_without_argument_evide
         ],
     }
 
-    adapted_payload = _fit_audit_file_tool_payload_to_context(
+    adapted_payload = fit_file_tool_payload_to_context(
         "audit",
         payload,
         {"context_window_k": 2, "max_tokens": 256},
@@ -824,7 +826,7 @@ def test_large_file_tool_write_audit_payload_uses_prefix_evidence_within_input_b
     }
     chat_params = {"context_window_k": 2, "max_tokens": 256}
 
-    adapted_payload = _fit_audit_file_tool_payload_to_context("audit", payload, chat_params)
+    adapted_payload = fit_file_tool_payload_to_context("audit", payload, chat_params)
     adapted_call = adapted_payload["tool_calls"][0]
     adapted_content = adapted_call["arguments"]["content"]
     evidence = adapted_call["argument_evidence"]["content"]
@@ -845,7 +847,7 @@ def test_large_file_tool_write_audit_payload_uses_prefix_evidence_within_input_b
         "truncated": True,
         "bytes_read": len(adapted_content.encode("utf-8")),
     }
-    assert request_tokens <= _audit_max_input_tokens(chat_params)
+    assert request_tokens <= max_input_tokens(chat_params)
 
 
 def test_multiple_file_tool_write_payloads_preserve_short_content_and_fairly_truncate_long_content():
@@ -866,7 +868,7 @@ def test_multiple_file_tool_write_payloads_preserve_short_content_and_fairly_tru
         ]
     }
 
-    adapted_payload = _fit_audit_file_tool_payload_to_context(
+    adapted_payload = fit_file_tool_payload_to_context(
         "audit",
         payload,
         {"context_window_k": 2, "max_tokens": 256},
@@ -907,7 +909,7 @@ def test_large_file_tool_edit_and_patch_audit_payload_bounds_mutation_content():
         ]
     }
 
-    adapted_payload = _fit_audit_file_tool_payload_to_context(
+    adapted_payload = fit_file_tool_payload_to_context(
         "audit",
         payload,
         {"context_window_k": 2, "max_tokens": 256},
@@ -1056,20 +1058,20 @@ def test_audit_read_result_fits_escaped_json_within_input_budget():
     }
     chat_params = {"context_window_k": 2, "max_tokens": 256}
     messages = [InternalMessage(role=MessageRole.SYSTEM, content="audit")]
-    max_input_tokens = _audit_max_input_tokens(chat_params)
+    input_limit = max_input_tokens(chat_params)
     original_context_tokens = estimate_request_context_tokens(
-        [*messages, _audit_read_tool_message("read-1", read_result)],
+        [*messages, build_read_tool_message("read-1", read_result)],
         [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
     )
 
-    fitted_result = _fit_audit_read_result_to_context(messages, "read-1", read_result, chat_params)
+    fitted_result = fit_read_result_to_context(messages, "read-1", read_result, chat_params)
     fitted_context_tokens = estimate_request_context_tokens(
-        [*messages, _audit_read_tool_message("read-1", fitted_result)],
+        [*messages, build_read_tool_message("read-1", fitted_result)],
         [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
     )
 
-    assert original_context_tokens > max_input_tokens
-    assert fitted_context_tokens <= max_input_tokens
+    assert original_context_tokens > input_limit
+    assert fitted_context_tokens <= input_limit
     assert content.startswith(fitted_result["content"])
     assert fitted_result["bytes_read"] == len(fitted_result["content"].encode("utf-8"))
     assert fitted_result["truncated"] is True

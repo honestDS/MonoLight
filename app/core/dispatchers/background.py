@@ -113,6 +113,8 @@ class BackgroundDispatcherMixin:
     @staticmethod
     async def _build_text_only_correction_request(
         retry_chat_params,
+        _chat_channel_obj,
+        _model_entry,
         *,
         db: AsyncSession,
         messages: list[InternalMessage],
@@ -120,13 +122,10 @@ class BackgroundDispatcherMixin:
         session_id: str,
     ) -> list[InternalMessage]:
         request_messages = materialize_user_environment_prompts(messages)
-        return ContextManager.trim_messages_for_model_request(
+        return ContextManager.prepare_messages_for_model_request(
             messages=request_messages,
-            uid=uid,
-            session_id=session_id,
             context_window_k=retry_chat_params["context_window_k"],
             max_tokens=retry_chat_params["max_tokens"],
-            tools=None,
         )
 
     @classmethod
@@ -175,7 +174,7 @@ class BackgroundDispatcherMixin:
                 allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
             tools = profile_tools or None
 
-        async def recover_context_length(chat_params, *, active_tools, target_messages=None):
+        async def recover_context_length(chat_params, chat_channel_obj, model_entry, *, active_tools, target_messages=None):
             nonlocal messages
             if not (initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0):
                 return False
@@ -192,7 +191,9 @@ class BackgroundDispatcherMixin:
                 context_window_k=chat_params["context_window_k"],
                 max_tokens=chat_params["max_tokens"],
                 tools=active_tools,
-                allow_incremental_input_estimate=False,
+                channel_id=chat_channel_obj.id,
+                model_id=model_entry["model_id"],
+                protocol=resolve_model_protocol(model_entry),
                 force=True,
             )
             if recovered_messages == recovery_messages:
@@ -202,7 +203,7 @@ class BackgroundDispatcherMixin:
                 messages = recovery_messages
             return True
 
-        async def build_initial_request(chat_params):
+        async def build_initial_request(chat_params, chat_channel_obj, model_entry):
             nonlocal messages
             if submission_context is None:
                 messages = await prepare_messages(
@@ -247,19 +248,19 @@ class BackgroundDispatcherMixin:
                     context_window_k=chat_params["context_window_k"],
                     max_tokens=chat_params["max_tokens"],
                     tools=tools,
+                    channel_id=chat_channel_obj.id,
+                    model_id=model_entry["model_id"],
+                    protocol=resolve_model_protocol(model_entry),
                 )
             if cleaned_guidance_prompt:
                 for message in reversed(messages):
                     if message.role == MessageRole.USER:
                         message.guidance_prompt = cleaned_guidance_prompt
                         break
-            return ContextManager.trim_messages_for_model_request(
+            return ContextManager.prepare_messages_for_model_request(
                 messages=materialize_user_environment_prompts(messages),
-                uid=uid,
-                session_id=session_id,
                 context_window_k=chat_params["context_window_k"],
                 max_tokens=chat_params["max_tokens"],
-                tools=tools,
             )
 
         logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, allow_tools=allow_tools).info(t("LOG_PROACTIVE_REPLY_GENERATION_STARTED"))
@@ -349,14 +350,11 @@ class BackgroundDispatcherMixin:
                 )
                 correction_context_messages = [*messages, *correction_messages]
 
-                async def build_correction_request(retry_chat_params):
-                    return ContextManager.trim_messages_for_model_request(
+                async def build_correction_request(retry_chat_params, _chat_channel_obj, _model_entry):
+                    return ContextManager.prepare_messages_for_model_request(
                         messages=materialize_user_environment_prompts(correction_context_messages),
-                        uid=uid,
-                        session_id=session_id,
                         context_window_k=retry_chat_params["context_window_k"],
                         max_tokens=retry_chat_params["max_tokens"],
-                        tools=tools,
                     )
 
                 retry_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
@@ -392,14 +390,11 @@ class BackgroundDispatcherMixin:
                     )
                     text_only_context_messages = [*correction_context_messages, *text_only_messages]
 
-                    async def build_text_only_request(retry_chat_params):
-                        return ContextManager.trim_messages_for_model_request(
+                    async def build_text_only_request(retry_chat_params, _chat_channel_obj, _model_entry):
+                        return ContextManager.prepare_messages_for_model_request(
                             messages=materialize_user_environment_prompts(text_only_context_messages),
-                            uid=uid,
-                            session_id=session_id,
                             context_window_k=retry_chat_params["context_window_k"],
                             max_tokens=retry_chat_params["max_tokens"],
-                            tools=None,
                         )
 
                     text_only_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
@@ -711,7 +706,7 @@ class BackgroundDispatcherMixin:
             turn_messages.append(confirmation_message)
             return confirmation_message, turn_messages, []
 
-        async def build_final_request(final_chat_params):
+        async def build_final_request(final_chat_params, chat_channel_obj, model_entry):
             nonlocal messages
             if initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
                 messages = await apply_context_summary_checkpoint(
@@ -726,15 +721,15 @@ class BackgroundDispatcherMixin:
                     context_window_k=final_chat_params["context_window_k"],
                     max_tokens=final_chat_params["max_tokens"],
                     tools=None,
+                    channel_id=chat_channel_obj.id,
+                    model_id=model_entry["model_id"],
+                    protocol=resolve_model_protocol(model_entry),
                 )
             request_messages = materialize_user_environment_prompts(messages)
-            return ContextManager.trim_messages_for_model_request(
+            return ContextManager.prepare_messages_for_model_request(
                 messages=request_messages,
-                uid=uid,
-                session_id=session_id,
                 context_window_k=final_chat_params["context_window_k"],
                 max_tokens=final_chat_params["max_tokens"],
-                tools=None,
             )
 
         final_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(

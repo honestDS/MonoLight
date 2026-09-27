@@ -248,6 +248,7 @@ async def count_lower_stage_merge_groups(
     lower_stage_key: str,
     max_group_tokens: int,
     page_size: int = CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE,
+    token_counter: Callable[[str], int] = estimate_tokens,
 ) -> int:
     group_count = 0
     async for _ in iter_lower_stage_merge_groups(
@@ -255,6 +256,7 @@ async def count_lower_stage_merge_groups(
         lower_stage_key=lower_stage_key,
         max_group_tokens=max_group_tokens,
         page_size=page_size,
+        token_counter=token_counter,
     ):
         group_count += 1
     return group_count
@@ -267,6 +269,7 @@ async def iter_lower_stage_merge_groups(
     max_group_tokens: int,
     page_size: int = CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE,
     first_group_index: int = 0,
+    token_counter: Callable[[str], int] = estimate_tokens,
 ) -> AsyncIterator[SummaryFragmentInput]:
     fragments = iter_completed_lower_stage_fragments(
         work_dedupe_key=work_dedupe_key,
@@ -277,5 +280,6 @@ async def iter_lower_stage_merge_groups(
         fragments,
         max_group_tokens=max_group_tokens,
         first_group_index=first_group_index,
+        token_counter=token_counter,
     ):
         yield group

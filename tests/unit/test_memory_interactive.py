@@ -211,7 +211,7 @@ def _install_dispatcher_stubs(
     monkeypatch.setattr(interactive_runtime_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_checkpoint)
     monkeypatch.setattr(interactive_generation_module, "materialize_user_environment_prompts", materialize_environment_prompt)
-    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
+    monkeypatch.setattr(interactive_generation_module.ContextManager, "prepare_messages_for_model_request", lambda **kwargs: kwargs["messages"])
     monkeypatch.setattr(interactive_runtime_module, "run_memory_recall_precheck", precheck)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
@@ -436,11 +436,10 @@ async def test_memory_recall_is_not_prechecked_without_enabled_memory(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_memory_precheck_metadata_is_not_used_as_formal_incremental_baseline(monkeypatch):
+async def test_memory_precheck_metadata_is_not_used_as_formal_provider_usage(monkeypatch):
     cfg = _build_cfg(SimpleNamespace(enabled=True), max_turns=1)
     request_log = []
     event_log = []
-    baselines = []
 
     async def precheck(context):
         context.latest_precheck_request_metadata = {
@@ -451,16 +450,8 @@ async def test_memory_precheck_metadata_is_not_used_as_formal_incremental_baseli
             "protocol": "openai",
             "context_summary_revision": 0,
             "context_content_revision": 0,
-            "system_tokens": 1,
-            "tools_tokens": 2,
-            "request_message_min_id": 10,
-            "request_message_max_id": 10,
         }
         return build_result(context, "completed")
-
-    def estimate_incremental(messages, tools, metadata, **kwargs):
-        baselines.append(metadata)
-        return None
 
     _install_dispatcher_stubs(
         monkeypatch,
@@ -470,12 +461,10 @@ async def test_memory_precheck_metadata_is_not_used_as_formal_incremental_baseli
         event_log,
         precheck,
     )
-    monkeypatch.setattr(interactive_generation_module, "estimate_incremental_input_tokens", estimate_incremental)
 
     response = await _dispatch_non_stream(additional_fetcher=lambda: _empty_batch())
 
     assert len(request_log) == 1
-    assert baselines == [None]
     assert response["llm_request_metadata"]["input_tokens_source"] == "estimated"
 
 

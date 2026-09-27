@@ -13,7 +13,7 @@ from app.core.constants import (
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_state import InteractiveDispatchState
-from app.core.exceptions import ApiKeyException, ContextBudgetExceededException, LLMContextLengthException, LLMException
+from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra
 from app.core.utils.context_summary import ContextSummaryTriggerMode
@@ -27,18 +27,11 @@ from app.core.utils.dispatcher.helpers import (
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
-from app.core.utils.token_calibration import (
-    INPUT_TOKEN_ESTIMATE_RAW_KEY,
-    build_token_calibration_metadata,
-    extract_token_calibration_factor,
-)
 from app.core.utils.request_token_baseline import (
     MAIN_DIALOGUE_REQUEST_PURPOSE,
     accumulate_session_cache_metrics,
     build_provider_request_usage_metadata,
-    build_request_token_baseline,
     build_session_cache_metrics,
-    estimate_incremental_input_tokens,
     extract_provider_token_metrics,
     extract_reusable_token_metrics,
     extract_session_total_output_tokens,
@@ -99,6 +92,8 @@ async def generate_interactive_turn(
         stream_state.buffered_content_chunks.clear()
         stream_state.buffered_reasoning_chunks.clear()
         try:
+            current_channel_id = getattr(state.chat_channel_obj, "id", None)
+            current_channel_id = current_channel_id if isinstance(current_channel_id, int) and not isinstance(current_channel_id, bool) and current_channel_id > 0 else None
             if state.checkpoint_state.upper_message_id is not None:
                 state.messages = await apply_context_summary_checkpoint(
                     state.db,
@@ -114,6 +109,7 @@ async def generate_interactive_turn(
                     tools=current_tools,
                     work_validity_checker=state.context_summary_work_validity_checker,
                     lifecycle_event_callback=state.context_summary_lifecycle_callback,
+                    channel_id=current_channel_id,
                     model_id=state.model_entry["model_id"],
                     protocol=resolve_model_protocol(state.model_entry),
                     previous_llm_request_metadata=(state.latest_llm_request_metadata if isinstance(state.latest_llm_request_metadata, dict) and state.latest_llm_request_metadata.get("input_tokens_source") == "provider" else None),
@@ -154,55 +150,16 @@ async def generate_interactive_turn(
                     state.checkpoint_state.session_total_output_tokens,
                     persisted_session_total_output_tokens,
                 )
-            previous_input_token_baseline_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) and previous_in_memory_llm_request_metadata.get("input_tokens_source") == "provider" else previous_session_llm_request_metadata
-            previous_display_token_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) else previous_input_token_baseline_metadata
-            incremental_input_tokens = estimate_incremental_input_tokens(
-                request_messages,
-                current_tools,
-                previous_input_token_baseline_metadata,
-                model_id=model_id,
-                protocol=protocol,
-                context_summary_revision=context_summary_revision,
-                context_content_revision=context_content_revision,
-            )
+            previous_display_token_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) else previous_session_llm_request_metadata
             api_key = state.chat_channel_obj.get_decrypted_api_key()
             base_url = state.chat_channel_obj.base_url
             http_proxy = get_channel_http_proxy(state.chat_channel_obj)
             custom_headers = get_model_custom_headers(state.model_entry)
-            calibration_factor = extract_token_calibration_factor(
-                previous_input_token_baseline_metadata,
-                model_id=model_id,
-                protocol=protocol,
-            )
-            request_token_estimate = await LLMClient.estimate_request_input_tokens(
-                api_key=api_key,
-                base_url=base_url,
-                model_id=model_id,
-                messages=request_messages,
-                tools=current_tools,
-                protocol=protocol,
-                timeout=state.chat_params["chat_timeout"],
-                http_proxy=http_proxy,
-                custom_headers=custom_headers,
-                calibration_factor=calibration_factor,
-            )
-            if request_token_estimate.source == "provider_count":
-                estimated_input_tokens = request_token_estimate.input_tokens
-            elif incremental_input_tokens is not None:
-                estimated_input_tokens = incremental_input_tokens
-            else:
-                estimated_input_tokens = request_token_estimate.input_tokens
 
-            request_messages = ContextManager.trim_messages_for_model_request(
+            request_messages = ContextManager.prepare_messages_for_model_request(
                 messages=request_messages,
-                uid=state.uid,
-                session_id=state.session_id,
                 context_window_k=state.chat_params["context_window_k"],
                 max_tokens=state.chat_params["max_tokens"],
-                tools=current_tools,
-                required_input_tokens_override=estimated_input_tokens,
-                model_id=model_id,
-                protocol=protocol,
             )
             generation_kwargs = {
                 "api_key": api_key,
@@ -217,7 +174,6 @@ async def generate_interactive_turn(
                 "tool_choice": tool_choice,
                 "protocol": protocol,
                 "timeout": state.chat_params["chat_timeout"],
-                "request_context_tokens": estimated_input_tokens,
                 "http_proxy": http_proxy,
                 "custom_headers": custom_headers,
             }
@@ -226,27 +182,22 @@ async def generate_interactive_turn(
                 "turn": state.current_turn,
                 "response_id": response_id,
                 "request_purpose": MAIN_DIALOGUE_REQUEST_PURPOSE,
-                "input_tokens": estimated_input_tokens,
+                "input_tokens": 0,
                 "input_tokens_source": "estimated",
                 "total_output_tokens": state.checkpoint_state.session_total_output_tokens,
                 "context_window_tokens": max(1, int(state.chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K),
                 "max_output_tokens": max(0, int(state.chat_params["max_tokens"])),
-                **build_request_token_baseline(
-                    request_messages,
-                    current_tools,
-                    model_id=model_id,
-                    protocol=protocol,
-                    context_summary_revision=context_summary_revision,
-                    context_content_revision=context_content_revision,
-                ),
+                **({"channel_id": current_channel_id} if current_channel_id is not None else {}),
+                "model_id": model_id,
+                "protocol": protocol,
+                "context_summary_revision": context_summary_revision,
+                "context_content_revision": context_content_revision,
                 **extract_reusable_token_metrics(previous_display_token_metadata),
                 **build_session_cache_metrics(
                     state.checkpoint_state.session_total_input_tokens,
                     state.checkpoint_state.session_total_cached_tokens,
                 ),
             }
-            if request_token_estimate.raw_local_tokens is not None:
-                state.latest_llm_request_metadata[INPUT_TOKEN_ESTIMATE_RAW_KEY] = request_token_estimate.raw_local_tokens
             if state.stream_event_callback is not None:
                 await state.stream_event_callback(dict(state.latest_llm_request_metadata))
             await state.db.commit()
@@ -288,17 +239,7 @@ async def generate_interactive_turn(
                 state.checkpoint_state.session_total_output_tokens += provider_token_metrics["output_tokens"]
                 provider_token_metrics["output_tokens"] = state.checkpoint_state.total_output_tokens
                 provider_token_metrics["total_output_tokens"] = state.checkpoint_state.session_total_output_tokens
-            calibration_metadata = build_token_calibration_metadata(
-                previous_input_token_baseline_metadata,
-                model_id=model_id,
-                protocol=protocol,
-                raw_estimated_tokens=request_token_estimate.raw_local_tokens,
-                provider_input_tokens=provider_token_metrics.get("input_tokens"),
-            )
-            provider_metadata_updates = {
-                **provider_token_metrics,
-                **calibration_metadata,
-            }
+            provider_metadata_updates = dict(provider_token_metrics)
             metadata_changed = any(state.latest_llm_request_metadata.get(field) != value for field, value in provider_metadata_updates.items())
             state.latest_llm_request_metadata.update(provider_metadata_updates)
             if state.request_metadata_callback is not None:
@@ -351,12 +292,12 @@ async def generate_interactive_turn(
             )
         except ApiKeyException:
             raise
-        except (LLMException, ContextBudgetExceededException) as exc:
+        except LLMException as exc:
             if stream_state.emitted_stream_content:
                 raise
 
             current_priority = state.channel_rule.priority
-            context_recovery_required = isinstance(exc, (LLMContextLengthException, ContextBudgetExceededException))
+            context_recovery_required = isinstance(exc, LLMContextLengthException)
             if context_recovery_required and current_priority not in context_length_recovery_priorities and state.checkpoint_state.upper_message_id is not None:
                 context_length_recovery_priorities.add(current_priority)
                 previous_messages = state.messages
@@ -375,9 +316,9 @@ async def generate_interactive_turn(
                         tools=current_tools,
                         work_validity_checker=state.context_summary_work_validity_checker,
                         lifecycle_event_callback=state.context_summary_lifecycle_callback,
+                        channel_id=current_channel_id,
                         model_id=state.model_entry["model_id"],
                         protocol=resolve_model_protocol(state.model_entry),
-                        allow_incremental_input_estimate=False,
                         force=True,
                     )
                 except Exception:

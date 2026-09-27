@@ -1,4 +1,5 @@
-﻿import os
+import os
+import re
 
 import tiktoken
 from dotenv import load_dotenv
@@ -6,18 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _DEFAULT_ENCODING = "cl100k_base"
-_OPENAI_PROTOCOLS = frozenset({"openai", "openai_responses"})
-_O200K_MODEL_PREFIXES = (
-    "gpt-5",
-    "gpt-4.5",
-    "gpt-4.1",
-    "gpt-4o",
-    "chatgpt-4o",
-    "o1",
-    "o3",
-    "o4",
-)
-_O200K_HARMONY_MODEL_PREFIXES = ("gpt-oss",)
+_VERSIONED_GPT_ALIAS_PATTERN = re.compile(r"^(gpt-\d+)\.(\d+)(.*)$", re.IGNORECASE)
 
 
 def _estimate_tokens_by_chars(text: str) -> int:
@@ -33,20 +23,25 @@ def resolve_token_encoding_name(
     *,
     protocol: str | None = None,
 ) -> str:
+    # 协议只描述请求格式，不能用于推断真实模型厂商（例如 NewAPI/OpenRouter）。
+    del protocol
     normalized_model = model_id.strip() if isinstance(model_id, str) else ""
     if normalized_model:
         try:
             return tiktoken.encoding_name_for_model(normalized_model)
         except KeyError:
-            pass
+            try:
+                return tiktoken.encoding_name_for_model(f"{normalized_model}-")
+            except KeyError:
+                pass
 
-    normalized_protocol = protocol.strip().lower() if isinstance(protocol, str) else ""
-    lowered_model = normalized_model.lower()
-    if normalized_protocol in _OPENAI_PROTOCOLS:
-        if lowered_model.startswith(_O200K_HARMONY_MODEL_PREFIXES):
-            return "o200k_harmony"
-        if lowered_model.startswith(_O200K_MODEL_PREFIXES):
-            return "o200k_base"
+            match = _VERSIONED_GPT_ALIAS_PATTERN.match(normalized_model)
+            if match is not None:
+                compatibility_name = f"{match.group(1)}-{match.group(2)}{match.group(3)}"
+                try:
+                    return tiktoken.encoding_name_for_model(compatibility_name)
+                except KeyError:
+                    pass
     return _DEFAULT_ENCODING
 
 
@@ -117,4 +112,3 @@ def truncate_text_to_tokens(
             else:
                 high = middle - 1
         return text[:low], True
-

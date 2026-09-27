@@ -49,7 +49,7 @@ async def test_complete_candidate_including_covered_user_block_must_reduce_repla
     async def measure_replacement(*_args, **_kwargs):
         return 50
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if "<covered_user_message " in content:
             return 60
         if "compressed history" in content:
@@ -90,6 +90,7 @@ async def test_complete_candidate_including_covered_user_block_must_reduce_repla
             safety_margin_tokens=0,
             trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
             fixed_upper_message_id=4,
+            force=True,
         )
 
     assert exc_info.value.message == ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED
@@ -121,7 +122,7 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         def debug(self, message, **kwargs):
             debug_calls.append((message, kwargs))
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content == "current":
             return 10
         if content.startswith('{"role":'):
@@ -150,6 +151,7 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
+        confirmed_input_tokens=600,
         lifecycle_event_callback=lifecycle_event_callback,
     )
 
@@ -196,7 +198,7 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
     async def lifecycle_event_callback(event):
         lifecycle_events.append(event)
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content == "current":
             return 10
         if content.startswith('{"role":'):
@@ -218,6 +220,7 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
         reserved_tokens=0,
         safety_margin_tokens=0,
         lifecycle_event_callback=lifecycle_event_callback,
+        confirmed_input_tokens=600,
     )
 
     assert below_ninety_state == ContextSummaryState(content=None, message_id=None)
@@ -239,6 +242,7 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
         reserved_tokens=0,
         safety_margin_tokens=0,
         lifecycle_event_callback=lifecycle_event_callback,
+        confirmed_input_tokens=600,
     )
 
     assert at_fifty_state == ContextSummaryState(
@@ -259,7 +263,7 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
 async def test_context_summary_force_bypasses_threshold(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content == "current":
             return 10
         if content.startswith('{"role":'):
@@ -297,7 +301,7 @@ async def test_context_summary_force_bypasses_threshold(monkeypatch):
 async def test_context_summary_does_not_persist_candidate_that_misses_compression_goal(monkeypatch):
     _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content.startswith('{"role":'):
             return 200
         if "compressed history" in content:
@@ -321,6 +325,7 @@ async def test_context_summary_does_not_persist_candidate_that_misses_compressio
             max_tokens=24,
             reserved_tokens=0,
             safety_margin_tokens=0,
+            force=True,
         )
 
     assert exc_info.value.message == ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED
@@ -374,6 +379,7 @@ async def test_context_summary_refinement_failure_uses_specific_user_error(monke
             max_tokens=24,
             reserved_tokens=0,
             safety_margin_tokens=0,
+            force=True,
         )
 
     assert exc_info.value.message == ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED
@@ -434,7 +440,7 @@ async def test_context_summary_refines_until_goal_without_attempt_limit(monkeypa
         "refined-3": 40,
     }
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         return token_counts.get(content, 20)
 
     monkeypatch.setattr(service_module, "calc_token_usage", calc_usage)
@@ -457,6 +463,7 @@ async def test_context_summary_refines_until_goal_without_attempt_limit(monkeypa
         max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
+        force=True,
     )
 
     assert refinement_calls == [1, 2, 3]
@@ -466,7 +473,7 @@ async def test_context_summary_refines_until_goal_without_attempt_limit(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_context_summary_threshold_uses_previous_provider_plus_new_override(monkeypatch):
+async def test_context_summary_threshold_uses_confirmed_provider_input_only(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
     bound_fields = {}
 
@@ -493,12 +500,12 @@ async def test_context_summary_threshold_uses_previous_provider_plus_new_overrid
         reserved_tokens=0,
         safety_margin_tokens=0,
         fixed_request_messages=[InternalMessage(role=MessageRole.SYSTEM, content="system")],
-        required_input_tokens_override=100,
+        confirmed_input_tokens=100,
     )
 
     assert state == ContextSummaryState(content=None, message_id=None)
-    assert bound_fields["required_tokens"] == 100
-    assert bound_fields["required_tokens_source"] == "previous_provider_plus_new"
+    assert bound_fields["trigger_input_tokens"] == 100
+    assert bound_fields["trigger_input_tokens_source"] == "provider"
     assert selected_calls == []
     assert update_calls == []
     assert generated_calls == []
@@ -508,7 +515,9 @@ async def test_context_summary_threshold_uses_previous_provider_plus_new_overrid
 async def test_fixed_request_summary_usage_includes_reserved_runtime_tokens(monkeypatch):
     _patch_summary_dependencies(monkeypatch)
     captured_additional_tokens = []
+    refinement_calls = []
     original_measure_context_request_usage = service_module.measure_context_request_usage
+    final_request_estimates = iter([950, 900])
 
     async def measure_snapshot_history(*_args, **_kwargs):
         return 1000, 1
@@ -516,6 +525,13 @@ async def test_fixed_request_summary_usage_includes_reserved_runtime_tokens(monk
     def measure_context_request_usage(**kwargs):
         captured_additional_tokens.append(kwargs["additional_non_system_tokens"])
         return original_measure_context_request_usage(**kwargs)
+
+    async def refine_completed_summary_stage(*_args, refinement_index, **_kwargs):
+        refinement_calls.append(refinement_index)
+        return reduction_module.CompletedSummaryResult(
+            content="short",
+            stage=SimpleNamespace(content="short", refinement_index=refinement_index),
+        )
 
     monkeypatch.setattr(
         service_module,
@@ -526,6 +542,16 @@ async def test_fixed_request_summary_usage_includes_reserved_runtime_tokens(monk
         service_module,
         "measure_context_request_usage",
         measure_context_request_usage,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "estimate_request_context_tokens",
+        lambda *_args, **_kwargs: next(final_request_estimates),
+    )
+    monkeypatch.setattr(
+        reduction_module,
+        "refine_completed_summary_stage",
+        refine_completed_summary_stage,
     )
 
     await service_module.ensure_context_summary(
@@ -540,18 +566,19 @@ async def test_fixed_request_summary_usage_includes_reserved_runtime_tokens(monk
         max_tokens=24,
         reserved_tokens=37,
         safety_margin_tokens=0,
+        force=True,
         fixed_request_messages=[InternalMessage(role=MessageRole.SYSTEM, content="system")],
     )
 
     assert captured_additional_tokens[0] == 1037
-    assert 37 in captured_additional_tokens[1:]
+    assert refinement_calls == [1]
 
 
 @pytest.mark.asyncio
-async def test_context_summary_threshold_includes_tool_definition_tokens(monkeypatch):
+async def test_context_summary_confirmed_provider_threshold_allows_tool_definition_compression(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content.startswith("["):
             return 150
         if content.startswith('{"role":'):
@@ -573,6 +600,7 @@ async def test_context_summary_threshold_includes_tool_definition_tokens(monkeyp
         reserved_tokens=0,
         tools=[{"type": "function", "function": {"name": "search"}}],
         safety_margin_tokens=0,
+        confirmed_input_tokens=600,
     )
 
     assert state == ContextSummaryState(
@@ -600,7 +628,7 @@ async def test_ensure_context_summary_failure_uses_specific_user_error(monkeypat
     async def cleanup_work(work_dedupe_key):
         cleanup_calls.append(work_dedupe_key)
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content == "current":
             return 10
         if content.startswith('{"role":'):
@@ -627,6 +655,7 @@ async def test_ensure_context_summary_failure_uses_specific_user_error(monkeypat
             max_tokens=24,
             reserved_tokens=0,
             safety_margin_tokens=0,
+            force=True,
             lifecycle_event_callback=lifecycle_event_callback,
         )
 
@@ -665,7 +694,7 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
     async def get_state(_db, *, session_id, uid):
         return next(states)
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content == "current":
             return 10
         if content.startswith('{"role":'):
@@ -687,6 +716,7 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
         max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
+        force=True,
     )
 
     assert state == ContextSummaryState(
@@ -715,7 +745,7 @@ async def test_context_summary_work_invalid_before_persist_discards_candidate(
         validity_checks += 1
         return validity_checks < 3
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content == "current":
             return 10
         if content.startswith('{"role":'):
@@ -744,6 +774,7 @@ async def test_context_summary_work_invalid_before_persist_discards_candidate(
             max_tokens=24,
             reserved_tokens=0,
             safety_margin_tokens=0,
+            force=True,
             work_validity_checker=check_work_validity,
         )
 
@@ -756,10 +787,10 @@ async def test_context_summary_work_invalid_before_persist_discards_candidate(
 
 
 @pytest.mark.asyncio
-async def test_context_summary_trigger_includes_reserved_and_current_message_tokens(monkeypatch):
+async def test_context_summary_local_reserved_and_current_tokens_do_not_trigger_without_provider_confirmation(monkeypatch):
     selected_calls, _update_calls, _generated_calls = _patch_summary_dependencies(monkeypatch)
 
-    def estimate_tokens(content):
+    def estimate_tokens(content, **_kwargs):
         if content == "large current input":
             return 250
         if content.startswith('{"role":'):
@@ -782,9 +813,7 @@ async def test_context_summary_trigger_includes_reserved_and_current_message_tok
         safety_margin_tokens=0,
     )
 
-    assert state == ContextSummaryState(
-        content="compressed history",
-        message_id=4,
-        revision=1,
-    )
-    assert len(selected_calls) >= 1
+    assert state == ContextSummaryState(content=None, message_id=None)
+    assert selected_calls == []
+    assert _update_calls == []
+    assert _generated_calls == []

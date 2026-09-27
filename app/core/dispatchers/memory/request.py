@@ -31,7 +31,6 @@ from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.llm_request_params import build_memory_recall_precheck_generation_params
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
-    build_request_token_baseline,
     build_session_cache_metrics,
     extract_provider_token_metrics,
     extract_session_total_output_tokens,
@@ -39,7 +38,7 @@ from app.core.utils.request_token_baseline import (
 )
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
-from app.providers.llm.client import LLMClient, estimate_request_context_tokens
+from app.providers.llm.client import LLMClient
 
 from .types import MemoryRecallContext
 
@@ -148,13 +147,10 @@ async def prepare_request_messages(
         model_entry=context.model_entry,
         protocol=protocol,
     )
-    request_messages = ContextManager.trim_messages_for_model_request(
+    request_messages = ContextManager.prepare_messages_for_model_request(
         messages=request_messages,
-        uid=context.uid,
-        session_id=context.session_id,
         context_window_k=context.chat_params["context_window_k"],
         max_tokens=precheck_generation_params["max_tokens"],
-        tools=[MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
     )
     session = await session_crud.get_by_session_id(context.db, context.session_id)
     if session is not None and hasattr(context.db, "refresh"):
@@ -164,8 +160,6 @@ async def prepare_request_messages(
         total_input_tokens=context.session_total_input_tokens,
         total_cached_tokens=context.session_total_cached_tokens,
     )
-    summary_revision = getattr(session, "context_summary_revision", 0) if session is not None else 0
-    content_revision = getattr(session, "context_content_revision", 0) if session is not None else 0
     persisted_total = extract_session_total_output_tokens(
         getattr(session, "llm_request_metadata", None),
     )
@@ -179,17 +173,13 @@ async def prepare_request_messages(
 
     model_id = context.model_entry["model_id"]
     protocol = resolve_model_protocol(context.model_entry)
-    input_tokens = estimate_request_context_tokens(
-        request_messages,
-        [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
-    )
     response_id = str(uuid.uuid4())
     metadata = {
         "type": "llm_request_metadata",
         "turn": 0,
         "response_id": response_id,
         "request_purpose": MEMORY_RECALL_REQUEST_PURPOSE,
-        "input_tokens": input_tokens,
+        "input_tokens": 0,
         "input_tokens_source": "estimated",
         "total_output_tokens": context.session_total_output_tokens,
         "context_window_tokens": max(
@@ -197,14 +187,8 @@ async def prepare_request_messages(
             int(context.chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K,
         ),
         "max_output_tokens": max(0, int(precheck_generation_params["max_tokens"])),
-        **build_request_token_baseline(
-            request_messages,
-            [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
-            model_id=model_id,
-            protocol=protocol,
-            context_summary_revision=summary_revision,
-            context_content_revision=content_revision,
-        ),
+        "model_id": model_id,
+        "protocol": protocol,
         **build_session_cache_metrics(
             context.session_total_input_tokens,
             context.session_total_cached_tokens,
@@ -239,7 +223,6 @@ async def generate(
         "timeout": context.chat_params["chat_timeout"],
         "http_proxy": get_channel_http_proxy(channel),
         "custom_headers": get_model_custom_headers(model_entry),
-        "request_context_tokens": metadata["input_tokens"],
     }
     if context.dispatcher_mode == "stream":
 

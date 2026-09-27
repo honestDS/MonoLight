@@ -117,6 +117,8 @@ async def measure_persistent_history(
     session_id: str,
     uid: str,
     snapshot: ContextSummarySnapshot,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> tuple[int, int]:
     total_tokens = 0
     message_count = 0
@@ -126,7 +128,14 @@ async def measure_persistent_history(
         uid=uid,
         snapshot=snapshot,
     ):
-        total_tokens += sum(estimate_tokens(serialize_message(message)) for message in round_messages)
+        total_tokens += sum(
+            estimate_tokens(
+                serialize_message(message),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            for message in round_messages
+        )
         message_count += len(round_messages)
     return total_tokens, message_count
 
@@ -138,6 +147,8 @@ async def iter_persistent_summary_source_units(
     uid: str,
     snapshot: ContextSummarySnapshot,
     max_unit_tokens: int,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> AsyncIterator[SummarySourceUnit]:
     expected_id = snapshot.expected_summary_message_id or 0
     target_id = snapshot.persistent_summary_target_id or 0
@@ -152,10 +163,27 @@ async def iter_persistent_summary_source_units(
         snapshot=snapshot,
     ):
         round_content = join_messages(round_messages)
-        serialized_token_floor = sum(max(1, estimate_tokens(serialize_message(message))) for message in round_messages)
+        serialized_token_floor = sum(
+            max(
+                1,
+                estimate_tokens(
+                    serialize_message(message),
+                    model_id=model_id,
+                    protocol=protocol,
+                ),
+            )
+            for message in round_messages
+        )
         round_tokens = max(
             serialized_token_floor,
-            max(1, estimate_tokens(round_content)),
+            max(
+                1,
+                estimate_tokens(
+                    round_content,
+                    model_id=model_id,
+                    protocol=protocol,
+                ),
+            ),
         )
         if round_tokens <= max_unit_tokens:
             start_id = round_messages[0].id
@@ -174,6 +202,8 @@ async def iter_persistent_summary_source_units(
             source_units = iter_round_source_units(
                 round_messages,
                 max_unit_tokens=max_unit_tokens,
+                model_id=model_id,
+                protocol=protocol,
             )
 
         for unit in source_units:
@@ -251,6 +281,8 @@ async def build_summary_fragment_plan(
     uid: str,
     snapshot: ContextSummarySnapshot,
     max_fragment_tokens: int,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> SummaryFragmentPlan:
     units = iter_persistent_summary_source_units(
         db,
@@ -258,6 +290,8 @@ async def build_summary_fragment_plan(
         uid=uid,
         snapshot=snapshot,
         max_unit_tokens=max_fragment_tokens,
+        model_id=model_id,
+        protocol=protocol,
     )
     unit_token_counts = [unit.token_count async for unit in units]
     return build_balanced_fragment_plan(
@@ -276,6 +310,8 @@ async def iter_summary_fragments(
     plan: SummaryFragmentPlan,
     max_fragment_tokens: int,
     first_fragment_index: int = 0,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> AsyncIterator[SummaryFragmentInput]:
     units = iter_persistent_summary_source_units(
         db,
@@ -283,6 +319,8 @@ async def iter_summary_fragments(
         uid=uid,
         snapshot=snapshot,
         max_unit_tokens=max_fragment_tokens,
+        model_id=model_id,
+        protocol=protocol,
     )
     async for fragment in iter_grouped_summary_source_units(
         units,

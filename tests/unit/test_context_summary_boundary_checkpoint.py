@@ -393,19 +393,17 @@ async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(
         captured.update(kwargs)
         return ContextSummaryState(content=None, message_id=None)
 
-    def estimate_incremental(messages, tools, metadata, **kwargs):
-        captured["estimate_messages"] = messages
-        captured["estimate_metadata"] = metadata
-        captured["estimate_kwargs"] = kwargs
-        return 352_375
-
     monkeypatch.setattr(checkpoint_module, "load_current_session_todo_snapshot", load_snapshot)
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
-    monkeypatch.setattr(checkpoint_module, "estimate_incremental_input_tokens", estimate_incremental)
 
     previous_metadata = {
+        "channel_id": 9,
         "input_tokens": 344_000,
         "input_tokens_source": "provider",
+        "model_id": "gpt-5.6-luna",
+        "protocol": "openai_responses",
+        "context_summary_revision": 1,
+        "context_content_revision": 0,
     }
     await checkpoint_module.apply_context_summary_checkpoint(
         db_session,
@@ -425,15 +423,14 @@ async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(
         context_window_k=250,
         max_tokens=20_480,
         tools=[],
+        channel_id=9,
         model_id="gpt-5.6-luna",
         protocol="openai_responses",
         previous_llm_request_metadata=previous_metadata,
     )
 
-    assert captured["estimate_metadata"] is previous_metadata
-    assert captured["required_input_tokens_override"] == 352_375
+    assert captured["confirmed_input_tokens"] == 344_000
     assert captured["reserved_tokens"] > 0
-    assert any("current_session_todo_snapshot" in str(message.content) for message in captured["estimate_messages"])
     assert all("current_session_todo_snapshot" not in str(message.content) for message in captured["fixed_request_messages"])
 
 
@@ -481,8 +478,13 @@ async def test_checkpoint_keeps_an_entire_merged_user_batch_after_its_earliest_p
 async def test_checkpoint_refreshes_same_work_content_version_when_provider_metadata_exists(monkeypatch):
     captured = {}
     previous_metadata = {
+        "channel_id": 13,
         "input_tokens": 7500,
         "input_tokens_source": "provider",
+        "model_id": "grok-4.5",
+        "protocol": "openai",
+        "context_summary_revision": 5,
+        "context_content_revision": 7,
     }
     session = SimpleNamespace(
         context_summary_revision=2,
@@ -508,14 +510,8 @@ async def test_checkpoint_refreshes_same_work_content_version_when_provider_meta
         captured.update(kwargs)
         return ContextSummaryState(content=None, message_id=None)
 
-    def estimate_incremental(_messages, _tools, metadata, **kwargs):
-        captured["estimate_metadata"] = metadata
-        captured["estimate_kwargs"] = kwargs
-        return kwargs["context_summary_revision"] * 1000 + kwargs["context_content_revision"]
-
     monkeypatch.setattr(checkpoint_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
-    monkeypatch.setattr(checkpoint_module, "estimate_incremental_input_tokens", estimate_incremental)
 
     await checkpoint_module.apply_context_summary_checkpoint(
         db,
@@ -534,16 +530,14 @@ async def test_checkpoint_refreshes_same_work_content_version_when_provider_meta
         context_window_k=8,
         max_tokens=512,
         tools=None,
+        channel_id=13,
         model_id="grok-4.5",
         protocol="openai",
         previous_llm_request_metadata=previous_metadata,
     )
 
     assert db.refreshed_sessions == [session]
-    assert captured["estimate_metadata"] is previous_metadata
-    assert captured["estimate_kwargs"]["context_summary_revision"] == 5
-    assert captured["estimate_kwargs"]["context_content_revision"] == 7
-    assert captured["required_input_tokens_override"] == 5007
+    assert captured["confirmed_input_tokens"] == 7500
 
 
 @pytest.mark.asyncio
@@ -751,6 +745,7 @@ async def test_context_summary_lease_loss_after_candidate_generation_never_persi
                 max_tokens=128,
                 reserved_tokens=0,
                 work_validity_checker=check_work_validity,
+                force=True,
             ),
             timeout=1,
         )

@@ -41,7 +41,7 @@ def test_confirmed_tool_result_budget_uses_provider_input_plus_confirmed_tool_ca
             )
         ],
     )
-    monkeypatch.setattr(executor_confirmed_module, "estimate_tokens", lambda _text: 5_000)
+    monkeypatch.setattr(executor_confirmed_module, "estimate_tokens", lambda _text, **_kwargs: 5_000)
     monkeypatch.setattr(executor_confirmed_module, "message_token_text", lambda _message: "confirmed-tool-call")
 
     budget_tokens = executor_confirmed_module._resolve_confirmed_tool_result_round_budget_tokens(
@@ -72,7 +72,7 @@ def test_confirmed_tool_result_budget_keeps_minimal_budget_when_provider_baselin
             )
         ],
     )
-    monkeypatch.setattr(executor_confirmed_module, "estimate_tokens", lambda _text: 2_000)
+    monkeypatch.setattr(executor_confirmed_module, "estimate_tokens", lambda _text, **_kwargs: 2_000)
     monkeypatch.setattr(executor_confirmed_module, "message_token_text", lambda _message: "confirmed-tool-call")
 
     budget_tokens = executor_confirmed_module._resolve_confirmed_tool_result_round_budget_tokens(

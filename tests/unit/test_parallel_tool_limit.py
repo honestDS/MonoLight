@@ -53,6 +53,7 @@ def _state(tool_limit: int = 5, tools: list[dict] | None = None) -> SimpleNamesp
             tool=SimpleNamespace(max_parallel_tools=tool_limit, executor_max_workers=tool_limit),
         ),
         memory_enabled=False,
+        model_entry={"model_id": "gpt-5.6-luna", "protocol": "OPENAI"},
         chat_params={"context_window_k": 4, "max_tokens": 100},
         tools=[MANAGE_TODO_TOOL_SCHEMA] if tools is None else tools,
         allowed_knowledge_base_ids=[],

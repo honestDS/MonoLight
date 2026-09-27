@@ -211,6 +211,7 @@ async def test_non_streaming_interactive_work_delegates_provider_usage_persisten
     persistence_calls = []
     request_metadata = {
         "type": "llm_request_metadata",
+        "channel_id": 11,
         "input_tokens": 100,
         "input_tokens_source": "provider",
         "cached_tokens": 25,

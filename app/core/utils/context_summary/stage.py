@@ -39,7 +39,11 @@ from app.core.utils.context_summary.history import (
     iter_summary_fragments,
     measure_persistent_history,
 )
-from app.core.utils.context_summary.model_call import call_context_summary_model
+from app.core.utils.context_summary.model_call import (
+    call_context_summary_model,
+    estimate_context_summary_prompt_tokens,
+    estimate_context_summary_text_tokens,
+)
 from app.core.utils.context_summary.pipeline import (
     SummaryFragmentInput,
     SummaryFragmentPlan,
@@ -51,7 +55,6 @@ from app.core.utils.context_summary.selection import (
     select_context_summary_model,
 )
 from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
-from app.core.utils.tokenizer import estimate_tokens
 from app.models.context_summary_stage import (
     ContextSummaryFragment,
     ContextSummaryStage,
@@ -128,14 +131,14 @@ async def call_fixed_summary_model(
     input_tokens: int,
 ) -> str:
     last_error: Exception | None = None
-    prompt_tokens = estimate_tokens(prompt)
+    prompt_tokens = estimate_context_summary_prompt_tokens(model, prompt)
     for attempt in range(1, CONTEXT_SUMMARY_MODEL_ATTEMPTS + 1):
         output_tokens: int | None = None
         try:
             generated = await call_context_summary_model(model=model, prompt=prompt)
             if not generated:
                 raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODEL_RESULT_EMPTY))
-            output_tokens = estimate_tokens(generated)
+            output_tokens = estimate_context_summary_text_tokens(model, generated)
             if output_tokens >= input_tokens:
                 raise RuntimeError(
                     t(
@@ -173,8 +176,15 @@ def fragment_prompt(fragment: SummaryFragmentInput) -> str:
     )
 
 
-def fragment_replacement_input_tokens(fragment: SummaryFragmentInput) -> int:
-    return fragment.token_count + estimate_tokens(fragment.existing_summary or "")
+def fragment_replacement_input_tokens(
+    fragment: SummaryFragmentInput,
+    *,
+    model: ContextSummaryModelSnapshot,
+) -> int:
+    return fragment.token_count + estimate_context_summary_text_tokens(
+        model,
+        fragment.existing_summary or "",
+    )
 
 
 def build_summary_work_identity(
@@ -343,6 +353,8 @@ async def generate_snapshot_summary_with_model(
         session_id=session_id,
         uid=uid,
         snapshot=snapshot,
+        model_id=model.model_id,
+        protocol=model.protocol,
     )
     if total_tokens <= 0:
         return GeneratedSummaryResult(
@@ -355,7 +367,7 @@ async def generate_snapshot_summary_with_model(
         recent_dialogue="(none)",
         conversation="(none)",
     )
-    prompt_overhead_tokens = estimate_tokens(empty_prompt)
+    prompt_overhead_tokens = estimate_context_summary_prompt_tokens(model, empty_prompt)
     max_fragment_tokens = model.input_budget_tokens - prompt_overhead_tokens - 32
     if max_fragment_tokens <= 0:
         raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="fragment"))
@@ -366,6 +378,8 @@ async def generate_snapshot_summary_with_model(
         uid=uid,
         snapshot=snapshot,
         max_fragment_tokens=max_fragment_tokens,
+        model_id=model.model_id,
+        protocol=model.protocol,
     )
     expected_fragment_count = fragment_plan.fragment_count
     if expected_fragment_count <= 0:
@@ -476,14 +490,19 @@ async def generate_snapshot_summary_with_model(
         plan=fragment_plan,
         max_fragment_tokens=max_fragment_tokens,
         first_fragment_index=first_fragment_index,
+        model_id=model.model_id,
+        protocol=model.protocol,
     )
 
     async def process_fragment(fragment: SummaryFragmentInput) -> SummaryFragmentResult:
         await ensure_context_summary_work_valid(work_validity_checker)
         prompt = fragment_prompt(fragment)
-        if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
+        if not model.accepts_prompt_tokens(estimate_context_summary_prompt_tokens(model, prompt)):
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW, stage="fragment"))
-        replacement_input_tokens = fragment_replacement_input_tokens(fragment)
+        replacement_input_tokens = fragment_replacement_input_tokens(
+            fragment,
+            model=model,
+        )
         generated = await call_fixed_summary_model(
             model=model,
             prompt=prompt,
@@ -494,7 +513,7 @@ async def generate_snapshot_summary_with_model(
             message_start_id=fragment.message_start_id,
             message_end_id=fragment.message_end_id,
             content=generated,
-            token_count=estimate_tokens(generated),
+            token_count=estimate_context_summary_text_tokens(model, generated),
         )
 
     try:

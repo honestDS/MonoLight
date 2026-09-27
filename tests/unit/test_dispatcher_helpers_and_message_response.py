@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, ERR_VALIDATION_FAILED
-from app.core.exceptions import ContextBudgetExceededException, LLMContextLengthException, ParameterException
+from app.core.exceptions import LLMContextLengthException, ParameterException
 from app.core.i18n import t
 from app.core.utils.dispatcher import channel_call, helpers
 from app.models.message import InternalMessage, InternalResponse, MessageResponse, MessageRole, MessageType
@@ -135,7 +135,7 @@ async def test_channel_call_releases_connection_and_reports_empty_response_usage
     response, *_ = await channel_call.generate_chat_with_fallback(
         db,
         chat_channel=SimpleNamespace(rules=[], chat_timeout=30),
-        request_builder=lambda _params: [InternalMessage(role=MessageRole.USER, content="hello")],
+        request_builder=lambda _params, _channel, _model: [InternalMessage(role=MessageRole.USER, content="hello")],
         call_context="test",
         cursor_key="profile:CHAT",
         uid="user-1",
@@ -147,6 +147,7 @@ async def test_channel_call_releases_connection_and_reports_empty_response_usage
     assert response.model == "model-2"
     assert [metadata["input_tokens"] for metadata in request_metadata] == [100, 100]
     assert [metadata["cached_tokens"] for metadata in request_metadata] == [100, 0]
+    assert [metadata["channel_id"] for metadata in request_metadata] == [1, 1]
     provider_request_ids = [metadata["_provider_request_id"] for metadata in request_metadata]
     assert all(isinstance(request_id, str) and request_id for request_id in provider_request_ids)
     assert provider_request_ids[0] != provider_request_ids[1]
@@ -200,7 +201,7 @@ async def test_channel_call_context_length_error_uses_existing_channel_fallback(
     response, *_ = await channel_call.generate_chat_with_fallback(
         db,
         chat_channel=SimpleNamespace(rules=[], chat_timeout=30),
-        request_builder=lambda _params: [InternalMessage(role=MessageRole.USER, content="hello")],
+        request_builder=lambda _params, _channel, _model: [InternalMessage(role=MessageRole.USER, content="hello")],
         call_context="test",
         cursor_key="profile:CHAT",
         uid="user-1",
@@ -249,8 +250,8 @@ async def test_channel_call_context_length_recovery_retries_current_channel_befo
             model=kwargs["model_id"],
         )
 
-    async def recover(chat_params):
-        recovery_calls.append(dict(chat_params))
+    async def recover(chat_params, channel, model_entry):
+        recovery_calls.append((dict(chat_params), channel.id, model_entry["model_id"]))
         return True
 
     monkeypatch.setattr(channel_call, "select_channel", select_channel)
@@ -259,7 +260,7 @@ async def test_channel_call_context_length_recovery_retries_current_channel_befo
     response, *_ = await channel_call.generate_chat_with_fallback(
         db,
         chat_channel=SimpleNamespace(rules=[], chat_timeout=30),
-        request_builder=lambda _params: [InternalMessage(role=MessageRole.USER, content="hello")],
+        request_builder=lambda _params, _channel, _model: [InternalMessage(role=MessageRole.USER, content="hello")],
         call_context="test",
         cursor_key="profile:CHAT",
         uid="user-1",
@@ -271,63 +272,7 @@ async def test_channel_call_context_length_recovery_retries_current_channel_befo
     assert model_calls == ["model-1", "model-1", "model-2"]
     assert selections == [None, {1}]
     assert len(recovery_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_channel_call_local_context_budget_recovery_retries_current_channel_before_provider_call(monkeypatch):
-    db = _TrackingSession()
-    channel = SimpleNamespace(
-        id=1,
-        name="channel-1",
-        base_url="https://example.invalid",
-        get_decrypted_api_key=lambda: "secret-1",
-    )
-    selections = []
-    request_calls = 0
-    model_calls = []
-    recovery_calls = []
-
-    async def select_channel(*_args, **kwargs):
-        selections.append(kwargs.get("excluded_priorities"))
-        return channel, {"model_id": "model-1", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
-
-    def request_builder(_params):
-        nonlocal request_calls
-        request_calls += 1
-        if request_calls == 1:
-            raise ContextBudgetExceededException()
-        return [InternalMessage(role=MessageRole.USER, content="compressed")]
-
-    async def generate(**kwargs):
-        model_calls.append(kwargs["model_id"])
-        return InternalResponse(
-            message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"),
-            model=kwargs["model_id"],
-        )
-
-    async def recover(chat_params):
-        recovery_calls.append(dict(chat_params))
-        return True
-
-    monkeypatch.setattr(channel_call, "select_channel", select_channel)
-    monkeypatch.setattr(channel_call.LLMClient, "generate", generate)
-
-    response, *_ = await channel_call.generate_chat_with_fallback(
-        db,
-        chat_channel=SimpleNamespace(rules=[], chat_timeout=30),
-        request_builder=request_builder,
-        call_context="test",
-        cursor_key="profile:CHAT",
-        uid="user-1",
-        session_id="session-1",
-        context_length_recovery_callback=recover,
-    )
-
-    assert response.message.content == "ok"
-    assert request_calls == 2
-    assert model_calls == ["model-1"]
-    assert selections == [None]
-    assert len(recovery_calls) == 1
+    assert recovery_calls[0][1:] == (1, "model-1")
 
 
 @pytest.mark.asyncio
@@ -357,7 +302,7 @@ async def test_channel_call_context_length_error_is_returned_when_no_fallback_ch
         await channel_call.generate_chat_with_fallback(
             db,
             chat_channel=SimpleNamespace(rules=[], chat_timeout=30),
-            request_builder=lambda _params: [InternalMessage(role=MessageRole.USER, content="hello")],
+            request_builder=lambda _params, _channel, _model: [InternalMessage(role=MessageRole.USER, content="hello")],
             call_context="test",
             cursor_key="profile:CHAT",
             uid="user-1",

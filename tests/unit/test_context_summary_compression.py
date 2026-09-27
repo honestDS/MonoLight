@@ -73,6 +73,7 @@ async def test_summary_recompresses_until_configured_threshold_goal(monkeypatch)
         max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
+        force=True,
     )
 
     assert state.content == "short summary"
@@ -143,6 +144,7 @@ async def test_summary_refinement_stops_when_token_reduction_is_too_small(monkey
             max_tokens=24,
             reserved_tokens=0,
             safety_margin_tokens=0,
+            force=True,
         )
 
     assert len(generated_calls) == 3

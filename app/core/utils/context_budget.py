@@ -43,6 +43,59 @@ class ContextRequestUsage:
         return self.required_input_tokens >= self.summary_trigger_tokens
 
 
+def calculate_context_input_capacity_tokens(
+    *,
+    context_window_k: int,
+    max_tokens: int,
+    safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+) -> int:
+    context_window_tokens = max(1, context_window_k * CONTEXT_WINDOW_TOKENS_PER_K)
+    return context_window_tokens - max(max_tokens, 0) - max(safety_margin_tokens, 0)
+
+
+def calculate_context_summary_trigger_tokens(
+    *,
+    context_window_k: int,
+    max_tokens: int,
+    threshold_percent: int,
+    safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+) -> int:
+    if not 1 <= threshold_percent <= 100:
+        raise ValueError(
+            t(
+                ERR_VALUE_MUST_BE_BETWEEN,
+                field="threshold_percent",
+                minimum=1,
+                maximum=100,
+            )
+        )
+    input_capacity_tokens = calculate_context_input_capacity_tokens(
+        context_window_k=context_window_k,
+        max_tokens=max_tokens,
+        safety_margin_tokens=safety_margin_tokens,
+    )
+    if input_capacity_tokens <= 0:
+        raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
+    return max(1, input_capacity_tokens * threshold_percent // 100)
+
+
+def ensure_configured_request_capacity_available(
+    *,
+    context_window_k: int,
+    max_tokens: int,
+    safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+) -> None:
+    if (
+        calculate_context_input_capacity_tokens(
+            context_window_k=context_window_k,
+            max_tokens=max_tokens,
+            safety_margin_tokens=safety_margin_tokens,
+        )
+        <= 0
+    ):
+        raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
+
+
 def count_message_tokens(
     messages: list[InternalMessage],
     *,
@@ -76,16 +129,6 @@ def measure_context_request_usage(
     model_id: str | None = None,
     protocol: str | None = None,
 ) -> ContextRequestUsage:
-    if not 1 <= threshold_percent <= 100:
-        raise ValueError(
-            t(
-                ERR_VALUE_MUST_BE_BETWEEN,
-                field="threshold_percent",
-                minimum=1,
-                maximum=100,
-            )
-        )
-
     system_tokens, non_system_tokens = count_message_tokens(
         messages,
         model_id=model_id,
@@ -103,17 +146,18 @@ def measure_context_request_usage(
     )
     message_tokens = system_tokens + non_system_tokens
     required_input_tokens = message_tokens + budget.tools_tokens
-    threshold_base = max(
-        1,
-        budget.context_window_tokens - budget.output_tokens - budget.safety_margin_tokens,
-    )
     return ContextRequestUsage(
         budget=budget,
         system_tokens=system_tokens,
         non_system_tokens=non_system_tokens,
         message_tokens=message_tokens,
         required_input_tokens=required_input_tokens,
-        summary_trigger_tokens=max(1, threshold_base * threshold_percent // 100),
+        summary_trigger_tokens=calculate_context_summary_trigger_tokens(
+            context_window_k=context_window_k,
+            max_tokens=max_tokens,
+            threshold_percent=threshold_percent,
+            safety_margin_tokens=safety_margin_tokens,
+        ),
     )
 
 
@@ -151,10 +195,3 @@ def build_context_request_budget(
         total_input_budget=total_input_budget,
         non_system_budget=non_system_budget,
     )
-
-
-def ensure_context_request_budget_available(
-    budget: ContextRequestBudget,
-) -> None:
-    if budget.total_input_budget <= 0 or budget.non_system_budget <= 0:
-        raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)

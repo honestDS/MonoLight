@@ -335,14 +335,12 @@ async def test_merge_group_count_reuses_paginated_group_stream(
     )
 
     assert count == 3
-    assert calls == [
-        {
-            "work_dedupe_key": "work-key",
-            "lower_stage_key": "lower-stage",
-            "max_group_tokens": 40,
-            "page_size": 2,
-        }
-    ]
+    assert len(calls) == 1
+    assert calls[0]["work_dedupe_key"] == "work-key"
+    assert calls[0]["lower_stage_key"] == "lower-stage"
+    assert calls[0]["max_group_tokens"] == 40
+    assert calls[0]["page_size"] == 2
+    assert callable(calls[0]["token_counter"])
 
 
 @pytest.mark.asyncio

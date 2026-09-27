@@ -24,10 +24,9 @@ from app.providers.llm import client as llm_client_module
 from app.providers.llm.client import LLMClient
 
 
-def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monkeypatch):
+def test_llm_request_context_debug_log_does_not_estimate_tokens(monkeypatch):
     bound_fields = {}
     logged_messages = []
-    estimate_calls = []
 
     class CapturingLogger:
         def bind(self, **kwargs):
@@ -45,14 +44,13 @@ def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monk
     tools = [{"type": "function", "function": {"name": "search"}}]
     monkeypatch.setattr(llm_client_module, "logger", CapturingLogger())
 
-    def estimate_request_context_tokens(request_messages, request_tools):
-        estimate_calls.append((request_messages, request_tools))
-        return 321
+    def unexpected_estimate(*_args, **_kwargs):
+        raise AssertionError("request logging must not perform local token estimation")
 
     monkeypatch.setattr(
         llm_client_module,
         "estimate_request_context_tokens",
-        estimate_request_context_tokens,
+        unexpected_estimate,
     )
 
     llm_client_module._log_request_context(
@@ -66,7 +64,7 @@ def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monk
 
     assert logged_messages == [
         (
-            "LLM request context: model={model_id}, protocol={protocol}, streaming={streaming}, messages={message_count}, roles={role_counts}, tools={tool_count}, estimated_tokens={estimated_context_tokens}, max_output_tokens={max_tokens}",
+            "LLM request context: model={model_id}, protocol={protocol}, streaming={streaming}, messages={message_count}, roles={role_counts}, tools={tool_count}, request_context_tokens={request_context_tokens}, max_output_tokens={max_tokens}",
             {
                 "model_id": "model-1",
                 "protocol": "openai",
@@ -74,7 +72,7 @@ def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monk
                 "message_count": 3,
                 "role_counts": {"system": 1, "user": 1, "assistant": 1},
                 "tool_count": 1,
-                "estimated_context_tokens": 321,
+                "request_context_tokens": None,
                 "max_tokens": 512,
             },
         )
@@ -86,13 +84,12 @@ def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monk
         "message_count": 3,
         "role_counts": {"system": 1, "user": 1, "assistant": 1},
         "tool_count": 1,
-        "estimated_context_tokens": 321,
+        "request_context_tokens": None,
         "max_output_tokens": 512,
     }
-    assert estimate_calls == [(messages, tools)]
 
 
-def test_llm_request_context_debug_log_reuses_provided_estimated_tokens(monkeypatch):
+def test_llm_request_context_debug_log_reuses_provided_token_count(monkeypatch):
     bound_fields = {}
     logged_fields = {}
 
@@ -124,8 +121,8 @@ def test_llm_request_context_debug_log_reuses_provided_estimated_tokens(monkeypa
         request_context_tokens=123,
     )
 
-    assert bound_fields["estimated_context_tokens"] == 123
-    assert logged_fields["estimated_context_tokens"] == 123
+    assert bound_fields["request_context_tokens"] == 123
+    assert logged_fields["request_context_tokens"] == 123
 
 
 @pytest.mark.asyncio
