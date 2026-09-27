@@ -39,8 +39,10 @@ from app.core.utils.dispatcher.session_todo_snapshot import (
     persist_session_todo_snapshot_on_tool_results,
 )
 from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
+from app.core.utils.token_calibration import apply_token_calibration, extract_token_calibration_factor
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
+from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
@@ -71,7 +73,22 @@ def _resolve_tool_result_required_input_tokens(
     input_tokens = metadata.get("input_tokens")
     if not isinstance(input_tokens, int) or isinstance(input_tokens, bool) or input_tokens <= 0:
         return None
-    return input_tokens + max(0, estimate_tokens(message_token_text(ai_msg)))
+    model_id = state.model_entry["model_id"]
+    protocol = resolve_model_protocol(state.model_entry)
+    calibration_factor = extract_token_calibration_factor(
+        metadata,
+        model_id=model_id,
+        protocol=protocol,
+    )
+    incremental_tokens = estimate_tokens(
+        message_token_text(ai_msg),
+        model_id=model_id,
+        protocol=protocol,
+    )
+    return input_tokens + apply_token_calibration(
+        max(0, incremental_tokens),
+        calibration_factor,
+    )
 
 
 class AuditExecutionStatePersistenceError(ServerException):
@@ -542,6 +559,8 @@ async def handle_interactive_tool_round(
         tools=state.tools,
         required_input_tokens_override=_resolve_tool_result_required_input_tokens(state, ai_msg),
         fallback_to_local_usage_on_overflow=True,
+        model_id=state.model_entry["model_id"],
+        protocol=resolve_model_protocol(state.model_entry),
     )
     parallel_tool_context = _ParallelToolExecutionContext(
         semaphore=asyncio.Semaphore(state.cfg.tool.executor_max_workers),
@@ -557,6 +576,8 @@ async def handle_interactive_tool_round(
         context_window_k=state.chat_params["context_window_k"],
         tool_call_count=len(executable_tool_calls),
         tool_result_round_budget_tokens=tool_result_round_budget_tokens,
+        model_id=state.model_entry["model_id"],
+        protocol=resolve_model_protocol(state.model_entry),
         context_summary_boundary_message_id=state.checkpoint_state.upper_message_id,
         source_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
     )

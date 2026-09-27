@@ -112,6 +112,8 @@ async def apply_context_summary_checkpoint(
         fixed_upper_message_id=fixed_upper_message_id,
         fixed_request_messages=fixed_request_messages,
         required_input_tokens_override=required_input_tokens_override,
+        model_id=model_id,
+        protocol=protocol,
         work_validity_checker=work_validity_checker,
         lifecycle_event_callback=lifecycle_event_callback,
         force=force,

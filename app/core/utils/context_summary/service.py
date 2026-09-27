@@ -216,6 +216,8 @@ async def _ensure_context_summary(
     fixed_upper_message_id: int | None = None,
     fixed_request_messages: list[InternalMessage] | None = None,
     required_input_tokens_override: int | None = None,
+    model_id: str | None = None,
+    protocol: str | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle: ContextSummaryLifecycle,
     force: bool = False,
@@ -269,6 +271,8 @@ async def _ensure_context_summary(
         uid=uid,
         snapshot=snapshot,
         use_request_token_text=fixed_request_messages is not None,
+        model_id=model_id,
+        protocol=protocol,
     )
     await ensure_context_summary_work_valid(combined_work_validity_checker)
     threshold_percent = cfg.other.context_summary_threshold_percent
@@ -276,7 +280,15 @@ async def _ensure_context_summary(
     required_tokens_source = "full_estimate"
     if fixed_request_messages is not None:
         summary_message = state.as_message()
-        summary_tokens = estimate_tokens(message_token_text(summary_message)) if summary_message is not None else 0
+        summary_tokens = (
+            estimate_tokens(
+                message_token_text(summary_message),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            if summary_message is not None
+            else 0
+        )
         request_usage = measure_context_request_usage(
             messages=fixed_request_messages,
             context_window_k=context_window_k,
@@ -285,6 +297,8 @@ async def _ensure_context_summary(
             safety_margin_tokens=safety_margin_tokens,
             threshold_percent=threshold_percent,
             additional_non_system_tokens=history_tokens + summary_tokens + max(reserved_tokens, 0),
+            model_id=model_id,
+            protocol=protocol,
         )
         usage = {
             "summary_tokens": summary_tokens,
@@ -318,6 +332,8 @@ async def _ensure_context_summary(
             threshold_percent=threshold_percent,
             history_tokens_override=history_tokens,
             history_message_count_override=history_message_count,
+            model_id=model_id,
+            protocol=protocol,
         )
     threshold_reached = force or usage["required_tokens"] >= usage["summary_trigger_tokens"]
     check_result = "forced" if force else ("triggered" if threshold_reached else "skipped")
@@ -435,11 +451,21 @@ async def _ensure_context_summary(
                 safety_margin_tokens=safety_margin_tokens,
                 threshold_percent=threshold_percent,
                 additional_non_system_tokens=max(reserved_tokens, 0),
+                model_id=model_id,
+                protocol=protocol,
             )
             final_usage = {
                 "required_tokens": measured_final_usage.required_input_tokens,
                 "compression_goal_tokens": measured_final_usage.summary_trigger_tokens,
-                "summary_tokens": estimate_tokens(message_token_text(candidate_summary_message)) if candidate_summary_message is not None else 0,
+                "summary_tokens": (
+                    estimate_tokens(
+                        message_token_text(candidate_summary_message),
+                        model_id=model_id,
+                        protocol=protocol,
+                    )
+                    if candidate_summary_message is not None
+                    else 0
+                ),
             }
         else:
             final_usage = calc_token_usage(
@@ -452,6 +478,8 @@ async def _ensure_context_summary(
                 max_tokens=max_tokens,
                 safety_margin_tokens=safety_margin_tokens,
                 threshold_percent=threshold_percent,
+                model_id=model_id,
+                protocol=protocol,
             )
         if final_usage["required_tokens"] <= final_usage["compression_goal_tokens"]:
             break
@@ -537,6 +565,8 @@ async def _ensure_context_summary(
             uid=uid,
             snapshot=snapshot,
             existing_summary=state.content,
+            model_id=model_id,
+            protocol=protocol,
         )
     if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT:
         candidate_summary = append_covered_user_message(
@@ -610,6 +640,8 @@ async def ensure_context_summary(
     fixed_upper_message_id: int | None = None,
     fixed_request_messages: list[InternalMessage] | None = None,
     required_input_tokens_override: int | None = None,
+    model_id: str | None = None,
+    protocol: str | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle_event_callback: ContextSummaryLifecycleCallback | None = None,
     force: bool = False,
@@ -634,6 +666,8 @@ async def ensure_context_summary(
             fixed_upper_message_id=fixed_upper_message_id,
             fixed_request_messages=fixed_request_messages,
             required_input_tokens_override=required_input_tokens_override,
+            model_id=model_id,
+            protocol=protocol,
             work_validity_checker=work_validity_checker,
             lifecycle=lifecycle,
             force=force,

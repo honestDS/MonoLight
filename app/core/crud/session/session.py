@@ -7,6 +7,7 @@ from sqlmodel import select
 from app.core.crud.base import CRUDBase
 from app.core.crud.profile.profile import profile_crud
 from app.core.session_source import default_show_tool_calls_for_source
+from app.core.utils.request_token_baseline import MAIN_DIALOGUE_REQUEST_PURPOSE
 from app.models.session import ChatSession
 
 
@@ -146,6 +147,10 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             "total_input_tokens",
             "total_cached_tokens",
             "cached_tokens",
+            "input_token_estimate_raw",
+            "input_token_calibration_estimated_total",
+            "input_token_calibration_provider_total",
+            "input_token_calibration_samples",
         )
         for field in optional_int_fields:
             if field not in metadata:
@@ -182,6 +187,15 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             if not isinstance(input_tokens_source, str) or input_tokens_source not in {"estimated", "provider"}:
                 return False
             persisted_metadata["input_tokens_source"] = input_tokens_source
+
+        request_purpose = metadata.get("request_purpose")
+        if request_purpose is not None:
+            if not isinstance(request_purpose, str) or not request_purpose.strip():
+                return False
+            if request_purpose != MAIN_DIALOGUE_REQUEST_PURPOSE:
+                return True
+        if metadata.get("input_tokens_source") == "estimated":
+            return True
 
         work_sequence_no = metadata.get("work_sequence_no")
         use_work_order = isinstance(work_sequence_no, int) and not isinstance(work_sequence_no, bool) and work_sequence_no > 0

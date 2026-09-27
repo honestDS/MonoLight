@@ -372,10 +372,10 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         chat_session = await db.get(ChatSession, "session-recall")
         assert chat_session is not None
         assert chat_session.llm_request_metadata is not None
-        assert chat_session.llm_request_metadata["input_tokens"] == 120
+        assert chat_session.llm_request_metadata["input_tokens"] == 100
         assert chat_session.llm_request_metadata["input_tokens_source"] == "provider"
-        assert chat_session.llm_request_metadata["cached_tokens"] == 20
-        assert chat_session.llm_request_metadata["output_tokens"] == 12
+        assert chat_session.llm_request_metadata["cached_tokens"] == 25
+        assert chat_session.llm_request_metadata["output_tokens"] == 10
         assert chat_session.llm_request_metadata["total_input_tokens"] == 1000
         assert chat_session.llm_request_metadata["total_cached_tokens"] == 250
         assert chat_session.llm_request_metadata["cache_hit_rate"] == 0.25

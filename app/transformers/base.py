@@ -16,6 +16,30 @@ from app.models.message import (
 
 
 class BaseTransformer(ABC):
+    @classmethod
+    def build_input_token_payload(
+        cls,
+        *,
+        model_id: str,
+        messages: list[InternalMessage],
+        tools: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def count_input_tokens(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        input_payload: dict[str, Any],
+        timeout: float = 30.0,
+        http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
+    ) -> int | None:
+        del api_key, base_url, model_id, input_payload, timeout, http_proxy, custom_headers
+        return None
+
     async def list_models(
         self,
         api_key: str,

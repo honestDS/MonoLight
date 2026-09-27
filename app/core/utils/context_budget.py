@@ -43,11 +43,20 @@ class ContextRequestUsage:
         return self.required_input_tokens >= self.summary_trigger_tokens
 
 
-def count_message_tokens(messages: list[InternalMessage]) -> tuple[int, int]:
+def count_message_tokens(
+    messages: list[InternalMessage],
+    *,
+    model_id: str | None = None,
+    protocol: str | None = None,
+) -> tuple[int, int]:
     system_tokens = 0
     non_system_tokens = 0
     for message in messages:
-        token_count = estimate_tokens(message_token_text(message))
+        token_count = estimate_tokens(
+            message_token_text(message),
+            model_id=model_id,
+            protocol=protocol,
+        )
         if message.role == MessageRole.SYSTEM:
             system_tokens += token_count
         else:
@@ -64,6 +73,8 @@ def measure_context_request_usage(
     safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     threshold_percent: int = 100,
     additional_non_system_tokens: int = 0,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> ContextRequestUsage:
     if not 1 <= threshold_percent <= 100:
         raise ValueError(
@@ -75,7 +86,11 @@ def measure_context_request_usage(
             )
         )
 
-    system_tokens, non_system_tokens = count_message_tokens(messages)
+    system_tokens, non_system_tokens = count_message_tokens(
+        messages,
+        model_id=model_id,
+        protocol=protocol,
+    )
     non_system_tokens += max(additional_non_system_tokens, 0)
     budget = build_context_request_budget(
         context_window_k=context_window_k,
@@ -83,6 +98,8 @@ def measure_context_request_usage(
         system_tokens=system_tokens,
         tools=tools,
         safety_margin_tokens=safety_margin_tokens,
+        model_id=model_id,
+        protocol=protocol,
     )
     message_tokens = system_tokens + non_system_tokens
     required_input_tokens = message_tokens + budget.tools_tokens
@@ -107,10 +124,20 @@ def build_context_request_budget(
     system_tokens: int = 0,
     tools: list[dict] | None = None,
     safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> ContextRequestBudget:
     context_window_tokens = max(1, context_window_k * CONTEXT_WINDOW_TOKENS_PER_K)
     output_tokens = max(max_tokens, 0)
-    tools_tokens = estimate_tokens(json.dumps(tools, ensure_ascii=False)) if tools else 0
+    tools_tokens = (
+        estimate_tokens(
+            json.dumps(tools, ensure_ascii=False),
+            model_id=model_id,
+            protocol=protocol,
+        )
+        if tools
+        else 0
+    )
     safety_tokens = max(safety_margin_tokens, 0)
     normalized_system_tokens = max(system_tokens, 0)
     total_input_budget = context_window_tokens - output_tokens - tools_tokens - safety_tokens

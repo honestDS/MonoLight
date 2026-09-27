@@ -120,27 +120,28 @@ async def _persist_session_reply_provider_usage(
             new_total_input_tokens += input_tokens
             new_total_cached_tokens += cached_tokens
             new_total_output_tokens += output_tokens
-        incoming_metadata = _metadata_with_work_order(work, _without_provider_usage_fields(metadata))
-        if _incoming_work_metadata_is_current(session, work, incoming_metadata):
-            metadata_to_persist = incoming_metadata
-        else:
-            current_metadata = session.llm_request_metadata
-            metadata_to_persist = dict(current_metadata) if isinstance(current_metadata, dict) else {}
-        metadata_to_persist = {
-            **metadata_to_persist,
-            **build_session_cache_metrics(new_total_input_tokens, new_total_cached_tokens),
-            "total_output_tokens": new_total_output_tokens,
-        }
+        if request_purpose.contributes_to_session_totals:
+            incoming_metadata = _metadata_with_work_order(work, _without_provider_usage_fields(metadata))
+            if _incoming_work_metadata_is_current(session, work, incoming_metadata):
+                metadata_to_persist = incoming_metadata
+            else:
+                current_metadata = session.llm_request_metadata
+                metadata_to_persist = dict(current_metadata) if isinstance(current_metadata, dict) else {}
+            metadata_to_persist = {
+                **metadata_to_persist,
+                **build_session_cache_metrics(new_total_input_tokens, new_total_cached_tokens),
+                "total_output_tokens": new_total_output_tokens,
+            }
 
-        updated = await session_crud.update_llm_request_metadata(
-            usage_db,
-            session_id=work.session_id,
-            uid=work.uid,
-            metadata=metadata_to_persist,
-            commit=False,
-        )
-        if not updated:
-            raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_METADATA_UPDATE_FAILED))
+            updated = await session_crud.update_llm_request_metadata(
+                usage_db,
+                session_id=work.session_id,
+                uid=work.uid,
+                metadata=metadata_to_persist,
+                commit=False,
+            )
+            if not updated:
+                raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_METADATA_UPDATE_FAILED))
         await usage_db.commit()
         return _ProviderUsagePersistenceResult(
             created=True,
@@ -223,6 +224,10 @@ async def _generate_auxiliary_reply_with_request_metadata(
 
     async def persist_request_metadata(metadata: dict[str, Any]) -> None:
         nonlocal latest_request_metadata, session_total_output_tokens, session_total_input_tokens, session_total_cached_tokens, work_output_tokens
+        metadata = {
+            **metadata,
+            "request_purpose": request_purpose.value,
+        }
         provider_usage = extract_provider_request_usage(metadata)
         request_id = provider_usage[0] if provider_usage is not None else None
         request_output_tokens = provider_usage[3] if provider_usage is not None else 0
@@ -261,14 +266,6 @@ async def _generate_auxiliary_reply_with_request_metadata(
                 "output_tokens": work_output_tokens,
                 "total_output_tokens": session_total_output_tokens,
             }
-        else:
-            await session_crud.update_llm_request_metadata(
-                db,
-                session_id=work.session_id,
-                uid=work.uid,
-                metadata=ordered_metadata,
-                commit=False,
-            )
         latest_request_metadata = _without_provider_usage_fields(ordered_metadata)
 
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(

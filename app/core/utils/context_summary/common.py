@@ -64,14 +64,21 @@ def join_messages(messages: list[InternalMessage]) -> str:
     return "\n".join(serialize_message(message) for message in messages)
 
 
-def estimate_summary_tokens(content: str | None) -> int:
+def estimate_summary_tokens(
+    content: str | None,
+    *,
+    model_id: str | None = None,
+    protocol: str | None = None,
+) -> int:
     if not content:
         return 0
     return estimate_tokens(
         CONTEXT_SUMMARY_WRAPPER.format(
             through_message_id=0,
             content=content,
-        )
+        ),
+        model_id=model_id,
+        protocol=protocol,
     )
 
 
@@ -125,15 +132,44 @@ def calc_token_usage(
     threshold_percent: int,
     history_tokens_override: int | None = None,
     history_message_count_override: int | None = None,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> dict[str, int]:
-    summary_tokens = estimate_summary_tokens(summary_content)
-    history_tokens = history_tokens_override if history_tokens_override is not None else sum(estimate_tokens(serialize_message(message)) for message in messages)
-    tools_tokens = estimate_tokens(json.dumps(tools, ensure_ascii=False)) if tools else 0
+    summary_tokens = estimate_summary_tokens(
+        summary_content,
+        model_id=model_id,
+        protocol=protocol,
+    )
+    history_tokens = (
+        history_tokens_override
+        if history_tokens_override is not None
+        else sum(
+            estimate_tokens(
+                serialize_message(message),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            for message in messages
+        )
+    )
+    tools_tokens = (
+        estimate_tokens(
+            json.dumps(tools, ensure_ascii=False),
+            model_id=model_id,
+            protocol=protocol,
+        )
+        if tools
+        else 0
+    )
     context_window_tokens = context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
     output_tokens = max(max_tokens, 0)
     safety_tokens = max(safety_margin_tokens, 0)
     input_budget = max(1, context_window_tokens - output_tokens - safety_tokens)
-    current_message_tokens = estimate_tokens(current_message)
+    current_message_tokens = estimate_tokens(
+        current_message,
+        model_id=model_id,
+        protocol=protocol,
+    )
     required_tokens = reserved_tokens + summary_tokens + history_tokens + current_message_tokens + tools_tokens
     summary_trigger_tokens = max(1, input_budget * threshold_percent // 100)
     return {

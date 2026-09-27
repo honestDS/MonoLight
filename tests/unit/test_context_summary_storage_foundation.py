@@ -245,6 +245,10 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "context_content_revision": 3,
             "system_tokens": 50,
             "tools_tokens": 60,
+            "input_token_estimate_raw": 200,
+            "input_token_calibration_estimated_total": 500,
+            "input_token_calibration_provider_total": 300,
+            "input_token_calibration_samples": 2,
         },
     )
     await db_session.refresh(session)
@@ -260,6 +264,10 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "context_content_revision": 3,
         "system_tokens": 50,
         "tools_tokens": 60,
+        "input_token_estimate_raw": 200,
+        "input_token_calibration_estimated_total": 500,
+        "input_token_calibration_provider_total": 300,
+        "input_token_calibration_samples": 2,
         "output_tokens": 77,
         "total_output_tokens": 567,
         "total_input_tokens": 1000,
@@ -367,6 +375,10 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "context_content_revision": 3,
         "system_tokens": 50,
         "tools_tokens": 60,
+        "input_token_estimate_raw": 200,
+        "input_token_calibration_estimated_total": 500,
+        "input_token_calibration_provider_total": 300,
+        "input_token_calibration_samples": 2,
         "output_tokens": 77,
         "total_output_tokens": 567,
         "total_input_tokens": 1000,
@@ -376,6 +388,63 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "model_id": "grok-4.5",
         "protocol": "openai",
         "input_tokens_source": "provider",
+    }
+
+
+@pytest.mark.asyncio
+async def test_llm_request_metadata_update_ignores_estimated_and_auxiliary_requests(
+    db_session: AsyncSession,
+):
+    session = ChatSession(
+        session_id="session-1",
+        uid="user-1",
+        llm_request_metadata={
+            "input_tokens": 123,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "input_tokens_source": "provider",
+            "total_input_tokens": 123,
+            "total_cached_tokens": 10,
+        },
+    )
+    db_session.add(session)
+    await db_session.commit()
+
+    estimated_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": 999,
+            "input_tokens_source": "estimated",
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "request_purpose": "main_dialogue",
+        },
+    )
+    auxiliary_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": 888,
+            "input_tokens_source": "provider",
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "request_purpose": "memory_recall",
+        },
+    )
+    await db_session.refresh(session)
+
+    assert estimated_updated is True
+    assert auxiliary_updated is True
+    assert session.llm_request_metadata == {
+        "input_tokens": 123,
+        "context_window_tokens": 4096,
+        "max_output_tokens": 512,
+        "input_tokens_source": "provider",
+        "total_input_tokens": 123,
+        "total_cached_tokens": 10,
     }
 
 

@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 
 from app.core.utils import request_token_baseline as baseline_module
 from app.models.message import InternalMessage, MessageRole
@@ -141,7 +141,7 @@ def _metadata_for(messages, tools=None):
 
 
 def test_incremental_input_tokens_add_only_messages_after_provider_baseline(monkeypatch):
-    monkeypatch.setattr(baseline_module, "estimate_tokens", len)
+    monkeypatch.setattr(baseline_module, "estimate_tokens", lambda text, **kwargs: len(text))
     previous_messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="system"),
         InternalMessage(id=1, role=MessageRole.USER, content="old user"),
@@ -168,7 +168,7 @@ def test_incremental_input_tokens_add_only_messages_after_provider_baseline(monk
 
 
 def test_incremental_input_tokens_falls_back_when_history_range_changes(monkeypatch):
-    monkeypatch.setattr(baseline_module, "estimate_tokens", len)
+    monkeypatch.setattr(baseline_module, "estimate_tokens", lambda text, **kwargs: len(text))
     previous_messages = [
         InternalMessage(id=1, role=MessageRole.USER, content="old user"),
         InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
@@ -192,7 +192,7 @@ def test_incremental_input_tokens_falls_back_when_history_range_changes(monkeypa
 
 
 def test_incremental_input_tokens_falls_back_when_model_or_summary_changes(monkeypatch):
-    monkeypatch.setattr(baseline_module, "estimate_tokens", len)
+    monkeypatch.setattr(baseline_module, "estimate_tokens", lambda text, **kwargs: len(text))
     messages = [
         InternalMessage(id=1, role=MessageRole.USER, content="old user"),
         InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
@@ -416,3 +416,4 @@ def test_provider_request_usage_metadata_ignores_estimated_input():
     assert metadata[baseline_module.PROVIDER_CACHED_TOKENS_METADATA_KEY] == 0
     assert metadata[baseline_module.PROVIDER_OUTPUT_TOKENS_METADATA_KEY] == 3
     assert baseline_module.extract_provider_request_usage(metadata) == ("request-2", 0, 0, 3)
+

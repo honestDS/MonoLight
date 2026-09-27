@@ -16,6 +16,7 @@ import { hasHttpResultMessage, shouldFetchHttpWorkStatus } from './sessionListLo
 import { createHttpHistorySyncController } from './httpHistorySync.js'
 import { activateSelectedSessionTransportMode, persistSessionTransportMode, resolveSessionTransportMode, resumeSelectedSessionByTransport } from './sessionTransportMode.js'
 import { createTransportNotifier } from './transportNotifications.js'
+import { isMainDialogueRequestMetadata, mergeLlmRequestMetadata, normalizeLlmRequestMetadata, shouldReplaceLlmRequestMetadata } from './llmRequestMetadata.js'
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import {
@@ -68,46 +69,6 @@ const parseAuditConfirmationResponse = (response) => {
     } catch {}
   }
   return null
-}
-
-const normalizeLlmRequestMetadata = (metadata) => {
-  const tokenFields = ['input_tokens', 'context_window_tokens', 'max_output_tokens']
-  if (!tokenFields.every(field => Number.isFinite(metadata?.[field]) && metadata[field] >= 0)) return null
-
-  const normalizedMetadata = {
-    input_tokens: Math.trunc(metadata.input_tokens),
-    context_window_tokens: Math.trunc(metadata.context_window_tokens),
-    max_output_tokens: Math.trunc(metadata.max_output_tokens)
-  }
-  for (const field of ['output_tokens', 'cached_tokens', 'total_output_tokens']) {
-    if (!Object.prototype.hasOwnProperty.call(metadata, field)) continue
-    if (!Number.isFinite(metadata[field]) || metadata[field] < 0) return null
-    normalizedMetadata[field] = Math.trunc(metadata[field])
-  }
-  if (Object.prototype.hasOwnProperty.call(metadata, 'cache_hit_rate')) {
-    if (!Number.isFinite(metadata.cache_hit_rate) || metadata.cache_hit_rate < 0 || metadata.cache_hit_rate > 1) return null
-    normalizedMetadata.cache_hit_rate = Number(metadata.cache_hit_rate)
-  }
-  if (Object.prototype.hasOwnProperty.call(metadata, 'response_id')) normalizedMetadata.response_id = metadata.response_id
-  if (Object.prototype.hasOwnProperty.call(metadata, 'turn')) normalizedMetadata.turn = metadata.turn
-  if (Object.prototype.hasOwnProperty.call(metadata, 'work_sequence_no')) {
-    if (!Number.isFinite(metadata.work_sequence_no) || !Number.isInteger(metadata.work_sequence_no) || metadata.work_sequence_no <= 0) return null
-    normalizedMetadata.work_sequence_no = metadata.work_sequence_no
-  }
-  if (Object.prototype.hasOwnProperty.call(metadata, 'event_sequence_no')) {
-    if (!Number.isFinite(metadata.event_sequence_no) || !Number.isInteger(metadata.event_sequence_no) || metadata.event_sequence_no < 0) return null
-    normalizedMetadata.event_sequence_no = metadata.event_sequence_no
-  }
-  return normalizedMetadata
-}
-
-const shouldReplaceLlmRequestMetadata = (currentMetadata, incomingMetadata) => {
-  if (!Object.prototype.hasOwnProperty.call(incomingMetadata, 'work_sequence_no')) return true
-  if (!Object.prototype.hasOwnProperty.call(currentMetadata || {}, 'work_sequence_no')) return true
-  if (incomingMetadata.work_sequence_no !== currentMetadata.work_sequence_no) {
-    return incomingMetadata.work_sequence_no > currentMetadata.work_sequence_no
-  }
-  return (incomingMetadata.event_sequence_no ?? 0) >= (currentMetadata.event_sequence_no ?? 0)
 }
 
 const getLocalMessageType = (message) => {
@@ -388,26 +349,23 @@ export function useChatSession() {
 
     const metadata = normalizeLlmRequestMetadata(event)
     if (!metadata) return
+    if (!isMainDialogueRequestMetadata(metadata)) return
 
     const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
     const currentMetadata = llmRequestMetadataBySession.value.get(sessionId)
       || normalizeLlmRequestMetadata(sessionManager.sessions.value[sessionIndex]?.llm_request_metadata)
     if (!shouldReplaceLlmRequestMetadata(currentMetadata, metadata)) return
 
-    for (const field of ['output_tokens', 'cached_tokens', 'cache_hit_rate', 'total_output_tokens']) {
-      if (!Object.prototype.hasOwnProperty.call(metadata, field) && Object.prototype.hasOwnProperty.call(currentMetadata || {}, field)) {
-        metadata[field] = currentMetadata[field]
-      }
-    }
+    const nextMetadata = mergeLlmRequestMetadata(currentMetadata, metadata)
 
     const nextMetadataBySession = new Map(llmRequestMetadataBySession.value)
-    nextMetadataBySession.set(sessionId, metadata)
+    nextMetadataBySession.set(sessionId, nextMetadata)
     llmRequestMetadataBySession.value = nextMetadataBySession
 
     if (sessionIndex !== -1) {
       sessionManager.sessions.value[sessionIndex] = {
         ...sessionManager.sessions.value[sessionIndex],
-        llm_request_metadata: metadata
+        llm_request_metadata: nextMetadata
       }
     }
   }
@@ -1529,7 +1487,10 @@ export function useChatSession() {
       },
       onProactiveReply: (data) => {
         if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-        if (data.llm_request_metadata) {
+        if (
+          data.llm_request_metadata
+          && (data.llm_request_metadata.request_purpose || !data.source || data.source === 'foreground')
+        ) {
           updateLlmRequestMetadata({
             ...data.llm_request_metadata,
             session_id: data.session_id || sessionManager.currentSessionId.value

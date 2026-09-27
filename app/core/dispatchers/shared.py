@@ -15,6 +15,7 @@ from app.core.utils.dispatcher.markdown_instruction import build_user_runtime_in
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.tokenizer import estimate_tokens
+from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
 
 
@@ -45,6 +46,8 @@ class DispatcherValidationMixin:
             raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
 
         chat_channel_obj, model_entry, _channel_rule = selection
+        model_id = model_entry["model_id"]
+        protocol = resolve_model_protocol(model_entry)
         img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
         chat_params = resolve_chat_params(model_entry, chat_channel)
         system_prompt = await build_prompt(db, profile)
@@ -68,6 +71,9 @@ class DispatcherValidationMixin:
             message=validation_msg,
             context_window_k=chat_params["context_window_k"],
             max_tokens=chat_params["max_tokens"],
-            system_tokens=estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions),
+            system_tokens=estimate_tokens(system_prompt, model_id=model_id, protocol=protocol)
+            + estimate_tokens(user_runtime_instructions, model_id=model_id, protocol=protocol),
             tools=tools,
+            model_id=model_id,
+            protocol=protocol,
         )

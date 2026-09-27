@@ -14,6 +14,7 @@ from app.core.constants import (
 from app.core.exceptions import LLMException
 from app.core.log import get_logger
 from app.core.utils.tokenizer import estimate_tokens
+from app.providers.llm.token_estimation import RequestTokenEstimate, resolve_request_token_estimate
 from app.models.message import (
     InternalMessage,
     InternalResponse,
@@ -73,6 +74,9 @@ def _openai_stream_metadata(
 def estimate_request_context_tokens(
     messages: list[InternalMessage],
     tools: list[dict[str, Any]] | None,
+    *,
+    model_id: str | None = None,
+    protocol: str | None = None,
 ) -> int:
     message_payload = [
         message.model_dump(
@@ -91,7 +95,11 @@ def estimate_request_context_tokens(
         separators=(",", ":"),
         default=str,
     )
-    return estimate_tokens(serialized_context)
+    return estimate_tokens(
+        serialized_context,
+        model_id=model_id,
+        protocol=protocol,
+    )
 
 
 def _log_request_context(
@@ -110,7 +118,16 @@ def _log_request_context(
         role_counts[role] = role_counts.get(role, 0) + 1
     message_count = len(messages)
     tool_count = len(tools or [])
-    estimated_context_tokens = request_context_tokens if isinstance(request_context_tokens, int) and not isinstance(request_context_tokens, bool) and request_context_tokens >= 0 else estimate_request_context_tokens(messages, tools)
+    estimated_context_tokens = (
+        request_context_tokens
+        if isinstance(request_context_tokens, int) and not isinstance(request_context_tokens, bool) and request_context_tokens >= 0
+        else estimate_request_context_tokens(
+            messages,
+            tools,
+            model_id=model_id,
+            protocol=protocol,
+        )
+    )
     logger.bind(
         model_id=model_id,
         protocol=protocol,
@@ -387,6 +404,38 @@ class LLMClient:
             timeout=timeout,
             http_proxy=http_proxy,
             **kwargs,
+        )
+
+    @classmethod
+    async def estimate_request_input_tokens(
+        cls,
+        *,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        messages: list[InternalMessage],
+        tools: list[dict[str, Any]] | None = None,
+        protocol: str = "openai",
+        timeout: float = 30.0,
+        http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
+        calibration_factor: float = 1.0,
+    ) -> RequestTokenEstimate:
+        transformer = cls._transformers.get(protocol.lower())
+        if not transformer:
+            raise LLMException(message=ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
+        return await resolve_request_token_estimate(
+            transformer,
+            api_key=api_key,
+            base_url=base_url,
+            model_id=model_id,
+            protocol=protocol,
+            messages=messages,
+            tools=tools,
+            timeout=timeout,
+            http_proxy=http_proxy,
+            custom_headers=custom_headers,
+            calibration_factor=calibration_factor,
         )
 
     @classmethod

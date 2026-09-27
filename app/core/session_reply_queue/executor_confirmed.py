@@ -46,6 +46,7 @@ from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
+from app.core.utils.token_calibration import apply_token_calibration, extract_token_calibration_factor
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
@@ -80,13 +81,36 @@ def _resolve_confirmed_tool_result_round_budget_tokens(
     if not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool) or max_output_tokens < 0:
         return None
 
-    required_input_tokens = input_tokens + max(0, estimate_tokens(message_token_text(confirmed_message)))
+    model_id = metadata.get("model_id")
+    protocol = metadata.get("protocol")
+    normalized_model_id = model_id if isinstance(model_id, str) and model_id else None
+    normalized_protocol = protocol if isinstance(protocol, str) and protocol else None
+    incremental_tokens = estimate_tokens(
+        message_token_text(confirmed_message),
+        model_id=normalized_model_id,
+        protocol=normalized_protocol,
+    )
+    calibration_factor = (
+        extract_token_calibration_factor(
+            metadata,
+            model_id=normalized_model_id,
+            protocol=normalized_protocol,
+        )
+        if normalized_model_id is not None and normalized_protocol is not None
+        else 1.0
+    )
+    required_input_tokens = input_tokens + apply_token_calibration(
+        max(0, incremental_tokens),
+        calibration_factor,
+    )
     return calculate_tool_result_round_budget_tokens(
         messages=[confirmed_message],
         context_window_k=_resolve_confirmed_tool_context_window_k(session),
         max_tokens=max_output_tokens,
         tools=tools,
         required_input_tokens_override=required_input_tokens,
+        model_id=normalized_model_id,
+        protocol=normalized_protocol,
     )
 
 
@@ -470,6 +494,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 context_window_k=confirmed_tool_context_window_k,
                 tool_call_count=len(confirmed_calls),
                 tool_result_round_budget_tokens=confirmed_tool_result_round_budget_tokens,
+                model_id=(session.llm_request_metadata or {}).get("model_id"),
+                protocol=(session.llm_request_metadata or {}).get("protocol"),
             )
             await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
             try:

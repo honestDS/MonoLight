@@ -132,6 +132,8 @@ class ContextManager:
         system_tokens: int = 0,
         tools: list[dict] | None = None,
         safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+        model_id: str | None = None,
+        protocol: str | None = None,
     ) -> ContextRequestBudget:
         return build_context_request_budget(
             context_window_k=context_window_k,
@@ -139,6 +141,8 @@ class ContextManager:
             system_tokens=system_tokens,
             tools=tools,
             safety_margin_tokens=safety_margin_tokens,
+            model_id=model_id,
+            protocol=protocol,
         )
 
     @classmethod
@@ -154,6 +158,8 @@ class ContextManager:
         system_tokens: int = 0,
         tools: list[dict] | None = None,
         safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+        model_id: str | None = None,
+        protocol: str | None = None,
     ) -> None:
         budget = cls.build_request_budget(
             context_window_k=context_window_k,
@@ -161,9 +167,11 @@ class ContextManager:
             system_tokens=system_tokens,
             tools=tools,
             safety_margin_tokens=safety_margin_tokens,
+            model_id=model_id,
+            protocol=protocol,
         )
         cls.ensure_request_budget_available(budget)
-        if message.role == MessageRole.USER and not message.tool_calls and estimate_tokens(cls._message_token_text(message)) > budget.non_system_budget:
+        if message.role == MessageRole.USER and not message.tool_calls and estimate_tokens(cls._message_token_text(message), model_id=model_id, protocol=protocol) > budget.non_system_budget:
             raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
 
     @classmethod
@@ -178,6 +186,8 @@ class ContextManager:
         safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
         additional_non_system_tokens: int = 0,
         required_input_tokens_override: int | None = None,
+        model_id: str | None = None,
+        protocol: str | None = None,
     ) -> list[InternalMessage]:
         """
         在每次模型请求前只校验完整请求预算，不修改消息内容或历史范围。
@@ -193,6 +203,8 @@ class ContextManager:
             tools=tools,
             safety_margin_tokens=safety_margin_tokens,
             additional_non_system_tokens=additional_non_system_tokens,
+            model_id=model_id,
+            protocol=protocol,
         )
         budget = usage.budget
         cls.ensure_request_budget_available(budget)
@@ -201,7 +213,7 @@ class ContextManager:
             effective_required_input_tokens = required_input_tokens_override
         if effective_required_input_tokens > budget.context_window_tokens - budget.output_tokens - budget.safety_margin_tokens:
             latest_msg = next((message for message in reversed(request_messages) if message.role != MessageRole.SYSTEM), None)
-            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and estimate_tokens(cls._message_token_text(latest_msg)) > budget.non_system_budget:
+            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and estimate_tokens(cls._message_token_text(latest_msg), model_id=model_id, protocol=protocol) > budget.non_system_budget:
                 raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
             raise ContextBudgetExceededException()
 
