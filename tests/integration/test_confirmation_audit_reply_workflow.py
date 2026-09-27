@@ -17,11 +17,13 @@ from app.core.audit.confirmation_persistence import persist_pending_confirmation
 from app.core.audit.integrity import build_tool_round_integrity_snapshot
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
+from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
+from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.session_reply_queue import manager_result as manager_result_module
 from app.core.session_reply_queue import manager_submission as manager_submission_module
-from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.request_token_baseline import build_provider_request_usage_metadata
 from app.core.utils.time import get_local_time
 from app.models.audit import (
     AuditConfirmationClaim,
@@ -38,6 +40,8 @@ from app.models.message import InternalMessage, InternalToolCall, Message, Messa
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
+from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose, SessionReplyProviderUsage
+from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySequence,
     SessionReplyWorkItem,
@@ -80,6 +84,8 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
         AuditToolResultVersion.__table__,
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
+        SessionReplyProviderUsage.__table__,
+        SessionReplyStreamEvent.__table__,
     ]
     await clone_sqlite_schema(tmp_path / "confirmation-workflow.db", tables=tables)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -138,7 +144,28 @@ async def _seed_pending_confirmation(
     async with session_factory() as db:
         profile = Profile(id=1, uid=uid, name="confirmation workflow", configs=_profile_config())
         db.add(profile)
-        db.add(ChatSession(session_id=session_id, uid=uid, profile_id=1))
+        db.add(
+            ChatSession(
+                session_id=session_id,
+                uid=uid,
+                profile_id=1,
+                llm_request_metadata={
+                    "type": "llm_request_metadata",
+                    "turn": 0,
+                    "response_id": "confirmation-initial",
+                    "input_tokens": 1000,
+                    "input_tokens_source": "provider",
+                    "cached_tokens": 250,
+                    "output_tokens": 200,
+                    "total_input_tokens": 1000,
+                    "total_cached_tokens": 250,
+                    "total_output_tokens": 200,
+                    "cache_hit_rate": 0.25,
+                    "context_window_tokens": 4096,
+                    "max_output_tokens": 512,
+                },
+            )
+        )
         await db.flush()
 
         source = Message(
@@ -252,6 +279,8 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
 
     monkeypatch.setattr(database_provider, "AsyncSessionLocal", confirmation_workflow_session_factory)
     monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", confirmation_workflow_session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", confirmation_workflow_session_factory)
+    monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", confirmation_workflow_session_factory)
     monkeypatch.setattr(manager_result_module, "WORK_RESULT_POLL_INTERVAL_SECONDS", 0.01)
 
     async def resolve_profile(db: AsyncSession, *, uid: str, session_id: str):
@@ -291,13 +320,9 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
 
     resumed_histories: list[list[Message]] = []
 
-    async def continue_reply(
-        db: AsyncSession,
-        *,
-        work: SessionReplyWorkItem,
-        **kwargs,
-    ) -> dict:
-        result = await db.execute(select(Message).where(Message.session_id == work.session_id).order_by(Message.id))
+    async def continue_reply(**kwargs) -> dict:
+        db = kwargs["db"]
+        result = await db.execute(select(Message).where(Message.session_id == kwargs["session_id"]).order_by(Message.id))
         persisted = list(result.scalars().all())
         resumed_histories.append(persisted)
         pending_rows = [row for row in persisted if row.type == MessageType.TOOL_RESULT and row.audit_record_id == audit_record_id]
@@ -317,15 +342,41 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
             "echo confirmed-2\n",
         ]
 
+        await db.commit()
+        metrics = {
+            "input_tokens": 120,
+            "input_tokens_source": "provider",
+            "cached_tokens": 20,
+            "output_tokens": 7,
+        }
+        await kwargs["request_metadata_callback"](
+            {
+                "type": "llm_request_metadata",
+                "turn": 1,
+                "response_id": "confirmation-final",
+                "input_tokens": metrics["input_tokens"],
+                "input_tokens_source": metrics["input_tokens_source"],
+                "cached_tokens": metrics["cached_tokens"],
+                "output_tokens": metrics["output_tokens"],
+                "context_window_tokens": 4096,
+                "max_output_tokens": 512,
+                **build_provider_request_usage_metadata("confirmed-continuation-request", metrics),
+            }
+        )
+        async with confirmation_workflow_session_factory() as metadata_db:
+            session = await metadata_db.get(ChatSession, kwargs["session_id"])
+            assert session is not None
+            latest_llm_request_metadata = session.llm_request_metadata
+
         await save_message(
             db,
-            work.session_id,
-            work.uid,
+            kwargs["session_id"],
+            kwargs["uid"],
             MessageRole.ASSISTANT,
             MessageType.TEXT,
             InternalMessage(role=MessageRole.ASSISTANT, content="confirmed tool completed"),
-            work.profile_id,
-            dedupe_key=_result_message_dedupe_key(work),
+            kwargs["persisted_profile_id"],
+            dedupe_key=kwargs["final_message_dedupe_key"],
         )
         return {
             "choices": [
@@ -337,9 +388,10 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
             "history": [],
             "files": None,
             "response_id": "confirmation-final",
+            "llm_request_metadata": latest_llm_request_metadata,
         }
 
-    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", continue_reply)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", continue_reply)
 
     delivered_events: list[dict] = []
 
@@ -396,6 +448,8 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
         executions = list((await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == audit_record_id))).scalars().all())
         versions = list((await db.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == audit_record_id).order_by(AuditToolResultVersion.version_no))).scalars().all())
         messages = list((await db.execute(select(Message).where(Message.session_id == "session-confirmation").order_by(Message.id))).scalars().all())
+        usage = (await db.execute(select(SessionReplyProviderUsage).where(SessionReplyProviderUsage.provider_request_id == "confirmed-continuation-request"))).scalars().one_or_none()
+        session = await db.get(ChatSession, "session-confirmation")
 
     assert record is not None
     assert record.status == AuditRecordStatus.SUCCEEDED
@@ -425,6 +479,17 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
     assert final_message.role == MessageRole.ASSISTANT
     assert final_message.content == "confirmed tool completed"
     assert any(event.get("source") == "confirmed_tool_execution" for event in delivered_events)
+    assert usage is not None
+    assert usage.request_purpose == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE
+    assert usage.work_id == created_work.id
+    assert usage.input_tokens == 120
+    assert usage.cached_tokens == 20
+    assert usage.output_tokens == 7
+    assert session is not None
+    assert session.llm_request_metadata["total_input_tokens"] == 1120
+    assert session.llm_request_metadata["total_cached_tokens"] == 270
+    assert session.llm_request_metadata["total_output_tokens"] == 207
+    assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
 
 
 @pytest.mark.asyncio

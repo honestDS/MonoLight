@@ -249,7 +249,6 @@ async def dispatch_interactive(
                                 expose_tool_call_content=expose_tool_call_content,
                                 allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
                                 main_tools=state.tools,
-                                latest_llm_request_metadata=state.latest_llm_request_metadata,
                                 total_output_tokens=state.checkpoint_state.total_output_tokens,
                                 session_total_output_tokens=state.checkpoint_state.session_total_output_tokens,
                                 session_total_input_tokens=state.checkpoint_state.session_total_input_tokens,
@@ -265,7 +264,6 @@ async def dispatch_interactive(
                         state.model_entry = memory_recall_result.model_entry
                         state.channel_rule = memory_recall_result.channel_rule
                         state.chat_params = memory_recall_result.chat_params
-                        state.latest_llm_request_metadata = memory_recall_result.latest_llm_request_metadata
                         state.checkpoint_state.total_output_tokens = memory_recall_result.total_output_tokens
                         state.checkpoint_state.session_total_output_tokens = memory_recall_result.session_total_output_tokens
                         state.checkpoint_state.session_total_input_tokens = memory_recall_result.session_total_input_tokens

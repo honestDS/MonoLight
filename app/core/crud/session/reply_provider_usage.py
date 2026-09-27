@@ -2,7 +2,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.models.session_reply_provider_usage import SessionReplyProviderUsage
+from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose, SessionReplyProviderUsage
 
 
 class CRUDSessionReplyProviderUsage:
@@ -21,6 +21,7 @@ class CRUDSessionReplyProviderUsage:
         input_tokens: int,
         cached_tokens: int,
         output_tokens: int,
+        request_purpose: SessionReplyProviderRequestPurpose,
     ) -> tuple[SessionReplyProviderUsage, bool]:
         item = SessionReplyProviderUsage(
             provider_request_id=provider_request_id,
@@ -30,6 +31,7 @@ class CRUDSessionReplyProviderUsage:
             input_tokens=input_tokens,
             cached_tokens=cached_tokens,
             output_tokens=output_tokens,
+            request_purpose=request_purpose,
         )
 
         try:
@@ -41,7 +43,7 @@ class CRUDSessionReplyProviderUsage:
             if existing is None:
                 raise
 
-            values_match = existing.work_id == work_id and existing.session_id == session_id and existing.uid == uid and existing.input_tokens == input_tokens and existing.cached_tokens == cached_tokens and existing.output_tokens == output_tokens
+            values_match = existing.work_id == work_id and existing.session_id == session_id and existing.uid == uid and existing.input_tokens == input_tokens and existing.cached_tokens == cached_tokens and existing.output_tokens == output_tokens and existing.request_purpose == request_purpose
             if not values_match:
                 raise
 

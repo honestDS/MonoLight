@@ -29,7 +29,7 @@ from app.core.session_reply_queue.executor_audit import (
 )
 from app.core.session_reply_queue.executor_common import _response_content, _result_message_dedupe_key
 from app.core.session_reply_queue.executor_interactive import _dispatch_interactive_work
-from app.core.session_reply_queue.executor_metadata import _generate_reply_with_request_metadata
+from app.core.session_reply_queue.executor_metadata import _generate_auxiliary_reply_with_request_metadata
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import serialize_execution_summary
@@ -48,6 +48,7 @@ from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import SessionReplyWorkItem
 
 __all__ = []
@@ -107,9 +108,10 @@ async def _source_invalid_confirmed_tool_response(
         await update_confirmation_message_status(db, audit_record_id=audit_record_id)
     if profile is None:
         raise RuntimeError(t(ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED))
-    ai_msg, turn_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
+    ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
         db,
         work=work,
+        request_purpose=SessionReplyProviderRequestPurpose.CONFIRMED_AUXILIARY,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,
@@ -324,9 +326,10 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     "history": dump_background_proactive_history(turn_messages),
                     "files": [],
                 }
-            ai_msg, final_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
+            ai_msg, final_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
                 db,
                 work=work,
+                request_purpose=SessionReplyProviderRequestPurpose.CONFIRMED_AUXILIARY,
                 uid=work.uid,
                 session_id=work.session_id,
                 profile=profile,

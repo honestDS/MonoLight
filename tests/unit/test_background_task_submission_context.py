@@ -6,6 +6,7 @@ import pytest
 
 from app.core.session_reply_queue import executor_replies as executor_replies_module
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 
 
 @pytest.mark.asyncio
@@ -62,11 +63,12 @@ async def test_background_summary_uses_submission_context_and_task_result(monkey
 
     monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_replies_module, "_generate_reply_with_request_metadata", generate_reply)
+    monkeypatch.setattr(executor_replies_module, "_generate_auxiliary_reply_with_request_metadata", generate_reply)
 
     response = await executor_replies_module._execute_background(object(), work)
 
     assert response["content"] == "后台总结"
+    assert captured["request_purpose"] == SessionReplyProviderRequestPurpose.BACKGROUND_SUMMARY
     assert [message.content for message in captured["submission_context"] if message.role == MessageRole.USER] == ["提交任务前的消息"]
     assert captured["submission_context"][-1].tool_calls[0].id == "call-1"
     assert captured["extra_messages"][0].role == MessageRole.TOOL

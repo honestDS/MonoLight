@@ -27,6 +27,7 @@ from app.models import (
     SessionReplyWorkItem,
 )
 from app.models.scheduled_task import ScheduledTaskStatus
+from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkType
 
 EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
@@ -341,6 +342,7 @@ async def test_provider_usage_cascades_with_reply_work_but_session_totals_remain
             uid="user-1",
             input_tokens=100,
             cached_tokens=25,
+            request_purpose=SessionReplyProviderRequestPurpose.MAIN_DIALOGUE,
             output_tokens=7,
         )
         db.add(provider_usage)

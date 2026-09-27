@@ -405,20 +405,20 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
     assert metadata["response_id"] == response_id
     assert "memory query secret" not in json.dumps(metadata)
     assert "retrieved memory body" not in json.dumps(metadata)
-    assert context.latest_llm_request_metadata is metadata
+    assert context.latest_precheck_request_metadata is metadata
     assert context.session_total_input_tokens == 1000
     assert context.session_total_cached_tokens == 250
 
 
 @pytest.mark.asyncio
-async def test_update_output_metadata_accumulates_session_cache_metrics_and_output_tokens():
+async def test_update_output_metadata_preserves_session_cache_metrics_and_accumulates_output_tokens():
     context = _context()
     context.session_total_input_tokens = 1000
     context.session_total_cached_tokens = 250
     context.total_output_tokens = 4
     context.session_total_output_tokens = 8
     metadata = {"total_output_tokens": 8}
-    context.latest_llm_request_metadata = metadata
+    context.latest_precheck_request_metadata = metadata
     events = []
 
     async def stream_event_callback(event):
@@ -435,13 +435,16 @@ async def test_update_output_metadata_accumulates_session_cache_metrics_and_outp
 
     await request_module.update_output_metadata(context, response)
 
-    assert context.session_total_input_tokens == 1500
-    assert context.session_total_cached_tokens == 550
+    assert context.session_total_input_tokens == 1000
+    assert context.session_total_cached_tokens == 250
     assert context.total_output_tokens == 14
-    assert context.session_total_output_tokens == 18
-    assert metadata["total_input_tokens"] == 1500
-    assert metadata["total_cached_tokens"] == 550
-    assert metadata["cache_hit_rate"] == pytest.approx(550 / 1500)
+    assert context.session_total_output_tokens == 8
+    assert metadata["input_tokens"] == 500
+    assert metadata["cached_tokens"] == 300
+    assert metadata["total_input_tokens"] == 1000
+    assert metadata["total_cached_tokens"] == 250
+    assert metadata["cache_hit_rate"] == 0.25
     assert metadata["output_tokens"] == 14
-    assert metadata["total_output_tokens"] == 18
-    assert events[-1]["cache_hit_rate"] == pytest.approx(550 / 1500)
+    assert metadata["total_output_tokens"] == 8
+    assert events[-1]["cache_hit_rate"] == 0.25
+    assert events[-1]["total_output_tokens"] == 8

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import select
 
 import app.core.dispatcher as dispatcher_module
+from app.core.crud.session.session import session_crud
 from app.core.dispatchers.memory import request as memory_request_module
 from app.core.dispatchers.memory.recall import run_memory_recall_precheck
 from app.core.dispatchers.memory.types import MemoryRecallContext
@@ -127,7 +128,25 @@ async def _seed_memory_recall_workflow(session_factory):
         )
         profile = Profile(id=1, uid="owner", name="memory-recall", configs=cfg.model_dump(mode="json"))
         db.add(profile)
-        db.add(ChatSession(session_id="session-recall", uid="owner", profile_id=1))
+        db.add(
+            ChatSession(
+                session_id="session-recall",
+                uid="owner",
+                profile_id=1,
+                llm_request_metadata={
+                    "input_tokens": 100,
+                    "input_tokens_source": "provider",
+                    "context_window_tokens": 32768,
+                    "max_output_tokens": 256,
+                    "cached_tokens": 25,
+                    "output_tokens": 10,
+                    "total_input_tokens": 1000,
+                    "total_cached_tokens": 250,
+                    "total_output_tokens": 200,
+                    "cache_hit_rate": 0.25,
+                },
+            )
+        )
         await db.flush()
 
         old_user = Message(
@@ -279,9 +298,6 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
 
     events: list[dict[str, Any]] = []
 
-    async def capture_event(event_payload: dict[str, Any]) -> None:
-        events.append(event_payload)
-
     chat_channel_obj = SimpleNamespace(
         base_url="https://chat.invalid",
         http_proxy=None,
@@ -304,6 +320,18 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     }
 
     def build_context(db: AsyncSession) -> MemoryRecallContext:
+        async def capture_event(event_payload: dict[str, Any]) -> None:
+            events.append(event_payload)
+            if event_payload.get("type") == "llm_request_metadata":
+                updated = await session_crud.update_llm_request_metadata(
+                    db,
+                    session_id="session-recall",
+                    uid="owner",
+                    metadata=event_payload,
+                    commit=False,
+                )
+                assert updated is True
+
         return MemoryRecallContext(
             db=db,
             uid="owner",
@@ -329,6 +357,8 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         first = await run_memory_recall_precheck(first_context)
         assert first.status == "completed"
         assert first.chat_params == chat_params
+        assert first.session_total_input_tokens == 1000
+        assert first.session_total_cached_tokens == 250
         assert [message.role for message in first.turn_messages] == [MessageRole.ASSISTANT, MessageRole.TOOL]
         tool_payload = json.loads(first.turn_messages[-1].content)
         assert tool_payload["items"][0]["memory_id"] == memory_id
@@ -339,6 +369,17 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         rows = list((await db.execute(select(Message).where(Message.session_id == "session-recall").order_by(Message.id))).scalars().all())
         recalled_record = await db.get(LongTermMemoryRecord, memory_id)
         assert recalled_record is not None and recalled_record.last_recalled_at is not None
+        chat_session = await db.get(ChatSession, "session-recall")
+        assert chat_session is not None
+        assert chat_session.llm_request_metadata is not None
+        assert chat_session.llm_request_metadata["input_tokens"] == 120
+        assert chat_session.llm_request_metadata["input_tokens_source"] == "provider"
+        assert chat_session.llm_request_metadata["cached_tokens"] == 20
+        assert chat_session.llm_request_metadata["output_tokens"] == 12
+        assert chat_session.llm_request_metadata["total_input_tokens"] == 1000
+        assert chat_session.llm_request_metadata["total_cached_tokens"] == 250
+        assert chat_session.llm_request_metadata["cache_hit_rate"] == 0.25
+        assert chat_session.llm_request_metadata["total_output_tokens"] == 200
         recall_rows = [row for row in rows if row.dedupe_key and row.dedupe_key.startswith("memory-recall-")]
         assert [row.type for row in recall_rows] == [MessageType.TOOL_CALL, MessageType.TOOL_RESULT]
         persisted_count = len(rows)
@@ -346,6 +387,16 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     assert llm_calls == 1
     assert embedding_calls == 1
     assert vector_query_calls == 1
+    metadata_events = [event for event in events if event["type"] == "llm_request_metadata"]
+    assert len(metadata_events) == 2
+    assert metadata_events[-1]["input_tokens"] == 120
+    assert metadata_events[-1]["input_tokens_source"] == "provider"
+    assert metadata_events[-1]["cached_tokens"] == 20
+    assert metadata_events[-1]["output_tokens"] == 12
+    assert metadata_events[-1]["total_input_tokens"] == 1000
+    assert metadata_events[-1]["total_cached_tokens"] == 250
+    assert metadata_events[-1]["cache_hit_rate"] == 0.25
+    assert metadata_events[-1]["total_output_tokens"] == 200
     assert [event["type"] for event in events if event["type"] != "llm_request_metadata"] == [
         "agent_loop_start",
         "turn_end",

@@ -31,7 +31,6 @@ from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.llm_request_params import build_memory_recall_precheck_generation_params
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
-    accumulate_session_cache_metrics,
     build_request_token_baseline,
     build_session_cache_metrics,
     extract_provider_token_metrics,
@@ -208,7 +207,7 @@ async def prepare_request_messages(
             context.session_total_cached_tokens,
         ),
     }
-    context.latest_llm_request_metadata = metadata
+    context.latest_precheck_request_metadata = metadata
     if context.stream_event_callback is not None:
         await context.stream_event_callback(dict(metadata))
     return request_messages, metadata, response_id
@@ -253,23 +252,23 @@ async def generate(
 
 async def update_output_metadata(context: MemoryRecallContext, response: Any) -> None:
     provider_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
-    context.session_total_input_tokens, context.session_total_cached_tokens = accumulate_session_cache_metrics(
-        provider_metrics,
-        total_input_tokens=context.session_total_input_tokens,
-        total_cached_tokens=context.session_total_cached_tokens,
+    provider_metrics.update(
+        build_session_cache_metrics(
+            context.session_total_input_tokens,
+            context.session_total_cached_tokens,
+        )
     )
     if "output_tokens" in provider_metrics:
         output_tokens = provider_metrics["output_tokens"]
         context.total_output_tokens += output_tokens
-        context.session_total_output_tokens = (context.session_total_output_tokens or 0) + output_tokens
         provider_metrics["output_tokens"] = context.total_output_tokens
         provider_metrics["total_output_tokens"] = context.session_total_output_tokens
-    if context.latest_llm_request_metadata is None:
+    if context.latest_precheck_request_metadata is None:
         return
-    changed = any(context.latest_llm_request_metadata.get(key) != value for key, value in provider_metrics.items())
-    context.latest_llm_request_metadata.update(provider_metrics)
+    changed = any(context.latest_precheck_request_metadata.get(key) != value for key, value in provider_metrics.items())
+    context.latest_precheck_request_metadata.update(provider_metrics)
     if changed and context.stream_event_callback is not None:
-        await context.stream_event_callback(dict(context.latest_llm_request_metadata))
+        await context.stream_event_callback(dict(context.latest_precheck_request_metadata))
 
 
 def response_is_valid(response: Any) -> bool:
