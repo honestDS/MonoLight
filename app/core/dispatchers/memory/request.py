@@ -1,10 +1,10 @@
 import uuid
+from copy import deepcopy
 from typing import Any
 
 from app.core.channel_router import select_channel
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
-    MEMORY_RECALL_PRECHECK_HISTORY_USER_ROUNDS,
 )
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
@@ -23,10 +23,7 @@ from app.core.utils.dispatcher.helpers import (
     reassemble_multimodal_messages,
     resolve_chat_params,
 )
-from app.core.utils.dispatcher.markdown_instruction import (
-    materialize_user_environment_prompts,
-    refresh_latest_user_max_output_tokens_instruction,
-)
+from app.core.utils.dispatcher.markdown_instruction import refresh_latest_user_max_output_tokens_instruction
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.llm_request_params import build_memory_recall_precheck_generation_params
 from app.core.utils.model_request_headers import get_model_custom_headers
@@ -46,34 +43,22 @@ MEMORY_RECALL_REQUEST_PURPOSE = "memory_recall"
 
 
 def build_precheck_request_messages(messages: list[InternalMessage]) -> list[InternalMessage]:
-    summary_messages = [message for message in messages if is_context_summary_message(message)]
-    latest_summary = [summary_messages[-1].model_copy(deep=True)] if summary_messages else []
-
-    dialogue: list[InternalMessage] = []
-    for message in messages:
-        if message.role not in {MessageRole.USER, MessageRole.ASSISTANT} or is_context_summary_message(message):
-            continue
-        if message.role == MessageRole.ASSISTANT and message.tool_calls and not _has_content(message.content):
-            continue
-        dialogue.append(
-            message.model_copy(
-                update={
-                    "reasoning_content": None,
-                    "provider_metadata": None,
-                    "tool_calls": None,
-                },
-                deep=True,
-            )
+    latest_user_message = next(
+        (
+            message
+            for message in reversed(messages)
+            if message.role == MessageRole.USER and not is_context_summary_message(message)
+        ),
+        None,
+    )
+    if latest_user_message is None:
+        return []
+    return [
+        InternalMessage(
+            role=MessageRole.USER,
+            content=deepcopy(latest_user_message.content),
         )
-    user_indexes = [index for index, message in enumerate(dialogue) if message.role == MessageRole.USER]
-    if not user_indexes:
-        recent_dialogue = dialogue
-    else:
-        history_user_count = min(MEMORY_RECALL_PRECHECK_HISTORY_USER_ROUNDS + 1, len(user_indexes))
-        start_index = user_indexes[-history_user_count]
-        recent_dialogue = dialogue[start_index:]
-
-    return [*latest_summary, *recent_dialogue]
+    ]
 
 
 async def select_initial_channel(context: MemoryRecallContext) -> bool:
@@ -141,7 +126,7 @@ async def prepare_request_messages(
             InternalMessage(role=MessageRole.SYSTEM, content=LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT),
             *precheck_messages,
         ]
-    request_messages = materialize_user_environment_prompts(precheck_messages)
+    request_messages = [message.model_copy(deep=True) for message in precheck_messages]
     protocol = resolve_model_protocol(context.model_entry)
     precheck_generation_params = build_memory_recall_precheck_generation_params(
         model_entry=context.model_entry,

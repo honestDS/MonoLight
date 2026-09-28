@@ -214,7 +214,12 @@ async def test_save_and_execute_recall_uses_main_context_remaining_budget(monkey
     )
 
     assert len(captured_budget_args) == 1
-    assert captured_budget_args[0]["messages"] == context.messages[:-1]
+    budget_messages = captured_budget_args[0]["messages"]
+    assert len(budget_messages) == 2
+    assert [message.role for message in budget_messages] == [MessageRole.USER, MessageRole.ASSISTANT]
+    assert json.loads(budget_messages[0].content)["user_message"] == "request"
+    assert context.messages[0].role == MessageRole.USER
+    assert context.messages[0].content == "request"
     assert captured_budget_args[0]["context_window_k"] == 4
     assert captured_budget_args[0]["max_tokens"] == 128
     assert captured_budget_args[0]["tools"] == main_tools
@@ -357,9 +362,6 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
         },
     )
 
-    def materialize(messages):
-        return list(messages)
-
     def trim(**kwargs):
         trim_calls.append(kwargs)
         return kwargs["messages"]
@@ -367,7 +369,6 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
     async def get_session(_db, _session_id):
         return session
 
-    monkeypatch.setattr(request_module, "materialize_user_environment_prompts", materialize)
     monkeypatch.setattr(request_module.ContextManager, "prepare_messages_for_model_request", trim)
     monkeypatch.setattr(request_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(request_module, "resolve_model_protocol", lambda _entry: "OPENAI")
@@ -381,7 +382,11 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
     assert context.messages == [summary_message, current_message]
     assert request_messages[0].role == MessageRole.SYSTEM
     assert request_messages[0].content == request_module.LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
-    assert request_messages[1:] == [summary_message, current_message]
+    assert len(request_messages) == 2
+    assert request_messages[1].role == MessageRole.USER
+    assert request_messages[1].content == "memory query secret"
+    assert request_messages[1].environment_prompt is None
+    assert request_messages[1].guidance_prompt is None
     assert set(trim_calls[0]) == {"messages", "context_window_k", "max_tokens"}
     assert metadata["turn"] == 0
     assert metadata["input_tokens"] == 0

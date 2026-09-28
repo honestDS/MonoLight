@@ -20,7 +20,6 @@ from app.core.terminal.schemas import (
     TerminalSessionStatus,
 )
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
-from app.core.utils.dispatcher.markdown_instruction import build_max_output_tokens_instruction
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
@@ -55,8 +54,21 @@ async def _passthrough_context_summary_checkpoint(db, **kwargs):
     return kwargs["messages"]
 
 
-async def _build_max_tokens_runtime_instruction(_db, _session_id, max_tokens):
-    return build_max_output_tokens_instruction(max_tokens)
+def _build_runtime_snapshot(max_tokens, platform_constraints=None):
+    snapshot = {"response_settings": {"max_output_tokens": max_tokens}}
+    if platform_constraints:
+        snapshot["platform_constraints"] = platform_constraints
+    return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+
+
+async def _build_max_tokens_runtime_instruction(
+    _db,
+    _session_id,
+    max_tokens,
+    *,
+    platform_constraints=None,
+):
+    return _build_runtime_snapshot(max_tokens, platform_constraints=platform_constraints)
 
 
 class _Channel:
@@ -472,7 +484,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
             MessageRole.ASSISTANT,
             MessageRole.TOOL,
         ]
-        assert request_messages[0].content == "original request"
+        assert json.loads(request_messages[0].content)["user_message"] == "original request"
         assert request_messages[1].tool_calls[0].id == "tool-1"
         assert request_messages[2].tool_call_id == "tool-1"
         assert request_messages[2].content == "1"
@@ -661,7 +673,7 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
                 id=1,
                 role=MessageRole.USER,
                 content="original request",
-                environment_prompt=build_max_output_tokens_instruction(kwargs["max_tokens"]),
+                environment_prompt=_build_runtime_snapshot(kwargs["max_tokens"]),
             )
         ]
 
@@ -784,10 +796,14 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
     assert request_metadatas[1]["total_input_tokens"] == 200
     assert request_metadatas[1]["total_cached_tokens"] == 100
     assert request_metadatas[1]["cache_hit_rate"] == pytest.approx(0.5)
-    assert "The hard maximum for this response is 1024 output tokens." in model_requests[0]["messages"][0].content
-    assert "The hard maximum for this response is 256 output tokens." in model_requests[1]["messages"][0].content
-    assert "The hard maximum for this response is 1024 output tokens." not in model_requests[1]["messages"][0].content
-    assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
+    first_user_payload = json.loads(model_requests[0]["messages"][0].content)
+    second_user_payload = json.loads(model_requests[1]["messages"][0].content)
+    assert first_user_payload["user_message"] == "original request"
+    assert first_user_payload["response_settings"]["max_output_tokens"] == 1024
+    assert second_user_payload["user_message"] == "original request"
+    assert second_user_payload["response_settings"]["max_output_tokens"] == 256
+    assert second_user_payload["response_settings"]["max_output_tokens"] != 1024
+    assert persisted_environment_prompts[-1] == (1, _build_runtime_snapshot(256))
     assert model_requests[1]["max_tokens"] == 256
     assert saved_created_at == [None]
     assert LLMResponse.model_validate(response).choices[0].message.content == "ok"
@@ -854,7 +870,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
                 id=1,
                 role=MessageRole.USER,
                 content="original request",
-                environment_prompt=build_max_output_tokens_instruction(kwargs["max_tokens"]),
+                environment_prompt=_build_runtime_snapshot(kwargs["max_tokens"]),
             )
         ]
 
@@ -944,10 +960,14 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
 
     assert [request["model_id"] for request in model_requests] == ["model-1", "model-2"]
     assert channel_call_contexts == ["chat_dispatch_stream", "chat_dispatch_stream_retry"]
-    assert "The hard maximum for this response is 1024 output tokens." in model_requests[0]["messages"][0].content
-    assert "The hard maximum for this response is 256 output tokens." in model_requests[1]["messages"][0].content
-    assert "The hard maximum for this response is 1024 output tokens." not in model_requests[1]["messages"][0].content
-    assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
+    first_user_payload = json.loads(model_requests[0]["messages"][0].content)
+    second_user_payload = json.loads(model_requests[1]["messages"][0].content)
+    assert first_user_payload["user_message"] == "original request"
+    assert first_user_payload["response_settings"]["max_output_tokens"] == 1024
+    assert second_user_payload["user_message"] == "original request"
+    assert second_user_payload["response_settings"]["max_output_tokens"] == 256
+    assert second_user_payload["response_settings"]["max_output_tokens"] != 1024
+    assert persisted_environment_prompts[-1] == (1, _build_runtime_snapshot(256))
     assert model_requests[1]["max_tokens"] == 256
     assert saved_created_at == [datetime(2026, 7, 21, 6, 1, tzinfo=UTC)]
     assert [event["type"] for event in events] == [

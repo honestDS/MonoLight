@@ -56,7 +56,7 @@ from app.core.utils.dispatcher.helpers import (
     validate_background_proactive_tool_calls,
 )
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
-from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.dispatcher.markdown_instruction import apply_platform_constraints_to_message, materialize_user_environment_prompts
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import (
     prevalidate_tool_round,
@@ -158,7 +158,7 @@ class BackgroundDispatcherMixin:
         chat_channel = cfg.channel.chat_channel
         chat_cursor_key = f"{profile.id}:CHAT"
         messages: list[InternalMessage] = []
-        cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
+        cleaned_platform_constraints = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
         cleaned_guidance_prompt = guidance_prompt.strip() if isinstance(guidance_prompt, str) else ""
 
         tools = None
@@ -218,7 +218,7 @@ class BackgroundDispatcherMixin:
                     context_window_k=chat_params["context_window_k"],
                     max_tokens=chat_params["max_tokens"],
                     tools=tools,
-                    additional_system_prompt=cleaned_additional_system_prompt or None,
+                    additional_system_prompt=cleaned_platform_constraints or None,
                     include_longterm_memory=False,
                 )
             else:
@@ -227,14 +227,17 @@ class BackgroundDispatcherMixin:
                     profile,
                     include_longterm_memory=False,
                 )
-                if cleaned_additional_system_prompt:
-                    system_prompt = f"{system_prompt}\n\n{cleaned_additional_system_prompt}" if system_prompt.strip() else cleaned_additional_system_prompt
                 messages = inject_system_prompt_text(
                     [message.model_copy(deep=True) for message in submission_context],
                     system_prompt,
                 )
             if extra_messages:
                 messages.extend(message.model_copy(deep=True) for message in extra_messages)
+            if cleaned_platform_constraints:
+                for message in reversed(messages):
+                    if message.role == MessageRole.USER:
+                        apply_platform_constraints_to_message(message, cleaned_platform_constraints)
+                        break
             if initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
                 messages = await apply_context_summary_checkpoint(
                     db,

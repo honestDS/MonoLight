@@ -50,6 +50,11 @@ async def test_generate_session_title_uses_internal_task_generation_params(monke
     assert "temperature" not in kwargs
     assert "top_p" not in kwargs
     assert kwargs["max_tokens"] == 128
+    assert len(kwargs["messages"]) == 1
+    assert kwargs["messages"][0].role == MessageRole.USER
+    assert kwargs["messages"][0].content == session_module.SESSION_TITLE_PROMPT.format(message="A first message")
+    assert kwargs["messages"][0].environment_prompt is None
+    assert kwargs["messages"][0].guidance_prompt is None
     create_or_update_title.assert_awaited_once_with(
         db=db,
         session_id="session-1",

@@ -1,5 +1,4 @@
 from app.core.constants import (
-    MEMORY_RECALL_PRECHECK_HISTORY_USER_ROUNDS,
     MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
     SESSION_TITLE_MAX_OUTPUT_TOKENS,
 )
@@ -13,7 +12,7 @@ from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import LongTermMemoryConfig
 
 
-def test_precheck_request_keeps_summary_recent_history_and_current_user_only():
+def test_precheck_request_uses_only_latest_user_body_without_runtime_metadata():
     summary = InternalMessage(role=MessageRole.USER, content='<conversation_summary through_message_id="10">older summary</conversation_summary>')
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="system"),
@@ -26,24 +25,28 @@ def test_precheck_request_keeps_summary_recent_history_and_current_user_only():
         InternalMessage(role=MessageRole.TOOL, tool_call_id="call-1", content="tool result"),
         InternalMessage(role=MessageRole.USER, content="recent user 2"),
         InternalMessage(role=MessageRole.ASSISTANT, content="recent answer 2"),
-        InternalMessage(role=MessageRole.USER, content="current user"),
+        InternalMessage(
+            id=99,
+            role=MessageRole.USER,
+            content="current user",
+            environment_prompt='{"environment":{"runtime_context":"runtime"},"response_settings":{"markdown":false}}',
+            guidance_prompt="platform guidance",
+            provider_metadata={"provider": "metadata"},
+            reasoning_content="should not leak",
+        ),
     ]
 
     result = build_precheck_request_messages(messages)
 
-    assert MEMORY_RECALL_PRECHECK_HISTORY_USER_ROUNDS == 2
-    assert [message.content for message in result] == [
-        summary.content,
-        "recent user 1",
-        "recent answer 1",
-        "tool-assisted answer",
-        "recent user 2",
-        "recent answer 2",
-        "current user",
-    ]
-    assert all(message.role != MessageRole.TOOL for message in result)
-    assert all(not message.tool_calls for message in result)
-    assert all(message.reasoning_content is None for message in result)
+    assert len(result) == 1
+    assert result[0].role == MessageRole.USER
+    assert result[0].content == "current user"
+    assert result[0].id is None
+    assert result[0].environment_prompt is None
+    assert result[0].guidance_prompt is None
+    assert result[0].provider_metadata is None
+    assert result[0].reasoning_content is None
+    assert result[0].tool_calls is None
 
 
 def test_memory_precheck_setting_defaults_on_and_can_be_disabled():
