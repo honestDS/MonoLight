@@ -11,7 +11,11 @@ from app.core.context import (
 )
 from app.core.utils.context_summary.service import get_context_summary_state
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
-from app.core.utils.dispatcher.markdown_instruction import build_user_runtime_instructions, ensure_user_runtime_instructions
+from app.core.utils.dispatcher.markdown_instruction import (
+    apply_platform_constraints_to_message,
+    build_user_runtime_instructions,
+    ensure_user_runtime_instructions,
+)
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
@@ -50,22 +54,24 @@ async def prepare_messages(
             profile,
             include_longterm_memory=False,
         )
-    cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
-    if cleaned_additional_system_prompt:
-        system_prompt = f"{system_prompt}\n\n{cleaned_additional_system_prompt}" if system_prompt.strip() else cleaned_additional_system_prompt
+    cleaned_platform_constraints = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
     current_msg = initial_msg.model_copy(deep=True) if is_first_iter and initial_msg is not None else None
-    if current_msg is not None and current_msg.environment_prompt:
-        user_runtime_instructions = current_msg.environment_prompt
+    if current_msg is not None:
+        await ensure_user_runtime_instructions(
+            db,
+            session_id,
+            current_msg,
+            max_tokens,
+            platform_constraints=cleaned_platform_constraints or None,
+        )
+        user_runtime_instructions = current_msg.environment_prompt or ""
     elif is_first_iter:
-        user_runtime_instructions = await build_user_runtime_instructions(db, session_id, max_tokens)
-        if current_msg is not None:
-            await ensure_user_runtime_instructions(
-                db,
-                session_id,
-                current_msg,
-                max_tokens,
-                instruction=user_runtime_instructions,
-            )
+        user_runtime_instructions = await build_user_runtime_instructions(
+            db,
+            session_id,
+            max_tokens,
+            platform_constraints=cleaned_platform_constraints or None,
+        )
     else:
         user_runtime_instructions = ""
     if current_msg is not None and (current_msg.attachments or isinstance(current_msg.content, list)):
@@ -109,5 +115,11 @@ async def prepare_messages(
         if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
             is_history = idx != len(messages) - 1
             messages[idx] = MessageAssembler.assemble(m, image_understanding=False, is_history=is_history)
+
+    if cleaned_platform_constraints:
+        for message in reversed(messages):
+            if message.role == MessageRole.USER:
+                apply_platform_constraints_to_message(message, cleaned_platform_constraints)
+                break
 
     return inject_system_prompt_text(messages, system_prompt)

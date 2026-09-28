@@ -183,7 +183,9 @@ def test_interactive_tool_budget_uses_provider_payload_local_fallback_without_pr
     )
 
     assert interactive_tools_module._resolve_tool_result_required_input_tokens(state, ai_msg) == 12_345
-    assert captured["messages"][0].content == "request"
+    user_message = json.loads(captured["messages"][0].content)
+    assert user_message["user_message"] == "request"
+    assert messages[0].content == "request"
     assert captured["tools"] == tools
 
 

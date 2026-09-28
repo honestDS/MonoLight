@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -509,6 +510,64 @@ async def test_context_summary_threshold_uses_confirmed_provider_input_only(monk
     assert selected_calls == []
     assert update_calls == []
     assert generated_calls == []
+
+
+@pytest.mark.asyncio
+async def test_fixed_request_summary_convergence_uses_final_materialized_request_order(monkeypatch):
+    _patch_summary_dependencies(monkeypatch)
+    estimated_requests = []
+
+    def estimate_request_context_tokens(messages, _tools, **_kwargs):
+        estimated_requests.append([message.model_copy(deep=True) for message in messages])
+        return 1
+
+    monkeypatch.setattr(
+        service_module,
+        "estimate_request_context_tokens",
+        estimate_request_context_tokens,
+    )
+
+    await service_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(100),
+        before_id=10,
+        current_message="",
+        context_window_k=4,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+        force=True,
+        fixed_request_messages=[
+            InternalMessage(role=MessageRole.SYSTEM, content="system"),
+            InternalMessage(
+                id=9,
+                role=MessageRole.USER,
+                content="current",
+                environment_prompt='{"environment":{"runtime_context":"runtime"},"response_settings":{"markdown":false}}',
+                guidance_prompt="latest guidance",
+            ),
+        ],
+    )
+
+    assert len(estimated_requests) == 1
+    estimated = estimated_requests[0]
+    assert [message.role for message in estimated] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.USER,
+        MessageRole.USER,
+    ]
+    payloads = [json.loads(message.content) for message in estimated[1:]]
+    assert payloads[0]["user_message"].startswith("<conversation_summary ")
+    assert payloads[1]["user_message"] == "recent"
+    assert payloads[2]["user_message"] == "current"
+    assert payloads[2]["environment"] == {"runtime_context": "runtime"}
+    assert payloads[2]["response_settings"] == {"markdown": False}
+    assert payloads[2]["platform_guidance"] == "latest guidance"
+    assert all("platform_guidance" not in payload for payload in payloads[:-1])
 
 
 @pytest.mark.asyncio

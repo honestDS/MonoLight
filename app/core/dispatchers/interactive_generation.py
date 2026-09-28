@@ -125,7 +125,7 @@ async def generate_interactive_turn(
                 video_understanding=state.video_understanding,
             )
             if pending_multimodal_message is not None:
-                request_messages.append(pending_multimodal_message)
+                request_messages.append(materialize_user_environment_prompts([pending_multimodal_message])[0])
             model_id = state.model_entry["model_id"]
             protocol = resolve_model_protocol(state.model_entry)
             previous_in_memory_llm_request_metadata = state.latest_llm_request_metadata
