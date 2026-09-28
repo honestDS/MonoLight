@@ -10,7 +10,7 @@ from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.model_request_headers import build_model_request_headers
-from app.models.message import FilePart, ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
+from app.models.message import AudioPart, FilePart, ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
 
 from .base import BaseOpenAITransformer
 
@@ -77,9 +77,10 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         **kwargs,
     ) -> dict[str, Any]:
         headers = build_model_request_headers(api_key, custom_headers)
+        request_messages = await self._materialize_audio_messages(messages)
         payload = self._request_payload(
             model_id=model_id,
-            messages=messages,
+            messages=request_messages,
             stream=False,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -117,9 +118,10 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         headers = build_model_request_headers(api_key, custom_headers)
+        request_messages = await self._materialize_audio_messages(messages)
         payload = self._request_payload(
             model_id=model_id,
-            messages=messages,
+            messages=request_messages,
             stream=True,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -505,12 +507,24 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 image_url = part.get("image_url", {}) if isinstance(part, dict) else getattr(part, "image_url", {})
                 url = image_url.get("url", "") if isinstance(image_url, dict) else str(image_url)
                 converted.append({"type": "input_image", "image_url": url, "detail": "auto"})
+            elif isinstance(part, AudioPart) or part_type == "audio":
+                data = part.get("data", "") if isinstance(part, dict) else getattr(part, "data", "")
+                audio_format = part.get("format", "") if isinstance(part, dict) else getattr(part, "format", "")
+                converted.append(
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": data or "",
+                            "format": audio_format,
+                        },
+                    }
+                )
             elif isinstance(part, FilePart) or part_type == "file":
                 path = part.get("path", "") if isinstance(part, dict) else getattr(part, "path", "")
                 converted.append({"type": "input_text", "text": f"[Attached File: {path}]"})
             else:
                 dumped = part.model_dump(mode="json") if hasattr(part, "model_dump") else part
-                if isinstance(dumped, dict) and dumped.get("type") in {"input_text", "input_image"}:
+                if isinstance(dumped, dict) and dumped.get("type") in {"input_text", "input_image", "input_audio"}:
                     converted.append(dumped)
                 else:
                     converted.append({"type": "input_text", "text": cls._stringify(dumped)})

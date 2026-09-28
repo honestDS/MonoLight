@@ -11,7 +11,16 @@ from app.core.exceptions import ParameterException
 from app.core.utils.context_budget import measure_context_request_usage
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.message import ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
+from app.models.message import AudioPart, ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
+
+
+def test_message_token_text_replaces_audio_payload_with_placeholder():
+    message = InternalMessage(
+        role=MessageRole.USER,
+        content=[AudioPart(format="mp3", data="YQ==" * 10000)],
+    )
+
+    assert message_token_text(message) == "[音频]"
 
 
 def test_complete_request_usage_counts_messages_tools_output_and_safety_with_shared_token_text():

@@ -34,7 +34,7 @@ READ_MULTIMODAL_FILE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "read_multimodal_file",
-        "description": ("Read an existing multimodal file from the hard drive. After success, the system appends the tool artifact to the next model request; it is not new user input. Only images are actually read and sent to the model. Audio and video explicitly report that local reading is not implemented."),
+        "description": ("Read an existing multimodal file from the hard drive. After success, the system appends the tool artifact to the next model request; it is not new user input. Images and audio are sent to the model. Video explicitly reports that local reading is not implemented."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -140,21 +140,22 @@ class ReadMultimodalFileExecutor(BaseExecutor):
         modality = _detect_modality(resolved_path)
         if modality is None:
             return self._failed_result(t(ERR_TOOL_MULTIMODAL_UNSUPPORTED_TYPE), path=resolved_path)
-        if modality in {"audio", "video"}:
+        if modality == "video":
             return self._failed_result(
                 t(ERR_TOOL_MULTIMODAL_LOCAL_READ_UNIMPLEMENTED),
                 path=resolved_path,
                 modality=modality,
             )
 
-        try:
-            await self.run_sync(self._verify_image, resolved_path)
-        except Exception:
-            return self._failed_result(
-                t(ERR_TOOL_MULTIMODAL_INVALID_IMAGE),
-                path=resolved_path,
-                modality=modality,
-            )
+        if modality == "image":
+            try:
+                await self.run_sync(self._verify_image, resolved_path)
+            except Exception:
+                return self._failed_result(
+                    t(ERR_TOOL_MULTIMODAL_INVALID_IMAGE),
+                    path=resolved_path,
+                    modality=modality,
+                )
 
         return json.dumps(
             {

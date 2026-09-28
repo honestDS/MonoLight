@@ -50,7 +50,7 @@ def collect_pending_multimodal_file_inputs(messages: list[InternalMessage]) -> l
             if tool_response.role != MessageRole.TOOL or tool_response.tool_call_id != tool_call.id:
                 continue
             result = parse_multimodal_file_read_result(tool_response.content)
-            if result is not None and result["modality"] == "image":
+            if result is not None and result["modality"] in {"image", "audio"}:
                 inputs.append(
                     {
                         "path": result["path"],

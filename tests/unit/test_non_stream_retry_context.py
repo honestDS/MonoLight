@@ -254,6 +254,70 @@ async def test_context_length_failed_summary_falls_through_each_channel_then_rai
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_single_channel_invalid_request_fails_after_one_model_attempt(monkeypatch, streaming):
+    async def stream_event_callback(_event):
+        return None
+
+    state = _context_length_generation_state(
+        stream_event_callback=stream_event_callback if streaming else None,
+    )
+    attempts = []
+    selection_calls = []
+
+    async def select_channel(_db, _channel_config, _expected_usage, **kwargs):
+        selection_calls.append(set(kwargs.get("excluded_priorities") or set()))
+        return None
+
+    async def generate_response(**kwargs):
+        attempts.append(kwargs["model_id"])
+        raise LLMException(
+            message="ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS",
+            status=400,
+            detail={
+                "error": {
+                    "message": "Audio input is not available.",
+                    "type": "invalid_request_error",
+                    "param": "input",
+                    "code": None,
+                }
+            },
+        )
+
+    async def generate_stream_response(**kwargs):
+        return await generate_response(**kwargs)
+
+    monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)
+    monkeypatch.setattr(
+        interactive_generation_module,
+        "apply_context_summary_checkpoint",
+        _passthrough_context_summary_checkpoint,
+    )
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
+    monkeypatch.setattr(
+        interactive_generation_module.LLMClient,
+        "generate_with_stream_callback",
+        generate_stream_response,
+    )
+    monkeypatch.setattr(
+        interactive_generation_module.ContextManager,
+        "prepare_messages_for_model_request",
+        lambda **kwargs: kwargs["messages"],
+    )
+
+    with pytest.raises(LLMException) as exc_info:
+        await interactive_generation_module.generate_interactive_turn(
+            state,
+            current_tools=[],
+            response_id="response-1",
+        )
+
+    assert attempts == ["model-1"]
+    assert selection_calls == [{1}]
+    assert exc_info.value.kwargs["status"] == 400
+
+
+@pytest.mark.asyncio
 async def test_handle_stream_content_buffers_leading_whitespace_until_text():
     emitted_events = []
 
@@ -1825,6 +1889,61 @@ async def test_interactive_injects_read_multimodal_result_only_into_next_model_r
     assert all("pending_multimodal_inputs" not in checkpoint for checkpoint in checkpoints)
     assert all("data:image" not in json.dumps(checkpoint, ensure_ascii=False) for checkpoint in checkpoints)
     assert all(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY not in checkpoint for checkpoint in checkpoints)
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_injects_read_audio_result_only_when_audio_understanding_is_enabled(monkeypatch, tmp_path):
+    audio_path = tmp_path / "read-result.mp3"
+    audio_path.write_bytes(b"audio")
+    tool_call = InternalToolCall(
+        id="call-audio",
+        name="read_multimodal_file",
+        arguments={"path": str(audio_path)},
+    )
+    generated_calls = []
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(current_tool_call, *args, **kwargs):
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=current_tool_call.id,
+            content=json.dumps(
+                {
+                    "type": "multimodal_file_read",
+                    "status": "success",
+                    "modality": "audio",
+                    "path": str(audio_path.resolve()),
+                    "message": "下一条 role=user 消息不是用户新输入",
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        generated_calls_target=generated_calls,
+        response_messages=[
+            InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]),
+            InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
+        ],
+        tool_call=tool_call,
+        multimodal_capabilities=(False, True, False),
+    )
+
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert len(generated_calls) == 2
+    temporary_message = generated_calls[1]["messages"][-1]
+    audio_parts = [part for part in temporary_message.content if part.type == "audio"]
+    assert len(audio_parts) == 1
+    assert audio_parts[0].path == str(audio_path.resolve())
+    assert audio_parts[0].format == "mp3"
+    assert audio_parts[0].data is None
     assert unknown_calls == []
 
 

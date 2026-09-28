@@ -9,7 +9,7 @@ from PIL import Image
 
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.models.message import FilePart, ImagePart, InternalMessage, TextPart
+from app.models.message import AudioPart, FilePart, ImagePart, InternalMessage, TextPart
 
 # 屏蔽 Pillow 库的 DEBUG 日志输出，防止刷屏
 logging.getLogger("PIL").setLevel(logging.WARNING)
@@ -115,8 +115,16 @@ class MessageAssembler:
 
                 # 音频文件处理
                 elif ext in [".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".wma"]:
-                    if audio_understanding:
-                        content_parts.append(FilePart(path=attachment))
+                    if is_history:
+                        content_parts.append(TextPart(text="[系统提示,此处不是用户说的话][历史音频][系统提示结束]"))
+                    elif audio_understanding:
+                        path = attachment[8:] if attachment.startswith("file:///") else attachment
+                        content_parts.append(
+                            AudioPart(
+                                path=path,
+                                format=os.path.splitext(path)[1].lower().lstrip("."),
+                            )
+                        )
                     else:
                         content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][未开启音频理解: {attachment}][系统提示结束]"))
 

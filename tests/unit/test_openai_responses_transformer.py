@@ -12,6 +12,7 @@ from app.core.utils.llm_request_params import (
     build_session_title_generation_params,
 )
 from app.models.message import (
+    AudioPart,
     FilePart,
     ImagePart,
     InternalMessage,
@@ -681,6 +682,104 @@ def test_responses_to_provider_preserves_content_and_tool_order() -> None:
             "output": "result",
         },
     ]
+
+
+def test_openai_transformers_preserve_audio_as_native_multimodal_input() -> None:
+    messages = [
+        InternalMessage(
+            role=MessageRole.USER,
+            content=[
+                TextPart(text="Listen to this"),
+                AudioPart(data="YXVkaW8=", format="mp3"),
+            ],
+        )
+    ]
+
+    assert OpenAIChatCompletionsTransformer.to_provider(messages) == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Listen to this"},
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "YXVkaW8=", "format": "mp3"},
+                },
+            ],
+        }
+    ]
+    assert OpenAIResponsesTransformer.to_provider(messages) == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Listen to this"},
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "YXVkaW8=", "format": "mp3"},
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_openai_audio_materialization_reads_file_without_mutating_message(tmp_path) -> None:
+    audio_path = tmp_path / "sample.mp3"
+    audio_path.write_bytes(b"audio")
+    source = InternalMessage(
+        role=MessageRole.USER,
+        content=[AudioPart(path=str(audio_path), format="mp3")],
+    )
+
+    materialized = await OpenAIChatCompletionsTransformer._materialize_audio_messages([source])
+
+    assert materialized[0] is not source
+    assert materialized[0].content[0].data == "YXVkaW8="
+    assert materialized[0].content[0].path == str(audio_path)
+    assert source.content[0].data is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transformer_cls", "payload_key"),
+    [
+        (OpenAIChatCompletionsTransformer, "messages"),
+        (OpenAIResponsesTransformer, "input"),
+    ],
+)
+async def test_openai_generate_materializes_audio_into_request_payload(
+    monkeypatch,
+    tmp_path,
+    transformer_cls,
+    payload_key,
+) -> None:
+    audio_path = tmp_path / "sample.mp3"
+    audio_path.write_bytes(b"audio")
+    source = InternalMessage(
+        role=MessageRole.USER,
+        content=[AudioPart(path=str(audio_path), format="mp3")],
+    )
+    captured = {}
+
+    async def post_json(**kwargs):
+        captured.update(kwargs["payload"])
+        return {}
+
+    transformer = transformer_cls()
+    monkeypatch.setattr(transformer, "_post_json", post_json)
+
+    await transformer.generate(
+        api_key="key",
+        base_url="https://example.invalid/v1",
+        model_id="audio-model",
+        messages=[source],
+    )
+
+    content = captured[payload_key][0]["content"]
+    assert content[0] == {
+        "type": "input_audio",
+        "input_audio": {"data": "YXVkaW8=", "format": "mp3"},
+    }
+    assert source.content[0].data is None
 
 
 def test_chat_completions_to_provider_fills_empty_tool_call_content_without_mutating_messages() -> None:

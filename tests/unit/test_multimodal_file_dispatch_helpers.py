@@ -6,15 +6,16 @@ from app.core.dispatchers.interactive_helpers import (
     build_pending_multimodal_input_message,
     collect_pending_multimodal_file_inputs,
 )
+from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
-def _success_result(path, message="不是用户的新输入"):
+def _success_result(path, message="不是用户的新输入", modality="image"):
     return json.dumps(
         {
             "type": "multimodal_file_read",
             "status": "success",
-            "modality": "image",
+            "modality": modality,
             "path": str(path.resolve()),
             "message": message,
         },
@@ -116,3 +117,56 @@ def test_build_pending_multimodal_input_message_assembles_image_without_mutating
     assert pending == original_pending
     assert any(part.type == "text" and "不是用户新输入" in part.text for part in message.content)
     assert any(part.type == "image_url" and part.image_url["url"].startswith("data:image/") for part in message.content)
+
+
+def test_collect_and_build_pending_multimodal_audio_input(tmp_path):
+    audio_path = tmp_path / "sample.mp3"
+    audio_path.write_bytes(b"audio-bytes")
+    tool_call = InternalToolCall(
+        id="call-audio",
+        name="read_multimodal_file",
+        arguments={"path": str(audio_path)},
+    )
+    messages = [
+        InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]),
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content=_success_result(audio_path, modality="audio"),
+        ),
+    ]
+
+    pending = collect_pending_multimodal_file_inputs(messages)
+    message = build_pending_multimodal_input_message(
+        pending,
+        image_understanding=False,
+        audio_understanding=True,
+        video_understanding=False,
+    )
+
+    assert [item["modality"] for item in pending] == ["audio"]
+    assert message is not None
+    audio_parts = [part for part in message.content if part.type == "audio"]
+    assert len(audio_parts) == 1
+    assert audio_parts[0].format == "mp3"
+    assert audio_parts[0].path == str(audio_path.resolve())
+    assert audio_parts[0].data is None
+
+
+def test_message_assembler_replaces_history_audio_with_placeholder(tmp_path):
+    audio_path = tmp_path / "history.mp3"
+    audio_path.write_bytes(b"audio")
+    message = InternalMessage(
+        role=MessageRole.USER,
+        content="previous audio",
+        attachments=[str(audio_path)],
+    )
+
+    assembled = MessageAssembler.assemble(
+        message,
+        audio_understanding=True,
+        is_history=True,
+    )
+
+    assert any(part.type == "text" and "历史音频" in part.text for part in assembled.content)
+    assert all(part.type != "audio" for part in assembled.content)
