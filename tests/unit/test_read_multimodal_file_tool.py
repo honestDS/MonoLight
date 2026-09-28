@@ -90,18 +90,20 @@ async def test_read_multimodal_file_does_not_claim_to_read_video(tmp_path):
     result = json.loads(await _build_executor(tmp_path).execute(path=str(video_path)))
 
     assert result["status"] == "failed"
-    assert "尚未实现本地音频/视频读取" in result["error"]
+    assert "尚未实现本地视频读取" in result["error"]
 
 
 @pytest.mark.asyncio
-async def test_read_multimodal_file_does_not_claim_to_read_audio(tmp_path):
+async def test_read_multimodal_file_reads_supported_audio(tmp_path):
     audio_path = tmp_path / "audio.mp3"
     audio_path.write_bytes(b"audio")
 
     result = json.loads(await _build_executor(tmp_path).execute(path=str(audio_path)))
 
-    assert result["status"] == "failed"
-    assert "尚未实现本地音频/视频读取" in result["error"]
+    assert result["status"] == "success"
+    assert result["modality"] == "audio"
+    assert result["path"] == str(audio_path.resolve())
+    assert "不是用户的新输入" in result["message"]
 
 
 @pytest.mark.asyncio

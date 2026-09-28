@@ -55,6 +55,13 @@ class ImagePart(MessagePart):
     image_url: dict[str, str]
 
 
+class AudioPart(MessagePart):
+    type: Literal["audio"] = "audio"
+    format: str
+    path: str | None = None
+    data: str | None = None
+
+
 class FilePart(MessagePart):
     type: Literal["file"] = "file"
     path: str
@@ -70,7 +77,7 @@ class InternalToolCall(BaseModel):
 class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
-    content: str | list[TextPart | ImagePart | FilePart | MessagePart] | None = None
+    content: str | list[TextPart | ImagePart | AudioPart | FilePart | MessagePart] | None = None
     reasoning_content: str | None = None
     refusal: str | None = None
     provider_metadata: dict[str, Any] | None = None
@@ -169,7 +176,7 @@ class MessageResponse(MessageBase):
 
 
 class ChatCompletionRequest(BaseModel):
-    message: str | list[TextPart | ImagePart | FilePart | MessagePart]
+    message: str | list[TextPart | ImagePart | AudioPart | FilePart | MessagePart]
     attachments: list[str] | None = None
     session_id: str | None = None
     request_id: str | None = None

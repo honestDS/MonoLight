@@ -115,7 +115,8 @@ async def generate_interactive_turn(
                     previous_llm_request_metadata=(state.latest_llm_request_metadata if isinstance(state.latest_llm_request_metadata, dict) and state.latest_llm_request_metadata.get("input_tokens_source") == "provider" else None),
                 )
             pending_file_inputs = collect_pending_multimodal_file_inputs(state.messages)
-            if pending_file_inputs and not state.img_understanding:
+            pending_modalities = {item["modality"] for item in pending_file_inputs}
+            if ("image" in pending_modalities and not state.img_understanding) or ("audio" in pending_modalities and not state.audio_understanding) or ("video" in pending_modalities and not state.video_understanding):
                 raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
             request_messages = materialize_user_environment_prompts(state.messages)
             pending_multimodal_message = build_pending_multimodal_input_message(

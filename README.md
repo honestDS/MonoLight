@@ -25,6 +25,7 @@ From everyday office tasks to server operations and complex automation workflows
 
 ## 0. Current Progress
 - Fixing remaining issues
+- Audio and video understanding support
 - Skill support
 
 ## 1. Core Features

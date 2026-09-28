@@ -1,5 +1,5 @@
 from app.core.utils.tokenizer import estimate_tokens, resolve_token_encoding_name
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import AudioPart, InternalMessage, MessageRole
 from app.providers.llm.token_estimation import estimate_request_tokens_locally
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
@@ -95,3 +95,21 @@ def test_local_request_estimate_counts_transformed_provider_payload():
     )
 
     assert estimate > 0
+
+
+def test_local_request_estimate_does_not_count_audio_base64_as_text_tokens():
+    def estimate_for(data: str) -> int:
+        return estimate_request_tokens_locally(
+            OpenAIChatCompletionsTransformer,
+            model_id="gpt-5.6-luna",
+            protocol="openai",
+            messages=[
+                InternalMessage(
+                    role=MessageRole.USER,
+                    content=[AudioPart(data=data, format="mp3")],
+                )
+            ],
+            tools=None,
+        )
+
+    assert estimate_for("YQ==") == estimate_for("YQ==" * 10000)

@@ -32,6 +32,8 @@ def message_token_text(msg: InternalMessage) -> str:
                 text_parts.append(str(getattr(part, "text", "") or ""))
             elif part_type == "image_url":
                 text_parts.append("[图片]")
+            elif part_type == "audio":
+                text_parts.append("[音频]")
             elif part_type == "file":
                 text_parts.append(f"[文件:{getattr(part, 'path', '') or ''}]")
             else:

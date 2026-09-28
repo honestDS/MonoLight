@@ -12,6 +12,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.model_request_headers import build_model_request_headers
 from app.models.message import (
+    AudioPart,
     FilePart,
     ImagePart,
     InternalMessage,
@@ -149,9 +150,10 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
     ) -> dict[str, Any]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
 
         headers = build_model_request_headers(api_key, custom_headers)
+        request_messages = await self._materialize_audio_messages(messages)
         payload = {
             "model": model_id,
-            "messages": self.to_provider(messages),
+            "messages": self.to_provider(request_messages),
             "stream": False,
         }
 
@@ -199,9 +201,10 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         headers = build_model_request_headers(api_key, custom_headers)
+        request_messages = await self._materialize_audio_messages(messages)
         payload = {
             "model": model_id,
-            "messages": self.to_provider(messages),
+            "messages": self.to_provider(request_messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -275,6 +278,16 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
                         content.append({"type": "text", "text": getattr(part, "text", "")})
                     elif isinstance(part, ImagePart) or getattr(part, "type", None) == "image_url":
                         content.append({"type": "image_url", "image_url": {"url": getattr(part, "image_url", {}).get("url", "")}})
+                    elif isinstance(part, AudioPart) or getattr(part, "type", None) == "audio":
+                        content.append(
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": getattr(part, "data", "") or "",
+                                    "format": getattr(part, "format", ""),
+                                },
+                            }
+                        )
                     elif isinstance(part, FilePart) or getattr(part, "type", None) == "file":
                         # OpenAI 当前不支持直接传递任意文件，转为文本描述给上下文
                         content.append({"type": "text", "text": f"[Attached File: {getattr(part, 'path', '')}]"})

@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import codecs
 import json
 import socket
 from collections.abc import AsyncGenerator, Callable
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -13,12 +15,14 @@ from app.core.constants import (
     ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
     ERR_LLM_CONNECTION_FAILED,
     ERR_LLM_FIRST_CHAR_TIMEOUT,
+    ERR_LLM_MULTIMODAL_INPUT_READ_FAILED,
     ERR_LLM_STREAM_TIMEOUT,
 )
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
+from app.models.message import AudioPart, InternalMessage
 
 from ..base import BaseTransformer
 
@@ -26,6 +30,41 @@ logger = get_logger(__name__)
 
 
 class BaseOpenAITransformer(BaseTransformer):
+    @classmethod
+    async def _materialize_audio_messages(cls, messages: list[InternalMessage]) -> list[InternalMessage]:
+        materialized_messages: list[InternalMessage] = []
+        for message in messages:
+            if not isinstance(message.content, list):
+                materialized_messages.append(message)
+                continue
+
+            changed = False
+            materialized_parts = []
+            for part in message.content:
+                if not isinstance(part, AudioPart):
+                    materialized_parts.append(part)
+                    continue
+                if part.data:
+                    materialized_parts.append(part)
+                    continue
+                if not part.path:
+                    raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_READ_FAILED, path="")
+                try:
+                    raw_audio = await asyncio.to_thread(Path(part.path).read_bytes)
+                except (OSError, ValueError) as exc:
+                    raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_READ_FAILED, path=part.path) from exc
+                if not raw_audio:
+                    raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_READ_FAILED, path=part.path)
+                materialized_parts.append(
+                    part.model_copy(
+                        update={"data": base64.b64encode(raw_audio).decode("ascii")},
+                    )
+                )
+                changed = True
+
+            materialized_messages.append(message.model_copy(update={"content": materialized_parts}) if changed else message)
+        return materialized_messages
+
     @staticmethod
     def _is_timeout_exception(exc: Exception) -> bool:
         return isinstance(exc, (asyncio.TimeoutError, TimeoutError, socket.timeout, aiohttp.ServerTimeoutError))
