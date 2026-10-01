@@ -170,7 +170,7 @@
 
         <div class="input-wrapper">
           <div class="input-controls">
-            <div class="chat-input-box">
+            <div ref="chatInputBoxRef" class="chat-input-box">
               <!-- 自定义附件展示区域（取代 el-upload 原生列表） -->
               <div class="upload-container" v-show="uploadFileList.length > 0">
                 <div class="custom-upload-list">
@@ -199,15 +199,18 @@
               <div class="chat-input-row">
                 <el-popover
                   v-model:visible="moreOptionsVisible"
-                  placement="bottom-start"
-                  :width="280"
+                  placement="top-start"
+                  :width="moreOptionsWidth"
+                  :reference-el="chatInputBoxRef"
                   :show-arrow="false"
+                  :popper-style="{ maxHeight: 'min(45vh, 420px)', overflowY: 'auto', minWidth: '0' }"
                   popper-class="chat-more-options-popover"
                 >
                   <template #reference>
                     <el-button
                       class="more-options-trigger"
                       :title="$t('chat.more_options')"
+                      :aria-label="$t('chat.more_options')"
                       circle
                     >
                       <el-icon><Plus /></el-icon>
@@ -215,13 +218,18 @@
                   </template>
 
                   <div class="more-options-content">
-                    <div
-                      class="more-option-row"
-                      :class="{ 'is-disabled': isCurrentSessionReadOnly }"
-                      @click="!isCurrentSessionReadOnly && openUploadPicker()"
-                    >
-                      <el-icon class="more-option-icon"><UploadFilled /></el-icon>
-                      <span class="more-option-label">{{ $t('chat.more_options_upload') }}</span>
+                    <div class="more-options-header">
+                      <span class="more-options-title">{{ $t('chat.more_options_session_settings') }}</span>
+                      <el-button
+                        class="more-option-upload-button"
+                        size="small"
+                        :aria-label="$t('chat.more_options_upload')"
+                        :disabled="isCurrentSessionReadOnly"
+                        @click="openUploadPicker"
+                      >
+                        <el-icon aria-hidden="true"><UploadFilled /></el-icon>
+                        {{ $t('chat.more_options_upload') }}
+                      </el-button>
                     </div>
 
                     <el-upload
@@ -235,115 +243,117 @@
                       class="more-option-upload-hidden"
                     />
 
-                    <div class="more-option-divider"></div>
+                    <div class="more-options-groups">
+                      <fieldset class="more-options-group">
+                        <legend class="more-options-group-title">{{ $t('chat.more_options_conversation_settings') }}</legend>
 
-                    <div class="more-option-segment">
-                      <span class="more-option-label">{{ $t('chat.more_options_plain') }} / {{ $t('chat.more_options_markdown') }}</span>
-                      <el-radio-group
-                        :model-value="currentSessionEnableMarkdown ? 'md' : 'plain'"
-                        :disabled="isCurrentSessionReadOnly"
-                        size="small"
-                        @update:model-value="val => toggleMarkdown(val === 'md')"
-                      >
-                        <el-radio-button label="plain">{{ $t('chat.more_options_plain') }}</el-radio-button>
-                        <el-radio-button label="md">{{ $t('chat.more_options_markdown') }}</el-radio-button>
-                      </el-radio-group>
-                    </div>
+                        <div class="more-option-row more-option-profile">
+                          <span class="more-option-label more-option-label--profile">{{ $t('chat.more_options_profile') }}</span>
+                          <el-select
+                            class="more-option-profile-select"
+                            :model-value="currentSessionProfileDisplayId"
+                            clearable
+                            filterable
+                            :loading="profilesLoading"
+                            :disabled="profileSettingSubmitting"
+                            :placeholder="currentSessionProfilePlaceholder"
+                            :aria-label="$t('chat.more_options_profile')"
+                            @change="updateSessionProfileOverride"
+                            size="small"
+                          >
+                            <el-option
+                              v-for="profile in currentSessionProfileOptions"
+                              :key="profile.id"
+                              :label="formatProfileOptionLabel(profile, $t('chat.default_profile_suffix'))"
+                              :value="profile.id"
+                            />
+                          </el-select>
+                        </div>
 
-                    <div class="more-option-divider"></div>
+                        <div class="more-option-toggle">
+                          <span class="more-option-label">
+                            <span>{{ $t('chat.goal_mode') }}</span>
+                            <HelpTooltip :content="$t('chat.goal_mode_hint')" />
+                          </span>
+                          <el-switch
+                            :model-value="currentSessionGoalMode"
+                            :aria-label="$t('chat.goal_mode')"
+                            :disabled="loading || agentSettingSubmitting"
+                            @update:model-value="updateSessionGoalMode"
+                          />
+                        </div>
 
-                    <div class="more-option-toggle">
-                      <span class="more-option-label">
-                        <span>{{ $t('chat.goal_mode') }}</span>
-                        <HelpTooltip :content="$t('chat.goal_mode_hint')" />
-                      </span>
-                      <el-switch
-                        :model-value="currentSessionGoalMode"
-                        :aria-label="$t('chat.goal_mode')"
-                        :disabled="loading || agentSettingSubmitting"
-                        @update:model-value="updateSessionGoalMode"
-                      />
-                    </div>
+                        <div class="more-option-segment">
+                          <span class="more-option-label">
+                            <span>{{ $t('chat.max_turns') }}</span>
+                            <HelpTooltip :content="$t('chat.max_turns_hint')" />
+                          </span>
+                          <el-input-number
+                            :model-value="currentSessionMaxTurns"
+                            :min="1"
+                            :max="SESSION_MAX_TURNS_UPPER_BOUND"
+                            :step="1"
+                            :precision="0"
+                            controls-position="right"
+                            size="small"
+                            :aria-label="$t('chat.max_turns')"
+                            :disabled="loading || agentSettingSubmitting || currentSessionGoalMode"
+                            @change="updateSessionMaxTurns"
+                          />
+                        </div>
 
-                    <div class="more-option-divider"></div>
+                        <div class="more-option-segment">
+                          <span class="more-option-label">{{ $t('chat.more_options_response_mode') }}</span>
+                          <el-radio-group
+                            :model-value="isWsModeComputed ? 'stream' : 'non_stream'"
+                            :aria-label="$t('chat.more_options_response_mode')"
+                            :disabled="isCurrentSessionReadOnly || modeSettingSubmitting || transportModeChangeBlocked"
+                            size="small"
+                            @update:model-value="val => handleModeChange(val === 'stream')"
+                          >
+                            <el-radio-button label="non_stream">{{ $t('chat.more_options_non_stream') }}</el-radio-button>
+                            <el-radio-button label="stream">{{ $t('chat.more_options_stream') }}</el-radio-button>
+                          </el-radio-group>
+                        </div>
+                      </fieldset>
 
-                    <div class="more-option-segment">
-                      <span class="more-option-label">
-                        <span>{{ $t('chat.max_turns') }}</span>
-                        <HelpTooltip :content="$t('chat.max_turns_hint')" />
-                      </span>
-                      <el-input-number
-                        :model-value="currentSessionMaxTurns"
-                        :min="1"
-                        :max="SESSION_MAX_TURNS_UPPER_BOUND"
-                        :step="1"
-                        :precision="0"
-                        controls-position="right"
-                        :aria-label="$t('chat.max_turns')"
-                        :disabled="loading || agentSettingSubmitting || currentSessionGoalMode"
-                        @change="updateSessionMaxTurns"
-                      />
-                    </div>
+                      <fieldset class="more-options-group">
+                        <legend class="more-options-group-title">{{ $t('chat.more_options_display_settings') }}</legend>
 
-                    <div class="more-option-divider"></div>
+                        <div class="more-option-segment">
+                          <span class="more-option-label">{{ $t('chat.more_options_message_format') }}</span>
+                          <el-radio-group
+                            :model-value="currentSessionEnableMarkdown ? 'md' : 'plain'"
+                            :aria-label="$t('chat.more_options_message_format')"
+                            :disabled="isCurrentSessionReadOnly"
+                            size="small"
+                            @update:model-value="val => toggleMarkdown(val === 'md')"
+                          >
+                            <el-radio-button label="plain">{{ $t('chat.more_options_plain') }}</el-radio-button>
+                            <el-radio-button label="md">{{ $t('chat.more_options_markdown') }}</el-radio-button>
+                          </el-radio-group>
+                        </div>
 
-                    <div class="more-option-segment">
-                      <span class="more-option-label">{{ $t('chat.more_options_non_stream') }} / {{ $t('chat.more_options_stream') }}</span>
-                      <el-radio-group
-                        :model-value="isWsModeComputed ? 'stream' : 'non_stream'"
-                        :disabled="isCurrentSessionReadOnly || modeSettingSubmitting || transportModeChangeBlocked"
-                        size="small"
-                        @update:model-value="val => handleModeChange(val === 'stream')"
-                      >
-                        <el-radio-button label="non_stream">{{ $t('chat.more_options_non_stream') }}</el-radio-button>
-                        <el-radio-button label="stream">{{ $t('chat.more_options_stream') }}</el-radio-button>
-                      </el-radio-group>
-                    </div>
+                        <div class="more-option-toggle">
+                          <span class="more-option-label">{{ $t('chat.more_options_tool_output') }}</span>
+                          <el-switch
+                            :model-value="currentSessionShowToolCalls"
+                            :aria-label="$t('chat.more_options_tool_output')"
+                            :disabled="toolOutputSettingSubmitting || loading"
+                            @update:model-value="updateSessionShowToolCalls"
+                          />
+                        </div>
 
-                    <div class="more-option-divider"></div>
-
-                    <div class="more-option-row more-option-profile">
-                      <span class="more-option-label more-option-label--profile">{{ $t('chat.more_options_profile') }}</span>
-                      <el-select
-                        class="more-option-profile-select"
-                        :model-value="currentSessionProfileDisplayId"
-                        clearable
-                        filterable
-                        :loading="profilesLoading"
-                        :disabled="profileSettingSubmitting"
-                        :placeholder="currentSessionProfilePlaceholder"
-                        @change="updateSessionProfileOverride"
-                        size="small"
-                      >
-                        <el-option
-                          v-for="profile in currentSessionProfileOptions"
-                          :key="profile.id"
-                          :label="formatProfileOptionLabel(profile, $t('chat.default_profile_suffix'))"
-                          :value="profile.id"
-                        />
-                      </el-select>
-                    </div>
-
-                    <div class="more-option-divider"></div>
-
-                    <div class="more-option-toggle">
-                      <span class="more-option-label">{{ $t('chat.more_options_tool_output') }}</span>
-                      <el-switch
-                        :model-value="currentSessionShowToolCalls"
-                        :disabled="toolOutputSettingSubmitting || loading"
-                        @update:model-value="updateSessionShowToolCalls"
-                      />
-                    </div>
-
-                    <div class="more-option-divider"></div>
-
-                    <div class="more-option-toggle">
-                      <span class="more-option-label">{{ $t('chat.show_reasoning') }}</span>
-                      <el-switch
-                        :model-value="currentSessionShowReasoning"
-                        :disabled="reasoningSettingSubmitting || loading"
-                        @update:model-value="updateSessionShowReasoning"
-                      />
+                        <div class="more-option-toggle">
+                          <span class="more-option-label">{{ $t('chat.show_reasoning') }}</span>
+                          <el-switch
+                            :model-value="currentSessionShowReasoning"
+                            :aria-label="$t('chat.show_reasoning')"
+                            :disabled="reasoningSettingSubmitting || loading"
+                            @update:model-value="updateSessionShowReasoning"
+                          />
+                        </div>
+                      </fieldset>
                     </div>
                   </div>
                 </el-popover>
@@ -424,6 +434,25 @@ const profilesLoading = ref(false)
 const profileSettingSubmitting = ref(false)
 const toolOutputSettingSubmitting = ref(false)
 const moreOptionsVisible = ref(false)
+const chatInputBoxRef = ref(null)
+const moreOptionsWidth = ref(0)
+let chatInputResizeObserver
+const syncMoreOptionsWidth = () => {
+  moreOptionsWidth.value = chatInputBoxRef.value?.getBoundingClientRect().width ?? 0
+}
+
+onMounted(() => {
+  const inputBox = chatInputBoxRef.value
+  if (!inputBox) return
+  syncMoreOptionsWidth()
+  chatInputResizeObserver = new ResizeObserver(syncMoreOptionsWidth)
+  chatInputResizeObserver.observe(inputBox, { box: 'border-box' })
+})
+
+onUnmounted(() => {
+  chatInputResizeObserver?.disconnect()
+})
+
 const uploadTriggerRef = ref(null)
 const agentSettingSubmitting = ref(false)
 

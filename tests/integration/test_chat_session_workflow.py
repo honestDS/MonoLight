@@ -21,6 +21,7 @@ from app.core.constants import (
 )
 from app.core.i18n import t
 from app.core.security import get_current_user
+from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers
 from app.models.audit import AuditConfirmationClaim, AuditRecord
@@ -728,6 +729,75 @@ async def test_max_turns_upper_bound_persists_across_session_settings(
         listed_session = next(item for item in listed.json()["data"] if item["session_id"] == session_id)
         assert listed_session["goal_mode"] is False
         assert listed_session["max_turns"] == SESSION_MAX_TURNS_UPPER_BOUND
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "stream_requested", "expected_show_tool_calls", "expected_stream_requested"),
+    [
+        pytest.param("http", None, True, False, id="http-none"),
+        pytest.param("http", False, True, False, id="http-false"),
+        pytest.param("http", True, True, True, id="http-true"),
+        pytest.param("ws", None, True, True, id="ws-none"),
+        pytest.param("ws", False, True, False, id="ws-false"),
+        pytest.param("ws", True, True, True, id="ws-true"),
+        pytest.param("weixin-openclaw", None, False, False, id="weixin-openclaw-none"),
+        pytest.param("weixin-openclaw", False, False, False, id="weixin-openclaw-false"),
+        pytest.param("weixin-openclaw", True, True, True, id="weixin-openclaw-true"),
+        pytest.param("other-message-platform", None, False, False, id="other-message-platform-none"),
+        pytest.param("other-message-platform", False, False, False, id="other-message-platform-false"),
+        pytest.param("other-message-platform", True, True, True, id="other-message-platform-true"),
+    ],
+)
+async def test_session_reply_submission_persists_visibility_defaults_and_manual_override(
+    chat_session_database: AsyncSession,
+    source: str,
+    stream_requested: bool | None,
+    expected_show_tool_calls: bool,
+    expected_stream_requested: bool,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    session_id = f"visibility-{source}-{stream_requested}"
+
+    _first_message, first_work, _first_status, _first_events = await session_reply_queue_manager.submit_user_message(
+        chat_session_database,
+        uid="user-1",
+        session_id=session_id,
+        profile=primary_profile,
+        message="first message",
+        attachments=None,
+        source=source,
+        stream_requested=stream_requested,
+    )
+
+    persisted = await chat_session_database.get(ChatSession, session_id)
+    assert persisted is not None
+    assert persisted.show_tool_calls is expected_show_tool_calls
+    assert first_work.execution_state["stream_requested"] is expected_stream_requested
+    assert first_work.execution_state["show_tool_calls"] is expected_show_tool_calls
+    assert first_work.execution_state["expose_tool_call_content"] is expected_show_tool_calls
+
+    persisted.show_tool_calls = not expected_show_tool_calls
+    chat_session_database.add(persisted)
+    await chat_session_database.commit()
+
+    _second_message, second_work, _second_status, _second_events = await session_reply_queue_manager.submit_user_message(
+        chat_session_database,
+        uid="user-1",
+        session_id=session_id,
+        profile=primary_profile,
+        message="second message",
+        attachments=None,
+        source=source,
+        stream_requested=stream_requested,
+    )
+
+    await chat_session_database.refresh(persisted)
+    assert persisted.show_tool_calls is (not expected_show_tool_calls)
+    assert second_work.execution_state["stream_requested"] is expected_stream_requested
+    assert second_work.execution_state["show_tool_calls"] is (not expected_show_tool_calls)
+    assert second_work.execution_state["expose_tool_call_content"] is (not expected_show_tool_calls)
 
 
 @pytest.mark.asyncio
