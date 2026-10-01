@@ -599,6 +599,7 @@ class CRUDSessionReplyWorkItem:
         uid: str | None = None,
         is_admin: bool = False,
         commit: bool = True,
+        interactive_only: bool = False,
     ) -> int:
         conditions = [
             SessionReplyWorkItem.session_id == session_id,
@@ -606,6 +607,15 @@ class CRUDSessionReplyWorkItem:
         ]
         if not is_admin:
             conditions.append(SessionReplyWorkItem.uid == uid)
+        if interactive_only:
+            conditions.append(
+                SessionReplyWorkItem.work_type.in_(
+                    [
+                        SessionReplyWorkType.FOREGROUND_REPLY,
+                        SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                    ]
+                )
+            )
         result = await db.execute(
             update(SessionReplyWorkItem)
             .where(*conditions)

@@ -106,6 +106,8 @@ export function useChatSession() {
   const historyMergeTracker = createHistoryMergeTracker()
   const initialHistoryLoaded = ref(true)
   const pendingHttpRequests = new Map()
+  const inFlightSubmissions = new Set()
+  const stoppingSessionIds = ref(new Set())
   const observedHttpWorkStatuses = new Map()
   const observedHttpLatestMessageIds = new Map()
   const fetchingHttpWorks = new Set()
@@ -113,6 +115,16 @@ export function useChatSession() {
   const incrementalHistoryCursors = new Map()
   let sessionScopeActive = true
   let httpPollingStateVersion = 0
+
+  const trackSubmission = async (getSessionId, submit) => {
+    const entry = { getSessionId, promise: submit() }
+    inFlightSubmissions.add(entry)
+    try {
+      return await entry.promise
+    } finally {
+      inFlightSubmissions.delete(entry)
+    }
+  }
 
   const normalizeHttpIdentity = value => (
     value === undefined || value === null || value === '' ? null : String(value)
@@ -294,6 +306,17 @@ export function useChatSession() {
     const source = currentSession.value?.source
     return Boolean(source && !['http', 'ws'].includes(source))
   })
+  const isStopping = computed(() => {
+    const sessionId = sessionManager.currentSessionId.value
+    return sessionId !== undefined
+      && sessionId !== null
+      && sessionId !== ''
+      && stoppingSessionIds.value.has(sessionId)
+  })
+  const isReplyRunning = computed(() => (
+    !isCurrentSessionReadOnly.value
+    && Boolean(chatState.loading.value || currentSession.value?.is_loading || isStopping.value)
+  ))
 
   // 3. 通信层
   const transport = useChatTransport()
@@ -303,7 +326,7 @@ export function useChatSession() {
   })
   const modeSettingSubmitting = ref(false)
   const transportModeChangeBlocked = computed(() => (
-    Boolean(chatState.loading.value || currentSession.value?.is_loading)
+    Boolean(chatState.loading.value || currentSession.value?.is_loading || isStopping.value)
   ))
 
   const setTransportMode = async (mode, { notifyError = true } = {}) => {
@@ -445,6 +468,28 @@ export function useChatSession() {
     onWorkFinished: event => {
       refreshSessionLoadingState()
       applyLifecycleEvent(workLifecycleTracker.finishWorkLifecycle, event, isCurrentRequestSession)
+      if (
+        isCurrentRequestSession()
+        && (!event?.session_id || event.session_id === sessionManager.currentSessionId.value)
+      ) {
+        contextSummaryTracker.endContextSummaryWork(
+          contextSummaryWorkKeys.value,
+          contextSummaryRequestKeys,
+          event,
+          event.request_id
+        )
+        for (const requestId of [
+          event.request_id,
+          ...(Array.isArray(event.request_ids) ? event.request_ids : [])
+        ]) {
+          if (requestId === undefined || requestId === null || requestId === '') continue
+          contextSummaryTracker.clearContextSummaryRequest(
+            contextSummaryWorkKeys.value,
+            contextSummaryRequestKeys,
+            requestId
+          )
+        }
+      }
     }
   })
 
@@ -674,6 +719,7 @@ export function useChatSession() {
     stopHttpHistorySync()
     incrementalHistoryCursors.clear()
     resetHttpPollingState()
+    inFlightSubmissions.clear()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     sessionManager.setSessionsUpdatedCallback(null)
@@ -896,7 +942,7 @@ export function useChatSession() {
           processAiResponse(response, null, requestId)
         }
       }
-    } else {
+    } else if (status === 'failed') {
       const errorMessage = statusData.error || response?.error || t('chat.send_failed')
       const resultAlreadyInHistory = hasHttpResultMessage(
         chatState.messages.value,
@@ -1085,7 +1131,11 @@ export function useChatSession() {
       ...createLifecycleCallbacks(isCurrentSession),
       deferLoadingUntilResumeComplete: true,
       onContextSummaryStart: (data) => {
-        if (!isCurrentSession() || contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionId)) return
+        if (
+          !isCurrentSession()
+          || contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionId)
+          || workLifecycleTracker.isWorkTerminal(data.work_id)
+        ) return
         contextSummaryTracker.startContextSummaryWork(
           contextSummaryWorkKeys.value,
           contextSummaryRequestKeys,
@@ -1145,6 +1195,7 @@ export function useChatSession() {
       onComplete: (data, _thinkingId, requestId, eventType) => {
         if (!isCurrentSession()) return
         if (eventType === 'turn_end') {
+          if (workLifecycleTracker.isWorkTerminal(getCompletedWorkId(data))) return
           chatState.messages.value = applyResumedTurnEnd(chatState.messages.value, data, requestId)
         }
         mergeResumedHistory()
@@ -1215,6 +1266,125 @@ export function useChatSession() {
     resumeSession: resumeSelectedSessionStream
   }))
 
+  const stopReply = async () => {
+    const sessionId = sessionManager.currentSessionId.value
+    const hasSessionId = sessionId !== undefined && sessionId !== null && sessionId !== ''
+    if (
+      !hasSessionId
+      || isCurrentSessionReadOnly.value
+      || !isReplyRunning.value
+      || stoppingSessionIds.value.has(sessionId)
+    ) return false
+
+    stoppingSessionIds.value.add(sessionId)
+    try {
+      const firstStopPromise = chatApi.stopSession(sessionId)
+      const inFlightPromises = [...inFlightSubmissions]
+        .filter(entry => entry.getSessionId() === sessionId)
+        .map(entry => entry.promise)
+      await firstStopPromise
+      if (inFlightPromises.length > 0) {
+        await Promise.allSettled(inFlightPromises)
+        await chatApi.stopSession(sessionId)
+      }
+
+      if (
+        sessionScopeActive
+        && sessionManager.currentSessionId.value === sessionId
+      ) {
+        const targetSession = sessionManager.sessions.value.find(session => session.session_id === sessionId)
+        const normalizedSessionId = normalizeHttpIdentity(sessionId)
+        const terminalReplyWorkStatuses = new Set(['merged', 'succeeded', 'failed', 'cancelled'])
+
+        const sources = [
+          ...chatState.messages.value,
+          ...(Array.isArray(targetSession?.reply_works)
+            ? targetSession.reply_works.filter(work => (
+                !terminalReplyWorkStatuses.has(String(work?.status || '').toLowerCase())
+              ))
+            : []),
+          ...Array.from(pendingHttpRequests)
+            .filter(([, pending]) => pending?.sessionId === normalizedSessionId)
+            .map(([requestId, pending]) => ({
+              work_id: pending?.workId,
+              request_id: requestId
+            }))
+        ]
+        const workIds = new Set(
+          sources
+            .map(source => normalizeHttpIdentity(source?.work_id))
+            .filter(Boolean)
+        )
+        for (const key of contextSummaryWorkKeys.value) {
+          if (typeof key !== 'string' || !key.startsWith('work:')) continue
+          const workId = normalizeHttpIdentity(key.slice(5))
+          if (workId) workIds.add(workId)
+        }
+        const requestIds = new Set(
+          sources
+            .flatMap(source => [
+              source?.request_id,
+              ...(Array.isArray(source?.request_ids) ? source.request_ids : [])
+            ])
+            .map(normalizeHttpIdentity)
+            .filter(Boolean)
+        )
+        const requestIdList = Array.from(requestIds)
+
+        for (const workId of workIds) {
+          const event = {
+            type: 'cancelled',
+            session_id: sessionId,
+            work_id: workId,
+            request_ids: requestIdList
+          }
+          chatState.messages.value = workLifecycleTracker.finishWorkLifecycle(
+            chatState.messages.value,
+            event
+          )
+          contextSummaryTracker.endContextSummaryWork(
+            contextSummaryWorkKeys.value,
+            contextSummaryRequestKeys,
+            event,
+            requestIdList[0]
+          )
+        }
+
+        chatState.messages.value = workLifecycleTracker.finishWorkLifecycle(
+          chatState.messages.value,
+          { request_ids: requestIdList }
+        )
+
+        for (const requestId of requestIdList) {
+          contextSummaryTracker.clearContextSummaryRequest(
+            contextSummaryWorkKeys.value,
+            contextSummaryRequestKeys,
+            requestId
+          )
+        }
+
+        resetHttpPollingState()
+        chatState.loading.value = false
+        if (targetSession) targetSession.is_loading = false
+        void mergeLatestSessionHistory(sessionId).catch(err => {
+          console.error('Stop reply history merge failed:', err)
+        })
+      }
+
+      if (sessionScopeActive) {
+        void sessionManager.refreshSessionLoadingState().catch(err => {
+          console.error('Session loading state refresh after stop reply failed:', err)
+        })
+      }
+      return true
+    } catch (error) {
+      ElMessage.error(error?.message || t('chat.stop_failed'))
+      return false
+    } finally {
+      stoppingSessionIds.value.delete(sessionId)
+    }
+  }
+
   // ==================== 核心发送方法 ====================
 
   /**
@@ -1222,6 +1392,7 @@ export function useChatSession() {
    * queued 状态由服务端 input_queued 事件设置。
    */
   const enqueueMessage = (text, attachments = []) => {
+    if (isStopping.value) return
     if (rejectReadOnlySession()) return
 
     const userMsgId = Date.now() + Math.random()
@@ -1250,6 +1421,7 @@ export function useChatSession() {
    * 发送消息（统一入口）
    */
   const send = async () => {
+    if (isStopping.value) return
     if (rejectReadOnlySession()) return
     if (transport.transportMode.value === 'ws') {
       return wsSend(chatState.inputMsg.value, attachments.value.map(a => a.path))
@@ -1262,6 +1434,7 @@ export function useChatSession() {
    * HTTP 方式发送消息
    */
   const httpSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
+    if (isStopping.value) return
     if (rejectReadOnlySession()) return
 
     const text = textParam !== null ? textParam : chatState.inputMsg.value
@@ -1328,17 +1501,20 @@ export function useChatSession() {
       && requestSessionId === sessionManager.currentSessionId.value
     )
     try {
-      const response = await transport.httpSend({
-        message: text,
-        sessionId: requestSessionId,
-        attachments: attachmentsToSent,
-        requestId,
-        profileOverrideId,
-        showToolCalls,
-        showReasoning,
-        goalMode,
-        maxTurns
-      })
+      const response = await trackSubmission(
+        () => requestSessionId,
+        () => transport.httpSend({
+          message: text,
+          sessionId: requestSessionId,
+          attachments: attachmentsToSent,
+          requestId,
+          profileOverrideId,
+          showToolCalls,
+          showReasoning,
+          goalMode,
+          maxTurns
+        })
+      )
 
       // 处理后端生成的 UUID (新建会话模式)
       if (response.choices?.[0]?.finish_reason === 'new_session') {
@@ -1438,6 +1614,7 @@ export function useChatSession() {
    * WebSocket 方式发送消息
    */
   const wsSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
+    if (isStopping.value) return
     if (rejectReadOnlySession()) return
 
     const text = textParam !== null ? textParam : chatState.inputMsg.value
@@ -1495,7 +1672,11 @@ export function useChatSession() {
     const callbacks = {
       ...createLifecycleCallbacks(isCurrentRequestSession),
       onContextSummaryStart: (data) => {
-        if (isCurrentRequestSession() && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
+        if (
+          isCurrentRequestSession()
+          && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)
+          && !workLifecycleTracker.isWorkTerminal(data.work_id)
+        ) {
           contextSummaryTracker.startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
         }
       },
@@ -1826,35 +2007,40 @@ export function useChatSession() {
       await httpSend(text, attachmentsToSent, userMsgId)
     }
 
-    try {
-      const sent = await transport.wsSend({
-        message: text,
-        sessionId: requestSessionId,
-        attachments: attachmentsToSent,
-        requestId,
-        profileOverrideId: newProfileOverrideId,
-        showToolCalls,
-        showReasoning,
-        goalMode,
-        maxTurns,
-        callbacks
-      })
-      if (!sent) {
-        await handleWsSendFailure()
-        return
-      }
+    return trackSubmission(
+      () => requestSessionId,
+      async () => {
+        try {
+          const sent = await transport.wsSend({
+            message: text,
+            sessionId: requestSessionId,
+            attachments: attachmentsToSent,
+            requestId,
+            profileOverrideId: newProfileOverrideId,
+            showToolCalls,
+            showReasoning,
+            goalMode,
+            maxTurns,
+            callbacks
+          })
+          if (!sent) {
+            await handleWsSendFailure()
+            return
+          }
 
-      const acknowledgement = await transport.waitForSubmissionAcknowledgement(requestId)
-      if (acknowledgement.status === 'unknown') {
-        if (isCurrentRequestSession()) {
-          transportNotifier.show('submission_unknown')
+          const acknowledgement = await transport.waitForSubmissionAcknowledgement(requestId)
+          if (acknowledgement.status === 'unknown') {
+            if (isCurrentRequestSession()) {
+              transportNotifier.show('submission_unknown')
+            }
+            void sessionManager.refreshSessionLoadingState()
+          }
+        } catch (e) {
+          console.error('WebSocket发送失败:', e)
+          await handleWsSendFailure()
         }
-        void sessionManager.refreshSessionLoadingState()
       }
-    } catch (e) {
-      console.error('WebSocket发送失败:', e)
-      await handleWsSendFailure()
-    }
+    )
   }
 
   // ==================== 会话选择 ====================
@@ -2021,6 +2207,8 @@ export function useChatSession() {
     currentSessionMaxTurns,
     currentTodoPlan,
     isCurrentSessionReadOnly,
+    isStopping,
+    isReplyRunning,
     
     // 状态 - 通信相关
     transportMode: transport.transportMode,
@@ -2037,6 +2225,7 @@ export function useChatSession() {
     
     // 方法 - 发送
     send,
+    stopReply,
     enqueueMessage,
     httpSend,
     wsSend,

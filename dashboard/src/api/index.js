@@ -91,6 +91,7 @@ export const chatApi = {
   sessionsList: () => request.get('/chat/sessions/list'),
   // 删除会话
   deleteSession: (sessionId) => request.post(`/chat/sessions/delete?session_id=${sessionId}`),
+  stopSession: sessionId => request.post('/chat/sessions/stop', null, { params: { session_id: sessionId } }),
   // 获取会话历史记录
   sessionsHistory: (sessionId, page = 1, size = 20, params = {}) => request.get('/chat/sessions/history', {
     params: { session_id: sessionId, page, size, ...params }

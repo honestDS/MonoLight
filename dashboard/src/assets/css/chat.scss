@@ -1113,6 +1113,22 @@
               border-radius: var(--radius-circle) !important;
               box-shadow: 0 6px 16px rgba(var(--color-slate-900-rgb), 0.14);
 
+              &.is-stop-reply {
+                color: var(--color-slate-900) !important;
+              }
+
+              .stop-reply-icon {
+                width: 10px;
+                height: 10px;
+                background: #FFF;
+                border-radius: var(--radius-3);
+              }
+
+              &:focus-visible {
+                outline: 2px solid var(--color-slate-900);
+                outline-offset: 2px;
+              }
+
               .el-icon {
                 font-size: 16px;
               }

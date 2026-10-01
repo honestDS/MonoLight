@@ -1,10 +1,17 @@
+import asyncio
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.constants import (
+    ERR_SESSION_REPLY_LEASE_LOST,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+)
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
+from app.core.i18n import t
 from app.core.utils.dispatcher.process_markdown_response import process_markdown_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import (
@@ -23,6 +30,20 @@ async def save_assistant_message(
     dedupe_key: str | None = None,
     created_at: datetime | None = None,
 ):
+    claim_info = db.info.get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+    if claim_info:
+        work_id, worker_id = claim_info
+        updated = await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=work_id,
+            worker_id=worker_id,
+            values={},
+            commit=False,
+        )
+        if not updated:
+            await db.rollback()
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
+
     session = await session_crud.get_by_session_id(db, session_id)
     enable_markdown = session.enable_markdown if session else False
 

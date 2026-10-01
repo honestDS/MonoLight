@@ -85,6 +85,12 @@ const loadImplementation = () => {
       'const uploadTriggerRef = ref(null)',
       'popover sizing'
     )
+    const actionButtonLabelSource = extractBetween(
+      scriptSetup,
+      'const actionButtonLabel = computed(() =>',
+      '// 拦截发送',
+      'action button label'
+    )
 
     return {
       render: new Function('Vue', compiled.code)(runtime),
@@ -97,7 +103,8 @@ const loadImplementation = () => {
       currentSessionSource,
       defaultsSource,
       agentComputedSource,
-      popoverSizingSource
+      popoverSizingSource,
+      actionButtonLabelSource
     }
   })()
   return implementationPromise
@@ -143,6 +150,19 @@ const createHarness = (implementation, messages, options = {}) => {
     }
   }
   const t = (key) => messages[key.slice('chat.'.length)] ?? key
+  const isReplyRunning = Vue.ref(options.isReplyRunning ?? false)
+  const isStopping = Vue.ref(options.isStopping ?? false)
+  const sendCalls = []
+  const stopCalls = []
+  const send = (...args) => sendCalls.push(args)
+  const stopReply = (...args) => stopCalls.push(args)
+  const actionButtonLabel = new Function(
+    'computed',
+    'isStopping',
+    'isReplyRunning',
+    't',
+    `${implementation.actionButtonLabelSource}\nreturn actionButtonLabel`
+  )(Vue.computed, isStopping, isReplyRunning, t)
   const extractedHandlers = new Function(
     'isCurrentSessionReadOnly',
     'agentSettingSubmitting',
@@ -174,11 +194,13 @@ const createHarness = (implementation, messages, options = {}) => {
   const currentSessionShowToolCalls = Vue.ref(true)
   const currentSessionShowReasoning = Vue.ref(true)
   const currentSessionInfo = Vue.computed(() => currentSession.value)
+  const inputMsg = Vue.ref(options.inputMsg ?? '')
+  const attachments = Vue.ref(options.attachments ?? [])
   const contextTarget = {
     $t: t,
     activeCollapse: null,
     agentSettingSubmitting,
-    attachments: [],
+    attachments,
     collapsedGroups: new Set(),
     currentSessionEnableMarkdown,
     currentSessionGoalMode: extractedGetters.currentSessionGoalMode,
@@ -207,9 +229,11 @@ const createHarness = (implementation, messages, options = {}) => {
     handleSessionGroupEnter: () => {},
     handleSessionGroupLeave: () => {},
     historyLoading: false,
-    inputMsg: '',
+    inputMsg,
     isContextSummarizing: false,
     isCurrentSessionReadOnly,
+    isReplyRunning,
+    isStopping,
     isWsModeComputed: Vue.computed(() => false),
     loadSessions: () => {},
     loading,
@@ -228,11 +252,12 @@ const createHarness = (implementation, messages, options = {}) => {
     reasoningSettingSubmitting: false,
     renderedInitialHistoryLoaded: false,
     renderedMessages: [],
-    send: () => {},
+    send,
     sessionEngaged: false,
     sessionsLoading: false,
     sessionsPanelOpen: false,
     showReasoning: true,
+    stopReply,
     toggleGroup: () => {},
     toggleMarkdown: () => {},
     toggleSessionsPanel: () => {},
@@ -246,7 +271,8 @@ const createHarness = (implementation, messages, options = {}) => {
     updateSessionMaxTurns: extractedHandlers.updateSessionMaxTurns,
     updateSessionProfileOverride: () => {},
     updateSessionShowReasoning: () => {},
-    updateSessionShowToolCalls: () => {}
+    updateSessionShowToolCalls: () => {},
+    actionButtonLabel
   }
   const context = Vue.proxyRefs(contextTarget)
 
@@ -258,11 +284,16 @@ const createHarness = (implementation, messages, options = {}) => {
     errors,
     goalModeDefault: extractedGetters.goalModeDefault,
     handlers: extractedHandlers,
+    inputMsg,
+    isReplyRunning,
+    isStopping,
     isCurrentSessionReadOnly,
     loading,
     maxTurnsDefault: extractedGetters.maxTurnsDefault,
     currentSessionMaxTurns: extractedGetters.currentSessionMaxTurns,
+    sendCalls,
     sessions,
+    stopCalls,
     agentSettingSubmitting
   }
 }
@@ -355,6 +386,19 @@ const controlsFor = (render, context, messages) => {
   assert.ok(goalModeSwitch, 'goal mode switch should be rendered')
   assert.ok(maxTurnsInput, 'max turns input should be rendered')
   return { goalModeSwitch, maxTurnsInput, root }
+}
+
+const actionButtonFor = (implementation, context) => {
+  const hasActionClass = (value) => {
+    if (typeof value === 'string') return value.split(/\s+/).includes('action-btn')
+    if (Array.isArray(value)) return value.some(hasActionClass)
+    return Boolean(value && typeof value === 'object' && value['action-btn'])
+  }
+  const button = vnodesOf(implementation.render(context, [])).find((node) => (
+    node.type?.name === 'el-button' && hasActionClass(node.props?.class)
+  ))
+  assert.ok(button, 'action button should be rendered')
+  return button
 }
 
 test('ChatView binds more options popover width to the chat input box', async () => {
@@ -733,4 +777,89 @@ test('useChatSession max turns computed setter accepts the upper bound and rejec
   assert.equal(existingSessionHarness.currentSessionMaxTurns.value, SESSION_MAX_TURNS_UPPER_BOUND)
   assert.equal(existingSessionHarness.sessions.value[0].max_turns, SESSION_MAX_TURNS_UPPER_BOUND)
   assert.equal(existingSessionHarness.calls.length, 0)
+})
+
+test('ChatView action button stops a running reply without depending on input or setting state', async () => {
+  const implementation = await loadImplementation()
+
+  for (const messages of [zhChat, enChat]) {
+    const harness = createHarness(implementation, messages, { currentSessionId: 'running' })
+    harness.isReplyRunning.value = true
+    harness.loading.value = true
+    harness.agentSettingSubmitting.value = true
+    harness.context.modeSettingSubmitting = true
+    harness.context.inputMsg = ''
+    harness.context.attachments = []
+
+    const button = actionButtonFor(implementation, harness.context)
+
+    assert.equal(button.props.type, 'danger')
+    assert.equal(button.props.disabled, false)
+    assert.equal(button.props.title, messages.stop_reply)
+    assert.equal(button.props['aria-label'], messages.stop_reply)
+
+    button.props.onClick()
+    assert.equal(harness.stopCalls.length, 1)
+    assert.equal(harness.sendCalls.length, 0)
+  }
+})
+
+test('ChatView action button exposes the stopping state while a reply is being stopped', async () => {
+  const implementation = await loadImplementation()
+  const harness = createHarness(implementation, enChat, { currentSessionId: 'running' })
+  harness.isReplyRunning.value = true
+  harness.isStopping.value = true
+
+  const button = actionButtonFor(implementation, harness.context)
+
+  assert.equal(button.props.loading, true)
+  assert.equal(button.props.disabled, true)
+  assert.equal(button.props['aria-busy'], true)
+  assert.equal(button.props.title, enChat.stopping_reply)
+  assert.equal(button.props['aria-label'], enChat.stopping_reply)
+})
+
+test('ChatView disables the running action button when the current session is missing', async () => {
+  const implementation = await loadImplementation()
+  const harness = createHarness(implementation, enChat)
+  harness.isReplyRunning.value = true
+  harness.loading.value = true
+
+  const button = actionButtonFor(implementation, harness.context)
+
+  assert.equal(button.props.type, 'danger')
+  assert.equal(button.props.disabled, true)
+})
+
+test('ChatView preserves primary send and read-only guidance action paths when idle', async () => {
+  const implementation = await loadImplementation()
+  const idleHarness = createHarness(implementation, enChat)
+  let button = actionButtonFor(implementation, idleHarness.context)
+
+  assert.equal(button.props.type, 'primary')
+  assert.equal(button.props.disabled, true)
+
+  idleHarness.context.inputMsg = 'hello'
+  button = actionButtonFor(implementation, idleHarness.context)
+  assert.equal(button.props.disabled, false)
+  button.props.onClick()
+  assert.equal(idleHarness.sendCalls.length, 1)
+  assert.equal(idleHarness.stopCalls.length, 0)
+
+  const readonlyHarness = createHarness(implementation, enChat, {
+    sessions: [createSession('external', true, 8)],
+    currentSessionId: 'external'
+  })
+  readonlyHarness.isCurrentSessionReadOnly.value = true
+  button = actionButtonFor(implementation, readonlyHarness.context)
+
+  assert.equal(button.props.type, 'primary')
+  assert.equal(button.props.disabled, true)
+
+  readonlyHarness.context.inputMsg = 'guidance'
+  button = actionButtonFor(implementation, readonlyHarness.context)
+  assert.equal(button.props.disabled, false)
+  button.props.onClick()
+  assert.equal(readonlyHarness.sendCalls.length, 1)
+  assert.equal(readonlyHarness.stopCalls.length, 0)
 })
