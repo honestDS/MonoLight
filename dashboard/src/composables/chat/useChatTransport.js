@@ -32,6 +32,7 @@ const lifecycleEventTypes = new Set([
   'tool_end',
   'todo_update',
   'done',
+  'cancelled',
   'resume_complete',
   'error',
   'proactive_reply'
@@ -329,6 +330,18 @@ export function useChatTransport() {
         if (onWorkFinished) onWorkFinished(data)
         complete()
       }
+      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
+      if (setLoading && !deferLoadingUntilResumeComplete) {
+        setLoading(false)
+      }
+      if (scrollToBottom) {
+        scrollToBottom()
+      }
+      return
+    }
+
+    if (type === 'cancelled') {
+      if (onWorkFinished) onWorkFinished(data)
       getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (setLoading && !deferLoadingUntilResumeComplete) {
         setLoading(false)

@@ -468,6 +468,9 @@ async def test_executor_resumes_from_persisted_result_without_calling_llm(monkey
     call_order = []
 
     class FakeSession:
+        def __init__(self):
+            self.info = {}
+
         async def commit(self) -> None:
             return None
 
@@ -551,6 +554,9 @@ async def test_executor_does_not_mark_terminal_when_event_delivery_fails(monkeyp
     terminal_calls = []
 
     class FakeSession:
+        def __init__(self):
+            self.info = {}
+
         async def commit(self) -> None:
             return None
 
@@ -686,6 +692,9 @@ async def test_executor_does_not_query_legacy_result_prefix(monkeypatch):
     sent_events = []
 
     class FakeSession:
+        def __init__(self):
+            self.info = {}
+
         async def commit(self) -> None:
             return None
 

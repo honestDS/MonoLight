@@ -846,3 +846,4 @@ ERR_TERMINAL_SESSION_DELETED = "ERR_TERMINAL_SESSION_DELETED"
 
 # Session reply execution state keys
 SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY = "active_audit_execution"
+SESSION_REPLY_WORK_CLAIM_INFO_KEY = "session_reply_work_claim"

@@ -10,6 +10,7 @@ from app.core.channel_router import select_channel
 from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
+    ERR_SESSION_REPLY_LEASE_LOST,
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED,
@@ -223,6 +224,8 @@ async def dispatch_interactive(
                     state.current_turn = max_turns - 1
 
                 while goal_mode or state.current_turn <= max_turns:
+                    if context_summary_work_validity_checker is not None and not await context_summary_work_validity_checker():
+                        raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
                     new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
                     if new_user_batch is not None:
                         state.current_turn = 0

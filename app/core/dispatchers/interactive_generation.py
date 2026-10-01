@@ -10,6 +10,7 @@ from app.core.constants import (
     ERR_LLM_EMPTY_RESPONSE,
     ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
     ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED,
+    ERR_SESSION_REPLY_LEASE_LOST,
     FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS,
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
@@ -112,6 +113,8 @@ async def generate_interactive_turn(
         stream_state.buffered_content_chunks.clear()
         stream_state.buffered_reasoning_chunks.clear()
         try:
+            if state.context_summary_work_validity_checker is not None and not await state.context_summary_work_validity_checker():
+                raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
             current_channel_id = getattr(state.chat_channel_obj, "id", None)
             current_channel_id = current_channel_id if isinstance(current_channel_id, int) and not isinstance(current_channel_id, bool) and current_channel_id > 0 else None
             if state.checkpoint_state.upper_message_id is not None:
@@ -242,6 +245,8 @@ async def generate_interactive_turn(
                     on_content=partial(_handle_stream_content, stream_state),
                     on_reasoning=partial(_handle_stream_reasoning, stream_state),
                 )
+            if state.context_summary_work_validity_checker is not None and not await state.context_summary_work_validity_checker():
+                raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
             ai_msg = response.message
             response_finish_reason = getattr(response, "finish_reason", None)
             response_finish_details = getattr(response, "finish_details", None)

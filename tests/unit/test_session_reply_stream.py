@@ -1428,6 +1428,9 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         )
         return True
 
+    async def update_claimed(db, **kwargs):
+        return True
+
     async def send_session_stream_event(uid, session_id, event):
         stream_event_calls.append(
             {
@@ -1528,6 +1531,11 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         executor_interactive_module.session_crud,
         "update_llm_request_metadata",
         update_llm_request_metadata,
+    )
+    monkeypatch.setattr(
+        executor_interactive_module.session_reply_work_item_crud,
+        "update_claimed",
+        update_claimed,
     )
     monkeypatch.setattr(
         executor_interactive_module,

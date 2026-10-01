@@ -374,14 +374,19 @@
 
                 <div class="action-btn-container">
                   <el-button
-                    type="primary"
-                    @click="send"
-                    :loading="isCurrentSessionReadOnly && guidanceSubmitting"
-                    :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || agentSettingSubmitting || !inputMsg.trim() : modeSettingSubmitting || agentSettingSubmitting || (!inputMsg.trim() && attachments.length === 0)"
+                    :type="isReplyRunning ? 'danger' : 'primary'"
+                    @click="isReplyRunning ? stopReply() : send()"
+                    :loading="isReplyRunning ? isStopping : (isCurrentSessionReadOnly && guidanceSubmitting)"
+                    :disabled="isReplyRunning ? (isStopping || !currentSessionId) : (isCurrentSessionReadOnly ? guidanceSubmitting || agentSettingSubmitting || !inputMsg.trim() : modeSettingSubmitting || agentSettingSubmitting || (!inputMsg.trim() && attachments.length === 0))"
+                    :class="{ 'is-stop-reply': isReplyRunning }"
+                    :title="actionButtonLabel"
+                    :aria-label="actionButtonLabel"
+                    :aria-busy="isStopping || (isCurrentSessionReadOnly && guidanceSubmitting)"
                     class="action-btn"
                     circle
                   >
-                    <el-icon style="margin-left: -2px;margin-top: 2px;"><Position /></el-icon>
+                    <span v-if="isReplyRunning" class="stop-reply-icon" aria-hidden="true"></span>
+                    <el-icon v-else style="margin-left: -2px;margin-top: 2px;" aria-hidden="true"><Position /></el-icon>
                   </el-button>
                 </div>
               </div>
@@ -605,6 +610,8 @@ const {
   messages,
   inputMsg,
   loading,
+  isReplyRunning,
+  isStopping,
   messageList,
   sessions,
   sessionsLoading,
@@ -775,6 +782,7 @@ const {
   createNewSession,
   reloadCurrentSessionHistory,
   send: originalSend,
+  stopReply,
   setTransportMode,
   disconnectWebSocket,
   handleScroll
@@ -813,8 +821,18 @@ const handleWelcomeExitTransitionEnd = async (event) => {
 
 const guidanceSubmitting = ref(false)
 
+const actionButtonLabel = computed(() => t(
+  isStopping.value
+    ? 'chat.stopping_reply'
+    : isReplyRunning.value
+      ? 'chat.stop_reply'
+      : 'chat.send_message'
+))
+
 // 拦截发送，发送完成后清空列表
 const send = async () => {
+  if (isStopping.value) return
+
   if (modeSettingSubmitting.value || agentSettingSubmitting.value) return
 
   if (isCurrentSessionReadOnly.value) {

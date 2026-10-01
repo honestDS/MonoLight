@@ -1,9 +1,11 @@
+import asyncio
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
 from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
+    ERR_SESSION_REPLY_LEASE_LOST,
     ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
@@ -30,6 +32,7 @@ __all__ = []
 @dataclass
 class _InteractiveWorkStreamEventState:
     work: SessionReplyWorkItem
+    worker_id: str
     next_sequence: int
     dequeued_request_ids: set[str]
     turn_end_content_by_response_id: dict[str, str]
@@ -48,6 +51,16 @@ async def _persist_interactive_work_stream_event(
         "event_sequence_no": stream_state.next_sequence,
     }
     async with AsyncSessionLocal() as event_db:
+        updated = await session_reply_work_item_crud.update_claimed(
+            event_db,
+            work_id=work.id,
+            worker_id=stream_state.worker_id,
+            values={},
+            commit=False,
+        )
+        if not updated:
+            await event_db.rollback()
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
         if persisted_event["type"] == "llm_request_metadata":
             persisted_event = _metadata_with_work_order(
                 work,
@@ -152,19 +165,22 @@ async def _fetch_additional_foreground_user_messages(
 
 async def _check_interactive_work_validity(
     *,
-    work: SessionReplyWorkItem,
+    work_id: int,
+    session_id: str,
+    uid: str,
+    profile_id: int,
     worker_id: str,
 ) -> bool:
     async with AsyncSessionLocal() as validity_db:
         active_claims = await session_reply_work_item_crud.get_active_claims(
             validity_db,
-            {work.id: worker_id},
+            {work_id: worker_id},
         )
         session = await session_crud.get_by_session_id(
             validity_db,
-            work.session_id,
+            session_id,
         )
-    return (work.id, worker_id) in active_claims and session is not None and session.uid == work.uid and session.profile_id == work.profile_id
+    return (work_id, worker_id) in active_claims and session is not None and session.uid == uid and session.profile_id == profile_id
 
 
 async def _save_interactive_work_execution_checkpoint(
@@ -216,6 +232,7 @@ async def _dispatch_interactive_work(
         next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work.id) + 1
     stream_state = _InteractiveWorkStreamEventState(
         work=work,
+        worker_id=worker_id,
         next_sequence=next_stream_sequence,
         dequeued_request_ids=set(),
         turn_end_content_by_response_id={},
@@ -255,7 +272,10 @@ async def _dispatch_interactive_work(
         ),
         "context_summary_work_validity_checker": partial(
             _check_interactive_work_validity,
-            work=work,
+            work_id=work.id,
+            session_id=work.session_id,
+            uid=work.uid,
+            profile_id=work.profile_id,
             worker_id=worker_id,
         ),
         "expose_tool_call_content": expose_tool_call_content,

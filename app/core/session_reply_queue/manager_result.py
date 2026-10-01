@@ -193,5 +193,11 @@ class SessionReplyResult:
                     }
                     return
                 if work.status == SessionReplyWorkStatus.CANCELLED:
-                    raise RuntimeError(work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status))
+                    yield {
+                        "type": "cancelled",
+                        "session_id": work.session_id,
+                        "work_id": target_work_id,
+                        "request_ids": get_work_request_ids(work),
+                    }
+                    return
             await asyncio.sleep(WORK_RESULT_POLL_INTERVAL_SECONDS)

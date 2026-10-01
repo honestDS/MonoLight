@@ -2,7 +2,11 @@ import time
 
 from sqlalchemy import update
 
-from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED
+from app.core.constants import (
+    ERR_LLM_UNEXPECTED_ERROR,
+    ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+)
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
@@ -37,6 +41,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         work = await session_reply_work_item_crud.get(db, work_id)
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
             return
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
 
         persisted_result = await _get_persisted_result(db, work)
         if persisted_result is not None:

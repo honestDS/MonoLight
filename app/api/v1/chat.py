@@ -464,6 +464,30 @@ async def delete_session(
     return StandardResponse.success(message=MSG_SESSION_CLEARED)
 
 
+@router.post("/sessions/stop")
+async def stop_session(
+    session_id: str = Query(min_length=1),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    session = await session_crud.get_by_session_id(db, session_id)
+    if not session:
+        return StandardResponse.error(code=404, message=ERR_SESSION_NOT_FOUND)
+    if session.uid != uid:
+        return StandardResponse.error(code=403, message=ERR_SESSION_NO_PERMISSION)
+    if (session.source or "http") not in {"http", "ws"}:
+        return StandardResponse.error(code=403, message=ERR_SESSION_READ_ONLY)
+
+    count = await session_reply_work_item_crud.cancel_session(
+        db,
+        session_id=session_id,
+        uid=uid,
+        interactive_only=True,
+    )
+    return StandardResponse.success(data={"session_id": session_id, "cancelled_count": count})
+
+
 class SessionSettingRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
