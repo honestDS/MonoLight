@@ -1,7 +1,7 @@
 import json
 
 from app.core.context import ContextManager
-from app.core.dispatchers.background import BackgroundDispatcherMixin
+from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 
@@ -306,7 +306,7 @@ def test_virtual_tool_feedback_builds_matched_tool_chain():
         ],
     )
 
-    messages = BackgroundDispatcherMixin._build_virtual_tool_feedback_messages(
+    messages = build_virtual_tool_feedback_messages(
         ai_msg,
         {
             "type": "background_proactive_tool_correction",
@@ -416,7 +416,7 @@ def test_audit_tool_chain_keeps_tool_call_after_function_response_turn():
 def test_virtual_tool_feedback_returns_empty_without_tool_calls():
     ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content="plain text")
 
-    messages = BackgroundDispatcherMixin._build_virtual_tool_feedback_messages(
+    messages = build_virtual_tool_feedback_messages(
         ai_msg,
         {"type": "background_proactive_tool_correction"},
     )
@@ -438,7 +438,7 @@ def test_virtual_tool_feedback_keeps_system_messages_at_beginning_after_trim():
             )
         ],
     )
-    correction_messages = BackgroundDispatcherMixin._build_virtual_tool_feedback_messages(
+    correction_messages = build_virtual_tool_feedback_messages(
         ai_msg,
         {
             "type": "background_proactive_tool_correction",

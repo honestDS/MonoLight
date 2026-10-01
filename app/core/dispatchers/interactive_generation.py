@@ -8,17 +8,19 @@ from app.core.channel_router import select_channel
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_LLM_EMPTY_RESPONSE,
+    ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
     ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED,
+    FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS,
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
 )
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_state import InteractiveDispatchState
-from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
+from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException, LLMModelCapabilityException
 from app.core.i18n import t
 from app.core.log import channel_log_extra
-from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT
+from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
 from app.core.tools.end_session import is_end_session_signal
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
@@ -29,6 +31,7 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
+from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
@@ -83,6 +86,8 @@ async def generate_interactive_turn(
 ) -> InteractiveGenerationResult:
     excluded_priorities: set[int] = set()
     context_length_recovery_priorities: set[int] = set()
+    tool_call_correction_attempts = 0
+    tool_call_correction_messages: list[InternalMessage] = []
     emitted_agent_loop_start = False
     stream_state = _AgentLoopStreamState(
         callback=state.stream_event_callback,
@@ -90,7 +95,7 @@ async def generate_interactive_turn(
         response_id=response_id,
         expose_tool_call_content=state.expose_tool_call_content,
         show_tool_calls=state.show_tool_calls,
-        defer_output_until_response=(state.goal_mode is True and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and tool_choice != "none"),
+        defer_output_until_response=(tool_choice == "none" or (state.goal_mode is True and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING)),
     )
     goal_mode = state.goal_mode is True
     execution_phase = state.checkpoint_state.execution_phase
@@ -133,7 +138,7 @@ async def generate_interactive_turn(
             pending_modalities = {item["modality"] for item in pending_file_inputs}
             if ("image" in pending_modalities and not state.img_understanding) or ("audio" in pending_modalities and not state.audio_understanding) or ("video" in pending_modalities and not state.video_understanding):
                 raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
-            request_messages = materialize_user_environment_prompts(state.messages)
+            request_messages = materialize_user_environment_prompts([*state.messages, *tool_call_correction_messages])
             pending_multimodal_message = build_pending_multimodal_input_message(
                 pending_file_inputs,
                 image_understanding=state.img_understanding,
@@ -243,8 +248,9 @@ async def generate_interactive_turn(
             response_provider_metadata = getattr(response, "provider_metadata", None)
             ai_refusal = getattr(ai_msg, "refusal", None)
             ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
+            tool_calls_forbidden = tool_choice == "none" and bool(ai_msg.tool_calls)
             end_session_signal = goal_mode and execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)
-            if end_session_signal:
+            if tool_calls_forbidden or end_session_signal:
                 stream_state.buffered_content_chunks.clear()
                 stream_state.buffered_reasoning_chunks.clear()
             elif stream_state.defer_output_until_response and state.show_tool_calls:
@@ -270,6 +276,23 @@ async def generate_interactive_turn(
                 await state.request_metadata_callback({**state.latest_llm_request_metadata, **provider_request_usage_metadata})
             if metadata_changed and state.stream_event_callback is not None:
                 await state.stream_event_callback(dict(state.latest_llm_request_metadata))
+            if tool_calls_forbidden:
+                if tool_call_correction_attempts >= FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS:
+                    raise LLMModelCapabilityException(message=ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED)
+                tool_call_correction_attempts += 1
+                ignored_tool_names = sorted({tool_call.name for tool_call in ai_msg.tool_calls or []})
+                tool_call_correction_messages.extend(
+                    build_virtual_tool_feedback_messages(
+                        ai_msg,
+                        {
+                            "type": "interactive_final_reply_tool_correction",
+                            "error": "Tool calls are disabled for this reply.",
+                            "instruction": TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
+                            "ignored_tool_calls": ignored_tool_names,
+                        },
+                    )
+                )
+                continue
             has_content = bool(ai_msg.content.strip()) if isinstance(ai_msg.content, str) else bool(ai_msg.content)
             has_refusal = bool(ai_refusal.strip()) if isinstance(ai_refusal, str) else False
             legal_empty_finish_reasons = {"length", "content_filter", "refusal", "incomplete"}
@@ -315,6 +338,8 @@ async def generate_interactive_turn(
                 message_provider_metadata=ai_provider_metadata,
             )
         except ApiKeyException:
+            raise
+        except LLMModelCapabilityException:
             raise
         except LLMException as exc:
             if stream_state.emitted_stream_content:

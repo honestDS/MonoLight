@@ -7,6 +7,7 @@ MESSAGES = {
     "ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH": "The model provider reported that the context length was exceeded. Check whether this channel's configured context window matches the model's actual capability.",
     "ERR_LLM_CHANNEL_NOT_CONFIGURED": "No valid model channel config or API Key detected. Check that a Profile with valid keys is set as default or selected for the current session or message platform.",
     "ERR_LLM_EMPTY_RESPONSE": "Large model returned an empty response, please try sending the instruction again or check the model configuration",
+    "ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED": "This model still couldn't produce the required final reply after 3 tries. It may not be a good fit for this task. Please try another model.",
     "ERR_LLM_FIRST_CHAR_TIMEOUT": "Timeout waiting for the dialog model's first character response ({timeout} seconds)",
     "ERR_LLM_STREAM_TIMEOUT": "Dialog model stream response timed out ({timeout} seconds)",
     "ERR_API_KEY_CRYPTO_FAILED": "API Key encryption/decryption failed: {reason}",

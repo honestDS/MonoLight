@@ -66,6 +66,7 @@ from app.core.utils.dispatcher.process_single_tool import (
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
+from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
@@ -87,30 +88,6 @@ def _tool_result_succeeded(content: str | None) -> bool:
 
 
 class BackgroundDispatcherMixin:
-    @staticmethod
-    def _build_virtual_tool_feedback_messages(ai_msg: InternalMessage, payload: dict[str, Any]) -> list[InternalMessage]:
-        if not ai_msg.tool_calls:
-            return []
-
-        feedback_messages = [ai_msg]
-        for tool_call in ai_msg.tool_calls:
-            feedback_payload = {
-                **payload,
-                "tool_call": {
-                    "id": tool_call.id,
-                    "name": tool_call.name,
-                    "arguments": tool_call.arguments,
-                },
-            }
-            feedback_messages.append(
-                InternalMessage(
-                    role=MessageRole.TOOL,
-                    tool_call_id=tool_call.id,
-                    content=json.dumps(feedback_payload, ensure_ascii=False),
-                )
-            )
-        return feedback_messages
-
     @staticmethod
     async def _build_text_only_correction_request(
         retry_chat_params,
@@ -294,7 +271,7 @@ class BackgroundDispatcherMixin:
                 ignored_tools=ignored_tool_names,
             ).warning(t("LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTING"))
             messages.extend(
-                cls._build_virtual_tool_feedback_messages(
+                build_virtual_tool_feedback_messages(
                     ai_msg,
                     {
                         "type": "background_proactive_tools_disabled_tool_correction",
@@ -342,7 +319,7 @@ class BackgroundDispatcherMixin:
             unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
             if unsupported_tool_names:
                 logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, unsupported_tools=unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY"))
-                correction_messages = cls._build_virtual_tool_feedback_messages(
+                correction_messages = build_virtual_tool_feedback_messages(
                     ai_msg,
                     {
                         "type": "background_proactive_tool_correction",
@@ -383,7 +360,7 @@ class BackgroundDispatcherMixin:
                 remaining_unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls or [], allowed_tool_names=allowed_tool_names)
                 if remaining_unsupported_tool_names:
                     logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, unsupported_tools=remaining_unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY"))
-                    text_only_messages = cls._build_virtual_tool_feedback_messages(
+                    text_only_messages = build_virtual_tool_feedback_messages(
                         ai_msg,
                         {
                             "type": "background_proactive_text_only_fallback",
@@ -761,7 +738,7 @@ class BackgroundDispatcherMixin:
                 reply_source=reply_source,
                 repeated_tools=repeated_tool_names,
             ).warning(t("LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_RETRY"))
-            final_correction_messages = cls._build_virtual_tool_feedback_messages(
+            final_correction_messages = build_virtual_tool_feedback_messages(
                 final_msg,
                 {
                     "type": "background_proactive_final_tool_correction",
