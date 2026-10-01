@@ -296,7 +296,7 @@ async def dispatch_interactive(
                     elif not goal_mode and state.current_turn == max_turns:
                         summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                         state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
-                        current_tools = state.tools
+                        current_tools = []
                         current_tool_choice = "none"
                     else:
                         current_tools = state.tools

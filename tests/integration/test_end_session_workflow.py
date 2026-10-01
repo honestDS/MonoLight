@@ -11,11 +11,18 @@ from sqlmodel import select
 
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatcher as dispatcher_module
-from app.core.constants import END_SESSION_TOOL_NAME, GOAL_EXECUTION_PHASE_FINALIZING, MANAGE_TODO_TOOL_NAME
+from app.core.constants import (
+    END_SESSION_TOOL_NAME,
+    ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
+    FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS,
+    GOAL_EXECUTION_PHASE_FINALIZING,
+    MANAGE_TODO_TOOL_NAME,
+)
 from app.core.dispatcher import ChatDispatcher
 from app.core.dispatchers import interactive_generation as interactive_generation_module
-from app.core.exceptions import ServerException
-from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, PROMPT_MAX_TURNS_REACHED
+from app.core.exceptions import LLMModelCapabilityException, ServerException
+from app.core.i18n import t
+from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, PROMPT_MAX_TURNS_REACHED, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
@@ -274,10 +281,12 @@ def _response_for_tool_calls(
     tool_calls: list[InternalToolCall],
     *,
     reasoning: str | None = "首轮工具协议检查",
+    content: str | None = None,
 ) -> InternalResponse:
     return InternalResponse(
         message=InternalMessage(
             role=MessageRole.ASSISTANT,
+            content=content,
             reasoning_content=reasoning,
             tool_calls=tool_calls,
         ),
@@ -814,6 +823,138 @@ async def test_finalizing_resume_skips_tools_and_generates_only_final_reply(
     assistant_text_rows = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
     assert len(assistant_text_rows) == 1
     assert assistant_text_rows[0].content == SUMMARY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+@pytest.mark.parametrize("goal_mode", [False, True], ids=["max-turn-final", "goal-finalizing"])
+async def test_text_only_final_reply_never_executes_provider_tool_calls(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    goal_mode: bool,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = f"final-tool-call-forbidden-{int(stream)}-{int(goal_mode)}"
+    initial_message = await _seed_conversation(
+        session_factory,
+        session_id,
+        goal_mode=goal_mode,
+        max_turns=1,
+    )
+    execution_resume_state = None
+    if goal_mode:
+        execution_resume_state = {
+            "current_turn": 6,
+            "execution_phase": GOAL_EXECUTION_PHASE_FINALIZING,
+            "messages": [initial_message.model_dump(mode="json")],
+            "turn_messages": [],
+            "files_to_user": [],
+        }
+    calls = _patch_llm(
+        monkeypatch,
+        [
+            _response_for_tool_calls(
+                [_todo_write_call("forbidden-final-tool")],
+                content="这段内容也不能作为最终回复提前发送",
+            ),
+            _final_response("纠正后的最终回复"),
+        ],
+        stream=stream,
+    )
+
+    result = await _dispatch(
+        session_factory,
+        initial_message,
+        session_id=session_id,
+        stream=stream,
+        show_tool_calls=True,
+        execution_resume_state=execution_resume_state,
+    )
+    response = _response_from_dispatch_result(result, stream=stream)
+
+    assert len(calls) == 2
+    assert [call["tool_choice"] for call in calls] == ["none", "none"]
+    assert [call["tools"] for call in calls] == [[], []]
+    correction_tool_results = [message for message in calls[1]["messages"] if message.role == MessageRole.TOOL and message.tool_call_id == "forbidden-final-tool"]
+    assert len(correction_tool_results) == 1
+    assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT in (correction_tool_results[0].content or "")
+    assert response["choices"][0]["message"]["content"] == "纠正后的最终回复"
+    messages = await _list_messages(session_factory, session_id)
+    assert not [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT}]
+    assistant_rows = [message for message in messages if message.role == MessageRole.ASSISTANT]
+    assert len(assistant_rows) == 1
+    assert assistant_rows[0].content == "纠正后的最终回复"
+    async with session_factory() as db:
+        assert await db.get(SessionTodoPlan, session_id) is None
+    if stream:
+        assert [event["content"] for event in result if event.get("type") == "content"] == ["纠正后的最终回复"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+async def test_text_only_final_reply_stops_after_three_failed_corrections(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = f"final-tool-call-correction-exhausted-{int(stream)}"
+    initial_message = await _seed_conversation(
+        session_factory,
+        session_id,
+        goal_mode=True,
+        max_turns=1,
+    )
+    execution_resume_state = {
+        "current_turn": 6,
+        "execution_phase": GOAL_EXECUTION_PHASE_FINALIZING,
+        "messages": [initial_message.model_dump(mode="json")],
+        "turn_messages": [],
+        "files_to_user": [],
+    }
+    responses = [
+        _response_for_tool_calls(
+            [_todo_write_call(f"forbidden-final-tool-{attempt}")],
+            content=f"错误最终回复 {attempt}",
+        )
+        for attempt in range(FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS + 1)
+    ]
+    calls = _patch_llm(monkeypatch, responses, stream=stream)
+
+    if stream:
+        result = await _dispatch(
+            session_factory,
+            initial_message,
+            session_id=session_id,
+            stream=True,
+            show_tool_calls=True,
+            execution_resume_state=execution_resume_state,
+        )
+        error_events = [event for event in result if event.get("type") == "error"]
+        assert len(error_events) == 1
+        assert error_events[0]["message"] == t(ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED)
+        assert not [event for event in result if event.get("type") in {"content", "reasoning", "turn_end", "tool_start", "tool_end"}]
+    else:
+        with pytest.raises(LLMModelCapabilityException) as exc_info:
+            await _dispatch(
+                session_factory,
+                initial_message,
+                session_id=session_id,
+                stream=False,
+                show_tool_calls=True,
+                execution_resume_state=execution_resume_state,
+            )
+        assert exc_info.value.render_message() == t(ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED)
+
+    assert len(calls) == FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS + 1
+    assert all(call["tool_choice"] == "none" for call in calls)
+    assert all(call["tools"] == [] for call in calls)
+    messages = await _list_messages(session_factory, session_id)
+    assert not [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT}]
+    assert not [message for message in messages if message.role == MessageRole.ASSISTANT]
+    async with session_factory() as db:
+        assert await db.get(SessionTodoPlan, session_id) is None
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ MESSAGES = {
     "ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH": "模型供应商返回上下文长度超限，请检查当前渠道模型的上下文窗口配置是否与实际模型能力一致",
     "ERR_LLM_CHANNEL_NOT_CONFIGURED": "未检测到有效的模型渠道配置或 API Key。请检查并将包含有效密钥的 Profile 设为默认，或为当前会话/消息平台选择该 Profile。",
     "ERR_LLM_EMPTY_RESPONSE": "大模型返回了空的响应内容，请尝试重新发送指令或检查模型侧配置",
+    "ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED": "这个模型连续 3 次都没能按要求生成最终回复，可能不太适合完成这类任务。请换个模型再试。",
     "ERR_LLM_FIRST_CHAR_TIMEOUT": "等待对话模型首字响应超时（{timeout} 秒）",
     "ERR_LLM_STREAM_TIMEOUT": "等待对话模型流响应超时（{timeout} 秒）",
     "ERR_API_KEY_CRYPTO_FAILED": "API Key 加解密失败：{reason}",

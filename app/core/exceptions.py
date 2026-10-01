@@ -97,6 +97,10 @@ class LLMException(BaseBusinessException):
         super().__init__(code=code, message=message, **kwargs)
 
 
+class LLMModelCapabilityException(LLMException):
+    """The selected model repeatedly violated a required output contract."""
+
+
 class LLMContextLengthException(LLMException):
     """模型供应商明确返回请求上下文长度超限。"""
 
