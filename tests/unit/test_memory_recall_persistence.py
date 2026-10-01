@@ -382,11 +382,13 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
     assert context.messages == [summary_message, current_message]
     assert request_messages[0].role == MessageRole.SYSTEM
     assert request_messages[0].content == request_module.LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
-    assert len(request_messages) == 2
+    assert len(request_messages) == 3
     assert request_messages[1].role == MessageRole.USER
-    assert request_messages[1].content == "memory query secret"
-    assert request_messages[1].environment_prompt is None
-    assert request_messages[1].guidance_prompt is None
+    assert request_messages[1].content == summary_message.content
+    assert request_messages[2].role == MessageRole.USER
+    assert request_messages[2].content == "memory query secret"
+    assert request_messages[2].environment_prompt is None
+    assert request_messages[2].guidance_prompt is None
     assert set(trim_calls[0]) == {"messages", "context_window_k", "max_tokens"}
     assert metadata["turn"] == 0
     assert metadata["input_tokens"] == 0

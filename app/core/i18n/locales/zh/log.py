@@ -31,6 +31,7 @@ MESSAGES = {
     "LOG_DISPATCHER_STREAM_QUEUED": "【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] 用户消息: {message} 附件列表: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] 第 {turn} 轮 | LLM 响应: {content}",
+    "LOG_DISPATCHER_LLM_LOOP_TERMINATED": "[{username}] 第 {turn} 轮 | LLM主动终止循环，进入最终回复阶段。",
     "LOG_AUDIT_ROUND_STARTED": "触发安全审计 LLM: record_id={audit_record_id}, model={model_id}, tool_count={tool_count}, source={source}",
     "LOG_AUDIT_LLM_TOOL_CALL": "安全审计 LLM 工具调用: tool={tool_name}, args={args}",
     "LOG_AUDIT_ROUND_COMPLETED": "安全审计结果: record_id={audit_record_id}, status={status}, max_score={max_score}, summary={summary}",

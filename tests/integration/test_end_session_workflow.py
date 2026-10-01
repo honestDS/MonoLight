@@ -1,10 +1,11 @@
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from typing import Any
 
 import pytest
 import pytest_asyncio
+from loguru import logger
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
@@ -22,6 +23,7 @@ from app.core.dispatcher import ChatDispatcher
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.exceptions import LLMModelCapabilityException, ServerException
 from app.core.i18n import t
+from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, PROMPT_MAX_TURNS_REACHED, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
@@ -80,6 +82,20 @@ async def session_factory(tmp_path: Path) -> AsyncGenerator[async_sessionmaker[A
         yield factory
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+def captured_logs() -> Generator[list[dict[str, Any]]]:
+    records: list[dict[str, Any]] = []
+
+    def sink(message: Any) -> None:
+        records.append(message.record)
+
+    sink_id = logger.add(sink, level="INFO")
+    try:
+        yield records
+    finally:
+        logger.remove(sink_id)
 
 
 def _profile_configs(
@@ -392,11 +408,22 @@ def _response_from_dispatch_result(result: dict[str, Any] | list[dict[str, Any]]
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
 @pytest.mark.parametrize("show_tool_calls", [False, True], ids=["hide-tools", "show-tools"])
+@pytest.mark.parametrize(
+    ("log_locale", "expected_log_message"),
+    [
+        ("zh", "[end_session_user] 第 1 轮 | LLM主动终止循环，进入最终回复阶段。"),
+        ("en", "[end_session_user] turn 1 | LLM proactively terminated the loop; entering the final reply phase."),
+    ],
+    ids=["chinese", "english"],
+)
 async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    captured_logs: list[dict[str, Any]],
     stream: bool,
     show_tool_calls: bool,
+    log_locale: str,
+    expected_log_message: str,
 ) -> None:
     _patch_runtime_database(monkeypatch, session_factory)
     session_id = f"end-session-{int(stream)}-{int(show_tool_calls)}"
@@ -418,14 +445,18 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
         stream=stream,
     )
 
-    result = await _dispatch(
-        session_factory,
-        initial_message,
-        session_id=session_id,
-        stream=stream,
-        show_tool_calls=show_tool_calls,
-        execution_checkpoint_callback=capture_checkpoint,
-    )
+    locale_token = set_current_log_locale(log_locale)
+    try:
+        result = await _dispatch(
+            session_factory,
+            initial_message,
+            session_id=session_id,
+            stream=stream,
+            show_tool_calls=show_tool_calls,
+            execution_checkpoint_callback=capture_checkpoint,
+        )
+    finally:
+        reset_current_log_locale(locale_token)
     response = _response_from_dispatch_result(result, stream=stream)
 
     assert len(calls) == 2
@@ -463,6 +494,95 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
         assert turn_end_events[0]["message_id"] == assistant_messages[0].id
         assert len(done_events) == 1
         assert done_events[0]["response"]["choices"][0]["message"]["content"] == SUMMARY
+
+        agent_loop_start_events = [event for event in events if event.get("type") == "agent_loop_start" and event.get("turn") == 1]
+        assert len(agent_loop_start_events) == 1
+
+    termination_logs = [record for record in captured_logs if record["extra"].get("session_id") == session_id and record["extra"].get("tool_name") == END_SESSION_TOOL_NAME]
+    assert len(termination_logs) == 1
+    termination_log = termination_logs[0]
+    termination_extra = termination_log["extra"]
+    assert termination_log["level"].name == "INFO"
+    assert termination_log["message"] == expected_log_message
+    assert termination_extra["uid"] == UID
+    assert termination_extra["session_id"] == session_id
+    assert termination_extra["turn"] == 1
+    assert termination_extra["response_id"] and isinstance(termination_extra["response_id"], str)
+    assert termination_extra["tool_call_id"] == "final-end-session"
+    assert termination_extra["tool_name"] == END_SESSION_TOOL_NAME
+    assert termination_extra["execution_phase"] == GOAL_EXECUTION_PHASE_FINALIZING
+
+    expected_final_log_message = t(
+        "LOG_DISPATCHER_LLM_RESPONSE",
+        locale=log_locale,
+        username="end_session_user",
+        turn=2,
+        content=SUMMARY,
+    )
+    final_log_indices = [index for index, record in enumerate(captured_logs) if record["extra"].get("session_id") == session_id and record["message"] == expected_final_log_message]
+    assert len(final_log_indices) == 1
+    termination_log_index = next(index for index, record in enumerate(captured_logs) if record is termination_log)
+    assert termination_log_index < final_log_indices[0]
+
+    for forbidden_text in ("这段正文不应展示或持久化", "结束前检查已完成"):
+        assert forbidden_text not in termination_log["message"]
+        assert forbidden_text not in str(termination_extra)
+
+    if stream:
+        assert termination_extra["response_id"] == agent_loop_start_events[0]["response_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+async def test_end_session_checkpoint_failure_does_not_log_termination_or_generate_final_reply(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    captured_logs: list[dict[str, Any]],
+    stream: bool,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = f"end-session-checkpoint-failed-{int(stream)}"
+    initial_message = await _seed_conversation(session_factory, session_id)
+    calls = _patch_llm(
+        monkeypatch,
+        [_end_session_response(call_id="checkpoint-failed-end")],
+        stream=stream,
+    )
+
+    async def fail_checkpoint(checkpoint: dict[str, Any]) -> None:
+        assert checkpoint["execution_phase"] == GOAL_EXECUTION_PHASE_FINALIZING
+        raise RuntimeError("checkpoint save failed")
+
+    if stream:
+        result = await _dispatch(
+            session_factory,
+            initial_message,
+            session_id=session_id,
+            stream=True,
+            show_tool_calls=True,
+            execution_checkpoint_callback=fail_checkpoint,
+        )
+        error_events = [event for event in result if event.get("type") == "error"]
+        assert len(error_events) == 1
+        assert not [event for event in result if event.get("type") in {"done", "content", "turn_end", "tool_start", "tool_end"}]
+    else:
+        with pytest.raises(ServerException):
+            await _dispatch(
+                session_factory,
+                initial_message,
+                session_id=session_id,
+                stream=False,
+                show_tool_calls=True,
+                execution_checkpoint_callback=fail_checkpoint,
+            )
+
+    assert len(calls) == 1
+    termination_logs = [record for record in captured_logs if record["extra"].get("session_id") == session_id and record["extra"].get("tool_name") == END_SESSION_TOOL_NAME]
+    assert not termination_logs
+
+    messages = await _list_messages(session_factory, session_id)
+    assert not [message for message in messages if message.role == MessageRole.ASSISTANT]
+    assert not [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT}]
 
 
 @pytest.mark.asyncio
