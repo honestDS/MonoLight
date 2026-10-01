@@ -1,4 +1,7 @@
+import asyncio
 import json
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -105,6 +108,98 @@ async def test_process_single_tool_keeps_half_context_fallback_when_round_budget
     )
 
     assert captured_budget_tokens == [(8 * CONTEXT_WINDOW_TOKENS_PER_K) // 2 // 4]
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_spills_large_result_and_returns_absolute_path(monkeypatch, tmp_path):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
+    tool_call = SimpleNamespace(
+        id="call-large-result",
+        name="execute_shell",
+        arguments={"command": "echo large", "execution_mode": "non_interactive"},
+    )
+    full_result = json.dumps({"html": "x" * 200_000}, ensure_ascii=False)
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def execute(self, **_kwargs):
+            return full_result
+
+    user_temp_dir = tmp_path / "temp_user-1"
+    monkeypatch.setitem(process_single_tool_module.TOOL_EXECUTOR_MAP, "execute_shell", FakeExecutor)
+    monkeypatch.setattr(process_single_tool_module, "get_user_temp_dir", lambda _root, _uid: user_temp_dir)
+
+    result = await process_single_tool_module.process_single_tool(
+        tool_call,
+        db=SimpleNamespace(),
+        profile=profile,
+        cfg=cfg,
+        messages=[],
+        username="user",
+        session_id="session-1",
+        turn=1,
+        uid="user-1",
+        context_window_k=1,
+        tool_call_count=1,
+        tool_result_round_budget_tokens=100,
+    )
+
+    payload = json.loads(result.content)
+    full_result_path = Path(payload["full_result_path"])
+    assert payload["full_result_saved"] is True
+    assert full_result_path.is_absolute()
+    assert full_result_path.parent == (user_temp_dir / "tool_results").resolve()
+    assert full_result_path.read_text(encoding="utf-8") == full_result
+    assert payload["original_chars"] == len(full_result)
+    assert isinstance(payload.get("html"), str)
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_moves_result_post_processing_off_event_loop(monkeypatch):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
+    tool_call = SimpleNamespace(
+        id="call-blocking-post-process",
+        name="execute_shell",
+        arguments={"command": "echo ok", "execution_mode": "non_interactive"},
+    )
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def execute(self, **_kwargs):
+            return "tool output"
+
+    def blocking_post_process(**_kwargs):
+        time.sleep(0.3)
+        return SimpleNamespace(truncated_count=0, removed_chars=0)
+
+    monkeypatch.setitem(process_single_tool_module.TOOL_EXECUTOR_MAP, "execute_shell", FakeExecutor)
+    monkeypatch.setattr(process_single_tool_module, "truncate_tool_messages_for_budget", blocking_post_process)
+
+    started_at = time.perf_counter()
+    process_task = asyncio.create_task(
+        process_single_tool_module.process_single_tool(
+            tool_call,
+            db=SimpleNamespace(),
+            profile=profile,
+            cfg=cfg,
+            messages=[],
+            username="user",
+            session_id="session-1",
+            turn=1,
+            uid="user-1",
+        )
+    )
+    await asyncio.sleep(0.02)
+    elapsed = time.perf_counter() - started_at
+    await process_task
+
+    assert elapsed < 0.15
 
 
 @pytest.mark.asyncio

@@ -190,6 +190,45 @@ async def test_worker_lease_renewal_retries_transient_sqlite_lock(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_worker_lease_logs_event_loop_lag_at_debug_level(monkeypatch):
+    shutdown_event = asyncio.Event()
+    owned_stop_event = asyncio.Event()
+    debug_calls = []
+    monotonic_values = iter([100.0, 112.5, 112.5])
+
+    async def renew(worker_name, owner_id):
+        shutdown_event.set()
+        return True
+
+    async def wait_for_stop(stop_event, timeout):
+        return False
+
+    class BoundLogger:
+        def debug(self, message):
+            debug_calls.append(message)
+
+    class FakeLogger:
+        def bind(self, **kwargs):
+            assert kwargs["worker_name"] == "session_reply"
+            assert kwargs["lag_seconds"] == pytest.approx(2.5)
+            return BoundLogger()
+
+    monkeypatch.setattr(lease_runner, "_renew_worker_lease", renew)
+    monkeypatch.setattr(lease_runner, "_wait_for_stop", wait_for_stop)
+    monkeypatch.setattr(lease_runner, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(lease_runner, "logger", FakeLogger())
+
+    await lease_runner._maintain_worker_lease(
+        "session_reply",
+        "worker-a",
+        shutdown_event,
+        owned_stop_event,
+    )
+
+    assert debug_calls == ["Worker event loop lag detected"]
+
+
+@pytest.mark.asyncio
 async def test_worker_lease_runner_releases_and_cancels_worker_on_cancellation(monkeypatch):
     events = []
     worker_started = asyncio.Event()

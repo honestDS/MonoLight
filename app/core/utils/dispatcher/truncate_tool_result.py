@@ -1,6 +1,8 @@
 import json
 import os
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 import tiktoken
 
@@ -316,6 +318,108 @@ class ToolMessagesTruncationStats:
     removed_chars: int
 
 
+def _write_full_tool_result(content: str, spill_dir: str | Path) -> str:
+    target_dir = Path(spill_dir).resolve(strict=False)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = (target_dir / f"tool_result_{uuid.uuid4().hex}.txt").resolve(strict=False)
+    target_path.write_text(content, encoding="utf-8")
+    return str(target_path)
+
+
+def _bound_json_for_spill(value: object, *, max_string_chars: int) -> object:
+    if isinstance(value, str):
+        return value[:max_string_chars]
+    if isinstance(value, list):
+        return [_bound_json_for_spill(item, max_string_chars=max_string_chars) for item in value[:100]]
+    if isinstance(value, dict):
+        return {str(key): _bound_json_for_spill(item, max_string_chars=max_string_chars) for key, item in value.items()}
+    return value
+
+
+def _build_spilled_tool_result_content(
+    content: str,
+    *,
+    full_result_path: str,
+    limit_tokens: int,
+    model_id: str | None,
+    protocol: str | None,
+) -> tuple[str, int, int]:
+    try:
+        encoding = tiktoken.get_encoding(
+            resolve_token_encoding_name(
+                model_id,
+                protocol=protocol,
+            )
+        )
+
+        def count_tokens(value: str) -> int:
+            return len(encoding.encode(value, disallowed_special=()))
+
+    except Exception:
+        count_tokens = _estimate_tokens_by_chars
+
+    try:
+        parsed_content = json.loads(content)
+    except (TypeError, ValueError, RecursionError):
+        parsed_content = None
+
+    if isinstance(parsed_content, dict):
+        bounded_payload = _bound_json_for_spill(
+            parsed_content,
+            max_string_chars=max(2048, limit_tokens * 8),
+        )
+        assert isinstance(bounded_payload, dict)
+        spill_payload = {
+            **bounded_payload,
+            "full_result_path": full_result_path,
+            "full_result_saved": True,
+            "original_chars": len(content),
+        }
+        truncated_content, final_tokens = _truncate_json_result(
+            spill_payload,
+            limit_tokens,
+            count_tokens,
+        )
+        return truncated_content, final_tokens, min(len(content), len(truncated_content))
+
+    base_payload = {
+        "truncated": True,
+        "original_chars": len(content),
+        "full_result_path": full_result_path,
+        "instruction": "The complete tool result was saved to full_result_path. Read that file in smaller chunks if more detail is needed.",
+        "preview": "",
+    }
+
+    def serialize_preview(length: int) -> str:
+        payload = dict(base_payload)
+        payload["preview"] = content[:length]
+        return _serialize_json(payload)
+
+    base_content = serialize_preview(0)
+    base_tokens = count_tokens(base_content)
+    if base_tokens >= limit_tokens:
+        return base_content, base_tokens, 0
+
+    max_preview_chars = min(len(content), max(1024, limit_tokens * 2))
+    low = 0
+    high = max_preview_chars
+    best_content = base_content
+    best_tokens = base_tokens
+    best_preview_chars = 0
+    while low <= high:
+        preview_chars = (low + high) // 2
+        candidate = serialize_preview(preview_chars)
+        candidate_tokens = count_tokens(candidate)
+        if candidate_tokens <= limit_tokens:
+            best_content = candidate
+            best_tokens = candidate_tokens
+            best_preview_chars = preview_chars
+            low = preview_chars + 1
+        else:
+            high = preview_chars - 1
+    return best_content, best_tokens, best_preview_chars
+
+
 def calculate_tool_result_round_budget_tokens(
     *,
     messages: list[InternalMessage],
@@ -472,6 +576,7 @@ def truncate_tool_messages_for_budget(
     session_id: str,
     model_id: str | None = None,
     protocol: str | None = None,
+    spill_dir: str | Path | None = None,
 ) -> ToolMessagesTruncationStats:
     if not tool_msgs:
         return ToolMessagesTruncationStats(truncated_count=0, removed_chars=0)
@@ -480,17 +585,46 @@ def truncate_tool_messages_for_budget(
     truncated_count = 0
     removed_chars = 0
     for msg in tool_msgs:
+        original_content = msg.content or ""
+        if spill_dir is not None and _estimate_tokens_by_chars(original_content) > per_tool_budget:
+            full_result_path = _write_full_tool_result(original_content, spill_dir)
+            spilled_content, _final_tokens, preview_chars = _build_spilled_tool_result_content(
+                original_content,
+                full_result_path=full_result_path,
+                limit_tokens=per_tool_budget,
+                model_id=model_id,
+                protocol=protocol,
+            )
+            msg.content = spilled_content
+            truncated_count += 1
+            removed_chars += max(len(original_content) - preview_chars, 0)
+            continue
+
         truncation = truncate_tool_result_with_stats(
-            msg.content or "",
+            original_content,
             context_window_k,
             limit_tokens=per_tool_budget,
             model_id=model_id,
             protocol=protocol,
         )
-        msg.content = truncation.content
         if truncation.truncated:
+            if spill_dir is not None:
+                full_result_path = _write_full_tool_result(original_content, spill_dir)
+                spilled_content, _final_tokens, preview_chars = _build_spilled_tool_result_content(
+                    original_content,
+                    full_result_path=full_result_path,
+                    limit_tokens=per_tool_budget,
+                    model_id=model_id,
+                    protocol=protocol,
+                )
+                msg.content = spilled_content
+                removed_chars += max(len(original_content) - preview_chars, 0)
+            else:
+                msg.content = truncation.content
+                removed_chars += truncation.removed_chars
             truncated_count += 1
-            removed_chars += truncation.removed_chars
+        else:
+            msg.content = truncation.content
 
     if truncated_count:
         logger.bind(uid=uid, session_id=session_id).info(

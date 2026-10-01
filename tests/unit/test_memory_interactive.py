@@ -519,7 +519,7 @@ async def test_stream_dispatch_runs_memory_recall_precheck_in_stream_mode(monkey
 
 @pytest.mark.asyncio
 async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_source_message_id(monkeypatch):
-    cfg = _build_cfg(SimpleNamespace(enabled=True), max_turns=1)
+    cfg = _build_cfg(SimpleNamespace(enabled=True), max_turns=2)
     request_log = []
     event_log = []
     source_message_ids = []
@@ -720,7 +720,7 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
 
     assert len(request_log) == 3
     assert all(item["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA] for item in request_log[:2])
-    assert request_log[-1]["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA]
+    assert request_log[-1]["tools"] == []
     assert [item["tool_choice"] for item in request_log] == ["auto", "auto", "none"]
     summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=cfg.tool.max_turns)
     assert any(message.role == MessageRole.USER and summary_notice in (message.content or "") for message in request_log[-1]["messages"])

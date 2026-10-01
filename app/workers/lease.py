@@ -21,6 +21,7 @@ WORKER_CANCEL_TIMEOUT_SECONDS = 5
 WORKER_FORCED_EXIT_CODE = 1
 WORKER_LEASE_LOCK_RETRY_INTERVAL_SECONDS = 1
 WORKER_LEASE_RENEW_SAFETY_SECONDS = 5
+WORKER_EVENT_LOOP_LAG_DEBUG_THRESHOLD_SECONDS = 1
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
@@ -71,12 +72,24 @@ async def _maintain_worker_lease(
     owned_stop_event: asyncio.Event,
 ) -> None:
     while not shutdown_event.is_set() and not owned_stop_event.is_set():
+        wait_started_at = monotonic()
         if await _wait_for_stop(
             shutdown_event,
             WORKER_LEASE_RENEW_INTERVAL_SECONDS,
         ):
             owned_stop_event.set()
             return
+
+        wake_time = monotonic()
+        event_loop_lag_seconds = max(
+            0.0,
+            wake_time - wait_started_at - WORKER_LEASE_RENEW_INTERVAL_SECONDS,
+        )
+        if event_loop_lag_seconds >= WORKER_EVENT_LOOP_LAG_DEBUG_THRESHOLD_SECONDS:
+            logger.bind(
+                worker_name=worker_name,
+                lag_seconds=event_loop_lag_seconds,
+            ).debug("Worker event loop lag detected")
 
         retry_deadline = monotonic() + WORKER_LEASE_SECONDS - WORKER_LEASE_RENEW_INTERVAL_SECONDS - WORKER_LEASE_RENEW_SAFETY_SECONDS
         while True:
