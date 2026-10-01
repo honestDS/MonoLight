@@ -11,6 +11,9 @@ from app.core.constants import (
     ERR_MEMORY_RECALL_BOUNDARY_INVALID,
     ERR_MEMORY_RECALL_STATUS_BOUNDARY_REQUIRED,
     ERR_MEMORY_RECALL_STATUS_INVALID,
+    ERR_SESSION_REPLY_EXECUTION_PHASE_INVALID,
+    GOAL_EXECUTION_PHASE_RUNNING,
+    GOAL_EXECUTION_PHASES,
 )
 from app.core.i18n import t
 from app.core.utils.context_summary import ContextSummaryTriggerMode
@@ -121,6 +124,9 @@ def build_interactive_dispatch_state(
     initial_memory_recall_boundary = max(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
     resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None
     resumed_memory_recall_status = execution_resume_state.get("memory_recall_status") if execution_resume_state else None
+    resumed_execution_phase = execution_resume_state.get("execution_phase", GOAL_EXECUTION_PHASE_RUNNING) if execution_resume_state else GOAL_EXECUTION_PHASE_RUNNING
+    if resumed_execution_phase not in GOAL_EXECUTION_PHASES:
+        raise ValueError(t(ERR_SESSION_REPLY_EXECUTION_PHASE_INVALID))
     if resumed_memory_recall_boundary is not None and (not isinstance(resumed_memory_recall_boundary, int) or isinstance(resumed_memory_recall_boundary, bool) or resumed_memory_recall_boundary <= 0):
         raise ValueError(t(ERR_MEMORY_RECALL_BOUNDARY_INVALID))
     if resumed_memory_recall_status is not None and (not isinstance(resumed_memory_recall_status, str) or resumed_memory_recall_status not in {"pending", "completed", "failed"}):
@@ -138,6 +144,7 @@ def build_interactive_dispatch_state(
         session_total_input_tokens=resumed_session_total_input_tokens,
         session_total_cached_tokens=resumed_session_total_cached_tokens,
         session_total_output_tokens=(resumed_session_total_output_tokens if isinstance(resumed_session_total_output_tokens, int) and not isinstance(resumed_session_total_output_tokens, bool) and resumed_session_total_output_tokens >= 0 else None),
+        execution_phase=resumed_execution_phase,
     )
     if execution_resume_state is not None:
         saved_checkpoint_mode = execution_resume_state.get("context_summary_trigger_mode")

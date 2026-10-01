@@ -10,6 +10,7 @@ from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.constants import (
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_VALUE_MUST_BE_POSITIVE,
+    GOAL_EXECUTION_PHASE_RUNNING,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
 from app.core.crud.audit.audit import audit_crud
@@ -153,6 +154,7 @@ class _ExecutionCheckpointState:
     session_total_input_tokens: int = 0
     session_total_cached_tokens: int = 0
     session_total_output_tokens: int | None = None
+    execution_phase: str = GOAL_EXECUTION_PHASE_RUNNING
 
 
 def _is_valid_memory_recall_boundary(value: Any) -> bool:
@@ -194,6 +196,7 @@ async def _save_execution_checkpoint(
         "total_output_tokens": state.total_output_tokens,
         "session_total_input_tokens": state.session_total_input_tokens,
         "session_total_cached_tokens": state.session_total_cached_tokens,
+        "execution_phase": state.execution_phase,
     }
     if state.session_total_output_tokens is not None:
         checkpoint["session_total_output_tokens"] = state.session_total_output_tokens
@@ -226,6 +229,7 @@ class _AgentLoopStreamState:
     response_id: str
     expose_tool_call_content: bool
     show_tool_calls: bool
+    defer_output_until_response: bool = False
     emitted_agent_loop_output: bool = False
     emitted_stream_content: bool = False
     buffered_content_chunks: list[str] = field(default_factory=list)
@@ -261,7 +265,7 @@ async def _publish_stream_reasoning(state: _AgentLoopStreamState, content: str) 
 async def _handle_stream_reasoning(state: _AgentLoopStreamState, content: str) -> None:
     if state.callback is None or not content:
         return
-    if not state.show_tool_calls:
+    if state.defer_output_until_response or not state.show_tool_calls:
         state.buffered_reasoning_chunks.append(content)
         return
     await _publish_stream_reasoning(state, content)
@@ -275,7 +279,7 @@ async def _flush_buffered_stream_reasoning(state: _AgentLoopStreamState) -> None
 
 
 async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> None:
-    if not state.expose_tool_call_content or not state.show_tool_calls:
+    if state.defer_output_until_response or not state.expose_tool_call_content or not state.show_tool_calls:
         state.buffered_content_chunks.append(content)
         return
 
@@ -298,6 +302,24 @@ async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> 
         }
     )
     state.buffered_content_chunks.clear()
+    state.emitted_stream_content = True
+
+
+async def _flush_buffered_stream_content(state: _AgentLoopStreamState) -> None:
+    buffered_chunks = list(state.buffered_content_chunks)
+    state.buffered_content_chunks.clear()
+    if state.callback is None or not "".join(buffered_chunks).strip():
+        return
+    await _emit_agent_loop_output(state)
+    for content in buffered_chunks:
+        await state.callback(
+            {
+                "type": "content",
+                "content": content,
+                "turn": state.current_turn,
+                "response_id": state.response_id,
+            }
+        )
     state.emitted_stream_content = True
 
 

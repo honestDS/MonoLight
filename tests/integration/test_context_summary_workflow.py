@@ -9,6 +9,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
+from app.core.constants import GOAL_EXECUTION_PHASE_RUNNING
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.exceptions import LLMContextLengthException
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
@@ -435,6 +436,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
                 session_total_input_tokens=0,
                 session_total_cached_tokens=0,
                 session_total_output_tokens=0,
+                execution_phase=GOAL_EXECUTION_PHASE_RUNNING,
             ),
             context_summary_work_validity_checker=None,
             context_summary_lifecycle_callback=None,

@@ -27,6 +27,7 @@ from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.message_platform_outbox import MessagePlatformOutbox, MessagePlatformOutboxStatus
 from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal, engine
+from scripts.migration_20260819_move_session_agent_settings import migrate as migrate_session_agent_settings
 from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
 
 
@@ -130,6 +131,7 @@ async def clean_outbox_table():
             )
         )
     async with AsyncSessionLocal() as db:
+        await migrate_session_agent_settings(db)
         await migrate_chat_session_show_reasoning(db)
         await db.execute(delete(MessagePlatformOutbox))
         await db.execute(delete(ChatSession).where(ChatSession.session_id == "session"))

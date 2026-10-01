@@ -9,6 +9,8 @@ from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_LLM_EMPTY_RESPONSE,
     ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED,
+    GOAL_EXECUTION_PHASE_FINALIZING,
+    GOAL_EXECUTION_PHASE_RUNNING,
 )
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
@@ -16,8 +18,8 @@ from app.core.dispatchers.interactive_state import InteractiveDispatchState
 from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra
-from app.core.prompts import GOAL_MODE_SYSTEM_PROMPT
-from app.core.tools.end_session import END_SESSION_TOOL_NAME, extract_end_session_summary
+from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT
+from app.core.tools.end_session import is_end_session_signal
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.helpers import (
@@ -47,6 +49,7 @@ from app.providers.llm.client import LLMClient
 from .interactive_helpers import (
     _AgentLoopStreamState,
     _emit_agent_loop_output,
+    _flush_buffered_stream_content,
     _flush_buffered_stream_reasoning,
     _handle_stream_content,
     _handle_stream_reasoning,
@@ -87,10 +90,15 @@ async def generate_interactive_turn(
         response_id=response_id,
         expose_tool_call_content=state.expose_tool_call_content,
         show_tool_calls=state.show_tool_calls,
+        defer_output_until_response=(state.goal_mode is True and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and tool_choice != "none"),
     )
     goal_mode = state.goal_mode is True
-    state.messages = [message for message in state.messages if not (message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_SYSTEM_PROMPT)]
-    if goal_mode:
+    execution_phase = state.checkpoint_state.execution_phase
+    state.messages = [message for message in state.messages if not (message.role == MessageRole.SYSTEM and message.content in {GOAL_MODE_SYSTEM_PROMPT, GOAL_MODE_FINAL_RESPONSE_PROMPT})]
+    if execution_phase == GOAL_EXECUTION_PHASE_FINALIZING:
+        system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
+        state.messages.insert(system_prompt_index, InternalMessage(role=MessageRole.SYSTEM, content=GOAL_MODE_FINAL_RESPONSE_PROMPT))
+    elif goal_mode:
         system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
         state.messages.insert(system_prompt_index, InternalMessage(role=MessageRole.SYSTEM, content=GOAL_MODE_SYSTEM_PROMPT))
 
@@ -235,24 +243,14 @@ async def generate_interactive_turn(
             response_provider_metadata = getattr(response, "provider_metadata", None)
             ai_refusal = getattr(ai_msg, "refusal", None)
             ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
-            end_session_tool_enabled = goal_mode and tool_choice != "none" and any(isinstance(tool, dict) and tool.get("function", {}).get("name") == END_SESSION_TOOL_NAME for tool in current_tools or [])
-            if end_session_tool_enabled:
-                end_session_summary = extract_end_session_summary(ai_msg)
-                if end_session_summary is not None:
-                    ai_msg = ai_msg.model_copy(
-                        update={
-                            "content": end_session_summary,
-                            "tool_calls": None,
-                            "tool_call_id": None,
-                            "refusal": None,
-                        },
-                        deep=True,
-                    )
-                    response_finish_reason = "stop"
-                    response_finish_details = None
-                    ai_refusal = None
-                    stream_state.buffered_content_chunks.clear()
-                    stream_state.emitted_stream_content = False
+            end_session_signal = goal_mode and execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)
+            if end_session_signal:
+                stream_state.buffered_content_chunks.clear()
+                stream_state.buffered_reasoning_chunks.clear()
+            elif stream_state.defer_output_until_response and state.show_tool_calls:
+                await _flush_buffered_stream_reasoning(stream_state)
+                if state.expose_tool_call_content:
+                    await _flush_buffered_stream_content(stream_state)
             provider_token_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
             provider_request_usage_metadata = build_provider_request_usage_metadata(provider_request_id, provider_token_metrics)
             state.checkpoint_state.session_total_input_tokens, state.checkpoint_state.session_total_cached_tokens = accumulate_session_cache_metrics(
@@ -285,7 +283,7 @@ async def generate_interactive_turn(
                     await _flush_buffered_stream_reasoning(stream_state)
             if not hidden_tool_round:
                 await _emit_agent_loop_output(stream_state)
-            if state.stream_event_callback is not None and state.show_tool_calls and not hidden_tool_round and state.expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content.strip():
+            if state.stream_event_callback is not None and state.show_tool_calls and not hidden_tool_round and state.expose_tool_call_content and not end_session_signal and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content.strip():
                 await state.stream_event_callback(
                     {
                         "type": "content",

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from app.core.constants import ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.constants import ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, GOAL_EXECUTION_PHASE_RUNNING, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.dispatchers import interactive_helpers as interactive_helpers_module
 from app.core.dispatchers import interactive_runtime as interactive_runtime_module
@@ -129,6 +129,7 @@ def _context_length_generation_state(*, stream_event_callback=None):
             session_total_input_tokens=0,
             session_total_cached_tokens=0,
             session_total_output_tokens=0,
+            execution_phase=GOAL_EXECUTION_PHASE_RUNNING,
         ),
         context_summary_work_validity_checker=None,
         context_summary_lifecycle_callback=None,

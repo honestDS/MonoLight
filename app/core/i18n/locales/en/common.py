@@ -256,6 +256,7 @@ MESSAGES = {
     "ERR_PROVIDER_REQUEST_ID_INVALID": "Provider request ID must be a non-empty string of at most 64 characters",
     "ERR_SESSION_REPLY_DEDUPLICATION_FAILED": "Session reply work deduplication failed",
     "ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN": "Tool execution was interrupted after audit claiming; the result is unknown and automatic retry is forbidden",
+    "ERR_SESSION_REPLY_EXECUTION_PHASE_INVALID": "The session reply execution phase is invalid",
     "ERR_MESSAGE_PLATFORM_EVENT_NOT_SENT": "Message platform handler did not send the event",
     "ERR_IMAGE_CONTENT_TYPE_UNSUPPORTED": "Downloaded image has unsupported content type: {content_type}",
     "ERR_CONTEXT_SUMMARY_UPPER_NOT_NEWER": "Fixed upper message must be newer than the persisted summary boundary",

@@ -7,7 +7,12 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR
+from app.core.constants import (
+    ERR_CHAT_CHANNEL_NOT_FOUND,
+    ERR_INTERNAL_SERVER_ERROR,
+    GOAL_EXECUTION_PHASE_FINALIZING,
+    GOAL_EXECUTION_PHASE_RUNNING,
+)
 from app.core.crud.account.user import user_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.session import session_crud
@@ -20,6 +25,7 @@ from app.core.log import get_logger
 from app.core.profile_selection import resolve_profile_for_session
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
+from app.core.tools.end_session import is_end_session_signal
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
@@ -219,6 +225,7 @@ async def dispatch_interactive(
                     new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
                     if new_user_batch is not None:
                         state.current_turn = 0
+                        state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
                         append_new_user_messages(
                             state.cfg,
                             state.messages,
@@ -283,7 +290,10 @@ async def dispatch_interactive(
 
                     state.current_turn += 1
 
-                    if not goal_mode and state.current_turn == max_turns:
+                    if state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING:
+                        current_tools = []
+                        current_tool_choice = "none"
+                    elif not goal_mode and state.current_turn == max_turns:
                         summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                         state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
                         current_tools = state.tools
@@ -300,6 +310,11 @@ async def dispatch_interactive(
                         response_id=response_id,
                     )
                     ai_msg = generation_result.message
+
+                    if goal_mode and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg):
+                        state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
+                        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                        continue
 
                     if not ai_msg.tool_calls and state.files_to_user:
                         ai_msg.content = build_assistant_content(ai_msg.content, state.files_to_user)
@@ -377,6 +392,7 @@ async def dispatch_interactive(
                             update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
 
                         state.current_turn = 0
+                        state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
                         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
                         continue
 
@@ -397,6 +413,7 @@ async def dispatch_interactive(
             new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
             if new_user_batch is None:
                 break
+            state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
             state.checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
             if state.memory_enabled:
                 update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
