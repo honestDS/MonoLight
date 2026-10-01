@@ -15,7 +15,7 @@ from .cancel_background_task import CANCEL_BACKGROUND_TASK_TOOL_SCHEMA, CancelBa
 from .end_session import (
     END_SESSION_TOOL_NAME as END_SESSION_TOOL_NAME,
 )
-from .end_session import END_SESSION_TOOL_SCHEMA, EndSessionExecutor
+from .end_session import END_SESSION_TOOL_SCHEMA
 from .file_tool import FILE_TOOL_SCHEMA, FileToolExecutor
 from .firecrawl_scrape import FIRECRAWL_SCRAPE_TOOL_SCHEMA, FirecrawlScrapeExecutor
 from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecutor
@@ -124,8 +124,19 @@ TOOL_EXECUTOR_MAP = {
     TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
     TERMINAL_CLOSE_TOOL_SCHEMA["function"]["name"]: TerminalCloseExecutor,
     MANAGE_TODO_TOOL_NAME: ManageTodoExecutor,
-    END_SESSION_TOOL_NAME: EndSessionExecutor,
 }
+
+CONTROL_TOOL_ROUND_EXECUTION_POLICIES = {
+    END_SESSION_TOOL_NAME: "exclusive",
+}
+
+
+def get_tool_round_execution_policy(tool_name: str) -> str:
+    control_policy = CONTROL_TOOL_ROUND_EXECUTION_POLICIES.get(tool_name)
+    if control_policy is not None:
+        return control_policy
+    executor_class = TOOL_EXECUTOR_MAP.get(tool_name)
+    return getattr(executor_class, "round_execution_policy", "parallel")
 
 
 def tool_requires_audit(tool_name: str) -> bool:

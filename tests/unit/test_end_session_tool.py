@@ -5,7 +5,7 @@ import pytest
 
 from app.core.log import LogManager
 from app.core.tools import END_SESSION_TOOL_NAME, get_tools_for_profile
-from app.core.tools.end_session import END_SESSION_TOOL_SCHEMA, extract_end_session_summary
+from app.core.tools.end_session import END_SESSION_TOOL_SCHEMA, is_end_session_signal
 from app.core.tools.list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA
 from app.core.utils.dispatcher.process_single_tool import (
     prevalidate_tool_round,
@@ -36,11 +36,11 @@ def _config_with_one_parallel_slot() -> ProfileConfig:
     )
 
 
-def _end_session_call(call_id: str = "end-session-call", summary: object = "completed") -> InternalToolCall:
+def _end_session_call(call_id: str = "end-session-call", arguments: dict[str, object] | None = None) -> InternalToolCall:
     return InternalToolCall(
         id=call_id,
         name=END_SESSION_TOOL_NAME,
-        arguments={"summary": summary},
+        arguments={} if arguments is None else arguments,
     )
 
 
@@ -53,7 +53,7 @@ def _ordinary_call(call_id: str = "ordinary-call") -> InternalToolCall:
 
 
 @pytest.mark.asyncio
-async def test_goal_mode_exposes_end_session_and_valid_summary_passes_prevalidation():
+async def test_goal_mode_exposes_end_session_and_parameterless_call_passes_prevalidation():
     profile = _profile_without_configured_tools()
     original_configs = copy.deepcopy(profile.configs)
 
@@ -169,14 +169,10 @@ async def test_normal_mode_process_single_tool_rejects_end_session(monkeypatch):
 @pytest.mark.parametrize(
     "arguments",
     [
-        {},
-        {"summary": ""},
-        {"summary": "\n\t \r\n"},
-        {"summary": None},
-        {"summary": 123},
-        {"summary": "completed", "unexpected": "value"},
+        {"summary": "completed"},
+        {"unexpected": "value"},
     ],
-    ids=["missing", "empty", "whitespace", "null", "non-string", "extra-argument"],
+    ids=["legacy-summary", "unexpected-argument"],
 )
 def test_invalid_end_session_arguments_return_failed_protocol_result(arguments):
     call = InternalToolCall(
@@ -243,22 +239,10 @@ def test_goal_mode_protocol_precheck_accepts_a_single_end_session_call():
     assert errors == {}
 
 
-@pytest.mark.parametrize(
-    ("raw_summary", "expected_summary"),
-    [
-        ("  completed  ", "completed"),
-        (" \nfirst line\nsecond line\t ", "first line\nsecond line"),
-        (" \n" + ("long-summary-" * 1000) + "\n ", "long-summary-" * 1000),
-    ],
-    ids=["strips", "multiline", "long"],
-)
-def test_extract_end_session_summary_preserves_valid_text(raw_summary, expected_summary):
-    message = InternalMessage(
-        role=MessageRole.ASSISTANT,
-        tool_calls=[_end_session_call(summary=raw_summary)],
-    )
+def test_end_session_signal_requires_one_parameterless_call():
+    message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[_end_session_call()])
 
-    assert extract_end_session_summary(message) == expected_summary
+    assert is_end_session_signal(message) is True
 
 
 @pytest.mark.parametrize(
@@ -266,22 +250,13 @@ def test_extract_end_session_summary_preserves_valid_text(raw_summary, expected_
     [
         None,
         [],
-        [_end_session_call(summary="")],
-        [_end_session_call(summary="\n\t")],
-        [_end_session_call(summary=None)],
-        [_end_session_call(summary="completed"), _end_session_call("second")],
+        [_end_session_call(arguments={"summary": "completed"})],
+        [_end_session_call(), _end_session_call("second")],
         [_ordinary_call("ordinary-only")],
-        [
-            InternalToolCall(
-                id="extra-argument",
-                name=END_SESSION_TOOL_NAME,
-                arguments={"summary": "completed", "unexpected": True},
-            )
-        ],
     ],
-    ids=["no-tools", "empty-tools", "empty-summary", "whitespace-summary", "null-summary", "multiple-tools", "other-tool", "extra-argument"],
+    ids=["no-tools", "empty-tools", "legacy-summary", "multiple-tools", "other-tool"],
 )
-def test_extract_end_session_summary_returns_no_final_text_for_invalid_calls(tool_calls):
+def test_non_matching_tool_round_is_not_end_session_signal(tool_calls):
     message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=tool_calls)
 
-    assert extract_end_session_summary(message) is None
+    assert is_end_session_signal(message) is False

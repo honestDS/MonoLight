@@ -256,6 +256,7 @@ MESSAGES = {
     "ERR_PROVIDER_REQUEST_ID_INVALID": "模型请求标识必须是长度不超过 64 个字符的非空字符串",
     "ERR_SESSION_REPLY_DEDUPLICATION_FAILED": "会话回复工作去重失败",
     "ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN": "审计工具执行领取后被中断，结果未知，禁止自动重试",
+    "ERR_SESSION_REPLY_EXECUTION_PHASE_INVALID": "会话回复执行阶段无效",
     "ERR_MESSAGE_PLATFORM_EVENT_NOT_SENT": "消息平台处理器未发送事件",
     "ERR_IMAGE_CONTENT_TYPE_UNSUPPORTED": "下载的图片内容类型不受支持: {content_type}",
     "ERR_CONTEXT_SUMMARY_UPPER_NOT_NEWER": "固定读取上界必须晚于已持久化的总结边界",

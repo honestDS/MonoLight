@@ -12,6 +12,7 @@ from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.client import CancellationSafeAsyncSession
+from scripts.migration_20260819_move_session_agent_settings import migrate as migrate_session_agent_settings
 from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
 
 TEST_SESSION_ID = "message-dedupe-session"
@@ -26,6 +27,7 @@ async def clean_message_table():
         await connection.run_sync(lambda sync_connection: ChatSession.__table__.create(sync_connection, checkfirst=True))
 
     async with AsyncSessionLocal() as db:
+        await migrate_session_agent_settings(db)
         await migrate_chat_session_show_reasoning(db)
         await db.commit()
 

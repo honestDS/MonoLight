@@ -11,10 +11,11 @@ from sqlmodel import select
 
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatcher as dispatcher_module
-from app.core.constants import END_SESSION_TOOL_NAME, MANAGE_TODO_TOOL_NAME
+from app.core.constants import END_SESSION_TOOL_NAME, GOAL_EXECUTION_PHASE_FINALIZING, MANAGE_TODO_TOOL_NAME
 from app.core.dispatcher import ChatDispatcher
 from app.core.dispatchers import interactive_generation as interactive_generation_module
-from app.core.prompts import GOAL_MODE_SYSTEM_PROMPT, PROMPT_MAX_TURNS_REACHED
+from app.core.exceptions import ServerException
+from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, PROMPT_MAX_TURNS_REACHED
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
@@ -223,27 +224,37 @@ async def _seed_running_work(
 
 
 def _end_session_response(
-    summary: str,
     *,
     call_id: str,
     reasoning: str | None = "结束前检查已完成",
+    content: str | None = None,
     usage: dict[str, Any] | None = None,
 ) -> InternalResponse:
     return InternalResponse(
         message=InternalMessage(
             role=MessageRole.ASSISTANT,
+            content=content,
             reasoning_content=reasoning,
             tool_calls=[
                 InternalToolCall(
                     id=call_id,
                     name=END_SESSION_TOOL_NAME,
-                    arguments={"summary": summary},
+                    arguments={},
                 )
             ],
         ),
         model=MODEL_ID,
         usage=usage or {"prompt_tokens": 31, "completion_tokens": 17, "total_tokens": 48},
         finish_reason="tool_calls",
+    )
+
+
+def _final_response(content: str = SUMMARY) -> InternalResponse:
+    return InternalResponse(
+        message=InternalMessage(role=MessageRole.ASSISTANT, content=content),
+        model=MODEL_ID,
+        usage={"prompt_tokens": 19, "completion_tokens": 11, "total_tokens": 30},
+        finish_reason="stop",
     )
 
 
@@ -298,6 +309,8 @@ def _patch_llm(
         response = next(response_iterator)
         if response.message.reasoning_content:
             await kwargs["on_reasoning"](response.message.reasoning_content)
+        if isinstance(response.message.content, str) and response.message.content:
+            await kwargs["on_content"](response.message.content)
         return response
 
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
@@ -313,6 +326,7 @@ async def _dispatch(
     stream: bool,
     show_tool_calls: bool,
     execution_resume_state: dict[str, Any] | None = None,
+    execution_checkpoint_callback=None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     async with factory() as db:
         if stream:
@@ -330,6 +344,7 @@ async def _dispatch(
                     persisted_profile_id=PROFILE_ID,
                     show_tool_calls=show_tool_calls,
                     execution_resume_state=execution_resume_state,
+                    execution_checkpoint_callback=execution_checkpoint_callback,
                 )
             ]
         return await ChatDispatcher.dispatch(
@@ -343,6 +358,7 @@ async def _dispatch(
             persisted_profile_id=PROFILE_ID,
             show_tool_calls=show_tool_calls,
             execution_resume_state=execution_resume_state,
+            execution_checkpoint_callback=execution_checkpoint_callback,
         )
 
 
@@ -376,13 +392,19 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
     _patch_runtime_database(monkeypatch, session_factory)
     session_id = f"end-session-{int(stream)}-{int(show_tool_calls)}"
     initial_message = await _seed_conversation(session_factory, session_id)
+    checkpoints: list[dict[str, Any]] = []
+
+    async def capture_checkpoint(checkpoint: dict[str, Any]) -> None:
+        checkpoints.append(checkpoint)
+
     calls = _patch_llm(
         monkeypatch,
         [
             _end_session_response(
-                SUMMARY,
                 call_id="final-end-session",
-            )
+                content="这段正文不应展示或持久化",
+            ),
+            _final_response(),
         ],
         stream=stream,
     )
@@ -393,10 +415,18 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
         session_id=session_id,
         stream=stream,
         show_tool_calls=show_tool_calls,
+        execution_checkpoint_callback=capture_checkpoint,
     )
     response = _response_from_dispatch_result(result, stream=stream)
 
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0]["tool_choice"] == "required"
+    assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
+    assert calls[1]["tool_choice"] == "none"
+    assert calls[1]["tools"] == []
+    assert any(message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_FINAL_RESPONSE_PROMPT for message in calls[1]["messages"])
+    assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for message in calls[1]["messages"] if message.role == MessageRole.SYSTEM)
+    assert any(checkpoint.get("execution_phase") == GOAL_EXECUTION_PHASE_FINALIZING for checkpoint in checkpoints)
     assert response["choices"][0]["message"]["content"] == SUMMARY
     assert response["choices"][0]["finish_reason"] == "stop"
     assert response["history"][-1]["role"] == MessageRole.ASSISTANT
@@ -414,9 +444,11 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
     if stream:
         events = result
         content_events = [event for event in events if event.get("type") == "content"]
+        reasoning_events = [event for event in events if event.get("type") == "reasoning"]
         turn_end_events = [event for event in events if event.get("type") == "turn_end"]
         done_events = [event for event in events if event.get("type") == "done"]
         assert [event["content"] for event in content_events] == [SUMMARY]
+        assert reasoning_events == []
         assert len(turn_end_events) == 1
         assert turn_end_events[0]["content"] == SUMMARY
         assert turn_end_events[0]["message_id"] == assistant_messages[0].id
@@ -457,7 +489,8 @@ async def test_goal_mode_continues_beyond_configured_and_legacy_turn_limits_then
         monkeypatch,
         [
             *todo_responses,
-            _end_session_response(SUMMARY, call_id="final-end-session"),
+            _end_session_response(call_id="final-end-session"),
+            _final_response(),
         ],
         stream=stream,
     )
@@ -471,10 +504,12 @@ async def test_goal_mode_continues_beyond_configured_and_legacy_turn_limits_then
     )
     response = _response_from_dispatch_result(result, stream=stream)
 
-    assert len(calls) == 26
-    assert all(call["tool_choice"] == "required" for call in calls)
+    assert len(calls) == 27
+    assert all(call["tool_choice"] == "required" for call in calls[:-1])
+    assert calls[-1]["tool_choice"] == "none"
+    assert calls[-1]["tools"] == []
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=1)
-    for call in calls:
+    for call in calls[:-1]:
         assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in call["tools"])
         goal_mode_messages = [message for message in call["messages"] if message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_SYSTEM_PROMPT]
         assert len(goal_mode_messages) == 1
@@ -482,6 +517,7 @@ async def test_goal_mode_continues_beyond_configured_and_legacy_turn_limits_then
             if message.role == MessageRole.USER:
                 user_payload = json.loads(message.content)
                 assert user_payload.get("user_message") != max_turns_notice
+    assert any(message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_FINAL_RESPONSE_PROMPT for message in calls[-1]["messages"])
 
     assert response["choices"][0]["message"]["content"] == SUMMARY
     assert response["choices"][0]["finish_reason"] == "stop"
@@ -509,7 +545,7 @@ async def test_goal_mode_continues_beyond_configured_and_legacy_turn_limits_then
         content_events = [event for event in result if event.get("type") == "content"]
         turn_end_events = [event for event in result if event.get("type") == "turn_end"]
         assert [event["content"] for event in content_events] == [SUMMARY]
-        assert turn_end_events[-1]["turn"] == 26
+        assert turn_end_events[-1]["turn"] == 27
         assert turn_end_events[-1]["content"] == SUMMARY
         assert turn_end_events[-1]["message_id"] == assistant_text_rows[0].id
 
@@ -687,15 +723,7 @@ async def test_execution_resume_state_restarts_over_limit_and_preserves_mode_con
         "files_to_user": [],
     }
     final_content = SUMMARY if goal_mode else "恢复普通模式后的总结"
-    responses = [
-        _end_session_response(SUMMARY, call_id="resumed-end")
-        if goal_mode
-        else InternalResponse(
-            message=InternalMessage(role=MessageRole.ASSISTANT, content=final_content),
-            model=MODEL_ID,
-            finish_reason="stop",
-        )
-    ]
+    responses = [_end_session_response(call_id="resumed-end"), _final_response(final_content)] if goal_mode else [_final_response(final_content)]
     calls = _patch_llm(monkeypatch, responses, stream=stream)
 
     result = await _dispatch(
@@ -708,12 +736,16 @@ async def test_execution_resume_state_restarts_over_limit_and_preserves_mode_con
     )
     response = _response_from_dispatch_result(result, stream=stream)
 
-    assert len(calls) == 1
+    assert len(calls) == (2 if goal_mode else 1)
     assert calls[0]["tool_choice"] == ("required" if goal_mode else "none")
     has_end_session = any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
     assert has_end_session is goal_mode
     goal_mode_messages = [message for message in calls[0]["messages"] if message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_SYSTEM_PROMPT]
     assert len(goal_mode_messages) == (1 if goal_mode else 0)
+    if goal_mode:
+        assert calls[1]["tool_choice"] == "none"
+        assert calls[1]["tools"] == []
+        assert any(message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_FINAL_RESPONSE_PROMPT for message in calls[1]["messages"])
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=1)
     user_payloads = [json.loads(message.content)["user_message"] for message in calls[0]["messages"] if message.role == MessageRole.USER]
     assert user_payloads.count(max_turns_notice) == (0 if goal_mode else 1)
@@ -736,9 +768,82 @@ async def test_execution_resume_state_restarts_over_limit_and_preserves_mode_con
         content_events = [event for event in result if event.get("type") == "content"]
         turn_end_events = [event for event in result if event.get("type") == "turn_end"]
         assert [event["content"] for event in content_events] == [final_content]
-        assert turn_end_events[-1]["turn"] == (26 if goal_mode else 1)
+        assert turn_end_events[-1]["turn"] == (27 if goal_mode else 1)
         assert turn_end_events[-1]["content"] == final_content
         assert turn_end_events[-1]["message_id"] == assistant_text_rows[0].id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+async def test_finalizing_resume_skips_tools_and_generates_only_final_reply(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = f"end-session-finalizing-resume-{int(stream)}"
+    initial_message = await _seed_conversation(session_factory, session_id, goal_mode=True)
+    execution_resume_state = {
+        "current_turn": 6,
+        "execution_phase": GOAL_EXECUTION_PHASE_FINALIZING,
+        "messages": [initial_message.model_dump(mode="json")],
+        "turn_messages": [],
+        "files_to_user": [],
+    }
+    calls = _patch_llm(monkeypatch, [_final_response()], stream=stream)
+
+    result = await _dispatch(
+        session_factory,
+        initial_message,
+        session_id=session_id,
+        stream=stream,
+        show_tool_calls=True,
+        execution_resume_state=execution_resume_state,
+    )
+    response = _response_from_dispatch_result(result, stream=stream)
+
+    assert len(calls) == 1
+    assert calls[0]["tool_choice"] == "none"
+    assert calls[0]["tools"] == []
+    assert any(message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_FINAL_RESPONSE_PROMPT for message in calls[0]["messages"])
+    assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for message in calls[0]["messages"] if message.role == MessageRole.SYSTEM)
+    assert response["choices"][0]["message"]["content"] == SUMMARY
+
+    messages = await _list_messages(session_factory, session_id)
+    assert not [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT}]
+    assistant_text_rows = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+    assert len(assistant_text_rows) == 1
+    assert assistant_text_rows[0].content == SUMMARY
+
+
+@pytest.mark.asyncio
+async def test_invalid_execution_phase_fails_before_any_llm_request(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = "end-session-invalid-execution-phase"
+    initial_message = await _seed_conversation(session_factory, session_id, goal_mode=True)
+    execution_resume_state = {
+        "current_turn": 6,
+        "execution_phase": "unknown-phase",
+        "messages": [initial_message.model_dump(mode="json")],
+        "turn_messages": [],
+        "files_to_user": [],
+    }
+    calls = _patch_llm(monkeypatch, [], stream=False)
+
+    with pytest.raises(ServerException):
+        await _dispatch(
+            session_factory,
+            initial_message,
+            session_id=session_id,
+            stream=False,
+            show_tool_calls=True,
+            execution_resume_state=execution_resume_state,
+        )
+
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -746,11 +851,8 @@ async def test_execution_resume_state_restarts_over_limit_and_preserves_mode_con
 @pytest.mark.parametrize(
     ("arguments", "case_id"),
     [
-        ({}, "missing"),
-        ({"summary": None}, "null"),
-        ({"summary": ""}, "empty"),
-        ({"summary": " \n\t "}, "whitespace"),
-        ({"summary": SUMMARY, "unexpected": "argument"}, "extra-argument"),
+        ({"summary": SUMMARY}, "legacy-summary"),
+        ({"unexpected": "argument"}, "extra-argument"),
     ],
 )
 async def test_invalid_end_session_call_is_corrected_and_failed_result_is_persisted(
@@ -773,9 +875,9 @@ async def test_invalid_end_session_call_is_corrected_and_failed_result_is_persis
         [
             _response_for_tool_calls([invalid_call]),
             _end_session_response(
-                SUMMARY,
                 call_id="corrected-end-session",
             ),
+            _final_response(),
         ],
         stream=stream,
     )
@@ -789,7 +891,7 @@ async def test_invalid_end_session_call_is_corrected_and_failed_result_is_persis
     )
     response = _response_from_dispatch_result(result, stream=stream)
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert response["choices"][0]["message"]["content"] == SUMMARY
     assert response["choices"][0]["finish_reason"] == "stop"
     assert response["history"][-1]["content"] == SUMMARY
@@ -822,14 +924,14 @@ async def test_invalid_end_session_call_is_corrected_and_failed_result_is_persis
     [
         (
             [
-                InternalToolCall(id="end-first", name=END_SESSION_TOOL_NAME, arguments={"summary": SUMMARY}),
-                InternalToolCall(id="end-second", name=END_SESSION_TOOL_NAME, arguments={"summary": SUMMARY}),
+                InternalToolCall(id="end-first", name=END_SESSION_TOOL_NAME, arguments={}),
+                InternalToolCall(id="end-second", name=END_SESSION_TOOL_NAME, arguments={}),
             ],
             "two-end-session-calls",
         ),
         (
             [
-                InternalToolCall(id="end-before-todo", name=END_SESSION_TOOL_NAME, arguments={"summary": SUMMARY}),
+                InternalToolCall(id="end-before-todo", name=END_SESSION_TOOL_NAME, arguments={}),
                 _todo_write_call("todo-after-end"),
             ],
             "end-before-todo",
@@ -837,7 +939,7 @@ async def test_invalid_end_session_call_is_corrected_and_failed_result_is_persis
         (
             [
                 _todo_write_call("todo-before-end"),
-                InternalToolCall(id="end-after-todo", name=END_SESSION_TOOL_NAME, arguments={"summary": SUMMARY}),
+                InternalToolCall(id="end-after-todo", name=END_SESSION_TOOL_NAME, arguments={}),
             ],
             "todo-before-end",
         ),
@@ -858,9 +960,9 @@ async def test_end_session_protocol_conflict_persists_all_failures_without_execu
         [
             _response_for_tool_calls(tool_calls),
             _end_session_response(
-                SUMMARY,
                 call_id="corrected-end-session",
             ),
+            _final_response(),
         ],
         stream=stream,
     )
@@ -874,7 +976,7 @@ async def test_end_session_protocol_conflict_persists_all_failures_without_execu
     )
     response = _response_from_dispatch_result(result, stream=stream)
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert response["choices"][0]["message"]["content"] == SUMMARY
     assert response["choices"][0]["finish_reason"] == "stop"
 
@@ -919,10 +1021,10 @@ async def test_queue_stream_persists_end_session_final_events_and_deduplicated_m
         monkeypatch,
         [
             _end_session_response(
-                SUMMARY,
                 call_id="queue-end-session",
                 usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            )
+            ),
+            _final_response(),
         ],
         stream=True,
     )
@@ -943,7 +1045,7 @@ async def test_queue_stream_persists_end_session_final_events_and_deduplicated_m
             execution_resume_state=None,
         )
 
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert response["choices"][0]["message"]["content"] == SUMMARY
     assert response["choices"][0]["finish_reason"] == "stop"
 

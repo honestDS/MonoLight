@@ -4,8 +4,12 @@
 PROMPT_MAX_TURNS_REACHED = "System notification: Maximum tool call turns ({max_turns}) reached. Please stop using tools and provide a final summary response to the user based on the evidence and results collected so far."
 
 GOAL_MODE_SYSTEM_PROMPT = """[Goal mode rules]
-Current interactive task has no consecutive tool-turn limit. Continue only with useful, authorized steps toward the user's goal; do not repeat unsuccessful actions without new evidence. When the task is complete, cannot proceed safely, or needs user input, call end_session exactly once and by itself with a non-empty user-visible summary of verified results, remaining limitations, or needed clarification. Do not put the final reply outside that tool call. Do not claim success without evidence. Goal mode does not relax permissions, safety audits, tool timeouts, or platform constraints.
+Current interactive task has no consecutive tool-turn limit. Continue only with useful, authorized steps toward the user's goal; do not repeat unsuccessful actions without new evidence. When the task is complete, cannot proceed safely, or needs user input, call end_session exactly once and by itself with no arguments. Do not include the user-facing final reply in the same response. After end_session is accepted, the system will request the final reply separately. Do not claim success without evidence. Goal mode does not relax permissions, safety audits, tool timeouts, or platform constraints.
 [End goal mode rules]"""
+
+GOAL_MODE_FINAL_RESPONSE_PROMPT = """[Goal mode final response]
+The execution phase has ended. Do not call or simulate tools. Reply to the user now using only the verified results already present in the conversation. Include any material limitations or required user input. Do not claim success without evidence.
+[End goal mode final response]"""
 
 # Parallel tool call limit error
 ERR_PARALLEL_LIMIT_EXCEEDED = "Too many parallel tool calls. Requested: {requested}, Limit: {limit}."

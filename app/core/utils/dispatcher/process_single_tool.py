@@ -39,6 +39,7 @@ from app.core.tools import (
     TOOL_EXECUTOR_MAP,
     get_tool_parameters_schema,
     get_tool_required_parameters,
+    get_tool_round_execution_policy,
     tool_runs_in_background,
     tool_schema_has_parameter,
     validate_longterm_memory_arguments,
@@ -370,8 +371,7 @@ def prevalidate_tool_round_protocol(
     max_parallel_tools = getattr(getattr(cfg, "tool", None), "max_parallel_tools", round_call_count)
     for tool_call in tool_calls:
         tool_name = tool_call.name
-        executor_cls = TOOL_EXECUTOR_MAP.get(tool_name)
-        round_execution_policy = getattr(executor_cls, "round_execution_policy", "parallel")
+        round_execution_policy = get_tool_round_execution_policy(tool_name)
         policy_is_unknown = round_execution_policy not in ("parallel", "exclusive", "atomic")
         policy_is_exclusive = round_execution_policy == "exclusive" and round_call_count != 1
         policy_is_atomic = round_execution_policy == "atomic" and round_call_count > max_parallel_tools

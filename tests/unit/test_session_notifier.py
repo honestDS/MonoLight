@@ -11,6 +11,7 @@ from app.core.utils.time import get_local_time
 from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
 from app.providers.database import AsyncSessionLocal, engine
+from scripts.migration_20260819_move_session_agent_settings import migrate as migrate_session_agent_settings
 from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
 
 
@@ -21,6 +22,7 @@ async def clean_session_event_table():
         await connection.run_sync(lambda sync_connection: SessionEvent.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: SessionEvent.__table__.create(sync_connection))
     async with AsyncSessionLocal() as db:
+        await migrate_session_agent_settings(db)
         await migrate_chat_session_show_reasoning(db)
         await db.execute(delete(SessionEvent))
         await db.execute(

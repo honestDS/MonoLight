@@ -4,6 +4,8 @@ from typing import Any
 from sqlalchemy import JSON, bindparam, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import SESSION_MAX_TURNS_UPPER_BOUND
+
 # This filename intentionally sorts before migration_20260820_add_profile_recall_settings,
 # whose ProfileConfig normalization would otherwise discard these legacy fields first.
 MIGRATION_ID = "20261001_move_session_agent_settings"
@@ -44,7 +46,9 @@ def _legacy_setting(configs: dict[str, Any], name: str) -> bool | int | None:
 
     if name == "goal_mode":
         return value if type(value) is bool else None
-    return value if type(value) is int and value >= 1 else None
+    if type(value) is int and value >= 1:
+        return min(value, SESSION_MAX_TURNS_UPPER_BOUND)
+    return None
 
 
 def _clean_configs(configs: dict[str, Any]) -> tuple[dict[str, Any], bool]:
