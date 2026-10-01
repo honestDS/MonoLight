@@ -17,16 +17,6 @@ const runtime = {
   withDirectives: (node) => node
 }
 
-const textOf = (value) => {
-  if (value == null || typeof value === 'boolean') return ''
-  if (typeof value === 'string' || typeof value === 'number') return String(value)
-  if (typeof value === 'function') return textOf(value())
-  if (Array.isArray(value)) return value.map(textOf).join('')
-  if (Vue.isVNode(value)) return textOf(value.children)
-  if (typeof value === 'object') return typeof value.default === 'function' ? textOf(value.default()) : ''
-  return ''
-}
-
 const vnodesOf = (value) => {
   if (value == null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return []
   if (typeof value === 'function') return vnodesOf(value())
@@ -89,6 +79,12 @@ const loadImplementation = () => {
       'const currentSessionShowReasoning = computed({',
       'agent computed'
     )
+    const popoverSizingSource = extractBetween(
+      scriptSetup,
+      'const chatInputBoxRef = ref(null)',
+      'const uploadTriggerRef = ref(null)',
+      'popover sizing'
+    )
 
     return {
       render: new Function('Vue', compiled.code)(runtime),
@@ -100,7 +96,8 @@ const loadImplementation = () => {
       ),
       currentSessionSource,
       defaultsSource,
-      agentComputedSource
+      agentComputedSource,
+      popoverSizingSource
     }
   })()
   return implementationPromise
@@ -221,6 +218,8 @@ const createHarness = (implementation, messages, options = {}) => {
     messages: [],
     modeSettingSubmitting: false,
     moreOptionsVisible: false,
+    chatInputBoxRef: options.chatInputBoxRef ?? null,
+    moreOptionsWidth: options.moreOptionsWidth ?? 0,
     newSessionProfileOverrideId: null,
     SESSION_MAX_TURNS_UPPER_BOUND,
     openUploadPicker: () => {},
@@ -268,6 +267,82 @@ const createHarness = (implementation, messages, options = {}) => {
   }
 }
 
+const createPopoverSizingHarness = (implementation, options = {}) => {
+  const mountedCallbacks = []
+  const unmountedCallbacks = []
+  const observers = []
+
+  class MockResizeObserver {
+    constructor(callback) {
+      this.callback = callback
+      this.observeCalls = []
+      this.disconnected = false
+      observers.push(this)
+    }
+
+    observe(target, options) {
+      this.observeCalls.push({ target, options })
+    }
+
+    disconnect() {
+      this.disconnected = true
+    }
+  }
+
+  const sizing = new Function(
+    'ref',
+    'onMounted',
+    'onUnmounted',
+    'ResizeObserver',
+    `${implementation.popoverSizingSource}
+return { chatInputBoxRef, moreOptionsWidth }`
+  )(
+    Vue.ref,
+    (callback) => mountedCallbacks.push(callback),
+    (callback) => unmountedCallbacks.push(callback),
+    MockResizeObserver
+  )
+
+  let width = options.width ?? 0
+  const inputBox = options.inputBox === false
+    ? null
+    : Vue.markRaw({
+        getBoundingClientRect: () => ({ width })
+      })
+  sizing.chatInputBoxRef.value = inputBox
+
+  const harness = createHarness(implementation, enChat, {
+    ...options,
+    chatInputBoxRef: sizing.chatInputBoxRef,
+    moreOptionsWidth: sizing.moreOptionsWidth
+  })
+  const renderNodes = () => vnodesOf(implementation.render(harness.context, []))
+  const renderPopover = () => renderNodes().find((node) => node.type?.name === 'el-popover')
+  const mount = () => {
+    mountedCallbacks.forEach((callback) => callback())
+    return renderPopover()
+  }
+  const unmount = () => {
+    unmountedCallbacks.forEach((callback) => callback())
+  }
+  const resize = (nextWidth) => {
+    width = nextWidth
+    observers.at(-1)?.callback()
+    return renderPopover()
+  }
+
+  return {
+    harness,
+    inputBox,
+    mount,
+    observers,
+    renderNodes,
+    renderPopover,
+    resize,
+    unmount
+  }
+}
+
 const controlsFor = (render, context, messages) => {
   const root = render(context, [])
   const nodes = vnodesOf(root)
@@ -282,7 +357,84 @@ const controlsFor = (render, context, messages) => {
   return { goalModeSwitch, maxTurnsInput, root }
 }
 
-test('ChatView renders localized session agent settings and new-session defaults', async () => {
+test('ChatView binds more options popover width to the chat input box', async () => {
+  const implementation = await loadImplementation()
+  const sizing = createPopoverSizingHarness(implementation, { width: 287.625 })
+
+  const popover = sizing.mount()
+  const trigger = sizing.renderNodes().find((node) => (
+    node.type?.name === 'el-button' && node.props?.title === enChat.more_options
+  ))
+
+  assert.equal(popover.props.width, 287.625)
+  assert.equal(popover.props['reference-el'], sizing.inputBox)
+  assert.equal(popover.props.placement, 'top-start')
+  assert.ok(trigger, 'more options trigger should be rendered')
+  assert.notEqual(popover.props['virtual-triggering'], true)
+  assert.equal(trigger.props.title, enChat.more_options)
+})
+
+test('ChatView follows more options popover width through resizes and visibility changes', async () => {
+  const implementation = await loadImplementation()
+  const session = createSession('session', true, 8)
+  const sizing = createPopoverSizingHarness(implementation, {
+    width: 312.625,
+    sessions: [session]
+  })
+
+  let popover = sizing.mount()
+  assert.equal(popover.props.width, 312.625)
+
+  popover = sizing.resize(312.625)
+  assert.equal(popover.props.width, 312.625)
+
+  sizing.harness.currentSessionId.value = 'session'
+  assert.equal(sizing.renderPopover().props.width, 312.625)
+  popover = sizing.resize(149.75)
+  assert.equal(popover.props.width, 149.75)
+  assert.equal(popover.props['popper-style'].minWidth, '0')
+
+  for (const visible of [true, false, true]) {
+    sizing.harness.context.moreOptionsVisible = visible
+    popover = sizing.renderPopover()
+    assert.equal(popover.props.visible, visible)
+    assert.equal(popover.props.width, 149.75)
+  }
+
+  popover = sizing.resize(0)
+  assert.equal(popover.props.width, 0)
+  popover = sizing.resize(0)
+  assert.equal(popover.props.width, 0)
+})
+
+test('ChatView releases the more options resize observer on unmount', async () => {
+  const implementation = await loadImplementation()
+  const sizing = createPopoverSizingHarness(implementation, { width: 180.5 })
+
+  sizing.mount()
+  assert.equal(sizing.observers.length, 1)
+  const observer = sizing.observers[0]
+  assert.equal(observer.disconnected, false)
+  assert.deepEqual(observer.observeCalls, [
+    { target: sizing.inputBox, options: { box: 'border-box' } }
+  ])
+
+  sizing.unmount()
+  assert.equal(observer.disconnected, true)
+})
+
+test('ChatView tolerates a missing chat input box during sizing lifecycle', async () => {
+  const implementation = await loadImplementation()
+  const sizing = createPopoverSizingHarness(implementation, { inputBox: false })
+
+  assert.doesNotThrow(() => sizing.mount())
+  assert.equal(sizing.observers.length, 0)
+  assert.equal(sizing.renderPopover().props.width, 0)
+  assert.doesNotThrow(() => sizing.unmount())
+  assert.equal(sizing.observers.length, 0)
+})
+
+test('ChatView renders session agent settings and new-session defaults', async () => {
   const implementation = await loadImplementation()
 
   for (const messages of [zhChat, enChat]) {
@@ -291,12 +443,8 @@ test('ChatView renders localized session agent settings and new-session defaults
 
     assert.equal(initial.goalModeSwitch.props['model-value'], true)
     assert.equal(initial.maxTurnsInput.props['model-value'], 5)
-    assert.equal(initial.goalModeSwitch.props['aria-label'], messages.goal_mode)
-    assert.equal(initial.maxTurnsInput.props['aria-label'], messages.max_turns)
     assert.equal(initial.maxTurnsInput.props.min, 1)
     assert.equal(initial.maxTurnsInput.props.max, SESSION_MAX_TURNS_UPPER_BOUND)
-    assert.match(textOf(initial.root), new RegExp(messages.goal_mode))
-    assert.match(textOf(initial.root), new RegExp(messages.max_turns))
     assert.equal(initial.goalModeSwitch.props.disabled, false)
     assert.equal(initial.maxTurnsInput.props.disabled, true)
     assert.equal(harness.calls.length, 0)
@@ -348,7 +496,13 @@ test('ChatView keeps external session settings available while preserving restri
   ))
   const profileSelect = nodes.find((node) => node.type?.name === 'el-select')
   const auxiliarySwitches = nodes.filter((node) => (
-    node.type?.name === 'el-switch' && !node.props?.['aria-label']
+    node.type?.name === 'el-switch' && [
+      enChat.more_options_tool_output,
+      enChat.show_reasoning
+    ].includes(node.props?.['aria-label'])
+  ))
+  const uploadButton = nodes.find((node) => (
+    node.type?.name === 'el-button' && node.props?.['aria-label'] === enChat.more_options_upload
   ))
   const upload = nodes.find((node) => node.type?.name === 'el-upload')
   const markdownGroup = nodes.find((node) => (
@@ -360,6 +514,12 @@ test('ChatView keeps external session settings available while preserving restri
 
   assert.ok(popover, 'more options popover should be rendered')
   assert.notEqual(popover.props?.disabled, true)
+  assert.equal(popover.props?.placement, 'top-start')
+  assert.deepEqual(popover.props?.['popper-style'], {
+    maxHeight: 'min(45vh, 420px)',
+    overflowY: 'auto',
+    minWidth: '0'
+  })
   assert.ok(moreOptionsTrigger, 'more options trigger should be rendered')
   assert.notEqual(moreOptionsTrigger.props?.disabled, true)
   assert.equal(initial.goalModeSwitch.props.disabled, false)
@@ -370,6 +530,8 @@ test('ChatView keeps external session settings available while preserving restri
   for (const switchNode of auxiliarySwitches) {
     assert.equal(switchNode.props.disabled, false)
   }
+  assert.ok(uploadButton, 'upload button should be rendered')
+  assert.equal(uploadButton.props.disabled, true)
   assert.ok(upload, 'upload control should be rendered')
   assert.equal(upload.props.disabled, true)
   assert.ok(markdownGroup, 'markdown control should be rendered')

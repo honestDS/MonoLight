@@ -249,7 +249,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             await db.commit()
         return result.rowcount or 0
 
-    async def upsert_profile(self, db: AsyncSession, *, session_id: str, uid: str, profile_id: int, source: str = "http") -> ChatSession | None:
+    async def upsert_profile(self, db: AsyncSession, *, session_id: str, uid: str, profile_id: int, source: str = "http", stream_requested: bool | None = None) -> ChatSession | None:
         profile = await profile_crud.lock_for_runtime_use(
             db,
             profile_id=profile_id,
@@ -273,7 +273,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
                 profile_id=profile_id,
                 source=source,
                 reply_target_source=source,
-                show_tool_calls=default_show_tool_calls_for_source(source),
+                show_tool_calls=default_show_tool_calls_for_source(source, stream_requested=stream_requested),
             )
             db.add(session)
         await db.flush()

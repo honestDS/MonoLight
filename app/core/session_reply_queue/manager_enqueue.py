@@ -138,6 +138,7 @@ class SessionReplyEnqueue:
                 uid=uid,
                 profile_id=profile_id,
                 source=source,
+                stream_requested=stream_requested,
             )
             if session is None:
                 raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)

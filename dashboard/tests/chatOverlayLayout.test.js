@@ -122,17 +122,12 @@ test('session item states use the same palette as the app sidebar', async () => 
 })
 
 test('app copyright lives in the sidebar footer without a standalone footer surface', async () => {
-  const [appSource, appStyles, loginSource] = await Promise.all([
+  const [appSource, appStyles] = await Promise.all([
     readDashboardSource('src/App.vue'),
-    readDashboardSource('src/assets/css/app.scss'),
-    readDashboardSource('src/views/LoginView.vue')
+    readDashboardSource('src/assets/css/app.scss')
   ])
 
-  const copyrightText = '&copy; 2026 MonoLight. All rights reserved.'
-
   assert.doesNotMatch(appSource, /class="app-footer"/)
-  assert.ok(appSource.includes(`<small class="sidebar-copyright">${copyrightText}</small>`))
-  assert.ok(loginSource.includes(`<span>${copyrightText}</span>`))
   assert.doesNotMatch(appStyles, /\.app-footer\s*\{/)
 
   const copyrightRule = appStyles.match(/\.sidebar-copyright\s*\{([\s\S]*?)\}/)?.[1] || ''

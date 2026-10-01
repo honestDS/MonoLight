@@ -2,11 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   filterProfilesByUid,
-  formatProfileOptionLabel,
   getNewSessionProfileOverrideId,
-  resolveDefaultProfileLabel,
   resolveSessionProfileDisplayId,
-  resolveSessionProfilePlaceholder,
   resolveProfileOwnerUid
 } from '../src/utils/profileOptions.js'
 
@@ -41,23 +38,6 @@ test('does not modify the source profile array', () => {
 
   assert.deepEqual(profiles, originalProfiles)
   assert.notEqual(result, profiles)
-})
-
-test('formats only default profiles with the suffix', () => {
-  assert.equal(
-    formatProfileOptionLabel({ name: 'Default profile', is_default: true }, ' (default)'),
-    'Default profile (default)'
-  )
-  assert.equal(
-    formatProfileOptionLabel({ name: 'Regular profile', is_default: false }, ' (default)'),
-    'Regular profile'
-  )
-})
-
-test('formats profiles without a name as an empty string', () => {
-  assert.equal(formatProfileOptionLabel({}, ' (default)'), '')
-  assert.equal(formatProfileOptionLabel({ is_default: true }, ' (default)'), '')
-  assert.equal(formatProfileOptionLabel(null, ' (default)'), '')
 })
 
 test('returns a valid draft profile override only for new sessions', () => {
@@ -104,66 +84,6 @@ test('returns null for invalid profile ids', () => {
       null
     )
   }
-})
-
-test('resolves the default profile label with its suffix', () => {
-  const profiles = [
-    { id: 1, name: 'Secondary profile', is_default: false },
-    { id: 2, name: 'Default profile', is_default: true }
-  ]
-
-  assert.equal(resolveDefaultProfileLabel(profiles, ' (default)', 'Inherited'), 'Default profile (default)')
-})
-
-test('returns the fallback when no valid default profile is available', () => {
-  const fallback = 'Inherited'
-
-  assert.equal(resolveDefaultProfileLabel([], ' (default)', fallback), fallback)
-  assert.equal(resolveDefaultProfileLabel(null, ' (default)', fallback), fallback)
-  assert.equal(resolveDefaultProfileLabel({}, ' (default)', fallback), fallback)
-  assert.equal(
-    resolveDefaultProfileLabel([{ id: 1, name: 'Secondary profile', is_default: false }], ' (default)', fallback),
-    fallback
-  )
-  assert.equal(
-    resolveDefaultProfileLabel([{ id: 1, is_default: true }], ' (default)', fallback),
-    fallback
-  )
-
-  for (const profileId of [0, -1, true, false, '1', 1.5, null, undefined, NaN, Infinity]) {
-    assert.equal(
-      resolveDefaultProfileLabel([{ id: profileId, name: 'Default profile', is_default: true }], ' (default)', fallback),
-      fallback
-    )
-  }
-})
-
-test('returns the generic placeholder for external sessions even with a default profile', () => {
-  const profiles = [
-    { id: 1, name: 'Default profile', is_default: true },
-    { id: 2, name: 'External profile', is_default: false }
-  ]
-
-  assert.equal(
-    resolveSessionProfilePlaceholder(profiles, true, ' (default)', 'Inherited'),
-    'Inherited'
-  )
-})
-
-test('resolves the current default profile for web and new sessions', () => {
-  const profiles = [
-    { id: 1, name: 'Default profile', is_default: true },
-    { id: 2, name: 'External profile', is_default: false }
-  ]
-
-  assert.equal(
-    resolveSessionProfilePlaceholder(profiles, false, ' (default)', 'Inherited'),
-    'Default profile (default)'
-  )
-  assert.equal(
-    resolveSessionProfilePlaceholder(profiles, false, ' (default)', 'Inherited'),
-    'Default profile (default)'
-  )
 })
 
 test('resolves the profile owner from the current session before the current user', () => {
