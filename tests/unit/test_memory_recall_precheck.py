@@ -6,6 +6,7 @@ import pytest
 from app.core.constants import LOG_MEMORY_RECALL_CHANNEL_FAILED
 from app.core.dispatchers.memory import persistence as persistence_module
 from app.core.dispatchers.memory import recall as precheck_module
+from app.core.dispatchers.memory import request as request_module
 from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.exceptions import LLMException
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
@@ -250,6 +251,158 @@ async def test_precheck_invalid_then_valid_corrects_once_without_polluting_main_
     assert [message.id for message in context.messages] == [1]
     assert [message.id for message in context.turn_messages] == []
     assert [message.tool_calls[0].id for message in saved] == ["valid-call"]
+
+
+@pytest.mark.asyncio
+async def test_precheck_retry_reuses_clean_request_prefix_before_appending_correction(monkeypatch):
+    todo_snapshot = (
+        "<current_session_todo_snapshot>"
+        + json.dumps(
+            {
+                "revision": 7,
+                "todos": [
+                    {"content": "send yellow image", "status": "completed"},
+                    {"content": "find other colors", "status": "pending"},
+                ],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "</current_session_todo_snapshot>"
+    )
+    context = _context(
+        messages=[
+            InternalMessage(
+                id=1,
+                role=MessageRole.SYSTEM,
+                content="ORIGINAL_PRIVATE_SYSTEM_MARKER",
+            ),
+            InternalMessage(
+                id=2,
+                role=MessageRole.USER,
+                content='<conversation_summary through_message_id="1">existing summary</conversation_summary>',
+            ),
+            InternalMessage(
+                id=3,
+                role=MessageRole.USER,
+                content=[
+                    {"type": "text", "text": "Magic9询图"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,IMAGE_PRIVATE_MARKER"},
+                    },
+                ],
+                environment_prompt="ENVIRONMENT_PRIVATE_MARKER",
+            ),
+            InternalMessage(
+                id=4,
+                role=MessageRole.ASSISTANT,
+                content="已发黄色图片",
+                reasoning_content="THOUGHT_PRIVATE_MARKER",
+            ),
+            InternalMessage(
+                id=5,
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    InternalToolCall(
+                        id="history-tool",
+                        name="private_history_tool",
+                        arguments={"secret": "TOOL_ARGUMENT_PRIVATE_MARKER"},
+                    )
+                ],
+            ),
+            InternalMessage(
+                id=6,
+                role=MessageRole.TOOL,
+                tool_call_id="history-tool",
+                content=f"TOOL_RESULT_PRIVATE_MARKER\n\n{todo_snapshot}",
+            ),
+            InternalMessage(
+                id=7,
+                role=MessageRole.USER,
+                content="多找其他颜色",
+                environment_prompt="CURRENT_ENVIRONMENT_PRIVATE_MARKER",
+                reasoning_content="CURRENT_THOUGHT_PRIVATE_MARKER",
+            ),
+        ]
+    )
+    original_messages = [message.model_dump(mode="json") for message in context.messages]
+    invalid = _assistant(call_id="invalid-call", content="unexpected body", message_id=20)
+    valid = _assistant(call_id="valid-call", message_id=21)
+    model_requests = []
+    accepted = []
+
+    async def load(_context):
+        return None, None, "assistant-key", "tool-key"
+
+    async def get_session(_db, _session_id):
+        return SimpleNamespace(llm_request_metadata={})
+
+    async def generate(**kwargs):
+        model_requests.append([message.model_copy(deep=True) for message in kwargs["messages"]])
+        return [_response(invalid), _response(valid)][len(model_requests) - 1]
+
+    async def save(_context, message, **_kwargs):
+        accepted.append(message)
+
+    monkeypatch.setattr(precheck_module, "load_dedupe_messages", load)
+    monkeypatch.setattr(request_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(request_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(precheck_module, "save_and_execute_recall", save)
+
+    result = await precheck_module.run_memory_recall_precheck(context)
+
+    assert result.status == "completed"
+    assert len(model_requests) == 2
+    assert len(accepted) == 1
+    assert accepted[0].tool_calls[0].id == "valid-call"
+
+    first_request = model_requests[0]
+    first_dump = [message.model_dump(mode="json") for message in first_request]
+    assert first_request[0].role == MessageRole.SYSTEM
+    assert first_request[-1].role == MessageRole.USER
+    assert first_request[-1].content == "多找其他颜色"
+    assert any(message.content == "已发黄色图片" for message in first_request)
+    assert any(message.role == MessageRole.USER and isinstance(message.content, str) and "Magic9询图" in message.content for message in first_request)
+    assert any(message.role == MessageRole.USER and isinstance(message.content, str) and message.content.startswith("<conversation_summary ") for message in first_request)
+    todo_messages = [message for message in first_request if message.role == MessageRole.USER and isinstance(message.content, str) and "current_session_todo" in message.content]
+    assert len(todo_messages) == 1
+    assert json.loads(todo_messages[0].content) == {
+        "current_session_todo": {
+            "revision": 7,
+            "todos": [
+                {"content": "send yellow image", "status": "completed"},
+                {"content": "find other colors", "status": "pending"},
+            ],
+        }
+    }
+    assert all(message.role != MessageRole.TOOL for message in first_request)
+    assert all(not message.tool_calls for message in first_request)
+
+    first_text = json.dumps(first_dump, ensure_ascii=False)
+    assert LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT not in first_text
+    for private_marker in (
+        "ORIGINAL_PRIVATE_SYSTEM_MARKER",
+        "IMAGE_PRIVATE_MARKER",
+        "TOOL_ARGUMENT_PRIVATE_MARKER",
+        "TOOL_RESULT_PRIVATE_MARKER",
+        "ENVIRONMENT_PRIVATE_MARKER",
+        "CURRENT_ENVIRONMENT_PRIVATE_MARKER",
+        "THOUGHT_PRIVATE_MARKER",
+        "CURRENT_THOUGHT_PRIVATE_MARKER",
+    ):
+        assert private_marker not in first_text
+
+    second_request = model_requests[1]
+    assert [message.model_dump(mode="json") for message in second_request[: len(first_request)]] == first_dump
+    assert len(second_request) == len(first_request) + 3
+    assert second_request[-3].model_dump(mode="json") == invalid.model_dump(mode="json")
+    assert second_request[-2].role == MessageRole.TOOL
+    assert second_request[-2].tool_call_id == "invalid-call"
+    assert json.loads(second_request[-2].content) == {"status": "ignored"}
+    assert second_request[-1].role == MessageRole.USER
+    assert second_request[-1].content == LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
+    assert [message.model_dump(mode="json") for message in context.messages] == original_messages
 
 
 @pytest.mark.asyncio

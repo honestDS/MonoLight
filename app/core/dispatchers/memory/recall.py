@@ -139,8 +139,7 @@ async def run_memory_recall_precheck(
                 )
                 return build_result(context, "completed")
             if attempt == 0:
-                base_messages = context.messages
-                correction_messages = build_correction_messages(base_messages, response)
+                correction_messages = build_correction_messages(request_messages, response)
 
         _log_failure(context, "invalid_recall_response")
         return build_result(context, "failed", "invalid_recall_response")

@@ -12,6 +12,7 @@ from app.core.constants import (
     ERR_INTERNAL_SERVER_ERROR,
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
+    LOG_DISPATCHER_LLM_LOOP_TERMINATED,
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.profile.profile import profile_crud
@@ -314,6 +315,15 @@ async def dispatch_interactive(
                     if goal_mode and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg):
                         state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
                         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                        state.dispatch_logger.bind(
+                            uid=uid,
+                            session_id=session_id,
+                            turn=state.current_turn,
+                            response_id=response_id,
+                            tool_call_id=ai_msg.tool_calls[0].id,
+                            tool_name=ai_msg.tool_calls[0].name,
+                            execution_phase=state.checkpoint_state.execution_phase,
+                        ).info(t(LOG_DISPATCHER_LLM_LOOP_TERMINATED, username=username, turn=state.current_turn))
                         continue
 
                     if not ai_msg.tool_calls and state.files_to_user:

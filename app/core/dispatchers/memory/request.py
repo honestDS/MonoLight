@@ -1,10 +1,14 @@
+import json
 import uuid
 from copy import deepcopy
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.channel_router import select_channel
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
+    MEMORY_RECALL_PRECHECK_MAX_USER_TURNS,
 )
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
@@ -17,13 +21,19 @@ from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
     validate_longterm_memory_arguments,
 )
-from app.core.utils.context_messages import is_context_summary_message
+from app.core.utils.assistant_files import parse_assistant_files_content
+from app.core.utils.context_messages import is_context_summary_message, message_token_text
 from app.core.utils.dispatcher.helpers import (
     get_multimodal_from_entry,
     reassemble_multimodal_messages,
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.markdown_instruction import refresh_latest_user_max_output_tokens_instruction
+from app.core.utils.dispatcher.session_todo_snapshot import (
+    load_current_session_todo_snapshot,
+    parse_session_todo_snapshot,
+    strip_session_todo_snapshot,
+)
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.llm_request_params import build_memory_recall_precheck_generation_params
 from app.core.utils.model_request_headers import get_model_custom_headers
@@ -42,23 +52,101 @@ from .types import MemoryRecallContext
 MEMORY_RECALL_REQUEST_PURPOSE = "memory_recall"
 
 
-def build_precheck_request_messages(messages: list[InternalMessage]) -> list[InternalMessage]:
-    latest_user_message = next(
-        (
-            message
-            for message in reversed(messages)
-            if message.role == MessageRole.USER and not is_context_summary_message(message)
-        ),
-        None,
-    )
-    if latest_user_message is None:
+def _extract_precheck_todo(content: Any) -> tuple[dict[str, object] | None, str | None]:
+    if not isinstance(content, str):
+        return None, None
+
+    payload = parse_session_todo_snapshot(content)
+    if payload is not None:
+        return payload, None
+
+    stripped = strip_session_todo_snapshot(content)
+    if not isinstance(stripped, str) or stripped == content:
+        return None, None
+    suffix = content[len(stripped) :]
+    if not suffix.startswith("\n\n"):
+        return None, None
+    payload = parse_session_todo_snapshot(suffix[2:])
+    if payload is None:
+        return None, None
+    return payload, stripped
+
+
+def build_precheck_request_messages(
+    messages: list[InternalMessage],
+    *,
+    todo_snapshot: str | None = None,
+) -> list[InternalMessage]:
+    current_index = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].role == MessageRole.USER and not is_context_summary_message(messages[index])), None)
+    if current_index is None:
         return []
-    return [
+
+    latest_summary_content: str | None = None
+    latest_embedded_todo: dict[str, object] | None = None
+    for message in messages[: current_index + 1]:
+        if is_context_summary_message(message):
+            summary_content = message.content
+            embedded_todo, stripped_content = _extract_precheck_todo(summary_content)
+            if embedded_todo is not None:
+                latest_embedded_todo = embedded_todo
+                if stripped_content is not None:
+                    summary_content = stripped_content
+            latest_summary_content = summary_content
+        elif message.role == MessageRole.TOOL:
+            embedded_todo, _ = _extract_precheck_todo(message.content)
+            if embedded_todo is not None:
+                latest_embedded_todo = embedded_todo
+
+    selected_todo = parse_session_todo_snapshot(todo_snapshot)
+    if selected_todo is None:
+        selected_todo = latest_embedded_todo
+
+    current_message = InternalMessage(
+        role=MessageRole.USER,
+        content=deepcopy(messages[current_index].content),
+    )
+    summary_message = InternalMessage(role=MessageRole.USER, content=latest_summary_content) if latest_summary_content is not None else None
+    todo_message = (
         InternalMessage(
             role=MessageRole.USER,
-            content=deepcopy(latest_user_message.content),
+            content=json.dumps(
+                {"current_session_todo": selected_todo},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
         )
-    ]
+        if selected_todo is not None
+        else None
+    )
+
+    def build_history_message(message: InternalMessage) -> InternalMessage | None:
+        content = message.content
+        if message.role == MessageRole.ASSISTANT and isinstance(content, str):
+            content = parse_assistant_files_content(content)
+        else:
+            content = deepcopy(content)
+        plain_message = InternalMessage(role=message.role, content=content)
+        text = message_token_text(plain_message)
+        if not text.strip():
+            return None
+        return InternalMessage(role=message.role, content=text)
+
+    history_limit = max(0, MEMORY_RECALL_PRECHECK_MAX_USER_TURNS - 1)
+    user_indices = [index for index in range(current_index) if messages[index].role == MessageRole.USER and not is_context_summary_message(messages[index])]
+    user_indices = user_indices[-history_limit:] if history_limit else []
+    history_rounds: list[list[InternalMessage]] = []
+    for round_index, start_index in enumerate(user_indices):
+        end_index = user_indices[round_index + 1] if round_index + 1 < len(user_indices) else current_index
+        history_round = []
+        for message in messages[start_index:end_index]:
+            if message.role not in {MessageRole.USER, MessageRole.ASSISTANT} or is_context_summary_message(message):
+                continue
+            history_message = build_history_message(message)
+            if history_message is not None:
+                history_round.append(history_message)
+        history_rounds.append(history_round)
+
+    return ([summary_message] if summary_message is not None else []) + ([todo_message] if todo_message is not None else []) + [message for history_round in history_rounds for message in history_round] + [current_message]
 
 
 async def select_initial_channel(context: MemoryRecallContext) -> bool:
@@ -120,7 +208,14 @@ async def prepare_request_messages(
     *,
     is_main_context: bool,
 ) -> tuple[list[InternalMessage], dict[str, Any], str]:
-    precheck_messages = build_precheck_request_messages(messages) if is_main_context else messages
+    todo_snapshot = None
+    if is_main_context and isinstance(context.db, AsyncSession):
+        todo_snapshot = await load_current_session_todo_snapshot(
+            context.db,
+            uid=context.uid,
+            session_id=context.session_id,
+        )
+    precheck_messages = build_precheck_request_messages(messages, todo_snapshot=todo_snapshot) if is_main_context else messages
     if is_main_context:
         precheck_messages = [
             InternalMessage(role=MessageRole.SYSTEM, content=LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT),
@@ -264,7 +359,8 @@ def build_correction_messages(
     base_messages: list[InternalMessage],
     response: Any,
 ) -> list[InternalMessage]:
-    correction_messages = [message.model_copy(deep=True) for message in build_precheck_request_messages(base_messages)]
+    """Copies the already prepared precheck request before appending corrections."""
+    correction_messages = [message.model_copy(deep=True) for message in base_messages]
     response_message = getattr(response, "message", None)
     if isinstance(response_message, InternalMessage):
         correction_messages.append(response_message.model_copy(deep=True))

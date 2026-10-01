@@ -16,9 +16,11 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.memory import service_recall as memory_service_recall_module
 from app.core.memory.identifiers import build_memory_vector_item_id
 from app.core.memory.normalization import build_memory_content_hash
+from app.core.prompts import LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
 from app.core.retrieval.schemas import RetrievalHit
 from app.core.tools import longterm_memory as longterm_memory_module
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
+from app.core.utils.assistant_files import build_assistant_files_content
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
@@ -40,6 +42,7 @@ from app.models.message import InternalMessage, InternalToolCall, Message, Messa
 from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
+from app.models.session_todo import SessionTodoPlan
 from tests.database_support import clone_sqlite_schema
 
 
@@ -64,6 +67,7 @@ async def memory_recall_session_factory(tmp_path):
         PromptLibrary.__table__,
         Profile.__table__,
         ChatSession.__table__,
+        SessionTodoPlan.__table__,
         Message.__table__,
         KnowledgeBase.__table__,
         KnowledgeBaseCollectionOwner.__table__,
@@ -148,6 +152,17 @@ async def _seed_memory_recall_workflow(session_factory):
             )
         )
         await db.flush()
+        db.add(
+            SessionTodoPlan(
+                session_id="session-recall",
+                uid="owner",
+                revision=8,
+                todos=[
+                    {"content": "Confirm VS Code preference", "status": "pending"},
+                    {"content": "Review editor note", "status": "completed"},
+                ],
+            )
+        )
 
         old_user = Message(
             session_id="session-recall",
@@ -266,10 +281,12 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", fake_hybrid_query)
 
     llm_calls = 0
+    captured_precheck_messages: list[list[InternalMessage]] = []
 
     async def fake_generate(**kwargs):
         nonlocal llm_calls
         llm_calls += 1
+        captured_precheck_messages.append([message.model_copy(deep=True) for message in kwargs["messages"]])
         assert [tool["function"]["name"] for tool in kwargs["tools"]] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME]
         assert kwargs["max_tokens"] == 256
         assert kwargs["temperature"] == 0.0
@@ -318,6 +335,10 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         "chat_timeout": 60,
         "context_window_k": 32,
     }
+    history_user_content = "I prefer VS Code as my editor for Python projects."
+    history_assistant_text = "Noted your VS Code editor preference."
+    summary_content = '<conversation_summary through_message_id="41">\nEarlier background: The user is working on Python projects.\n</conversation_summary>'
+    todo_snapshot = '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"STALE_TODO_MUST_NOT_LEAK","status":"pending"}]}</current_session_todo_snapshot>'
 
     def build_context(db: AsyncSession) -> MemoryRecallContext:
         async def capture_event(event_payload: dict[str, Any]) -> None:
@@ -332,6 +353,47 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
                 )
                 assert updated is True
 
+        context_messages = [
+            InternalMessage(role=MessageRole.USER, content=summary_content),
+            InternalMessage(role=MessageRole.USER, content=history_user_content),
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content=build_assistant_files_content(
+                    history_assistant_text,
+                    [
+                        {
+                            "id": "private-file-token-must-not-leak",
+                            "download_url": "https://download.invalid/private-file-token",
+                        }
+                    ],
+                ),
+                reasoning_content="PRIVATE_REASONING_MUST_NOT_LEAK",
+                refusal="PRIVATE_REFUSAL_MUST_NOT_LEAK",
+                provider_metadata={"private": "PRIVATE_PROVIDER_METADATA_MUST_NOT_LEAK"},
+                environment_prompt="PRIVATE_ENVIRONMENT_MUST_NOT_LEAK",
+                guidance_prompt="PRIVATE_GUIDANCE_MUST_NOT_LEAK",
+                attachments=["PRIVATE_ATTACHMENT_MUST_NOT_LEAK"],
+            ),
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    InternalToolCall(
+                        id="private-tool-call-id",
+                        name="private_tool",
+                        arguments={
+                            "query": "PRIVATE_TOOL_ARGUMENT_MUST_NOT_LEAK",
+                            "token": "PRIVATE_TOOL_TOKEN_MUST_NOT_LEAK",
+                        },
+                    )
+                ],
+            ),
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="private-tool-call-id",
+                content=f'{{"status":"ok","result":"PRIVATE_TOOL_RESULT_MUST_NOT_LEAK","download_url":"https://download.invalid/tool-result"}}\n\n{todo_snapshot}',
+            ),
+            InternalMessage(role=MessageRole.USER, content="Which editor do I prefer?"),
+        ]
         return MemoryRecallContext(
             db=db,
             uid="owner",
@@ -339,7 +401,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
             profile=profile,
             cfg=cfg,
             username="owner",
-            messages=[InternalMessage(id=current_user_id, role=MessageRole.USER, content="Which editor do I prefer?")],
+            messages=context_messages,
             turn_messages=[],
             current_user_boundary_message_id=current_user_id,
             upper_message_id=current_user_id,
@@ -354,6 +416,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
 
     async with memory_recall_session_factory() as db:
         first_context = build_context(db)
+        first_context_messages_before = [message.model_dump(mode="json") for message in first_context.messages]
         first = await run_memory_recall_precheck(first_context)
         assert first.status == "completed"
         assert first.chat_params == chat_params
@@ -364,6 +427,52 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         assert tool_payload["items"][0]["memory_id"] == memory_id
         assert tool_payload["items"][0]["content"] == "The user's preferred Python editor is VS Code."
         assert any("VS Code" in item["content"] for item in tool_payload["chat_history"])
+
+    assert len(captured_precheck_messages) == 1
+    precheck_messages = captured_precheck_messages[0]
+    assert precheck_messages[0].role == MessageRole.SYSTEM
+    assert precheck_messages[0].content == LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
+    assert sum(message.role == MessageRole.SYSTEM for message in precheck_messages) == 1
+    assert all(not message.tool_calls and message.tool_call_id is None for message in precheck_messages)
+    assert any(message.role == MessageRole.USER and message.content == history_user_content for message in precheck_messages)
+    assert any(message.role == MessageRole.ASSISTANT and message.content == history_assistant_text for message in precheck_messages)
+    assert any(message.role == MessageRole.USER and message.content == summary_content for message in precheck_messages)
+    todo_messages = [message for message in precheck_messages if message.role == MessageRole.USER and isinstance(message.content, str) and "current_session_todo" in message.content]
+    assert len(todo_messages) == 1
+    todo_payload = json.loads(todo_messages[0].content)
+    assert todo_payload == {
+        "current_session_todo": {
+            "revision": 8,
+            "todos": [
+                {"content": "Confirm VS Code preference", "status": "pending"},
+                {"content": "Review editor note", "status": "completed"},
+            ],
+        }
+    }
+    assert precheck_messages[-1].role == MessageRole.USER
+    assert precheck_messages[-1].content == "Which editor do I prefer?"
+    precheck_dump = "\n".join(message.model_dump_json(exclude_none=False) for message in precheck_messages)
+    for forbidden in (
+        "private-file-token-must-not-leak",
+        "https://download.invalid/private-file-token",
+        "PRIVATE_REASONING_MUST_NOT_LEAK",
+        "PRIVATE_REFUSAL_MUST_NOT_LEAK",
+        "PRIVATE_PROVIDER_METADATA_MUST_NOT_LEAK",
+        "PRIVATE_ENVIRONMENT_MUST_NOT_LEAK",
+        "PRIVATE_GUIDANCE_MUST_NOT_LEAK",
+        "PRIVATE_ATTACHMENT_MUST_NOT_LEAK",
+        "PRIVATE_TOOL_ARGUMENT_MUST_NOT_LEAK",
+        "PRIVATE_TOOL_TOKEN_MUST_NOT_LEAK",
+        "PRIVATE_TOOL_RESULT_MUST_NOT_LEAK",
+        "https://download.invalid/tool-result",
+        "STALE_TODO_MUST_NOT_LEAK",
+    ):
+        assert forbidden not in precheck_dump
+    original_message_count = len(first_context_messages_before)
+    assert [message.model_dump(mode="json") for message in first_context.messages[:original_message_count]] == first_context_messages_before
+    appended_messages = first_context.messages[original_message_count:]
+    assert len(appended_messages) == 2
+    assert [message.model_dump(mode="json") for message in appended_messages] == [message.model_dump(mode="json") for message in first.turn_messages]
 
     async with memory_recall_session_factory() as db:
         rows = list((await db.execute(select(Message).where(Message.session_id == "session-recall").order_by(Message.id))).scalars().all())
@@ -420,6 +529,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     async with memory_recall_session_factory() as db:
         current_count = len(list((await db.execute(select(Message).where(Message.session_id == "session-recall"))).scalars().all()))
     assert current_count == persisted_count
+    assert llm_calls == 1
     assert embedding_calls == 1
     assert vector_query_calls == 1
     assert events == []
