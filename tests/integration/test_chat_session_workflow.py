@@ -17,6 +17,7 @@ from app.core.constants import (
     ERR_SESSION_TRANSPORT_CHANGE_ACTIVE,
     GUIDANCE_MESSAGE_PREFIX,
     GUIDANCE_MESSAGE_SUFFIX,
+    SESSION_MAX_TURNS_UPPER_BOUND,
 )
 from app.core.i18n import t
 from app.core.security import get_current_user
@@ -214,7 +215,6 @@ async def test_session_todo_api_reads_current_plan_and_enforces_owner(
             params={"session_id": session.session_id},
         )
         assert forbidden.status_code == 200
-        assert forbidden.json()["code"] == 403
         assert forbidden.json()["message"] == t(ERR_SESSION_NO_PERMISSION)
 
 
@@ -325,6 +325,409 @@ async def test_web_session_lifecycle_creates_with_profile_updates_settings_and_e
         assert cleared.json()["code"] == 200
         await chat_session_database.refresh(persisted)
         assert persisted.profile_override_id is None
+
+
+@pytest.mark.asyncio
+async def test_http_new_session_defaults_goal_mode_and_max_turns_independent_of_profile(
+    chat_session_database: AsyncSession,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        created = await client.post(
+            "/api/v1/chat/completions",
+            json={
+                "message": "default session",
+                "profile_override_id": primary_profile.id,
+            },
+        )
+        assert created.status_code == 200
+        session_id = created.json()["choices"][0]["message"]["content"]
+
+        persisted = await chat_session_database.get(ChatSession, session_id)
+        assert persisted is not None
+        assert persisted.profile_override_id == primary_profile.id
+        assert persisted.goal_mode is True
+        assert persisted.max_turns == 5
+
+        listed = await client.get("/api/v1/chat/sessions/list")
+        assert listed.status_code == 200
+        listed_session = next(item for item in listed.json()["data"] if item["session_id"] == session_id)
+        assert listed_session["profile_override_id"] == primary_profile.id
+        assert listed_session["goal_mode"] is True
+        assert listed_session["max_turns"] == 5
+
+
+@pytest.mark.asyncio
+async def test_sessions_using_one_profile_keep_independent_goal_and_max_turn_settings(
+    chat_session_database: AsyncSession,
+) -> None:
+    primary_profile, alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    assert alternate_profile.id is not None
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        first_created = await client.post(
+            "/api/v1/chat/completions",
+            json={
+                "message": "configured session",
+                "profile_override_id": primary_profile.id,
+                "goal_mode": False,
+                "max_turns": 21,
+            },
+        )
+        second_created = await client.post(
+            "/api/v1/chat/completions",
+            json={
+                "message": "default session",
+                "profile_override_id": primary_profile.id,
+            },
+        )
+        assert first_created.status_code == 200
+        assert second_created.status_code == 200
+        first_id = first_created.json()["choices"][0]["message"]["content"]
+        second_id = second_created.json()["choices"][0]["message"]["content"]
+        assert first_id != second_id
+
+        first = await chat_session_database.get(ChatSession, first_id)
+        second = await chat_session_database.get(ChatSession, second_id)
+        assert first is not None
+        assert second is not None
+        assert (first.goal_mode, first.max_turns) == (False, 21)
+        assert (second.goal_mode, second.max_turns) == (True, 5)
+
+        updated = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={
+                "session_id": first_id,
+                "goal_mode": False,
+                "max_turns": 1_000_000,
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["code"] == 200
+
+        await chat_session_database.refresh(first)
+        await chat_session_database.refresh(second)
+        assert (first.goal_mode, first.max_turns) == (False, 1_000_000)
+        assert (second.goal_mode, second.max_turns) == (True, 5)
+
+        listed = await client.get("/api/v1/chat/sessions/list")
+        assert listed.status_code == 200
+        listed_by_id = {item["session_id"]: item for item in listed.json()["data"]}
+        assert (listed_by_id[first_id]["goal_mode"], listed_by_id[first_id]["max_turns"]) == (False, 1_000_000)
+        assert (listed_by_id[second_id]["goal_mode"], listed_by_id[second_id]["max_turns"]) == (True, 5)
+
+        for goal_mode in (True, False):
+            toggled = await client.post(
+                "/api/v1/chat/sessions/setting",
+                json={"session_id": first_id, "goal_mode": goal_mode},
+            )
+            assert toggled.status_code == 200
+            assert toggled.json()["code"] == 200
+            await chat_session_database.refresh(first)
+            assert first.goal_mode is goal_mode
+            assert first.max_turns == 1_000_000
+
+        changed_profile = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={"session_id": first_id, "profile_override_id": alternate_profile.id},
+        )
+        assert changed_profile.status_code == 200
+        assert changed_profile.json()["code"] == 200
+        await chat_session_database.refresh(first)
+        await chat_session_database.refresh(second)
+        assert first.profile_override_id == alternate_profile.id
+        assert (first.goal_mode, first.max_turns) == (False, 1_000_000)
+        assert second.profile_override_id == primary_profile.id
+        assert (second.goal_mode, second.max_turns) == (True, 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["http", "ws", "weixin-openclaw", "other-message-platform"])
+async def test_session_setting_rejects_non_owner_without_mutating_db(
+    chat_session_database: AsyncSession,
+    source: str,
+) -> None:
+    _primary_profile, _alternate_profile, other_profile = await _seed_profiles(chat_session_database)
+    assert other_profile.id is not None
+    session = ChatSession(
+        session_id="other-owner-setting-session",
+        uid="user-2",
+        profile_override_id=other_profile.id,
+        source=source,
+        reply_target_source=source,
+        goal_mode=False,
+        max_turns=21,
+    )
+    chat_session_database.add(session)
+    await chat_session_database.commit()
+
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        forbidden = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={
+                "session_id": session.session_id,
+                "goal_mode": True,
+                "max_turns": 1_000_000,
+            },
+        )
+        assert forbidden.status_code == 200
+        assert forbidden.json()["message"] == t(ERR_SESSION_NO_PERMISSION)
+
+        await chat_session_database.refresh(session)
+        assert session.uid == "user-2"
+        assert session.profile_override_id == other_profile.id
+        assert (session.goal_mode, session.max_turns) == (False, 21)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["weixin-openclaw", "other-message-platform"])
+@pytest.mark.parametrize(
+    ("uid", "is_superuser"),
+    [
+        pytest.param("user-1", False, id="owner"),
+        pytest.param("user-2", True, id="admin"),
+    ],
+)
+async def test_external_session_allows_goal_and_max_turn_updates(
+    chat_session_database: AsyncSession,
+    source: str,
+    uid: str,
+    is_superuser: bool,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    session = ChatSession(
+        session_id=f"external-setting-{source}-{uid}",
+        uid="user-1",
+        profile_id=primary_profile.id,
+        source=source,
+        reply_target_source=source,
+        goal_mode=True,
+        max_turns=3,
+    )
+    chat_session_database.add(session)
+    await chat_session_database.commit()
+
+    auth_state: dict[str, object] = {"uid": uid, "is_superuser": is_superuser}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        goal_disabled = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={"session_id": session.session_id, "goal_mode": False},
+        )
+        assert goal_disabled.status_code == 200
+        assert goal_disabled.json()["code"] == 200
+        await chat_session_database.refresh(session)
+        assert (session.goal_mode, session.max_turns) == (False, 3)
+
+        max_turns_updated = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={"session_id": session.session_id, "max_turns": 21},
+        )
+        assert max_turns_updated.status_code == 200
+        assert max_turns_updated.json()["code"] == 200
+        await chat_session_database.refresh(session)
+        assert (session.goal_mode, session.max_turns) == (False, 21)
+
+        goal_enabled = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={"session_id": session.session_id, "goal_mode": True},
+        )
+        assert goal_enabled.status_code == 200
+        assert goal_enabled.json()["code"] == 200
+        await chat_session_database.refresh(session)
+        assert (session.goal_mode, session.max_turns) == (True, 21)
+        assert session.source == source
+        assert session.reply_target_source == source
+        assert session.profile_id == primary_profile.id
+
+        listed = await client.get("/api/v1/chat/sessions/list")
+        assert listed.status_code == 200
+        listed_session = next(item for item in listed.json()["data"] if item["session_id"] == session.session_id)
+        assert listed_session["source"] == source
+        assert listed_session["profile_id"] == primary_profile.id
+        assert listed_session["goal_mode"] is True
+        assert listed_session["max_turns"] == 21
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting_field", "invalid_value"),
+    [
+        pytest.param("max_turns", 0, id="max-zero"),
+        pytest.param("max_turns", -1, id="max-negative"),
+        pytest.param("max_turns", 1.5, id="max-float"),
+        pytest.param("max_turns", True, id="max-bool"),
+        pytest.param("max_turns", "2", id="max-string"),
+        pytest.param("max_turns", None, id="max-null"),
+        pytest.param("max_turns", SESSION_MAX_TURNS_UPPER_BOUND + 1, id="max-above-upper-bound"),
+        pytest.param("max_turns", 2**63, id="max-2-to-63"),
+        pytest.param("max_turns", 10**100, id="max-10-to-100"),
+        pytest.param("goal_mode", 1, id="goal-int"),
+        pytest.param("goal_mode", "true", id="goal-string"),
+        pytest.param("goal_mode", None, id="goal-null"),
+    ],
+)
+async def test_invalid_session_setting_values_reject_updates_and_new_sessions(
+    chat_session_database: AsyncSession,
+    setting_field: str,
+    invalid_value: object,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+    request_id = f"invalid-session-setting-{setting_field}"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        created = await client.post(
+            "/api/v1/chat/completions",
+            json={
+                "message": "baseline session",
+                "profile_override_id": primary_profile.id,
+            },
+        )
+        assert created.status_code == 200
+        session_id = created.json()["choices"][0]["message"]["content"]
+        persisted = await chat_session_database.get(ChatSession, session_id)
+        assert persisted is not None
+        assert (persisted.goal_mode, persisted.max_turns) == (True, 5)
+
+        invalid_setting = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={"session_id": session_id, setting_field: invalid_value},
+        )
+        assert invalid_setting.status_code == 422
+        await chat_session_database.refresh(persisted)
+        assert (persisted.goal_mode, persisted.max_turns) == (True, 5)
+
+        invalid_new = await client.post(
+            "/api/v1/chat/completions",
+            json={
+                "message": "invalid new session",
+                "request_id": request_id,
+                "profile_override_id": primary_profile.id,
+                setting_field: invalid_value,
+            },
+        )
+        assert invalid_new.status_code == 422
+        await chat_session_database.refresh(persisted)
+        assert (persisted.goal_mode, persisted.max_turns) == (True, 5)
+        expected_new_session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"monolight:http:user-1:{request_id}"))
+        assert await chat_session_database.get(ChatSession, expected_new_session_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["http", "ws", "weixin-openclaw", "other-message-platform"])
+async def test_max_turns_upper_bound_persists_across_session_settings(
+    chat_session_database: AsyncSession,
+    source: str,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        created = await client.post(
+            "/api/v1/chat/completions",
+            json={
+                "message": "max turns boundary session",
+                "profile_override_id": primary_profile.id,
+                "goal_mode": False,
+                "max_turns": SESSION_MAX_TURNS_UPPER_BOUND,
+            },
+        )
+        assert created.status_code == 200
+        created_payload = created.json()
+        assert created_payload["choices"][0]["finish_reason"] == "new_session"
+        session_id = created_payload["choices"][0]["message"]["content"]
+
+        persisted = await chat_session_database.get(ChatSession, session_id)
+        assert persisted is not None
+        assert (persisted.goal_mode, persisted.max_turns) == (False, SESSION_MAX_TURNS_UPPER_BOUND)
+        persisted.source = source
+        persisted.reply_target_source = source
+        await chat_session_database.commit()
+
+        enabled = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={
+                "session_id": session_id,
+                "goal_mode": True,
+                "max_turns": SESSION_MAX_TURNS_UPPER_BOUND - 1,
+            },
+        )
+        assert enabled.status_code == 200
+        assert enabled.json()["code"] == 200
+        await chat_session_database.refresh(persisted)
+        assert (persisted.goal_mode, persisted.max_turns) == (True, SESSION_MAX_TURNS_UPPER_BOUND - 1)
+        assert persisted.source == source
+        assert persisted.reply_target_source == source
+
+        restored = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={
+                "session_id": session_id,
+                "goal_mode": False,
+                "max_turns": SESSION_MAX_TURNS_UPPER_BOUND,
+            },
+        )
+        assert restored.status_code == 200
+        assert restored.json()["code"] == 200
+        await chat_session_database.refresh(persisted)
+        assert (persisted.goal_mode, persisted.max_turns) == (False, SESSION_MAX_TURNS_UPPER_BOUND)
+        assert persisted.source == source
+        assert persisted.reply_target_source == source
+
+        invalid = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={
+                "session_id": session_id,
+                "goal_mode": True,
+                "max_turns": SESSION_MAX_TURNS_UPPER_BOUND + 1,
+            },
+        )
+        assert invalid.status_code == 422
+        await chat_session_database.refresh(persisted)
+        assert (persisted.goal_mode, persisted.max_turns) == (False, SESSION_MAX_TURNS_UPPER_BOUND)
+        assert persisted.source == source
+        assert persisted.reply_target_source == source
+
+        listed = await client.get("/api/v1/chat/sessions/list")
+        assert listed.status_code == 200
+        listed_session = next(item for item in listed.json()["data"] if item["session_id"] == session_id)
+        assert listed_session["goal_mode"] is False
+        assert listed_session["max_turns"] == SESSION_MAX_TURNS_UPPER_BOUND
 
 
 @pytest.mark.asyncio

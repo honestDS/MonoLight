@@ -34,6 +34,7 @@ def _state(tool_limit: int = 5, tools: list[dict] | None = None) -> SimpleNamesp
         session_id="session",
         active_tasks=set(),
         session_source="test",
+        goal_mode=False,
         final_message_dedupe_key=None,
         stream_event_callback=None,
         show_tool_calls=False,

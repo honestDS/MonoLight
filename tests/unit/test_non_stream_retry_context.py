@@ -32,6 +32,9 @@ class _Session:
     async def commit(self):
         self.commit_count += 1
 
+    async def refresh(self, session):
+        return None
+
 
 class _DatabaseLikeSession(_Session):
     async def execute(self, *args, **kwargs):
@@ -48,6 +51,20 @@ class _StreamDispatcher(stream_module.StreamDispatcherMixin):
     @classmethod
     async def validate_initial_message_before_save(cls, db, message, uid, session_id, profile, attachments):
         return None
+
+
+@pytest.fixture(autouse=True)
+def _patch_session_crud(monkeypatch):
+    async def get_session_by_id(*args, **kwargs):
+        return SimpleNamespace(
+            goal_mode=False,
+            max_turns=5,
+            context_summary_revision=0,
+            context_content_revision=0,
+            llm_request_metadata=None,
+        )
+
+    monkeypatch.setattr(interactive_runtime_module.session_crud, "get_by_session_id", get_session_by_id)
 
 
 async def _passthrough_context_summary_checkpoint(db, **kwargs):
@@ -102,6 +119,7 @@ def _context_length_generation_state(*, stream_event_callback=None):
         db=_Session(),
         uid="user-1",
         session_id="session-1",
+        goal_mode=False,
         profile=SimpleNamespace(id=1),
         cfg=SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90)),
         messages=[InternalMessage(id=1, role=MessageRole.USER, content="request")],
@@ -448,7 +466,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
             return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile):
+    async def get_tools(db, current_profile, *, goal_mode=False):
         return [], []
 
     async def prepare_messages(*args, **kwargs):
@@ -592,7 +610,7 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
             return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile):
+    async def get_tools(db, current_profile, *, goal_mode=False):
         return [], []
 
     async def generate_with_stream_callback(**kwargs):
@@ -728,7 +746,7 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
             return _Channel(), {"model_id": "model-2", "max_tokens": 256, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "max_tokens": 1024, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile):
+    async def get_tools(db, current_profile, *, goal_mode=False):
         return [], []
 
     async def prepare_messages(*args, **kwargs):
@@ -925,7 +943,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
             return _Channel(), {"model_id": "model-2", "max_tokens": 256, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "max_tokens": 1024, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile):
+    async def get_tools(db, current_profile, *, goal_mode=False):
         return [], []
 
     async def prepare_messages(*args, **kwargs):
@@ -1131,7 +1149,7 @@ async def _run_audited_interactive_dispatch(
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile):
+    async def get_tools(db, current_profile, *, goal_mode=False):
         return [
             {
                 "type": "function",
@@ -1376,7 +1394,13 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(interactive_helpers_module, "ensure_user_runtime_instructions", ensure_runtime_snapshot)
 
     async def get_session_by_id(*args, **kwargs):
-        return None
+        return SimpleNamespace(
+            goal_mode=False,
+            max_turns=5,
+            context_summary_revision=0,
+            context_content_revision=0,
+            llm_request_metadata=None,
+        )
 
     db = _DatabaseLikeSession() if use_execution_round_if_complete else _Session()
     if use_execution_round_if_complete:

@@ -2,10 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.constants import MANAGE_TODO_TOOL_NAME
+from app.core.constants import END_SESSION_TOOL_NAME, MANAGE_TODO_TOOL_NAME
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.prompts import BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
+from app.core.tools.end_session import END_SESSION_TOOL_SCHEMA
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 
 
@@ -20,12 +21,13 @@ from app.models.message import InternalMessage, InternalResponse, InternalToolCa
         (None, True, None),
     ],
 )
+@pytest.mark.parametrize("goal_mode", [False, True])
 @pytest.mark.asyncio
-async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(monkeypatch, correction_succeeds, has_files, repeated_tool_content):
+async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(monkeypatch, correction_succeeds, has_files, repeated_tool_content, goal_mode):
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
         channel=SimpleNamespace(chat_channel=object()),
-        tool=SimpleNamespace(max_parallel_tools=5),
+        tool=SimpleNamespace(max_parallel_tools=5, goal_mode=goal_mode),
     )
     sent_file = {
         "id": "file-token",
@@ -88,6 +90,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
                         "parameters": {"type": "object", "properties": {}},
                     },
                 },
+                END_SESSION_TOOL_SCHEMA,
             ],
             None,
         )
@@ -198,7 +201,9 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     if correction_succeeds is not None:
         expected_contexts.append("background_task_proactive_reply_final_tool_correction")
     assert [request["call_context"] for request in requests] == expected_contexts
-    assert MANAGE_TODO_TOOL_NAME not in {tool["function"]["name"] for tool in requests[0]["tools"]}
+    first_request_tool_names = {tool["function"]["name"] for tool in requests[0]["tools"]}
+    assert MANAGE_TODO_TOOL_NAME not in first_request_tool_names
+    assert END_SESSION_TOOL_NAME not in first_request_tool_names
     assert requests[1]["tools"] is None
     assert todo_snapshot in next(message.content for message in requests[1]["messages"] if message.role == MessageRole.TOOL)
 

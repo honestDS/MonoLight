@@ -1,6 +1,7 @@
 // 公共常量
 // 分页相关
 export const PAGE_SIZE = 20
+export const SESSION_MAX_TURNS_UPPER_BOUND = 2147483647
 
 // 路由名称映射
 export const routeNameMap = {
@@ -45,7 +46,6 @@ export const defaultProfileConfigs = () => ({
     image_generation_timeout: 60,
     max_parallel_tools: 5,
     executor_max_workers: 10,
-    max_turns: 5,
     background_task_max_concurrency: 2,
     scheduled_task_max_concurrency: 4,
     firecrawl_api_key: '',

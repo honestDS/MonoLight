@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
+    END_SESSION_TOOL_NAME,
     ERR_BACKGROUND_TASK_UNSUPPORTED,
     ERR_TOOL_ARGUMENT_SCHEMA_INVALID,
     ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
@@ -56,7 +57,9 @@ from app.models.profile import (
 )
 
 
-def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
+def _is_tool_enabled(tool_name: str, cfg: ProfileConfig, *, goal_mode: bool = False) -> bool:
+    if tool_name == END_SESSION_TOOL_NAME:
+        return goal_mode is True
     if tool_name in SYSTEM_BUILTIN_TOOL_NAMES:
         return True
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
@@ -389,6 +392,7 @@ def prevalidate_tool_round(
     tool_calls: list[Any],
     cfg: ProfileConfig,
     *,
+    goal_mode: bool = False,
     allow_background_submission: bool = True,
     tool_schemas: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
@@ -402,7 +406,7 @@ def prevalidate_tool_round(
         declared_properties = parameters_schema.get("properties", {}) if parameters_schema is not None else {}
         missing_arguments = sorted(parameter_name for parameter_name in required_parameters if isinstance(parameter_name, str) and parameter_name not in args)
         unsupported_arguments = sorted(argument_name for argument_name in args if parameters_schema is not None and argument_name not in declared_properties)
-        if not _is_tool_enabled(tool_name, cfg):
+        if not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
             errors[tool_call.id] = _build_tool_disabled_result(tool_name)
         elif missing_arguments:
             errors[tool_call.id] = _build_missing_required_arguments_result(
@@ -450,6 +454,7 @@ async def process_single_tool(
     source_message_id: int | None = None,
     dispatch_mode: DispatchMode = "interactive",
     dispatch_source: str = "interactive_tool",
+    goal_mode: bool = False,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -467,7 +472,7 @@ async def process_single_tool(
         log_args = json.dumps(args, ensure_ascii=False)
     LogManager.log_tool_call(turn, tool_name, log_args, session_id, uid)
 
-    if not _is_tool_enabled(tool_name, cfg):
+    if not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
         cmd_result = _build_tool_disabled_result(tool_name)
     elif missing_arguments:
         cmd_result = _build_missing_required_arguments_result(tool_name, missing_arguments)

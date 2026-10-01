@@ -65,6 +65,120 @@ test('http transport includes new-session display settings without changing pers
   })
 })
 
+test('http transport forwards goal settings only for new sessions', async () => {
+  const requests = []
+  const api = {
+    async completions(payload) {
+      requests.push(payload)
+      return { data: { data: {} } }
+    }
+  }
+
+  await sendHttpNonStream({
+    api,
+    message: 'goal true',
+    sessionId: null,
+    attachments: [],
+    requestId: 'request-goal-true',
+    showToolCalls: false,
+    showReasoning: false,
+    goalMode: true,
+    maxTurns: 1
+  })
+  await sendHttpNonStream({
+    api,
+    message: 'goal false',
+    sessionId: null,
+    attachments: [],
+    requestId: 'request-goal-false',
+    showToolCalls: false,
+    showReasoning: false,
+    goalMode: false,
+    maxTurns: 21
+  })
+  await sendHttpNonStream({
+    api,
+    message: 'goal max',
+    sessionId: null,
+    attachments: [],
+    requestId: 'request-goal-max',
+    showToolCalls: false,
+    showReasoning: false,
+    goalMode: true,
+    maxTurns: 1000000
+  })
+  await sendHttpNonStream({
+    api,
+    message: 'goal default',
+    sessionId: null,
+    attachments: [],
+    requestId: 'request-goal-default',
+    showToolCalls: false,
+    showReasoning: false
+  })
+  await sendHttpNonStream({
+    api,
+    message: 'goal persisted',
+    sessionId: 'session-existing',
+    attachments: [],
+    requestId: 'request-goal-existing',
+    goalMode: false,
+    maxTurns: 1000000
+  })
+
+  assert.deepEqual(requests, [
+    {
+      message: 'goal true',
+      session_id: null,
+      attachments: [],
+      request_id: 'request-goal-true',
+      show_tool_calls: false,
+      show_reasoning: false,
+      goal_mode: true,
+      max_turns: 1,
+      stream: false
+    },
+    {
+      message: 'goal false',
+      session_id: null,
+      attachments: [],
+      request_id: 'request-goal-false',
+      show_tool_calls: false,
+      show_reasoning: false,
+      goal_mode: false,
+      max_turns: 21,
+      stream: false
+    },
+    {
+      message: 'goal max',
+      session_id: null,
+      attachments: [],
+      request_id: 'request-goal-max',
+      show_tool_calls: false,
+      show_reasoning: false,
+      goal_mode: true,
+      max_turns: 1000000,
+      stream: false
+    },
+    {
+      message: 'goal default',
+      session_id: null,
+      attachments: [],
+      request_id: 'request-goal-default',
+      show_tool_calls: false,
+      show_reasoning: false,
+      stream: false
+    },
+    {
+      message: 'goal persisted',
+      session_id: 'session-existing',
+      attachments: [],
+      request_id: 'request-goal-existing',
+      stream: false
+    }
+  ])
+})
+
 test('persistSessionTransportMode persists the selected mode without owning runtime activation', async () => {
   const sessions = [{ session_id: 'session-1', source: 'ws' }]
   const calls = []

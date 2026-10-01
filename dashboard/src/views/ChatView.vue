@@ -203,12 +203,10 @@
                   :width="280"
                   :show-arrow="false"
                   popper-class="chat-more-options-popover"
-                  :disabled="isCurrentSessionReadOnly"
                 >
                   <template #reference>
                     <el-button
                       class="more-options-trigger"
-                      :disabled="isCurrentSessionReadOnly"
                       :title="$t('chat.more_options')"
                       circle
                     >
@@ -254,6 +252,41 @@
 
                     <div class="more-option-divider"></div>
 
+                    <div class="more-option-toggle">
+                      <span class="more-option-label">
+                        <span>{{ $t('chat.goal_mode') }}</span>
+                        <HelpTooltip :content="$t('chat.goal_mode_hint')" />
+                      </span>
+                      <el-switch
+                        :model-value="currentSessionGoalMode"
+                        :aria-label="$t('chat.goal_mode')"
+                        :disabled="loading || agentSettingSubmitting"
+                        @update:model-value="updateSessionGoalMode"
+                      />
+                    </div>
+
+                    <div class="more-option-divider"></div>
+
+                    <div class="more-option-segment">
+                      <span class="more-option-label">
+                        <span>{{ $t('chat.max_turns') }}</span>
+                        <HelpTooltip :content="$t('chat.max_turns_hint')" />
+                      </span>
+                      <el-input-number
+                        :model-value="currentSessionMaxTurns"
+                        :min="1"
+                        :max="SESSION_MAX_TURNS_UPPER_BOUND"
+                        :step="1"
+                        :precision="0"
+                        controls-position="right"
+                        :aria-label="$t('chat.max_turns')"
+                        :disabled="loading || agentSettingSubmitting || currentSessionGoalMode"
+                        @change="updateSessionMaxTurns"
+                      />
+                    </div>
+
+                    <div class="more-option-divider"></div>
+
                     <div class="more-option-segment">
                       <span class="more-option-label">{{ $t('chat.more_options_non_stream') }} / {{ $t('chat.more_options_stream') }}</span>
                       <el-radio-group
@@ -277,7 +310,7 @@
                         clearable
                         filterable
                         :loading="profilesLoading"
-                        :disabled="isCurrentSessionReadOnly || profileSettingSubmitting"
+                        :disabled="profileSettingSubmitting"
                         :placeholder="currentSessionProfilePlaceholder"
                         @change="updateSessionProfileOverride"
                         size="small"
@@ -297,7 +330,7 @@
                       <span class="more-option-label">{{ $t('chat.more_options_tool_output') }}</span>
                       <el-switch
                         :model-value="currentSessionShowToolCalls"
-                        :disabled="isCurrentSessionReadOnly || toolOutputSettingSubmitting || loading"
+                        :disabled="toolOutputSettingSubmitting || loading"
                         @update:model-value="updateSessionShowToolCalls"
                       />
                     </div>
@@ -308,7 +341,7 @@
                       <span class="more-option-label">{{ $t('chat.show_reasoning') }}</span>
                       <el-switch
                         :model-value="currentSessionShowReasoning"
-                        :disabled="isCurrentSessionReadOnly || reasoningSettingSubmitting || loading"
+                        :disabled="reasoningSettingSubmitting || loading"
                         @update:model-value="updateSessionShowReasoning"
                       />
                     </div>
@@ -334,7 +367,7 @@
                     type="primary"
                     @click="send"
                     :loading="isCurrentSessionReadOnly && guidanceSubmitting"
-                    :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || !inputMsg.trim() : modeSettingSubmitting || (!inputMsg.trim() && attachments.length === 0)"
+                    :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || agentSettingSubmitting || !inputMsg.trim() : modeSettingSubmitting || agentSettingSubmitting || (!inputMsg.trim() && attachments.length === 0)"
                     class="action-btn"
                     circle
                   >
@@ -359,8 +392,10 @@ import { ChatLineSquare, Delete, Plus, Refresh, UploadFilled, ArrowDown } from '
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import SessionTodoPanel from '../components/SessionTodoPanel.vue'
+import HelpTooltip from '../components/HelpTooltip.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
 import { fileApi, chatApi, profileApi } from '../api'
+import { SESSION_MAX_TURNS_UPPER_BOUND } from '../constants/index.js'
 import {
   filterProfilesByUid,
   formatProfileOptionLabel,
@@ -390,6 +425,7 @@ const profileSettingSubmitting = ref(false)
 const toolOutputSettingSubmitting = ref(false)
 const moreOptionsVisible = ref(false)
 const uploadTriggerRef = ref(null)
+const agentSettingSubmitting = ref(false)
 
 const openUploadPicker = () => {
   const triggerEl = uploadTriggerRef.value?.$el || uploadTriggerRef.value
@@ -559,6 +595,10 @@ const {
   newSessionProfileOverrideId,
   currentSessionShowToolCalls,
   currentSessionShowReasoning,
+  currentSessionGoalMode,
+  currentSessionMaxTurns,
+  goalModeDefault,
+  maxTurnsDefault,
   currentTodoPlan
 } = chat
 
@@ -576,6 +616,41 @@ const currentSessionProfilePlaceholder = computed(() => resolveSessionProfilePla
   t('chat.default_profile_suffix'),
   t('chat.inherited_profile')
 ))
+
+const updateSessionAgentSetting = async (field, value) => {
+  if (agentSettingSubmitting.value || loading.value) return
+
+  if (field === 'max_turns' && (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > SESSION_MAX_TURNS_UPPER_BOUND
+  )) {
+    ElMessage.error(t('chat.max_turns_invalid'))
+    return
+  }
+
+  agentSettingSubmitting.value = true
+  const sessionId = currentSessionId.value
+  try {
+    if (!sessionId) {
+      if (field === 'goal_mode') goalModeDefault.value = value
+      if (field === 'max_turns') maxTurnsDefault.value = value
+      return
+    }
+
+    await chatApi.updateSessionSetting(sessionId, { [field]: value })
+    const session = sessions.value.find(item => item.session_id === sessionId)
+    if (session) session[field] = value
+  } catch (error) {
+    ElMessage.error(error.message || t('chat.setting_failed'))
+  } finally {
+    agentSettingSubmitting.value = false
+  }
+}
+
+const updateSessionGoalMode = (value) => updateSessionAgentSetting('goal_mode', value)
+const updateSessionMaxTurns = (value) => updateSessionAgentSetting('max_turns', value)
 
 const deferredContentSessionId = ref(null)
 const chatContentVisible = computed(() => shouldExposeChatContent({
@@ -711,7 +786,7 @@ const guidanceSubmitting = ref(false)
 
 // 拦截发送，发送完成后清空列表
 const send = async () => {
-  if (modeSettingSubmitting.value) return
+  if (modeSettingSubmitting.value || agentSettingSubmitting.value) return
 
   if (isCurrentSessionReadOnly.value) {
     const content = inputMsg.value.trim()
@@ -775,7 +850,7 @@ const send = async () => {
 }
 
 const handleAuditDecision = async ({ decision }) => {
-  if (isCurrentSessionReadOnly.value || loading.value) return
+  if (isCurrentSessionReadOnly.value || loading.value || agentSettingSubmitting.value) return
   inputMsg.value = decision === 'approve'
     ? t('chat.audit_approve_word')
     : decision === 'ignore'

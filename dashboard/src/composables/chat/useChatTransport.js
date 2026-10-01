@@ -468,7 +468,7 @@ export function useChatTransport() {
     ...options
   })
 
-  const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, callbacks = {} }) => {
+  const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, goalMode, maxTurns, callbacks = {} }) => {
     if (transportMode.value !== 'ws') return false
     const operationGeneration = transportGeneration
     const token = localStorage.getItem('token')
@@ -526,6 +526,12 @@ export function useChatTransport() {
     }
     if (!sessionId && showReasoning === false) {
       wsData.show_reasoning = false
+    }
+    if (!sessionId && goalMode !== undefined) {
+      wsData.goal_mode = goalMode
+    }
+    if (!sessionId && maxTurns !== undefined) {
+      wsData.max_turns = maxTurns
     }
 
     if (!wsManager.sendMessage(wsData)) {

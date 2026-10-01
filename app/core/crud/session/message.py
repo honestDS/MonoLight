@@ -432,6 +432,8 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 User.username,
                 ChatSession.title,
                 ChatSession.enable_markdown,
+                ChatSession.goal_mode,
+                ChatSession.max_turns,
                 ChatSession.show_tool_calls,
                 ChatSession.show_reasoning,
                 ChatSession.profile_id,

@@ -4,6 +4,11 @@ from typing import Any
 from sqlalchemy import JSON
 from sqlmodel import Column, DateTime, Field, SQLModel, UniqueConstraint
 
+from app.core.constants import (
+    DEFAULT_SESSION_GOAL_MODE,
+    DEFAULT_SESSION_MAX_TURNS,
+    SESSION_MAX_TURNS_UPPER_BOUND,
+)
 from app.core.utils.time import get_local_time
 
 
@@ -35,6 +40,8 @@ class ChatSession(SQLModel, table=True):
     )
     title: str | None = Field(default=None, max_length=255)
     enable_markdown: bool = Field(default=False)
+    goal_mode: bool = Field(default=DEFAULT_SESSION_GOAL_MODE)
+    max_turns: int = Field(default=DEFAULT_SESSION_MAX_TURNS, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
     show_tool_calls: bool = Field(default=True)
     show_reasoning: bool = Field(default=True)
     context_summary: str | None = Field(default=None)

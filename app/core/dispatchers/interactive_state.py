@@ -6,6 +6,8 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    DEFAULT_SESSION_GOAL_MODE,
+    DEFAULT_SESSION_MAX_TURNS,
     ERR_MEMORY_RECALL_BOUNDARY_INVALID,
     ERR_MEMORY_RECALL_STATUS_BOUNDARY_REQUIRED,
     ERR_MEMORY_RECALL_STATUS_INVALID,
@@ -56,6 +58,8 @@ class InteractiveDispatchState:
     latest_llm_request_metadata: dict[str, Any] | None = None
     messages: list[InternalMessage] = field(default_factory=list)
     current_turn: int = 0
+    goal_mode: bool = DEFAULT_SESSION_GOAL_MODE
+    max_turns: int = DEFAULT_SESSION_MAX_TURNS
     cfg: Any = None
     memory_enabled: bool = False
     memory_precheck_enabled: bool = False

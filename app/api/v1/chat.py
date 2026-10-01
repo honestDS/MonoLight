@@ -11,13 +11,15 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import _response_has_background_tasks, web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.core.channel_router import select_channel
 from app.core.constants import (
+    DEFAULT_SESSION_GOAL_MODE,
+    DEFAULT_SESSION_MAX_TURNS,
     ERR_BACKGROUND_TASK_NOT_FOUND,
     ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED,
     ERR_CHAT_REQUEST_ID_REQUIRED,
@@ -41,6 +43,7 @@ from app.core.constants import (
     MSG_SESSION_TODO_SUCCESS,
     MSG_SESSION_UPDATED,
     MSG_TITLE_GENERATED,
+    SESSION_MAX_TURNS_UPPER_BOUND,
 )
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
@@ -114,6 +117,8 @@ async def _create_new_web_session_with_profile_override(
     profile_override_id: int | None,
     show_tool_calls: bool | None = None,
     show_reasoning: bool | None = None,
+    goal_mode: bool = DEFAULT_SESSION_GOAL_MODE,
+    max_turns: int = DEFAULT_SESSION_MAX_TURNS,
     force_create: bool = False,
 ) -> None:
     if not force_create and profile_override_id is None and show_tool_calls is None and show_reasoning is None:
@@ -141,6 +146,8 @@ async def _create_new_web_session_with_profile_override(
             reply_target_source=source,
             show_tool_calls=show_tool_calls if show_tool_calls is not None else default_show_tool_calls_for_source(source),
             show_reasoning=show_reasoning if show_reasoning is not None else True,
+            goal_mode=goal_mode,
+            max_turns=max_turns,
         )
     )
     await db.commit()
@@ -157,6 +164,8 @@ class NewSessionProfileSetting(BaseModel):
     profile_override_id: int | None = Field(default=None, gt=0)
     show_tool_calls: bool | None = None
     show_reasoning: bool | None = None
+    goal_mode: StrictBool = DEFAULT_SESSION_GOAL_MODE
+    max_turns: StrictInt = Field(default=DEFAULT_SESSION_MAX_TURNS, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
 
 
 async def _cancel_websocket_stream_task(state: _WebSocketChatState) -> None:
@@ -304,6 +313,8 @@ async def chat_completions(
             profile_override_id=request.profile_override_id,
             show_tool_calls=request.show_tool_calls,
             show_reasoning=request.show_reasoning,
+            goal_mode=request.goal_mode,
+            max_turns=request.max_turns,
             force_create=True,
         )
         return LLMResponse(
@@ -391,6 +402,8 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "enable_markdown": row.enable_markdown,
                 "show_tool_calls": row.show_tool_calls,
                 "show_reasoning": row.show_reasoning,
+                "goal_mode": row.goal_mode,
+                "max_turns": row.max_turns,
                 "profile_id": row.profile_id,
                 "profile_override_id": row.profile_override_id,
                 "source": row.source or "http",
@@ -459,6 +472,8 @@ class SessionSettingRequest(BaseModel):
     enable_markdown: bool | None = None
     show_tool_calls: bool | None = None
     show_reasoning: bool | None = None
+    goal_mode: StrictBool = Field(default=None)
+    max_turns: StrictInt = Field(default=None, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
     profile_override_id: int | None = Field(default=None, gt=0)
 
 
@@ -542,6 +557,10 @@ async def update_session_setting(
         session.show_tool_calls = request.show_tool_calls
     if request.show_reasoning is not None:
         session.show_reasoning = request.show_reasoning
+    if request.goal_mode is not None:
+        session.goal_mode = request.goal_mode
+    if request.max_turns is not None:
+        session.max_turns = request.max_turns
     if "profile_override_id" in request.model_fields_set:
         if request.profile_override_id is None:
             session.profile_override_id = None
@@ -824,6 +843,8 @@ async def chat_websocket(
                                 "profile_override_id": profile_override_id,
                                 "show_tool_calls": data.get("show_tool_calls"),
                                 "show_reasoning": data.get("show_reasoning"),
+                                "goal_mode": data.get("goal_mode", DEFAULT_SESSION_GOAL_MODE),
+                                "max_turns": data.get("max_turns", DEFAULT_SESSION_MAX_TURNS),
                             }
                         )
                     except ValidationError as exc:
@@ -848,6 +869,9 @@ async def chat_websocket(
                                 profile_override_id=profile_setting.profile_override_id,
                                 show_tool_calls=profile_setting.show_tool_calls,
                                 show_reasoning=profile_setting.show_reasoning,
+                                goal_mode=profile_setting.goal_mode,
+                                max_turns=profile_setting.max_turns,
+                                force_create=True,
                             )
                     except BaseBusinessException as exc:
                         await websocket.send_json(
