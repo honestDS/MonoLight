@@ -6,7 +6,9 @@ export const sendHttpNonStream = async ({
   requestId,
   profileOverrideId,
   showToolCalls,
-  showReasoning
+  showReasoning,
+  goalMode,
+  maxTurns
 }) => {
   const payload = {
     message,
@@ -22,6 +24,12 @@ export const sendHttpNonStream = async ({
   }
   if (!sessionId && showReasoning === false) {
     payload.show_reasoning = false
+  }
+  if (!sessionId && goalMode !== undefined) {
+    payload.goal_mode = goalMode
+  }
+  if (!sessionId && maxTurns !== undefined) {
+    payload.max_turns = maxTurns
   }
 
   const response = await api.completions({ ...payload, stream: false })

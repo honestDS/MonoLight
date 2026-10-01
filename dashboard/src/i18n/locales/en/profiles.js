@@ -185,7 +185,6 @@ export default {
   background_task_max_concurrency_hint: 'Maximum number of background tasks running concurrently for this profile. Concurrency is calculated separately for each profile.',
   scheduled_task_max_concurrency: 'Scheduled Task Concurrency',
   scheduled_task_max_concurrency_hint: 'Maximum number of scheduled task replies generated concurrently for this profile. Concurrency is calculated separately for each profile; replies in the same session are still processed sequentially.',
-  max_turns: 'Max Consecutive Turns',
   tool_visibility_config: 'Tool Exposure Config',
   enabled_tools: 'Enabled Tools',
   enabled_tools_placeholder: 'Select tools exposed to the model',

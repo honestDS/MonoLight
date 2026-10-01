@@ -7,7 +7,7 @@ from typing import (
     Literal,
 )
 
-from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationInfo, field_validator
 from pydantic import Field as PyField
 from sqlalchemy import ForeignKeyConstraint, Text
 from sqlmodel import (
@@ -18,6 +18,11 @@ from sqlmodel import (
     SQLModel,
 )
 
+from app.core.constants import (
+    DEFAULT_SESSION_GOAL_MODE,
+    DEFAULT_SESSION_MAX_TURNS,
+    SESSION_MAX_TURNS_UPPER_BOUND,
+)
 from app.core.utils.time import get_local_time
 
 
@@ -184,3 +189,5 @@ class ChatCompletionRequest(BaseModel):
     profile_override_id: int | None = PyField(default=None, gt=0)
     show_tool_calls: bool | None = None
     show_reasoning: bool | None = None
+    goal_mode: StrictBool = DEFAULT_SESSION_GOAL_MODE
+    max_turns: StrictInt = PyField(default=DEFAULT_SESSION_MAX_TURNS, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)

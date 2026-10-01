@@ -12,6 +12,10 @@ from app.models.knowledge_base import KnowledgeBaseType
 from app.models.profile import Profile
 
 from .cancel_background_task import CANCEL_BACKGROUND_TASK_TOOL_SCHEMA, CancelBackgroundTaskExecutor
+from .end_session import (
+    END_SESSION_TOOL_NAME as END_SESSION_TOOL_NAME,
+)
+from .end_session import END_SESSION_TOOL_SCHEMA, EndSessionExecutor
 from .file_tool import FILE_TOOL_SCHEMA, FileToolExecutor
 from .firecrawl_scrape import FIRECRAWL_SCRAPE_TOOL_SCHEMA, FirecrawlScrapeExecutor
 from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecutor
@@ -56,9 +60,10 @@ from .todo import MANAGE_TODO_TOOL_NAME, MANAGE_TODO_TOOL_SCHEMA, ManageTodoExec
 
 logger = get_logger(__name__)
 
-# 始终向模型暴露的系统内置工具 Schema
+# 系统内置工具 Schema；具体暴露范围由运行模式控制
 SYSTEM_BUILTIN_TOOL_SCHEMAS = [
     MANAGE_TODO_TOOL_SCHEMA,
+    END_SESSION_TOOL_SCHEMA,
 ]
 SYSTEM_BUILTIN_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS)
 
@@ -119,6 +124,7 @@ TOOL_EXECUTOR_MAP = {
     TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
     TERMINAL_CLOSE_TOOL_SCHEMA["function"]["name"]: TerminalCloseExecutor,
     MANAGE_TODO_TOOL_NAME: ManageTodoExecutor,
+    END_SESSION_TOOL_NAME: EndSessionExecutor,
 }
 
 
@@ -266,14 +272,20 @@ async def _is_image_generation_profile_available(db: AsyncSession, profile: Prof
     return selected_channel is not None
 
 
-async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_background: bool = True) -> tuple[list[dict[str, Any]], list[int]]:
+async def get_tools_for_profile(
+    db: AsyncSession,
+    profile: Profile,
+    *,
+    allow_background: bool = True,
+    goal_mode: bool = False,
+) -> tuple[list[dict[str, Any]], list[int]]:
     """
     根据 Profile 中的 enabled_tools 生成当前会话向 LLM 暴露的工具列表。
     query_knowledge_base 属于动态工具：长期记忆关闭且存在已发布、索引可用的用户知识库时才暴露，
     并会注入运行时知识库白名单；该工具不受 enabled_tools 控制。
     """
     enabled_tool_names = _get_enabled_tool_names(profile)
-    base_tools = [copy.deepcopy(schema) for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS]
+    base_tools = [copy.deepcopy(schema) for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS if schema["function"]["name"] != END_SESSION_TOOL_NAME or goal_mode is True]
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
         if schema["function"]["name"] in enabled_tool_names:
             tool_schema = copy.deepcopy(schema)

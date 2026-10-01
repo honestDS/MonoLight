@@ -464,9 +464,6 @@
                     </template>
                     <el-input-number v-model="form.configs.tool.scheduled_task_max_concurrency" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
                   </el-form-item>
-                  <el-form-item :label="$t('profiles.max_turns')">
-                    <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
-                  </el-form-item>
                   <el-form-item>
                     <template #label>
                       {{ $t('profiles.tool_timeout') }}

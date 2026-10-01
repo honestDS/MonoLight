@@ -27,6 +27,7 @@ import {
 import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
 import { shouldReturnToWelcomeAfterSessionDelete } from '../../utils/chatContentReveal.js'
 import { chatApi } from '../../api'
+import { SESSION_MAX_TURNS_UPPER_BOUND } from '../../constants/index.js'
 import i18n from '../../i18n'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
 
@@ -142,6 +143,8 @@ export function useChatSession() {
   const enableMarkdownDefault = ref(false)
   const showToolCallsDefault = ref(true)
   const showReasoningDefault = ref(true)
+  const goalModeDefault = ref(true)
+  const maxTurnsDefault = ref(5)
   const newSessionProfileOverrideId = ref(null)
   
   // 2. 会话管理
@@ -210,6 +213,51 @@ export function useChatSession() {
         sessionManager.sessions.value[sessionIndex] = {
           ...sessionManager.sessions.value[sessionIndex],
           show_tool_calls: enabled
+        }
+      }
+    }
+  })
+  const currentSessionGoalMode = computed({
+    get: () => {
+      if (!sessionManager.currentSessionId.value) return goalModeDefault.value
+      return currentSession.value?.goal_mode ?? true
+    },
+    set: (goalMode) => {
+      const enabled = Boolean(goalMode)
+      const sessionId = sessionManager.currentSessionId.value
+      if (!sessionId) {
+        goalModeDefault.value = enabled
+        return
+      }
+
+      const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
+      if (sessionIndex !== -1) {
+        sessionManager.sessions.value[sessionIndex] = {
+          ...sessionManager.sessions.value[sessionIndex],
+          goal_mode: enabled
+        }
+      }
+    }
+  })
+  const currentSessionMaxTurns = computed({
+    get: () => {
+      if (!sessionManager.currentSessionId.value) return maxTurnsDefault.value
+      return currentSession.value?.max_turns ?? 5
+    },
+    set: (maxTurns) => {
+      if (typeof maxTurns !== 'number' || !Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > SESSION_MAX_TURNS_UPPER_BOUND) return
+
+      const sessionId = sessionManager.currentSessionId.value
+      if (!sessionId) {
+        maxTurnsDefault.value = maxTurns
+        return
+      }
+
+      const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
+      if (sessionIndex !== -1) {
+        sessionManager.sessions.value[sessionIndex] = {
+          ...sessionManager.sessions.value[sessionIndex],
+          max_turns: maxTurns
         }
       }
     }
@@ -1262,14 +1310,16 @@ export function useChatSession() {
       requestId,
       newProfileOverrideId,
       currentSessionShowToolCalls.value,
-      currentSessionShowReasoning.value
+      currentSessionShowReasoning.value,
+      currentSessionGoalMode.value,
+      currentSessionMaxTurns.value
     )
   }
 
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true) => {
+  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true, goalMode = true, maxTurns = 5) => {
     if (requestSessionId) {
       ensureIncrementalHistoryCursor(requestSessionId)
     }
@@ -1285,7 +1335,9 @@ export function useChatSession() {
         requestId,
         profileOverrideId,
         showToolCalls,
-        showReasoning
+        showReasoning,
+        goalMode,
+        maxTurns
       })
 
       // 处理后端生成的 UUID (新建会话模式)
@@ -1302,6 +1354,8 @@ export function useChatSession() {
           enable_markdown: enableMarkdownDefault.value,
           show_tool_calls: showToolCalls,
           show_reasoning: showReasoning,
+          goal_mode: goalMode,
+          max_turns: maxTurns,
           profile_override_id: profileOverrideId,
           source: 'http'
         })
@@ -1315,7 +1369,7 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId, showToolCalls, showReasoning)
+        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId, showToolCalls, showReasoning, goalMode, maxTurns)
       }
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
@@ -1430,6 +1484,8 @@ export function useChatSession() {
     )
     const showToolCalls = currentSessionShowToolCalls.value
     const showReasoning = currentSessionShowReasoning.value
+    const goalMode = currentSessionGoalMode.value
+    const maxTurns = currentSessionMaxTurns.value
     const isCurrentRequestSession = () => (
       sessionScopeActive
       && requestSessionId === sessionManager.currentSessionId.value
@@ -1553,6 +1609,8 @@ export function useChatSession() {
           enable_markdown: enableMarkdownDefault.value,
           show_tool_calls: showToolCalls,
           show_reasoning: showReasoning,
+          goal_mode: goalMode,
+          max_turns: maxTurns,
           profile_override_id: newProfileOverrideId,
           source: 'ws'
         })
@@ -1777,6 +1835,8 @@ export function useChatSession() {
         profileOverrideId: newProfileOverrideId,
         showToolCalls,
         showReasoning,
+        goalMode,
+        maxTurns,
         callbacks
       })
       if (!sent) {
@@ -1852,6 +1912,8 @@ export function useChatSession() {
     newSessionProfileOverrideId.value = null
     showToolCallsDefault.value = true
     showReasoningDefault.value = true
+    goalModeDefault.value = true
+    maxTurnsDefault.value = 5
     // 新建会话时重置加载状态，解除模式锁定
     chatState.loading.value = false
   }
@@ -1939,6 +2001,8 @@ export function useChatSession() {
     enableMarkdownDefault,
     showToolCallsDefault,
     showReasoningDefault,
+    goalModeDefault,
+    maxTurnsDefault,
     newSessionProfileOverrideId,
 
     // 状态 - 会话相关
@@ -1953,6 +2017,8 @@ export function useChatSession() {
     currentSession,
     currentSessionShowToolCalls,
     currentSessionShowReasoning,
+    currentSessionGoalMode,
+    currentSessionMaxTurns,
     currentTodoPlan,
     isCurrentSessionReadOnly,
     

@@ -553,3 +553,71 @@ async def test_profile_memory_embedding_preview_probe_failure_returns_standard_r
     assert "choices" not in payload
     selections = list((await db_session.execute(select(LongTermMemoryEmbeddingSelectionToken))).scalars().all())
     assert selections == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", ["nested", "flat"])
+async def test_profile_tool_config_discards_legacy_goal_fields_and_persists_parallel_tools(
+    layout: str,
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+
+    def assert_config(configs: dict, expected_max_parallel_tools: int) -> None:
+        assert "goal_mode" not in configs
+        assert "max_turns" not in configs
+        assert "goal_mode" not in configs["tool"]
+        assert "max_turns" not in configs["tool"]
+        assert configs["tool"]["max_parallel_tools"] == expected_max_parallel_tools
+
+    create_configs = _profile_configs()
+    if layout == "nested":
+        create_configs["tool"].update(goal_mode=True, max_turns=3, max_parallel_tools=3)
+    else:
+        for key in ("goal_mode", "max_turns", "max_parallel_tools"):
+            create_configs["tool"].pop(key, None)
+        create_configs.update(goal_mode=True, max_turns=3, max_parallel_tools=3)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await client.post(
+            "/api/v1/profiles/create",
+            json={"name": f"profile-goal-clean-{layout}", "configs": create_configs},
+        )
+        create_payload = _assert_standard(create_response, 200)
+        created_data = create_payload["data"]
+        profile_id = created_data["id"]
+        assert_config(created_data["configs"], 3)
+
+        db_session.expire_all()
+        persisted_profile = await profile_crud.get(db_session, profile_id)
+        assert persisted_profile is not None
+        assert_config(persisted_profile.configs, 3)
+
+        updated_configs = created_data["configs"].copy()
+        if layout == "nested":
+            updated_configs["tool"] = updated_configs["tool"].copy()
+            updated_configs["tool"].update(goal_mode=False, max_turns=3, max_parallel_tools=4)
+        else:
+            updated_configs["tool"] = updated_configs["tool"].copy()
+            for key in ("goal_mode", "max_turns", "max_parallel_tools"):
+                updated_configs["tool"].pop(key, None)
+            updated_configs.update(goal_mode=False, max_turns=3, max_parallel_tools=4)
+        update_response = await client.post(
+            "/api/v1/profiles/update",
+            params={"profile_id": profile_id},
+            json={"configs": updated_configs},
+        )
+        update_payload = _assert_standard(update_response, 200)
+        assert_config(update_payload["data"]["configs"], 4)
+
+        db_session.expire_all()
+        persisted_profile = await profile_crud.get(db_session, profile_id)
+        assert persisted_profile is not None
+        assert_config(persisted_profile.configs, 4)
+
+        list_response = await client.get("/api/v1/profiles/list")
+
+    list_payload = _assert_standard(list_response, 200)
+    listed_profile = next(item for item in list_payload["data"]["items"] if item["id"] == profile_id)
+    assert_config(listed_profile["configs"], 4)

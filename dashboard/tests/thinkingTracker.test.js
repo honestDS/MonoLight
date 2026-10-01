@@ -174,5 +174,5 @@ test('chat rendering keeps Thinking as lifecycle state, hides its row, and gates
   assert.match(viewSource, /chat\.show_reasoning/)
   assert.match(viewSource, /:current-session-show-reasoning="currentSessionShowReasoning"/)
   const sessionSource = readFileSync(new URL('../src/composables/chat/useChatSession.js', import.meta.url), 'utf8')
-  assert.match(sessionSource, /performHttpSend\([\s\S]*?currentSessionShowToolCalls\.value,\s*currentSessionShowReasoning\.value\s*\)/)
+  assert.match(sessionSource, /performHttpSend\([\s\S]*?currentSessionShowToolCalls\.value,\s*currentSessionShowReasoning\.value\s*[,)]/)
 })

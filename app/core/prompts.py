@@ -3,6 +3,10 @@
 # System notice when maximum turns reached
 PROMPT_MAX_TURNS_REACHED = "System notification: Maximum tool call turns ({max_turns}) reached. Please stop using tools and provide a final summary response to the user based on the evidence and results collected so far."
 
+GOAL_MODE_SYSTEM_PROMPT = """[Goal mode rules]
+Current interactive task has no consecutive tool-turn limit. Continue only with useful, authorized steps toward the user's goal; do not repeat unsuccessful actions without new evidence. When the task is complete, cannot proceed safely, or needs user input, call end_session exactly once and by itself with a non-empty user-visible summary of verified results, remaining limitations, or needed clarification. Do not put the final reply outside that tool call. Do not claim success without evidence. Goal mode does not relax permissions, safety audits, tool timeouts, or platform constraints.
+[End goal mode rules]"""
+
 # Parallel tool call limit error
 ERR_PARALLEL_LIMIT_EXCEEDED = "Too many parallel tool calls. Requested: {requested}, Limit: {limit}."
 

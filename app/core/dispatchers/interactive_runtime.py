@@ -10,6 +10,7 @@ from app.core.channel_router import select_channel
 from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR
 from app.core.crud.account.user import user_crud
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_generation import generate_interactive_turn
 from app.core.dispatchers.interactive_state import build_interactive_dispatch_state
 from app.core.dispatchers.memory import MemoryRecallContext, run_memory_recall_precheck
@@ -132,6 +133,11 @@ async def dispatch_interactive(
             execution_resume_state=execution_resume_state,
             execution_checkpoint_callback=execution_checkpoint_callback,
         )
+        session = await session_crud.get_by_session_id(db, session_id)
+        if session is not None:
+            await db.refresh(session)
+            state.goal_mode = session.goal_mode
+            state.max_turns = session.max_turns
 
         initial_memory_recall_boundary = max(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
         resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None
@@ -169,7 +175,7 @@ async def dispatch_interactive(
                 state.chat_channel_obj, state.model_entry, state.channel_rule = selection
                 state.img_understanding, state.audio_understanding, state.video_understanding = get_multimodal_from_entry(state.model_entry)
                 state.chat_params = resolve_chat_params(state.model_entry, state.chat_channel)
-                state.tools, state.allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
+                state.tools, state.allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, goal_mode=state.goal_mode)
 
                 if state.execution_resume_state is not None:
                     state.messages = [InternalMessage.model_validate(item) for item in state.execution_resume_state.get("messages", [])]
@@ -204,9 +210,12 @@ async def dispatch_interactive(
                             is_history=is_history,
                         )
 
-                max_turns = state.cfg.tool.max_turns
+                max_turns = state.max_turns
+                goal_mode = state.goal_mode
+                if not goal_mode and state.current_turn >= max_turns:
+                    state.current_turn = max_turns - 1
 
-                while state.current_turn <= max_turns:
+                while goal_mode or state.current_turn <= max_turns:
                     new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
                     if new_user_batch is not None:
                         state.current_turn = 0
@@ -274,14 +283,14 @@ async def dispatch_interactive(
 
                     state.current_turn += 1
 
-                    if state.current_turn == max_turns:
+                    if not goal_mode and state.current_turn == max_turns:
                         summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                         state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
                         current_tools = state.tools
                         current_tool_choice = "none"
                     else:
                         current_tools = state.tools
-                        current_tool_choice = "auto"
+                        current_tool_choice = "required" if goal_mode else "auto"
 
                     response_id = str(uuid.uuid4())
                     generation_result = await generate_interactive_turn(

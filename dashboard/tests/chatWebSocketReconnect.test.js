@@ -137,6 +137,59 @@ class FakeWebSocket {
   }
 }
 
+test('wsSend forwards session settings for new sessions and keeps repeated payloads stable', async () => {
+  const { manager, sent } = createTransportManager()
+  const transport = loadUseChatTransport({ manager })()
+
+  for (const goalMode of [true, false]) {
+    for (const maxTurns of [1, 21, 1000000]) {
+      assert.equal(await transport.wsSend({
+        message: 'new session',
+        goalMode,
+        maxTurns
+      }), true)
+
+      const data = sent.at(-1)
+      assert.equal(Object.hasOwn(data, 'goal_mode'), true)
+      assert.equal(data.goal_mode, goalMode)
+      assert.equal(Object.hasOwn(data, 'max_turns'), true)
+      assert.equal(data.max_turns, maxTurns)
+    }
+  }
+
+  const repeatedOptions = {
+    message: 'repeated session settings',
+    goalMode: true,
+    maxTurns: 21
+  }
+  await transport.wsSend(repeatedOptions)
+  const firstRepeatedPayload = sent.at(-1)
+  await transport.wsSend(repeatedOptions)
+  assert.deepEqual(sent.at(-1), firstRepeatedPayload)
+
+  await transport.wsSend({ message: 'default session settings' })
+  const defaultPayload = sent.at(-1)
+  assert.equal(Object.hasOwn(defaultPayload, 'goal_mode'), false)
+  assert.equal(Object.hasOwn(defaultPayload, 'max_turns'), false)
+})
+
+test('wsSend does not override settings for an existing session', async () => {
+  const { manager, sent } = createTransportManager()
+  const transport = loadUseChatTransport({ manager })()
+
+  assert.equal(await transport.wsSend({
+    message: 'existing session',
+    sessionId: 'existing-session',
+    goalMode: false,
+    maxTurns: 1000000
+  }), true)
+
+  const data = sent.at(-1)
+  assert.equal(data.session_id, 'existing-session')
+  assert.equal(Object.hasOwn(data, 'goal_mode'), false)
+  assert.equal(Object.hasOwn(data, 'max_turns'), false)
+})
+
 test('initial connection does not notify connection_reopened', async () => {
   const sockets = []
   const timers = []

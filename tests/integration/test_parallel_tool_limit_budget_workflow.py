@@ -157,6 +157,7 @@ def _build_interactive_state(
         context_summary_work_validity_checker=None,
         expose_tool_call_content=True,
         show_tool_calls=True,
+        goal_mode=False,
         dispatcher_mode="non_stream",
         request_metadata_callback=None,
         stream_event_callback=None,

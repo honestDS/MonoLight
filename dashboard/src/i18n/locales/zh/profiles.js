@@ -185,7 +185,6 @@ export default {
   background_task_max_concurrency_hint: '该配置同时运行的后台任务上限。不同配置分别计算并发数量。',
   scheduled_task_max_concurrency: '计划任务并发数',
   scheduled_task_max_concurrency_hint: '该配置同时生成计划任务回复的上限。不同配置分别计算并发数量；同一会话仍会依次处理。',
-  max_turns: '最大连续轮数',
   tool_visibility_config: '工具暴露配置',
   enabled_tools: '启用工具',
   enabled_tools_placeholder: '请选择允许模型调用的工具',

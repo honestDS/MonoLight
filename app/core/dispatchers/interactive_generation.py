@@ -16,6 +16,8 @@ from app.core.dispatchers.interactive_state import InteractiveDispatchState
 from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra
+from app.core.prompts import GOAL_MODE_SYSTEM_PROMPT
+from app.core.tools.end_session import END_SESSION_TOOL_NAME, extract_end_session_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.helpers import (
@@ -39,7 +41,7 @@ from app.core.utils.request_token_baseline import (
 )
 from app.core.utils.time import get_local_time
 from app.models.channel import resolve_model_protocol
-from app.models.message import InternalMessage
+from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import LLMClient
 
 from .interactive_helpers import (
@@ -86,6 +88,11 @@ async def generate_interactive_turn(
         expose_tool_call_content=state.expose_tool_call_content,
         show_tool_calls=state.show_tool_calls,
     )
+    goal_mode = state.goal_mode is True
+    state.messages = [message for message in state.messages if not (message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_SYSTEM_PROMPT)]
+    if goal_mode:
+        system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
+        state.messages.insert(system_prompt_index, InternalMessage(role=MessageRole.SYSTEM, content=GOAL_MODE_SYSTEM_PROMPT))
 
     while True:
         stream_state.emitted_stream_content = False
@@ -228,6 +235,24 @@ async def generate_interactive_turn(
             response_provider_metadata = getattr(response, "provider_metadata", None)
             ai_refusal = getattr(ai_msg, "refusal", None)
             ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
+            end_session_tool_enabled = goal_mode and tool_choice != "none" and any(isinstance(tool, dict) and tool.get("function", {}).get("name") == END_SESSION_TOOL_NAME for tool in current_tools or [])
+            if end_session_tool_enabled:
+                end_session_summary = extract_end_session_summary(ai_msg)
+                if end_session_summary is not None:
+                    ai_msg = ai_msg.model_copy(
+                        update={
+                            "content": end_session_summary,
+                            "tool_calls": None,
+                            "tool_call_id": None,
+                            "refusal": None,
+                        },
+                        deep=True,
+                    )
+                    response_finish_reason = "stop"
+                    response_finish_details = None
+                    ai_refusal = None
+                    stream_state.buffered_content_chunks.clear()
+                    stream_state.emitted_stream_content = False
             provider_token_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
             provider_request_usage_metadata = build_provider_request_usage_metadata(provider_request_id, provider_token_metrics)
             state.checkpoint_state.session_total_input_tokens, state.checkpoint_state.session_total_cached_tokens = accumulate_session_cache_metrics(

@@ -169,7 +169,12 @@ async def handle_interactive_tool_round(
         ai_msg.tool_calls,
         state.cfg.tool.max_parallel_tools,
     )
-    precheck_errors = prevalidate_tool_round(executable_tool_calls, state.cfg, tool_schemas=state.tools)
+    precheck_errors = prevalidate_tool_round(
+        executable_tool_calls,
+        state.cfg,
+        tool_schemas=state.tools,
+        goal_mode=state.goal_mode,
+    )
     if precheck_errors:
         rejected_tool_results_by_id = {tool_result.tool_call_id: tool_result for tool_result in rejected_tool_results}
         stored_tool_results: list[InternalMessage] = []

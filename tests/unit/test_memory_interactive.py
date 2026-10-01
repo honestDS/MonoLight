@@ -19,6 +19,9 @@ from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
 class _Session:
+    async def refresh(self, session):
+        return None
+
     async def commit(self):
         return None
 
@@ -108,13 +111,16 @@ def _install_dispatcher_stubs(
     async def get_profile(db, profile_id):
         return profile
 
+    async def get_session(db, session_id):
+        return SimpleNamespace(goal_mode=False, max_turns=cfg.tool.max_turns)
+
     async def validate_profile(db, current_profile):
         return cfg
 
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         return channel, {"model_id": "chat-model", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile):
+    async def get_tools(db, current_profile, *, goal_mode=False):
         if expose_memory_tool:
             return [copy.deepcopy(MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA)], []
         return [], []
@@ -179,6 +185,7 @@ def _install_dispatcher_stubs(
 
     monkeypatch.setattr(interactive_runtime_module.user_crud, "get_by_uid", get_user)
     monkeypatch.setattr(interactive_runtime_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(interactive_runtime_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(interactive_runtime_module, "validate_profile_and_cfg", validate_profile)
     monkeypatch.setattr(interactive_runtime_module, "select_channel", select_channel)
     monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)
