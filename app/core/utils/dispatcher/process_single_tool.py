@@ -29,6 +29,7 @@ from app.core.log import (
     LogManager,
     get_logger,
 )
+from app.core.paths import get_user_temp_dir
 from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.terminal.schemas import ShellInteractiveHandoffResult
 from app.core.tools import (
@@ -571,7 +572,8 @@ async def process_single_tool(
     else:
         tool_result_round_budget_tokens = max(1, tool_result_round_budget_tokens)
     tool_result_budget_tokens = max(1, tool_result_round_budget_tokens // max(1, tool_call_count))
-    truncation_stats = truncate_tool_messages_for_budget(
+    truncation_stats = await asyncio.to_thread(
+        truncate_tool_messages_for_budget,
         tool_msgs=[tool_msg],
         context_window_k=context_window_k,
         budget_tokens=tool_result_budget_tokens,
@@ -579,6 +581,7 @@ async def process_single_tool(
         session_id=session_id,
         model_id=model_id,
         protocol=protocol,
+        spill_dir=get_user_temp_dir(os.getcwd(), uid) / "tool_results",
     )
     if truncation_stats.truncated_count:
         get_logger("dispatcher").bind(
@@ -587,12 +590,13 @@ async def process_single_tool(
             tool_name=tool_name,
         ).warning(t("LOG_TOOL_RESULT_TRUNCATED", tool_name=tool_name, context_window_k=context_window_k))
 
+    processed_result = tool_msg.content or ""
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
-        log_result = _serialize_longterm_memory_log_result(cmd_result)
+        log_result = _serialize_longterm_memory_log_result(processed_result)
     elif tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
-        log_result = _serialize_knowledge_base_query_log_result(cmd_result)
+        log_result = _serialize_knowledge_base_query_log_result(processed_result)
     else:
-        log_result = cmd_result
+        log_result = processed_result
     LogManager.log_tool_result(turn, log_result, session_id, uid)
 
     return tool_msg
