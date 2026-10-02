@@ -24,7 +24,6 @@ from app.core.dispatchers.interactive_state import InteractiveDispatchState
 from app.core.exceptions import ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.utils.background_task_result import serialize_execution_summary
-from app.core.utils.context_messages import message_token_text
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import dump_output_history, extract_files_to_user
@@ -41,7 +40,6 @@ from app.core.utils.dispatcher.session_todo_snapshot import (
     persist_session_todo_snapshot_on_tool_results,
 )
 from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
-from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
@@ -75,9 +73,10 @@ def _resolve_tool_result_required_input_tokens(
     if isinstance(metadata, dict) and metadata.get("input_tokens_source") == "provider":
         input_tokens = metadata.get("input_tokens")
         if isinstance(input_tokens, int) and not isinstance(input_tokens, bool) and input_tokens > 0:
-            incremental_tokens = estimate_tokens(
-                message_token_text(ai_msg),
+            incremental_tokens = LLMClient.estimate_request_input_tokens_locally(
                 model_id=model_id,
+                messages=[ai_msg],
+                tools=None,
                 protocol=protocol,
             )
             return input_tokens + max(0, incremental_tokens)

@@ -5,8 +5,11 @@ import pytest
 
 from app.core.constants import TOOL_RESULT_COMPACT_TRUNCATION_NOTICE, TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE
 from app.core.dispatchers import interactive_tools as interactive_tools_module
+from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
+from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.core.utils.dispatcher import truncate_tool_result as truncate_tool_result_module
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.profile import Profile, ProfileConfig
 
 
 def test_tool_result_round_budget_uses_half_of_remaining_request_input(monkeypatch):
@@ -136,8 +139,17 @@ def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(mon
             )
         ],
     )
-    monkeypatch.setattr(interactive_tools_module, "message_token_text", lambda _message: "tool-call")
-    monkeypatch.setattr(interactive_tools_module, "estimate_tokens", lambda _text, **_kwargs: 5_000)
+    captured = {}
+
+    def estimate_request_input_tokens_locally(**kwargs):
+        captured.update(kwargs)
+        return 5_000
+
+    monkeypatch.setattr(
+        interactive_tools_module.LLMClient,
+        "estimate_request_input_tokens_locally",
+        estimate_request_input_tokens_locally,
+    )
 
     required_input_tokens = interactive_tools_module._resolve_tool_result_required_input_tokens(
         state,
@@ -145,6 +157,209 @@ def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(mon
     )
 
     assert required_input_tokens == 190_765
+    assert captured == {
+        "model_id": "gpt-5.6-luna",
+        "messages": [ai_msg],
+        "tools": None,
+        "protocol": "openai",
+    }
+
+
+@pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
+def test_provider_tool_budget_ignores_large_image_metadata_and_keeps_todo_result(protocol):
+    model_id = "gpt-5.6-luna"
+    resolved_protocol = protocol.lower()
+    image_result = "YQ==" * 200_000
+    encrypted_content = "encrypted-reasoning"
+
+    def build_ai_message(*, include_image=True, include_reasoning=True):
+        provider_metadata = None
+        if protocol == "OPENAI_RESPONSES":
+            output = []
+            if include_reasoning:
+                output.append(
+                    {
+                        "type": "reasoning",
+                        "id": "rs_1",
+                        "encrypted_content": encrypted_content,
+                        "summary": [],
+                    }
+                )
+            if include_image:
+                output.append(
+                    {
+                        "type": "image_generation_call",
+                        "id": "ig_1",
+                        "result": image_result,
+                    }
+                )
+            provider_metadata = {
+                "protocol": "openai_responses",
+                "output": output,
+            }
+        elif include_image:
+            provider_metadata = {
+                "image_generation_call": {
+                    "result": image_result,
+                }
+            }
+
+        return InternalMessage(
+            role=MessageRole.ASSISTANT,
+            provider_metadata=provider_metadata,
+            tool_calls=[
+                InternalToolCall(
+                    id="call-todo",
+                    name="manage_todo",
+                    arguments={
+                        "operation": "write",
+                        "todos": [{"content": "keep plan", "status": "pending"}],
+                        "expected_revision": 0,
+                    },
+                )
+            ],
+        )
+
+    state = SimpleNamespace(
+        latest_llm_request_metadata={
+            "input_tokens": 408_566,
+            "input_tokens_source": "provider",
+        },
+        model_entry={"model_id": model_id, "protocol": protocol},
+    )
+    ai_msg_without_image = build_ai_message(include_image=False)
+    ai_msg_with_image = build_ai_message()
+
+    required_without_image = interactive_tools_module._resolve_tool_result_required_input_tokens(
+        state,
+        ai_msg_without_image,
+    )
+    required_with_image = interactive_tools_module._resolve_tool_result_required_input_tokens(
+        state,
+        ai_msg_with_image,
+    )
+
+    assert required_without_image > 408_566
+    assert required_with_image == required_without_image
+
+    budget_without_image = truncate_tool_result_module.calculate_tool_result_round_budget_tokens(
+        messages=[],
+        context_window_k=700,
+        max_tokens=20_480,
+        tools=[],
+        required_input_tokens_override=required_without_image,
+        model_id=model_id,
+        protocol=resolved_protocol,
+    )
+    budget_with_image = truncate_tool_result_module.calculate_tool_result_round_budget_tokens(
+        messages=[],
+        context_window_k=700,
+        max_tokens=20_480,
+        tools=[],
+        required_input_tokens_override=required_with_image,
+        model_id=model_id,
+        protocol=resolved_protocol,
+    )
+
+    assert budget_with_image == budget_without_image
+    assert budget_with_image > 0
+
+    todo_content = json.dumps(
+        {
+            "status": "success",
+            "operation": "write",
+            "revision": 1,
+            "todos": [{"content": "keep plan", "status": "pending"}],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    todo_result = truncate_tool_result_module.truncate_tool_result_with_stats(
+        todo_content,
+        context_window_k=700,
+        limit_tokens=budget_with_image,
+        model_id=model_id,
+        protocol=resolved_protocol,
+    )
+
+    assert todo_result.truncated is False
+    assert todo_result.content == todo_content
+    assert json.loads(todo_result.content)["todos"]
+    assert todo_result.content != "{}"
+
+    if protocol == "OPENAI_RESPONSES":
+        provider_input = interactive_tools_module.LLMClient.estimate_request_input_tokens_locally(
+            model_id=model_id,
+            messages=[ai_msg_with_image],
+            tools=None,
+            protocol=resolved_protocol,
+        )
+        provider_input_without_reasoning = interactive_tools_module.LLMClient.estimate_request_input_tokens_locally(
+            model_id=model_id,
+            messages=[build_ai_message(include_image=True, include_reasoning=False)],
+            tools=None,
+            protocol=resolved_protocol,
+        )
+        assert provider_input > provider_input_without_reasoning
+        assert ai_msg_with_image.provider_metadata["output"][1]["result"] == image_result
+        assert ai_msg_with_image.provider_metadata["output"][0]["encrypted_content"] == encrypted_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["zh", "en"])
+async def test_process_single_tool_truncation_log_uses_localized_per_tool_budget(monkeypatch, tmp_path, locale):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": []}})
+    profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
+    tool_call = SimpleNamespace(
+        id="call-disabled",
+        name="execute_shell",
+        arguments={"command": "echo disabled", "execution_mode": "non_interactive"},
+    )
+    warnings = []
+
+    class CapturingLogger:
+        def bind(self, **_kwargs):
+            return self
+
+        def warning(self, message):
+            warnings.append(message)
+
+    logger = CapturingLogger()
+    monkeypatch.setattr(process_single_tool_module, "get_logger", lambda _name: logger)
+    monkeypatch.setattr(process_single_tool_module, "get_user_temp_dir", lambda _root, _uid: tmp_path)
+
+    locale_token = set_current_log_locale(locale)
+    try:
+        await process_single_tool_module.process_single_tool(
+            tool_call,
+            db=SimpleNamespace(),
+            profile=profile,
+            cfg=cfg,
+            messages=[],
+            username="user",
+            session_id="session-1",
+            turn=1,
+            uid="user-1",
+            context_window_k=700,
+            tool_call_count=4,
+            tool_result_round_budget_tokens=80,
+        )
+    finally:
+        reset_current_log_locale(locale_token)
+
+    assert len(warnings) == 1
+    warning = warnings[0]
+    if locale == "zh":
+        assert "单工具预算 20 tokens" in warning
+    else:
+        assert "per-tool budget=20 tokens" in warning
+    assert "context_window_k=700" in warning
+    assert "execute_shell" in warning
+    assert "half" not in warning.lower()
+    assert "一半" not in warning
+    assert "{tool_name}" not in warning
+    assert "{budget_tokens}" not in warning
+    assert "{context_window_k}" not in warning
 
 
 def test_interactive_tool_budget_uses_provider_payload_local_fallback_without_provider_usage(monkeypatch):

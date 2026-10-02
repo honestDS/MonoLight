@@ -591,7 +591,14 @@ async def process_single_tool(
             uid=uid,
             session_id=session_id,
             tool_name=tool_name,
-        ).warning(t("LOG_TOOL_RESULT_TRUNCATED", tool_name=tool_name, context_window_k=context_window_k))
+        ).warning(
+            t(
+                "LOG_TOOL_RESULT_TRUNCATED",
+                tool_name=tool_name,
+                context_window_k=context_window_k,
+                budget_tokens=tool_result_budget_tokens,
+            )
+        )
 
     processed_result = tool_msg.content or ""
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
