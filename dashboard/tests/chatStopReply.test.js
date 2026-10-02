@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import * as Vue from 'vue'
 import { createContextSummaryTracker } from '../src/composables/chat/contextSummaryTracker.js'
+import { shouldFetchHttpWorkStatus } from '../src/composables/chat/sessionListLoading.js'
 import { createWorkLifecycleTracker } from '../src/composables/chat/workLifecycleTracker.js'
 
 const useChatSessionPath = new URL('../src/composables/chat/useChatSession.js', import.meta.url)
@@ -77,6 +78,12 @@ const loadImplementation = () => {
       'const applyHttpWorkStatus = (work, statusData, sessionId) => {',
       'const fetchHttpWorkStatus = async (work, sessionId) => {',
       'HTTP work status application'
+    ),
+    processHttpSessionSnapshotSource: extractBetween(
+      source,
+      'const processHttpSessionSnapshot = async (sessions) => {',
+      'const handleSessionsUpdated = sessions => {',
+      'HTTP session snapshot processing'
     )
   }))
   return implementationPromise
@@ -95,6 +102,9 @@ const createDeferred = () => {
 const createHarness = (implementation, options = {}) => {
   const sessions = Vue.ref(options.sessions || [])
   const currentSessionId = Vue.ref(options.currentSessionId ?? null)
+  const transport = {
+    transportMode: Vue.ref(options.transportMode ?? 'http')
+  }
   const sessionManager = {
     sessions,
     currentSessionId,
@@ -118,6 +128,7 @@ const createHarness = (implementation, options = {}) => {
   const contextSummaryRequestKeys = new Map()
   const contextSummaryTracker = createContextSummaryTracker()
   const workLifecycleTracker = createWorkLifecycleTracker()
+  const initialHistoryLoaded = Vue.ref(options.initialHistoryLoaded ?? true)
   const pendingHttpRequests = new Map(options.pendingHttpRequests || [])
   const inFlightSubmissions = new Set()
   const stoppingSessionIds = Vue.ref(new Set())
@@ -127,6 +138,8 @@ const createHarness = (implementation, options = {}) => {
   const resolvedHttpWorks = new Set()
   const refreshCalls = []
   const historyMergeCalls = []
+  const maybeMergeHttpSessionHistory = () => undefined
+  const hasPendingHttpRequestForWork = () => false
   const errors = []
   const streamErrors = []
   const stopCalls = []
@@ -255,6 +268,41 @@ const createHarness = (implementation, options = {}) => {
     finishHttpWorkLifecycle,
     resolvedHttpWorks
   )
+  const fetchHttpWorkStatus = async () => null
+  const processHttpSessionSnapshot = new Function(
+    'transport',
+    'sessionManager',
+    'isCurrentSessionReadOnly',
+    'normalizeHttpIdentity',
+    'maybeMergeHttpSessionHistory',
+    'observedHttpWorkStatuses',
+    'hasPendingHttpRequestForWork',
+    'initialHistoryLoaded',
+    'shouldFetchHttpWorkStatus',
+    'resolvedHttpWorks',
+    'fetchingHttpWorks',
+    'fetchHttpWorkStatus',
+    'isCurrentWritableHttpSession',
+    'mergeLatestSessionHistory',
+    'chatState',
+    `${implementation.processHttpSessionSnapshotSource}\nreturn processHttpSessionSnapshot`
+  )(
+    transport,
+    sessionManager,
+    isCurrentSessionReadOnly,
+    normalizeHttpIdentity,
+    maybeMergeHttpSessionHistory,
+    observedHttpWorkStatuses,
+    hasPendingHttpRequestForWork,
+    initialHistoryLoaded,
+    shouldFetchHttpWorkStatus,
+    resolvedHttpWorks,
+    fetchingHttpWorks,
+    fetchHttpWorkStatus,
+    isCurrentWritableHttpSession,
+    mergeLatestSessionHistory,
+    chatState
+  )
   const stopReply = new Function(
     'sessionManager',
     'isCurrentSessionReadOnly',
@@ -310,6 +358,7 @@ const createHarness = (implementation, options = {}) => {
     isCurrentSessionReadOnly,
     isReplyRunning,
     applyHttpWorkStatus,
+    processHttpSessionSnapshot,
     messageProcessorErrors: streamErrors,
     pendingHttpRequests,
     resolvedHttpWorks,
@@ -338,6 +387,7 @@ test('stopReply clears active lifecycle state, preserves history and prevents la
     session_id: 'A',
     source: 'http',
     is_loading: true,
+    is_reply_running: true,
     reply_works: [
       { work_id: 'work-A', status: 'running', request_ids: ['request-A'] }
     ]
@@ -370,7 +420,8 @@ test('stopReply clears active lifecycle state, preserves history and prevents la
   assert.equal(await harness.stopReply(), true)
   assert.deepEqual(harness.stopCalls, ['A'])
   assert.equal(harness.chatState.loading.value, false)
-  assert.equal(session.is_loading, false)
+  assert.equal(session.is_loading, true)
+  assert.equal(session.is_reply_running, false)
   assert.equal(harness.chatState.inputMsg.value, 'draft prompt')
   assert.deepEqual(harness.attachments.value, [{ path: 'draft.txt' }])
   assert.equal(
@@ -399,7 +450,7 @@ test('stopReply sends only one stop without in-flight submissions and blocks rep
   const implementation = await loadImplementation()
   const stopDeferred = createDeferred()
   const harness = createHarness(implementation, {
-    sessions: [{ session_id: 'A', source: 'http', is_loading: true }],
+    sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
     currentSessionId: 'A',
     loading: true
   })
@@ -422,7 +473,7 @@ test('stopReply waits for same-session submissions before a second stop, includi
     const stopDeferreds = []
     const secondStopCalled = createDeferred()
     const harness = createHarness(implementation, {
-      sessions: [{ session_id: 'A', source: 'http', is_loading: true }],
+      sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
       currentSessionId: 'A',
       loading: true
     })
@@ -467,8 +518,8 @@ test('stopReply ignores in-flight submissions belonging to another session', asy
   const submissionDeferred = createDeferred()
   const harness = createHarness(implementation, {
     sessions: [
-      { session_id: 'A', source: 'http', is_loading: true },
-      { session_id: 'B', source: 'http', is_loading: true }
+      { session_id: 'A', source: 'http', is_loading: true, is_reply_running: true },
+      { session_id: 'B', source: 'http', is_loading: true, is_reply_running: true }
     ],
     currentSessionId: 'A',
     loading: true
@@ -496,7 +547,7 @@ test('stopReply preserves loading, messages and draft when the stop request fail
     { id: 'thinking', role: 'thinking', request_ids: ['request-A'] }
   ]
   const harness = createHarness(implementation, {
-    sessions: [{ session_id: 'A', source: 'http', is_loading: true }],
+    sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
     currentSessionId: 'A',
     loading: true,
     inputMsg: 'keep this draft',
@@ -522,7 +573,7 @@ test('stopReply does not send a stop for read-only, missing or idle sessions', a
   const implementation = await loadImplementation()
   const cases = [
     {
-      sessions: [{ session_id: 'read-only', source: 'external', is_loading: true }],
+      sessions: [{ session_id: 'read-only', source: 'external', is_loading: true, is_reply_running: false }],
       currentSessionId: 'read-only',
       loading: true
     },
@@ -532,7 +583,7 @@ test('stopReply does not send a stop for read-only, missing or idle sessions', a
       loading: true
     },
     {
-      sessions: [{ session_id: 'idle', source: 'http', is_loading: false }],
+      sessions: [{ session_id: 'idle', source: 'http', is_loading: false, is_reply_running: false }],
       currentSessionId: 'idle',
       loading: false
     }
@@ -545,11 +596,130 @@ test('stopReply does not send a stop for read-only, missing or idle sessions', a
   }
 })
 
+test('stopReply ignores aggregate-only busy sessions for HTTP and WS', async () => {
+  const implementation = await loadImplementation()
+
+  for (const source of ['http', 'ws']) {
+    const session = {
+      session_id: 'A',
+      source,
+      is_loading: true,
+      is_reply_running: false,
+      reply_works: []
+    }
+    const harness = createHarness(implementation, {
+      sessions: [session],
+      currentSessionId: 'A',
+      transportMode: source,
+      inputMsg: 'keep this draft',
+      attachments: [{ path: 'keep-me.txt' }]
+    })
+
+    assert.equal(harness.isReplyRunning.value, false)
+    assert.equal(await harness.stopReply(), false)
+    assert.equal(await harness.stopReply(), false)
+    assert.deepEqual(harness.stopCalls, [])
+    assert.equal(harness.chatState.inputMsg.value, 'keep this draft')
+    assert.deepEqual(harness.attachments.value, [{ path: 'keep-me.txt' }])
+    assert.equal(session.is_loading, true)
+    assert.equal(session.is_reply_running, false)
+  }
+})
+
+test('processHttpSessionSnapshot clears stale local loading for an aggregate-only session', async () => {
+  const implementation = await loadImplementation()
+  const session = {
+    session_id: 'A',
+    source: 'http',
+    is_loading: true,
+    is_reply_running: false,
+    reply_works: []
+  }
+  const harness = createHarness(implementation, {
+    sessions: [session],
+    currentSessionId: 'A',
+    loading: true,
+    inputMsg: 'keep this draft'
+  })
+
+  assert.equal(harness.isReplyRunning.value, true)
+  await harness.processHttpSessionSnapshot([session])
+  assert.equal(harness.chatState.loading.value, false)
+  assert.equal(harness.isReplyRunning.value, false)
+  assert.equal(session.is_loading, true)
+  assert.equal(session.is_reply_running, false)
+
+  await harness.processHttpSessionSnapshot([session])
+  assert.equal(harness.chatState.loading.value, false)
+  assert.equal(harness.isReplyRunning.value, false)
+  assert.equal(await harness.stopReply(), false)
+  assert.equal(await harness.stopReply(), false)
+  assert.deepEqual(harness.stopCalls, [])
+  assert.equal(harness.chatState.inputMsg.value, 'keep this draft')
+  assert.equal(session.is_loading, true)
+})
+
+test('stopReply clears only remote reply state when aggregate work remains for HTTP and WS', async () => {
+  const implementation = await loadImplementation()
+
+  for (const source of ['http', 'ws']) {
+    const session = {
+      session_id: 'A',
+      source,
+      is_loading: true,
+      is_reply_running: true,
+      reply_works: []
+    }
+    const harness = createHarness(implementation, {
+      sessions: [session],
+      currentSessionId: 'A',
+      transportMode: source,
+      inputMsg: 'keep this draft'
+    })
+
+    assert.equal(harness.isReplyRunning.value, true)
+    assert.equal(await harness.stopReply(), true)
+    assert.deepEqual(harness.stopCalls, ['A'])
+    assert.equal(harness.chatState.loading.value, false)
+    assert.equal(session.is_reply_running, false)
+    assert.equal(session.is_loading, true)
+    assert.equal(harness.isReplyRunning.value, false)
+    assert.equal(await harness.stopReply(), false)
+    assert.deepEqual(harness.stopCalls, ['A'])
+    assert.equal(session.is_loading, true)
+  }
+})
+
+test('stopReply uses local loading before remote reply confirmation', async () => {
+  const implementation = await loadImplementation()
+  const session = {
+    session_id: 'A',
+    source: 'http',
+    is_loading: false,
+    is_reply_running: false,
+    reply_works: []
+  }
+  const harness = createHarness(implementation, {
+    sessions: [session],
+    currentSessionId: 'A',
+    loading: true,
+    inputMsg: 'keep this draft'
+  })
+
+  assert.equal(harness.isReplyRunning.value, true)
+  assert.equal(await harness.stopReply(), true)
+  assert.deepEqual(harness.stopCalls, ['A'])
+  assert.equal(harness.chatState.loading.value, false)
+  assert.equal(session.is_loading, false)
+  assert.equal(session.is_reply_running, false)
+  assert.equal(harness.chatState.inputMsg.value, 'keep this draft')
+})
+
 test('stopReply isolates a completed stop for A after switching to B and allows B to stop independently', async () => {
   const implementation = await loadImplementation()
   const stopA = createDeferred()
-  const sessionA = { session_id: 'A', source: 'http', is_loading: true }
-  const sessionB = { session_id: 'B', source: 'http', is_loading: true }
+  const sessionA = { session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }
+  const sessionB = { session_id: 'B', source: 'http', is_loading: true, is_reply_running: true }
   const harness = createHarness(implementation, {
     sessions: [sessionA, sessionB],
     currentSessionId: 'A',
@@ -584,13 +754,14 @@ test('stopReply isolates a completed stop for A after switching to B and allows 
   assert.equal(await harness.stopReply(), true)
   assert.deepEqual(harness.stopCalls, ['A', 'B'])
   assert.equal(harness.chatState.loading.value, false)
-  assert.equal(sessionB.is_loading, false)
+  assert.equal(sessionB.is_loading, true)
+  assert.equal(sessionB.is_reply_running, false)
 })
 
 test('stopReply terminates compression tracked only by a work key', async () => {
   const implementation = await loadImplementation()
   const harness = createHarness(implementation, {
-    sessions: [{ session_id: 'A', source: 'http', is_loading: true }],
+    sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
     currentSessionId: 'A',
     loading: true,
     messages: [
@@ -620,7 +791,7 @@ test('stopReply terminates compression tracked only by a work key', async () => 
 test('stopReply clears residual no-work thinking after a cancelled lifecycle was already terminal', async () => {
   const implementation = await loadImplementation()
   const harness = createHarness(implementation, {
-    sessions: [{ session_id: 'A', source: 'http', is_loading: true }],
+    sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
     currentSessionId: 'A',
     loading: true,
     messages: [

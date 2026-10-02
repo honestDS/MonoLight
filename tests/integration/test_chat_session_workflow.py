@@ -32,6 +32,7 @@ from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
+    SESSION_REPLY_ACTIVE_STATUSES,
     SessionReplySequence,
     SessionReplySourceType,
     SessionReplyWorkItem,
@@ -1499,3 +1500,89 @@ async def test_background_task_pending_activity_is_not_limited_by_task_history_p
             params={"session_id": session.session_id},
         )
         assert completed.json()["data"] == {"has_pending_activity": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["http", "ws"])
+@pytest.mark.parametrize("work_type", list(SessionReplyWorkType))
+@pytest.mark.parametrize("status", list(SessionReplyWorkStatus))
+async def test_session_list_loading_and_reply_running_follow_work_type_and_status(
+    chat_session_database: AsyncSession,
+    source: str,
+    work_type: SessionReplyWorkType,
+    status: SessionReplyWorkStatus,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    source_type_by_work_type = {
+        SessionReplyWorkType.FOREGROUND_REPLY: SessionReplySourceType.USER_MESSAGE,
+        SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION: SessionReplySourceType.AUDIT_RECORD,
+        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY: SessionReplySourceType.BACKGROUND_TASK,
+        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY: SessionReplySourceType.SCHEDULED_TASK_RUN,
+    }
+    interactive_work_types = {
+        SessionReplyWorkType.FOREGROUND_REPLY,
+        SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+    }
+    session_id = f"session-list-state-{source}-{work_type.value}-{status.value}"
+    work = SessionReplyWorkItem(
+        uid="user-1",
+        session_id=session_id,
+        profile_id=primary_profile.id,
+        sequence_no=1,
+        work_type=work_type,
+        source_type=source_type_by_work_type[work_type],
+        source_id="source-1",
+        dedupe_key=f"{session_id}-work",
+        status=status,
+        execution_state={"message_source": source, "request_ids": [f"{session_id}-request"]},
+    )
+    chat_session_database.add_all(
+        [
+            ChatSession(
+                session_id=session_id,
+                uid="user-1",
+                profile_id=primary_profile.id,
+                source=source,
+                reply_target_source=source,
+            ),
+            work,
+        ]
+    )
+    await chat_session_database.commit()
+
+    is_active = status in SESSION_REPLY_ACTIVE_STATUSES
+    is_interactive = work_type in interactive_work_types
+    should_cancel = is_active and is_interactive
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        listed = await client.get("/api/v1/chat/sessions/list")
+        assert listed.status_code == 200
+        listed_session = next(item for item in listed.json()["data"] if item["session_id"] == session_id)
+        assert listed_session["is_loading"] is is_active
+        assert listed_session["is_reply_running"] is (is_active and is_interactive)
+
+        stopped = await client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": session_id},
+        )
+        assert stopped.status_code == 200
+        assert stopped.json()["code"] == 200
+        assert stopped.json()["data"] == {
+            "session_id": session_id,
+            "cancelled_count": int(should_cancel),
+        }
+
+        await chat_session_database.refresh(work)
+        assert work.status == (SessionReplyWorkStatus.CANCELLED if should_cancel else status)
+
+        listed_after_stop = await client.get("/api/v1/chat/sessions/list")
+        assert listed_after_stop.status_code == 200
+        listed_session_after_stop = next(item for item in listed_after_stop.json()["data"] if item["session_id"] == session_id)
+        assert listed_session_after_stop["is_reply_running"] is False
+        assert listed_session_after_stop["is_loading"] is (is_active and not should_cancel)

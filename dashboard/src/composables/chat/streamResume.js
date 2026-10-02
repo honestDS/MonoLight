@@ -34,7 +34,7 @@ export const shouldResumeSessionStream = ({ session, transportMode }) => {
 }
 
 export const getInitialResumeLoading = ({ session, transportMode }) =>
-  shouldResumeSessionStream({ session, transportMode }) && session?.is_loading === true
+  shouldResumeSessionStream({ session, transportMode }) && session?.is_reply_running === true
 
 export const getHistoryMessageCursor = messages => {
   if (!Array.isArray(messages)) return 0
@@ -60,7 +60,7 @@ export const resumeSessionStream = async ({
     return
   }
 
-  if (session?.is_loading || latestSession?.is_loading) setLoading(true)
+  if (session?.is_reply_running || latestSession?.is_reply_running) setLoading(true)
   let resumed = false
   try {
     resumed = await resume()
