@@ -155,7 +155,7 @@ MESSAGES = {
     "LOG_TOOL_ABORTED": "Tool {tool_name} aborted after {duration}",
     "LOG_TOOL_CALL": "Turn {turn} | Tool: {tool_name} | Args: {args}",
     "LOG_TOOL_RESULT": "Turn {turn} | Result: {result}",
-    "LOG_TOOL_RESULT_TRUNCATED": "Tool {tool_name} response is too large and was truncated to half of context limit (context_window_k={context_window_k})",
+    "LOG_TOOL_RESULT_TRUNCATED": "Tool {tool_name} response was truncated to fit the current available budget (per-tool budget={budget_tokens} tokens, context_window_k={context_window_k})",
     "LOG_WS_ACTIVE_STREAM_MESSAGE_SUBMITTED": "Session {session_id} already has an active stream subscription; the new message was submitted to the persistent reply queue for dynamic append.",
     "MSG_LOG_MESSAGE_TRUNCATED": "...[Log truncated, original length {original_length} chars]",
 }

@@ -16,6 +16,7 @@ import app.core.dispatchers.interactive_tools as interactive_tools
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.tools.file_tool import FILE_TOOL_SCHEMA
+from app.core.tools.todo import MANAGE_TODO_TOOL_NAME, MANAGE_TODO_TOOL_SCHEMA
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
@@ -296,6 +297,99 @@ async def test_interactive_parallel_tool_limit_budget_uses_executable_call_count
     assert sum(row.model_context_suffix is not None for row in rows) == 1
     tool_results = _read_tool_results(rows, tool_calls)
     _assert_tool_result_budget(tool_results)
+
+
+@pytest.mark.asyncio
+async def test_interactive_tool_round_budget_ignores_openai_responses_image_output(
+    parallel_tool_limit_budget_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = _profile_config(tmp_path)
+    todos = [{"content": "complete regression step", "status": "completed"}]
+    assistant_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        provider_metadata={
+            "protocol": "openai_responses",
+            "output": [
+                {"type": "reasoning", "encrypted_content": "encrypted reasoning"},
+                {"type": "image_generation_call", "result": "YQ==" * 200000},
+            ],
+        },
+        tool_calls=[
+            InternalToolCall(
+                id="manage-todo-call",
+                name=MANAGE_TODO_TOOL_NAME,
+                arguments={
+                    "operation": "write",
+                    "expected_revision": 0,
+                    "todos": todos,
+                },
+            )
+        ],
+    )
+    profile, saved_assistant_message = await _persist_profile_and_session(
+        parallel_tool_limit_budget_session_factory,
+        cfg,
+        assistant_message,
+    )
+
+    monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", parallel_tool_limit_budget_session_factory)
+
+    async def audit_tool_round(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(interactive_tools, "audit_tool_round", audit_tool_round)
+
+    async with parallel_tool_limit_budget_session_factory() as db:
+        state = _build_interactive_state(db, profile, cfg, assistant_message)
+        state.model_entry = {"model_id": "gpt-5.6-luna", "protocol": "OPENAI_RESPONSES"}
+        state.latest_llm_request_metadata = {
+            "input_tokens": 408566,
+            "input_tokens_source": "provider",
+        }
+        state.chat_params = {"context_window_k": 700, "max_tokens": 20480}
+        state.tools = [MANAGE_TODO_TOOL_SCHEMA]
+        await interactive_tools.handle_interactive_tool_round(
+            state,
+            ai_msg=assistant_message,
+            saved_msg=SimpleNamespace(id=saved_assistant_message.id),
+            response_id="todo-budget-response",
+        )
+
+    state_tool_results = [message for message in state.messages if message.role is MessageRole.TOOL]
+    assert len(state_tool_results) == 1
+    state_payload = json.loads((state_tool_results[0].content or "").split("\n\n<current_session_todo_snapshot>", 1)[0])
+    assert state_payload == {
+        "status": "success",
+        "operation": "write",
+        "revision": 1,
+        "todos": todos,
+    }
+    assert state_payload != {}
+
+    async with parallel_tool_limit_budget_session_factory() as db:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == SESSION_ID,
+                Message.uid == UID,
+                Message.type == MessageType.TOOL_RESULT,
+            )
+            .order_by(Message.id.asc())
+        )
+        rows = list(result.scalars().all())
+        plan = await db.get(SessionTodoPlan, SESSION_ID)
+
+    assert len(rows) == 1
+    persisted_tool_result = InternalMessage.model_validate_json(rows[0].content or "")
+    persisted_payload = json.loads(persisted_tool_result.content or "{}")
+    assert persisted_payload == state_payload
+    assert persisted_payload != {}
+    assert plan is not None
+    assert plan.revision == 1
+    assert plan.todos == todos
 
 
 @pytest.mark.asyncio
