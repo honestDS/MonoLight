@@ -12,56 +12,147 @@ import { mergeAssistantResponseIntoList } from '../src/utils/assistantResponseId
 
 test('writable sessions resume only in websocket mode', () => {
   assert.equal(shouldResumeSessionStream({
-    session: { session_id: 'session-1', source: 'ws', is_loading: true },
+    session: { session_id: 'session-1', source: 'ws', is_loading: true, is_reply_running: true },
     transportMode: 'ws'
   }), true)
 
   assert.equal(shouldResumeSessionStream({
-    session: { session_id: 'session-1', source: 'ws', is_loading: false },
+    session: { session_id: 'session-1', source: 'ws', is_loading: false, is_reply_running: false },
     transportMode: 'ws'
   }), true)
 
   assert.equal(shouldResumeSessionStream({
-    session: { session_id: 'session-1', source: 'http', is_loading: true },
+    session: { session_id: 'session-1', source: 'http', is_loading: true, is_reply_running: true },
     transportMode: 'http'
   }), false)
 })
 
 test('external read-only sessions do not start websocket resume', () => {
   assert.equal(shouldResumeSessionStream({
-    session: { session_id: 'session-1', source: 'weixin', is_loading: true },
+    session: { session_id: 'session-1', source: 'weixin', is_loading: true, is_reply_running: true },
     transportMode: 'ws'
   }), false)
 })
 
 test('initial resume loading only reflects active writable websocket sessions', () => {
   assert.equal(getInitialResumeLoading({
-    session: { session_id: 'session-1', source: 'ws', is_loading: true },
+    session: { session_id: 'session-1', source: 'ws', is_loading: true, is_reply_running: true },
     transportMode: 'ws'
   }), true)
 
   assert.equal(getInitialResumeLoading({
-    session: { session_id: 'session-1', source: 'ws', is_loading: false },
+    session: { session_id: 'session-1', source: 'ws', is_loading: false, is_reply_running: false },
     transportMode: 'ws'
   }), false)
 
   assert.equal(getInitialResumeLoading({
-    session: { session_id: 'session-1', source: 'http', is_loading: true },
+    session: { session_id: 'session-1', source: 'http', is_loading: true, is_reply_running: true },
     transportMode: 'http'
   }), false)
 
   assert.equal(getInitialResumeLoading({
-    session: { session_id: 'session-1', source: 'weixin', is_loading: true },
+    session: { session_id: 'session-1', source: 'weixin', is_loading: true, is_reply_running: true },
     transportMode: 'ws'
   }), false)
 })
 
-test('history cursor resume survives a refresh that reports the writable session idle', async () => {
-  const session = { session_id: 'session-1', source: 'ws', is_loading: true }
+test('aggregate loading does not enter resume loading when the foreground reply is idle', async () => {
+  const session = {
+    session_id: 'session-1',
+    source: 'ws',
+    is_loading: true,
+    is_reply_running: false
+  }
+  assert.equal(getInitialResumeLoading({ session, transportMode: 'ws' }), false)
+
   const loading = []
   let resumed = 0
   await resumeSessionStream({
-    session, latestSession: { ...session, is_loading: false }, transportMode: 'ws',
+    session,
+    latestSession: { ...session },
+    transportMode: 'ws',
+    isCurrentSession: () => true,
+    setLoading: value => { loading.push(value) },
+    resume: async () => { resumed++; return false }
+  })
+  assert.equal(resumed, 1)
+  assert.deepEqual(loading, [false])
+})
+
+test('foreground reply loading wins over an idle aggregate across repeated resumes', async () => {
+  const session = {
+    session_id: 'session-1',
+    source: 'ws',
+    is_loading: false,
+    is_reply_running: true
+  }
+  assert.equal(getInitialResumeLoading({ session, transportMode: 'ws' }), true)
+
+  const loading = []
+  let resumed = 0
+  const resume = () => {
+    resumed++
+    return Promise.resolve(false)
+  }
+  const options = {
+    session,
+    latestSession: { ...session },
+    transportMode: 'ws',
+    isCurrentSession: () => true,
+    setLoading: value => { loading.push(value) },
+    resume
+  }
+  await resumeSessionStream(options)
+  await resumeSessionStream(options)
+  assert.equal(resumed, 2)
+  assert.deepEqual(loading, [true, false, true, false])
+})
+
+test('a fresh aggregate-only snapshot does not enter resume loading', async () => {
+  const loading = []
+  let resumed = 0
+  const session = {
+    session_id: 'session-1',
+    source: 'ws',
+    is_loading: false,
+    is_reply_running: false
+  }
+  await resumeSessionStream({
+    session,
+    latestSession: { ...session, is_loading: true, is_reply_running: false },
+    transportMode: 'ws',
+    isCurrentSession: () => true,
+    setLoading: value => { loading.push(value) },
+    resume: async () => { resumed++; return false }
+  })
+  assert.equal(resumed, 1)
+  assert.deepEqual(loading, [false])
+})
+
+test('missing foreground state is not inferred from aggregate loading', async () => {
+  const session = { session_id: 'session-1', source: 'ws', is_loading: true }
+  assert.equal(getInitialResumeLoading({ session, transportMode: 'ws' }), false)
+
+  const loading = []
+  let resumed = 0
+  await resumeSessionStream({
+    session,
+    latestSession: { ...session },
+    transportMode: 'ws',
+    isCurrentSession: () => true,
+    setLoading: value => { loading.push(value) },
+    resume: async () => { resumed++; return false }
+  })
+  assert.equal(resumed, 1)
+  assert.deepEqual(loading, [false])
+})
+
+test('history cursor resume survives a refresh that reports the writable session idle', async () => {
+  const session = { session_id: 'session-1', source: 'ws', is_loading: true, is_reply_running: true }
+  const loading = []
+  let resumed = 0
+  await resumeSessionStream({
+    session, latestSession: { ...session, is_loading: false, is_reply_running: false }, transportMode: 'ws',
     isCurrentSession: () => true, setLoading: value => { loading.push(value) },
     resume: async () => { resumed++; return false }
   })
@@ -73,8 +164,8 @@ test('idle writable sessions resume without setting loading true', async () => {
   const loading = []
   let resumed = 0
   await resumeSessionStream({
-    session: { session_id: 'session-1', source: 'ws', is_loading: false },
-    latestSession: { session_id: 'session-1', source: 'ws', is_loading: false },
+    session: { session_id: 'session-1', source: 'ws', is_loading: false, is_reply_running: false },
+    latestSession: { session_id: 'session-1', source: 'ws', is_loading: false, is_reply_running: false },
     transportMode: 'ws', isCurrentSession: () => true,
     setLoading: value => { loading.push(value) },
     resume: async () => { resumed++; return false }
@@ -85,8 +176,8 @@ test('idle writable sessions resume without setting loading true', async () => {
 
 test('HTTP and external read-only sessions do not subscribe', async () => {
   for (const { session, transportMode } of [
-    { session: { session_id: 'http-session', source: 'http', is_loading: true }, transportMode: 'http' },
-    { session: { session_id: 'external-session', source: 'weixin', is_loading: true }, transportMode: 'ws' }
+    { session: { session_id: 'http-session', source: 'http', is_loading: true, is_reply_running: true }, transportMode: 'http' },
+    { session: { session_id: 'external-session', source: 'weixin', is_loading: true, is_reply_running: true }, transportMode: 'ws' }
   ]) {
     const loading = []
     let resumed = 0
@@ -104,7 +195,7 @@ test('switched-away sessions do not change loading or subscribe', async () => {
   const loading = []
   let resumed = 0
   await resumeSessionStream({
-    session: { session_id: 'session-1', source: 'ws', is_loading: true },
+    session: { session_id: 'session-1', source: 'ws', is_loading: true, is_reply_running: true },
     transportMode: 'ws', isCurrentSession: () => false,
     setLoading: value => { loading.push(value) },
     resume: async () => { resumed++ }
@@ -118,7 +209,7 @@ test('resume errors clear only the current selection loading state', async () =>
     let current = true
     let loading = false
     await assert.rejects(resumeSessionStream({
-      session: { session_id: 'session-1', is_loading: true },
+      session: { session_id: 'session-1', is_loading: true, is_reply_running: true },
       transportMode: 'ws', isCurrentSession: () => current,
       setLoading: value => { loading = value },
       resume: async () => { current = !changed; throw new Error('connection failed') }
@@ -131,8 +222,8 @@ test('successful resume keeps loading until completion and supports a freshly st
   const loading = []
   let resumed = 0
   await resumeSessionStream({
-    session: { session_id: 'session-1', is_loading: false },
-    latestSession: { session_id: 'session-1', is_loading: true },
+    session: { session_id: 'session-1', is_loading: false, is_reply_running: false },
+    latestSession: { session_id: 'session-1', is_loading: true, is_reply_running: true },
     transportMode: 'ws', isCurrentSession: () => true,
     setLoading: value => { loading.push(value) },
     resume: async () => { resumed++; return true }

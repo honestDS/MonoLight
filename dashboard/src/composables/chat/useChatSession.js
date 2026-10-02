@@ -315,7 +315,7 @@ export function useChatSession() {
   })
   const isReplyRunning = computed(() => (
     !isCurrentSessionReadOnly.value
-    && Boolean(chatState.loading.value || currentSession.value?.is_loading || isStopping.value)
+    && Boolean(chatState.loading.value || currentSession.value?.is_reply_running || isStopping.value)
   ))
 
   // 3. 通信层
@@ -326,7 +326,7 @@ export function useChatSession() {
   })
   const modeSettingSubmitting = ref(false)
   const transportModeChangeBlocked = computed(() => (
-    Boolean(chatState.loading.value || currentSession.value?.is_loading || isStopping.value)
+    Boolean(chatState.loading.value || currentSession.value?.is_reply_running || isStopping.value)
   ))
 
   const setTransportMode = async (mode, { notifyError = true } = {}) => {
@@ -1048,7 +1048,7 @@ export function useChatSession() {
       )
       if (
         (initialHistoryLoaded.value || activeStatuses.includes(status))
-        && !(status === 'merged' && session.is_loading === true && activeStatuses.includes(previousStatus))
+        && !(status === 'merged' && session.is_reply_running === true && activeStatuses.includes(previousStatus))
       ) {
         observedHttpWorkStatuses.set(workId, status)
       }
@@ -1058,7 +1058,7 @@ export function useChatSession() {
         previousStatus,
         hasPendingRequest,
         historyLoaded: initialHistoryLoaded.value,
-        sessionLoading: session.is_loading,
+        sessionLoading: session.is_reply_running,
         resolved: resolvedHttpWorks.has(workId),
         fetching: fetchingHttpWorks.has(workId)
       })) continue
@@ -1079,7 +1079,7 @@ export function useChatSession() {
       item => normalizeHttpIdentity(item?.session_id) === sessionId
     )
     if (currentSnapshot) {
-      chatState.loading.value = Boolean(currentSnapshot.is_loading) || hasActiveResult
+      chatState.loading.value = Boolean(currentSnapshot.is_reply_running) || hasActiveResult
     }
   }
 
@@ -1365,7 +1365,7 @@ export function useChatSession() {
 
         resetHttpPollingState()
         chatState.loading.value = false
-        if (targetSession) targetSession.is_loading = false
+        if (targetSession) targetSession.is_reply_running = false
         void mergeLatestSessionHistory(sessionId).catch(err => {
           console.error('Stop reply history merge failed:', err)
         })

@@ -398,6 +398,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
                 "latest_message_id": row.latest_message_id,
                 "is_loading": bool(row.is_loading),
+                "is_reply_running": bool(row.is_reply_running),
                 "username": row.username,
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,

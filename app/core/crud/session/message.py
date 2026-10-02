@@ -22,7 +22,7 @@ from app.models.message import (
     MessageType,
 )
 from app.models.session import ChatSession
-from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem
+from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkType
 from app.models.user import User
 
 
@@ -414,13 +414,13 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             session_activity_stmt = session_activity_stmt.where(Message.uid == uid)
         session_activity = session_activity_stmt.group_by(Message.session_id, Message.uid).subquery()
         last_active = func.coalesce(session_activity.c.last_active, ChatSession.created_at).label("last_active")
-        is_loading = exists(
-            select(1).where(
-                SessionReplyWorkItem.session_id == ChatSession.session_id,
-                SessionReplyWorkItem.uid == ChatSession.uid,
-                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
-            )
-        ).label("is_loading")
+        active_reply_work = select(1).where(
+            SessionReplyWorkItem.session_id == ChatSession.session_id,
+            SessionReplyWorkItem.uid == ChatSession.uid,
+            SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+        )
+        is_loading = exists(active_reply_work).label("is_loading")
+        is_reply_running = exists(active_reply_work.where(SessionReplyWorkItem.work_type.in_([SessionReplyWorkType.FOREGROUND_REPLY, SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION]))).label("is_reply_running")
 
         stmt = (
             select(
@@ -428,6 +428,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 last_active,
                 session_activity.c.latest_message_id,
                 is_loading,
+                is_reply_running,
                 ChatSession.uid,
                 User.username,
                 ChatSession.title,
