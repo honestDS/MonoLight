@@ -5,12 +5,13 @@ from typing import Any
 from app.core.constants import (
     ERR_LLM_CONNECTION_FAILED,
     ERR_LLM_EMPTY_RESPONSE,
+    ERR_LLM_IMAGE_OUTPUT_INVALID,
 )
 from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.model_request_headers import build_model_request_headers
-from app.models.message import AudioPart, FilePart, ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
+from app.models.message import AudioPart, FilePart, ImagePart, InternalGeneratedImage, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
 
 from .base import BaseOpenAITransformer
 
@@ -139,6 +140,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         refusal_fallback_indexes: set[tuple[int | str | None, int | str | None]] = set()
         reasoning_delta_indexes: set[tuple[str, int | str | None, int | str | None]] = set()
         reasoning_fallback_indexes: set[tuple[str, int | str | None, int | str | None]] = set()
+        image_output_ids: set[str] = set()
 
         def normalize_event(event: Any) -> tuple[dict[str, Any] | None, bool]:
             return self._normalize_stream_event(
@@ -151,6 +153,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 refusal_fallback_indexes=refusal_fallback_indexes,
                 reasoning_delta_indexes=reasoning_delta_indexes,
                 reasoning_fallback_indexes=reasoning_fallback_indexes,
+                image_output_ids=image_output_ids,
             )
 
         async for chunk in self._stream_sse_json(
@@ -228,11 +231,46 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         return content or None
 
     @classmethod
+    def _responses_generated_images(cls, output: Any) -> list[InternalGeneratedImage]:
+        if not isinstance(output, list):
+            return []
+
+        mime_types = {
+            "png": "image/png",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp",
+        }
+        images: list[InternalGeneratedImage] = []
+        seen_ids: set[str] = set()
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "image_generation_call" or item.get("status") != "completed":
+                continue
+            image_id = item.get("id")
+            result = item.get("result")
+            if not isinstance(image_id, str) or not image_id or not isinstance(result, str) or not result:
+                raise LLMException(ERR_LLM_IMAGE_OUTPUT_INVALID)
+
+            output_format = item.get("output_format")
+            if output_format is None:
+                mime_type = None
+            else:
+                mime_type = mime_types.get(output_format) if isinstance(output_format, str) else None
+                if mime_type is None:
+                    raise LLMException(ERR_LLM_IMAGE_OUTPUT_INVALID)
+
+            if image_id in seen_ids:
+                continue
+            seen_ids.add(image_id)
+            images.append(InternalGeneratedImage(id=image_id, data=result, mime_type=mime_type))
+        return images
+
+    @classmethod
     def from_provider(cls, provider_response: Any) -> InternalMessage:
         output = provider_response.get("output") if isinstance(provider_response, dict) else None
         if not isinstance(output, list):
             raise LLMException(ERR_LLM_EMPTY_RESPONSE)
 
+        generated_images = cls._responses_generated_images(output)
         text_parts: list[str] = []
         refusal_parts: list[str] = []
         tool_calls: list[InternalToolCall] = []
@@ -274,7 +312,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         refusal = "".join(refusal_parts) or None
         reasoning_content = cls._reasoning_content_from_output(output)
         content = "".join(text_parts) or refusal
-        if not content and not reasoning_content and not tool_calls and provider_response.get("status") != "incomplete":
+        if not content and not reasoning_content and not tool_calls and not generated_images and provider_response.get("status") != "incomplete":
             raise LLMException(ERR_LLM_EMPTY_RESPONSE)
         return InternalMessage(
             role=MessageRole.ASSISTANT,
@@ -283,6 +321,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             refusal=refusal,
             provider_metadata=cls._responses_message_provider_metadata(output),
             tool_calls=tool_calls or None,
+            generated_images=generated_images or None,
         )
 
     @classmethod
@@ -322,6 +361,9 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 continue
             item_type = item.get("type")
             if item_type == "function_call":
+                continue
+            if item_type == "image_generation_call":
+                output_metadata.append({key: value for key, value in item.items() if key != "result"})
                 continue
             if item_type != "message":
                 output_metadata.append(dict(item))
@@ -592,6 +634,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         refusal_fallback_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
         reasoning_delta_indexes: set[tuple[str, int | str | None, int | str | None]] | None = None,
         reasoning_fallback_indexes: set[tuple[str, int | str | None, int | str | None]] | None = None,
+        image_output_ids: set[str] | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         if not isinstance(event, dict):
             return None, False
@@ -601,6 +644,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         refusal_fallback_indexes = refusal_fallback_indexes if refusal_fallback_indexes is not None else set()
         reasoning_delta_indexes = reasoning_delta_indexes if reasoning_delta_indexes is not None else set()
         reasoning_fallback_indexes = reasoning_fallback_indexes if reasoning_fallback_indexes is not None else set()
+        image_output_ids = image_output_ids if image_output_ids is not None else set()
         event_type = event.get("type")
         if event_type in {"response.failed", "error"}:
             cls._raise_event_error(event)
@@ -707,6 +751,12 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
 
         if event_type == "response.output_item.done":
             item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "image_generation_call":
+                generated_images = [image for image in cls._responses_generated_images([item]) if image.id not in image_output_ids]
+                image_output_ids.update(image.id for image in generated_images)
+                if not generated_images:
+                    return None, False
+                return {"generated_images": [image.model_dump() for image in generated_images]}, True
             if not isinstance(item, dict) or item.get("type") != "function_call":
                 return None, False
             output_index = cls._output_index(event)
@@ -755,18 +805,23 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 cls._raise_response_error(response)
             finish_reason, finish_details = cls._responses_finish(response)
             delta: dict[str, Any] = {}
+            generated_images = [image for image in cls._responses_generated_images(response.get("output")) if image.id not in image_output_ids]
+            image_output_ids.update(image.id for image in generated_images)
             if not reasoning_delta_indexes and not reasoning_fallback_indexes:
                 reasoning_content = cls._reasoning_content_from_output(response.get("output"))
                 if reasoning_content:
                     delta["reasoning_content"] = reasoning_content
-            return {
+            terminal_payload = {
                 "choices": [{"delta": delta, "finish_reason": finish_reason}],
                 "model": response.get("model"),
                 "usage": cls._normalize_responses_usage(response.get("usage")),
                 "finish_details": finish_details,
                 "provider_metadata": cls._responses_provider_metadata(response),
                 "message_provider_metadata": cls._responses_message_provider_metadata(response.get("output")),
-            }, bool(delta)
+            }
+            if generated_images:
+                terminal_payload["generated_images"] = [image.model_dump() for image in generated_images]
+            return terminal_payload, bool(delta or generated_images)
 
         return None, False
 

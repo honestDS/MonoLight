@@ -14,6 +14,7 @@ from app.core.constants import (
 from app.core.exceptions import LLMException
 from app.core.log import get_logger
 from app.models.message import (
+    InternalGeneratedImage,
     InternalMessage,
     InternalResponse,
     InternalToolCall,
@@ -479,6 +480,7 @@ class LLMClient:
         deferred_content_chunks: list[str] = []
         refusal_chunks: list[str] = []
         reasoning_chunks: list[str] = []
+        generated_images_by_id: dict[str, InternalGeneratedImage] = {}
         normalized_protocol = protocol.lower()
         content_callbacks_released = normalized_protocol != "openai"
         tool_call_assembler = _StreamToolCallAssembler(normalized_protocol)
@@ -538,6 +540,10 @@ class LLMClient:
                 finish_details = _merge_metadata(finish_details, raw_finish_details)
             finish_details = _merge_metadata(finish_details, chunk.get("finish_details"))
 
+            for raw_generated_image in chunk.get("generated_images") or []:
+                generated_image = InternalGeneratedImage.model_validate(raw_generated_image)
+                generated_images_by_id.setdefault(generated_image.id, generated_image)
+
             if not choice:
                 continue
             content = delta.get("content")
@@ -585,6 +591,7 @@ class LLMClient:
                 refusal=refusal,
                 provider_metadata=message_provider_metadata,
                 tool_calls=cls.normalize_tool_calls(tool_calls),
+                generated_images=list(generated_images_by_id.values()) or None,
             ),
             model=model,
             usage=usage,

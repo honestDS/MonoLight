@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, MutableSet
@@ -29,6 +30,7 @@ from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
 from app.core.tools.end_session import is_end_session_signal
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
+from app.core.utils.assistant_files import materialize_generated_images, merge_assistant_files
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.helpers import (
@@ -328,6 +330,15 @@ async def dispatch_interactive(
                             execution_phase=state.checkpoint_state.execution_phase,
                         ).info(t(LOG_DISPATCHER_LLM_LOOP_TERMINATED, username=username, turn=state.current_turn))
                         continue
+
+                    generated_image_files = await materialize_generated_images(
+                        ai_msg,
+                        project_root=os.getcwd(),
+                        uid=uid,
+                        session_id=session_id,
+                        cfg=state.cfg,
+                    )
+                    state.files_to_user[:] = merge_assistant_files(state.files_to_user, generated_image_files)
 
                     if not ai_msg.tool_calls and state.files_to_user:
                         ai_msg.content = build_assistant_content(ai_msg.content, state.files_to_user)

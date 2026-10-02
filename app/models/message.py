@@ -79,6 +79,12 @@ class InternalToolCall(BaseModel):
     provider_metadata: dict[str, Any] | None = None
 
 
+class InternalGeneratedImage(BaseModel):
+    id: str
+    data: str = PyField(repr=False)
+    mime_type: str | None = None
+
+
 class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
@@ -86,6 +92,7 @@ class InternalMessage(BaseModel):
     reasoning_content: str | None = None
     refusal: str | None = None
     provider_metadata: dict[str, Any] | None = None
+    generated_images: list[InternalGeneratedImage] | None = PyField(default=None, repr=False)
     environment_prompt: str | None = None
     guidance_prompt: str | None = None
     tool_calls: list[InternalToolCall] | None = None
