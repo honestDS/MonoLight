@@ -342,6 +342,7 @@ class _ParallelToolExecutionContext:
     protocol: str
     context_summary_boundary_message_id: int | None
     source_message_id: int | None = None
+    session_reply_work_claim: tuple[int, str] | None = None
 
 
 async def _execute_isolated_tool_call(
@@ -367,6 +368,7 @@ async def _execute_isolated_tool_call(
                 protocol=context.protocol,
                 context_summary_boundary_message_id=context.context_summary_boundary_message_id,
                 source_message_id=context.source_message_id,
+                session_reply_work_claim=context.session_reply_work_claim,
             )
         )
         if context.active_tasks is not None:

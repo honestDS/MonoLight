@@ -12,6 +12,7 @@ from app.core.audit.integrity import canonical_json_dumps
 from app.core.crud.session.message import (
     message_crud,
 )
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -58,6 +59,9 @@ async def save_message(
     content_revision: int = 0,
     commit: bool = True,
 ) -> InternalMessage:
+    if msg_type == MessageType.AUDIT_CONFIRMATION:
+        await ensure_session_reply_work_claim(db)
+
     # Determine attachments and final content payload
     attachments_to_save = None
     environment_prompt_to_save = None

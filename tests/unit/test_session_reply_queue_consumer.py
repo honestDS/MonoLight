@@ -259,7 +259,8 @@ async def test_consumer_marks_background_or_scheduled_audit_unknown_when_cancell
     )
 
     class FakeSession:
-        pass
+        async def commit(self) -> None:
+            return None
 
     class SessionContext:
         async def __aenter__(self):
@@ -284,6 +285,12 @@ async def test_consumer_marks_background_or_scheduled_audit_unknown_when_cancell
         unknown_calls.append(kwargs)
         return True
 
+    async def finish_execution_round_if_complete(db, **kwargs) -> None:
+        return None
+
+    async def update_confirmation_tool_results(db, **kwargs) -> int:
+        return 0
+
     async def update_confirmation(db, *, audit_record_id: int) -> None:
         unknown_calls.append({"confirmation_audit_record_id": audit_record_id})
 
@@ -297,7 +304,9 @@ async def test_consumer_marks_background_or_scheduled_audit_unknown_when_cancell
         "list_active_audit_execution_record_ids",
         list_active_audit_execution_record_ids,
     )
+    monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round_if_complete", finish_execution_round_if_complete)
     monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_audit_module, "_update_confirmation_tool_results", update_confirmation_tool_results)
     monkeypatch.setattr(executor_audit_module, "update_confirmation_message_status", update_confirmation)
 
     with pytest.raises(asyncio.CancelledError):
@@ -322,7 +331,8 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
     )
 
     class FakeSession:
-        pass
+        async def commit(self) -> None:
+            return None
 
     class SessionContext:
         async def __aenter__(self):
@@ -347,6 +357,12 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
         unknown_calls.append(kwargs)
         return True
 
+    async def finish_execution_round_if_complete(db, **kwargs) -> None:
+        return None
+
+    async def update_confirmation_tool_results(db, **kwargs) -> int:
+        return 0
+
     async def update_confirmation(db, *, audit_record_id: int) -> None:
         unknown_calls.append({"confirmation_audit_record_id": audit_record_id})
 
@@ -360,7 +376,9 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
         "list_active_audit_execution_record_ids",
         list_active_audit_execution_record_ids,
     )
+    monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round_if_complete", finish_execution_round_if_complete)
     monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_audit_module, "_update_confirmation_tool_results", update_confirmation_tool_results)
     monkeypatch.setattr(executor_audit_module, "update_confirmation_message_status", update_confirmation)
 
     with pytest.raises(asyncio.CancelledError):

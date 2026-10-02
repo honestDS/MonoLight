@@ -1,3 +1,4 @@
+import asyncio
 import json
 import socket
 import uuid
@@ -10,6 +11,7 @@ from app.core.audit.confirmation import (
     replace_pending_tool_result,
     update_confirmation_message_status,
 )
+from app.core.audit.confirmation_results import _update_confirmation_tool_results
 from app.core.audit.integrity import verify_persisted_tool_round
 from app.core.audit.service import audit_tool_round, is_audit_configured
 from app.core.constants import (
@@ -17,9 +19,11 @@ from app.core.constants import (
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
+    MSG_AUDIT_STATUS_CANCELLED,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.crud.session.session import session_crud
 from app.core.i18n import get_current_locale, t
 from app.core.prompts import AUDIT_SOURCE_MESSAGE_INVALID_PROMPT
@@ -474,46 +478,77 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
             execution_round_status = AuditRecordStatus.FAILED
     else:
-        for original_call, confirmed_call in zip(source_tool_calls, confirmed_calls, strict=True):
-            detail = detail_by_original_id[original_call.id]
-            execution = executions_by_original_call_id[original_call.id]
-            tool_result = await process_single_tool(
-                confirmed_call,
-                db,
-                profile,
-                cfg,
-                messages,
-                record.operator_username,
-                work.session_id,
-                detail.turn_index,
-                work.uid,
-                allowed_knowledge_base_ids=allowed_knowledge_base_ids,
-                context_window_k=confirmed_tool_context_window_k,
-                tool_call_count=len(confirmed_calls),
-                tool_result_round_budget_tokens=confirmed_tool_result_round_budget_tokens,
-                model_id=confirmed_tool_model_id,
-                protocol=confirmed_tool_protocol,
-            )
-            await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
-            try:
-                result_payload = json.loads(tool_result.content or "{}")
-            except (TypeError, ValueError):
-                result_payload = {}
-            terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == "execute_shell" else None
-            if get_queued_background_task_id(tool_result.content) is None and terminal_session_id is None:
-                succeeded = not (isinstance(result_payload, dict) and (result_payload.get("error") or result_payload.get("status") == "failed" or (isinstance(result_payload.get("exit_code"), int) and result_payload["exit_code"] != 0)))
-                all_succeeded = all_succeeded and succeeded
-                result_summary = serialize_execution_summary(
-                    tool_result.content,
-                    max_chars=1000,
-                )
-                await audit_crud.finish_execution_attempt(
+        execution_ids_by_original_call_id = {original_call_id: execution.id for original_call_id, execution in executions_by_original_call_id.items()}
+        started_call_ids: set[str] = set()
+        try:
+            for original_call, confirmed_call in zip(source_tool_calls, confirmed_calls, strict=True):
+                detail = detail_by_original_id[original_call.id]
+                execution = executions_by_original_call_id[original_call.id]
+                await ensure_session_reply_work_claim(db, commit=True)
+                started_call_ids.add(original_call.id)
+                tool_result = await process_single_tool(
+                    confirmed_call,
                     db,
-                    execution_record_id=execution.id,
-                    status=AuditExecutionStatus.SUCCEEDED if succeeded else AuditExecutionStatus.FAILED,
-                    result_summary=result_summary,
-                    error=None if succeeded else result_summary,
+                    profile,
+                    cfg,
+                    messages,
+                    record.operator_username,
+                    work.session_id,
+                    detail.turn_index,
+                    work.uid,
+                    allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                    context_window_k=confirmed_tool_context_window_k,
+                    tool_call_count=len(confirmed_calls),
+                    tool_result_round_budget_tokens=confirmed_tool_result_round_budget_tokens,
+                    model_id=confirmed_tool_model_id,
+                    protocol=confirmed_tool_protocol,
                 )
+                await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
+                try:
+                    result_payload = json.loads(tool_result.content or "{}")
+                except (TypeError, ValueError):
+                    result_payload = {}
+                terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == "execute_shell" else None
+                if get_queued_background_task_id(tool_result.content) is None and terminal_session_id is None:
+                    succeeded = not (isinstance(result_payload, dict) and (result_payload.get("error") or result_payload.get("status") == "failed" or (isinstance(result_payload.get("exit_code"), int) and result_payload["exit_code"] != 0)))
+                    all_succeeded = all_succeeded and succeeded
+                    result_summary = serialize_execution_summary(
+                        tool_result.content,
+                        max_chars=1000,
+                    )
+                    await audit_crud.finish_execution_attempt(
+                        db,
+                        execution_record_id=execution.id,
+                        status=AuditExecutionStatus.SUCCEEDED if succeeded else AuditExecutionStatus.FAILED,
+                        result_summary=result_summary,
+                        error=None if succeeded else result_summary,
+                    )
+        except asyncio.CancelledError:
+            await db.rollback()
+            cancelled_call_ids = set(execution_ids_by_original_call_id) - started_call_ids
+            cancellation_reason = t(MSG_AUDIT_STATUS_CANCELLED)
+            for original_call_id in cancelled_call_ids:
+                await audit_crud.cancel_execution_attempt(
+                    db,
+                    audit_record_id=audit_record_id,
+                    execution_record_id=execution_ids_by_original_call_id[original_call_id],
+                    claim_token=claim_token,
+                    error_reason=cancellation_reason,
+                    commit=False,
+                )
+            if cancelled_call_ids:
+                await _update_confirmation_tool_results(
+                    db,
+                    audit_record_id=audit_record_id,
+                    before_message_id=None,
+                    status=AuditRecordStatus.CANCELLED,
+                    confirmation_status=AuditRecordStatus.CANCELLED.value,
+                    feedback=cancellation_reason,
+                    expected_statuses=(AuditRecordStatus.PENDING, AuditRecordStatus.EXECUTING),
+                    selected_tool_call_ids=cancelled_call_ids,
+                )
+            await db.commit()
+            raise
 
     if execution_round_status is None:
         execution_round_status = await audit_crud.finish_execution_round_if_complete(

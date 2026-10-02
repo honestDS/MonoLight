@@ -23,6 +23,7 @@ from app.core.constants import (
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
 )
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.dispatch_context import DispatchMode, build_dispatch_context
 from app.core.i18n import t
 from app.core.log import (
@@ -487,6 +488,7 @@ async def process_single_tool(
     if cmd_result is None and run_in_background:
         from app.core.background_tasks.manager import background_task_manager
 
+        await ensure_session_reply_work_claim(db)
         task = await background_task_manager.submit(
             db,
             uid=uid,
@@ -503,6 +505,7 @@ async def process_single_tool(
         cmd_result = _build_background_task_queued_result(tool_name, task.id)
 
     if cmd_result is None:
+        await ensure_session_reply_work_claim(db, commit=True)
         executor_cls = TOOL_EXECUTOR_MAP.get(tool_name)
         if executor_cls:
             instance = executor_cls(

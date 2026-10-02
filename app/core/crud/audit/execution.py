@@ -8,6 +8,7 @@ from app.core.constants import (
     ERR_AUDIT_EXECUTIONS_RUNNING,
     ERR_AUDIT_ROUND_EXECUTION_STATUS_INVALID,
 )
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.audit import (
@@ -38,6 +39,7 @@ class CRUDAuditExecution:
         execution_node: str,
         new_tool_call_id: str,
     ) -> AuditExecutionRecord | None:
+        await ensure_session_reply_work_claim(db)
         record_exists = select(AuditRecord.id).where(
             AuditRecord.id == audit_record_id,
             AuditRecord.status == AuditRecordStatus.EXECUTING,

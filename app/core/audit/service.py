@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import cancel_confirmation_by_session
+from app.core.audit.confirmation import cancel_confirmation_by_session, update_confirmation_message_status
 from app.core.audit.context_budget import (
     AUDIT_READ_TEXT_FILE_TOOL_SCHEMA,
     build_read_tool_message,
@@ -41,10 +41,12 @@ from app.core.constants import (
     MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK,
     MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM,
     MSG_AUDIT_ROUND_SKIPPED,
+    MSG_AUDIT_STATUS_CANCELLED,
     MSG_AUDIT_WAITING_CONFIRMATION,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel.channel import channel_crud
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
@@ -417,6 +419,7 @@ async def _call_auditor(
     read_state = {"calls": 0}
     read_results: list[dict[str, Any]] = []
     for _round_index in range(AUDIT_FILE_MAX_ROUNDS):
+        await ensure_session_reply_work_claim(db)
         await db.commit()
         _, request_context_tokens = read_token_budget(
             messages,
@@ -526,6 +529,7 @@ async def _summarize_pending(
     read_results: list[dict[str, Any]] = []
     try:
         for _round_index in range(AUDIT_FILE_MAX_ROUNDS):
+            await ensure_session_reply_work_claim(db)
             await db.commit()
             _, request_context_tokens = read_token_budget(
                 messages,
@@ -630,256 +634,269 @@ async def audit_tool_round(
         tool_count=len(tool_calls),
     )
     audit_record_id = int(record.id)
-    logger.bind(
-        audit_record_id=audit_record_id,
-        uid=uid,
-        session_id=session_id,
-        source=source,
-        model_id=str(cfg.security.audit_model_id or "-"),
-        tool_count=len(tool_calls),
-    ).info(
-        t(
-            "LOG_AUDIT_ROUND_STARTED",
+    try:
+        logger.bind(
             audit_record_id=audit_record_id,
+            uid=uid,
+            session_id=session_id,
+            source=source,
             model_id=str(cfg.security.audit_model_id or "-"),
             tool_count=len(tool_calls),
-            source=source,
+        ).info(
+            t(
+                "LOG_AUDIT_ROUND_STARTED",
+                audit_record_id=audit_record_id,
+                model_id=str(cfg.security.audit_model_id or "-"),
+                tool_count=len(tool_calls),
+                source=source,
+            )
         )
-    )
-    request_payload = {
-        "confirmation_threshold": cfg.security.audit_threshold,
-        "working_directory": str(workdir),
-        "tool_calls": [
-            {
-                "tool_call_id": item.id,
-                "turn_index": index,
-                "tool_name": item.name,
-                "arguments": item.arguments,
-            }
-            for index, item in enumerate(tool_calls)
-            if item.id in audited_tool_call_id_set
-        ],
-    }
-    failure_type = None
-    error_reason = None
-    request_context: dict[str, Any] = {"messages": []}
-    response_context: dict[str, Any] = {}
-    file_reads: list[dict[str, Any]] = []
-    read_file_snapshots: dict[str, list[dict[str, Any]]] = {}
-    high_risk_override = False
-    try:
-        conflict_ids = _round_conflict_ids(audited_tool_calls, workdir, allowed_operation_dirs)
-        if conflict_ids:
-            server_blocked_tool_call_ids.update(conflict_ids)
-            response_context = {"local_block": "same-round file write conflict"}
-            audited_results = [
+        request_payload = {
+            "confirmation_threshold": cfg.security.audit_threshold,
+            "working_directory": str(workdir),
+            "tool_calls": [
                 {
-                    "tool_call_id": call.id,
-                    "score": 10 if call.id in conflict_ids else 0,
-                    "reason": t(ERR_AUDIT_ROUND_FILE_CONFLICT) if call.id in conflict_ids else t(MSG_AUDIT_ROUND_SKIPPED),
-                    "file_checks": [],
+                    "tool_call_id": item.id,
+                    "turn_index": index,
+                    "tool_name": item.name,
+                    "arguments": item.arguments,
                 }
-                for call in audited_tool_calls
-            ]
-        else:
-            for item in audited_tool_calls:
-                if item.name == "execute_shell":
-                    blacklisted = ShellExecutor.check_blacklist(str((item.arguments or {}).get("command", "")))
-                    if blacklisted:
-                        server_blocked_tool_call_ids.add(item.id)
-                        response_context = {"local_block": blacklisted}
-                        audited_results = [
-                            {
-                                "tool_call_id": call.id,
-                                "score": 10 if call.id == item.id else 0,
-                                "reason": t(ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted) if call.id == item.id else t(MSG_AUDIT_ROUND_SKIPPED),
-                                "file_checks": [],
-                            }
-                            for call in audited_tool_calls
-                        ]
-                        break
-            else:
-                request_context, response_context = await _call_auditor(
-                    db,
-                    cfg,
-                    request_payload,
-                    workdir,
-                )
-                audited_results = _parse_results(response_context["parsed"], audited_tool_call_ids)
-        audited_results_by_id = {item["tool_call_id"]: item for item in audited_results}
-        parsed_results = [
-            audited_results_by_id.get(
-                tool_call.id,
-                {
-                    "tool_call_id": tool_call.id,
-                    "score": 0,
-                    "reason": t(MSG_AUDIT_ROUND_SKIPPED),
-                    "file_checks": [],
-                },
-            )
-            for tool_call in tool_calls
-        ]
-        high_risk_override = any(isinstance(item.get("score"), int) and not isinstance(item["score"], bool) and item["score"] >= AUDIT_HIGH_RISK_SCORE for item in parsed_results)
-        conclusions = []
-        file_reads = response_context.get("file_reads", []) if isinstance(response_context, dict) else []
-        expected_tool_call_ids = audited_tool_call_id_set
-        read_file_snapshots = _file_snapshots_from_reads(file_reads, expected_tool_call_ids)
-        read_protocol_failures = [item for item in file_reads if not isinstance(item, dict) or item.get("status") in {"denied", "invalid"} or item.get("tool_call_id") not in expected_tool_call_ids]
-        for tool_call, result in zip(tool_calls, parsed_results, strict=True):
-            if tool_call.id not in audited_tool_call_id_set:
-                conclusions.append(AuditToolConclusion.PASSED)
-                continue
-            tool_file_reads = [item for item in file_reads if isinstance(item, dict) and item.get("tool_call_id") == tool_call.id]
-            local_reasons = list(server_confirmation_reasons.get(tool_call.id, []))
-            evidence_requires_confirmation = _requires_confirmation_from_evidence(
-                tool_call,
-                read_file_snapshots.get(tool_call.id, []),
-                tool_file_reads,
-                result.get("file_checks", []),
-            )
-            requires_confirmation = bool(read_protocol_failures) or evidence_requires_confirmation
-            evidence_reason = _evidence_confirmation_reason(
-                tool_call,
-                read_file_snapshots.get(tool_call.id, []),
-                tool_file_reads,
-                result.get("file_checks", []),
-            )
-            if evidence_reason is not None:
-                local_reasons.append(evidence_reason)
-            if read_protocol_failures:
-                local_reasons.append(
+                for index, item in enumerate(tool_calls)
+                if item.id in audited_tool_call_id_set
+            ],
+        }
+        failure_type = None
+        error_reason = None
+        request_context: dict[str, Any] = {"messages": []}
+        response_context: dict[str, Any] = {}
+        file_reads: list[dict[str, Any]] = []
+        read_file_snapshots: dict[str, list[dict[str, Any]]] = {}
+        high_risk_override = False
+        try:
+            conflict_ids = _round_conflict_ids(audited_tool_calls, workdir, allowed_operation_dirs)
+            if conflict_ids:
+                server_blocked_tool_call_ids.update(conflict_ids)
+                response_context = {"local_block": "same-round file write conflict"}
+                audited_results = [
                     {
-                        "code": "file_read_protocol_invalid",
-                        "message": t(ERR_AUDIT_FILE_EVIDENCE_INSUFFICIENT),
-                        "details": {"failure_count": len(read_protocol_failures)},
+                        "tool_call_id": call.id,
+                        "score": 10 if call.id in conflict_ids else 0,
+                        "reason": t(ERR_AUDIT_ROUND_FILE_CONFLICT) if call.id in conflict_ids else t(MSG_AUDIT_ROUND_SKIPPED),
+                        "file_checks": [],
                     }
-                )
-            if local_reasons:
-                server_confirmation_reasons[tool_call.id] = local_reasons
-            if local_reasons:
-                result["reason"] = f"{result['reason']}; {'; '.join(item['message'] for item in local_reasons)}"
-            if tool_call.id in server_blocked_tool_call_ids:
-                conclusion = AuditToolConclusion.BLOCKED
+                    for call in audited_tool_calls
+                ]
             else:
-                conclusion = classify_audit_score(result["score"], cfg.security.audit_threshold)
-                if cfg.security.audit_threshold > 0 and (local_reasons or requires_confirmation) and conclusion != AuditToolConclusion.BLOCKED:
-                    conclusion = AuditToolConclusion.PENDING
-            conclusions.append(conclusion)
-        status = _aggregate(conclusions)
-    except Exception as exc:
-        status = AuditRecordStatus.AUDIT_FAILED
-        failure_type = AuditFailureType.AUDIT_SERVICE_FAILED
-        error_reason = str(exc)
-        parsed_results = [{"tool_call_id": item.id, "score": None, "reason": error_reason} for item in tool_calls]
-        conclusions = [AuditToolConclusion.AUDIT_FAILED for _ in tool_calls]
-        response_context = {"error": error_reason}
+                for item in audited_tool_calls:
+                    if item.name == "execute_shell":
+                        blacklisted = ShellExecutor.check_blacklist(str((item.arguments or {}).get("command", "")))
+                        if blacklisted:
+                            server_blocked_tool_call_ids.add(item.id)
+                            response_context = {"local_block": blacklisted}
+                            audited_results = [
+                                {
+                                    "tool_call_id": call.id,
+                                    "score": 10 if call.id == item.id else 0,
+                                    "reason": t(ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted) if call.id == item.id else t(MSG_AUDIT_ROUND_SKIPPED),
+                                    "file_checks": [],
+                                }
+                                for call in audited_tool_calls
+                            ]
+                            break
+                else:
+                    request_context, response_context = await _call_auditor(
+                        db,
+                        cfg,
+                        request_payload,
+                        workdir,
+                    )
+                    audited_results = _parse_results(response_context["parsed"], audited_tool_call_ids)
+            audited_results_by_id = {item["tool_call_id"]: item for item in audited_results}
+            parsed_results = [
+                audited_results_by_id.get(
+                    tool_call.id,
+                    {
+                        "tool_call_id": tool_call.id,
+                        "score": 0,
+                        "reason": t(MSG_AUDIT_ROUND_SKIPPED),
+                        "file_checks": [],
+                    },
+                )
+                for tool_call in tool_calls
+            ]
+            high_risk_override = any(isinstance(item.get("score"), int) and not isinstance(item["score"], bool) and item["score"] >= AUDIT_HIGH_RISK_SCORE for item in parsed_results)
+            conclusions = []
+            file_reads = response_context.get("file_reads", []) if isinstance(response_context, dict) else []
+            expected_tool_call_ids = audited_tool_call_id_set
+            read_file_snapshots = _file_snapshots_from_reads(file_reads, expected_tool_call_ids)
+            read_protocol_failures = [item for item in file_reads if not isinstance(item, dict) or item.get("status") in {"denied", "invalid"} or item.get("tool_call_id") not in expected_tool_call_ids]
+            for tool_call, result in zip(tool_calls, parsed_results, strict=True):
+                if tool_call.id not in audited_tool_call_id_set:
+                    conclusions.append(AuditToolConclusion.PASSED)
+                    continue
+                tool_file_reads = [item for item in file_reads if isinstance(item, dict) and item.get("tool_call_id") == tool_call.id]
+                local_reasons = list(server_confirmation_reasons.get(tool_call.id, []))
+                evidence_requires_confirmation = _requires_confirmation_from_evidence(
+                    tool_call,
+                    read_file_snapshots.get(tool_call.id, []),
+                    tool_file_reads,
+                    result.get("file_checks", []),
+                )
+                requires_confirmation = bool(read_protocol_failures) or evidence_requires_confirmation
+                evidence_reason = _evidence_confirmation_reason(
+                    tool_call,
+                    read_file_snapshots.get(tool_call.id, []),
+                    tool_file_reads,
+                    result.get("file_checks", []),
+                )
+                if evidence_reason is not None:
+                    local_reasons.append(evidence_reason)
+                if read_protocol_failures:
+                    local_reasons.append(
+                        {
+                            "code": "file_read_protocol_invalid",
+                            "message": t(ERR_AUDIT_FILE_EVIDENCE_INSUFFICIENT),
+                            "details": {"failure_count": len(read_protocol_failures)},
+                        }
+                    )
+                if local_reasons:
+                    server_confirmation_reasons[tool_call.id] = local_reasons
+                if local_reasons:
+                    result["reason"] = f"{result['reason']}; {'; '.join(item['message'] for item in local_reasons)}"
+                if tool_call.id in server_blocked_tool_call_ids:
+                    conclusion = AuditToolConclusion.BLOCKED
+                else:
+                    conclusion = classify_audit_score(result["score"], cfg.security.audit_threshold)
+                    if cfg.security.audit_threshold > 0 and (local_reasons or requires_confirmation) and conclusion != AuditToolConclusion.BLOCKED:
+                        conclusion = AuditToolConclusion.PENDING
+                conclusions.append(conclusion)
+            status = _aggregate(conclusions)
+        except Exception as exc:
+            status = AuditRecordStatus.AUDIT_FAILED
+            failure_type = AuditFailureType.AUDIT_SERVICE_FAILED
+            error_reason = str(exc)
+            parsed_results = [{"tool_call_id": item.id, "score": None, "reason": error_reason} for item in tool_calls]
+            conclusions = [AuditToolConclusion.AUDIT_FAILED for _ in tool_calls]
+            response_context = {"error": error_reason}
 
-    intent_summary = None
-    summary_context = None
-    expires_at = None
-    if status == AuditRecordStatus.PENDING:
-        intent_summary, summary_context = await _summarize_pending(
+        await ensure_session_reply_work_claim(db, commit=True)
+        intent_summary = None
+        summary_context = None
+        expires_at = None
+        if status == AuditRecordStatus.PENDING:
+            intent_summary, summary_context = await _summarize_pending(
+                db,
+                cfg,
+                _tool_payload(audited_tool_calls),
+                server_confirmation_reasons,
+                working_directory=workdir,
+            )
+        if status == AuditRecordStatus.PENDING:
+            expires_at = get_local_time() + timedelta(seconds=cfg.security.audit_confirmation_timeout_seconds)
+
+        details = []
+        for index, (call_snapshot, result, conclusion) in enumerate(zip(snapshot.tool_calls, parsed_results, conclusions, strict=True)):
+            file_snapshots = [*file_mutation_snapshots.get(call_snapshot.tool_call_id, []), *read_file_snapshots.get(call_snapshot.tool_call_id, [])]
+            details.append(
+                {
+                    "original_tool_call_id": call_snapshot.tool_call_id,
+                    "turn_index": index,
+                    "tool_name": call_snapshot.tool_name,
+                    "conclusion": conclusion.value,
+                    "score": result["score"],
+                    "reason": result["reason"],
+                    "arguments_hash": call_snapshot.arguments_sha256,
+                    "arguments_summary": serialize_tool_arguments(call_snapshot.arguments),
+                    "file_snapshots": file_snapshots,
+                    "server_confirmation_reasons": server_confirmation_reasons.get(call_snapshot.tool_call_id, []),
+                }
+            )
+        context_payload = {
+            "audit_record_id": audit_record_id,
+            "source_assistant_message_id": source_assistant_message_id,
+            "round_arguments_hash": snapshot.round_sha256,
+            "tool_calls": payload_calls,
+            "audited_tool_call_ids": audited_tool_call_ids,
+            "server_confirmation_reasons": server_confirmation_reasons,
+            "scoring_request": request_context,
+            "scoring_response": response_context,
+            "results": details,
+        }
+        if summary_context is not None:
+            context_payload["summary"] = summary_context
+        persisted = await persist_prepared_audit_round(
             db,
-            cfg,
-            _tool_payload(audited_tool_calls),
-            server_confirmation_reasons,
-            working_directory=workdir,
-        )
-    if status == AuditRecordStatus.PENDING:
-        expires_at = get_local_time() + timedelta(seconds=cfg.security.audit_confirmation_timeout_seconds)
-
-    details = []
-    for index, (call_snapshot, result, conclusion) in enumerate(zip(snapshot.tool_calls, parsed_results, conclusions, strict=True)):
-        file_snapshots = [*file_mutation_snapshots.get(call_snapshot.tool_call_id, []), *read_file_snapshots.get(call_snapshot.tool_call_id, [])]
-        details.append(
-            {
-                "original_tool_call_id": call_snapshot.tool_call_id,
-                "turn_index": index,
-                "tool_name": call_snapshot.tool_name,
-                "conclusion": conclusion.value,
-                "score": result["score"],
-                "reason": result["reason"],
-                "arguments_hash": call_snapshot.arguments_sha256,
-                "arguments_summary": serialize_tool_arguments(call_snapshot.arguments),
-                "file_snapshots": file_snapshots,
-                "server_confirmation_reasons": server_confirmation_reasons.get(call_snapshot.tool_call_id, []),
-            }
-        )
-    context_payload = {
-        "audit_record_id": audit_record_id,
-        "source_assistant_message_id": source_assistant_message_id,
-        "round_arguments_hash": snapshot.round_sha256,
-        "tool_calls": payload_calls,
-        "audited_tool_call_ids": audited_tool_call_ids,
-        "server_confirmation_reasons": server_confirmation_reasons,
-        "scoring_request": request_context,
-        "scoring_response": response_context,
-        "results": details,
-    }
-    if summary_context is not None:
-        context_payload["summary"] = summary_context
-    persisted = await persist_prepared_audit_round(
-        db,
-        audit_record_id=audit_record_id,
-        uid=uid,
-        status=status,
-        context_payload=context_payload,
-        tool_details=details,
-        intent_summary=intent_summary,
-        failure_type=failure_type,
-        error_reason=error_reason,
-        expires_at=expires_at,
-        create_confirmation_claim=status != AuditRecordStatus.PENDING,
-    )
-    if not persisted:
-        status = AuditRecordStatus.AUDIT_FAILED
-        error_reason = "audit persistence failed"
-        parsed_results = [{**item, "reason": error_reason} for item in parsed_results]
-
-    tool_scores = {str(item.get("tool_call_id")): item.get("score") for item in parsed_results if isinstance(item, dict) and item.get("tool_call_id")}
-    score_values = [score for score in tool_scores.values() if isinstance(score, int) and not isinstance(score, bool)]
-    max_score = max(score_values) if score_values else "-"
-    logger.bind(
-        audit_record_id=audit_record_id,
-        uid=uid,
-        session_id=session_id,
-        source=source,
-        status=status.value,
-        max_score=max_score,
-        tool_scores=tool_scores,
-        summary=intent_summary or "-",
-    ).info(
-        t(
-            "LOG_AUDIT_ROUND_COMPLETED",
             audit_record_id=audit_record_id,
+            uid=uid,
+            status=status,
+            context_payload=context_payload,
+            tool_details=details,
+            intent_summary=intent_summary,
+            failure_type=failure_type,
+            error_reason=error_reason,
+            expires_at=expires_at,
+            create_confirmation_claim=status != AuditRecordStatus.PENDING,
+        )
+        if not persisted:
+            status = AuditRecordStatus.AUDIT_FAILED
+            error_reason = "audit persistence failed"
+            parsed_results = [{**item, "reason": error_reason} for item in parsed_results]
+
+        tool_scores = {str(item.get("tool_call_id")): item.get("score") for item in parsed_results if isinstance(item, dict) and item.get("tool_call_id")}
+        score_values = [score for score in tool_scores.values() if isinstance(score, int) and not isinstance(score, bool)]
+        max_score = max(score_values) if score_values else "-"
+        logger.bind(
+            audit_record_id=audit_record_id,
+            uid=uid,
+            session_id=session_id,
+            source=source,
             status=status.value,
             max_score=max_score,
+            tool_scores=tool_scores,
             summary=intent_summary or "-",
+        ).info(
+            t(
+                "LOG_AUDIT_ROUND_COMPLETED",
+                audit_record_id=audit_record_id,
+                status=status.value,
+                max_score=max_score,
+                summary=intent_summary or "-",
+            )
         )
-    )
 
-    if status == AuditRecordStatus.PASSED:
-        return AuditRoundResult(audit_record_id=audit_record_id, status=status, tool_results=())
-    tool_results = tuple(_result_message(call, status, next(item["reason"] for item in parsed_results if item["tool_call_id"] == call.id)) for call in tool_calls)
-    confirmation_payload = None
-    if status == AuditRecordStatus.PENDING:
-        risk_score = max(max(item["score"] or 0 for item in parsed_results), cfg.security.audit_threshold)
-        expires_at_text = expires_at.isoformat() if expires_at else "-"
-        timeout_seconds = cfg.security.audit_confirmation_timeout_seconds
-        confirmation_payload = {
-            "type": "audit_confirmation",
-            "audit_record_id": audit_record_id,
-            "summary": intent_summary,
-            "risk": risk_score,
-            "status": status.value,
-            "confirmation_mode": "high_risk_override" if high_risk_override else "standard",
-            "expires_at": expires_at_text,
-            "plain_text": t(
-                MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM if high_risk_override else MSG_AUDIT_CONFIRMATION_IM,
-                locale=language,
-                summary=intent_summary,
-                score=risk_score,
-                expires_in_seconds=timeout_seconds,
-            ),
-        }
-    return AuditRoundResult(audit_record_id=audit_record_id, status=status, tool_results=tool_results, confirmation_payload=confirmation_payload)
+        if status == AuditRecordStatus.PASSED:
+            return AuditRoundResult(audit_record_id=audit_record_id, status=status, tool_results=())
+        tool_results = tuple(_result_message(call, status, next(item["reason"] for item in parsed_results if item["tool_call_id"] == call.id)) for call in tool_calls)
+        confirmation_payload = None
+        if status == AuditRecordStatus.PENDING:
+            risk_score = max(max(item["score"] or 0 for item in parsed_results), cfg.security.audit_threshold)
+            expires_at_text = expires_at.isoformat() if expires_at else "-"
+            timeout_seconds = cfg.security.audit_confirmation_timeout_seconds
+            confirmation_payload = {
+                "type": "audit_confirmation",
+                "audit_record_id": audit_record_id,
+                "summary": intent_summary,
+                "risk": risk_score,
+                "status": status.value,
+                "confirmation_mode": "high_risk_override" if high_risk_override else "standard",
+                "expires_at": expires_at_text,
+                "plain_text": t(
+                    MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM if high_risk_override else MSG_AUDIT_CONFIRMATION_IM,
+                    locale=language,
+                    summary=intent_summary,
+                    score=risk_score,
+                    expires_in_seconds=timeout_seconds,
+                ),
+            }
+        return AuditRoundResult(audit_record_id=audit_record_id, status=status, tool_results=tool_results, confirmation_payload=confirmation_payload)
+    except asyncio.CancelledError:
+        await db.rollback()
+        await audit_crud.cancel_unexecuted(
+            db,
+            audit_record_id=audit_record_id,
+            uid=uid,
+            session_id=session_id,
+            error_reason=t(MSG_AUDIT_STATUS_CANCELLED, locale=language),
+        )
+        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+        raise
