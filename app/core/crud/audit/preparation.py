@@ -18,6 +18,7 @@ from app.core.constants import (
     ERR_AUDIT_TOOL_DETAIL_COUNT_MISMATCH,
     ERR_AUDIT_TOOL_ORDER_INVALID,
 )
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.audit import (
@@ -119,6 +120,7 @@ class CRUDAuditPreparation:
         round_arguments_hash: str,
         tool_count: int,
     ) -> AuditRecord:
+        await ensure_session_reply_work_claim(db)
         record = AuditRecord(
             uid=uid,
             operator_username=operator_username,
@@ -178,6 +180,7 @@ class CRUDAuditPreparation:
         if not context_path.is_absolute():
             raise ValueError(t(ERR_AUDIT_FILE_PATH_NOT_ABSOLUTE))
 
+        await ensure_session_reply_work_claim(db)
         record = await self.get_record(db, audit_record_id)
         if record is None or record.status != AuditRecordStatus.PREPARING:
             return False

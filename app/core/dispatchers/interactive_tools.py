@@ -16,8 +16,10 @@ from app.core.constants import (
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     MANAGE_TODO_TOOL_NAME,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
 from app.core.crud.audit.audit import audit_crud
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.dispatchers.interactive_state import InteractiveDispatchState
 from app.core.exceptions import ServerException
 from app.core.i18n import get_current_locale, t
@@ -126,6 +128,7 @@ async def handle_interactive_tool_round(
     saved_msg,
     response_id: str,
 ) -> dict[str, Any] | None:
+    await ensure_session_reply_work_claim(state.db, commit=True)
     # 完整整轮协议预检必须先于部分限额执行，以保留独占/原子语义。
     protocol_precheck_errors = prevalidate_tool_round_protocol(ai_msg.tool_calls, state.cfg)
     if protocol_precheck_errors:
@@ -581,6 +584,7 @@ async def handle_interactive_tool_round(
         protocol=resolve_model_protocol(state.model_entry),
         context_summary_boundary_message_id=state.checkpoint_state.upper_message_id,
         source_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
+        session_reply_work_claim=getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY),
     )
     tasks = [asyncio.create_task(_execute_isolated_tool_call(parallel_tool_context, tc)) for tc in executable_tool_calls]
     stored_tool_results: list[InternalMessage] = []

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import _response_has_background_tasks, web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
+from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.channel_router import select_channel
 from app.core.constants import (
     DEFAULT_SESSION_GOAL_MODE,
@@ -479,12 +480,7 @@ async def stop_session(
     if (session.source or "http") not in {"http", "ws"}:
         return StandardResponse.error(code=403, message=ERR_SESSION_READ_ONLY)
 
-    count = await session_reply_work_item_crud.cancel_session(
-        db,
-        session_id=session_id,
-        uid=uid,
-        interactive_only=True,
-    )
+    count = await stop_interactive_reply(db, uid=uid, session_id=session_id)
     return StandardResponse.success(data={"session_id": session_id, "cancelled_count": count})
 
 

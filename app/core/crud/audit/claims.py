@@ -8,6 +8,7 @@ from sqlmodel import select
 from app.core.constants import (
     ERR_AUDIT_PENDING_CLOSE_STATUS_INVALID,
 )
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.audit import (
@@ -186,6 +187,7 @@ class CRUDAuditClaims:
         return await self.get_record(db, audit_record_id), claim_token
 
     async def claim_passed_for_execution(self, db: AsyncSession, *, audit_record_id: int) -> tuple[AuditRecord | None, str | None]:
+        await ensure_session_reply_work_claim(db)
         claim_token = uuid.uuid4().hex
         now = get_local_time()
         await db.execute(build_passed_execution_claim_update(audit_record_id=audit_record_id, now=now, claim_token=claim_token))

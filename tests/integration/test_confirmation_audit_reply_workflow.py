@@ -3,25 +3,36 @@ import json
 from collections.abc import AsyncGenerator
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
 import app.providers.database as database_provider
 from app.adapters.chat_web import web_chat_adapter
+from app.api.v1 import chat as chat_api
 from app.core.audit import confirmation_events as confirmation_events_module
+from app.core.audit import service as audit_service_module
 from app.core.audit.confirmation_persistence import persist_pending_confirmation_bundle
 from app.core.audit.integrity import build_tool_round_integrity_snapshot
+from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.security import get_current_user
+from app.core.session_reply_queue import consumer as consumer_module
+from app.core.session_reply_queue import executor_audit as executor_audit_module
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.session_reply_queue import manager_result as manager_result_module
 from app.core.session_reply_queue import manager_submission as manager_submission_module
+from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.tools import TOOL_EXECUTOR_MAP
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.request_token_baseline import build_provider_request_usage_metadata
 from app.core.utils.time import get_local_time
@@ -35,20 +46,24 @@ from app.models.audit import (
     AuditToolDetail,
     AuditToolResultVersion,
 )
+from app.models.background_task import BackgroundTask
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseDocument, KnowledgeBaseProfileBinding
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
-from app.models.profile import Profile
+from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose, SessionReplyProviderUsage
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySequence,
+    SessionReplySourceType,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
 from app.models.session_todo import SessionTodoPlan
+from app.models.terminal_session import TerminalSession
+from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
 
 
@@ -72,6 +87,7 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
         PromptLibrary.__table__,
         Profile.__table__,
         ChatSession.__table__,
+        TerminalSession.__table__,
         SessionTodoPlan.__table__,
         KnowledgeBase.__table__,
         KnowledgeBaseProfileBinding.__table__,
@@ -81,6 +97,7 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
         AuditToolDetail.__table__,
         AuditConfirmationClaim.__table__,
         AuditExecutionRecord.__table__,
+        BackgroundTask.__table__,
         AuditToolResultVersion.__table__,
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
@@ -303,6 +320,32 @@ async def _wait_for_confirmed_work(
                 return work
         await asyncio.sleep(0.01)
     raise AssertionError("confirmed tool work was not enqueued")
+
+
+async def _stop_confirmation_session(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    session_id: str = "session-confirmation",
+    uid: str = "owner",
+) -> dict:
+    app = FastAPI()
+    app.include_router(chat_api.router, prefix="/api/v1")
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession]:
+        async with session_factory() as db:
+            yield db
+
+    def override_current_user() -> SimpleNamespace:
+        return SimpleNamespace(uid=uid, is_superuser=False)
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = override_current_user
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/sessions/stop", params={"session_id": session_id})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code"] == 200
+    return payload["data"]
 
 
 @pytest.mark.asyncio
@@ -765,3 +808,696 @@ async def test_web_submit_duplicate_request_id_does_not_repeat_confirmation_deci
         assert work.execution_state["decision_message_id"] == message_row.id
     else:
         assert work.source_id == str(message_row.id)
+
+
+@pytest.mark.asyncio
+async def test_high_risk_confirmation_stop_before_worker_claim_cancels_audit_bundle(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        details = list((await db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id == audit_record_id).order_by(AuditToolDetail.turn_index))).scalars().all())
+        assert details
+        for detail in details:
+            detail.score = 9
+        await db.commit()
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None
+        source_message_id = record.source_assistant_message_id
+        confirmation_card = (await db.execute(select(Message).where(Message.session_id == "session-confirmation", Message.uid == "owner", Message.type == MessageType.AUDIT_CONFIRMATION))).scalars().one()
+        assert confirmation_card.id is not None
+        confirmation_card_id = confirmation_card.id
+
+    delivered_events: list[dict] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event_payload: dict) -> None:
+        delivered_events.append(event_payload)
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", capture_session_event)
+
+    async with confirmation_workflow_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        _message, work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile=profile,
+            message="ignore",
+            attachments=None,
+            source="http",
+        )
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None
+        assert record.status == AuditRecordStatus.EXECUTING
+    assert submission_status == "approved"
+    assert work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    assert work.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+    stop_payload = await _stop_confirmation_session(confirmation_workflow_session_factory)
+    assert stop_payload == {"session_id": "session-confirmation", "cancelled_count": 1}
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        stopped_work = await db.get(SessionReplyWorkItem, work.id)
+        source_message = await db.get(Message, source_message_id)
+        decision_message = await db.get(Message, record.decision_message_id) if record and record.decision_message_id else None
+        confirmation_card = await db.get(Message, confirmation_card_id)
+        structured_results = list((await db.execute(select(Message).where(Message.audit_record_id == audit_record_id, Message.audit_tool_call_id.is_not(None), Message.type == MessageType.TOOL_RESULT).order_by(Message.id))).scalars().all())
+        claims = list((await db.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == audit_record_id))).scalars().all())
+        executions = list((await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == audit_record_id))).scalars().all())
+        versions = list((await db.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == audit_record_id).order_by(AuditToolResultVersion.original_tool_call_id, AuditToolResultVersion.version_no))).scalars().all())
+
+    assert record is not None
+    assert record.status == AuditRecordStatus.CANCELLED
+    assert record.completed_at is not None
+    completed_at = record.completed_at
+    assert record.execution_claim_token is None
+    assert record.decision is not None and record.decision.value == "approve"
+    assert record.decision_raw_message == "ignore"
+    assert source_message is not None and source_message.type == MessageType.TOOL_CALL
+    assert decision_message is not None
+    assert decision_message.type == MessageType.AUDIT_DECISION
+    assert decision_message.content == "ignore"
+    assert stopped_work is not None
+    assert stopped_work.status == SessionReplyWorkStatus.CANCELLED
+    assert stopped_work.locked_by is None and stopped_work.lock_until is None
+    assert confirmation_card is not None
+    assert json.loads(confirmation_card.content or "{}")["status"] == AuditRecordStatus.CANCELLED.value
+    assert len(structured_results) == 2
+    for result_message in structured_results:
+        tool_result = InternalMessage.model_validate_json(result_message.content or "{}")
+        result_payload = json.loads(tool_result.content or "{}")
+        assert result_payload["status"] == AuditRecordStatus.CANCELLED.value
+        assert result_payload["confirmation_status"] == AuditRecordStatus.CANCELLED.value
+        assert result_payload["confirmation_decision"] == "ignore"
+    assert claims == []
+    assert executions == []
+    versions_by_call: dict[str, list[AuditToolResultVersion]] = {}
+    for version in versions:
+        versions_by_call.setdefault(version.original_tool_call_id, []).append(version)
+    assert set(versions_by_call) == {"original-shell-call-1", "original-shell-call-2"}
+    assert all([version.version_no for version in call_versions] == [0, 1, 2] for call_versions in versions_by_call.values())
+    assert any(event.get("type") == "audit_confirmation_status" and event.get("audit_record_id") == audit_record_id and event.get("status") == AuditRecordStatus.CANCELLED.value for event in delivered_events)
+
+    repeated_stop = await _stop_confirmation_session(confirmation_workflow_session_factory)
+    assert repeated_stop == {"session_id": "session-confirmation", "cancelled_count": 0}
+    async with confirmation_workflow_session_factory() as db:
+        repeated_record = await db.get(AuditRecord, audit_record_id)
+        repeated_versions = list((await db.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == audit_record_id).order_by(AuditToolResultVersion.original_tool_call_id, AuditToolResultVersion.version_no))).scalars().all())
+    assert repeated_record is not None
+    assert repeated_record.completed_at == completed_at
+    assert [(version.original_tool_call_id, version.version_no) for version in repeated_versions] == [(version.original_tool_call_id, version.version_no) for version in versions]
+
+    async with confirmation_workflow_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        _message, replacement_work, _submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile=profile,
+            message="ignore",
+            attachments=None,
+            source="http",
+        )
+    assert replacement_work.work_type == SessionReplyWorkType.FOREGROUND_REPLY
+    assert replacement_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+
+@pytest.mark.asyncio
+async def test_stop_pending_confirmation_without_work_cancels_bundle_without_enqueueing(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None
+        source_message_id = record.source_assistant_message_id
+        confirmation_card = (await db.execute(select(Message).where(Message.session_id == "session-confirmation", Message.uid == "owner", Message.type == MessageType.AUDIT_CONFIRMATION))).scalars().one()
+        assert confirmation_card.id is not None
+        confirmation_card_id = confirmation_card.id
+        pending_tool_messages = list((await db.execute(select(Message).where(Message.audit_record_id == audit_record_id, Message.audit_tool_call_id.is_not(None), Message.type == MessageType.TOOL_RESULT).order_by(Message.id))).scalars().all())
+        assert len(pending_tool_messages) == 2
+        assert all(message.id is not None and message.audit_tool_call_id is not None for message in pending_tool_messages)
+        tool_message_ids = [message.id for message in pending_tool_messages]
+        tool_call_ids = [message.audit_tool_call_id for message in pending_tool_messages]
+        versions = list((await db.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == audit_record_id).order_by(AuditToolResultVersion.original_tool_call_id, AuditToolResultVersion.version_no))).scalars().all())
+        version_counts: dict[str, int] = {tool_call_id: 0 for tool_call_id in tool_call_ids if tool_call_id is not None}
+        for version in versions:
+            version_counts[version.original_tool_call_id] += 1
+        works = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == "session-confirmation", SessionReplyWorkItem.uid == "owner"))).scalars().all())
+
+    assert works == []
+    assert version_counts == {"original-shell-call-1": 1, "original-shell-call-2": 1}
+
+    delivered_events: list[dict] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event_payload: dict) -> None:
+        delivered_events.append(event_payload)
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", capture_session_event)
+
+    stop_payload = await _stop_confirmation_session(confirmation_workflow_session_factory)
+    assert stop_payload == {"session_id": "session-confirmation", "cancelled_count": 0}
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        source_message = await db.get(Message, source_message_id)
+        confirmation_card = await db.get(Message, confirmation_card_id)
+        pending_tool_messages = list((await db.execute(select(Message).where(Message.audit_record_id == audit_record_id, Message.audit_tool_call_id.is_not(None), Message.type == MessageType.TOOL_RESULT).order_by(Message.id))).scalars().all())
+        versions = list((await db.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == audit_record_id).order_by(AuditToolResultVersion.original_tool_call_id, AuditToolResultVersion.version_no))).scalars().all())
+        claims = list((await db.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == audit_record_id))).scalars().all())
+        executions = list((await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == audit_record_id))).scalars().all())
+        works = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == "session-confirmation", SessionReplyWorkItem.uid == "owner"))).scalars().all())
+
+    assert record is not None
+    assert record.status == AuditRecordStatus.CANCELLED
+    assert record.completed_at is not None
+    assert record.execution_claim_token is None
+    assert source_message is not None and source_message.id == source_message_id
+    assert confirmation_card is not None and confirmation_card.id == confirmation_card_id
+    assert json.loads(confirmation_card.content or "{}")["status"] == AuditRecordStatus.CANCELLED.value
+    assert [message.id for message in pending_tool_messages] == tool_message_ids
+    assert [message.audit_tool_call_id for message in pending_tool_messages] == tool_call_ids
+    for message in pending_tool_messages:
+        tool_result = InternalMessage.model_validate_json(message.content or "{}")
+        result_payload = json.loads(tool_result.content or "{}")
+        assert result_payload["status"] == AuditRecordStatus.CANCELLED.value
+        assert result_payload["confirmation_status"] == AuditRecordStatus.CANCELLED.value
+    version_counts_after: dict[str, int] = {tool_call_id: 0 for tool_call_id in tool_call_ids if tool_call_id is not None}
+    for version in versions:
+        version_counts_after[version.original_tool_call_id] += 1
+    assert version_counts_after == {tool_call_id: count + 1 for tool_call_id, count in version_counts.items()}
+    assert claims == []
+    assert executions == []
+    assert works == []
+    assert any(event.get("type") == "audit_confirmation_status" and event.get("audit_record_id") == audit_record_id and event.get("status") == AuditRecordStatus.CANCELLED.value for event in delivered_events)
+
+    async with confirmation_workflow_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        approval_message, foreground_work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile=profile,
+            message="approve",
+            attachments=None,
+            source="http",
+        )
+    assert submission_status == "accepted"
+    assert foreground_work.work_type == SessionReplyWorkType.FOREGROUND_REPLY
+    assert foreground_work.source_type == SessionReplySourceType.USER_MESSAGE
+    assert foreground_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert approval_message.id is not None
+    assert foreground_work.source_id == str(approval_message.id)
+
+    async with confirmation_workflow_session_factory() as db:
+        record_after_approval = await db.get(AuditRecord, audit_record_id)
+        works_after_approval = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == "session-confirmation", SessionReplyWorkItem.uid == "owner").order_by(SessionReplyWorkItem.id))).scalars().all())
+        executions_after_approval = list((await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == audit_record_id))).scalars().all())
+
+    assert record_after_approval is not None
+    assert record_after_approval.status == AuditRecordStatus.CANCELLED
+    assert len(works_after_approval) == 1
+    assert works_after_approval[0].id == foreground_work.id
+    assert works_after_approval[0].work_type == SessionReplyWorkType.FOREGROUND_REPLY
+    assert not any(work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION for work in works_after_approval)
+    assert executions_after_approval == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("score", [0, 9])
+async def test_stop_during_preparing_audit_discards_delayed_result_without_confirmation_or_reply(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    score: int,
+) -> None:
+    uid = "owner"
+    session_id = "session-confirmation"
+    worker_id = "audit-worker"
+    tool_call = InternalToolCall(
+        id="audit-stop-call",
+        name="execute_shell",
+        arguments={"command": "echo audit-stop", "execution_mode": "non_interactive"},
+    )
+    profile_configs = _profile_config()
+    profile_configs["security"].update({"audit_channel_id": 1, "audit_model_id": "audit-model"})
+    cfg = ProfileConfig.model_validate(profile_configs)
+
+    async with confirmation_workflow_session_factory() as db:
+        db.add(Profile(id=1, uid=uid, name="confirmation workflow", configs=profile_configs))
+        db.add(ChatSession(session_id=session_id, uid=uid, profile_id=1, source="http", reply_target_source="http"))
+        await db.flush()
+        user_message = Message(
+            session_id=session_id,
+            uid=uid,
+            profile_id=1,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="run audit-stop",
+            is_processed=True,
+        )
+        source_message = Message(
+            session_id=session_id,
+            uid=uid,
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TOOL_CALL,
+            content=InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]).model_dump_json(exclude_none=True),
+            is_processed=True,
+        )
+        db.add_all([user_message, source_message])
+        await db.commit()
+        assert user_message.id is not None
+        assert source_message.id is not None
+        user_message_id = user_message.id
+        source_message_id = source_message.id
+
+    async with confirmation_workflow_session_factory() as db:
+        work, created = await session_reply_work_item_crud.enqueue(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id=user_message_id,
+            dedupe_key="audit-stop-foreground",
+        )
+        assert created
+        claimed = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id=worker_id,
+            lease_seconds=300,
+        )
+    assert claimed is not None
+    assert claimed.id == work.id
+    assert claimed.work_type == SessionReplyWorkType.FOREGROUND_REPLY
+    assert claimed.source_type == SessionReplySourceType.USER_MESSAGE
+    assert claimed.status == SessionReplyWorkStatus.RUNNING
+    assert claimed.id is not None
+    work_id = claimed.id
+
+    audit_started = asyncio.Event()
+    release_audit = asyncio.Event()
+
+    async def delayed_auditor(db: AsyncSession, *_args, **_kwargs) -> tuple[dict, dict]:
+        await db.commit()
+        audit_started.set()
+        await release_audit.wait()
+        return (
+            {"messages": []},
+            {
+                "parsed": {
+                    "results": [
+                        {
+                            "tool_call_id": tool_call.id,
+                            "score": score,
+                            "reason": "delayed audit",
+                            "file_checks": [],
+                        }
+                    ]
+                },
+                "file_reads": [],
+            },
+        )
+
+    async def fail_summary(*_args, **_kwargs):
+        raise AssertionError("pending audit summary must not start after stop")
+
+    monkeypatch.setattr(audit_service_module, "_call_auditor", delayed_auditor)
+    monkeypatch.setattr(audit_service_module, "_summarize_pending", fail_summary)
+
+    async def run_audit() -> object:
+        async with confirmation_workflow_session_factory() as db:
+            db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
+            return await audit_service_module.audit_tool_round(
+                db,
+                cfg=cfg,
+                tool_calls=[tool_call],
+                source_assistant_message_id=source_message_id,
+                uid=uid,
+                operator_username=uid,
+                session_id=session_id,
+                source="http",
+                language="zh",
+                working_directory=tmp_path,
+            )
+
+    audit_task = asyncio.create_task(run_audit())
+    try:
+        await asyncio.wait_for(audit_started.wait(), timeout=5)
+        async with confirmation_workflow_session_factory() as db:
+            records = list((await db.execute(select(AuditRecord).order_by(AuditRecord.id))).scalars().all())
+            confirmation_cards = list((await db.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid, Message.type == MessageType.AUDIT_CONFIRMATION))).scalars().all())
+        assert len(records) == 1
+        preparing_record = records[0]
+        assert preparing_record.id is not None
+        assert preparing_record.status == AuditRecordStatus.PREPARING
+        assert confirmation_cards == []
+
+        stop_payload = await _stop_confirmation_session(confirmation_workflow_session_factory)
+        assert stop_payload == {"session_id": session_id, "cancelled_count": 1}
+        release_audit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(audit_task, timeout=5)
+    finally:
+        release_audit.set()
+        if not audit_task.done():
+            audit_task.cancel()
+        try:
+            await audit_task
+        except asyncio.CancelledError:
+            pass
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, preparing_record.id)
+        work = await db.get(SessionReplyWorkItem, work_id)
+        claims = list((await db.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == preparing_record.id))).scalars().all())
+        confirmation_cards = list((await db.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid, Message.type == MessageType.AUDIT_CONFIRMATION))).scalars().all())
+        executions = list((await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == preparing_record.id))).scalars().all())
+        messages = list((await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.id))).scalars().all())
+
+    assert record is not None
+    assert record.status == AuditRecordStatus.CANCELLED
+    assert record.completed_at is not None
+    assert record.execution_claim_token is None
+    assert work is not None
+    assert work.status == SessionReplyWorkStatus.CANCELLED
+    assert work.locked_by is None and work.lock_until is None
+    assert work.result_message_id is None
+    assert claims == []
+    assert confirmation_cards == []
+    assert executions == []
+    assert len(messages) == 2
+    assert {message.id for message in messages} == {user_message_id, source_message_id}
+    assert not any(message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "failed", "interrupted"])
+async def test_confirmation_execution_stop_preserves_started_result_and_cancels_remaining(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None and record.source_assistant_message_id is not None
+        source_message_id = record.source_assistant_message_id
+        confirmation_card = (await db.execute(select(Message).where(Message.session_id == "session-confirmation", Message.uid == "owner", Message.type == MessageType.AUDIT_CONFIRMATION))).scalars().one()
+        assert confirmation_card.id is not None
+        confirmation_card_id = confirmation_card.id
+
+    for module in (consumer_module, executor_lifecycle_module, executor_audit_module):
+        monkeypatch.setattr(module, "AsyncSessionLocal", confirmation_workflow_session_factory)
+
+    delivered_events: list[dict] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event_payload: dict) -> None:
+        delivered_events.append(event_payload)
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", capture_session_event)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
+
+    commands: list[str] = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    class ControlledShellExecutor:
+        requires_audit = True
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def execute(self, **arguments) -> str:
+            commands.append(arguments["command"])
+            assert len(commands) == 1
+            first_started.set()
+            await release_first.wait()
+            if outcome == "interrupted":
+                raise AssertionError("interrupted shell call was not cancelled")
+            if outcome == "success":
+                payload = {"status": "success", "exit_code": 0, "stdout": "controlled success\n"}
+            else:
+                payload = {
+                    "status": "failed",
+                    "exit_code": 7,
+                    "stdout": "controlled failed\n",
+                    "error": "controlled failure",
+                }
+            return json.dumps(payload, ensure_ascii=False)
+
+    monkeypatch.setitem(TOOL_EXECUTOR_MAP, "execute_shell", ControlledShellExecutor)
+
+    async with confirmation_workflow_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        _message, submitted_work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile=profile,
+            message="approve",
+            attachments=None,
+            source="http",
+        )
+    assert submission_status == "approved"
+    assert submitted_work.id is not None
+
+    worker_id = "confirmation-stop-worker"
+    async with confirmation_workflow_session_factory() as db:
+        claimed = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id=worker_id,
+            lease_seconds=300,
+        )
+    assert claimed is not None
+    assert claimed.id == submitted_work.id
+    assert claimed.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+
+    consumer = consumer_module.SessionReplyConsumer()
+    work_task = asyncio.create_task(consumer._run_claimed(claimed.id, worker_id, claimed.attempt_count, claimed.max_attempts))
+    try:
+        await asyncio.wait_for(first_started.wait(), timeout=5)
+        stop_payload = await _stop_confirmation_session(confirmation_workflow_session_factory)
+        assert stop_payload == {"session_id": "session-confirmation", "cancelled_count": 1}
+
+        async with confirmation_workflow_session_factory() as db:
+            executing_record = await db.get(AuditRecord, audit_record_id)
+        assert executing_record is not None
+        assert executing_record.status == AuditRecordStatus.EXECUTING
+
+        if outcome == "interrupted":
+            work_task.cancel()
+        else:
+            release_first.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(work_task, timeout=5)
+    finally:
+        release_first.set()
+        if not work_task.done():
+            work_task.cancel()
+        await asyncio.gather(work_task, return_exceptions=True)
+
+    expected_first_execution_status = {
+        "success": AuditExecutionStatus.SUCCEEDED,
+        "failed": AuditExecutionStatus.FAILED,
+        "interrupted": AuditExecutionStatus.EXECUTION_UNKNOWN,
+    }[outcome]
+    expected_audit_status = AuditRecordStatus.EXECUTION_UNKNOWN if outcome == "interrupted" else AuditRecordStatus.CANCELLED
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        work = await db.get(SessionReplyWorkItem, submitted_work.id)
+        source_message = await db.get(Message, source_message_id)
+        card = await db.get(Message, confirmation_card_id)
+        messages = list((await db.execute(select(Message).where(Message.session_id == "session-confirmation").order_by(Message.id))).scalars().all())
+        executions = list((await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == audit_record_id).order_by(AuditExecutionRecord.id))).scalars().all())
+        claims = list((await db.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == audit_record_id))).scalars().all())
+        versions = list((await db.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == audit_record_id).order_by(AuditToolResultVersion.original_tool_call_id, AuditToolResultVersion.version_no))).scalars().all())
+
+    assert commands == ["echo confirmed-1"]
+    assert record is not None
+    assert record.status == expected_audit_status
+    assert record.decision is not None and record.decision.value == "approve"
+    assert record.decision_raw_message == "approve"
+    assert record.execution_claim_token is None
+    assert record.completed_at is not None
+    assert work is not None
+    assert work.status == SessionReplyWorkStatus.CANCELLED
+    assert work.locked_by is None and work.lock_until is None
+    assert work.result_message_id is None
+    assert [execution.status for execution in executions] == [expected_first_execution_status, AuditExecutionStatus.CANCELLED]
+    assert all(execution.status != AuditExecutionStatus.RUNNING for execution in executions)
+    assert claims == []
+    assert source_message is not None and source_message.id == source_message_id and source_message.type == MessageType.TOOL_CALL
+    assert card is not None and card.id == confirmation_card_id
+    assert json.loads(card.content or "{}")["status"] == expected_audit_status.value
+
+    structured_results = [message for message in messages if message.audit_record_id == audit_record_id and message.audit_tool_call_id is not None and message.type == MessageType.TOOL_RESULT]
+    assert [message.audit_tool_call_id for message in structured_results] == [
+        "original-shell-call-1",
+        "original-shell-call-2",
+    ]
+    result_payloads = {message.audit_tool_call_id: json.loads(InternalMessage.model_validate_json(message.content or "{}").content or "{}") for message in structured_results}
+    first_payload = result_payloads["original-shell-call-1"]
+    assert first_payload["confirmation_decision"] == "approve"
+    if outcome == "success":
+        assert first_payload["status"] == "success"
+        assert first_payload["exit_code"] == 0
+        assert first_payload["stdout"] == "controlled success\n"
+    elif outcome == "failed":
+        assert first_payload["status"] == "failed"
+        assert first_payload["exit_code"] == 7
+        assert first_payload["stdout"] == "controlled failed\n"
+        assert first_payload["error"] == "controlled failure"
+    else:
+        assert first_payload["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
+        assert first_payload["confirmation_status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
+        assert first_payload["error"]
+    second_payload = result_payloads["original-shell-call-2"]
+    assert second_payload["status"] == AuditRecordStatus.CANCELLED.value
+    assert second_payload["confirmation_status"] == AuditRecordStatus.CANCELLED.value
+    assert second_payload["confirmation_decision"] == "approve"
+    assert second_payload["error"]
+
+    versions_by_call: dict[str, list[AuditToolResultVersion]] = {}
+    for version in versions:
+        versions_by_call.setdefault(version.original_tool_call_id, []).append(version)
+    assert set(versions_by_call) == {"original-shell-call-1", "original-shell-call-2"}
+    assert all([version.version_no for version in call_versions] == [0, 1, 2] for call_versions in versions_by_call.values())
+    assert len([message for message in messages if message.type == MessageType.AUDIT_CONFIRMATION]) == 1
+    assert not any(message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT for message in messages)
+    assert not any(message.role == MessageRole.ERR for message in messages)
+    assert not any(event.get("source") == "confirmed_tool_execution" for event in delivered_events)
+
+
+@pytest.mark.asyncio
+async def test_stopped_foreground_work_blocks_audit_before_preparation(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    uid = "owner"
+    session_id = "session-confirmation"
+    worker_id = "stopped-foreground-worker"
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    delivered_events: list[dict] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event_payload: dict) -> None:
+        delivered_events.append(event_payload)
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", capture_session_event)
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None and record.source_assistant_message_id is not None
+        source_message_id = record.source_assistant_message_id
+        source_message = await db.get(Message, source_message_id)
+        assert source_message is not None
+        source_internal = InternalMessage.model_validate_json(source_message.content or "{}")
+        assert source_internal.tool_calls
+        source_tool_calls = source_internal.tool_calls
+        confirmation_card = (await db.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid, Message.type == MessageType.AUDIT_CONFIRMATION))).scalars().one()
+        assert confirmation_card.id is not None
+        confirmation_card_id = confirmation_card.id
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        _message, submitted_work, _submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile=profile,
+            message="new operation",
+            attachments=None,
+            source="http",
+        )
+        assert submitted_work.id is not None
+        assert submitted_work.work_type == SessionReplyWorkType.FOREGROUND_REPLY
+        assert submitted_work.source_type == SessionReplySourceType.USER_MESSAGE
+        assert submitted_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+        work_id = submitted_work.id
+
+    async with confirmation_workflow_session_factory() as db:
+        claimed = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id=worker_id,
+            lease_seconds=300,
+        )
+        assert claimed is not None and claimed.id == work_id
+        assert claimed.work_type == SessionReplyWorkType.FOREGROUND_REPLY
+        assert claimed.status == SessionReplyWorkStatus.RUNNING
+
+    stop_payload = await _stop_confirmation_session(confirmation_workflow_session_factory)
+    assert stop_payload == {"session_id": session_id, "cancelled_count": 1}
+
+    async with confirmation_workflow_session_factory() as db:
+        stopped_work = await db.get(SessionReplyWorkItem, work_id)
+        assert stopped_work is not None and stopped_work.status == SessionReplyWorkStatus.CANCELLED
+
+    profile_configs = _profile_config()
+    profile_configs["security"].update({"audit_channel_id": 1, "audit_model_id": "audit-model"})
+    cfg = ProfileConfig.model_validate(profile_configs)
+
+    async def fail_call_auditor(*_args, **_kwargs):
+        raise AssertionError("stopped work must not call the auditor")
+
+    monkeypatch.setattr(audit_service_module, "_call_auditor", fail_call_auditor)
+
+    async with confirmation_workflow_session_factory() as db:
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
+        with pytest.raises(asyncio.CancelledError):
+            await audit_service_module.audit_tool_round(
+                db,
+                cfg=cfg,
+                tool_calls=source_tool_calls,
+                source_assistant_message_id=source_message_id,
+                uid=uid,
+                operator_username=uid,
+                session_id=session_id,
+                source="http",
+                language="zh",
+                working_directory=tmp_path,
+            )
+
+    async with confirmation_workflow_session_factory() as db:
+        records = (await db.execute(select(AuditRecord).order_by(AuditRecord.id))).scalars().all()
+        confirmation_cards = (await db.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid, Message.type == MessageType.AUDIT_CONFIRMATION).order_by(Message.id))).scalars().all()
+        executions = (await db.execute(select(AuditExecutionRecord))).scalars().all()
+        work = await db.get(SessionReplyWorkItem, work_id)
+
+    assert len(records) == 1
+    assert records[0].id == audit_record_id
+    assert records[0].status == AuditRecordStatus.CANCELLED
+    assert records[0].source_assistant_message_id == source_message_id
+    assert len(confirmation_cards) == 1
+    assert confirmation_cards[0].id == confirmation_card_id
+    assert executions == []
+    assert work is not None and work.status == SessionReplyWorkStatus.CANCELLED
+    assert work.locked_by is None and work.lock_until is None
+    assert delivered_events

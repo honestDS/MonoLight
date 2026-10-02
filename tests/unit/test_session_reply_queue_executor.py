@@ -1180,6 +1180,10 @@ async def test_confirmed_binding_failure_marks_new_audit_unknown(monkeypatch, fa
     finish_calls = []
     update_calls = []
 
+    class FakeSession:
+        async def commit(self):
+            return None
+
     async def update_claimed(db, **kwargs):
         if failure == "false":
             return False
@@ -1195,18 +1199,26 @@ async def test_confirmed_binding_failure_marks_new_audit_unknown(monkeypatch, fa
         finish_calls.append(kwargs)
         return True
 
+    async def finish_execution_round_if_complete(db, **kwargs):
+        return None
+
+    async def update_confirmation_tool_results(db, **kwargs):
+        return 0
+
     async def update_confirmation(db, *, audit_record_id):
         assert audit_record_id == 99
 
     monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
     monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
     monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round", finish_execution_round)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round_if_complete", finish_execution_round_if_complete)
+    monkeypatch.setattr(executor_audit_module, "_update_confirmation_tool_results", update_confirmation_tool_results)
     monkeypatch.setattr(executor_audit_module, "update_confirmation_message_status", update_confirmation)
 
     expected_exception = asyncio.CancelledError if failure == "cancelled" else RuntimeError
     with pytest.raises(expected_exception) as exc_info:
         await executor_audit_module._persist_confirmed_work_audit_execution_binding(
-            object(),
+            FakeSession(),
             work=work,
             worker_id="worker-1",
             audit_record_id=99,
@@ -1254,7 +1266,8 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
     confirmation_calls = []
 
     class FakeSession:
-        pass
+        async def commit(self):
+            return None
 
     class SessionContext:
         async def __aenter__(self):
@@ -1283,6 +1296,12 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
         finish_calls.append(kwargs)
         return True
 
+    async def finish_execution_round_if_complete(db, **kwargs):
+        return None
+
+    async def update_confirmation_tool_results(db, **kwargs):
+        return 0
+
     async def update_confirmation(db, *, audit_record_id):
         confirmation_calls.append(audit_record_id)
 
@@ -1296,6 +1315,8 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
     )
     monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
     monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round", finish_execution_round)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round_if_complete", finish_execution_round_if_complete)
+    monkeypatch.setattr(executor_audit_module, "_update_confirmation_tool_results", update_confirmation_tool_results)
     monkeypatch.setattr(executor_audit_module, "update_confirmation_message_status", update_confirmation)
 
     await executor_audit_module.mark_work_audit_execution_unknown(7, "worker-1", "interrupted")

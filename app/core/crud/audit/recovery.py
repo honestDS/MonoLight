@@ -1,9 +1,10 @@
 from datetime import timedelta
 
-from sqlalchemy import delete, update
+from sqlalchemy import String, and_, cast, delete, exists, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.utils.time import get_local_time
 from app.models.audit import (
     AuditConfirmationClaim,
@@ -14,6 +15,7 @@ from app.models.audit import (
     AuditRecordStatus,
     AuditToolDetail,
 )
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 
 __all__ = [
     "CRUDAuditRecovery",
@@ -21,6 +23,130 @@ __all__ = [
 
 
 class CRUDAuditRecovery:
+    async def cancel_unexecuted(
+        self,
+        db: AsyncSession,
+        *,
+        audit_record_id: int,
+        uid: str,
+        session_id: str,
+        error_reason: str,
+        commit: bool = True,
+    ) -> bool:
+        now = get_local_time()
+        result = await db.execute(
+            update(AuditRecord)
+            .where(
+                AuditRecord.id == audit_record_id,
+                AuditRecord.uid == uid,
+                AuditRecord.session_id == session_id,
+                or_(
+                    AuditRecord.status.in_(
+                        [
+                            AuditRecordStatus.PREPARING,
+                            AuditRecordStatus.PASSED,
+                            AuditRecordStatus.PENDING,
+                        ]
+                    ),
+                    and_(
+                        AuditRecord.status == AuditRecordStatus.EXECUTING,
+                        ~exists(
+                            select(AuditExecutionRecord.id).where(
+                                AuditExecutionRecord.audit_record_id == AuditRecord.id,
+                            )
+                        ),
+                    ),
+                ),
+            )
+            .values(
+                status=AuditRecordStatus.CANCELLED,
+                execution_claim_token=None,
+                completed_at=now,
+                updated_at=now,
+                error_reason=error_reason,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) <= 0:
+            return False
+
+        await db.execute(delete(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == audit_record_id))
+        if commit:
+            await db.commit()
+        return True
+
+    async def cancel_unexecuted_interactive_by_session(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        error_reason: str,
+        commit: bool = True,
+    ) -> list[int]:
+        claim_exists = exists(
+            select(AuditConfirmationClaim.id).where(
+                AuditConfirmationClaim.audit_record_id == AuditRecord.id,
+                AuditConfirmationClaim.uid == uid,
+                AuditConfirmationClaim.session_id == session_id,
+            )
+        )
+        cancelled_work_exists = exists(
+            select(SessionReplyWorkItem.id).where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.CANCELLED,
+                or_(
+                    and_(
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                        SessionReplyWorkItem.source_id == cast(AuditRecord.id, String),
+                    ),
+                    and_(
+                        SessionReplyWorkItem.work_type.in_(
+                            [
+                                SessionReplyWorkType.FOREGROUND_REPLY,
+                                SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                            ]
+                        ),
+                        SessionReplyWorkItem.execution_state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY]["audit_record_id"].as_integer() == AuditRecord.id,
+                    ),
+                ),
+            )
+        )
+        result = await db.execute(
+            select(AuditRecord.id)
+            .where(
+                AuditRecord.uid == uid,
+                AuditRecord.session_id == session_id,
+                AuditRecord.status.in_(
+                    [
+                        AuditRecordStatus.PREPARING,
+                        AuditRecordStatus.PASSED,
+                        AuditRecordStatus.PENDING,
+                        AuditRecordStatus.EXECUTING,
+                    ]
+                ),
+                or_(AuditRecord.source.in_(["http", "ws"]), claim_exists, cancelled_work_exists),
+            )
+            .with_for_update()
+            .order_by(AuditRecord.id)
+        )
+        audit_record_ids = list(result.scalars().all())
+        cancelled_ids: list[int] = []
+        for audit_record_id in audit_record_ids:
+            if await self.cancel_unexecuted(
+                db,
+                audit_record_id=audit_record_id,
+                uid=uid,
+                session_id=session_id,
+                error_reason=error_reason,
+                commit=False,
+            ):
+                cancelled_ids.append(audit_record_id)
+        if commit:
+            await db.commit()
+        return cancelled_ids
+
     async def mark_running_executions_unknown_except(
         self,
         db: AsyncSession,

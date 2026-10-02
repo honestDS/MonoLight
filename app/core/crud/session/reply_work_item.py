@@ -1,3 +1,4 @@
+import asyncio
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -8,7 +9,13 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN, ERR_SESSION_REPLY_DEDUPLICATION_FAILED, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.constants import (
+    ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
+    ERR_SESSION_REPLY_DEDUPLICATION_FAILED,
+    ERR_SESSION_REPLY_LEASE_LOST,
+    SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+)
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.session import ChatSession
@@ -820,3 +827,24 @@ class CRUDSessionReplyWorkItem:
 
 
 session_reply_work_item_crud = CRUDSessionReplyWorkItem()
+
+
+# 校验队列回复事务仍持有工作项租约。
+async def ensure_session_reply_work_claim(db: AsyncSession, *, commit: bool = False) -> None:
+    claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+    if not claim:
+        return
+
+    work_id, worker_id = claim
+    claimed = await session_reply_work_item_crud.update_claimed(
+        db,
+        work_id=work_id,
+        worker_id=worker_id,
+        values={},
+        commit=False,
+    )
+    if not claimed:
+        await db.rollback()
+        raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
+    if commit:
+        await db.commit()

@@ -173,7 +173,10 @@ async def _update_confirmation_tool_results(
     confirmation_status: str,
     feedback: str | None,
     confirmation_decision: str | None = None,
+    expected_statuses: tuple[AuditRecordStatus, ...] = (AuditRecordStatus.PENDING,),
+    selected_tool_call_ids: set[str] | None = None,
 ) -> int:
+    expected_status_values = {expected_status.value for expected_status in expected_statuses}
     record = await audit_crud.get_record(db, audit_record_id)
     if record is None or record.source_assistant_message_id is None:
         return 0
@@ -186,6 +189,8 @@ async def _update_confirmation_tool_results(
     except ValueError:
         return 0
     tool_call_ids = {tool_call.id for tool_call in source_internal.tool_calls or []}
+    if selected_tool_call_ids is not None:
+        tool_call_ids.intersection_update(selected_tool_call_ids)
     if not tool_call_ids:
         return 0
 
@@ -221,7 +226,7 @@ async def _update_confirmation_tool_results(
             continue
         if tool_call_id not in tool_call_ids or not isinstance(result_payload, dict):
             continue
-        if result_payload.get("status") != AuditRecordStatus.PENDING.value:
+        if result_payload.get("status") not in expected_status_values:
             continue
         result_payload.update(status=status.value, confirmation_status=confirmation_status)
         if feedback is not None:

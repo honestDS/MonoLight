@@ -10,7 +10,10 @@ from app.core.constants import (
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
-from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.reply_work_item import (
+    ensure_session_reply_work_claim,
+    session_reply_work_item_crud,
+)
 from app.core.crud.session.session import session_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.i18n import t
@@ -225,6 +228,7 @@ async def _dispatch_interactive_work(
     allow_additional_user_messages: bool,
     execution_resume_state: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    await ensure_session_reply_work_claim(db, commit=True)
     execution_state = work.execution_state or {}
     stream_requested = bool((work.execution_state or {}).get("stream_requested"))
     context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))

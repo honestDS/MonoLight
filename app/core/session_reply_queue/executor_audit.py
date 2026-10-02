@@ -1,7 +1,8 @@
 import asyncio
 from typing import Any
 
-from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.audit.confirmation import notify_confirmation_tool_results, update_confirmation_message_status
+from app.core.audit.confirmation_results import _update_confirmation_tool_results
 from app.core.audit.integrity import create_file_integrity_snapshot, verify_file_integrity_snapshot
 from app.core.constants import ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.crud.audit.audit import audit_crud
@@ -52,22 +53,46 @@ async def _mark_audit_execution_unknown_reliably(
     claim_token: str,
     error_reason: str,
 ) -> bool:
-    marked = await audit_crud.mark_execution_unknown(
+    round_status = await audit_crud.finish_execution_round_if_complete(
         db,
         audit_record_id=audit_record_id,
         claim_token=claim_token,
-        error_reason=error_reason,
     )
-    if not marked:
-        marked = await audit_crud.finish_execution_round(
+    if round_status is not None:
+        marked = True
+        execution_unknown = round_status == AuditRecordStatus.EXECUTION_UNKNOWN
+    else:
+        marked = await audit_crud.mark_execution_unknown(
             db,
             audit_record_id=audit_record_id,
             claim_token=claim_token,
-            status=AuditRecordStatus.EXECUTION_UNKNOWN,
             error_reason=error_reason,
         )
+        if not marked:
+            marked = await audit_crud.finish_execution_round(
+                db,
+                audit_record_id=audit_record_id,
+                claim_token=claim_token,
+                status=AuditRecordStatus.EXECUTION_UNKNOWN,
+                error_reason=error_reason,
+            )
+        execution_unknown = marked
     if marked:
-        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+        updated_tool_results = 0
+        if execution_unknown:
+            updated_tool_results = await _update_confirmation_tool_results(
+                db,
+                audit_record_id=audit_record_id,
+                before_message_id=None,
+                status=AuditRecordStatus.EXECUTION_UNKNOWN,
+                confirmation_status=AuditRecordStatus.EXECUTION_UNKNOWN.value,
+                feedback=error_reason,
+                expected_statuses=(AuditRecordStatus.PENDING, AuditRecordStatus.EXECUTING),
+            )
+            await db.commit()
+        status_updated = await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+        if status_updated is False and updated_tool_results:
+            await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
     return marked
 
 

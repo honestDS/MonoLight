@@ -2,7 +2,7 @@ import json
 from importlib import import_module
 from typing import Any
 
-from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL
+from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.dispatch_context import DispatchMode
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
@@ -108,11 +108,14 @@ async def process_single_tool_with_isolated_db(
     source_message_id: int | None = None,
     dispatch_mode: DispatchMode = "interactive",
     dispatch_source: str = "interactive_tool",
+    session_reply_work_claim: tuple[int, str] | None = None,
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
     process_tool = getattr(dispatcher_module, "process_single_tool")
     async with async_session_local() as tool_db:
+        if session_reply_work_claim is not None:
+            tool_db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = session_reply_work_claim
         return await process_tool(
             tool_call,
             tool_db,
