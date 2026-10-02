@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import socket
 from collections.abc import Awaitable, Callable
 from functools import partial
@@ -41,7 +42,12 @@ from app.core.tools import (
     MANAGE_TODO_TOOL_NAME,
     get_tools_for_profile,
 )
-from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
+from app.core.utils.assistant_files import (
+    build_assistant_files_content,
+    materialize_generated_images,
+    merge_assistant_files,
+    parse_assistant_files_content,
+)
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
@@ -355,7 +361,7 @@ class BackgroundDispatcherMixin:
                     ),
                 )
                 ai_msg = retry_response.message
-                if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
+                if not ai_msg.tool_calls and not (ai_msg.content or "").strip() and not ai_msg.generated_images:
                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                 remaining_unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls or [], allowed_tool_names=allowed_tool_names)
                 if remaining_unsupported_tool_names:
@@ -398,11 +404,20 @@ class BackgroundDispatcherMixin:
                     ai_msg = text_only_response.message
                     if ai_msg.tool_calls:
                         ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content=BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT)
-                    if not (ai_msg.content or "").strip():
+                    if not (ai_msg.content or "").strip() and not ai_msg.generated_images:
                         raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
         safe_content = parse_assistant_files_content(ai_msg.content)
         ai_msg.content = safe_content
+        generated_image_files = await materialize_generated_images(
+            ai_msg,
+            project_root=os.getcwd(),
+            uid=uid,
+            session_id=session_id,
+            cfg=cfg,
+        )
+        if not ai_msg.tool_calls and generated_image_files:
+            ai_msg.content = build_assistant_files_content(safe_content, generated_image_files)
         logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=ai_msg.content or "[工具调用]"))
         messages.append(ai_msg)
         turn_messages = [ai_msg]
@@ -416,7 +431,7 @@ class BackgroundDispatcherMixin:
                 dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls else None,
             )
         if not allow_tools or not ai_msg.tool_calls:
-            return ai_msg, turn_messages, []
+            return ai_msg, turn_messages, generated_image_files
 
         validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
         audit_round = None
@@ -652,7 +667,7 @@ class BackgroundDispatcherMixin:
             if audit_execution_binding_callback is not None:
                 await audit_execution_binding_callback(None)
 
-        files_to_user = extract_files_to_user(tool_responses)
+        files_to_user = merge_assistant_files(generated_image_files, extract_files_to_user(tool_responses))
         confirmation_message = None
         if audit_round is not None and audit_round.confirmation_payload is not None:
             audited_stored_tool_responses, confirmation_message = await persist_pending_confirmation_bundle(
@@ -784,6 +799,14 @@ class BackgroundDispatcherMixin:
                 final_msg.tool_calls = []
                 fallback_message = MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES if files_to_user else MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES
                 final_msg.content = t(fallback_message)
+        final_generated_image_files = await materialize_generated_images(
+            final_msg,
+            project_root=os.getcwd(),
+            uid=uid,
+            session_id=session_id,
+            cfg=cfg,
+        )
+        files_to_user = merge_assistant_files(files_to_user, final_generated_image_files)
         final_text = parse_assistant_files_content(final_msg.content)
         final_msg.content = final_text
         if not final_text.strip() and not files_to_user:

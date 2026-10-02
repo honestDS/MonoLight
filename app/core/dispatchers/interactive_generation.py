@@ -301,7 +301,7 @@ async def generate_interactive_turn(
             has_content = bool(ai_msg.content.strip()) if isinstance(ai_msg.content, str) else bool(ai_msg.content)
             has_refusal = bool(ai_refusal.strip()) if isinstance(ai_refusal, str) else False
             legal_empty_finish_reasons = {"length", "content_filter", "refusal", "incomplete"}
-            if not ai_msg.tool_calls and not has_content and not has_refusal and response_finish_reason not in legal_empty_finish_reasons:
+            if not ai_msg.tool_calls and not has_content and not has_refusal and not ai_msg.generated_images and response_finish_reason not in legal_empty_finish_reasons:
                 raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
             hidden_tool_round = bool(ai_msg.tool_calls) and not state.show_tool_calls
             if not state.show_tool_calls:

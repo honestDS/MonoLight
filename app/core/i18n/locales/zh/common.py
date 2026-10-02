@@ -353,6 +353,8 @@ MESSAGES = {
     "ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED": "文件总大小超过限制",
     "ERR_LLM_UNSUPPORTED_PROTOCOL": "不支持的协议: {protocol}",
     "ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS": "流式工具调用的身份边界无法确定",
+    "ERR_LLM_IMAGE_OUTPUT_INVALID": "模型返回的图片数据无效、格式不受支持或未通过完整性校验",
+    "ERR_LLM_IMAGE_OUTPUT_SAVE_FAILED": "生成的图片保存失败，未输出图片文件",
     "ERR_BACKGROUND_TOO_MANY_TOOL_CALLS": "后台主动回复触发的工具调用过多: {count}",
     "ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN": "后台主动回复的最终结果不允许继续调用工具",
     "ERR_FAVICON_NOT_FOUND": "图标文件不存在",

@@ -111,7 +111,7 @@ async def generate_chat_with_fallback(
                 )
             if require_content and not (ai_msg.content or "").strip():
                 raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-            if require_content_or_tools and not ai_msg.tool_calls and not (ai_msg.content or "").strip():
+            if require_content_or_tools and not ai_msg.tool_calls and not ai_msg.generated_images and not (ai_msg.content or "").strip():
                 raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
             return response, chat_channel_obj, model_entry, channel_rule, chat_params
         except ApiKeyException:
