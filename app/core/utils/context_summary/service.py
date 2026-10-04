@@ -224,6 +224,7 @@ async def _ensure_context_summary(
     confirmed_input_tokens: int | None = None,
     model_id: str | None = None,
     protocol: str | None = None,
+    channel_id: int | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle: ContextSummaryLifecycle,
     force: bool = False,
@@ -485,6 +486,7 @@ async def _ensure_context_summary(
                 tools,
                 model_id=model_id,
                 protocol=protocol,
+                channel_id=channel_id,
             ) + max(reserved_tokens, 0)
             compression_goal_tokens = calculate_context_summary_trigger_tokens(
                 context_window_k=context_window_k,
@@ -701,6 +703,7 @@ async def ensure_context_summary(
     confirmed_input_tokens: int | None = None,
     model_id: str | None = None,
     protocol: str | None = None,
+    channel_id: int | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle_event_callback: ContextSummaryLifecycleCallback | None = None,
     force: bool = False,
@@ -727,6 +730,7 @@ async def ensure_context_summary(
             confirmed_input_tokens=confirmed_input_tokens,
             model_id=model_id,
             protocol=protocol,
+            channel_id=channel_id,
             work_validity_checker=work_validity_checker,
             lifecycle=lifecycle,
             force=force,

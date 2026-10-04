@@ -117,6 +117,7 @@ async def apply_context_summary_checkpoint(
         fixed_upper_message_id=fixed_upper_message_id,
         fixed_request_messages=fixed_request_messages,
         confirmed_input_tokens=confirmed_input_tokens,
+        channel_id=channel_id,
         model_id=model_id,
         protocol=protocol,
         work_validity_checker=work_validity_checker,

@@ -11,6 +11,7 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.exceptions import LLMException
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
+from app.core.utils.dispatcher import provider_state
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
@@ -327,6 +328,8 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
         ]
     )
     original_messages = [message.model_dump(mode="json") for message in context.messages]
+    original_messages[3]["reasoning_content"] = None
+    original_messages[3]["provider_metadata"] = {}
     invalid = _assistant(call_id="invalid-call", content="unexpected body", message_id=20)
     valid = _assistant(call_id="valid-call", message_id=21)
     model_requests = []
@@ -338,6 +341,9 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
     async def get_session(_db, _session_id):
         return SimpleNamespace(llm_request_metadata={})
 
+    async def get_provider_states(*_args, **_kwargs):
+        return []
+
     async def generate(**kwargs):
         model_requests.append([message.model_copy(deep=True) for message in kwargs["messages"]])
         return [_response(invalid), _response(valid)][len(model_requests) - 1]
@@ -346,6 +352,7 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
         accepted.append(message)
 
     monkeypatch.setattr(precheck_module, "load_dedupe_messages", load)
+    monkeypatch.setattr(provider_state.message_crud, "get_provider_states", get_provider_states)
     monkeypatch.setattr(request_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(request_module.LLMClient, "generate", generate)
     monkeypatch.setattr(precheck_module, "save_and_execute_recall", save)

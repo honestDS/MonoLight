@@ -6,8 +6,16 @@ import pytest
 from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, ERR_VALIDATION_FAILED
 from app.core.exceptions import LLMContextLengthException, ParameterException
 from app.core.i18n import t
-from app.core.utils.dispatcher import channel_call, helpers
+from app.core.utils.dispatcher import channel_call, helpers, provider_state
 from app.models.message import InternalMessage, InternalResponse, MessageResponse, MessageRole, MessageType
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_state_reads(monkeypatch):
+    async def get_provider_states(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(provider_state.message_crud, "get_provider_states", get_provider_states)
 
 
 class CapturingLogger:

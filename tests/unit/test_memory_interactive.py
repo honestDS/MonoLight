@@ -14,6 +14,7 @@ from app.core.dispatchers.memory.types import build_result
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
+from app.core.utils.dispatcher import provider_state
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
@@ -114,6 +115,9 @@ def _install_dispatcher_stubs(
     async def get_session(db, session_id):
         return SimpleNamespace(goal_mode=False, max_turns=cfg.tool.max_turns)
 
+    async def get_provider_states(*args, **kwargs):
+        return []
+
     async def validate_profile(db, current_profile):
         return cfg
 
@@ -186,6 +190,7 @@ def _install_dispatcher_stubs(
     monkeypatch.setattr(interactive_runtime_module.user_crud, "get_by_uid", get_user)
     monkeypatch.setattr(interactive_runtime_module.profile_crud, "get_with_relations", get_profile)
     monkeypatch.setattr(interactive_runtime_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(provider_state.message_crud, "get_provider_states", get_provider_states)
     monkeypatch.setattr(interactive_runtime_module, "validate_profile_and_cfg", validate_profile)
     monkeypatch.setattr(interactive_runtime_module, "select_channel", select_channel)
     monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)

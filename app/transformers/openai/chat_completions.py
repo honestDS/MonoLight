@@ -20,6 +20,7 @@ from app.models.message import (
     InternalToolCall,
     MessageRole,
     TextPart,
+    build_provider_source,
 )
 
 from .base import BaseOpenAITransformer
@@ -80,6 +81,14 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         )
         return normalized
 
+    @staticmethod
+    def _reasoning_content(message: dict[str, Any]) -> str | None:
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str):
+            return reasoning_content
+        reasoning = message.get("reasoning")
+        return reasoning if isinstance(reasoning, str) else None
+
     @classmethod
     def _tool_call_provider_metadata(cls, tool_call: dict[str, Any]) -> dict[str, Any] | None:
         metadata = {key: value for key, value in tool_call.items() if key not in {"id", "function"}}
@@ -126,9 +135,9 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         model_id: str | None,
         messages: list[InternalMessage],
         tools: list[dict[str, Any]] | None,
+        channel_id: int | None = None,
     ) -> dict[str, Any]:
-        del model_id
-        payload: dict[str, Any] = {"messages": cls.to_provider(messages)}
+        payload: dict[str, Any] = {"messages": cls.to_provider(messages, model_id=model_id, channel_id=channel_id)}
         if tools:
             payload["tools"] = tools
         return payload
@@ -153,7 +162,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         request_messages = await self._materialize_audio_messages(messages)
         payload = {
             "model": model_id,
-            "messages": self.to_provider(request_messages),
+            "messages": self.to_provider(request_messages, model_id=model_id, channel_id=kwargs.get("channel_id")),
             "stream": False,
         }
 
@@ -204,7 +213,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         request_messages = await self._materialize_audio_messages(messages)
         payload = {
             "model": model_id,
-            "messages": self.to_provider(request_messages),
+            "messages": self.to_provider(request_messages, model_id=model_id, channel_id=kwargs.get("channel_id")),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -243,10 +252,24 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             cls._raise_provider_error(parsed)
         if "usage" in parsed:
             parsed["usage"] = cls._normalize_usage(parsed.get("usage"))
+        choices = parsed.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            choice = choices[0]
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                reasoning_content = cls._reasoning_content(delta)
+                if reasoning_content is not None and not isinstance(delta.get("reasoning_content"), str):
+                    normalized_delta = dict(delta)
+                    normalized_delta["reasoning_content"] = reasoning_content
+                    normalized_choice = dict(choice)
+                    normalized_choice["delta"] = normalized_delta
+                    normalized_choices = list(choices)
+                    normalized_choices[0] = normalized_choice
+                    parsed["choices"] = normalized_choices
         return parsed, cls._stream_chunk_has_payload(parsed)
 
-    @staticmethod
-    def _stream_chunk_has_payload(parsed: dict[str, Any]) -> bool:
+    @classmethod
+    def _stream_chunk_has_payload(cls, parsed: dict[str, Any]) -> bool:
         """判断流式数据块是否包含实质负载（非空文本、推理内容或工具调用）。
 
         用于重置覆盖首个有效输出及后续有效输出间隔的流响应超时：role-only 空块、
@@ -260,7 +283,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             return True
         if delta.get("refusal"):
             return True
-        if delta.get("reasoning_content"):
+        if bool(cls._reasoning_content(delta)):
             return True
         if delta.get("tool_calls"):
             return True
@@ -268,8 +291,14 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
 
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
+        source = build_provider_source(
+            channel_id=kwargs.get("channel_id"),
+            model_id=kwargs.get("model_id"),
+            protocol="openai",
+        )
         provider_msgs = []
-        for msg in internal_messages:
+        for original_msg in internal_messages:
+            msg = original_msg.for_provider(source)
             if isinstance(msg.content, list):
                 # 转换 InternalMessage content 列表 为 OpenAI 官方多模态格式
                 content = []
@@ -298,6 +327,16 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             else:
                 item = {"role": msg.role.value, "content": msg.content}
 
+            if msg.role == MessageRole.ASSISTANT:
+                reasoning_content = msg.reasoning_content
+                if reasoning_content is None:
+                    provider_metadata = msg.provider_metadata
+                    if isinstance(provider_metadata, dict) and provider_metadata.get("protocol") == cls._PROTOCOL_METADATA:
+                        metadata_message = provider_metadata.get("message")
+                        if isinstance(metadata_message, dict):
+                            reasoning_content = cls._reasoning_content(metadata_message)
+                if isinstance(reasoning_content, str):
+                    item["reasoning_content"] = reasoning_content
             if msg.tool_calls:
                 # 兼容严格要求 assistant content 非空的提供商，仅修改发送给上游的副本。
                 if msg.role.value == "assistant" and (msg.content is None or (isinstance(msg.content, str) and not msg.content.strip()) or (isinstance(msg.content, list) and not msg.content)):
@@ -326,6 +365,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
                 item["tool_calls"] = tool_calls
             if msg.tool_call_id:
                 item["tool_call_id"] = msg.tool_call_id
+            if msg.role == MessageRole.ASSISTANT and not item.get("content") and not msg.tool_calls and "reasoning_content" not in item:
+                continue
             provider_msgs.append(item)
         return provider_msgs
 
@@ -362,7 +403,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
                     logger.bind(tool_call=tc).warning(t("LOG_OPENAI_TOOL_ARGS_PARSE_FAILED", error=str(e)))
 
         refusal = message.get("refusal") if isinstance(message.get("refusal"), str) else None
-        reasoning_content = message.get("reasoning_content") if isinstance(message.get("reasoning_content"), str) else None
+        reasoning_content = cls._reasoning_content(message)
         content = message.get("content")
         if tool_calls and isinstance(content, str) and content.strip() == cls._TOOL_CALL_PLACEHOLDER:
             content = None

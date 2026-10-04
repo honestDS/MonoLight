@@ -19,6 +19,7 @@ from app.models.message import (
     InternalResponse,
     InternalToolCall,
     MessageRole,
+    build_provider_source,
 )
 from app.providers.llm.token_estimation import (
     estimate_request_tokens_locally,
@@ -83,6 +84,7 @@ def estimate_request_context_tokens(
     *,
     model_id: str | None = None,
     protocol: str | None = None,
+    channel_id: int | None = None,
 ) -> int:
     normalized_protocol = protocol.strip().lower() if isinstance(protocol, str) and protocol.strip() else "openai"
     transformer = _CHAT_TRANSFORMERS.get(normalized_protocol)
@@ -94,6 +96,7 @@ def estimate_request_context_tokens(
         protocol=normalized_protocol,
         messages=messages,
         tools=tools,
+        channel_id=channel_id,
     )
 
 
@@ -355,6 +358,31 @@ class LLMClient:
     _transformers = _CHAT_TRANSFORMERS
 
     @staticmethod
+    def _bind_provider_source(
+        response: InternalResponse,
+        *,
+        channel_id: Any,
+        model_id: str,
+        protocol: str,
+    ) -> InternalResponse:
+        source = build_provider_source(
+            channel_id=channel_id,
+            model_id=model_id,
+            protocol=protocol,
+        )
+        if source is None:
+            return response
+        message_provider_metadata = {
+            **(response.message.provider_metadata or {}),
+            "source": source,
+        }
+        normalized_message = response.message.model_copy(
+            update={"provider_metadata": message_provider_metadata},
+            deep=True,
+        )
+        return response.model_copy(update={"message": normalized_message}, deep=True)
+
+    @staticmethod
     def normalize_tool_calls(tool_calls: list[InternalToolCall] | None) -> list[InternalToolCall] | None:
         if not tool_calls:
             return None
@@ -397,6 +425,7 @@ class LLMClient:
         messages: list[InternalMessage],
         tools: list[dict[str, Any]] | None = None,
         protocol: str = "openai",
+        channel_id: int | None = None,
     ) -> int:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
@@ -407,6 +436,7 @@ class LLMClient:
             protocol=protocol,
             messages=messages,
             tools=tools,
+            channel_id=channel_id,
         )
 
     @classmethod
@@ -583,21 +613,26 @@ class LLMClient:
         if is_tool_call_placeholder:
             content = None
 
-        return InternalResponse(
-            message=InternalMessage(
-                role=MessageRole.ASSISTANT,
-                content=content or refusal,
-                reasoning_content="".join(reasoning_chunks) or None,
-                refusal=refusal,
-                provider_metadata=message_provider_metadata,
-                tool_calls=cls.normalize_tool_calls(tool_calls),
-                generated_images=list(generated_images_by_id.values()) or None,
+        return cls._bind_provider_source(
+            InternalResponse(
+                message=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=content or refusal,
+                    reasoning_content="".join(reasoning_chunks) or None,
+                    refusal=refusal,
+                    provider_metadata=message_provider_metadata,
+                    tool_calls=cls.normalize_tool_calls(tool_calls),
+                    generated_images=list(generated_images_by_id.values()) or None,
+                ),
+                model=model,
+                usage=usage,
+                finish_reason=finish_reason,
+                finish_details=finish_details,
+                provider_metadata=provider_metadata,
             ),
-            model=model,
-            usage=usage,
-            finish_reason=finish_reason,
-            finish_details=finish_details,
-            provider_metadata=provider_metadata,
+            channel_id=kwargs.get("channel_id"),
+            model_id=model_id,
+            protocol=protocol,
         )
 
     @classmethod
@@ -651,4 +686,9 @@ class LLMClient:
             update={"tool_calls": cls.normalize_tool_calls(internal_response.message.tool_calls)},
             deep=True,
         )
-        return internal_response.model_copy(update={"message": normalized_message}, deep=True)
+        return cls._bind_provider_source(
+            internal_response.model_copy(update={"message": normalized_message}, deep=True),
+            channel_id=kwargs.get("channel_id"),
+            model_id=model_id,
+            protocol=protocol,
+        )

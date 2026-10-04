@@ -78,6 +78,7 @@ def _resolve_tool_result_required_input_tokens(
                 messages=[ai_msg],
                 tools=None,
                 protocol=protocol,
+                channel_id=getattr(state.chat_channel_obj, "id", None),
             )
             return input_tokens + max(0, incremental_tokens)
 
@@ -86,6 +87,7 @@ def _resolve_tool_result_required_input_tokens(
         messages=materialize_user_environment_prompts(state.messages),
         tools=state.tools,
         protocol=protocol,
+        channel_id=getattr(state.chat_channel_obj, "id", None),
     )
 
 

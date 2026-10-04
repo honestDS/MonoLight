@@ -128,6 +128,7 @@ def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(mon
             "input_tokens_source": "provider",
         },
         model_entry={"model_id": "gpt-5.6-luna", "protocol": "OPENAI"},
+        chat_channel_obj=SimpleNamespace(id=1),
     )
     ai_msg = InternalMessage(
         role=MessageRole.ASSISTANT,
@@ -158,6 +159,7 @@ def test_interactive_tool_budget_extends_provider_input_by_current_tool_call(mon
 
     assert required_input_tokens == 190_765
     assert captured == {
+        "channel_id": 1,
         "model_id": "gpt-5.6-luna",
         "messages": [ai_msg],
         "tools": None,
@@ -204,6 +206,15 @@ def test_provider_tool_budget_ignores_large_image_metadata_and_keeps_todo_result
                 }
             }
 
+        provider_metadata = {
+            **(provider_metadata or {}),
+            "source": {
+                "channel_id": 1,
+                "model_id": model_id,
+                "protocol": resolved_protocol,
+            },
+        }
+
         return InternalMessage(
             role=MessageRole.ASSISTANT,
             provider_metadata=provider_metadata,
@@ -226,6 +237,7 @@ def test_provider_tool_budget_ignores_large_image_metadata_and_keeps_todo_result
             "input_tokens_source": "provider",
         },
         model_entry={"model_id": model_id, "protocol": protocol},
+        chat_channel_obj=SimpleNamespace(id=1),
     )
     ai_msg_without_image = build_ai_message(include_image=False)
     ai_msg_with_image = build_ai_message()
@@ -293,12 +305,14 @@ def test_provider_tool_budget_ignores_large_image_metadata_and_keeps_todo_result
             messages=[ai_msg_with_image],
             tools=None,
             protocol=resolved_protocol,
+            channel_id=1,
         )
         provider_input_without_reasoning = interactive_tools_module.LLMClient.estimate_request_input_tokens_locally(
             model_id=model_id,
             messages=[build_ai_message(include_image=True, include_reasoning=False)],
             tools=None,
             protocol=resolved_protocol,
+            channel_id=1,
         )
         assert provider_input > provider_input_without_reasoning
         assert ai_msg_with_image.provider_metadata["output"][1]["result"] == image_result
@@ -371,6 +385,7 @@ def test_interactive_tool_budget_uses_provider_payload_local_fallback_without_pr
             "input_tokens_source": "estimated",
         },
         model_entry={"model_id": "gpt-5.6-luna", "protocol": "OPENAI"},
+        chat_channel_obj=SimpleNamespace(id=1),
         messages=messages,
         tools=tools,
     )

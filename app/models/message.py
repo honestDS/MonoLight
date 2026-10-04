@@ -79,6 +79,47 @@ class InternalToolCall(BaseModel):
     provider_metadata: dict[str, Any] | None = None
 
 
+def build_provider_source(*, channel_id: Any, model_id: Any, protocol: Any) -> dict[str, Any] | None:
+    if not (isinstance(channel_id, int) and not isinstance(channel_id, bool) and channel_id > 0):
+        return None
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None
+    if not isinstance(protocol, str):
+        return None
+    normalized_protocol = protocol.strip().lower()
+    if not normalized_protocol:
+        return None
+    return {
+        "channel_id": channel_id,
+        "model_id": model_id,
+        "protocol": normalized_protocol,
+    }
+
+
+def provider_source_matches(provider_metadata: Any, source: Any) -> bool:
+    if not isinstance(source, dict):
+        return False
+    valid_source = build_provider_source(
+        channel_id=source.get("channel_id"),
+        model_id=source.get("model_id"),
+        protocol=source.get("protocol"),
+    )
+    if valid_source is None or not isinstance(provider_metadata, dict):
+        return False
+
+    metadata_source = provider_metadata.get("source")
+    if not isinstance(metadata_source, dict):
+        return False
+    valid_metadata_source = build_provider_source(
+        channel_id=metadata_source.get("channel_id"),
+        model_id=metadata_source.get("model_id"),
+        protocol=metadata_source.get("protocol"),
+    )
+    if valid_metadata_source is None:
+        return False
+    return valid_source == valid_metadata_source
+
+
 class InternalGeneratedImage(BaseModel):
     id: str
     data: str = PyField(repr=False)
@@ -99,6 +140,19 @@ class InternalMessage(BaseModel):
     tool_call_id: str | None = None
     attachments: list[str] | None = None
     created_at: float = PyField(default_factory=lambda: time.time())
+
+    def discard_provider_state(self) -> None:
+        self.reasoning_content = None
+        self.provider_metadata = {}
+        if self.tool_calls is not None:
+            for tool_call in self.tool_calls:
+                tool_call.provider_metadata = None
+
+    def for_provider(self, source: dict[str, Any] | None) -> "InternalMessage":
+        message = self.model_copy(deep=True)
+        if not provider_source_matches(message.provider_metadata, source):
+            message.discard_provider_state()
+        return message
 
 
 class InternalResponse(BaseModel):
@@ -138,6 +192,7 @@ class Message(MessageBase, table=True):
     )
     id: int | None = Field(default=None, primary_key=True, index=True)
     reasoning_content: str | None = Field(default=None, sa_column=Column(Text))
+    provider_metadata: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     profile_id: int = Field()
     environment_prompt: str | None = Field(default=None, sa_column=Column(Text))
     guidance_prompt: str | None = Field(default=None, sa_column=Column(Text))

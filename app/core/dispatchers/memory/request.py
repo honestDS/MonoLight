@@ -29,6 +29,7 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.markdown_instruction import refresh_latest_user_max_output_tokens_instruction
+from app.core.utils.dispatcher.provider_state import discard_mismatched_provider_state
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
     parse_session_todo_snapshot,
@@ -208,6 +209,15 @@ async def prepare_request_messages(
     *,
     is_main_context: bool,
 ) -> tuple[list[InternalMessage], dict[str, Any], str]:
+    await discard_mismatched_provider_state(
+        context.db,
+        session_id=context.session_id,
+        uid=context.uid,
+        messages=[*context.messages, *messages],
+        channel_id=context.chat_channel_obj.id,
+        model_id=context.model_entry["model_id"],
+        protocol=resolve_model_protocol(context.model_entry),
+    )
     todo_snapshot = None
     if is_main_context and isinstance(context.db, AsyncSession):
         todo_snapshot = await load_current_session_todo_snapshot(
@@ -293,6 +303,7 @@ async def generate(
         "api_key": channel.get_decrypted_api_key(),
         "base_url": channel.base_url,
         "model_id": model_entry["model_id"],
+        "channel_id": channel.id,
         "messages": request_messages,
         **build_memory_recall_precheck_generation_params(
             model_entry=model_entry,
