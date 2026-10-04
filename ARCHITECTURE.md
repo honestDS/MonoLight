@@ -664,7 +664,7 @@ Provider 层隔离数据库、向量存储、语言模型、嵌入、重排和�
 - Provider 成功响应中的 `usage.input_tokens` 是主会话上下文占用、前端展示和主动总结阈值的权威来源。主动总结只复用同一 `channel_id + model_id + protocol` 且上下文版本未变化的最近一次 Provider 确认值；旧 metadata 没有渠道身份时不得复用，避免不同 NewAPI/OpenAI-compatible 渠道的同名 alias 串用。
 - 正式模型请求不会因为本地 Token 估算超过配置窗口而被拒绝或触发总结。若 Provider 明确返回上下文超限，则在当前渠道强制总结后重试；仅 `context_window - max_output - safety_margin <= 0` 这类与 Tokenizer 无关的静态配置错误会在本地直接拒绝。
 - 本地 Token 估算只用于发送前必须确定大小的内部链路，例如工具结果截断、审计载荷拟合、总结分片和压缩结果校验，不作为整个会话是否超限的事实来源。
-- `transformers` 负责把内部消息转换为实际 Provider 请求形态；`providers/llm/token_estimation.py` 对该 Provider 载荷做本地估算。审计完整请求拟合、工具结果预算和总结后的最终请求校验都复用这一口径，避免把 `reasoning_content`、`provider_metadata` 等不会发送的内部字段重复计入。
+- `transformers` 负责把内部消息转换为实际 Provider 请求形态；`providers/llm/token_estimation.py` 对该 Provider 载荷做本地估算。审计完整请求拟合、工具结果预算和总结后的最终请求校验都复用这一口径；回传的推理文本或原生推理项按实际请求形态计入，未发送的内部元数据不计入，避免重复。
 - `core/utils/tokenizer.py` 只根据 `model_id` 选择 tiktoken 已知编码；协议只表示请求格式，不能用于推断真实模型厂商。对于 `gpt-5.6-*` 这类 tiktoken 前缀表已能表达、但点号版本名无法直接命中的名称，仅做名称归一化后再次交给 tiktoken 决策；无法确认的普通 alias 使用通用回退。
 - 不通过 OpenAI-compatible 协议猜测并调用厂商专有的预请求 Token 计数接口，也不维护“本地估算 / Provider usage”的历史校准系数；聚合网关后的真实 Provider 由对端响应负责给出最终 usage 和上下文超限结果。
 

@@ -142,6 +142,62 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         )
         return list(result.scalars().all())
 
+    async def get_provider_states(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        message_ids: list[int],
+    ) -> list[tuple[int, dict[str, Any] | None, bool]]:
+        if not message_ids:
+            return []
+
+        result = await db.execute(
+            select(
+                Message.id,
+                Message.provider_metadata,
+                Message.reasoning_content.is_not(None),
+            )
+            .where(
+                Message.session_id == session_id,
+                Message.uid == uid,
+                Message.role == MessageRole.ASSISTANT,
+                Message.id.in_(message_ids),
+            )
+            .order_by(Message.id.asc())
+        )
+        return [(message_id, provider_metadata, bool(has_reasoning_content)) for message_id, provider_metadata, has_reasoning_content in result.all()]
+
+    async def discard_provider_states(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        message_ids: list[int],
+        commit: bool = False,
+    ) -> int:
+        if not message_ids:
+            return 0
+
+        result = await db.execute(
+            update(Message)
+            .where(
+                Message.session_id == session_id,
+                Message.uid == uid,
+                Message.role == MessageRole.ASSISTANT,
+                Message.id.in_(message_ids),
+            )
+            .values(reasoning_content=None, provider_metadata={})
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return result.rowcount or 0
+
     async def update_content(
         self,
         db: AsyncSession,

@@ -35,7 +35,7 @@ def _to_storable_content(content: Any, msg_type: MessageType) -> str:
         return json.dumps(payload, ensure_ascii=False)
 
     if msg_type == MessageType.TOOL_CALL and hasattr(content, "model_dump"):
-        return canonical_json_dumps(content.model_dump(mode="python", exclude={"reasoning_content"}, exclude_none=True))
+        return canonical_json_dumps(content.model_dump(mode="python", exclude={"reasoning_content", "provider_metadata"}, exclude_none=True))
 
     if hasattr(content, "model_dump_json"):
         return content.model_dump_json(exclude_none=True)
@@ -66,12 +66,15 @@ async def save_message(
     attachments_to_save = None
     environment_prompt_to_save = None
     reasoning_content_to_save = None
+    provider_metadata_to_save = None
     if hasattr(content, "attachments"):
         attachments_to_save = content.attachments
     if hasattr(content, "environment_prompt"):
         environment_prompt_to_save = content.environment_prompt
     if hasattr(content, "reasoning_content"):
         reasoning_content_to_save = content.reasoning_content
+    if hasattr(content, "provider_metadata"):
+        provider_metadata_to_save = content.provider_metadata
 
     obj_in_data = {
         "session_id": session_id,
@@ -80,6 +83,7 @@ async def save_message(
         "type": msg_type,
         "content": _to_storable_content(content, msg_type),
         "reasoning_content": reasoning_content_to_save,
+        "provider_metadata": provider_metadata_to_save,
         "environment_prompt": environment_prompt_to_save,
         "attachments": attachments_to_save,
         "profile_id": profile_id,
@@ -109,6 +113,7 @@ async def save_message(
         role=role,
         content=db_obj.content,
         reasoning_content=db_obj.reasoning_content,
+        provider_metadata=db_obj.provider_metadata,
         environment_prompt=db_obj.environment_prompt,
         attachments=db_obj.attachments,
         created_at=db_obj.created_at.timestamp(),

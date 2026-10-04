@@ -11,7 +11,7 @@ from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.model_request_headers import build_model_request_headers
-from app.models.message import AudioPart, FilePart, ImagePart, InternalGeneratedImage, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
+from app.models.message import AudioPart, FilePart, ImagePart, InternalGeneratedImage, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart, build_provider_source
 
 from .base import BaseOpenAITransformer
 
@@ -81,6 +81,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         request_messages = await self._materialize_audio_messages(messages)
         payload = self._request_payload(
             model_id=model_id,
+            channel_id=kwargs.get("channel_id"),
             messages=request_messages,
             stream=False,
             temperature=temperature,
@@ -122,6 +123,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         request_messages = await self._materialize_audio_messages(messages)
         payload = self._request_payload(
             model_id=model_id,
+            channel_id=kwargs.get("channel_id"),
             messages=request_messages,
             stream=True,
             temperature=temperature,
@@ -170,17 +172,24 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
 
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
+        source = build_provider_source(
+            channel_id=kwargs.get("channel_id"),
+            model_id=kwargs.get("model_id"),
+            protocol=cls._PROTOCOL_METADATA,
+        )
         provider_items: list[dict[str, Any]] = []
-        for message in internal_messages:
+        for original_message in internal_messages:
+            message = original_message.for_provider(source)
             role = getattr(message.role, "value", message.role)
             role = str(role).lower()
 
-            if role == MessageRole.ASSISTANT.value and message.tool_calls:
+            if role == MessageRole.ASSISTANT.value:
                 metadata = message.provider_metadata or {}
                 if metadata.get("protocol") == cls._PROTOCOL_METADATA:
                     output_items = metadata.get("output")
                     if isinstance(output_items, list):
-                        provider_items.extend(dict(item) for item in output_items if isinstance(item, dict) and item.get("type") == "reasoning")
+                        reasoning_items = [dict(item) for item in output_items if isinstance(item, dict) and item.get("type") == "reasoning"]
+                        provider_items.extend(reasoning_items)
 
             if role == MessageRole.TOOL.value:
                 provider_items.append(
@@ -193,7 +202,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 continue
 
             content = cls._content_as_input(message.content)
-            if not message.tool_calls or content:
+            if content or (role != MessageRole.ASSISTANT.value and not message.tool_calls):
                 provider_items.append({"role": role, "content": content})
 
             if role == MessageRole.ASSISTANT.value and message.tool_calls:
@@ -312,7 +321,8 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         refusal = "".join(refusal_parts) or None
         reasoning_content = cls._reasoning_content_from_output(output)
         content = "".join(text_parts) or refusal
-        if not content and not reasoning_content and not tool_calls and not generated_images and provider_response.get("status") != "incomplete":
+        has_encrypted_reasoning = any(isinstance(item, dict) and item.get("type") == "reasoning" and isinstance(item.get("encrypted_content"), str) and bool(item["encrypted_content"]) for item in output)
+        if not content and not reasoning_content and not tool_calls and not generated_images and not has_encrypted_reasoning and provider_response.get("status") != "incomplete":
             raise LLMException(ERR_LLM_EMPTY_RESPONSE)
         return InternalMessage(
             role=MessageRole.ASSISTANT,
@@ -468,11 +478,11 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         cls,
         *,
         model_id: str | None,
+        channel_id: int | None = None,
         messages: list[InternalMessage],
         tools: list[dict[str, Any]] | None,
     ) -> dict[str, Any]:
-        del model_id
-        payload: dict[str, Any] = {"input": cls.to_provider(messages)}
+        payload: dict[str, Any] = {"input": cls.to_provider(messages, model_id=model_id, channel_id=channel_id)}
         if tools:
             payload["tools"] = cls._convert_tools(tools)
         return payload
@@ -482,6 +492,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         cls,
         *,
         model_id: str,
+        channel_id: int | None = None,
         messages: list[InternalMessage],
         stream: bool,
         temperature: float | None,
@@ -493,7 +504,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model_id,
-            "input": cls.to_provider(messages),
+            "input": cls.to_provider(messages, model_id=model_id, channel_id=channel_id),
             "stream": stream,
             "store": False,
             "include": ["reasoning.encrypted_content"],

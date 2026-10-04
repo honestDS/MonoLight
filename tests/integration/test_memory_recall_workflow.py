@@ -316,6 +316,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     events: list[dict[str, Any]] = []
 
     chat_channel_obj = SimpleNamespace(
+        id=1,
         base_url="https://chat.invalid",
         http_proxy=None,
         get_decrypted_api_key=lambda: "chat-key",
@@ -469,7 +470,28 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     ):
         assert forbidden not in precheck_dump
     original_message_count = len(first_context_messages_before)
-    assert [message.model_dump(mode="json") for message in first_context.messages[:original_message_count]] == first_context_messages_before
+    first_context_messages_after = [message.model_dump(mode="json") for message in first_context.messages[:original_message_count]]
+    for before, after in zip(first_context_messages_before, first_context_messages_after, strict=True):
+        if before["role"] == MessageRole.ASSISTANT.value:
+            assert after["reasoning_content"] is None
+            if before["reasoning_content"] is not None or bool(before["provider_metadata"]) or any(tool_call["provider_metadata"] for tool_call in before["tool_calls"] or []):
+                assert after["provider_metadata"] == {}
+            else:
+                assert after["provider_metadata"] == before["provider_metadata"]
+            if before["tool_calls"] is not None:
+                assert all(tool_call["provider_metadata"] is None for tool_call in after["tool_calls"])
+            after = dict(after)
+            after["reasoning_content"] = before["reasoning_content"]
+            after["provider_metadata"] = before["provider_metadata"]
+            if before["tool_calls"] is not None:
+                after["tool_calls"] = [
+                    {
+                        **after_tool_call,
+                        "provider_metadata": before_tool_call["provider_metadata"],
+                    }
+                    for before_tool_call, after_tool_call in zip(before["tool_calls"], after["tool_calls"], strict=True)
+                ]
+        assert after == before
     appended_messages = first_context.messages[original_message_count:]
     assert len(appended_messages) == 2
     assert [message.model_dump(mode="json") for message in appended_messages] == [message.model_dump(mode="json") for message in first.turn_messages]

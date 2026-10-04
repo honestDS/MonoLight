@@ -22,6 +22,7 @@ class BaseTransformer(ABC):
         cls,
         *,
         model_id: str | None,
+        channel_id: int | None = None,
         messages: list[InternalMessage],
         tools: list[dict[str, Any]] | None,
     ) -> dict[str, Any]:

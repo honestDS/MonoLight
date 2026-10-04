@@ -14,6 +14,7 @@ from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLME
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
+from app.core.utils.dispatcher.provider_state import discard_mismatched_provider_state
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
@@ -75,12 +76,22 @@ async def generate_chat_with_fallback(
                 chat_channel_obj,
                 model_entry,
             )
+            await discard_mismatched_provider_state(
+                db,
+                session_id=session_id,
+                uid=uid,
+                messages=request_messages,
+                channel_id=chat_channel_obj.id,
+                model_id=model_entry["model_id"],
+                protocol=resolve_model_protocol(model_entry),
+            )
             await db.commit()
             provider_request_id = str(uuid.uuid4())
             response = await LLMClient.generate(
                 api_key=chat_channel_obj.get_decrypted_api_key(),
                 base_url=chat_channel_obj.base_url,
                 model_id=model_entry["model_id"],
+                channel_id=chat_channel_obj.id,
                 messages=request_messages,
                 temperature=chat_params["temperature"],
                 top_p=chat_params["top_p"],

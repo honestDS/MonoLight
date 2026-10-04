@@ -61,7 +61,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             tool_calls = None
             tool_call_id = None
             refusal = None
-            provider_metadata = None
+            provider_metadata = msg.provider_metadata if isinstance(msg.provider_metadata, dict) else None
 
             # 直接检测：仅在类型明确为 TOOL_CALL 或 TOOL_RESULT 时尝试解析 JSON
             if m_type in {MessageType.AUDIT_CONFIRMATION, MessageType.AUDIT_DECISION}:
@@ -86,7 +86,8 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                             refusal = parsed["refusal"]
                             content = parsed.get("content")
                         if isinstance(parsed.get("provider_metadata"), dict):
-                            provider_metadata = parsed["provider_metadata"]
+                            if not isinstance(provider_metadata, dict):
+                                provider_metadata = parsed["provider_metadata"]
                             content = parsed.get("content")
                 except json.JSONDecodeError:
                     # 鲁棒性退避：解析失败按原样呈现

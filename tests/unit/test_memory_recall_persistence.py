@@ -9,7 +9,16 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
 )
+from app.core.utils.dispatcher import provider_state
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_state_reads(monkeypatch):
+    async def get_provider_states(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(provider_state.message_crud, "get_provider_states", get_provider_states)
 
 
 class _FakeDb:
@@ -43,6 +52,7 @@ def _assistant(call_id="call-1", message_id=None):
 
 def _context(*, messages=None, turn_messages=None, main_tools=None):
     channel = SimpleNamespace(
+        id=1,
         base_url="https://example.invalid",
         chat_timeout=60,
         get_decrypted_api_key=lambda: "api-key",

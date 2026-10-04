@@ -24,6 +24,7 @@ def estimate_request_tokens_locally(
     protocol: str,
     messages: list[InternalMessage],
     tools: list[dict[str, Any]] | None,
+    channel_id: int | None = None,
 ) -> int:
     """Estimate only where a pre-request local size decision is unavoidable.
 
@@ -31,11 +32,14 @@ def estimate_request_tokens_locally(
     used as authoritative session usage, a context-summary trigger, or a hard
     request limit.
     """
-    input_payload = transformer.build_input_token_payload(
-        model_id=model_id,
-        messages=messages,
-        tools=tools,
-    )
+    payload_kwargs = {
+        "model_id": model_id,
+        "messages": messages,
+        "tools": tools,
+    }
+    if channel_id is not None:
+        payload_kwargs["channel_id"] = channel_id
+    input_payload = transformer.build_input_token_payload(**payload_kwargs)
     serialized_payload = json.dumps(
         _redact_audio_payload_data(input_payload),
         ensure_ascii=False,

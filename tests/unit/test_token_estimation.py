@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.utils.tokenizer import estimate_tokens, resolve_token_encoding_name
 from app.models.message import AudioPart, InternalMessage, MessageRole
 from app.providers.llm.token_estimation import estimate_request_tokens_locally
@@ -36,17 +38,171 @@ def test_chat_estimation_payload_matches_provider_shape_and_excludes_internal_me
             role=MessageRole.ASSISTANT,
             content="visible",
             reasoning_content="internal reasoning",
-            provider_metadata={"large_internal_blob": "x" * 1000},
+            provider_metadata={
+                "large_internal_blob": "x" * 1000,
+                "source": {
+                    "channel_id": 1,
+                    "model_id": "gpt-5.6-luna",
+                    "protocol": "openai",
+                },
+            },
         )
     ]
 
     payload = OpenAIChatCompletionsTransformer.build_input_token_payload(
         model_id="gpt-5.6-luna",
+        channel_id=1,
         messages=messages,
         tools=None,
     )
 
-    assert payload == {"messages": [{"role": "assistant", "content": "visible"}]}
+    assert payload == {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "visible",
+                "reasoning_content": "internal reasoning",
+            }
+        ]
+    }
+
+
+def test_local_chat_estimate_counts_reasoning_without_counting_provider_metadata():
+    def estimate_for(reasoning_content: str, metadata_blob: str) -> int:
+        return estimate_request_tokens_locally(
+            OpenAIChatCompletionsTransformer,
+            model_id="gpt-5.6-luna",
+            protocol="openai",
+            messages=[
+                InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="visible",
+                    reasoning_content=reasoning_content,
+                    provider_metadata={
+                        "large_internal_blob": metadata_blob,
+                        "source": {
+                            "channel_id": 1,
+                            "model_id": "gpt-5.6-luna",
+                            "protocol": "openai",
+                        },
+                    },
+                )
+            ],
+            tools=None,
+            channel_id=1,
+        )
+
+    baseline = estimate_for("internal reasoning", "small")
+
+    assert estimate_for("internal reasoning", "x" * 1000) == baseline
+    assert estimate_for("internal reasoning " * 100, "small") > baseline
+
+
+@pytest.mark.parametrize(
+    ("transformer_cls", "protocol", "reasoning_content", "provider_metadata"),
+    [
+        pytest.param(
+            OpenAIChatCompletionsTransformer,
+            "openai",
+            "internal reasoning " * 100,
+            {"large_internal_blob": "opaque"},
+            id="chat-reasoning",
+        ),
+        pytest.param(
+            OpenAIResponsesTransformer,
+            "openai_responses",
+            None,
+            {
+                "protocol": "openai_responses",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": "encrypted reasoning " * 100,
+                    }
+                ],
+            },
+            id="responses-encrypted-reasoning",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "source_case",
+    [
+        pytest.param("matching", id="matching-source"),
+        pytest.param("wrong-channel", id="wrong-channel-source"),
+        pytest.param("wrong-model", id="wrong-model-source"),
+        pytest.param("wrong-protocol", id="wrong-protocol-source"),
+        pytest.param("missing-source", id="missing-source"),
+        pytest.param("missing-request-channel", id="missing-request-channel"),
+    ],
+)
+def test_local_estimate_only_counts_provider_state_from_matching_source(
+    transformer_cls,
+    protocol,
+    reasoning_content,
+    provider_metadata,
+    source_case,
+):
+    matching_source = {
+        "channel_id": 1,
+        "model_id": "gpt-5.6-luna",
+        "protocol": protocol,
+    }
+    request_channel_id = None if source_case == "missing-request-channel" else 1
+    metadata = dict(provider_metadata)
+    if source_case != "missing-source":
+        metadata_source = dict(matching_source)
+        if source_case == "wrong-channel":
+            metadata_source["channel_id"] = 2
+        elif source_case == "wrong-model":
+            metadata_source["model_id"] = "other-model"
+        elif source_case == "wrong-protocol":
+            metadata_source["protocol"] = "other-protocol"
+        metadata["source"] = metadata_source
+
+    message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content="visible",
+        reasoning_content=reasoning_content,
+        provider_metadata=metadata,
+    )
+    visible_message = InternalMessage(role=MessageRole.ASSISTANT, content="visible")
+
+    payload = transformer_cls.build_input_token_payload(
+        model_id="gpt-5.6-luna",
+        channel_id=request_channel_id,
+        messages=[message],
+        tools=None,
+    )
+    visible_payload = transformer_cls.build_input_token_payload(
+        model_id="gpt-5.6-luna",
+        channel_id=request_channel_id,
+        messages=[visible_message],
+        tools=None,
+    )
+    estimate = estimate_request_tokens_locally(
+        transformer_cls,
+        model_id="gpt-5.6-luna",
+        protocol=protocol,
+        messages=[message],
+        tools=None,
+        channel_id=request_channel_id,
+    )
+    visible_estimate = estimate_request_tokens_locally(
+        transformer_cls,
+        model_id="gpt-5.6-luna",
+        protocol=protocol,
+        messages=[visible_message],
+        tools=None,
+        channel_id=request_channel_id,
+    )
+
+    if source_case == "matching":
+        assert payload != visible_payload
+        assert estimate > visible_estimate
+    else:
+        assert payload == visible_payload
+        assert estimate == visible_estimate
 
 
 def test_responses_estimation_payload_matches_provider_input_and_tool_shape():

@@ -32,6 +32,7 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
+from app.core.utils.dispatcher.provider_state import discard_mismatched_provider_state
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
@@ -117,6 +118,15 @@ async def generate_interactive_turn(
                 raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
             current_channel_id = getattr(state.chat_channel_obj, "id", None)
             current_channel_id = current_channel_id if isinstance(current_channel_id, int) and not isinstance(current_channel_id, bool) and current_channel_id > 0 else None
+            await discard_mismatched_provider_state(
+                db=state.db,
+                session_id=state.session_id,
+                uid=state.uid,
+                messages=[*state.messages, *tool_call_correction_messages],
+                channel_id=current_channel_id,
+                model_id=state.model_entry["model_id"],
+                protocol=resolve_model_protocol(state.model_entry),
+            )
             if state.checkpoint_state.upper_message_id is not None:
                 state.messages = await apply_context_summary_checkpoint(
                     state.db,
@@ -188,6 +198,7 @@ async def generate_interactive_turn(
             generation_kwargs = {
                 "api_key": api_key,
                 "base_url": base_url,
+                "channel_id": current_channel_id,
                 "model_id": model_id,
                 "messages": request_messages,
                 "temperature": state.chat_params["temperature"],
