@@ -142,6 +142,41 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             payload["tools"] = tools
         return payload
 
+    @classmethod
+    def _request_payload(
+        cls,
+        *,
+        model_id: str,
+        channel_id: int | None = None,
+        messages: list[InternalMessage],
+        stream: bool,
+        temperature: float | None,
+        max_tokens: int,
+        tools: list[dict[str, Any]] | None,
+        tool_choice: str,
+        top_p: Any,
+        reasoning_effort: Any = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "model": model_id,
+            "messages": cls.to_provider(messages, model_id=model_id, channel_id=channel_id),
+            "stream": stream,
+        }
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if tools:
+            payload["tools"] = tools
+        payload["tool_choice"] = tool_choice if tools else "none"
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        return payload
+
     async def generate(
         self,
         api_key: str,
@@ -160,24 +195,18 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
 
         headers = build_model_request_headers(api_key, custom_headers)
         request_messages = await self._materialize_audio_messages(messages)
-        payload = {
-            "model": model_id,
-            "messages": self.to_provider(request_messages, model_id=model_id, channel_id=kwargs.get("channel_id")),
-            "stream": False,
-        }
-
-        if temperature is not None:
-            payload["temperature"] = temperature
-
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = tool_choice
-        if max_tokens > 0:
-            payload["max_tokens"] = max_tokens
-        if kwargs.get("top_p") is not None:
-            payload["top_p"] = kwargs["top_p"]
-        if kwargs.get("reasoning_effort") is not None:
-            payload["reasoning_effort"] = kwargs["reasoning_effort"]
+        payload = self._request_payload(
+            model_id=model_id,
+            channel_id=kwargs.get("channel_id"),
+            messages=request_messages,
+            stream=False,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            top_p=kwargs.get("top_p"),
+            reasoning_effort=kwargs.get("reasoning_effort"),
+        )
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         parsed = await self._post_json(
@@ -211,23 +240,18 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
     ) -> AsyncGenerator[dict[str, Any]]:
         headers = build_model_request_headers(api_key, custom_headers)
         request_messages = await self._materialize_audio_messages(messages)
-        payload = {
-            "model": model_id,
-            "messages": self.to_provider(request_messages, model_id=model_id, channel_id=kwargs.get("channel_id")),
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = tool_choice
-        if max_tokens > 0:
-            payload["max_tokens"] = max_tokens
-        if kwargs.get("top_p") is not None:
-            payload["top_p"] = kwargs["top_p"]
-        if kwargs.get("reasoning_effort") is not None:
-            payload["reasoning_effort"] = kwargs["reasoning_effort"]
+        payload = self._request_payload(
+            model_id=model_id,
+            channel_id=kwargs.get("channel_id"),
+            messages=request_messages,
+            stream=True,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            top_p=kwargs.get("top_p"),
+            reasoning_effort=kwargs.get("reasoning_effort"),
+        )
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         async for parsed in self._stream_sse_json(

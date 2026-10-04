@@ -522,7 +522,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             payload["max_output_tokens"] = max_tokens
         if tools:
             payload["tools"] = cls._convert_tools(tools)
-            payload["tool_choice"] = tool_choice
+        payload["tool_choice"] = tool_choice if tools else "none"
         return payload
 
     @staticmethod
