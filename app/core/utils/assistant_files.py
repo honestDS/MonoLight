@@ -95,7 +95,7 @@ async def materialize_generated_images(
         max_total_size = int((getattr(tool_config, "file_send_max_total_size_mb", DEFAULT_MAX_TOTAL_FILE_SIZE_MB) or DEFAULT_MAX_TOTAL_FILE_SIZE_MB) * 1024 * 1024)
         blocked_extensions = _normalize_blocked_extensions(getattr(tool_config, "file_send_blocked_extensions", []) or [])
 
-        if not isinstance(session_id, str) or not session_id or "\x00" in session_id or session_id in {".", ".."} or PurePosixPath(session_id).name != session_id or PureWindowsPath(session_id).name != session_id:
+        if not isinstance(uid, str) or not uid or "\x00" in uid or uid in {".", ".."} or PurePosixPath(uid).name != uid or PureWindowsPath(uid).name != uid:
             raise LLMException(message=ERR_FILE_ARGUMENT_INVALID)
 
         def _resolve_child(path: Path, parent: Path) -> Path:
@@ -105,10 +105,10 @@ async def materialize_generated_images(
             return resolved
 
         try:
-            session_dir = get_user_temp_dir(project_root, session_id)
-            session_parent = session_dir.parent.resolve(strict=False)
-            session_dir = _resolve_child(session_dir, session_parent)
-            generated_dir = _resolve_child(session_dir / "generated_images", session_dir)
+            user_dir = get_user_temp_dir(project_root, uid)
+            user_parent = user_dir.parent.resolve(strict=False)
+            user_dir = _resolve_child(user_dir, user_parent)
+            generated_dir = _resolve_child(user_dir / "generated_images", user_dir)
         except (ValueError, RuntimeError) as exc:
             raise LLMException(message=ERR_FILE_ARGUMENT_INVALID) from exc
         except OSError as exc:
@@ -163,10 +163,10 @@ async def materialize_generated_images(
             prepared.append((image_bytes, mime_type, f"generated_image_{deterministic_id}.{extension}", deterministic_id))
 
         try:
-            session_dir.mkdir(parents=True, exist_ok=True)
+            user_dir.mkdir(parents=True, exist_ok=True)
             generated_dir.mkdir(parents=True, exist_ok=True)
-            session_dir = _resolve_child(session_dir, session_parent)
-            generated_dir = _resolve_child(generated_dir, session_dir)
+            user_dir = _resolve_child(user_dir, user_parent)
+            generated_dir = _resolve_child(generated_dir, user_dir)
         except (ValueError, RuntimeError) as exc:
             raise LLMException(message=ERR_FILE_ARGUMENT_INVALID) from exc
         except OSError as exc:
