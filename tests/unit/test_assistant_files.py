@@ -44,8 +44,8 @@ def _cfg(**tool_values):
     return SimpleNamespace(tool=SimpleNamespace(**tool_values))
 
 
-def _generated_dir(tmp_path, session_id: str):
-    return tmp_path / "temp" / f"temp_{session_id}" / "generated_images"
+def _generated_dir(tmp_path, uid: str):
+    return tmp_path / "temp" / f"temp_{uid}" / "generated_images"
 
 
 def _patch_token_signing(monkeypatch):
@@ -54,8 +54,8 @@ def _patch_token_signing(monkeypatch):
     monkeypatch.setattr(send_file_to_user_module, "_sign_payload", lambda _payload: "test-signature")
 
 
-def _assert_generated_dir_empty(tmp_path, session_id: str):
-    generated_dir = _generated_dir(tmp_path, session_id)
+def _assert_generated_dir_empty(tmp_path, uid: str):
+    generated_dir = _generated_dir(tmp_path, uid)
     assert not generated_dir.exists() or not any(generated_dir.iterdir())
 
 
@@ -212,12 +212,12 @@ async def test_materialize_generated_images_writes_supported_formats_and_downloa
     assert message.generated_images is None
     assert message.content is None
 
-    generated_dir = _generated_dir(tmp_path, "session-1")
+    generated_dir = _generated_dir(tmp_path, "user-1")
     target = generated_dir / file_item["name"]
     assert target.parent == generated_dir
     assert target.is_file()
     assert target.read_bytes() == raw
-    assert not (tmp_path / "temp" / "temp_user-1").exists()
+    assert not (tmp_path / "temp" / "temp_session-1").exists()
 
     download_url = urlparse(file_item["download_url"])
     assert download_url.path == "/api/v1/download-sent"
@@ -258,7 +258,7 @@ async def test_materialize_generated_images_deduplicates_repeated_ids_and_is_sta
     assert second == first
     assert first_message.generated_images is None
     assert second_message.generated_images is None
-    generated_dir = _generated_dir(tmp_path, "session-1")
+    generated_dir = _generated_dir(tmp_path, "user-1")
     assert [path.name for path in generated_dir.iterdir()] == [first[0]["name"]]
     assert (generated_dir / first[0]["name"]).read_bytes() == raw
 
@@ -286,12 +286,12 @@ async def test_materialize_generated_images_keeps_same_bytes_for_different_ids(m
     assert len(files) == 2
     assert len({item["id"] for item in files}) == 2
     assert len({item["name"] for item in files}) == 2
-    generated_dir = _generated_dir(tmp_path, "session-1")
+    generated_dir = _generated_dir(tmp_path, "user-1")
     assert all((generated_dir / item["name"]).read_bytes() == raw for item in files)
 
 
 @pytest.mark.asyncio
-async def test_materialize_generated_images_isolates_sessions(monkeypatch, tmp_path):
+async def test_materialize_generated_images_shares_user_directory_across_sessions(monkeypatch, tmp_path):
     _patch_token_signing(monkeypatch)
     encoded, raw = _encoded_image("PNG")
 
@@ -318,14 +318,53 @@ async def test_materialize_generated_images_isolates_sessions(monkeypatch, tmp_p
         cfg=_cfg(),
     )
 
-    first_path = _generated_dir(tmp_path, "session-a") / first[0]["name"]
-    second_path = _generated_dir(tmp_path, "session-b") / second[0]["name"]
-    assert first_path != second_path
+    first_path = _generated_dir(tmp_path, "user-1") / first[0]["name"]
+    second_path = _generated_dir(tmp_path, "user-1") / second[0]["name"]
+    assert first_path == second_path
+    assert first[0]["id"] == second[0]["id"]
     assert first_path.is_file() and second_path.is_file()
     assert first_path.read_bytes() == raw
     assert second_path.read_bytes() == raw
     assert resolve_file_token(first[0]["id"]) == first_path.resolve()
     assert resolve_file_token(second[0]["id"]) == second_path.resolve()
+    assert not (tmp_path / "temp" / "temp_session-a").exists()
+    assert not (tmp_path / "temp" / "temp_session-b").exists()
+
+
+@pytest.mark.asyncio
+async def test_materialize_generated_images_isolates_user_directories(monkeypatch, tmp_path):
+    _patch_token_signing(monkeypatch)
+    encoded, raw = _encoded_image("PNG")
+
+    first_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        generated_images=[_generated_image("image-1", encoded, "image/png")],
+    )
+    first = await materialize_generated_images(
+        first_message,
+        project_root=tmp_path,
+        uid="user-1",
+        session_id="session-a",
+        cfg=_cfg(),
+    )
+    second_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        generated_images=[_generated_image("image-1", encoded, "image/png")],
+    )
+    second = await materialize_generated_images(
+        second_message,
+        project_root=tmp_path,
+        uid="user-2",
+        session_id="session-b",
+        cfg=_cfg(),
+    )
+
+    first_path = _generated_dir(tmp_path, "user-1") / first[0]["name"]
+    second_path = _generated_dir(tmp_path, "user-2") / second[0]["name"]
+    assert first_path != second_path
+    assert first[0]["id"] != second[0]["id"]
+    assert first_path.read_bytes() == raw
+    assert second_path.read_bytes() == raw
 
 
 @pytest.mark.asyncio
@@ -359,7 +398,7 @@ async def test_materialize_generated_images_rejects_invalid_image_output(monkeyp
 
     assert exc_info.value.message == ERR_LLM_IMAGE_OUTPUT_INVALID
     assert message.generated_images == [image]
-    _assert_generated_dir_empty(tmp_path, "session-1")
+    _assert_generated_dir_empty(tmp_path, "user-1")
 
 
 @pytest.mark.asyncio
@@ -383,7 +422,7 @@ async def test_materialize_generated_images_rejects_single_file_limit_without_la
 
     assert exc_info.value.message == ERR_FILE_SINGLE_SIZE_LIMIT_EXCEEDED
     assert message.generated_images is not None
-    _assert_generated_dir_empty(tmp_path, "session-1")
+    _assert_generated_dir_empty(tmp_path, "user-1")
 
 
 @pytest.mark.asyncio
@@ -408,7 +447,7 @@ async def test_materialize_generated_images_rejects_total_size_limit_without_lar
 
     assert exc_info.value.message == ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED
     assert message.generated_images == images
-    _assert_generated_dir_empty(tmp_path, "session-1")
+    _assert_generated_dir_empty(tmp_path, "user-1")
 
 
 @pytest.mark.asyncio
@@ -432,7 +471,7 @@ async def test_materialize_generated_images_rejects_file_count_limit(monkeypatch
 
     assert exc_info.value.message == ERR_FILE_ARGUMENT_INVALID
     assert message.generated_images == images
-    _assert_generated_dir_empty(tmp_path, "session-1")
+    _assert_generated_dir_empty(tmp_path, "user-1")
 
 
 @pytest.mark.asyncio
@@ -453,11 +492,12 @@ async def test_materialize_generated_images_blocks_jpeg_when_jpeg_extension_is_b
 
     assert exc_info.value.message == ERR_FILE_EXTENSION_BLOCKED
     assert message.generated_images == [image]
-    _assert_generated_dir_empty(tmp_path, "session-1")
+    _assert_generated_dir_empty(tmp_path, "user-1")
 
 
 @pytest.mark.asyncio
-async def test_materialize_generated_images_rejects_session_traversal(monkeypatch, tmp_path):
+@pytest.mark.parametrize("invalid_uid", ["../escape", r"..\escape", "", ".", "..", "\x00", None])
+async def test_materialize_generated_images_rejects_invalid_uid(monkeypatch, tmp_path, invalid_uid):
     _patch_token_signing(monkeypatch)
     encoded, _raw = _encoded_image("PNG")
     message = InternalMessage(
@@ -469,14 +509,14 @@ async def test_materialize_generated_images_rejects_session_traversal(monkeypatc
         await materialize_generated_images(
             message,
             project_root=tmp_path,
-            uid="user-1",
-            session_id="../escape",
+            uid=invalid_uid,
+            session_id="session-1",
             cfg=_cfg(),
         )
 
     assert exc_info.value.message == ERR_FILE_ARGUMENT_INVALID
     assert message.generated_images is not None
-    assert not (tmp_path / "escape").exists()
+    assert not (tmp_path / "temp").exists()
 
 
 @pytest.mark.asyncio
@@ -500,7 +540,7 @@ async def test_materialize_generated_images_does_not_keep_valid_files_when_batch
 
     assert exc_info.value.message == ERR_LLM_IMAGE_OUTPUT_INVALID
     assert message.generated_images == images
-    _assert_generated_dir_empty(tmp_path, "session-1")
+    _assert_generated_dir_empty(tmp_path, "user-1")
 
 
 @pytest.mark.asyncio
@@ -528,7 +568,7 @@ async def test_materialize_generated_images_cleans_temporary_file_when_storage_f
 
     assert exc_info.value.message == ERR_LLM_IMAGE_OUTPUT_SAVE_FAILED
     assert message.generated_images == [image]
-    generated_dir = _generated_dir(tmp_path, "session-1")
+    generated_dir = _generated_dir(tmp_path, "user-1")
     assert generated_dir.exists()
     assert not list(generated_dir.glob("*.tmp"))
     assert not list(generated_dir.glob(".*.tmp"))
