@@ -471,6 +471,167 @@ async def test_generate_omits_unspecified_sampling_and_output_token_params(monke
         assert parameter not in payload
 
 
+@pytest.mark.parametrize(
+    "protocol",
+    [
+        pytest.param("openai", id="chat-completions"),
+        pytest.param("openai_responses", id="responses"),
+    ],
+)
+@pytest.mark.parametrize(
+    "streaming",
+    [
+        pytest.param(False, id="non-stream"),
+        pytest.param(True, id="stream"),
+    ],
+)
+@pytest.mark.parametrize(
+    "tools",
+    [
+        pytest.param(None, id="tools-omitted"),
+        pytest.param([], id="tools-empty"),
+        pytest.param(
+            [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+            id="tools-lookup",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        pytest.param("default", id="choice-default"),
+        pytest.param("auto", id="choice-auto"),
+        pytest.param("none", id="choice-none"),
+        pytest.param("required", id="choice-required"),
+        pytest.param("function", id="choice-function"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_llm_client_generate_sends_actual_tool_request_parameters(monkeypatch, protocol, streaming, tools, tool_choice) -> None:
+    if protocol == "openai":
+        response_body = {
+            "id": "chatcmpl_regression",
+            "model": "gpt-test",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "Answer"}, "finish_reason": "stop"}],
+        }
+        stream_events = [
+            {
+                "id": "chatcmpl_regression",
+                "object": "chat.completion.chunk",
+                "model": "gpt-test",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Answer"}, "finish_reason": None}],
+            },
+            {
+                "id": "chatcmpl_regression",
+                "object": "chat.completion.chunk",
+                "model": "gpt-test",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+    else:
+        response_body = {
+            "id": "resp_regression",
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Answer"}],
+                }
+            ],
+        }
+        stream_events = [
+            {"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "Answer"},
+            {"type": "response.completed", "response": response_body},
+        ]
+
+    if streaming:
+        response = _FakeAiohttpResponse(chunks=[f"data: {json.dumps(event)}\n\n".encode() for event in stream_events] + [b"data: [DONE]\n\n"])
+    else:
+        response = _FakeAiohttpResponse(text=json.dumps(response_body))
+
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+
+    request_kwargs: dict[str, Any] = {
+        "api_key": "key",
+        "base_url": "https://example.invalid",
+        "model_id": "gpt-test",
+        "messages": [InternalMessage(role=MessageRole.USER, content="Question")],
+        "temperature": 0,
+        "top_p": 0,
+        "max_tokens": 256,
+        "reasoning_effort": "low",
+        "protocol": protocol,
+        "tools": tools,
+    }
+    expected_tool_choice: str | dict[str, Any]
+    if tool_choice == "function":
+        expected_tool_choice = {"type": "function", "function": {"name": "lookup"}} if protocol == "openai" else {"type": "function", "name": "lookup"}
+    else:
+        expected_tool_choice = tool_choice
+    if tool_choice != "default":
+        request_kwargs["tool_choice"] = expected_tool_choice
+
+    if streaming:
+
+        async def on_content(_content: str) -> None:
+            return None
+
+        result = await LLMClient.generate_with_stream_callback(on_content=on_content, **request_kwargs)
+    else:
+        result = await LLMClient.generate(**request_kwargs)
+
+    assert len(sessions) == 1
+    assert len(sessions[0].post_calls) == 1
+    post_call = sessions[0].post_calls[0]
+    expected_endpoint = "/chat/completions" if protocol == "openai" else "/responses"
+    assert post_call["url"].endswith(expected_endpoint)
+    payload = post_call["kwargs"]["json"]
+    assert payload["stream"] is streaming
+    assert payload["temperature"] == 0
+    assert payload["top_p"] == 0
+    if protocol == "openai":
+        assert payload["max_tokens"] == 256
+        assert payload["reasoning_effort"] == "low"
+        if streaming:
+            assert payload["stream_options"] == {"include_usage": True}
+        else:
+            assert "stream_options" not in payload
+    else:
+        assert payload["max_output_tokens"] == 256
+        assert payload["reasoning"] == {"effort": "low", "summary": "auto"}
+
+    if tools is None or tools == []:
+        assert payload["tool_choice"] == "none"
+        assert "tools" not in payload
+    else:
+        if protocol == "openai":
+            assert payload["tools"] == tools
+        else:
+            assert payload["tools"] == [
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                    "strict": False,
+                }
+            ]
+        assert payload["tool_choice"] == ("auto" if tool_choice == "default" else expected_tool_choice)
+
+    assert result.message.content == "Answer"
+    assert result.message.tool_calls is None
+    assert result.message.generated_images is None
+
+
 @pytest.mark.parametrize("protocol", ("openai", "openai_responses"))
 @pytest.mark.asyncio
 async def test_memory_recall_precheck_stream_does_not_backfill_sampling_params(monkeypatch, protocol) -> None:
