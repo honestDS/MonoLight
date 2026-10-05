@@ -211,38 +211,40 @@
 
               <div v-loading="memorySettingsLoading" class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.memory_organization_settings') }}</div>
-                <el-form-item>
-                  <template #label>
-                    {{ $t('profiles.auto_organize_enabled') }}
-                    <HelpTooltip :content="$t('profiles.auto_organize_enabled_hint')" />
-                  </template>
-                  <el-switch v-model="form.memory_organization.auto_organize_enabled" :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady" />
-                </el-form-item>
-                <el-form-item :label="$t('profiles.organization_model')">
-                  <el-select
-                    :model-value="memoryOrganizationModelKey"
-                    clearable
-                    filterable
-                    class="full-width-input"
-                    :placeholder="$t('profiles.organization_model_placeholder')"
-                    :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady"
-                    @update:model-value="$emit('update:memoryOrganizationModelKey', $event)"
-                  >
-                    <el-option
-                      v-for="item in memoryOrganizationModelOptions"
-                      :key="item.key"
-                      :label="item.label"
-                      :value="item.key"
-                      :disabled="item.channel_disabled || item.model_disabled"
+                <div class="memory-organization-controls">
+                  <el-form-item class="memory-organization-toggle">
+                    <template #label>
+                      {{ $t('profiles.auto_organize_enabled') }}
+                      <HelpTooltip :content="$t('profiles.auto_organize_enabled_hint')" />
+                    </template>
+                    <el-switch v-model="form.memory_organization.auto_organize_enabled" :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady" />
+                  </el-form-item>
+                  <el-form-item class="memory-organization-model-select" :label="$t('profiles.organization_model')">
+                    <el-select
+                      :model-value="memoryOrganizationModelKey"
+                      clearable
+                      filterable
+                      class="full-width-input"
+                      :placeholder="$t('profiles.organization_model_placeholder')"
+                      :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady || !form.memory_organization.auto_organize_enabled"
+                      @update:model-value="$emit('update:memoryOrganizationModelKey', $event)"
                     >
-                      <div class="organization-model-option">
-                        <span>{{ item.label }}</span>
-                        <el-tag v-if="item.channel_disabled" type="warning" size="small">{{ $t('profiles.channel_disabled') }}</el-tag>
-                        <el-tag v-else-if="item.model_disabled" type="warning" size="small">{{ $t('profiles.model_disabled') }}</el-tag>
-                      </div>
-                    </el-option>
-                  </el-select>
-                </el-form-item>
+                      <el-option
+                        v-for="item in memoryOrganizationModelOptions"
+                        :key="item.key"
+                        :label="item.label"
+                        :value="item.key"
+                        :disabled="item.channel_disabled || item.model_disabled"
+                      >
+                        <div class="organization-model-option">
+                          <span>{{ item.label }}</span>
+                          <el-tag v-if="item.channel_disabled" type="warning" size="small">{{ $t('profiles.channel_disabled') }}</el-tag>
+                          <el-tag v-else-if="item.model_disabled" type="warning" size="small">{{ $t('profiles.model_disabled') }}</el-tag>
+                        </div>
+                      </el-option>
+                    </el-select>
+                  </el-form-item>
+                </div>
                 <div v-if="memoryOrganizationModel" class="model-summary">
                   <div class="config-line"><span>{{ $t('profiles.selected_model') }}</span><b>{{ memoryOrganizationModel.model_id }}</b></div>
                   <div class="config-line"><span>{{ $t('profiles.context_window_k') }}</span><b>{{ memoryOrganizationModel.context_window_k ?? '-' }}</b></div>
@@ -371,30 +373,32 @@
                     ></el-option>
                   </el-select>
                 </el-form-item>
-                <el-form-item label-width="auto">
-                  <template #label>
-                    {{ $t('profiles.secondary_confirmation') }}
-                    <HelpTooltip :content="$t('profiles.secondary_confirmation_hint')" />
-                  </template>
-                  <el-switch
-                    :model-value="form.configs.security.audit_threshold > 0"
-                    @update:model-value="form.configs.security.audit_threshold = $event ? 5 : 0"
-                  ></el-switch>
-                </el-form-item>
-                <el-form-item v-if="form.configs.security.audit_threshold > 0" label-width="auto">
-                  <template #label>
-                    {{ $t('profiles.audit_threshold') }}
-                    <HelpTooltip :content="$t('profiles.audit_threshold_hint')" />
-                  </template>
-                  <el-slider v-model="form.configs.security.audit_threshold" :min="1" :max="7" show-stops show-input></el-slider>
-                </el-form-item>
-                <el-form-item label-width="auto">
-                  <template #label>
-                    {{ $t('profiles.audit_confirmation_timeout_seconds') }}
-                    <HelpTooltip :content="$t('profiles.audit_confirmation_timeout_seconds_hint')" />
-                  </template>
-                  <el-input-number v-model="form.configs.security.audit_confirmation_timeout_seconds" :min="1" :max="86400" :step="1" class="full-width-input" controls-position="right"></el-input-number>
-                </el-form-item>
+                <div class="secondary-confirmation-controls">
+                  <el-form-item class="secondary-confirmation-toggle" label-width="auto">
+                    <template #label>
+                      {{ $t('profiles.secondary_confirmation') }}
+                      <HelpTooltip :content="$t('profiles.secondary_confirmation_hint')" />
+                    </template>
+                    <el-switch
+                      :model-value="form.configs.security.audit_threshold > 0"
+                      @update:model-value="form.configs.security.audit_threshold = $event ? 5 : 0"
+                    ></el-switch>
+                  </el-form-item>
+                  <el-form-item v-if="form.configs.security.audit_threshold > 0" class="secondary-confirmation-threshold" label-width="auto">
+                    <template #label>
+                      {{ $t('profiles.audit_threshold') }}
+                      <HelpTooltip :content="$t('profiles.audit_threshold_hint')" />
+                    </template>
+                    <el-slider v-model="form.configs.security.audit_threshold" :min="1" :max="7" show-stops show-input></el-slider>
+                  </el-form-item>
+                  <el-form-item class="secondary-confirmation-timeout" label-width="auto">
+                    <template #label>
+                      {{ $t('profiles.audit_confirmation_timeout_seconds') }}
+                      <HelpTooltip :content="$t('profiles.audit_confirmation_timeout_seconds_hint')" />
+                    </template>
+                    <el-input-number v-model="form.configs.security.audit_confirmation_timeout_seconds" :min="1" :max="86400" :step="1" class="full-width-input" controls-position="right"></el-input-number>
+                  </el-form-item>
+                </div>
               </div>
             </div>
           </el-tab-pane>
