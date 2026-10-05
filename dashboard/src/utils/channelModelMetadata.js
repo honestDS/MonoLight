@@ -83,17 +83,50 @@ function getContextLength(model) {
   return toPositiveInteger(model.context_length)
 }
 
+export function normalizeReasoningEfforts(values) {
+  if (!Array.isArray(values)) {
+    return []
+  }
+
+  const seen = new Set()
+  return values.reduce((efforts, value) => {
+    if (typeof value !== 'string') {
+      return efforts
+    }
+
+    const normalizedValue = value.trim()
+    if (!normalizedValue || seen.has(normalizedValue)) {
+      return efforts
+    }
+
+    seen.add(normalizedValue)
+    efforts.push(normalizedValue)
+    return efforts
+  }, [])
+}
+
+export function getModelReasoningEfforts(entry) {
+  if (!isObject(entry)) {
+    return []
+  }
+
+  if (Array.isArray(entry.reasoning_efforts)) {
+    return normalizeReasoningEfforts(entry.reasoning_efforts)
+  }
+
+  if (Object.prototype.hasOwnProperty.call(entry, 'reasoning_efforts')) {
+    return []
+  }
+
+  return normalizeReasoningEfforts([entry.reasoning_effort])
+}
+
 export function getOpenRouterReasoningEfforts(model) {
   if (!isObject(model) || !isObject(model.reasoning) || !Array.isArray(model.reasoning.supported_efforts)) {
     return []
   }
 
-  return [...new Set(
-    model.reasoning.supported_efforts
-      .filter(value => typeof value === 'string')
-      .map(value => value.trim())
-      .filter(Boolean)
-  )]
+  return normalizeReasoningEfforts(model.reasoning.supported_efforts)
 }
 
 export function applyOpenRouterModelMetadata(entry, model) {
@@ -125,6 +158,18 @@ export function applyOpenRouterModelMetadata(entry, model) {
   if ((typeof entry.description !== 'string' || !entry.description.trim()) && description) {
     entry.description = description
     fields.push('description')
+  }
+
+  if (Array.isArray(model.reasoning?.supported_efforts)) {
+    const reasoningEfforts = getOpenRouterReasoningEfforts(model)
+    entry.reasoning_efforts = normalizeReasoningEfforts([
+      ...getModelReasoningEfforts(entry),
+      ...reasoningEfforts,
+    ])
+
+    if (reasoningEfforts.length > 0) {
+      fields.push('reasoning_efforts')
+    }
   }
 
   return { fields, model }

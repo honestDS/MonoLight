@@ -184,6 +184,12 @@ async def select_channel(
                 call_context=call_context or "unspecified",
             ).info(t("LOG_CHANNEL_SELECTED", channel_name=channel_name))
 
+        if expected_usage == "CHAT":
+            selected_model_entry = {
+                **selected_model_entry,
+                "reasoning_effort": selected_rule.reasoning_effort,
+            }
+
         return selected_channel, selected_model_entry, selected_rule
 
     logger.warning(t("LOG_CHANNEL_ALL_UNAVAILABLE", expected_usage=expected_usage))

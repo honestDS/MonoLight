@@ -179,6 +179,72 @@ test('http transport forwards goal settings only for new sessions', async () => 
   ])
 })
 
+test('http transport forwards reasoning effort only for new sessions', async () => {
+  const requests = []
+  const api = {
+    async completions(payload) {
+      requests.push(payload)
+      return { data: { data: { accepted_request_id: payload.request_id } } }
+    }
+  }
+  const baseOptions = { api, attachments: [] }
+  const cases = [
+    {
+      options: { message: 'custom', sessionId: null, requestId: 'request-custom', reasoningEffort: 'custom-level' },
+      expectedReasoningPayload: { reasoning_effort: 'custom-level' },
+      repeat: true
+    },
+    {
+      options: { message: 'none', sessionId: null, requestId: 'request-none', reasoningEffort: 'none' },
+      expectedReasoningPayload: { reasoning_effort: 'none' }
+    },
+    {
+      options: { message: 'null', sessionId: null, requestId: 'request-null', reasoningEffort: null },
+      expectedReasoningPayload: {}
+    },
+    {
+      options: { message: 'undefined', sessionId: null, requestId: 'request-undefined', reasoningEffort: undefined },
+      expectedReasoningPayload: {}
+    },
+    {
+      options: { message: 'omitted', sessionId: null, requestId: 'request-omitted' },
+      expectedReasoningPayload: {}
+    },
+    {
+      options: { message: 'existing-high', sessionId: 'session-existing', requestId: 'request-existing-high', reasoningEffort: 'high' },
+      expectedReasoningPayload: {}
+    },
+    {
+      options: { message: 'existing-null', sessionId: 'session-existing', requestId: 'request-existing-null', reasoningEffort: null },
+      expectedReasoningPayload: {}
+    }
+  ]
+
+  for (const testCase of cases) {
+    const options = { ...baseOptions, ...testCase.options, attachments: [...baseOptions.attachments] }
+    const originalOptions = testCase.repeat ? { ...options, attachments: [...options.attachments] } : null
+    const result = await sendHttpNonStream(options)
+    const expectedPayload = {
+      message: options.message,
+      session_id: options.sessionId,
+      attachments: [],
+      request_id: options.requestId,
+      ...testCase.expectedReasoningPayload,
+      stream: false
+    }
+
+    assert.deepEqual(requests[requests.length - 1], expectedPayload)
+    assert.deepEqual(result, { accepted_request_id: options.requestId })
+    if (testCase.repeat) {
+      const repeatedResult = await sendHttpNonStream(options)
+      assert.deepEqual(requests[requests.length - 1], expectedPayload)
+      assert.deepEqual(requests[requests.length - 2], requests[requests.length - 1])
+      assert.deepEqual(repeatedResult, { accepted_request_id: options.requestId })
+      assert.deepEqual(options, originalOptions)
+    }
+  }
+})
+
 test('persistSessionTransportMode persists the selected mode without owning runtime activation', async () => {
   const sessions = [{ session_id: 'session-1', source: 'ws' }]
   const calls = []

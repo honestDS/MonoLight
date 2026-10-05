@@ -783,14 +783,13 @@ async function detectModelMetadata() {
     const { fields: filledFields, model } = applyOpenRouterModelMetadata(entry, matches[0])
     const reasoningEfforts = getOpenRouterReasoningEfforts(model)
     reasoningEffortOptions.value = reasoningEfforts
-    const detectedFields = reasoningEfforts.length > 0 ? [...filledFields, 'reasoning_effort'] : filledFields
-    if (detectedFields.length === 0) {
+    if (filledFields.length === 0) {
       throw new Error(t('channels.model_metadata_no_mappable_fields'))
     }
 
     ElMessage.success(t('channels.model_metadata_detect_success', {
       model: typeof model.id === 'string' && model.id.trim() ? model.id : entry.model_id.trim(),
-      fields: detectedFields.map(field => t('channels.' + field)).join(', '),
+      fields: filledFields.map(field => t('channels.' + field)).join(', '),
     }))
   } catch (error) {
     ElMessage.error(error.message || t('channels.model_metadata_detect_failed'))
@@ -865,7 +864,7 @@ async function testChatModel(testMode, prompt) {
       protocol: entry.protocol,
       temperature: entry.temperature,
       top_p: entry.top_p,
-      reasoning_effort: entry.reasoning_effort || null,
+      reasoning_effort: null,
       max_tokens: entry.max_tokens || 0,
       test_mode: testMode,
       prompt,

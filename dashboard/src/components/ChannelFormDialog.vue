@@ -155,7 +155,7 @@ import { truncateErrorMessage } from '../utils/errorMessage.js'
 import { createChannelTestManager } from '../utils/channelTestManager.js'
 import { normalizeHttpProxy, isValidHttpProxy } from '../utils/channelHttpProxy.js'
 import { customHeadersTemplate, customHeadersPlaceholder, ensureAdvancedSettings, formatAdvancedSettings, parseAdvancedSettingsDraft, mergeCustomHeaders } from '../utils/channelAdvancedSettings.js'
-import { getOpenRouterModelMatches, getOpenRouterReasoningEfforts, applyOpenRouterModelMetadata } from '../utils/channelModelMetadata.js'
+import { getOpenRouterModelMatches, getOpenRouterReasoningEfforts, getModelReasoningEfforts, normalizeReasoningEfforts, applyOpenRouterModelMetadata } from '../utils/channelModelMetadata.js'
 import ChannelModelEntry from './ChannelModelEntry.vue'
 import ModelTestResultDialog from './ModelTestResultDialog.vue'
 
@@ -300,6 +300,7 @@ const validateModelAdvancedSettings = (idx) => {
 }
 
 const syncModelEntryStates = () => {
+  const existingReasoningEffortOptions = reasoningEffortOptions.value
   form.model_ids.forEach(ensureAdvancedSettings)
   modelIdErrors.value = form.model_ids.map((_, idx) => modelIdErrors.value[idx] || '')
   protocolErrors.value = form.model_ids.map((_, idx) => protocolErrors.value[idx] || '')
@@ -310,7 +311,10 @@ const syncModelEntryStates = () => {
   ))
   advancedSettingsErrors.value = form.model_ids.map((_, idx) => advancedSettingsErrors.value[idx] || '')
   advancedSettingsExpanded.value = form.model_ids.map((_, idx) => advancedSettingsExpanded.value[idx] || [])
-  reasoningEffortOptions.value = form.model_ids.map((_, idx) => reasoningEffortOptions.value[idx] || [])
+  reasoningEffortOptions.value = form.model_ids.map((entry, idx) => normalizeReasoningEfforts([
+    ...getModelReasoningEfforts(entry),
+    ...(Array.isArray(existingReasoningEffortOptions[idx]) ? existingReasoningEffortOptions[idx] : [])
+  ]))
 }
 
 const addModelEntry = () => {
@@ -579,14 +583,13 @@ const detectModelMetadata = async (entry, idx) => {
     const { fields: filledFields, model } = applyOpenRouterModelMetadata(entry, matches[0])
     const reasoningEfforts = getOpenRouterReasoningEfforts(model)
     reasoningEffortOptions.value[idx] = reasoningEfforts
-    const detectedFields = reasoningEfforts.length > 0 ? [...filledFields, 'reasoning_effort'] : filledFields
-    if (detectedFields.length === 0) {
+    if (filledFields.length === 0) {
       throw new Error(t('channels.model_metadata_no_mappable_fields'))
     }
 
     ElMessage.success(t('channels.model_metadata_detect_success', {
       model: typeof model.id === 'string' && model.id.trim() ? model.id : entry.model_id.trim(),
-      fields: detectedFields.map(field => t('channels.' + field)).join(', ')
+      fields: filledFields.map(field => t('channels.' + field)).join(', ')
     }))
   } catch (err) {
     ElMessage.error(err.message || t('channels.model_metadata_detect_failed'))
@@ -665,7 +668,7 @@ const testChatModel = async (entry, idx, testMode, prompt) => {
       protocol: entry.protocol,
       temperature: entry.temperature,
       top_p: entry.top_p,
-      reasoning_effort: entry.reasoning_effort || null,
+      reasoning_effort: null,
       max_tokens: entry.max_tokens || 0,
       test_mode: testMode,
       prompt,
@@ -809,6 +812,11 @@ const buildModelEntryPayload = (entry) => {
     ...entry,
     model_id: (entry.model_id || '').trim(),
     advanced_settings: { ...entry.advanced_settings }
+  }
+
+  if (entry.lifecycle_status !== 'pending_delete') {
+    payload.reasoning_efforts = normalizeReasoningEfforts(getModelReasoningEfforts(entry))
+    delete payload.reasoning_effort
   }
 
   if (payload.usage !== 'IMAGE_GENERATION') {

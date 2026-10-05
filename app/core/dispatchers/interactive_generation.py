@@ -168,6 +168,8 @@ async def generate_interactive_turn(
                 session = await session_crud.get_by_session_id(state.db, state.session_id)
                 if session is not None:
                     await state.db.refresh(session)
+            session_reasoning_effort = getattr(session, "reasoning_effort", None)
+            effective_reasoning_effort = session_reasoning_effort if session_reasoning_effort is not None else state.chat_params.get("reasoning_effort")
             context_summary_revision = session.context_summary_revision if session is not None else 0
             context_content_revision = session.context_content_revision if session is not None else 0
             previous_session_llm_request_metadata = session.llm_request_metadata if session is not None else None
@@ -201,9 +203,9 @@ async def generate_interactive_turn(
                 "channel_id": current_channel_id,
                 "model_id": model_id,
                 "messages": request_messages,
-                "temperature": state.chat_params["temperature"],
-                "top_p": state.chat_params["top_p"],
-                "reasoning_effort": state.chat_params.get("reasoning_effort"),
+                "temperature": None if effective_reasoning_effort is not None else state.chat_params["temperature"],
+                "top_p": None if effective_reasoning_effort is not None else state.chat_params["top_p"],
+                "reasoning_effort": effective_reasoning_effort,
                 "max_tokens": state.chat_params["max_tokens"],
                 "tools": current_tools,
                 "tool_choice": tool_choice,

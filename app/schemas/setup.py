@@ -18,6 +18,7 @@ from app.models.channel import (
     ChannelModelAdvancedSettings,
     ModelProtocol,
     ModelUsage,
+    ReasoningEffort,
     validate_channel_api_key,
 )
 from app.models.user import UserCreate
@@ -51,6 +52,10 @@ class SetupChannelInput(BaseModel):
     temperature: float | None = Field(None, ge=0, le=2, description="采样温度")
     top_p: float | None = Field(None, ge=0, le=1, description="核采样概率")
     reasoning_effort: str | None = Field(None, min_length=1, max_length=64, description="思考等级")
+    reasoning_efforts: list[ReasoningEffort] = Field(
+        default_factory=list,
+        description="思考等级候选数据，非默认值",
+    )
     max_tokens: int | None = Field(None, ge=0, description="最大生成 Token 数")
     description: str | None = Field(None, description="模型描述")
     advanced_settings: ChannelModelAdvancedSettings = Field(

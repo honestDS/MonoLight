@@ -210,9 +210,11 @@ const createHarness = (implementation, messages, options = {}) => {
     currentSessionProfileDisplayId: null,
     currentSessionProfileOptions: [],
     currentSessionProfilePlaceholder: '',
+    currentSessionReasoningEffort: null,
     currentSessionShowReasoning,
     currentSessionShowToolCalls,
     currentSessionProfileOverrideId: null,
+    chatMainRef: null,
     formatProfileOptionLabel: () => '',
     formatSessionSource: () => '',
     groupedSessions: [],
@@ -228,6 +230,8 @@ const createHarness = (implementation, messages, options = {}) => {
     handleSessionGroupBeforeLeave: () => {},
     handleSessionGroupEnter: () => {},
     handleSessionGroupLeave: () => {},
+    handleMoreOptionsAfterLeave: () => {},
+    handleReasoningVisibleChange: () => {},
     historyLoading: false,
     inputMsg,
     isContextSummarizing: false,
@@ -241,6 +245,7 @@ const createHarness = (implementation, messages, options = {}) => {
     messageList: null,
     messages: [],
     modeSettingSubmitting: false,
+    moreOptionsOverlayActive: false,
     moreOptionsVisible: false,
     chatInputBoxRef: options.chatInputBoxRef ?? null,
     moreOptionsWidth: options.moreOptionsWidth ?? 0,
@@ -249,6 +254,16 @@ const createHarness = (implementation, messages, options = {}) => {
     openUploadPicker: () => {},
     profilesLoading: false,
     profileSettingSubmitting: false,
+    reasoningDisplayValue: messages.reasoning_effort_follow_profile,
+    reasoningDropdownDisabled: false,
+    reasoningDropdownRef: null,
+    reasoningDropdownVisible: false,
+    reasoningEffortSubmitting: false,
+    reasoningOptions: [],
+    reasoningOptionsFailed: false,
+    reasoningOptionsLoading: false,
+    reasoningProfileDefaultHint: '',
+    reasoningTriggerLabel: messages.reasoning_effort,
     reasoningSettingSubmitting: false,
     renderedInitialHistoryLoaded: false,
     renderedMessages: [],
@@ -258,6 +273,7 @@ const createHarness = (implementation, messages, options = {}) => {
     sessionsPanelOpen: false,
     showReasoning: true,
     stopReply,
+    todoExpanded: false,
     toggleGroup: () => {},
     toggleMarkdown: () => {},
     toggleSessionsPanel: () => {},
@@ -270,6 +286,7 @@ const createHarness = (implementation, messages, options = {}) => {
     updateSessionGoalMode: extractedHandlers.updateSessionGoalMode,
     updateSessionMaxTurns: extractedHandlers.updateSessionMaxTurns,
     updateSessionProfileOverride: () => {},
+    updateSessionReasoningEffort: () => {},
     updateSessionShowReasoning: () => {},
     updateSessionShowToolCalls: () => {},
     actionButtonLabel
@@ -562,7 +579,8 @@ test('ChatView keeps external session settings available while preserving restri
   assert.deepEqual(popover.props?.['popper-style'], {
     maxHeight: 'min(45vh, 420px)',
     overflowY: 'auto',
-    minWidth: '0'
+    minWidth: '0',
+    zIndex: 14
   })
   assert.ok(moreOptionsTrigger, 'more options trigger should be rendered')
   assert.notEqual(moreOptionsTrigger.props?.disabled, true)
