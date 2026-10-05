@@ -1324,3 +1324,262 @@ async def test_virtual_provider_state_cleanup_does_not_scan_history_without_pers
     assert reloaded_historical.content == historical_content
     assert reloaded_historical.reasoning_content == historical_reasoning
     assert reloaded_historical.provider_metadata == historical_metadata
+
+
+def _reasoning_effort_model_entry(
+    protocol: str,
+    reasoning_effort: str | None,
+    *,
+    reasoning_efforts: list[str],
+) -> dict[str, Any]:
+    return {
+        "model_id": MODEL_ID,
+        "usage": "CHAT",
+        "protocol": protocol.upper(),
+        "context_window_k": 64,
+        "max_tokens": 128,
+        "temperature": 0.25,
+        "top_p": 0.75,
+        "reasoning_effort": reasoning_effort,
+        "reasoning_efforts": reasoning_efforts,
+    }
+
+
+def _build_reasoning_effort_state(
+    *,
+    db_session: AsyncSession,
+    uid: str,
+    session_id: str,
+    profile: Profile,
+    messages: list[InternalMessage],
+    initial_message: InternalMessage,
+    model_entry: dict[str, Any],
+    channel: Any,
+    channel_rule: Any,
+    chat_channel: Any,
+    mode: str,
+) -> tuple[SimpleNamespace, list[dict[str, Any]]]:
+    stream_events: list[dict[str, Any]] = []
+
+    async def stream_event_callback(event: dict[str, Any]) -> None:
+        stream_events.append(deepcopy(event))
+
+    state = SimpleNamespace(
+        db=db_session,
+        uid=uid,
+        session_id=session_id,
+        profile=profile,
+        cfg=SimpleNamespace(),
+        messages=messages,
+        checkpoint_state=SimpleNamespace(
+            upper_message_id=None,
+            total_output_tokens=0,
+            session_total_input_tokens=0,
+            session_total_cached_tokens=0,
+            session_total_output_tokens=0,
+            execution_phase=GOAL_EXECUTION_PHASE_RUNNING,
+        ),
+        context_summary_work_validity_checker=None,
+        context_summary_lifecycle_callback=None,
+        chat_params={
+            "temperature": model_entry["temperature"],
+            "top_p": model_entry["top_p"],
+            "reasoning_effort": model_entry["reasoning_effort"],
+            "max_tokens": model_entry["max_tokens"],
+            "chat_timeout": 60.0,
+            "context_window_k": model_entry["context_window_k"],
+        },
+        model_entry=model_entry,
+        chat_channel=chat_channel,
+        chat_cursor_key=f"{session_id}:CHAT",
+        chat_channel_obj=channel,
+        channel_rule=channel_rule,
+        latest_llm_request_metadata=None,
+        current_turn=1,
+        goal_mode=False,
+        stream_event_callback=stream_event_callback if mode == "stream" else None,
+        request_metadata_callback=None,
+        expose_tool_call_content=True,
+        show_tool_calls=True,
+        dispatcher_mode=mode,
+        dispatch_logger=SimpleNamespace(
+            bind=lambda **_bind_kwargs: SimpleNamespace(
+                warning=lambda *_warning_args, **_warning_kwargs: None,
+            ),
+        ),
+        img_understanding=False,
+        audio_understanding=False,
+        video_understanding=False,
+        initial_msg=initial_message,
+    )
+    return state, stream_events
+
+
+def _assert_reasoning_effort_payload(
+    payload: dict[str, Any],
+    *,
+    protocol: str,
+    mode: str,
+    expected_effort: str | None,
+) -> None:
+    assert payload["model"] == MODEL_ID
+    assert payload["stream"] is (mode == "stream")
+    if expected_effort is None:
+        assert payload["temperature"] == 0.25
+        assert payload["top_p"] == 0.75
+        if protocol == "openai":
+            assert "reasoning_effort" not in payload
+        else:
+            assert "reasoning" not in payload
+        return
+
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+    if protocol == "openai":
+        assert payload["reasoning_effort"] == expected_effort
+    else:
+        expected_reasoning = {"effort": expected_effort}
+        if expected_effort != "none":
+            expected_reasoning["summary"] = "auto"
+        assert payload["reasoning"] == expected_reasoning
+
+
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses"])
+@pytest.mark.parametrize("mode", ["non_stream", "stream", "background"])
+@pytest.mark.asyncio
+async def test_reasoning_effort_reaches_openai_protocol_payloads(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    mode: str,
+) -> None:
+    session_id = f"{SESSION_ID}-effort-{protocol}-{mode}"
+    uid = f"{UID}-effort-{protocol}-{mode}"
+    profile = Profile(id=PROFILE_ID, uid=uid, name="reasoning-effort", configs={})
+    db_session.add(
+        ChatSession(
+            session_id=session_id,
+            uid=uid,
+            profile_id=PROFILE_ID,
+            reasoning_effort="custom-tier",
+        )
+    )
+    await db_session.commit()
+    user_message = await save_message(
+        db_session,
+        session_id,
+        uid,
+        MessageRole.USER,
+        MessageType.TEXT,
+        InternalMessage(role=MessageRole.USER, content="Question"),
+        PROFILE_ID,
+    )
+
+    channel = SimpleNamespace(
+        id=1,
+        name="reasoning-channel",
+        api_key=API_KEY,
+        base_url=BASE_URL,
+        http_proxy=None,
+        get_decrypted_api_key=lambda: API_KEY,
+    )
+    channel_rule = SimpleNamespace(priority=1)
+    chat_channel = SimpleNamespace(chat_timeout=60.0, rules=[channel_rule])
+    selected_model_entry: dict[str, Any] = {}
+
+    if mode == "background":
+
+        async def fake_select_channel(_db: AsyncSession, _chat_channel: Any, _expected_usage: str, **_kwargs: Any):
+            return channel, deepcopy(selected_model_entry), channel_rule
+
+        monkeypatch.setattr(channel_call, "select_channel", fake_select_channel)
+
+    async def request_builder(_chat_params: dict[str, Any], _channel_obj: Any, _model_entry: dict[str, Any]) -> list[InternalMessage]:
+        return await ContextManager.get_messages(
+            db_session,
+            session_id,
+            uid,
+            profile=profile,
+            current_message="Follow-up",
+        )
+
+    raw_response = _chat_response("", False) if protocol == "openai" else _responses_response("", False)
+    raw_response["model"] = "provider-real-model"
+    stream_events = _chat_stream_events(raw_response) if protocol == "openai" else _responses_stream_events(raw_response)
+    captured_payloads: list[dict[str, Any]] = []
+
+    async def fake_post(_self: BaseOpenAITransformer, *, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        captured_payloads.append(deepcopy(payload))
+        return deepcopy(raw_response)
+
+    async def fake_stream(_self: BaseOpenAITransformer, *, payload: dict[str, Any], normalize_event, **_kwargs: Any):
+        captured_payloads.append(deepcopy(payload))
+        for raw_event in stream_events:
+            normalized, _ = normalize_event(deepcopy(raw_event))
+            if normalized is not None:
+                yield normalized
+
+    monkeypatch.setattr(BaseOpenAITransformer, "_post_json", fake_post)
+    monkeypatch.setattr(BaseOpenAITransformer, "_stream_sse_json", fake_stream)
+
+    model_entries = [
+        _reasoning_effort_model_entry(protocol, "model-default", reasoning_efforts=["model-default", "high"]),
+        _reasoning_effort_model_entry(protocol, "rule-default", reasoning_efforts=["rule-default", "high"]),
+        _reasoning_effort_model_entry(protocol, None, reasoning_efforts=["low", "high"]),
+        _reasoning_effort_model_entry(protocol, "none", reasoning_efforts=["none", "high"]),
+    ]
+    expected_efforts = ["custom-tier", "rule-default", None, "none"]
+
+    for index, (model_entry, expected_effort) in enumerate(zip(model_entries, expected_efforts, strict=True)):
+        if index == 1:
+            session = await db_session.get(ChatSession, session_id)
+            assert session is not None
+            session.reasoning_effort = None
+            await db_session.commit()
+            db_session.expire_all()
+            persisted_session = await db_session.get(ChatSession, session_id)
+            assert persisted_session is not None
+            assert persisted_session.reasoning_effort is None
+
+        if mode == "background":
+            selected_model_entry = deepcopy(model_entry)
+            response, _, _, _, chat_params = await channel_call.generate_chat_with_fallback(
+                db_session,
+                chat_channel=chat_channel,
+                request_builder=request_builder,
+                call_context="test_reasoning_effort",
+                cursor_key=None,
+                uid=uid,
+                session_id=session_id,
+            )
+            assert response.message.content == "Answer"
+            assert chat_params["reasoning_effort"] == expected_effort
+        else:
+            history = await request_builder({}, channel, model_entry)
+            state, _stream_events_received = _build_reasoning_effort_state(
+                db_session=db_session,
+                uid=uid,
+                session_id=session_id,
+                profile=profile,
+                messages=history,
+                initial_message=user_message,
+                model_entry=deepcopy(model_entry),
+                channel=channel,
+                channel_rule=channel_rule,
+                chat_channel=chat_channel,
+                mode=mode,
+            )
+            result = await interactive_generation_module.generate_interactive_turn(
+                state,
+                current_tools=[],
+                response_id=f"reasoning-effort-{index}",
+            )
+            assert result.message.content == "Answer"
+
+        assert len(captured_payloads) == index + 1
+        _assert_reasoning_effort_payload(
+            captured_payloads[-1],
+            protocol=protocol,
+            mode=mode,
+            expected_effort=expected_effort,
+        )

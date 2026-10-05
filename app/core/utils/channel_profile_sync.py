@@ -107,7 +107,7 @@ async def _remove_unavailable_channel_rules(
 
 
 def _model_entry_signature(item: dict) -> str:
-    normalized = ChannelModelItem.model_validate(item).model_dump(exclude={"model_id"})
+    normalized = ChannelModelItem.model_validate(item).model_dump(exclude={"model_id", "reasoning_effort", "reasoning_efforts"})
     return json.dumps(normalized, sort_keys=True, default=str)
 
 

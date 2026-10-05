@@ -10,6 +10,7 @@ from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_LLM_EMPTY_RESPONSE,
 )
+from app.core.crud.session.session import session_crud
 from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
@@ -69,6 +70,15 @@ async def generate_chat_with_fallback(
     while True:
         chat_channel_obj, model_entry, channel_rule = selection
         chat_params = resolve_chat_params(model_entry, chat_channel)
+        if hasattr(db, "execute"):
+            session = await session_crud.get_by_session_id(db, session_id)
+            if session is not None:
+                await db.refresh(session)
+                if session.uid == uid and session.reasoning_effort is not None:
+                    chat_params["reasoning_effort"] = session.reasoning_effort
+        if chat_params.get("reasoning_effort") is not None:
+            chat_params["temperature"] = None
+            chat_params["top_p"] = None
         try:
             request_messages = await _resolve_request_messages(
                 request_builder,

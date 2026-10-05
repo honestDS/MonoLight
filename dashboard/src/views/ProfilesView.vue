@@ -934,7 +934,13 @@ const submitForm = async () => {
     if (ch && ch.rules) {
       ch.rules = ch.rules
         .filter(r => r.channel_id && r.model_id)
-        .map(({ channel_id, model_id, priority, weight }) => ({ channel_id, model_id, priority, weight }))
+        .map(({ channel_id, model_id, priority, weight, reasoning_effort }) => ({
+          channel_id,
+          model_id,
+          priority,
+          weight,
+          reasoning_effort: typeof reasoning_effort === 'string' ? reasoning_effort.trim() || null : null
+        }))
         .sort(compareRules)
     }
   }

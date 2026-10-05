@@ -227,6 +227,9 @@
 
 .model-entry-reasoning-effort {
   display: inline-flex;
+  width: 320px !important;
+  max-width: 100%;
+  min-width: 0;
   vertical-align: middle;
 }
 

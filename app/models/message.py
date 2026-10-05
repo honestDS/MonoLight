@@ -24,6 +24,7 @@ from app.core.constants import (
     SESSION_MAX_TURNS_UPPER_BOUND,
 )
 from app.core.utils.time import get_local_time
+from app.models.channel import ReasoningEffort
 
 
 class MessageRole(StrEnum):
@@ -251,5 +252,6 @@ class ChatCompletionRequest(BaseModel):
     profile_override_id: int | None = PyField(default=None, gt=0)
     show_tool_calls: bool | None = None
     show_reasoning: bool | None = None
+    reasoning_effort: ReasoningEffort | None = None
     goal_mode: StrictBool = DEFAULT_SESSION_GOAL_MODE
     max_turns: StrictInt = PyField(default=DEFAULT_SESSION_MAX_TURNS, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)

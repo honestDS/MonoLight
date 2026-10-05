@@ -80,16 +80,28 @@
           </el-form-item>
         </div>
         <div class="model-entry-field">
-          <el-form-item :label="$t('channels.reasoning_effort')">
-            <el-autocomplete
-              v-model="props.entry.reasoning_effort"
+          <el-form-item>
+            <template #label>
+              {{ $t('channels.reasoning_efforts') }}
+              <HelpTooltip :content="$t('channels.reasoning_efforts_hint')" />
+            </template>
+            <el-select
+              :model-value="getModelReasoningEfforts(props.entry)"
               class="full-width-input model-entry-reasoning-effort"
+              multiple
+              filterable
+              allow-create
+              default-first-option
               clearable
-              :fetch-suggestions="queryReasoningEfforts"
-              :placeholder="$t('channels.reasoning_effort_placeholder')"
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="3"
+              :reserve-keyword="false"
+              :placeholder="$t('channels.reasoning_efforts_placeholder')"
               :disabled="props.locked"
-              @input="emit('test-config-change')"
-              @select="emit('test-config-change')" />
+              @update:model-value="handleReasoningEffortsChange">
+              <el-option v-for="item in reasoningEffortOptions" :key="item" :label="item" :value="item" />
+            </el-select>
           </el-form-item>
         </div>
         <div class="model-entry-understanding-row">
@@ -199,7 +211,10 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import HelpTooltip from './HelpTooltip.vue'
+import { getModelReasoningEfforts, normalizeReasoningEfforts } from '../utils/channelModelMetadata.js'
 
 const props = defineProps({
   entry: {
@@ -292,6 +307,11 @@ const emit = defineEmits([
 
 const { t } = useI18n()
 
+const reasoningEffortOptions = computed(() => normalizeReasoningEfforts([
+  ...getModelReasoningEfforts(props.entry),
+  ...props.reasoningEffortOptions
+]))
+
 const handleModelIdInput = () => {
   emit('model-id-input')
   emit('test-config-change')
@@ -307,17 +327,14 @@ const handleProtocolChange = (value) => {
   emit('test-config-change')
 }
 
-const handleAdvancedSettingsInput = () => {
-  emit('advanced-settings-input')
+const handleReasoningEffortsChange = (values) => {
+  props.entry.reasoning_efforts = normalizeReasoningEfforts(values)
   emit('test-config-change')
 }
 
-const queryReasoningEfforts = (query, callback) => {
-  const normalizedQuery = String(query || '').trim().toLowerCase()
-  const suggestions = props.reasoningEffortOptions
-    .filter(value => !normalizedQuery || value.toLowerCase().includes(normalizedQuery))
-    .map(value => ({ value }))
-  callback(suggestions)
+const handleAdvancedSettingsInput = () => {
+  emit('advanced-settings-input')
+  emit('test-config-change')
 }
 
 const getTestStatusType = (status) => {

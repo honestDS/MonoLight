@@ -2,10 +2,13 @@
 
 import copy
 import enum
+from typing import Annotated
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    StringConstraints,
+    TypeAdapter,
     ValidationError,
     field_validator,
     model_validator,
@@ -42,6 +45,16 @@ from app.core.utils.model_request_headers import (
 )
 
 ENCRYPTED_API_KEY_PREFIX = "enc:v1:"
+
+ReasoningEffort = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=64,
+        strict=True,
+    ),
+]
 
 
 class ModelUsage(enum.StrEnum):
@@ -180,6 +193,24 @@ def _format_channel_model_validation_error(exc: Exception) -> str:
     return " | ".join(messages)
 
 
+def _normalize_reasoning_effort_candidates(value: object) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        normalized_candidates = []
+        seen: set[str] = set()
+        for candidate in value:
+            if isinstance(candidate, str):
+                candidate = candidate.strip()
+                if not candidate:
+                    continue
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+            normalized_candidates.append(candidate)
+        value = normalized_candidates
+
+    return TypeAdapter(list[ReasoningEffort]).validate_python(value)
+
+
 class ChannelModelItem(BaseModel):
     """渠道下单个模型条目的完整配置"""
 
@@ -192,7 +223,16 @@ class ChannelModelItem(BaseModel):
     context_window_k: int | None = PydanticField(None, ge=1, description="上下文窗口（K Tokens），CHAT 专属")
     temperature: float | None = PydanticField(None, ge=0, le=2.0, description="采样温度，CHAT 专属")
     top_p: float | None = PydanticField(None, ge=0, le=1.0, description="核采样阈值，CHAT 专属")
-    reasoning_effort: str | None = PydanticField(None, min_length=1, max_length=64, description="思考等级，CHAT 专属")
+    reasoning_effort: str | None = PydanticField(
+        None,
+        min_length=1,
+        max_length=64,
+        description="思考等级（仅兼容候选来源，非会话默认），CHAT 专属",
+    )
+    reasoning_efforts: list[ReasoningEffort] = PydanticField(
+        default_factory=list,
+        description="思考等级候选列表，CHAT 专属",
+    )
     max_tokens: int | None = PydanticField(None, ge=0, description="单次生成最大 Token 数，CHAT 专属")
     embedding_dimensions: int | None = PydanticField(None, gt=0, description="向量输出维度，EMBEDDING 专属")
     size: ImageGenerationSize | None = PydanticField(None, description="生成图片尺寸，IMAGE_GENERATION 专属")
@@ -210,6 +250,17 @@ class ChannelModelItem(BaseModel):
         description="模型高级设置",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_reasoning_effort(cls, value: object) -> object:
+        if not isinstance(value, dict) or "reasoning_efforts" in value or "reasoning_effort" not in value:
+            return value
+
+        normalized_value = dict(value)
+        legacy_reasoning_effort = normalized_value.get("reasoning_effort")
+        normalized_value["reasoning_efforts"] = [] if legacy_reasoning_effort is None else [legacy_reasoning_effort]
+        return normalized_value
+
     @field_validator("reasoning_effort", mode="before")
     @classmethod
     def normalize_reasoning_effort(cls, value):
@@ -217,6 +268,11 @@ class ChannelModelItem(BaseModel):
             return value
         normalized = value.strip()
         return normalized or None
+
+    @field_validator("reasoning_efforts", mode="before")
+    @classmethod
+    def normalize_reasoning_efforts(cls, value: object) -> list[str]:
+        return _normalize_reasoning_effort_candidates(value)
 
     @model_validator(mode="after")
     def validate_usage_specific_fields(self):
@@ -252,6 +308,29 @@ def resolve_model_protocol(model_entry: dict) -> str:
     return ModelProtocol(model_entry["protocol"]).value.lower()
 
 
+def get_model_reasoning_efforts(model_entry: dict) -> list[str]:
+    """读取模型条目中的思考等级候选，兼容历史单值字段。"""
+    if "reasoning_efforts" in model_entry:
+        candidates = model_entry["reasoning_efforts"]
+    else:
+        legacy_reasoning_effort = model_entry.get("reasoning_effort")
+        candidates = [legacy_reasoning_effort] if isinstance(legacy_reasoning_effort, str) else []
+
+    if not isinstance(candidates, (list, tuple)):
+        return []
+
+    normalized_candidates = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            normalized_candidates.append(candidate)
+            seen.add(candidate)
+    return normalized_candidates
+
+
 def validate_channel_model_ids(model_ids: list[dict] | None) -> tuple[str | None, dict]:
     """校验模型条目列表：每项符合 ChannelModelItem，且同一 usage 下 model_id 不重复。"""
     if not model_ids:
@@ -277,7 +356,7 @@ def validate_channel_model_ids(model_ids: list[dict] | None) -> tuple[str | None
 
 
 def normalize_channel_model_ids(model_ids: list[dict] | None) -> list[dict]:
-    """仅规范化模型条目的高级设置，避免为历史条目补入其它默认字段。"""
+    """规范化模型条目的高级设置与思考候选，不为历史条目补入其它默认字段。"""
     if not model_ids:
         return []
 
@@ -299,6 +378,21 @@ def normalize_channel_model_ids(model_ids: list[dict] | None) -> list[dict]:
                 _format_channel_model_validation_error(exc),
                 _get_channel_model_display_id(item, index),
             ) from exc
+
+        if "reasoning_efforts" in normalized_item or "reasoning_effort" in normalized_item:
+            if "reasoning_efforts" in normalized_item:
+                reasoning_efforts = normalized_item["reasoning_efforts"]
+            else:
+                legacy_reasoning_effort = normalized_item.get("reasoning_effort")
+                reasoning_efforts = [] if legacy_reasoning_effort is None else [legacy_reasoning_effort]
+            try:
+                normalized_item["reasoning_efforts"] = _normalize_reasoning_effort_candidates(reasoning_efforts)
+            except Exception as exc:
+                raise ChannelModelIdsNormalizationError(
+                    index,
+                    _format_channel_model_validation_error(exc),
+                    _get_channel_model_display_id(item, index),
+                ) from exc
 
         normalized_model_ids.append(normalized_item)
 
@@ -475,9 +569,18 @@ class ChannelRule(BaseModel):
 
     channel_id: int = PydanticField(..., gt=0, description="渠道 ID")
     model_id: str = PydanticField(..., min_length=1, description="模型标识符")
+    reasoning_effort: ReasoningEffort | None = PydanticField(None, description="用户明确指定的思考等级默认值")
     priority: int = PydanticField(..., ge=1, description="优先级分组，越小越优先；同组内失败会降级到下一组")
     weight: int = PydanticField(..., ge=0, description="同优先级组内的轮询配额：一个轮询周期内该渠道被使用的次数")
     is_enabled: bool = PydanticField(True, description="是否启用该路由规则")
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def normalize_reasoning_effort(cls, value: object) -> object:
+        if value is None or not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
 
 
 class ChannelConfig(BaseModel):

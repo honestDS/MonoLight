@@ -1,3 +1,5 @@
+import { getModelReasoningEfforts } from '../utils/channelModelMetadata.js'
+
 // 公共常量
 // 分页相关
 export const PAGE_SIZE = 20
@@ -84,6 +86,7 @@ export const defaultProfileConfigs = () => ({
 export const defaultChannelRule = () => ({
   channel_id: null,
   model_id: '',
+  reasoning_effort: null,
   priority: 1,
   weight: 1,
 })
@@ -99,7 +102,7 @@ export const defaultModelEntry = () => ({
   context_window_k: 64,
   temperature: 0.7,
   top_p: 1,
-  reasoning_effort: null,
+  reasoning_efforts: [],
   max_tokens: 20480,
   embedding_dimensions: null,
   embedding_timeout: 30,
@@ -121,6 +124,7 @@ export const normalizeModelEntry = (entry) => {
   return {
     ...defaults,
     ...entry,
+    reasoning_efforts: getModelReasoningEfforts(entry),
     advanced_settings: entry.advanced_settings && typeof entry.advanced_settings === 'object' && !Array.isArray(entry.advanced_settings)
       ? { ...entry.advanced_settings }
       : {}

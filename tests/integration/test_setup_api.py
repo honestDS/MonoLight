@@ -1190,11 +1190,15 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
             "temperature",
             "top_p",
             "reasoning_effort",
+            "reasoning_efforts",
             "max_tokens",
             "description",
             "advanced_settings",
         }
     )
+    reasoning_efforts_schema = channel_schema["properties"]["reasoning_efforts"]
+    assert reasoning_efforts_schema["type"] == "array"
+    assert reasoning_efforts_schema["items"] == {"type": "string", "minLength": 1, "maxLength": 64}
     protocol_schema = _resolve_schema(openapi, channel_schema["properties"]["protocol"])
     assert set(protocol_schema["enum"]) == {protocol.value for protocol in MODEL_PROTOCOLS_BY_USAGE[ModelUsage.CHAT]}
     assert set(profile_schema["properties"]) == set(SetupProfileInput.model_fields) == {"name"}

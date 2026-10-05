@@ -21,9 +21,11 @@ from app.models.channel import (
     ChannelModelIdsNormalizationError,
     ChannelModelItem,
     ChannelResponse,
+    ChannelRule,
     ChannelUpdate,
     ModelProtocol,
     ModelUsage,
+    get_model_reasoning_efforts,
     normalize_channel_model_ids,
     resolve_model_protocol,
     validate_channel_model_ids,
@@ -219,6 +221,162 @@ def test_chat_model_accepts_custom_reasoning_effort() -> None:
     )
 
     assert model_entry.reasoning_effort == "custom-tier"
+
+
+def test_chat_model_normalizes_reasoning_effort_candidates() -> None:
+    model_entry = ChannelModelItem.model_validate(
+        {
+            "model_id": "model",
+            "usage": ModelUsage.CHAT,
+            "protocol": ModelProtocol.OPENAI,
+            "context_window_k": 64,
+            "reasoning_efforts": [
+                " high ",
+                "",
+                " custom-tier ",
+                "high",
+                "  ",
+                "xhigh",
+                "custom-tier",
+            ],
+        }
+    )
+
+    assert model_entry.reasoning_efforts == ["high", "custom-tier", "xhigh"]
+
+
+@pytest.mark.parametrize("candidate", [123, 1.5, True, None, "x" * 65])
+def test_chat_model_rejects_invalid_reasoning_effort_candidates(candidate: object) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ChannelModelItem.model_validate(
+            {
+                "model_id": "model",
+                "usage": ModelUsage.CHAT,
+                "protocol": ModelProtocol.OPENAI,
+                "context_window_k": 64,
+                "reasoning_efforts": [candidate],
+            }
+        )
+
+    assert exc_info.value.errors()[0]["loc"] == ("reasoning_efforts", 0)
+
+
+def test_chat_model_reasoning_efforts_default_is_independent() -> None:
+    payload = {
+        "model_id": "model",
+        "usage": ModelUsage.CHAT,
+        "protocol": ModelProtocol.OPENAI,
+        "context_window_k": 64,
+    }
+    first = ChannelModelItem.model_validate(payload)
+    second = ChannelModelItem.model_validate(payload)
+
+    first.reasoning_efforts.append("custom-tier")
+
+    assert first.reasoning_efforts == ["custom-tier"]
+    assert second.reasoning_efforts == []
+
+
+def test_normalize_channel_model_ids_migrates_legacy_reasoning_effort_without_model_defaults() -> None:
+    model_ids = [{"model_id": "model", "reasoning_effort": "  custom-tier  "}]
+
+    normalized = normalize_channel_model_ids(model_ids)
+
+    assert normalized == [
+        {
+            "model_id": "model",
+            "reasoning_effort": "  custom-tier  ",
+            "advanced_settings": {},
+            "reasoning_efforts": ["custom-tier"],
+        }
+    ]
+    assert set(normalized[0]) == {"model_id", "reasoning_effort", "advanced_settings", "reasoning_efforts"}
+
+
+def test_normalize_channel_model_ids_explicit_empty_reasoning_efforts_do_not_revive_legacy_value() -> None:
+    normalized = normalize_channel_model_ids([{"model_id": "model", "reasoning_effort": "legacy", "reasoning_efforts": []}])
+
+    assert normalized[0]["reasoning_efforts"] == []
+
+
+def test_normalize_channel_model_ids_does_not_modify_input() -> None:
+    model_ids = [
+        {
+            "model_id": "model",
+            "reasoning_efforts": [" high ", "high"],
+            "advanced_settings": {"custom_headers": {"X-Test": " value "}},
+        }
+    ]
+
+    normalized = normalize_channel_model_ids(model_ids)
+
+    assert model_ids == [
+        {
+            "model_id": "model",
+            "reasoning_efforts": [" high ", "high"],
+            "advanced_settings": {"custom_headers": {"X-Test": " value "}},
+        }
+    ]
+    assert normalized[0]["reasoning_efforts"] == ["high"]
+    assert normalized[0]["advanced_settings"] == {"custom_headers": {"x-test": "value"}}
+
+
+@pytest.mark.parametrize(
+    ("model_entry", "expected_efforts"),
+    [
+        ({"reasoning_effort": "  custom-tier  "}, ["custom-tier"]),
+        ({"reasoning_effort": "legacy", "reasoning_efforts": []}, []),
+        (
+            {"reasoning_efforts": [" high ", "high", "", " custom-tier ", "custom-tier"]},
+            ["high", "custom-tier"],
+        ),
+    ],
+)
+def test_get_model_reasoning_efforts_handles_legacy_empty_and_duplicates(
+    model_entry: dict,
+    expected_efforts: list[str],
+) -> None:
+    assert get_model_reasoning_efforts(model_entry) == expected_efforts
+
+
+def test_channel_rule_reasoning_effort_defaults_to_none() -> None:
+    rule = ChannelRule.model_validate({"channel_id": 1, "model_id": "model", "priority": 1, "weight": 1})
+
+    assert rule.reasoning_effort is None
+
+
+@pytest.mark.parametrize(
+    ("reasoning_effort", "expected_effort"),
+    [("  custom-tier  ", "custom-tier"), (" \t\n ", None)],
+)
+def test_channel_rule_normalizes_reasoning_effort(reasoning_effort: str, expected_effort: str | None) -> None:
+    rule = ChannelRule.model_validate(
+        {
+            "channel_id": 1,
+            "model_id": "model",
+            "reasoning_effort": reasoning_effort,
+            "priority": 1,
+            "weight": 1,
+        }
+    )
+
+    assert rule.reasoning_effort == expected_effort
+
+
+@pytest.mark.parametrize("reasoning_effort", [123, True, ["custom-tier"], "x" * 65])
+def test_channel_rule_rejects_invalid_reasoning_effort(reasoning_effort: object) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ChannelRule.model_validate(
+            {
+                "channel_id": 1,
+                "model_id": "model",
+                "reasoning_effort": reasoning_effort,
+                "priority": 1,
+                "weight": 1,
+            }
+        )
+
+    assert exc_info.value.errors()[0]["loc"] == ("reasoning_effort",)
 
 
 @pytest.mark.parametrize(

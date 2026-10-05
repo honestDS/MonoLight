@@ -113,6 +113,31 @@
                 <el-input-number v-model="element.weight" :min="0" controls-position="right" />
               </el-form-item>
             </div>
+            <div v-if="usage === 'CHAT'" class="channel-rule-field">
+              <el-form-item label-width="auto">
+                <template #label>
+                  {{ $t('profiles.reasoning_effort') }}
+                  <HelpTooltip :content="$t('profiles.reasoning_effort_hint')" />
+                </template>
+                <el-select
+                  :model-value="element.reasoning_effort ?? ''"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  class="full-width-input"
+                  :placeholder="$t('profiles.reasoning_effort_placeholder')"
+                  @update:model-value="value => updateReasoningEffort(element, value)"
+                >
+                  <el-option
+                    v-for="effort in getRuleReasoningEfforts(element)"
+                    :key="effort"
+                    :label="effort"
+                    :value="effort"
+                  />
+                </el-select>
+              </el-form-item>
+            </div>
           </div>
         </div>
       </template>
@@ -131,6 +156,7 @@ import { Rank } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
 import HelpTooltip from './HelpTooltip.vue'
 import { defaultChannelRule } from '../constants'
+import { getModelReasoningEfforts, normalizeReasoningEfforts } from '../utils/channelModelMetadata.js'
 
 const props = defineProps({
   channel: { type: Object, required: true },
@@ -227,6 +253,18 @@ const findRuleChannel = (rule) => {
 const findRuleModel = (rule) => {
   const channel = findRuleChannel(rule)
   return channel?.model_ids?.find(item => item.model_id === rule.model_id && item.usage === props.usage)
+}
+
+const getRuleReasoningEfforts = (rule) => {
+  return normalizeReasoningEfforts([
+    ...getModelReasoningEfforts(findRuleModel(rule)),
+    rule.reasoning_effort
+  ])
+}
+
+const updateReasoningEffort = (rule, value) => {
+  const effort = typeof value === 'string' ? value.trim() : ''
+  rule.reasoning_effort = effort || null
 }
 
 const getRuleLabel = (rule) => {

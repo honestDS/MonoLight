@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.chat_web import _response_has_background_tasks, web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.core.audit.confirmation_lifecycle import stop_interactive_reply
-from app.core.channel_router import select_channel
+from app.core.channel_router import get_model_entry, select_channel
 from app.core.constants import (
     DEFAULT_SESSION_GOAL_MODE,
     DEFAULT_SESSION_MAX_TURNS,
@@ -46,6 +46,8 @@ from app.core.constants import (
     MSG_TITLE_GENERATED,
     SESSION_MAX_TURNS_UPPER_BOUND,
 )
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
@@ -75,17 +77,18 @@ from app.core.session_reply_queue.manager import (
     is_submission_queued,
     session_reply_queue_manager,
 )
-from app.core.session_source import default_show_tool_calls_for_source
+from app.core.session_source import default_show_tool_calls_for_source, is_web_session_source
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.session import ensure_web_session_writable, generate_session_title
 from app.models.background_task import BackgroundTaskResponse
-from app.models.channel import ChannelConfig, resolve_model_protocol
+from app.models.channel import ChannelConfig, ReasoningEffort, get_model_reasoning_efforts, is_channel_model_available, resolve_model_protocol
 from app.models.message import (
     ChatCompletionRequest,
     MessageResponse,
     MessageRole,
 )
+from app.models.profile import ProfileConfig
 from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal, get_db
 from app.schemas.response import (
@@ -121,8 +124,9 @@ async def _create_new_web_session_with_profile_override(
     goal_mode: bool = DEFAULT_SESSION_GOAL_MODE,
     max_turns: int = DEFAULT_SESSION_MAX_TURNS,
     force_create: bool = False,
+    reasoning_effort: str | None = None,
 ) -> None:
-    if not force_create and profile_override_id is None and show_tool_calls is None and show_reasoning is None:
+    if not force_create and profile_override_id is None and show_tool_calls is None and show_reasoning is None and reasoning_effort is None:
         return
 
     existing_session = await session_crud.get_by_session_id(db, session_id)
@@ -147,6 +151,7 @@ async def _create_new_web_session_with_profile_override(
             reply_target_source=source,
             show_tool_calls=show_tool_calls if show_tool_calls is not None else default_show_tool_calls_for_source(source),
             show_reasoning=show_reasoning if show_reasoning is not None else True,
+            reasoning_effort=reasoning_effort,
             goal_mode=goal_mode,
             max_turns=max_turns,
         )
@@ -165,6 +170,7 @@ class NewSessionProfileSetting(BaseModel):
     profile_override_id: int | None = Field(default=None, gt=0)
     show_tool_calls: bool | None = None
     show_reasoning: bool | None = None
+    reasoning_effort: ReasoningEffort | None = None
     goal_mode: StrictBool = DEFAULT_SESSION_GOAL_MODE
     max_turns: StrictInt = Field(default=DEFAULT_SESSION_MAX_TURNS, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
 
@@ -314,6 +320,7 @@ async def chat_completions(
             profile_override_id=request.profile_override_id,
             show_tool_calls=request.show_tool_calls,
             show_reasoning=request.show_reasoning,
+            reasoning_effort=request.reasoning_effort,
             goal_mode=request.goal_mode,
             max_turns=request.max_turns,
             force_create=True,
@@ -404,6 +411,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "enable_markdown": row.enable_markdown,
                 "show_tool_calls": row.show_tool_calls,
                 "show_reasoning": row.show_reasoning,
+                "reasoning_effort": row.reasoning_effort,
                 "goal_mode": row.goal_mode,
                 "max_turns": row.max_turns,
                 "profile_id": row.profile_id,
@@ -415,6 +423,82 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
             }
         )
     return StandardResponse.success(data=data, message=MSG_SESSION_LIST_SUCCESS)
+
+
+@router.get("/sessions/reasoning-options")
+async def get_session_reasoning_options(
+    session_id: str | None = None,
+    profile_override_id: Annotated[int | None, Query(gt=0)] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
+    session = None
+
+    if session_id is not None:
+        session = await session_crud.get_by_session_id(db, session_id)
+        if not session:
+            return StandardResponse.error(code=404, message=ERR_SESSION_NOT_FOUND)
+        if not is_admin and session.uid != uid:
+            return StandardResponse.error(code=403, message=ERR_SESSION_NO_PERMISSION)
+        uid = session.uid
+
+    if profile_override_id is not None:
+        profile = await get_validated_profile_for_assignment(
+            db,
+            profile_id=profile_override_id,
+            uid=uid,
+        )
+    elif session is not None and not is_web_session_source(session.source):
+        profile = None
+        for profile_id in (session.profile_override_id, session.profile_id):
+            if profile_id is None:
+                continue
+            profile = await profile_crud.get_with_relations(db, profile_id)
+            if profile is not None and profile.uid != uid:
+                profile = None
+            if profile is not None:
+                break
+        if profile is None:
+            profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id)
+    else:
+        profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id or "")
+
+    if profile is None:
+        return StandardResponse.success(data={"profile_id": None, "options": [], "defaults": []})
+
+    profile_config = ProfileConfig.model_validate(profile.configs)
+    options: list[str] = []
+    option_seen: set[str] = set()
+    defaults: list[str | None] = []
+    default_seen: set[str | None] = set()
+
+    for rule in profile_config.channel.chat_channel.rules:
+        if not rule.is_enabled or rule.weight <= 0:
+            continue
+
+        channel = await channel_crud.get(db, rule.channel_id)
+        if channel is None or not channel.is_active:
+            continue
+
+        raw_entry = get_model_entry(channel, rule.model_id, "CHAT")
+        if raw_entry is None or not is_channel_model_available(raw_entry):
+            continue
+
+        for reasoning_effort in get_model_reasoning_efforts(raw_entry):
+            if reasoning_effort not in option_seen:
+                option_seen.add(reasoning_effort)
+                options.append(reasoning_effort)
+        if rule.reasoning_effort and rule.reasoning_effort not in option_seen:
+            option_seen.add(rule.reasoning_effort)
+            options.append(rule.reasoning_effort)
+
+        if rule.reasoning_effort not in default_seen:
+            default_seen.add(rule.reasoning_effort)
+            defaults.append(rule.reasoning_effort)
+
+    return StandardResponse.success(data={"profile_id": profile.id, "options": options, "defaults": defaults})
 
 
 @router.get("/sessions/todo")
@@ -493,6 +577,7 @@ class SessionSettingRequest(BaseModel):
     enable_markdown: bool | None = None
     show_tool_calls: bool | None = None
     show_reasoning: bool | None = None
+    reasoning_effort: ReasoningEffort | None = None
     goal_mode: StrictBool = Field(default=None)
     max_turns: StrictInt = Field(default=None, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
     profile_override_id: int | None = Field(default=None, gt=0)
@@ -578,6 +663,8 @@ async def update_session_setting(
         session.show_tool_calls = request.show_tool_calls
     if request.show_reasoning is not None:
         session.show_reasoning = request.show_reasoning
+    if "reasoning_effort" in request.model_fields_set:
+        session.reasoning_effort = request.reasoning_effort
     if request.goal_mode is not None:
         session.goal_mode = request.goal_mode
     if request.max_turns is not None:
@@ -864,6 +951,7 @@ async def chat_websocket(
                                 "profile_override_id": profile_override_id,
                                 "show_tool_calls": data.get("show_tool_calls"),
                                 "show_reasoning": data.get("show_reasoning"),
+                                "reasoning_effort": data.get("reasoning_effort"),
                                 "goal_mode": data.get("goal_mode", DEFAULT_SESSION_GOAL_MODE),
                                 "max_turns": data.get("max_turns", DEFAULT_SESSION_MAX_TURNS),
                             }
@@ -890,6 +978,7 @@ async def chat_websocket(
                                 profile_override_id=profile_setting.profile_override_id,
                                 show_tool_calls=profile_setting.show_tool_calls,
                                 show_reasoning=profile_setting.show_reasoning,
+                                reasoning_effort=profile_setting.reasoning_effort,
                                 goal_mode=profile_setting.goal_mode,
                                 max_turns=profile_setting.max_turns,
                                 force_create=True,

@@ -51,6 +51,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
             commit=False,
         )
 
+        reasoning_efforts = request.channel.reasoning_efforts if "reasoning_efforts" in request.channel.model_fields_set else ([request.channel.reasoning_effort] if request.channel.reasoning_effort is not None else [])
         model_item = ChannelModelItem(
             model_id=request.channel.model_id,
             usage=ModelUsage.CHAT,
@@ -62,6 +63,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
             temperature=request.channel.temperature,
             top_p=request.channel.top_p,
             reasoning_effort=request.channel.reasoning_effort,
+            reasoning_efforts=reasoning_efforts,
             max_tokens=request.channel.max_tokens,
             description=request.channel.description,
             advanced_settings=request.channel.advanced_settings,

@@ -174,6 +174,52 @@ test('wsSend forwards session settings for new sessions and keeps repeated paylo
   assert.equal(Object.hasOwn(defaultPayload, 'max_turns'), false)
 })
 
+test('wsSend forwards reasoning effort only for new sessions', async () => {
+  const { manager, sent } = createTransportManager()
+  const transport = loadUseChatTransport({ manager })()
+
+  for (const reasoningEffort of ['custom-tier', 'none']) {
+    assert.equal(await transport.wsSend({
+      message: 'new session reasoning effort',
+      reasoningEffort
+    }), true)
+
+    const data = sent.at(-1)
+    assert.equal(data.reasoning_effort, reasoningEffort)
+    assert.equal(Object.hasOwn(data, 'reasoning_effort'), true)
+  }
+
+  for (const reasoningEffort of [null, undefined]) {
+    assert.equal(await transport.wsSend({
+      message: 'new session without reasoning effort',
+      reasoningEffort
+    }), true)
+
+    assert.equal(Object.hasOwn(sent.at(-1), 'reasoning_effort'), false)
+  }
+
+  const repeatedPayload = {
+    message: 'repeated reasoning effort',
+    reasoningEffort: 'custom-tier'
+  }
+  await transport.wsSend(repeatedPayload)
+  const firstRepeatedPayload = sent.at(-1)
+  await transport.wsSend(repeatedPayload)
+  assert.deepEqual(sent.at(-1), firstRepeatedPayload)
+
+  for (const reasoningEffort of ['high', null]) {
+    assert.equal(await transport.wsSend({
+      message: 'existing session reasoning effort',
+      sessionId: 'existing-reasoning-session',
+      reasoningEffort
+    }), true)
+
+    const data = sent.at(-1)
+    assert.equal(data.session_id, 'existing-reasoning-session')
+    assert.equal(Object.hasOwn(data, 'reasoning_effort'), false)
+  }
+})
+
 test('wsSend does not override settings for an existing session', async () => {
   const { manager, sent } = createTransportManager()
   const transport = loadUseChatTransport({ manager })()
