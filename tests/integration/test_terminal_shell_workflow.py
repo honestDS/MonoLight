@@ -40,6 +40,7 @@ from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.providers.database import AsyncSessionLocal, engine
 from scripts.migration_20260819_move_session_agent_settings import migrate as migrate_session_agent_settings
 from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
+from scripts.migration_20261005_add_chat_session_reasoning_effort import migrate as migrate_chat_session_reasoning_effort
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32" and not sys.platform.startswith("linux"),
@@ -67,6 +68,7 @@ async def isolated_terminal_database():
     async with AsyncSessionLocal() as db:
         await migrate_session_agent_settings(db)
         await migrate_chat_session_show_reasoning(db)
+        await migrate_chat_session_reasoning_effort(db)
         await db.execute(delete(ChatSession).where(ChatSession.session_id == TEST_SESSION_ID))
         db.add(ChatSession(session_id=TEST_SESSION_ID, uid=TEST_UID))
         await db.commit()

@@ -5,7 +5,7 @@ import sys
 
 import psutil
 import pytest
-from sqlalchemy import delete, update
+from sqlalchemy import delete, inspect, update
 
 import app.core.terminal.worker_coordinator as worker_coordinator_module
 from app.core.constants import ERR_TERMINAL_SESSION_LEASE_LOST
@@ -26,6 +26,7 @@ from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.time import get_database_timestamp
 from scripts.migration_20260819_move_session_agent_settings import migrate as migrate_session_agent_settings
 from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
+from scripts.migration_20261005_add_chat_session_reasoning_effort import migrate as migrate_chat_session_reasoning_effort
 
 
 def _process_has_exited(pid: int, create_time: float) -> bool:
@@ -101,6 +102,7 @@ async def isolated_terminal_database():
     async with AsyncSessionLocal() as db:
         await migrate_session_agent_settings(db)
         await migrate_chat_session_show_reasoning(db)
+        await migrate_chat_session_reasoning_effort(db)
         await db.execute(delete(ChatSession).where(ChatSession.session_id == "recovery-session"))
         db.add(ChatSession(session_id="recovery-session", uid="recovery-user"))
         await db.commit()
@@ -113,6 +115,18 @@ async def isolated_terminal_database():
             await db.execute(delete(TerminalSession))
             await db.execute(delete(ChatSession).where(ChatSession.session_id == "recovery-session"))
             await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_terminal_test_database_schema_includes_reasoning_effort():
+    async with engine.begin() as connection:
+        columns = await connection.run_sync(
+            lambda sync_connection: {
+                column["name"] for column in inspect(sync_connection).get_columns("chat_session")
+            }
+        )
+
+    assert "reasoning_effort" in columns
 
 
 @pytest.mark.asyncio

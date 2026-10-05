@@ -14,6 +14,7 @@ from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.client import CancellationSafeAsyncSession
 from scripts.migration_20260819_move_session_agent_settings import migrate as migrate_session_agent_settings
 from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
+from scripts.migration_20261005_add_chat_session_reasoning_effort import migrate as migrate_chat_session_reasoning_effort
 
 TEST_SESSION_ID = "message-dedupe-session"
 TEST_UID = "message-dedupe-user"
@@ -29,6 +30,7 @@ async def clean_message_table():
     async with AsyncSessionLocal() as db:
         await migrate_session_agent_settings(db)
         await migrate_chat_session_show_reasoning(db)
+        await migrate_chat_session_reasoning_effort(db)
         await db.commit()
 
     async with engine.begin() as connection:
