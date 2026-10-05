@@ -374,73 +374,12 @@
                   :resize="'none'"
                 />
 
-                <el-dropdown
-                  ref="reasoningDropdownRef"
-                  class="session-reasoning-dropdown"
-                  trigger="click"
-                  placement="top-end"
-                  :show-arrow="false"
-                  max-height="min(40vh, 320px)"
-                  :popper-options="{ modifiers: [{ name: 'flip', options: { fallbackPlacements: ['top-start'] } }] }"
-                  popper-class="session-reasoning-popper"
-                  :popper-style="{ zIndex: 11, visibility: reasoningDropdownDisabled ? 'hidden' : undefined, pointerEvents: reasoningDropdownDisabled ? 'none' : undefined }"
-                  :append-to="chatMainRef"
-                  :disabled="reasoningDropdownDisabled"
-                  @command="updateSessionReasoningEffort"
-                  @visible-change="handleReasoningVisibleChange"
-                >
-                  <button
-                    type="button"
-                    class="session-reasoning-trigger"
-                    aria-haspopup="menu"
-                    :aria-expanded="reasoningDropdownVisible"
-                    :aria-label="reasoningTriggerLabel"
-                    :title="reasoningTriggerLabel"
-                    :disabled="reasoningDropdownDisabled"
-                  >
-                    <span class="session-reasoning-value">{{ reasoningDisplayValue }}</span>
-                    <el-icon v-if="loading || reasoningEffortSubmitting || profileSettingSubmitting" class="is-loading" aria-hidden="true"><Loading /></el-icon>
-                    <el-icon v-else aria-hidden="true"><ArrowDown /></el-icon>
-                  </button>
-
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item
-                        :command="null"
-                        :class="{ 'is-selected': currentSessionReasoningEffort === null }"
-                        :title="reasoningProfileDefaultHint || undefined"
-                      >
-                        <span>{{ $t('chat.reasoning_effort_follow_profile') }}</span>
-                        <el-icon v-if="currentSessionReasoningEffort === null" class="session-reasoning-check" aria-hidden="true"><Check /></el-icon>
-                      </el-dropdown-item>
-                      <el-dropdown-item
-                        v-for="effort in reasoningOptions"
-                        :key="effort"
-                        :command="effort"
-                        :class="{ 'is-selected': currentSessionReasoningEffort === effort }"
-                      >
-                        <span>{{ effort }}</span>
-                        <el-icon v-if="currentSessionReasoningEffort === effort" class="session-reasoning-check" aria-hidden="true"><Check /></el-icon>
-                      </el-dropdown-item>
-                      <el-dropdown-item v-if="reasoningOptionsLoading" disabled>
-                        {{ $t('chat.reasoning_effort_loading') }}
-                      </el-dropdown-item>
-                      <el-dropdown-item v-else-if="reasoningOptionsFailed" disabled>
-                        {{ $t('chat.reasoning_effort_load_failed') }}
-                      </el-dropdown-item>
-                      <el-dropdown-item v-else-if="reasoningOptions.length === 0" disabled>
-                        {{ $t('chat.reasoning_effort_no_options') }}
-                      </el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
-
                 <div class="action-btn-container">
                   <el-button
                     :type="isReplyRunning ? 'danger' : 'primary'"
                     @click="isReplyRunning ? stopReply() : send()"
                     :loading="isReplyRunning ? isStopping : (isCurrentSessionReadOnly && guidanceSubmitting)"
-                    :disabled="isReplyRunning ? (isStopping || !currentSessionId) : (isCurrentSessionReadOnly ? guidanceSubmitting || agentSettingSubmitting || reasoningEffortSubmitting || !inputMsg.trim() : modeSettingSubmitting || agentSettingSubmitting || reasoningEffortSubmitting || (!inputMsg.trim() && attachments.length === 0))"
+                    :disabled="isReplyRunning ? (isStopping || !currentSessionId) : (isCurrentSessionReadOnly ? guidanceSubmitting || agentSettingSubmitting || !inputMsg.trim() : modeSettingSubmitting || agentSettingSubmitting || (!inputMsg.trim() && attachments.length === 0))"
                     :class="{ 'is-stop-reply': isReplyRunning }"
                     :title="actionButtonLabel"
                     :aria-label="actionButtonLabel"
@@ -461,7 +400,6 @@
       <SessionTodoPanel
         :plan="currentTodoPlan"
         :suppressed="moreOptionsVisible || moreOptionsOverlayActive"
-        @expanded-change="todoExpanded = $event"
       />
     </div>
   </div>
@@ -470,13 +408,12 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { ElMessage, ClickOutside as vClickOutside } from 'element-plus'
-import { ChatLineSquare, Delete, Plus, Refresh, UploadFilled, ArrowDown, Check, Loading } from '@element-plus/icons-vue'
+import { ChatLineSquare, Delete, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import SessionTodoPanel from '../components/SessionTodoPanel.vue'
 import HelpTooltip from '../components/HelpTooltip.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
-import { useSessionReasoning } from '../composables/chat/useSessionReasoning'
 import { fileApi, chatApi, profileApi } from '../api'
 import { SESSION_MAX_TURNS_UPPER_BOUND } from '../constants/index.js'
 import {
@@ -509,10 +446,7 @@ const toolOutputSettingSubmitting = ref(false)
 const chatMainRef = ref(null)
 const moreOptionsVisible = ref(false)
 const moreOptionsOverlayActive = ref(false)
-const todoExpanded = ref(false)
 const chatInputBoxRef = ref(null)
-const reasoningDropdownRef = ref(null)
-const reasoningDropdownVisible = ref(false)
 const moreOptionsWidth = ref(0)
 let chatInputResizeObserver
 const syncMoreOptionsWidth = () => {
@@ -702,7 +636,6 @@ const {
   historyLoading,
   initialHistoryLoaded,
   newSessionProfileOverrideId,
-  currentSessionReasoningEffort,
   currentSessionShowToolCalls,
   currentSessionShowReasoning,
   currentSessionGoalMode,
@@ -727,74 +660,15 @@ const currentSessionProfilePlaceholder = computed(() => resolveSessionProfilePla
   t('chat.inherited_profile')
 ))
 
-const profileOverrideId = computed(() => {
-  if (currentSessionId.value) return currentSession.value?.profile_override_id ?? null
-  return newSessionProfileOverrideId.value
-})
-
-const {
-  reasoningOptions,
-  reasoningDefaults,
-  reasoningOptionsLoading,
-  reasoningOptionsFailed,
-  reasoningEffortSubmitting,
-  loadReasoningOptions,
-  updateSessionReasoningEffort
-} = useSessionReasoning({
-  currentSessionId,
-  profileOverrideId,
-  currentSessionReasoningEffort,
-  sessions,
-  loading,
-  api: chatApi,
-  onError: (error, key) => ElMessage.error(error?.message || t(key))
-})
-
-const reasoningDisplayValue = computed(() => (
-  currentSessionReasoningEffort.value ?? t('chat.reasoning_effort_follow_profile')
-))
-const reasoningTriggerLabel = computed(() => (
-  t('chat.reasoning_effort_selection', { effort: reasoningDisplayValue.value })
-))
-const reasoningProfileDefaultHint = computed(() => {
-  if (reasoningDefaults.value.length === 0) return ''
-  const defaults = reasoningDefaults.value.map(effort => (
-    effort === null ? t('chat.reasoning_effort_unspecified') : effort
-  ))
-  return t('chat.reasoning_effort_profile_default', { effort: defaults.join(' / ') })
-})
-const reasoningDropdownDisabled = computed(() => (
-  loading.value || reasoningEffortSubmitting.value || profileSettingSubmitting.value || moreOptionsVisible.value || moreOptionsOverlayActive.value || todoExpanded.value
-))
-const closeReasoningDropdown = () => {
-  reasoningDropdownVisible.value = false
-  reasoningDropdownRef.value?.handleClose()
-}
 const handleMoreOptionsAfterLeave = () => {
   if (!moreOptionsVisible.value) moreOptionsOverlayActive.value = false
 }
 watch(moreOptionsVisible, visible => {
   if (visible) moreOptionsOverlayActive.value = true
 }, { flush: 'sync' })
-watch(reasoningDropdownDisabled, disabled => {
-  if (disabled) closeReasoningDropdown()
+watch(currentSessionId, (sessionId, previousSessionId) => {
+  if (sessionId !== previousSessionId) moreOptionsVisible.value = false
 }, { flush: 'sync' })
-watch(
-  [currentSessionId, profileOverrideId],
-  ([sessionId], [previousSessionId]) => {
-    closeReasoningDropdown()
-    if (sessionId !== previousSessionId) moreOptionsVisible.value = false
-  },
-  { flush: 'sync' }
-)
-const handleReasoningVisibleChange = visible => {
-  if (visible && reasoningDropdownDisabled.value) {
-    closeReasoningDropdown()
-    return
-  }
-  reasoningDropdownVisible.value = visible
-  if (visible && !reasoningOptionsLoading.value) void loadReasoningOptions()
-}
 
 const updateSessionAgentSetting = async (field, value) => {
   if (agentSettingSubmitting.value || loading.value) return
@@ -934,7 +808,6 @@ const {
 const handleSelectSession = (session) => {
   closeSessionsPanel()
   moreOptionsVisible.value = false
-  closeReasoningDropdown()
   const sessionId = session?.session_id
   const shouldDefer = shouldDeferChatContent({
     wasWelcome: !sessionEngaged.value,
@@ -949,7 +822,6 @@ const handleSelectSession = (session) => {
 const handleCreateNewSession = () => {
   closeSessionsPanel()
   moreOptionsVisible.value = false
-  closeReasoningDropdown()
   deferredContentSessionId.value = null
   createNewSession()
 }
@@ -980,7 +852,7 @@ const actionButtonLabel = computed(() => t(
 const send = async () => {
   if (isStopping.value) return
 
-  if (modeSettingSubmitting.value || agentSettingSubmitting.value || reasoningEffortSubmitting.value) return
+  if (modeSettingSubmitting.value || agentSettingSubmitting.value) return
 
   if (isCurrentSessionReadOnly.value) {
     const content = inputMsg.value.trim()
@@ -1044,7 +916,7 @@ const send = async () => {
 }
 
 const handleAuditDecision = async ({ decision }) => {
-  if (isCurrentSessionReadOnly.value || loading.value || agentSettingSubmitting.value || reasoningEffortSubmitting.value) return
+  if (isCurrentSessionReadOnly.value || loading.value || agentSettingSubmitting.value) return
   inputMsg.value = decision === 'approve'
     ? t('chat.audit_approve_word')
     : decision === 'ignore'

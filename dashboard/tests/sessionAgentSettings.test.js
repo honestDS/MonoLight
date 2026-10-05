@@ -210,7 +210,6 @@ const createHarness = (implementation, messages, options = {}) => {
     currentSessionProfileDisplayId: null,
     currentSessionProfileOptions: [],
     currentSessionProfilePlaceholder: '',
-    currentSessionReasoningEffort: null,
     currentSessionShowReasoning,
     currentSessionShowToolCalls,
     currentSessionProfileOverrideId: null,
@@ -231,7 +230,6 @@ const createHarness = (implementation, messages, options = {}) => {
     handleSessionGroupEnter: () => {},
     handleSessionGroupLeave: () => {},
     handleMoreOptionsAfterLeave: () => {},
-    handleReasoningVisibleChange: () => {},
     historyLoading: false,
     inputMsg,
     isContextSummarizing: false,
@@ -254,16 +252,6 @@ const createHarness = (implementation, messages, options = {}) => {
     openUploadPicker: () => {},
     profilesLoading: false,
     profileSettingSubmitting: false,
-    reasoningDisplayValue: messages.reasoning_effort_follow_profile,
-    reasoningDropdownDisabled: false,
-    reasoningDropdownRef: null,
-    reasoningDropdownVisible: false,
-    reasoningEffortSubmitting: false,
-    reasoningOptions: [],
-    reasoningOptionsFailed: false,
-    reasoningOptionsLoading: false,
-    reasoningProfileDefaultHint: '',
-    reasoningTriggerLabel: messages.reasoning_effort,
     reasoningSettingSubmitting: false,
     renderedInitialHistoryLoaded: false,
     renderedMessages: [],
@@ -273,7 +261,6 @@ const createHarness = (implementation, messages, options = {}) => {
     sessionsPanelOpen: false,
     showReasoning: true,
     stopReply,
-    todoExpanded: false,
     toggleGroup: () => {},
     toggleMarkdown: () => {},
     toggleSessionsPanel: () => {},
@@ -286,7 +273,6 @@ const createHarness = (implementation, messages, options = {}) => {
     updateSessionGoalMode: extractedHandlers.updateSessionGoalMode,
     updateSessionMaxTurns: extractedHandlers.updateSessionMaxTurns,
     updateSessionProfileOverride: () => {},
-    updateSessionReasoningEffort: () => {},
     updateSessionShowReasoning: () => {},
     updateSessionShowToolCalls: () => {},
     actionButtonLabel
@@ -537,6 +523,27 @@ test('ChatView renders session agent settings and new-session defaults', async (
       assert.equal(controls.maxTurnsInput.props.disabled, true)
       flag.value = false
     }
+  }
+})
+
+test('ChatView keeps chat input and reasoning visibility without the reasoning effort menu', async () => {
+  const implementation = await loadImplementation()
+
+  for (const messages of [zhChat, enChat]) {
+    const harness = createHarness(implementation, messages)
+    const nodes = vnodesOf(implementation.render(harness.context, []))
+    const input = nodes.find((node) => node.type?.name === 'el-input')
+    const reasoningSwitch = nodes.find((node) => (
+      node.type?.name === 'el-switch' && node.props?.['aria-label'] === messages.show_reasoning
+    ))
+    const dropdown = nodes.find((node) => node.type?.name === 'el-dropdown')
+
+    assert.ok(input, 'chat input should be rendered')
+    assert.ok(actionButtonFor(implementation, harness.context), 'send button should be rendered')
+    assert.equal(dropdown, undefined)
+    assert.ok(reasoningSwitch, 'show reasoning switch should be rendered')
+    assert.equal(reasoningSwitch.props['model-value'], true)
+    assert.equal(reasoningSwitch.props.disabled, false)
   }
 })
 

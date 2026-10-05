@@ -493,7 +493,6 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 ChatSession.max_turns,
                 ChatSession.show_tool_calls,
                 ChatSession.show_reasoning,
-                ChatSession.reasoning_effort,
                 ChatSession.profile_id,
                 ChatSession.profile_override_id,
                 ChatSession.source,

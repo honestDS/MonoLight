@@ -42,6 +42,7 @@ from app.models.channel import ModelProtocol, ModelUsage
 from app.models.memory import LongTermMemoryMutationJob, LongTermMemoryMutationOperation, LongTermMemoryType
 from app.models.message import InternalMessage, InternalResponse, MessageRole
 from app.providers.llm.client import LLMClient
+from app.transformers.openai import BaseOpenAITransformer
 
 
 def _snapshot_items(count: int = 1, *, token_count_start: int = 11) -> tuple[MemoryOrganizationSnapshotItem, ...]:
@@ -269,11 +270,20 @@ def test_build_organization_execution_request_uses_complete_two_message_snapshot
 
 
 @pytest.mark.asyncio
-async def test_call_organization_model_uses_all_frozen_model_settings_and_dynamic_request_budget(
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses"])
+@pytest.mark.parametrize("reasoning_effort", [None, "high", "none"])
+async def test_call_organization_model_cleans_reasoning_effort_and_uses_dynamic_request_budget(
     monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    reasoning_effort: str | None,
 ) -> None:
     snapshot = _snapshot()
-    model = _model_config(snapshot.count, max_tokens=40_000, reasoning_effort="high")
+    model = _model_config(
+        snapshot.count,
+        max_tokens=40_000,
+        protocol=protocol,
+        reasoning_effort=reasoning_effort,
+    )
     request = build_organization_execution_request(build_organization_job_payload(snapshot, model))
     captured: dict[str, Any] = {}
     expected_response = _response()
@@ -287,14 +297,11 @@ async def test_call_organization_model_uses_all_frozen_model_settings_and_dynami
     response = await organization_handler.call_organization_model(request)
 
     assert response is expected_response
-    assert captured == {
+    expected = {
         "api_key": model.api_key,
         "base_url": model.base_url,
         "model_id": model.model_id,
         "messages": list(request.messages),
-        "temperature": model.temperature,
-        "top_p": model.top_p,
-        "reasoning_effort": model.reasoning_effort,
         "max_tokens": request.budget.max_output_tokens,
         "tools": None,
         "protocol": model.protocol,
@@ -303,6 +310,86 @@ async def test_call_organization_model_uses_all_frozen_model_settings_and_dynami
         "http_proxy": model.http_proxy,
         "custom_headers": dict(model.custom_headers),
     }
+    if reasoning_effort is None:
+        expected.update(
+            {
+                "temperature": model.temperature,
+                "top_p": model.top_p,
+            }
+        )
+
+    assert captured == expected
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses"])
+@pytest.mark.parametrize("reasoning_effort", [None, "high", "none"])
+async def test_call_organization_model_protocol_payload_omits_reasoning_level(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    reasoning_effort: str | None,
+) -> None:
+    snapshot = _snapshot()
+    model = _model_config(
+        snapshot.count,
+        max_tokens=40_000,
+        protocol=protocol,
+        reasoning_effort=reasoning_effort,
+    )
+    payload = _payload(snapshot, model)
+    if reasoning_effort is None:
+        payload["organization_model"].pop("reasoning_effort")
+    request = build_organization_execution_request(payload)
+    expected_content = _response().message.content
+    captured: dict[str, Any] = {}
+
+    async def fake_post_json(_self: BaseOpenAITransformer, **kwargs: Any) -> dict[str, Any]:
+        captured["payload"] = kwargs["payload"]
+        if protocol == "openai":
+            return {
+                "id": "chatcmpl-memory-organization",
+                "model": model.model_id,
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": expected_content},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        return {
+            "id": "resp-memory-organization",
+            "status": "completed",
+            "model": model.model_id,
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": expected_content}],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(BaseOpenAITransformer, "_post_json", fake_post_json)
+
+    response = await organization_handler.call_organization_model(request)
+
+    assert response.message.content == expected_content
+    protocol_payload = captured["payload"]
+    assert "reasoning_effort" not in protocol_payload
+    assert "reasoning" not in protocol_payload
+    if protocol == "openai":
+        assert protocol_payload["max_tokens"] == request.budget.max_output_tokens
+        assert "max_output_tokens" not in protocol_payload
+    else:
+        assert protocol_payload["max_output_tokens"] == request.budget.max_output_tokens
+        assert "max_tokens" not in protocol_payload
+    if reasoning_effort is None:
+        assert protocol_payload["temperature"] == model.temperature
+        assert protocol_payload["top_p"] == model.top_p
+    else:
+        assert "temperature" not in protocol_payload
+        assert "top_p" not in protocol_payload
 
 
 @pytest.mark.parametrize(

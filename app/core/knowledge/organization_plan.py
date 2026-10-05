@@ -37,6 +37,7 @@ from app.core.knowledge.organization_types import (
 )
 from app.core.log import get_logger
 from app.core.prompts import KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT
+from app.core.utils.llm_request_params import build_internal_task_generation_params
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.knowledge_base import (
     KnowledgeOrganizationSnapshot,
@@ -141,6 +142,16 @@ async def _default_model_caller(
     payload = canonical_json_dumps([organization_scope._scope_payload(item) for item in scope])
     if estimate_tokens(payload) > model.input_budget_tokens:
         raise KnowledgeOrganizationContextExceededError()
+    generation_params = build_internal_task_generation_params(
+        model_entry={
+            "reasoning_effort": model.reasoning_effort,
+            "max_tokens": model.max_output_tokens,
+        },
+        protocol=model.protocol,
+        temperature=model.temperature,
+        top_p=model.top_p,
+        max_tokens=model.max_output_tokens,
+    )
     response = await LLMClient.generate(
         api_key=model.api_key,
         base_url=model.base_url,
@@ -149,10 +160,7 @@ async def _default_model_caller(
             InternalMessage(role=MessageRole.SYSTEM, content=KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT),
             InternalMessage(role=MessageRole.USER, content=payload),
         ],
-        temperature=model.temperature,
-        top_p=model.top_p,
-        reasoning_effort=model.reasoning_effort,
-        max_tokens=model.max_output_tokens,
+        **generation_params,
         tools=None,
         protocol=model.protocol,
         timeout=model.timeout,

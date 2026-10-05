@@ -174,7 +174,6 @@ class MemoryOrganizationModelResponse(BaseModel):
     protocol: str
     temperature: float
     top_p: float | None = None
-    reasoning_effort: str | None = None
     timeout: float
     context_window_k: int
     context_window_tokens: int

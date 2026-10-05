@@ -1589,124 +1589,9 @@ async def test_session_list_loading_and_reply_running_follow_work_type_and_statu
 
 
 @pytest.mark.asyncio
-async def test_session_reasoning_options_filter_candidates_and_enforce_owner_scope(
+async def test_removed_reasoning_options_endpoint_returns_not_found(
     chat_session_database: AsyncSession,
 ) -> None:
-    primary_profile, alternate_profile, other_profile = await _seed_profiles(chat_session_database)
-    primary_profile_id = primary_profile.id
-    alternate_profile_id = alternate_profile.id
-    other_profile_id = other_profile.id
-    assert primary_profile_id is not None
-    assert alternate_profile_id is not None
-    assert other_profile_id is not None
-
-    channel_id = primary_profile.configs["channel"]["chat_channel"]["rules"][0]["channel_id"]
-    channel = await chat_session_database.get(ModelChannel, channel_id)
-    assert channel is not None
-
-    def chat_model(
-        model_id: str,
-        *,
-        reasoning_efforts: list[str] | None = None,
-        legacy_reasoning_effort: str | None = None,
-        is_enabled: bool = True,
-    ) -> dict[str, object]:
-        entry: dict[str, object] = {
-            "model_id": model_id,
-            "usage": "CHAT",
-            "protocol": "OPENAI",
-            "context_window_k": 64,
-            "max_tokens": 4096,
-            "is_enabled": is_enabled,
-        }
-        if reasoning_efforts is not None:
-            entry["reasoning_efforts"] = reasoning_efforts
-        if legacy_reasoning_effort is not None:
-            entry["reasoning_effort"] = legacy_reasoning_effort
-        return entry
-
-    channel.model_ids = [
-        chat_model("chat-model", reasoning_efforts=["low", " custom-tier ", "low"]),
-        chat_model("legacy-model", legacy_reasoning_effort=" legacy-tier "),
-        chat_model("disabled-model", reasoning_efforts=["disabled-model"], is_enabled=False),
-        chat_model("rule-disabled-model", reasoning_efforts=["disabled-rule"]),
-        chat_model("zero-weight-model", reasoning_efforts=["zero-weight"]),
-    ]
-    inactive_channel = ModelChannel(
-        name="chat-session-inactive-channel",
-        api_key="enc:v1:chat-session-inactive-key",
-        base_url="https://chat-session-inactive.example.com/v1",
-        is_active=False,
-        model_ids=[chat_model("inactive-model", reasoning_efforts=["inactive-channel"])],
-    )
-    chat_session_database.add(inactive_channel)
-    await chat_session_database.flush()
-    assert inactive_channel.id is not None
-
-    primary_config = _profile_config(channel_id)
-    primary_config["channel"]["chat_channel"]["rules"] = [
-        {
-            "channel_id": channel_id,
-            "model_id": "chat-model",
-            "priority": 1,
-            "weight": 1,
-            "is_enabled": True,
-        },
-        {
-            "channel_id": channel_id,
-            "model_id": "disabled-model",
-            "priority": 2,
-            "weight": 1,
-            "is_enabled": True,
-        },
-        {
-            "channel_id": channel_id,
-            "model_id": "rule-disabled-model",
-            "priority": 3,
-            "weight": 1,
-            "is_enabled": False,
-        },
-        {
-            "channel_id": channel_id,
-            "model_id": "zero-weight-model",
-            "priority": 4,
-            "weight": 0,
-            "is_enabled": True,
-        },
-        {
-            "channel_id": inactive_channel.id,
-            "model_id": "inactive-model",
-            "priority": 5,
-            "weight": 1,
-            "is_enabled": True,
-        },
-    ]
-    alternate_config = _profile_config(channel_id)
-    alternate_config["channel"]["chat_channel"]["rules"] = [
-        {
-            "channel_id": channel_id,
-            "model_id": "legacy-model",
-            "reasoning_effort": " explicit-default ",
-            "priority": 1,
-            "weight": 1,
-            "is_enabled": True,
-        }
-    ]
-    primary_profile.configs = primary_config
-    alternate_profile.configs = alternate_config
-    chat_session_database.add_all([channel, primary_profile, alternate_profile])
-    await chat_session_database.commit()
-
-    owner_session = ChatSession(
-        session_id="reasoning-options-owner-session",
-        uid="user-1",
-        profile_id=alternate_profile_id,
-        source="weixin-openclaw",
-        reply_target_source="weixin-openclaw",
-    )
-    chat_session_database.add(owner_session)
-    await chat_session_database.commit()
-
     auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
     app = _build_app(chat_session_database, auth_state)
 
@@ -1714,111 +1599,13 @@ async def test_session_reasoning_options_filter_candidates_and_enforce_owner_sco
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
     ) as client:
-        primary_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"profile_override_id": primary_profile_id},
-        )
-        assert primary_options.status_code == 200
-        assert primary_options.json()["data"] == {
-            "profile_id": primary_profile_id,
-            "options": ["low", "custom-tier"],
-            "defaults": [None],
-        }
-
-        alternate_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"profile_override_id": alternate_profile_id},
-        )
-        assert alternate_options.status_code == 200
-        assert alternate_options.json()["data"] == {
-            "profile_id": alternate_profile_id,
-            "options": ["legacy-tier", "explicit-default"],
-            "defaults": ["explicit-default"],
-        }
-
-        forbidden_profile = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"profile_override_id": other_profile_id},
-        )
-        assert forbidden_profile.status_code == 404
-        assert forbidden_profile.json()["code"] == 404
-
-        owner_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"session_id": owner_session.session_id},
-        )
-        assert owner_options.status_code == 200
-        assert owner_options.json()["data"]["profile_id"] == alternate_profile_id
-
-        overridden = await client.post(
-            "/api/v1/chat/sessions/setting",
-            json={
-                "session_id": owner_session.session_id,
-                "profile_override_id": primary_profile_id,
-            },
-        )
-        assert overridden.status_code == 200
-        assert overridden.json()["code"] == 200
-
-        overridden_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"session_id": owner_session.session_id},
-        )
-        assert overridden_options.status_code == 200
-        assert overridden_options.json()["data"] == {
-            "profile_id": primary_profile_id,
-            "options": ["low", "custom-tier"],
-            "defaults": [None],
-        }
-
-        cleared_override = await client.post(
-            "/api/v1/chat/sessions/setting",
-            json={
-                "session_id": owner_session.session_id,
-                "profile_override_id": None,
-            },
-        )
-        assert cleared_override.status_code == 200
-        assert cleared_override.json()["code"] == 200
-
-        restored_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"session_id": owner_session.session_id},
-        )
-        assert restored_options.status_code == 200
-        assert restored_options.json()["data"] == {
-            "profile_id": alternate_profile_id,
-            "options": ["legacy-tier", "explicit-default"],
-            "defaults": ["explicit-default"],
-        }
-
-        auth_state["uid"] = "user-2"
-        forbidden_session = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"session_id": owner_session.session_id},
-        )
-        assert forbidden_session.status_code == 200
-        assert forbidden_session.json()["code"] == 403
-        assert forbidden_session.json()["message"] == t(ERR_SESSION_NO_PERMISSION)
-
-        auth_state.update({"uid": "admin", "is_superuser": True})
-        admin_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={
-                "session_id": owner_session.session_id,
-                "profile_override_id": alternate_profile_id,
-            },
-        )
-        assert admin_options.status_code == 200
-        assert admin_options.json()["data"] == {
-            "profile_id": alternate_profile_id,
-            "options": ["legacy-tier", "explicit-default"],
-            "defaults": ["explicit-default"],
-        }
+        for params in (None, {"session_id": "missing-session"}, {"profile_override_id": 1}):
+            response = await client.get("/api/v1/chat/sessions/reasoning-options", params=params)
+            assert response.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_session_reasoning_effort_persists_through_http_settings_and_external_sessions(
+async def test_http_new_session_ignores_legacy_reasoning_effort(
     chat_session_database: AsyncSession,
 ) -> None:
     primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
@@ -1833,9 +1620,10 @@ async def test_session_reasoning_effort_persists_through_http_settings_and_exter
         created = await client.post(
             "/api/v1/chat/completions",
             json={
-                "message": "reasoning session",
+                "message": "legacy reasoning field",
                 "profile_override_id": primary_profile.id,
-                "reasoning_effort": " custom-tier ",
+                "show_reasoning": False,
+                "reasoning_effort": "custom-tier",
             },
         )
         assert created.status_code == 200
@@ -1843,104 +1631,35 @@ async def test_session_reasoning_effort_persists_through_http_settings_and_exter
 
         persisted = await chat_session_database.get(ChatSession, session_id)
         assert persisted is not None
-        assert persisted.reasoning_effort == "custom-tier"
+        assert persisted.profile_override_id == primary_profile.id
+        assert persisted.show_reasoning is False
 
         listed = await client.get("/api/v1/chat/sessions/list")
         assert listed.status_code == 200
         listed_session = next(item for item in listed.json()["data"] if item["session_id"] == session_id)
-        assert listed_session["reasoning_effort"] == "custom-tier"
-
-        omitted = await client.post(
-            "/api/v1/chat/sessions/setting",
-            json={"session_id": session_id, "show_reasoning": False},
-        )
-        assert omitted.status_code == 200
-        assert omitted.json()["code"] == 200
-        await chat_session_database.refresh(persisted)
-        assert persisted.reasoning_effort == "custom-tier"
-        assert persisted.show_reasoning is False
-
-        cleared = await client.post(
-            "/api/v1/chat/sessions/setting",
-            json={"session_id": session_id, "reasoning_effort": None},
-        )
-        assert cleared.status_code == 200
-        assert cleared.json()["code"] == 200
-        await chat_session_database.refresh(persisted)
-        assert persisted.reasoning_effort is None
-
-        listed_after_clear = await client.get("/api/v1/chat/sessions/list")
-        assert listed_after_clear.status_code == 200
-        listed_after_clear_session = next(item for item in listed_after_clear.json()["data"] if item["session_id"] == session_id)
-        assert listed_after_clear_session["reasoning_effort"] is None
-
-        auth_state["uid"] = "user-2"
-        forbidden = await client.post(
-            "/api/v1/chat/sessions/setting",
-            json={"session_id": session_id, "reasoning_effort": "other-tier"},
-        )
-        assert forbidden.status_code == 200
-        assert forbidden.json()["code"] == 500
-        assert forbidden.json()["message"] == t(ERR_SESSION_NO_PERMISSION)
-        await chat_session_database.refresh(persisted)
-        assert persisted.reasoning_effort is None
-
-        auth_state["uid"] = "user-1"
-        external_session = ChatSession(
-            session_id="reasoning-external-session",
-            uid="user-1",
-            profile_id=primary_profile.id,
-            source="weixin-openclaw",
-            reply_target_source="weixin-openclaw",
-        )
-        chat_session_database.add(external_session)
-        await chat_session_database.commit()
-
-        external_updated = await client.post(
-            "/api/v1/chat/sessions/setting",
-            json={
-                "session_id": external_session.session_id,
-                "reasoning_effort": " external-tier ",
-            },
-        )
-        assert external_updated.status_code == 200
-        assert external_updated.json()["code"] == 200
-        await chat_session_database.refresh(external_session)
-        assert external_session.reasoning_effort == "external-tier"
+        assert listed_session["show_reasoning"] is False
+        assert "reasoning_effort" not in listed_session
 
 
 @pytest.mark.asyncio
-async def test_reasoning_options_use_default_and_external_profile_or_return_empty(
+@pytest.mark.parametrize("source", ["http", "ws", "weixin-openclaw"])
+@pytest.mark.parametrize("legacy_value", ["high", None, "x" * 65, 123, True])
+async def test_session_setting_rejects_legacy_reasoning_effort_and_persists_show_reasoning(
     chat_session_database: AsyncSession,
+    source: str,
+    legacy_value: object,
 ) -> None:
     primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
     assert primary_profile.id is not None
-    channel_id = primary_profile.configs["channel"]["chat_channel"]["rules"][0]["channel_id"]
-    channel = await chat_session_database.get(ModelChannel, channel_id)
-    assert channel is not None
-    channel.model_ids = [
-        {
-            **channel.model_ids[0],
-            "reasoning_efforts": ["default-tier"],
-        }
-    ]
-    primary_profile.is_default = True
-    chat_session_database.add_all([channel, primary_profile])
-
-    empty_profile_session = ChatSession(
-        session_id="reasoning-empty-profile-session",
-        uid="user-2",
-        source="weixin-openclaw",
-        reply_target_source="weixin-openclaw",
-    )
-    external_profile_session = ChatSession(
-        session_id="reasoning-external-profile-session",
+    session = ChatSession(
+        session_id=f"legacy-reasoning-setting-{source}",
         uid="user-1",
         profile_id=primary_profile.id,
-        source="other-message-platform",
-        reply_target_source="other-message-platform",
+        source=source,
+        reply_target_source=source,
+        show_reasoning=True,
     )
-    chat_session_database.add_all([empty_profile_session, external_profile_session])
+    chat_session_database.add(session)
     await chat_session_database.commit()
 
     auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
@@ -1950,113 +1669,29 @@ async def test_reasoning_options_use_default_and_external_profile_or_return_empt
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
     ) as client:
-        default_without_context = await client.get("/api/v1/chat/sessions/reasoning-options")
-        assert default_without_context.status_code == 200
-        assert default_without_context.json()["data"] == {
-            "profile_id": primary_profile.id,
-            "options": ["default-tier"],
-            "defaults": [None],
-        }
-
-        created = await client.post(
-            "/api/v1/chat/completions",
-            json={"message": "default profile session"},
-        )
-        assert created.status_code == 200
-        new_session_id = created.json()["choices"][0]["message"]["content"]
-        new_session = await chat_session_database.get(ChatSession, new_session_id)
-        assert new_session is not None
-        assert new_session.profile_override_id is None
-
-        default_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"session_id": new_session_id},
-        )
-        assert default_options.status_code == 200
-        assert default_options.json()["data"] == {
-            "profile_id": primary_profile.id,
-            "options": ["default-tier"],
-            "defaults": [None],
-        }
-
-        external_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"session_id": external_profile_session.session_id},
-        )
-        assert external_options.status_code == 200
-        assert external_options.json()["data"]["profile_id"] == primary_profile.id
-        assert external_options.json()["data"]["options"] == ["default-tier"]
-
-        auth_state["uid"] = "user-2"
-        empty_options = await client.get(
-            "/api/v1/chat/sessions/reasoning-options",
-            params={"session_id": empty_profile_session.session_id},
-        )
-        assert empty_options.status_code == 200
-        assert empty_options.json()["data"] == {
-            "profile_id": None,
-            "options": [],
-            "defaults": [],
-        }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("invalid_value", "case_id"),
-    [
-        pytest.param("x" * 65, "too-long", id="too-long"),
-        pytest.param(123, "integer", id="integer"),
-        pytest.param(True, "boolean", id="boolean"),
-    ],
-)
-async def test_reasoning_effort_validation_rejects_oversized_or_non_string_values(
-    chat_session_database: AsyncSession,
-    invalid_value: object,
-    case_id: str,
-) -> None:
-    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
-    assert primary_profile.id is not None
-    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
-    app = _build_app(chat_session_database, auth_state)
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        created = await client.post(
-            "/api/v1/chat/completions",
-            json={
-                "message": "validation baseline",
-                "profile_override_id": primary_profile.id,
-                "reasoning_effort": "valid-tier",
-            },
-        )
-        assert created.status_code == 200
-        session_id = created.json()["choices"][0]["message"]["content"]
-        persisted = await chat_session_database.get(ChatSession, session_id)
-        assert persisted is not None
-        assert persisted.reasoning_effort == "valid-tier"
-
-        invalid_setting = await client.post(
+        rejected = await client.post(
             "/api/v1/chat/sessions/setting",
-            json={"session_id": session_id, "reasoning_effort": invalid_value},
-        )
-        assert invalid_setting.status_code == 422
-        assert invalid_setting.json()["code"] == 422
-        await chat_session_database.refresh(persisted)
-        assert persisted.reasoning_effort == "valid-tier"
-
-        request_id = f"invalid-reasoning-{case_id}"
-        invalid_new = await client.post(
-            "/api/v1/chat/completions",
             json={
-                "message": "invalid new reasoning session",
-                "request_id": request_id,
-                "profile_override_id": primary_profile.id,
-                "reasoning_effort": invalid_value,
+                "session_id": session.session_id,
+                "reasoning_effort": legacy_value,
+                "show_reasoning": False,
             },
         )
-        assert invalid_new.status_code == 422
-        assert invalid_new.json()["code"] == 422
-        expected_new_session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"monolight:http:user-1:{request_id}"))
-        assert await chat_session_database.get(ChatSession, expected_new_session_id) is None
+        assert rejected.status_code == 422
+        await chat_session_database.refresh(session)
+        assert session.show_reasoning is True
+
+        updated = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={"session_id": session.session_id, "show_reasoning": False},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["code"] == 200
+        await chat_session_database.refresh(session)
+        assert session.show_reasoning is False
+
+        listed = await client.get("/api/v1/chat/sessions/list")
+        assert listed.status_code == 200
+        listed_session = next(item for item in listed.json()["data"] if item["session_id"] == session.session_id)
+        assert listed_session["show_reasoning"] is False
+        assert "reasoning_effort" not in listed_session

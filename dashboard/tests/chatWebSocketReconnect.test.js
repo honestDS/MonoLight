@@ -174,7 +174,7 @@ test('wsSend forwards session settings for new sessions and keeps repeated paylo
   assert.equal(Object.hasOwn(defaultPayload, 'max_turns'), false)
 })
 
-test('wsSend forwards reasoning effort only for new sessions', async () => {
+test('wsSend ignores removed session reasoning effort for new and existing sessions', async () => {
   const { manager, sent } = createTransportManager()
   const transport = loadUseChatTransport({ manager })()
 
@@ -185,8 +185,7 @@ test('wsSend forwards reasoning effort only for new sessions', async () => {
     }), true)
 
     const data = sent.at(-1)
-    assert.equal(data.reasoning_effort, reasoningEffort)
-    assert.equal(Object.hasOwn(data, 'reasoning_effort'), true)
+    assert.equal(Object.hasOwn(data, 'reasoning_effort'), false)
   }
 
   for (const reasoningEffort of [null, undefined]) {

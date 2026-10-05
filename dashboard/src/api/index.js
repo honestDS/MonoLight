@@ -98,7 +98,6 @@ export const chatApi = {
   }),
   // 获取当前会话 Todo
   sessionTodo: (sessionId) => request.get('/chat/sessions/todo', { params: { session_id: sessionId } }),
-  sessionReasoningOptions: (params = {}) => request.get('/chat/sessions/reasoning-options', { params }),
   // 异步生成会话标题
   generateTitle: (data) => request.post('/chat/sessions/generate-title', data),
   // 创建外部会话引导

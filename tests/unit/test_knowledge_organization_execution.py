@@ -16,7 +16,7 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
 from app.core.audit.integrity import canonical_json_dumps
-from app.core.constants import MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
+from app.core.constants import KNOWLEDGE_ORGANIZATION_SUMMARY_MAX_TOKENS, MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
 from app.core.crud.knowledge.embedding_transition import knowledge_base_migration_crud
 from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.exceptions import BaseBusinessException, LLMException, ParameterException, ResourceNotFoundException, ServerException
@@ -57,7 +57,7 @@ from app.core.knowledge.organization_runtime import (
     validate_knowledge_organization_plan,
 )
 from app.core.knowledge.organization_types import KnowledgeOrganizationPlan
-from app.core.prompts import KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT
+from app.core.prompts import KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT, KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
@@ -985,7 +985,13 @@ async def test_model_candidates_are_resolved_from_current_config_without_persist
 
 
 @pytest.mark.asyncio
-async def test_model_call_uses_full_candidate_scope_and_strict_json(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses"])
+@pytest.mark.parametrize("reasoning_effort", [None, "high", "none"])
+async def test_model_call_uses_full_candidate_scope_and_strict_json(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    reasoning_effort: str | None,
+):
     candidates = (
         _candidate(1, "topic-a", "alpha knowledge"),
         _candidate(2, "topic-b", "beta knowledge"),
@@ -1005,15 +1011,151 @@ async def test_model_call_uses_full_candidate_scope_and_strict_json(monkeypatch:
     import app.core.knowledge.organization_runtime as runtime_module
 
     monkeypatch.setattr(runtime_module.LLMClient, "generate", fake_generate)
-    plan = await call_knowledge_organization_model(_model(), candidates=candidates)
+    model = replace(_model(), protocol=protocol, reasoning_effort=reasoning_effort, top_p=0.65)
+    plan = await call_knowledge_organization_model(model, candidates=candidates)
     assert len(plan.items) == 2
     assert captured["model_id"] == "model-a"
+    assert captured["protocol"] == model.protocol
     assert captured["tools"] is None
     assert captured["max_tokens"] == 768
+    assert "reasoning_effort" not in captured
+    if reasoning_effort is None:
+        assert captured["temperature"] == model.temperature
+        assert captured["top_p"] == model.top_p
+    else:
+        assert "temperature" not in captured
+        assert "top_p" not in captured
     request_text = captured["messages"][1].content
     assert isinstance(request_text, str)
     assert "alpha knowledge" in request_text
     assert "beta knowledge" in request_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses"])
+@pytest.mark.parametrize("reasoning_effort", [None, "high", "none"])
+@pytest.mark.parametrize("max_output_tokens", [128, 768])
+async def test_default_analysis_caller_cleans_generation_params(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    reasoning_effort: str | None,
+    max_output_tokens: int,
+):
+    content = "complete analysis content"
+    captured = {}
+    model = replace(
+        _model(input_budget_tokens=4000),
+        protocol=protocol,
+        reasoning_effort=reasoning_effort,
+        top_p=0.65,
+        max_output_tokens=max_output_tokens,
+    )
+
+    async def fake_generate(**kwargs):
+        captured.update(kwargs)
+        return InternalResponse(
+            message=InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content='{"summary":"compact summary"}',
+            ),
+            model=model.model_id,
+        )
+
+    monkeypatch.setattr(organization_analysis.LLMClient, "generate", fake_generate)
+    summary = await organization_analysis._default_analysis_caller(model, content=content)
+
+    assert summary == "compact summary"
+    assert captured["messages"][0].role == MessageRole.SYSTEM
+    assert captured["messages"][0].content == KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT
+    assert captured["messages"][1].role == MessageRole.USER
+    assert captured["messages"][1].content == canonical_json_dumps({"content": content})
+    assert captured["tools"] is None
+    assert captured["protocol"] == model.protocol
+    assert captured["max_tokens"] == min(max_output_tokens, KNOWLEDGE_ORGANIZATION_SUMMARY_MAX_TOKENS)
+    assert "reasoning_effort" not in captured
+    if reasoning_effort is None:
+        assert captured["temperature"] == model.temperature
+        assert captured["top_p"] == model.top_p
+    else:
+        assert "temperature" not in captured
+        assert "top_p" not in captured
+    assert captured["timeout"] == model.timeout
+    assert captured["http_proxy"] == model.http_proxy
+    assert captured["custom_headers"] == model.custom_headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses"])
+@pytest.mark.parametrize("reasoning_effort", [None, "high", "none"])
+async def test_default_model_caller_cleans_generation_params(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    reasoning_effort: str | None,
+):
+    candidate = _candidate(1, "topic-a", "complete alpha knowledge")
+    scope = (
+        KnowledgeOrganizationScopeItem(
+            sources=((candidate.knowledge_id, candidate.expected_version),),
+            knowledge_key=candidate.knowledge_key,
+            content=candidate.content,
+            content_hash=candidate.content_hash,
+            source_type=candidate.source_type,
+        ),
+    )
+    captured = {}
+    model = replace(
+        _model(input_budget_tokens=4000),
+        protocol=protocol,
+        reasoning_effort=reasoning_effort,
+        top_p=0.65,
+    )
+
+    async def fake_generate(**kwargs):
+        captured.update(kwargs)
+        return InternalResponse(
+            message=InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content='{"items":[{"action":"keep","source":{"knowledge_id":1,"expected_version":1},"summary":"alpha"}]}',
+            ),
+            model=model.model_id,
+        )
+
+    expected_scope_payload = canonical_json_dumps(
+        [
+            {
+                "sources": [{"knowledge_id": 1, "expected_version": 1}],
+                "knowledge_key": "topic-a",
+                "content": "complete alpha knowledge",
+                "content_hash": candidate.content_hash,
+                "source_type": candidate.source_type,
+                "source_reference": None,
+            }
+        ]
+    )
+    monkeypatch.setattr(organization_plan.LLMClient, "generate", fake_generate)
+    plan = await organization_plan._default_model_caller(model, scope=scope)
+
+    assert len(plan.items) == 1
+    assert plan.items[0].action == "keep"
+    assert plan.items[0].source.knowledge_id == candidate.knowledge_id
+    assert plan.items[0].source.expected_version == candidate.expected_version
+    assert captured["messages"][0].role == MessageRole.SYSTEM
+    assert captured["messages"][0].content == KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT
+    assert captured["messages"][1].role == MessageRole.USER
+    assert captured["messages"][1].content == expected_scope_payload
+    assert captured["tools"] is None
+    assert captured["protocol"] == model.protocol
+    assert captured["max_tokens"] == model.max_output_tokens
+    assert "reasoning_effort" not in captured
+    if reasoning_effort is None:
+        assert captured["temperature"] == model.temperature
+        assert captured["top_p"] == model.top_p
+    else:
+        assert "temperature" not in captured
+        assert "top_p" not in captured
+    assert captured["timeout"] == model.timeout
+    assert captured["http_proxy"] == model.http_proxy
+    assert captured["custom_headers"] == model.custom_headers
 
 
 @pytest.mark.asyncio

@@ -1461,7 +1461,6 @@ async def test_reasoning_effort_reaches_openai_protocol_payloads(
             session_id=session_id,
             uid=uid,
             profile_id=PROFILE_ID,
-            reasoning_effort="custom-tier",
         )
     )
     await db_session.commit()
@@ -1528,19 +1527,9 @@ async def test_reasoning_effort_reaches_openai_protocol_payloads(
         _reasoning_effort_model_entry(protocol, None, reasoning_efforts=["low", "high"]),
         _reasoning_effort_model_entry(protocol, "none", reasoning_efforts=["none", "high"]),
     ]
-    expected_efforts = ["custom-tier", "rule-default", None, "none"]
+    expected_efforts = ["model-default", "rule-default", None, "none"]
 
     for index, (model_entry, expected_effort) in enumerate(zip(model_entries, expected_efforts, strict=True)):
-        if index == 1:
-            session = await db_session.get(ChatSession, session_id)
-            assert session is not None
-            session.reasoning_effort = None
-            await db_session.commit()
-            db_session.expire_all()
-            persisted_session = await db_session.get(ChatSession, session_id)
-            assert persisted_session is not None
-            assert persisted_session.reasoning_effort is None
-
         if mode == "background":
             selected_model_entry = deepcopy(model_entry)
             response, _, _, _, chat_params = await channel_call.generate_chat_with_fallback(
@@ -1584,9 +1573,10 @@ async def test_reasoning_effort_reaches_openai_protocol_payloads(
             expected_effort=expected_effort,
         )
 
+
 @pytest.mark.parametrize("mode", ["non_stream", "stream", "background"])
 @pytest.mark.asyncio
-async def test_automatic_fallback_uses_fallback_rule_reasoning_default(
+async def test_automatic_fallback_uses_selected_rule_reasoning_effort(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
@@ -1599,7 +1589,6 @@ async def test_automatic_fallback_uses_fallback_rule_reasoning_default(
             session_id=session_id,
             uid=uid,
             profile_id=PROFILE_ID,
-            reasoning_effort="session-tier",
         )
     )
     await db_session.commit()
@@ -1620,7 +1609,7 @@ async def test_automatic_fallback_uses_fallback_rule_reasoning_default(
         current_message="Follow-up",
     )
 
-    primary_model = _reasoning_effort_model_entry("openai", "primary-default", reasoning_efforts=["session-tier", "primary-default"])
+    primary_model = _reasoning_effort_model_entry("openai", "primary-default", reasoning_efforts=["primary-default"])
     primary_model["model_id"] = "primary-model"
     fallback_model = _reasoning_effort_model_entry("openai", "fallback-default", reasoning_efforts=["fallback-default"])
     fallback_model["model_id"] = "fallback-model"
@@ -1687,6 +1676,7 @@ async def test_automatic_fallback_uses_fallback_rule_reasoning_default(
         )
         assert result.message.content == "Answer"
     else:
+
         async def fake_select_channel(*_args: Any, **_kwargs: Any):
             return fallback_channel, deepcopy(fallback_model), fallback_rule
 
@@ -1711,6 +1701,6 @@ async def test_automatic_fallback_uses_fallback_rule_reasoning_default(
         )
         assert result.message.content == "Answer"
 
-    assert [attempt["reasoning_effort"] for attempt in attempts] == ["session-tier", "fallback-default"]
+    assert [attempt["reasoning_effort"] for attempt in attempts] == ["primary-default", "fallback-default"]
     assert all(attempt["temperature"] is None for attempt in attempts)
     assert all(attempt["top_p"] is None for attempt in attempts)

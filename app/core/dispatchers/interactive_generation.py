@@ -91,7 +91,6 @@ async def generate_interactive_turn(
     tool_call_correction_attempts = 0
     tool_call_correction_messages: list[InternalMessage] = []
     emitted_agent_loop_start = False
-    use_session_reasoning_override = True
     stream_state = _AgentLoopStreamState(
         callback=state.stream_event_callback,
         current_turn=state.current_turn,
@@ -169,8 +168,7 @@ async def generate_interactive_turn(
                 session = await session_crud.get_by_session_id(state.db, state.session_id)
                 if session is not None:
                     await state.db.refresh(session)
-            session_reasoning_effort = getattr(session, "reasoning_effort", None)
-            effective_reasoning_effort = session_reasoning_effort if use_session_reasoning_override and session_reasoning_effort is not None else state.chat_params.get("reasoning_effort")
+            effective_reasoning_effort = state.chat_params.get("reasoning_effort")
             context_summary_revision = session.context_summary_revision if session is not None else 0
             context_content_revision = session.context_content_revision if session is not None else 0
             previous_session_llm_request_metadata = session.llm_request_metadata if session is not None else None
@@ -415,7 +413,6 @@ async def generate_interactive_turn(
                 raise
             previous_max_tokens = state.chat_params["max_tokens"]
             state.chat_channel_obj, state.model_entry, state.channel_rule = selection
-            use_session_reasoning_override = False
             state.img_understanding, state.audio_understanding, state.video_understanding = get_multimodal_from_entry(state.model_entry)
             state.chat_params = resolve_chat_params(state.model_entry, state.chat_channel)
             if state.chat_params["max_tokens"] != previous_max_tokens:
