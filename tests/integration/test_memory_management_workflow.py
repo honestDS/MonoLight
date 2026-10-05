@@ -674,7 +674,7 @@ async def test_memory_organization_workflow_configures_submits_idempotently_and_
     db_session: AsyncSession,
 ) -> None:
     app, _current_user = api_app
-    channel = await _create_chat_channel(db_session)
+    channel = await _create_chat_channel(db_session, model_ids=[_chat_model(reasoning_effort="high")])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         unconfigured = _assert_standard(await client.get("/api/v1/memories/settings"), 200)
     assert unconfigured["data"]["configured"] is False
@@ -734,6 +734,8 @@ async def test_memory_organization_workflow_configures_submits_idempotently_and_
         assert updated_data["organization"]["model"]["channel_id"] == channel.id
         assert updated_data["organization"]["model"]["model_id"] == "organization-chat-model"
         assert updated_data["organization"]["model"]["usage"] == "CHAT"
+        assert "reasoning_effort" not in updated_data["organization"]["model"]
+        assert "reasoning_efforts" not in updated_data["organization"]["model"]
         assert updated_data["organization"]["current_job_id"] is None
         assert updated_data["organization"]["recent_job_id"] is None
         assert updated_data["current_job"] is None
@@ -748,6 +750,7 @@ async def test_memory_organization_workflow_configures_submits_idempotently_and_
         assert organize["data"]["created"] is True
         assert organize["data"]["job"]["payload"]["snapshot"]["count"] == 1
         assert [item["memory_id"] for item in organize["data"]["job"]["payload"]["snapshot"]["items"]] == [record.id]
+        assert "reasoning_effort" not in organize["data"]["job"]["payload"]["organization_model"]
 
         duplicate = _assert_standard(
             await client.post(
@@ -781,6 +784,8 @@ async def test_memory_organization_workflow_configures_submits_idempotently_and_
         assert data["capacity"]["organize_trigger_records"] == 45
         assert data["capacity"]["content_max_tokens"] == 160
         assert data["capacity"]["active_record_count"] == 1
+        assert "reasoning_effort" not in data["organization"]["model"]
+        assert "reasoning_efforts" not in data["organization"]["model"]
         assert data["current_job"]["id"] == organize_job_id
         assert data["organization"]["current_job_id"] == organize_job_id
         assert data["organization"]["recent_job_id"] == organize_job_id

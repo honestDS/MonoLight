@@ -44,7 +44,6 @@ class ChatSession(SQLModel, table=True):
     max_turns: int = Field(default=DEFAULT_SESSION_MAX_TURNS, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
     show_tool_calls: bool = Field(default=True)
     show_reasoning: bool = Field(default=True)
-    reasoning_effort: str | None = Field(default=None, max_length=64, nullable=True, description="会话思考等级覆盖，空值跟随配置中的模型默认设置")
     context_summary: str | None = Field(default=None)
     context_summary_message_id: int | None = Field(default=None, index=True)
     context_summary_revision: int = Field(default=0, ge=0)

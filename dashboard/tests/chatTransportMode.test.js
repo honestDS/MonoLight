@@ -179,7 +179,7 @@ test('http transport forwards goal settings only for new sessions', async () => 
   ])
 })
 
-test('http transport forwards reasoning effort only for new sessions', async () => {
+test('http transport ignores removed reasoning effort', async () => {
   const requests = []
   const api = {
     async completions(payload) {
@@ -191,32 +191,25 @@ test('http transport forwards reasoning effort only for new sessions', async () 
   const cases = [
     {
       options: { message: 'custom', sessionId: null, requestId: 'request-custom', reasoningEffort: 'custom-level' },
-      expectedReasoningPayload: { reasoning_effort: 'custom-level' },
       repeat: true
     },
     {
-      options: { message: 'none', sessionId: null, requestId: 'request-none', reasoningEffort: 'none' },
-      expectedReasoningPayload: { reasoning_effort: 'none' }
+      options: { message: 'none', sessionId: null, requestId: 'request-none', reasoningEffort: 'none' }
     },
     {
-      options: { message: 'null', sessionId: null, requestId: 'request-null', reasoningEffort: null },
-      expectedReasoningPayload: {}
+      options: { message: 'null', sessionId: null, requestId: 'request-null', reasoningEffort: null }
     },
     {
-      options: { message: 'undefined', sessionId: null, requestId: 'request-undefined', reasoningEffort: undefined },
-      expectedReasoningPayload: {}
+      options: { message: 'undefined', sessionId: null, requestId: 'request-undefined', reasoningEffort: undefined }
     },
     {
-      options: { message: 'omitted', sessionId: null, requestId: 'request-omitted' },
-      expectedReasoningPayload: {}
+      options: { message: 'omitted', sessionId: null, requestId: 'request-omitted' }
     },
     {
-      options: { message: 'existing-high', sessionId: 'session-existing', requestId: 'request-existing-high', reasoningEffort: 'high' },
-      expectedReasoningPayload: {}
+      options: { message: 'existing-high', sessionId: 'session-existing', requestId: 'request-existing-high', reasoningEffort: 'high' }
     },
     {
-      options: { message: 'existing-null', sessionId: 'session-existing', requestId: 'request-existing-null', reasoningEffort: null },
-      expectedReasoningPayload: {}
+      options: { message: 'existing-null', sessionId: 'session-existing', requestId: 'request-existing-null', reasoningEffort: null }
     }
   ]
 
@@ -229,7 +222,6 @@ test('http transport forwards reasoning effort only for new sessions', async () 
       session_id: options.sessionId,
       attachments: [],
       request_id: options.requestId,
-      ...testCase.expectedReasoningPayload,
       stream: false
     }
 

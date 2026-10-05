@@ -17,6 +17,7 @@ from app.core.memory.organization_types import (
 )
 from app.core.utils.context_budget import measure_context_request_usage
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.llm_request_params import build_internal_task_generation_params
 from app.core.utils.model_request_headers import normalize_model_custom_headers
 from app.models.channel import (
     MODEL_PROTOCOLS_BY_USAGE,
@@ -305,15 +306,22 @@ async def call_organization_model(request: MemoryOrganizationExecutionRequest) -
     if request.snapshot.count == 0:
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
     model = request.organization_model
+    generation_params = build_internal_task_generation_params(
+        model_entry={
+            "reasoning_effort": model.reasoning_effort,
+            "max_tokens": model.max_tokens,
+        },
+        protocol=model.protocol,
+        temperature=model.temperature,
+        top_p=model.top_p,
+        max_tokens=request.budget.max_output_tokens,
+    )
     return await LLMClient.generate(
         api_key=model.api_key,
         base_url=model.base_url,
         model_id=model.model_id,
         messages=list(request.messages),
-        temperature=model.temperature,
-        top_p=model.top_p,
-        reasoning_effort=model.reasoning_effort,
-        max_tokens=request.budget.max_output_tokens,
+        **generation_params,
         tools=None,
         protocol=model.protocol,
         timeout=model.timeout,

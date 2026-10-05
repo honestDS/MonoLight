@@ -50,7 +50,7 @@ export default {
   reasoning_effort_placeholder: '请选择或输入思考等级',
   reasoning_efforts: '思考等级候选',
   reasoning_efforts_placeholder: '选择候选或输入后按回车添加',
-  reasoning_efforts_hint: '仅保存可选等级，不作为默认值；默认思考等级请在配置文件的模型设置中指定。',
+  reasoning_efforts_hint: '仅保存可选等级；实际使用的思考等级请在配置文件中对应模型的路由规则里设置。',
   max_tokens: '最大输出 Token',
   context_window_k: '上下文限制 K',
   image_understanding: '图像理解',

@@ -158,7 +158,6 @@ export function useChatSession() {
   const goalModeDefault = ref(true)
   const maxTurnsDefault = ref(5)
   const newSessionProfileOverrideId = ref(null)
-  const newSessionReasoningEffort = ref(null)
   
   // 2. 会话管理
   const sessionManager = useSessionManager()
@@ -208,31 +207,6 @@ export function useChatSession() {
       session => session.session_id === sessionManager.currentSessionId.value
     ) || null
   )
-  const currentSessionReasoningEffort = computed({
-    get: () => {
-      if (!sessionManager.currentSessionId.value) return newSessionReasoningEffort.value
-      return currentSession.value?.reasoning_effort ?? null
-    },
-    set: (reasoningEffort) => {
-      if (reasoningEffort !== null && typeof reasoningEffort !== 'string') return
-      const normalizedReasoningEffort = typeof reasoningEffort === 'string'
-        ? reasoningEffort.trim() || null
-        : null
-      const sessionId = sessionManager.currentSessionId.value
-      if (!sessionId) {
-        newSessionReasoningEffort.value = normalizedReasoningEffort
-        return
-      }
-
-      const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
-      if (sessionIndex !== -1) {
-        sessionManager.sessions.value[sessionIndex] = {
-          ...sessionManager.sessions.value[sessionIndex],
-          reasoning_effort: normalizedReasoningEffort
-        }
-      }
-    }
-  })
   const currentSessionShowToolCalls = computed({
     get: () => {
       if (!sessionManager.currentSessionId.value) return showToolCallsDefault.value
@@ -1501,7 +1475,6 @@ export function useChatSession() {
       requestSessionId,
       newSessionProfileOverrideId.value
     )
-    const reasoningEffort = currentSessionReasoningEffort.value
     await performHttpSend(
       text,
       attachmentsToSent,
@@ -1512,15 +1485,14 @@ export function useChatSession() {
       currentSessionShowToolCalls.value,
       currentSessionShowReasoning.value,
       currentSessionGoalMode.value,
-      currentSessionMaxTurns.value,
-      reasoningEffort
+      currentSessionMaxTurns.value
     )
   }
 
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true, goalMode = true, maxTurns = 5, reasoningEffort = null) => {
+  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true, goalMode = true, maxTurns = 5) => {
     if (requestSessionId) {
       ensureIncrementalHistoryCursor(requestSessionId)
     }
@@ -1540,8 +1512,7 @@ export function useChatSession() {
           showToolCalls,
           showReasoning,
           goalMode,
-          maxTurns,
-          reasoningEffort
+          maxTurns
         })
       )
 
@@ -1562,7 +1533,6 @@ export function useChatSession() {
           goal_mode: goalMode,
           max_turns: maxTurns,
           profile_override_id: profileOverrideId,
-          reasoning_effort: reasoningEffort,
           source: 'http'
         })
         
@@ -1575,7 +1545,7 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId, showToolCalls, showReasoning, goalMode, maxTurns, reasoningEffort)
+        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId, showToolCalls, showReasoning, goalMode, maxTurns)
       }
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
@@ -1693,7 +1663,6 @@ export function useChatSession() {
     const showReasoning = currentSessionShowReasoning.value
     const goalMode = currentSessionGoalMode.value
     const maxTurns = currentSessionMaxTurns.value
-    const reasoningEffort = currentSessionReasoningEffort.value
     const isCurrentRequestSession = () => (
       sessionScopeActive
       && requestSessionId === sessionManager.currentSessionId.value
@@ -1824,7 +1793,6 @@ export function useChatSession() {
           goal_mode: goalMode,
           max_turns: maxTurns,
           profile_override_id: newProfileOverrideId,
-          reasoning_effort: reasoningEffort,
           source: 'ws'
         })
         
@@ -2053,7 +2021,6 @@ export function useChatSession() {
             showReasoning,
             goalMode,
             maxTurns,
-            reasoningEffort,
             callbacks
           })
           if (!sent) {
@@ -2129,7 +2096,6 @@ export function useChatSession() {
     chatState.clearMessages()
     chatState.inputMsg.value = ''
     newSessionProfileOverrideId.value = null
-    newSessionReasoningEffort.value = null
     showToolCallsDefault.value = true
     showReasoningDefault.value = true
     goalModeDefault.value = true
@@ -2224,7 +2190,6 @@ export function useChatSession() {
     goalModeDefault,
     maxTurnsDefault,
     newSessionProfileOverrideId,
-    newSessionReasoningEffort,
 
     // 状态 - 会话相关
     sessions: sessionManager.sessions,
@@ -2240,7 +2205,6 @@ export function useChatSession() {
     currentSessionShowReasoning,
     currentSessionGoalMode,
     currentSessionMaxTurns,
-    currentSessionReasoningEffort,
     currentTodoPlan,
     isCurrentSessionReadOnly,
     isStopping,

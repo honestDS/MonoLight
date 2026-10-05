@@ -218,7 +218,7 @@ async def test_load_valid_chat_organization_config_and_runtime_snapshot(
     assert "http_proxy" not in public
     assert "custom_headers" not in public
     assert public["model_id"] == "chat-model"
-    assert public["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in public
     assert public["max_tokens"] == 2048
     assert public["required_output_tokens"] == snapshot["required_output_tokens"]
 
@@ -353,10 +353,15 @@ async def test_unconfigured_organization_model_uses_not_configured_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning_effort", [None, "high"])
 async def test_update_organization_settings_writes_store_and_exposes_only_public_model_data(
     db_session: AsyncSession,
+    reasoning_effort: str | None,
 ) -> None:
-    channel = await _create_channel(db_session)
+    channel = await _create_channel(
+        db_session,
+        model_ids=[_chat_model(reasoning_effort=reasoning_effort)],
+    )
     await _create_store(db_session, uid="settings-user")
 
     result = await update_organization_settings(
@@ -381,6 +386,8 @@ async def test_update_organization_settings_writes_store_and_exposes_only_public
     assert "api_key" not in result["model"]
     assert "http_proxy" not in result["model"]
     assert "custom_headers" not in result["model"]
+    assert "reasoning_effort" not in result["model"]
+    assert "reasoning_efforts" not in result["model"]
 
 
 @pytest.mark.asyncio

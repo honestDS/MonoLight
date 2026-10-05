@@ -227,7 +227,7 @@ class ChannelModelItem(BaseModel):
         None,
         min_length=1,
         max_length=64,
-        description="思考等级（仅兼容候选来源，非会话默认），CHAT 专属",
+        description="思考等级（历史单值兼容字段），CHAT 专属",
     )
     reasoning_efforts: list[ReasoningEffort] = PydanticField(
         default_factory=list,
@@ -569,7 +569,7 @@ class ChannelRule(BaseModel):
 
     channel_id: int = PydanticField(..., gt=0, description="渠道 ID")
     model_id: str = PydanticField(..., min_length=1, description="模型标识符")
-    reasoning_effort: ReasoningEffort | None = PydanticField(None, description="用户明确指定的思考等级默认值")
+    reasoning_effort: ReasoningEffort | None = PydanticField(None, description="该渠道/模型路由规则使用的思考等级")
     priority: int = PydanticField(..., ge=1, description="优先级分组，越小越优先；同组内失败会降级到下一组")
     weight: int = PydanticField(..., ge=0, description="同优先级组内的轮询配额：一个轮询周期内该渠道被使用的次数")
     is_enabled: bool = PydanticField(True, description="是否启用该路由规则")

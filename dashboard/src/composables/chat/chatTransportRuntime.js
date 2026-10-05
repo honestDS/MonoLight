@@ -8,8 +8,7 @@ export const sendHttpNonStream = async ({
   showToolCalls,
   showReasoning,
   goalMode,
-  maxTurns,
-  reasoningEffort
+  maxTurns
 }) => {
   const payload = {
     message,
@@ -32,10 +31,6 @@ export const sendHttpNonStream = async ({
   if (!sessionId && maxTurns !== undefined) {
     payload.max_turns = maxTurns
   }
-  if (!sessionId && reasoningEffort !== null && reasoningEffort !== undefined) {
-    payload.reasoning_effort = reasoningEffort
-  }
-
   const response = await api.completions({ ...payload, stream: false })
   return response.data?.data ?? response.data
 }

@@ -50,7 +50,7 @@ export default {
   reasoning_effort_placeholder: 'Select or enter a reasoning effort',
   reasoning_efforts: 'Reasoning Effort Options',
   reasoning_efforts_placeholder: 'Select options or type and press Enter to add',
-  reasoning_efforts_hint: 'Stores optional levels only, not defaults. Set the default reasoning effort in the profile model settings.',
+  reasoning_efforts_hint: 'Stores selectable levels only. Set the reasoning effort used by each channel/model rule in the profile.',
   max_tokens: 'Max Tokens',
   context_window_k: 'Context Window K',
   image_understanding: 'Image Understanding',

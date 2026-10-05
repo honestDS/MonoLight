@@ -33,6 +33,7 @@ from app.core.knowledge.organization_types import (
     KnowledgeOrganizationUpdate,
 )
 from app.core.prompts import KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT
+from app.core.utils.llm_request_params import build_internal_task_generation_params
 from app.core.utils.tokenizer import estimate_tokens, truncate_text_to_tokens
 from app.models.channel import ChannelModelItem, ModelUsage, is_channel_model_available, resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
@@ -383,6 +384,16 @@ async def call_knowledge_organization_model(
     payload = canonical_json_dumps([_candidate_request_payload(candidate) for candidate in candidates])
     if estimate_tokens(payload) > model.input_budget_tokens:
         raise ValueError(t("organization candidate scope exceeds model budget"))
+    generation_params = build_internal_task_generation_params(
+        model_entry={
+            "reasoning_effort": model.reasoning_effort,
+            "max_tokens": model.max_output_tokens,
+        },
+        protocol=model.protocol,
+        temperature=model.temperature,
+        top_p=model.top_p,
+        max_tokens=model.max_output_tokens,
+    )
     response = await LLMClient.generate(
         api_key=model.api_key,
         base_url=model.base_url,
@@ -391,10 +402,7 @@ async def call_knowledge_organization_model(
             InternalMessage(role=MessageRole.SYSTEM, content=KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT),
             InternalMessage(role=MessageRole.USER, content=payload),
         ],
-        temperature=model.temperature,
-        top_p=model.top_p,
-        reasoning_effort=model.reasoning_effort,
-        max_tokens=model.max_output_tokens,
+        **generation_params,
         tools=None,
         protocol=model.protocol,
         timeout=model.timeout,

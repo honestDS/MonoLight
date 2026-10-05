@@ -41,9 +41,11 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
    - 不使用外键时，必须通过单一事务、条件写入或比较更新、明确的生命周期状态、幂等键、租约栅栏令牌和一致性巡检保证关联完整性；禁止仅依赖“先查询父记录、再写入子记录”的 Python 检查。
    - 新增或调整外键前必须检查现有孤儿数据、明确历史数据修复方式，并通过 `scripts/migration_*.py` 迁移脚本兼容项目支持的数据库方言，不得只修改模型定义。
 5. 若修改需要做老旧数据迁移(如涉及数据库结构变更等)，应在 `scripts/` 目录下编写一次性迁移脚本，不允许只依赖 `SQLModel.metadata.create_all` 处理已存在表结构。
-   - 迁移脚本文件名必须使用 `migration_*.py` 格式，例如 `scripts/migration_001_add_profile_id_to_scheduled_task.py`。
+   - 新增脚本必须为 `migration_YYYYMMDD_NN_<description>.py` 格式；`YYYYMMDD` 为八位迁移版本日期，`NN` 为同日两位序号（从 `01` 开始递增至 `99`），`<description>` 使用小写下划线命名。例如 `scripts/migration_20261006_01_add_profile_id_to_scheduled_task.py`。
+   - 同日依赖必须通过序号表达，依赖前一步的迁移使用较大序号，禁止依靠 `add`/`remove` 等描述的字母顺序安排先后。
+   - 新增文件的完整名称必须排在所有已发布迁移之后；历史脚本保持原名，不得为符合新规范而重命名。若同日旧格式使新格式按完整文件名字典序排序提前，或序号用尽，则使用更晚的迁移版本日期。
    - 迁移脚本必须定义全局唯一的 `MIGRATION_ID`，并提供 `async def migrate(session): ...` 入口函数。
-   - 应用启动时会自动扫描并按文件名排序执行 `scripts/migration_*.py`，执行成功后写入 `migration_record` 表；同一个 `MIGRATION_ID` 后续启动会自动跳过。
+   - 应用启动时会自动扫描并按完整文件名字典序升序执行 `scripts/migration_*.py`，执行成功后写入 `migration_record` 表；同一个 `MIGRATION_ID` 后续启动会自动跳过。
    - 已执行过的迁移脚本禁止修改语义；如需补充或修复迁移逻辑，必须新增下一个迁移脚本。
    - 迁移脚本中应使用 `sqlalchemy.text` 或现有 CRUD/模型完成数据修正，并自行处理 SQLite/Mysql 等数据库方言差异。
 

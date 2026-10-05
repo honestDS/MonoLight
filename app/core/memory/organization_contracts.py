@@ -75,6 +75,7 @@ class MemoryOrganizationModelConfig:
     custom_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     temperature: float = 0.7
     top_p: float | None = None
+    # 历史字段仅供内部请求采样兼容清理，不能作为整理请求参数。
     reasoning_effort: str | None = None
     timeout: float = MEMORY_ORGANIZE_LLM_TIMEOUT_SECONDS
 
@@ -113,7 +114,6 @@ class MemoryOrganizationModelConfig:
             "protocol": self.protocol,
             "temperature": self.temperature,
             "top_p": self.top_p,
-            "reasoning_effort": self.reasoning_effort,
             "timeout": self.timeout,
             "context_window_k": self.context_window_k,
             "context_window_tokens": self.context_window_tokens,
