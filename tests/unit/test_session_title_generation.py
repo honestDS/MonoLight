@@ -46,7 +46,7 @@ async def test_generate_session_title_uses_internal_task_generation_params(monke
 
     assert title == "\u6807\u9898"
     kwargs = generate.await_args.kwargs
-    assert kwargs["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in kwargs
     assert "temperature" not in kwargs
     assert "top_p" not in kwargs
     assert kwargs["max_tokens"] == 128

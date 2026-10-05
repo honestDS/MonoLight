@@ -185,9 +185,10 @@ async def select_channel(
             ).info(t("LOG_CHANNEL_SELECTED", channel_name=channel_name))
 
         if expected_usage == "CHAT":
+            reasoning_effort = selected_rule.reasoning_effort if selected_rule.reasoning_effort is not None else selected_model_entry.get("reasoning_effort")
             selected_model_entry = {
                 **selected_model_entry,
-                "reasoning_effort": selected_rule.reasoning_effort,
+                "reasoning_effort": reasoning_effort,
             }
 
         return selected_channel, selected_model_entry, selected_rule

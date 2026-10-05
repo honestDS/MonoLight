@@ -1583,3 +1583,134 @@ async def test_reasoning_effort_reaches_openai_protocol_payloads(
             mode=mode,
             expected_effort=expected_effort,
         )
+
+@pytest.mark.parametrize("mode", ["non_stream", "stream", "background"])
+@pytest.mark.asyncio
+async def test_automatic_fallback_uses_fallback_rule_reasoning_default(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    session_id = f"{SESSION_ID}-fallback-effort-{mode}"
+    uid = f"{UID}-fallback-effort-{mode}"
+    profile = Profile(id=PROFILE_ID, uid=uid, name="fallback-reasoning-effort", configs={})
+    db_session.add(
+        ChatSession(
+            session_id=session_id,
+            uid=uid,
+            profile_id=PROFILE_ID,
+            reasoning_effort="session-tier",
+        )
+    )
+    await db_session.commit()
+    user_message = await save_message(
+        db_session,
+        session_id,
+        uid,
+        MessageRole.USER,
+        MessageType.TEXT,
+        InternalMessage(role=MessageRole.USER, content="Question"),
+        PROFILE_ID,
+    )
+    history = await ContextManager.get_messages(
+        db_session,
+        session_id,
+        uid,
+        profile=profile,
+        current_message="Follow-up",
+    )
+
+    primary_model = _reasoning_effort_model_entry("openai", "primary-default", reasoning_efforts=["session-tier", "primary-default"])
+    primary_model["model_id"] = "primary-model"
+    fallback_model = _reasoning_effort_model_entry("openai", "fallback-default", reasoning_efforts=["fallback-default"])
+    fallback_model["model_id"] = "fallback-model"
+    primary_channel = SimpleNamespace(
+        id=1,
+        name="primary-channel",
+        api_key=API_KEY,
+        base_url=BASE_URL,
+        http_proxy=None,
+        get_decrypted_api_key=lambda: API_KEY,
+    )
+    fallback_channel = SimpleNamespace(
+        id=2,
+        name="fallback-channel",
+        api_key=API_KEY,
+        base_url=BASE_URL,
+        http_proxy=None,
+        get_decrypted_api_key=lambda: API_KEY,
+    )
+    primary_rule = SimpleNamespace(priority=1)
+    fallback_rule = SimpleNamespace(priority=2)
+    chat_channel = SimpleNamespace(chat_timeout=60.0, rules=[primary_rule, fallback_rule])
+    attempts: list[dict[str, Any]] = []
+
+    async def fake_generate(**kwargs: Any):
+        attempts.append(deepcopy(kwargs))
+        if len(attempts) == 1:
+            raise LLMException(message="ERR_TEST_FALLBACK")
+        return SimpleNamespace(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="Answer"),
+            finish_reason="stop",
+            finish_details=None,
+            provider_metadata=None,
+            usage=None,
+        )
+
+    async def fake_generate_stream(**kwargs: Any):
+        return await fake_generate(**kwargs)
+
+    monkeypatch.setattr(LLMClient, "generate", fake_generate)
+    monkeypatch.setattr(LLMClient, "generate_with_stream_callback", fake_generate_stream)
+
+    if mode == "background":
+        selections = [
+            (primary_channel, deepcopy(primary_model), primary_rule),
+            (fallback_channel, deepcopy(fallback_model), fallback_rule),
+        ]
+
+        async def fake_select_channel(*_args: Any, **_kwargs: Any):
+            return selections.pop(0)
+
+        async def request_builder(_chat_params: dict[str, Any], _channel_obj: Any, _model_entry: dict[str, Any]) -> list[InternalMessage]:
+            return [message.model_copy(deep=True) for message in history]
+
+        monkeypatch.setattr(channel_call, "select_channel", fake_select_channel)
+        result, _, _, _, _ = await channel_call.generate_chat_with_fallback(
+            db_session,
+            chat_channel=chat_channel,
+            request_builder=request_builder,
+            call_context="test_reasoning_fallback",
+            cursor_key=None,
+            uid=uid,
+            session_id=session_id,
+        )
+        assert result.message.content == "Answer"
+    else:
+        async def fake_select_channel(*_args: Any, **_kwargs: Any):
+            return fallback_channel, deepcopy(fallback_model), fallback_rule
+
+        monkeypatch.setattr(interactive_generation_module, "select_channel", fake_select_channel)
+        state, _stream_events = _build_reasoning_effort_state(
+            db_session=db_session,
+            uid=uid,
+            session_id=session_id,
+            profile=profile,
+            messages=[message.model_copy(deep=True) for message in history],
+            initial_message=user_message,
+            model_entry=deepcopy(primary_model),
+            channel=primary_channel,
+            channel_rule=primary_rule,
+            chat_channel=chat_channel,
+            mode=mode,
+        )
+        result = await interactive_generation_module.generate_interactive_turn(
+            state,
+            current_tools=[],
+            response_id=f"reasoning-fallback-{mode}",
+        )
+        assert result.message.content == "Answer"
+
+    assert [attempt["reasoning_effort"] for attempt in attempts] == ["session-tier", "fallback-default"]
+    assert all(attempt["temperature"] is None for attempt in attempts)
+    assert all(attempt["top_p"] is None for attempt in attempts)
