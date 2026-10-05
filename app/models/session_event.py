@@ -16,6 +16,7 @@ class SessionEvent(SQLModel, table=True):
             name="fk_session_event_session_owner",
             ondelete="CASCADE",
         ),
+        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True, index=True)

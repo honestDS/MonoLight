@@ -359,7 +359,7 @@ async def get_reply_work_status(
             "revision": plan.revision if plan else 0,
             "todos": [dict(item) for item in plan.todos] if plan else [],
         }
-        if _response_has_background_tasks(response):
+        if _response_has_background_tasks(response) or await background_task_crud.has_pending_user_activity(db, uid=uid, session_id=session_id):
             response["has_background_tasks"] = True
             response["background_task_poll_interval"] = 2
     return StandardResponse.success(data=status)
