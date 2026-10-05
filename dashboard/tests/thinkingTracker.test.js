@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { appendStreamReasoning, finalizeStreamReasoning } from '../src/composables/chat/reasoningTracker.js'
@@ -160,19 +159,4 @@ test('turn end archives streamed reasoning on the assistant and removes only the
   assert.equal(finalized.some(message => message.role === 'reasoning'), false)
   assert.equal(finalized.some(message => message.role === 'thinking'), true)
   assert.equal(finalized.find(message => message.id === 'assistant-1').reasoning_content, 'streamed reasoning')
-})
-
-
-test('chat rendering keeps Thinking as lifecycle state, hides its row, and gates reasoning by the session switch', () => {
-  const listSource = readFileSync(new URL('../src/components/ChatMessageList.vue', import.meta.url), 'utf8')
-  const viewSource = readFileSync(new URL('../src/views/ChatView.vue', import.meta.url), 'utf8')
-
-  assert.doesNotMatch(listSource, /msg\.role === 'thinking'[\s\S]*?thinking-status/)
-  assert.match(listSource, /message\.role !== 'thinking'/)
-  assert.match(listSource, /msg\.role === 'reasoning'[\s\S]*?currentSessionShowReasoning[\s\S]*?<ThinkingBlock/)
-  assert.match(listSource, /currentSessionShowReasoning:\s*\{ type: Boolean, default: true \}/)
-  assert.match(viewSource, /chat\.show_reasoning/)
-  assert.match(viewSource, /:current-session-show-reasoning="currentSessionShowReasoning"/)
-  const sessionSource = readFileSync(new URL('../src/composables/chat/useChatSession.js', import.meta.url), 'utf8')
-  assert.match(sessionSource, /performHttpSend\([\s\S]*?currentSessionShowToolCalls\.value,\s*currentSessionShowReasoning\.value\s*[,)]/)
 })

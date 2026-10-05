@@ -10,8 +10,11 @@ from pathlib import Path
 
 import psutil
 import pytest
-from sqlalchemy import delete
 
+import app.core.terminal.session_runtime_commands as terminal_runtime_commands_module
+import app.core.terminal.session_runtime_core as terminal_runtime_core_module
+import app.core.terminal.session_runtime_state as terminal_runtime_state_module
+import app.core.terminal.worker_coordinator as terminal_worker_module
 from app.core.constants import ERR_TERMINAL_WORKER_STOPPED
 from app.core.dispatch_context import DispatchContext
 from app.core.i18n import t
@@ -34,13 +37,10 @@ from app.core.tools.terminal import (
     TerminalWriteExecutor,
 )
 from app.models.profile import Profile, ProfileConfig
-from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
-from app.models.terminal_session import TerminalControlCommand, TerminalSession
-from app.providers.database import AsyncSessionLocal, engine
-from scripts.migration_20260819_move_session_agent_settings import migrate as migrate_session_agent_settings
-from scripts.migration_20260916_add_chat_session_show_reasoning import migrate as migrate_chat_session_show_reasoning
-from scripts.migration_20261005_add_chat_session_reasoning_effort import migrate as migrate_chat_session_reasoning_effort
+from app.models.terminal_session import TerminalSession
+from app.providers.database import AsyncSessionLocal
+from app.providers.database.client import CancellationSafeAsyncSession
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32" and not sys.platform.startswith("linux"),
@@ -55,32 +55,26 @@ TEST_SESSION_ID = "terminal-shell-workflow-session"
 
 
 @pytest.fixture(autouse=True)
-async def isolated_terminal_database():
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.drop(sync_connection, checkfirst=True))
-        await connection.run_sync(lambda sync_connection: TerminalSession.__table__.drop(sync_connection, checkfirst=True))
-        await connection.run_sync(lambda sync_connection: PromptLibrary.__table__.create(sync_connection, checkfirst=True))
-        await connection.run_sync(lambda sync_connection: Profile.__table__.create(sync_connection, checkfirst=True))
-        await connection.run_sync(lambda sync_connection: ChatSession.__table__.create(sync_connection, checkfirst=True))
-        await connection.run_sync(lambda sync_connection: TerminalSession.__table__.create(sync_connection, checkfirst=True))
-        await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.create(sync_connection, checkfirst=True))
+async def isolated_terminal_database(database_factory, monkeypatch):
+    async with database_factory(
+        foreign_keys=True,
+        wal=True,
+        session_class=CancellationSafeAsyncSession,
+        name="terminal-shell-workflow.sqlite3",
+    ) as factory:
+        monkeypatch.setattr(sys.modules[__name__], "AsyncSessionLocal", factory)
+        for module in (
+            terminal_worker_module,
+            terminal_runtime_core_module,
+            terminal_runtime_state_module,
+            terminal_runtime_commands_module,
+        ):
+            monkeypatch.setattr(module, "AsyncSessionLocal", factory)
 
-    async with AsyncSessionLocal() as db:
-        await migrate_session_agent_settings(db)
-        await migrate_chat_session_show_reasoning(db)
-        await migrate_chat_session_reasoning_effort(db)
-        await db.execute(delete(ChatSession).where(ChatSession.session_id == TEST_SESSION_ID))
-        db.add(ChatSession(session_id=TEST_SESSION_ID, uid=TEST_UID))
-        await db.commit()
-
-    try:
-        yield
-    finally:
-        async with AsyncSessionLocal() as db:
-            await db.execute(delete(TerminalControlCommand))
-            await db.execute(delete(TerminalSession))
-            await db.execute(delete(ChatSession).where(ChatSession.session_id == TEST_SESSION_ID))
+        async with factory() as db:
+            db.add(ChatSession(session_id=TEST_SESSION_ID, uid=TEST_UID))
             await db.commit()
+        yield
 
 
 def _interactive_python_command(script_path: Path) -> str:

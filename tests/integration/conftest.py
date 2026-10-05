@@ -1,10 +1,14 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import Pool
+from sqlalchemy.sql.schema import Table
 from sqlmodel import SQLModel
 
 from app.core.constants import (
@@ -20,6 +24,54 @@ from app.models.session import ChatSession
 from app.models.system_setting import SystemSetting
 from app.models.user import User
 from tests.database_support import clone_sqlite_schema
+
+
+@pytest.fixture
+def database_factory(tmp_path: Path):
+    @asynccontextmanager
+    async def create_database(
+        *,
+        tables: Iterable[Table] | None = None,
+        foreign_keys: bool = False,
+        wal: bool = False,
+        name: str = "workflow.sqlite3",
+        poolclass: type[Pool] | None = None,
+        create_schema: bool = True,
+        session_class: type[AsyncSession] = AsyncSession,
+    ) -> AsyncGenerator[async_sessionmaker[AsyncSession]]:
+        database_path = tmp_path / name
+        if create_schema:
+            await clone_sqlite_schema(database_path, tables=tables)
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{database_path.as_posix()}",
+            connect_args={"timeout": 30},
+            poolclass=poolclass,
+        )
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def configure_sqlite_connection(
+            dbapi_connection: Any,
+            _connection_record: Any,
+        ) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA busy_timeout=30000")
+                cursor.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
+                if wal:
+                    cursor.execute("PRAGMA journal_mode=WAL")
+            finally:
+                cursor.close()
+
+        try:
+            yield async_sessionmaker(
+                engine,
+                class_=session_class,
+                expire_on_commit=False,
+            )
+        finally:
+            await engine.dispose()
+
+    return create_database
 
 
 @pytest_asyncio.fixture

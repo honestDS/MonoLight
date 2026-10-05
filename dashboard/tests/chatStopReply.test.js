@@ -1,93 +1,11 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import * as Vue from 'vue'
 import { createContextSummaryTracker } from '../src/composables/chat/contextSummaryTracker.js'
-import { shouldFetchHttpWorkStatus } from '../src/composables/chat/sessionListLoading.js'
+import { createHttpReplyPolling } from '../src/composables/chat/httpReplyPolling.js'
+import { createReplyController } from '../src/composables/chat/replyControl.js'
 import { createWorkLifecycleTracker } from '../src/composables/chat/workLifecycleTracker.js'
-
-const useChatSessionPath = new URL('../src/composables/chat/useChatSession.js', import.meta.url)
-
-const extractBetween = (source, startMarker, endMarker, label) => {
-  const start = source.indexOf(startMarker)
-  const end = source.indexOf(endMarker, start + startMarker.length)
-  assert.ok(start >= 0, `${label} start should be found`)
-  assert.ok(end > start, `${label} end should be found`)
-  return source.slice(start, end)
-}
-
-let implementationPromise
-const loadImplementation = () => {
-  implementationPromise ||= readFile(useChatSessionPath, 'utf8').then(source => ({
-    currentSessionSource: extractBetween(
-      source,
-      'const currentSession = computed(() =>',
-      'const currentSessionShowToolCalls = computed({',
-      'currentSession computed'
-    ),
-    readOnlySource: extractBetween(
-      source,
-      'const isCurrentSessionReadOnly = computed(() =>',
-      'const isStopping = computed(() =>',
-      'read-only computed'
-    ),
-    stoppingSource: extractBetween(
-      source,
-      'const isStopping = computed(() =>',
-      'const isReplyRunning = computed(() =>',
-      'stopping computed'
-    ),
-    replyRunningSource: extractBetween(
-      source,
-      'const isReplyRunning = computed(() =>',
-      '// 3. 通信层',
-      'reply-running computed'
-    ),
-    trackSubmissionSource: extractBetween(
-      source,
-      'const trackSubmission = async (getSessionId, submit) => {',
-      'const normalizeHttpIdentity =',
-      'trackSubmission'
-    ),
-    normalizeHttpIdentitySource: extractBetween(
-      source,
-      'const normalizeHttpIdentity =',
-      'const trackHttpSubmission =',
-      'HTTP identity normalizer'
-    ),
-    resetHttpPollingStateSource: extractBetween(
-      source,
-      'const resetHttpPollingState = () => {',
-      '// 默认 Markdown 开关状态',
-      'HTTP polling reset'
-    ),
-    stopReplySource: extractBetween(
-      source,
-      'const stopReply = async () => {',
-      '// ==================== 核心发送方法 ====================',
-      'stopReply'
-    ),
-    finishHttpWorkLifecycleSource: extractBetween(
-      source,
-      'const finishHttpWorkLifecycle = ({ sessionId, workId, resolvedWorkId, requestIds }) => {',
-      'const maybeMergeHttpSessionHistory = (sessionId, latestMessageId) => {',
-      'HTTP work lifecycle finish'
-    ),
-    applyHttpWorkStatusSource: extractBetween(
-      source,
-      'const applyHttpWorkStatus = (work, statusData, sessionId) => {',
-      'const fetchHttpWorkStatus = async (work, sessionId) => {',
-      'HTTP work status application'
-    ),
-    processHttpSessionSnapshotSource: extractBetween(
-      source,
-      'const processHttpSessionSnapshot = async (sessions) => {',
-      'const handleSessionsUpdated = sessions => {',
-      'HTTP session snapshot processing'
-    )
-  }))
-  return implementationPromise
-}
+import { processStreamError } from '../src/composables/chat/terminalHistory.js'
 
 const createDeferred = () => {
   let resolve
@@ -99,12 +17,34 @@ const createDeferred = () => {
   return { promise, resolve, reject }
 }
 
-const createHarness = (implementation, options = {}) => {
-  const sessions = Vue.ref(options.sessions || [])
+const createHarness = (options = {}) => {
+  const sessions = Vue.ref(options.sessions ?? [])
   const currentSessionId = Vue.ref(options.currentSessionId ?? null)
   const transport = {
     transportMode: Vue.ref(options.transportMode ?? 'http')
   }
+  const chatState = {
+    messages: Vue.ref(options.messages ?? []),
+    loading: Vue.ref(options.loading ?? false),
+    inputMsg: Vue.ref(options.inputMsg ?? '')
+  }
+  const attachments = Vue.ref(options.attachments ?? [])
+  const contextSummaryWorkKeys = Vue.ref(new Set())
+  const contextSummaryRequestKeys = new Map()
+  const contextSummaryTracker = createContextSummaryTracker()
+  const workLifecycleTracker = createWorkLifecycleTracker()
+  const initialHistoryLoaded = Vue.ref(options.initialHistoryLoaded ?? true)
+  const pendingHttpRequests = new Map(options.pendingHttpRequests ?? [])
+  const refreshCalls = []
+  const historyMergeCalls = []
+  const stopCalls = []
+  const errors = []
+  const streamErrors = []
+  const replyWorkStatusCalls = []
+  let sessionScopeActive = options.sessionScopeActive ?? true
+  let stopBehavior = options.stopBehavior ?? (async () => undefined)
+  let replyWorkStatusBehavior = options.replyWorkStatusBehavior ?? (() => null)
+
   const sessionManager = {
     sessions,
     currentSessionId,
@@ -112,271 +52,114 @@ const createHarness = (implementation, options = {}) => {
       refreshCalls.push(currentSessionId.value)
     }
   }
-  const currentSession = new Function(
-    'computed',
-    'sessionManager',
-    `${implementation.currentSessionSource}\nreturn currentSession`
-  )(Vue.computed, sessionManager)
+  const currentSession = Vue.computed(() => (
+    sessions.value.find(session => session.session_id === currentSessionId.value) || null
+  ))
+  const isCurrentSessionReadOnly = Vue.computed(() => {
+    const source = currentSession.value?.source
+    return Boolean(source && !['http', 'ws'].includes(source))
+  })
 
-  const chatState = {
-    messages: Vue.ref(options.messages || []),
-    loading: Vue.ref(options.loading ?? false),
-    inputMsg: Vue.ref(options.inputMsg || '')
+  const reportError = message => {
+    errors.push(message)
   }
-  const attachments = Vue.ref(options.attachments || [])
-  const contextSummaryWorkKeys = Vue.ref(new Set())
-  const contextSummaryRequestKeys = new Map()
-  const contextSummaryTracker = createContextSummaryTracker()
-  const workLifecycleTracker = createWorkLifecycleTracker()
-  const initialHistoryLoaded = Vue.ref(options.initialHistoryLoaded ?? true)
-  const pendingHttpRequests = new Map(options.pendingHttpRequests || [])
-  const inFlightSubmissions = new Set()
-  const stoppingSessionIds = Vue.ref(new Set())
-  const observedHttpWorkStatuses = new Map()
-  const observedHttpLatestMessageIds = new Map()
-  const fetchingHttpWorks = new Set()
-  const resolvedHttpWorks = new Set()
-  const refreshCalls = []
-  const historyMergeCalls = []
-  const maybeMergeHttpSessionHistory = () => undefined
-  const hasPendingHttpRequestForWork = () => false
-  const errors = []
-  const streamErrors = []
-  const stopCalls = []
-  let stopBehavior = async () => undefined
-
-  const normalizeHttpIdentity = new Function(
-    `${implementation.normalizeHttpIdentitySource}\nreturn normalizeHttpIdentity`
-  )()
-  const isCurrentWritableHttpSession = sessionId => (
-    normalizeHttpIdentity(currentSessionId.value) === normalizeHttpIdentity(sessionId)
-  )
-  const getPendingHttpRequestIdsForWork = (_sessionId, _workId, requestIds) => (
-    new Set(
-      (Array.isArray(requestIds) ? requestIds : [])
-        .map(normalizeHttpIdentity)
-        .filter(Boolean)
-    )
-  )
-  const resetHttpPollingState = new Function(
-    'httpPollingStateVersion',
-    'pendingHttpRequests',
-    'observedHttpWorkStatuses',
-    'observedHttpLatestMessageIds',
-    'fetchingHttpWorks',
-    'resolvedHttpWorks',
-    `${implementation.resetHttpPollingStateSource}\nreturn resetHttpPollingState`
-  )(
-    0,
-    pendingHttpRequests,
-    observedHttpWorkStatuses,
-    observedHttpLatestMessageIds,
-    fetchingHttpWorks,
-    resolvedHttpWorks
-  )
-  const trackSubmission = new Function(
-    'inFlightSubmissions',
-    `${implementation.trackSubmissionSource}\nreturn trackSubmission`
-  )(inFlightSubmissions)
-
-  const isCurrentSessionReadOnly = new Function(
-    'computed',
-    'currentSession',
-    `${implementation.readOnlySource}\nreturn isCurrentSessionReadOnly`
-  )(Vue.computed, currentSession)
-  const isStopping = new Function(
-    'computed',
-    'sessionManager',
-    'stoppingSessionIds',
-    `${implementation.stoppingSource}\nreturn isStopping`
-  )(Vue.computed, sessionManager, stoppingSessionIds)
-  const isReplyRunning = new Function(
-    'computed',
-    'isCurrentSessionReadOnly',
-    'chatState',
-    'currentSession',
-    'isStopping',
-    `${implementation.replyRunningSource}\nreturn isReplyRunning`
-  )(Vue.computed, isCurrentSessionReadOnly, chatState, currentSession, isStopping)
-
-  const chatApi = {
-    stopSession: sessionId => {
-      stopCalls.push(sessionId)
-      return stopBehavior(sessionId)
-    }
-  }
+  const translate = key => key
   const mergeLatestSessionHistory = async sessionId => {
     historyMergeCalls.push(sessionId)
   }
-  const finishHttpWorkLifecycle = new Function(
-    'normalizeHttpIdentity',
-    'getPendingHttpRequestIdsForWork',
-    'isCurrentWritableHttpSession',
-    'chatState',
-    'workLifecycleTracker',
-    'pendingHttpRequests',
-    `${implementation.finishHttpWorkLifecycleSource}\nreturn finishHttpWorkLifecycle`
-  )(
-    normalizeHttpIdentity,
-    getPendingHttpRequestIdsForWork,
-    isCurrentWritableHttpSession,
-    chatState,
-    workLifecycleTracker,
-    pendingHttpRequests
-  )
+  const stopSession = sessionId => {
+    stopCalls.push(sessionId)
+    return typeof stopBehavior === 'function' ? stopBehavior(sessionId) : stopBehavior
+  }
+
   const messageProcessor = {
     processStreamError: (...args) => {
       streamErrors.push(args)
-      return true
+      return processStreamError(...args)
     }
   }
-  const applyHttpWorkStatus = new Function(
-    'normalizeHttpIdentity',
-    'isCurrentWritableHttpSession',
-    'observedHttpWorkStatuses',
-    'getPendingHttpRequestIdsForWork',
-    'applyTodoTransportPayload',
-    'updateLlmRequestMetadata',
-    'startHttpHistoryBackgroundTaskSync',
-    'applyNonStreamSessionEvents',
-    'shouldProcessCompletedWork',
-    'processAiResponse',
-    'hasHttpResultMessage',
-    'messageProcessor',
-    'chatState',
-    't',
-    'ElMessage',
-    'finishHttpWorkLifecycle',
-    'resolvedHttpWorks',
-    `${implementation.applyHttpWorkStatusSource}\nreturn applyHttpWorkStatus`
-  )(
-    normalizeHttpIdentity,
-    isCurrentWritableHttpSession,
-    observedHttpWorkStatuses,
-    getPendingHttpRequestIdsForWork,
-    () => undefined,
-    () => undefined,
-    () => undefined,
-    () => undefined,
-    () => false,
-    () => undefined,
-    () => false,
-    messageProcessor,
-    chatState,
-    key => key,
-    { error: message => errors.push(message) },
-    finishHttpWorkLifecycle,
-    resolvedHttpWorks
-  )
-  const fetchHttpWorkStatus = async () => null
-  const processHttpSessionSnapshot = new Function(
-    'transport',
-    'sessionManager',
-    'isCurrentSessionReadOnly',
-    'normalizeHttpIdentity',
-    'maybeMergeHttpSessionHistory',
-    'observedHttpWorkStatuses',
-    'hasPendingHttpRequestForWork',
-    'initialHistoryLoaded',
-    'shouldFetchHttpWorkStatus',
-    'resolvedHttpWorks',
-    'fetchingHttpWorks',
-    'fetchHttpWorkStatus',
-    'isCurrentWritableHttpSession',
-    'mergeLatestSessionHistory',
-    'chatState',
-    `${implementation.processHttpSessionSnapshotSource}\nreturn processHttpSessionSnapshot`
-  )(
+
+  const api = {
+    replyWorkStatus: workId => {
+      replyWorkStatusCalls.push(workId)
+      return typeof replyWorkStatusBehavior === 'function'
+        ? replyWorkStatusBehavior(workId)
+        : replyWorkStatusBehavior
+    }
+  }
+  const httpPolling = createHttpReplyPolling({
     transport,
     sessionManager,
     isCurrentSessionReadOnly,
-    normalizeHttpIdentity,
-    maybeMergeHttpSessionHistory,
-    observedHttpWorkStatuses,
-    hasPendingHttpRequestForWork,
-    initialHistoryLoaded,
-    shouldFetchHttpWorkStatus,
-    resolvedHttpWorks,
-    fetchingHttpWorks,
-    fetchHttpWorkStatus,
-    isCurrentWritableHttpSession,
-    mergeLatestSessionHistory,
-    chatState
-  )
-  const stopReply = new Function(
-    'sessionManager',
-    'isCurrentSessionReadOnly',
-    'isReplyRunning',
-    'stoppingSessionIds',
-    'chatApi',
-    'inFlightSubmissions',
-    'pendingHttpRequests',
-    'sessionScopeActive',
-    'normalizeHttpIdentity',
-    'chatState',
-    'contextSummaryWorkKeys',
-    'contextSummaryRequestKeys',
-    'workLifecycleTracker',
-    'contextSummaryTracker',
-    'resetHttpPollingState',
-    'mergeLatestSessionHistory',
-    'ElMessage',
-    't',
-    `${implementation.stopReplySource}\nreturn stopReply`
-  )(
-    sessionManager,
-    isCurrentSessionReadOnly,
-    isReplyRunning,
-    stoppingSessionIds,
-    chatApi,
-    inFlightSubmissions,
-    pendingHttpRequests,
-    true,
-    normalizeHttpIdentity,
     chatState,
+    initialHistoryLoaded,
+    pendingHttpRequests,
+    workLifecycleTracker,
+    applyTodoTransportPayload: () => undefined,
+    updateLlmRequestMetadata: () => undefined,
+    startHttpHistoryBackgroundTaskSync: () => undefined,
+    applyNonStreamSessionEvents: () => undefined,
+    shouldProcessCompletedWork: () => false,
+    processAiResponse: () => undefined,
+    messageProcessor,
+    api,
+    mergeLatestSessionHistory,
+    reportError,
+    translate
+  })
+  const replyController = createReplyController({
+    sessionManager,
+    chatState,
+    currentSession,
+    isCurrentSessionReadOnly,
+    pendingHttpRequests,
     contextSummaryWorkKeys,
     contextSummaryRequestKeys,
     workLifecycleTracker,
     contextSummaryTracker,
-    resetHttpPollingState,
+    stopSession,
+    isSessionScopeActive: () => sessionScopeActive,
+    resetHttpPollingState: httpPolling.resetHttpPollingState,
     mergeLatestSessionHistory,
-    { error: message => errors.push(message) },
-    key => key
-  )
+    reportError,
+    translate
+  })
 
   return {
+    ...replyController,
+    ...httpPolling,
     attachments,
+    api,
     chatState,
     contextSummaryRequestKeys,
     contextSummaryTracker,
     contextSummaryWorkKeys,
     currentSessionId,
     errors,
-    finishHttpWorkLifecycle,
     historyMergeCalls,
-    inFlightSubmissions,
+    initialHistoryLoaded,
     isCurrentSessionReadOnly,
-    isReplyRunning,
-    applyHttpWorkStatus,
-    processHttpSessionSnapshot,
     messageProcessorErrors: streamErrors,
     pendingHttpRequests,
-    resolvedHttpWorks,
-    isStopping,
     refreshCalls,
+    replyWorkStatusCalls,
     sessions,
+    set replyWorkStatusBehavior(value) {
+      replyWorkStatusBehavior = value
+    },
+    set sessionScopeActive(value) {
+      sessionScopeActive = value
+    },
     set stopBehavior(value) {
       stopBehavior = value
     },
     stopCalls,
-    stopReply,
-    trackSubmission,
+    transport,
     workLifecycleTracker
   }
 }
 
 test('stopReply clears active lifecycle state, preserves history and prevents late loop resurrection', async () => {
-  const implementation = await loadImplementation()
   const historicalMessage = {
     id: 'history',
     db_id: 42,
@@ -392,7 +175,7 @@ test('stopReply clears active lifecycle state, preserves history and prevents la
       { work_id: 'work-A', status: 'running', request_ids: ['request-A'] }
     ]
   }
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [session],
     currentSessionId: 'A',
     loading: true,
@@ -446,10 +229,9 @@ test('stopReply clears active lifecycle state, preserves history and prevents la
   assert.equal(afterLateLoop.some(message => message.role === 'thinking'), false)
 })
 
-test('stopReply sends only one stop without in-flight submissions and blocks repeats while stopping', async () => {
-  const implementation = await loadImplementation()
+test('stopReply sends only one stop and blocks repeats while stopping', async () => {
   const stopDeferred = createDeferred()
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
     currentSessionId: 'A',
     loading: true
@@ -467,12 +249,10 @@ test('stopReply sends only one stop without in-flight submissions and blocks rep
 })
 
 test('stopReply waits for same-session submissions before a second stop, including rejected submissions', async () => {
-  const implementation = await loadImplementation()
-
   for (const shouldReject of [false, true]) {
     const stopDeferreds = []
     const secondStopCalled = createDeferred()
-    const harness = createHarness(implementation, {
+    const harness = createHarness({
       sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
       currentSessionId: 'A',
       loading: true
@@ -514,9 +294,9 @@ test('stopReply waits for same-session submissions before a second stop, includi
 })
 
 test('stopReply ignores in-flight submissions belonging to another session', async () => {
-  const implementation = await loadImplementation()
   const submissionDeferred = createDeferred()
-  const harness = createHarness(implementation, {
+  let submissionSettled = false
+  const harness = createHarness({
     sessions: [
       { session_id: 'A', source: 'http', is_loading: true, is_reply_running: true },
       { session_id: 'B', source: 'http', is_loading: true, is_reply_running: true }
@@ -528,25 +308,26 @@ test('stopReply ignores in-flight submissions belonging to another session', asy
     () => 'B',
     () => submissionDeferred.promise
   )
-  trackedSubmission.catch(() => undefined)
+  trackedSubmission.then(() => {
+    submissionSettled = true
+  })
 
   harness.stopBehavior = async () => undefined
   assert.equal(await harness.stopReply(), true)
   assert.deepEqual(harness.stopCalls, ['A'])
-  assert.equal(harness.inFlightSubmissions.size, 1)
+  assert.equal(submissionSettled, false)
 
   submissionDeferred.resolve('submitted')
   await trackedSubmission
-  assert.equal(harness.inFlightSubmissions.size, 0)
+  assert.equal(submissionSettled, true)
 })
 
 test('stopReply preserves loading, messages and draft when the stop request fails', async () => {
-  const implementation = await loadImplementation()
   const messages = [
     { id: 'queued', role: 'user', request_id: 'request-A', status: 'queued' },
     { id: 'thinking', role: 'thinking', request_ids: ['request-A'] }
   ]
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
     currentSessionId: 'A',
     loading: true,
@@ -570,7 +351,6 @@ test('stopReply preserves loading, messages and draft when the stop request fail
 })
 
 test('stopReply does not send a stop for read-only, missing or idle sessions', async () => {
-  const implementation = await loadImplementation()
   const cases = [
     {
       sessions: [{ session_id: 'read-only', source: 'external', is_loading: true, is_reply_running: false }],
@@ -590,15 +370,13 @@ test('stopReply does not send a stop for read-only, missing or idle sessions', a
   ]
 
   for (const options of cases) {
-    const harness = createHarness(implementation, options)
+    const harness = createHarness(options)
     assert.equal(await harness.stopReply(), false)
     assert.deepEqual(harness.stopCalls, [])
   }
 })
 
 test('stopReply ignores aggregate-only busy sessions for HTTP and WS', async () => {
-  const implementation = await loadImplementation()
-
   for (const source of ['http', 'ws']) {
     const session = {
       session_id: 'A',
@@ -607,7 +385,7 @@ test('stopReply ignores aggregate-only busy sessions for HTTP and WS', async () 
       is_reply_running: false,
       reply_works: []
     }
-    const harness = createHarness(implementation, {
+    const harness = createHarness({
       sessions: [session],
       currentSessionId: 'A',
       transportMode: source,
@@ -627,7 +405,6 @@ test('stopReply ignores aggregate-only busy sessions for HTTP and WS', async () 
 })
 
 test('processHttpSessionSnapshot clears stale local loading for an aggregate-only session', async () => {
-  const implementation = await loadImplementation()
   const session = {
     session_id: 'A',
     source: 'http',
@@ -635,7 +412,7 @@ test('processHttpSessionSnapshot clears stale local loading for an aggregate-onl
     is_reply_running: false,
     reply_works: []
   }
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [session],
     currentSessionId: 'A',
     loading: true,
@@ -660,8 +437,6 @@ test('processHttpSessionSnapshot clears stale local loading for an aggregate-onl
 })
 
 test('stopReply clears only remote reply state when aggregate work remains for HTTP and WS', async () => {
-  const implementation = await loadImplementation()
-
   for (const source of ['http', 'ws']) {
     const session = {
       session_id: 'A',
@@ -670,7 +445,7 @@ test('stopReply clears only remote reply state when aggregate work remains for H
       is_reply_running: true,
       reply_works: []
     }
-    const harness = createHarness(implementation, {
+    const harness = createHarness({
       sessions: [session],
       currentSessionId: 'A',
       transportMode: source,
@@ -691,7 +466,6 @@ test('stopReply clears only remote reply state when aggregate work remains for H
 })
 
 test('stopReply uses local loading before remote reply confirmation', async () => {
-  const implementation = await loadImplementation()
   const session = {
     session_id: 'A',
     source: 'http',
@@ -699,7 +473,7 @@ test('stopReply uses local loading before remote reply confirmation', async () =
     is_reply_running: false,
     reply_works: []
   }
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [session],
     currentSessionId: 'A',
     loading: true,
@@ -716,11 +490,10 @@ test('stopReply uses local loading before remote reply confirmation', async () =
 })
 
 test('stopReply isolates a completed stop for A after switching to B and allows B to stop independently', async () => {
-  const implementation = await loadImplementation()
   const stopA = createDeferred()
   const sessionA = { session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }
   const sessionB = { session_id: 'B', source: 'http', is_loading: true, is_reply_running: true }
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [sessionA, sessionB],
     currentSessionId: 'A',
     loading: true,
@@ -758,9 +531,30 @@ test('stopReply isolates a completed stop for A after switching to B and allows 
   assert.equal(sessionB.is_reply_running, false)
 })
 
+test('stopReply does not clear current state after the session scope is disposed', async () => {
+  const stopDeferred = createDeferred()
+  const session = { session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }
+  const harness = createHarness({
+    sessions: [session],
+    currentSessionId: 'A',
+    loading: true,
+    messages: [{ role: 'thinking', work_id: 'work-A', request_ids: ['request-A'] }]
+  })
+  harness.stopBehavior = () => stopDeferred.promise
+
+  const stopping = harness.stopReply()
+  harness.sessionScopeActive = false
+  stopDeferred.resolve()
+
+  assert.equal(await stopping, true)
+  assert.equal(harness.chatState.loading.value, true)
+  assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), true)
+  assert.equal(session.is_reply_running, true)
+  assert.deepEqual(harness.historyMergeCalls, [])
+})
+
 test('stopReply terminates compression tracked only by a work key', async () => {
-  const implementation = await loadImplementation()
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
     currentSessionId: 'A',
     loading: true,
@@ -789,8 +583,7 @@ test('stopReply terminates compression tracked only by a work key', async () => 
 })
 
 test('stopReply clears residual no-work thinking after a cancelled lifecycle was already terminal', async () => {
-  const implementation = await loadImplementation()
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [{ session_id: 'A', source: 'http', is_loading: true, is_reply_running: true }],
     currentSessionId: 'A',
     loading: true,
@@ -815,8 +608,7 @@ test('stopReply clears residual no-work thinking after a cancelled lifecycle was
 })
 
 test('cancelled HTTP work status finishes quietly and clears its lifecycle state', async () => {
-  const implementation = await loadImplementation()
-  const harness = createHarness(implementation, {
+  const harness = createHarness({
     sessions: [{ session_id: 'A', source: 'http' }],
     currentSessionId: 'A',
     inputMsg: 'keep this draft',
@@ -855,12 +647,10 @@ test('cancelled HTTP work status finishes quietly and clears its lifecycle state
   assert.equal(harness.pendingHttpRequests.has('request-B'), false)
   assert.equal(harness.pendingHttpRequests.has('request-other'), true)
   assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), true)
-  assert.equal(harness.resolvedHttpWorks.has('work-A'), true)
 })
 
-test('failed HTTP work status reports its actual error once before finishing cleanup', async () => {
-  const implementation = await loadImplementation()
-  const harness = createHarness(implementation, {
+test('failed HTTP work status reports its actual error once and cleans up lifecycle state', async () => {
+  const harness = createHarness({
     sessions: [{ session_id: 'A', source: 'http' }],
     currentSessionId: 'A',
     inputMsg: 'keep this draft',
@@ -876,14 +666,16 @@ test('failed HTTP work status reports its actual error once before finishing cle
     ]
   })
 
+  const statusData = {
+    session_id: 'A',
+    status: 'failed',
+    error: 'backend failure details',
+    result_message_id: 100,
+    request_ids: ['request-A', 'request-B']
+  }
   const result = harness.applyHttpWorkStatus(
     { work_id: 'work-A', request_ids: ['request-A', 'request-B'] },
-    {
-      session_id: 'A',
-      status: 'failed',
-      error: 'backend failure details',
-      request_ids: ['request-A', 'request-B']
-    },
+    statusData,
     'A'
   )
 
@@ -892,6 +684,7 @@ test('failed HTTP work status reports its actual error once before finishing cle
   assert.equal(harness.messageProcessorErrors.length, 1)
   assert.equal(harness.messageProcessorErrors[0][1], 'backend failure details')
   assert.deepEqual(harness.errors, ['backend failure details'])
+  assert.equal(harness.chatState.messages.value.filter(message => message.role === 'err').length, 1)
   assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), false)
   assert.equal(harness.chatState.messages.value.find(message => message.id === 'queued').status, undefined)
   assert.equal(harness.chatState.messages.value.find(message => message.id === 'history').content, 'historical answer')
@@ -900,5 +693,197 @@ test('failed HTTP work status reports its actual error once before finishing cle
   assert.equal(harness.pendingHttpRequests.has('request-B'), false)
   assert.equal(harness.pendingHttpRequests.has('request-other'), true)
   assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), true)
-  assert.equal(harness.resolvedHttpWorks.has('work-A'), true)
+
+  harness.applyHttpWorkStatus(
+    { work_id: 'work-A', request_ids: ['request-A', 'request-B'] },
+    statusData,
+    'A'
+  )
+  assert.equal(harness.chatState.messages.value.filter(message => message.role === 'err').length, 1)
+  assert.deepEqual(harness.errors, ['backend failure details'])
+})
+
+test('failed HTTP status does not duplicate an existing error result message', async () => {
+  const harness = createHarness({
+    sessions: [{ session_id: 'A', source: 'http' }],
+    currentSessionId: 'A',
+    messages: [
+      { id: 'thinking', role: 'thinking', work_id: 'work-A', request_ids: ['request-A'] },
+      { id: 'existing-error', role: 'err', db_id: 77, content: 'already recorded' }
+    ],
+    pendingHttpRequests: [
+      ['request-A', { sessionId: 'A', workId: 'work-A' }]
+    ]
+  })
+
+  const result = harness.applyHttpWorkStatus(
+    { work_id: 'work-A', request_ids: ['request-A'] },
+    {
+      session_id: 'A',
+      status: 'failed',
+      error: 'backend failure details',
+      result_message_id: 77,
+      request_ids: ['request-A']
+    },
+    'A'
+  )
+
+  assert.equal(result?.terminal, true)
+  assert.deepEqual(harness.messageProcessorErrors, [])
+  assert.deepEqual(harness.errors, [])
+  assert.equal(harness.chatState.messages.value.filter(message => message.role === 'err').length, 1)
+  assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), false)
+})
+
+test('HTTP terminal status is fetched once and duplicate snapshots do not report a second error', async () => {
+  const session = {
+    session_id: 'A',
+    source: 'http',
+    is_reply_running: false,
+    reply_works: [
+      { work_id: 'work-A', status: 'failed', request_ids: ['request-A'] }
+    ]
+  }
+  const harness = createHarness({
+    sessions: [session],
+    currentSessionId: 'A',
+    messages: [{ role: 'thinking', work_id: 'work-A', request_ids: ['request-A'] }],
+    pendingHttpRequests: [
+      ['request-A', { sessionId: 'A', workId: 'work-A' }]
+    ]
+  })
+  harness.replyWorkStatusBehavior = async workId => ({
+    data: {
+      data: {
+        session_id: 'A',
+        status: 'failed',
+        error: `failure for ${workId}`,
+        request_ids: ['request-A']
+      }
+    }
+  })
+
+  await harness.processHttpSessionSnapshot([session])
+  assert.deepEqual(harness.replyWorkStatusCalls, ['work-A'])
+  assert.deepEqual(harness.errors, ['failure for work-A'])
+  assert.equal(harness.chatState.messages.value.filter(message => message.role === 'err').length, 1)
+
+  await harness.processHttpSessionSnapshot([session])
+  assert.deepEqual(harness.replyWorkStatusCalls, ['work-A'])
+  assert.deepEqual(harness.errors, ['failure for work-A'])
+  assert.equal(harness.chatState.messages.value.filter(message => message.role === 'err').length, 1)
+})
+
+test('HTTP status from another session or transport mode is not applied', async () => {
+  const session = {
+    session_id: 'A',
+    source: 'http',
+    reply_works: [{ work_id: 'work-A', request_ids: ['request-A'] }]
+  }
+  const messages = [{ role: 'thinking', work_id: 'work-A', request_ids: ['request-A'] }]
+  const harness = createHarness({
+    sessions: [session],
+    currentSessionId: 'A',
+    messages,
+    pendingHttpRequests: [
+      ['request-A', { sessionId: 'A', workId: 'work-A' }]
+    ]
+  })
+  const status = {
+    status: 'failed',
+    error: 'should not be applied',
+    request_ids: ['request-A']
+  }
+
+  assert.equal(
+    harness.applyHttpWorkStatus({ work_id: 'work-A', request_ids: ['request-A'] }, {
+      ...status,
+      session_id: 'B'
+    }, 'A'),
+    null
+  )
+  assert.deepEqual(harness.chatState.messages.value, messages)
+  assert.equal(harness.pendingHttpRequests.has('request-A'), true)
+
+  harness.transport.transportMode.value = 'ws'
+  assert.equal(
+    harness.applyHttpWorkStatus({ work_id: 'work-A', request_ids: ['request-A'] }, {
+      ...status,
+      session_id: 'A'
+    }, 'A'),
+    null
+  )
+  assert.deepEqual(harness.chatState.messages.value, messages)
+  assert.equal(harness.pendingHttpRequests.has('request-A'), true)
+  assert.deepEqual(harness.errors, [])
+})
+
+test('HTTP status queries returning after reset or session/mode changes are ignored', async () => {
+  for (const transition of ['reset', 'session', 'mode']) {
+    const statusDeferred = createDeferred()
+    const sessionA = {
+      session_id: 'A',
+      source: 'http',
+      is_reply_running: false,
+      reply_works: [{ work_id: 'work-A', status: 'failed', request_ids: ['request-A'] }]
+    }
+    const sessionB = {
+      session_id: 'B',
+      source: 'http',
+      is_reply_running: false,
+      reply_works: []
+    }
+    const harness = createHarness({
+      sessions: [sessionA, sessionB],
+      currentSessionId: 'A',
+      messages: [{ role: 'thinking', work_id: 'work-A', request_ids: ['request-A'] }],
+      pendingHttpRequests: [
+        ['request-A', { sessionId: 'A', workId: 'work-A' }]
+      ]
+    })
+    harness.replyWorkStatusBehavior = () => statusDeferred.promise
+
+    const processing = harness.processHttpSessionSnapshot([sessionA])
+    assert.deepEqual(harness.replyWorkStatusCalls, ['work-A'])
+    if (transition === 'reset') {
+      harness.resetHttpPollingState()
+    } else if (transition === 'session') {
+      harness.currentSessionId.value = 'B'
+    } else {
+      harness.transport.transportMode.value = 'ws'
+    }
+
+    statusDeferred.resolve({
+      data: {
+        data: {
+          session_id: 'A',
+          status: 'failed',
+          error: 'late failure',
+          request_ids: ['request-A']
+        }
+      }
+    })
+    await processing
+
+    assert.deepEqual(harness.errors, [])
+    assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), true)
+    assert.equal(harness.chatState.messages.value.some(message => message.role === 'err'), false)
+  }
+})
+
+test('processStreamError deduplicates event IDs and omits invalid message IDs', () => {
+  const messages = Vue.ref([])
+
+  assert.equal(
+    processStreamError(messages, 'first error', null, 'request-A', 'work-A', 'event-A', 'invalid'),
+    true
+  )
+  assert.equal(messages.value[0].role, 'err')
+  assert.equal(Object.hasOwn(messages.value[0], 'db_id'), false)
+
+  assert.equal(
+    processStreamError(messages, 'duplicate error', null, 'request-B', 'work-B', 'event-A', 17),
+    false
+  )
+  assert.equal(messages.value.length, 1)
 })

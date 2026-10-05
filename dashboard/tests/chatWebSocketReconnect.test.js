@@ -1,92 +1,81 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { markRaw, ref } from 'vue'
+import { createWebSocketConnection } from '../src/composables/webSocketConnection.js'
+import { createChatTransport } from '../src/composables/chat/chatTransportRuntime.js'
 import { resumeSessionStream } from '../src/composables/chat/streamResume.js'
 import { createWorkLifecycleTracker } from '../src/composables/chat/workLifecycleTracker.js'
 
-const source = readFileSync(
-  new URL('../src/composables/useWebSocket.js', import.meta.url),
-  'utf8'
-)
-const transportSource = readFileSync(
-  new URL('../src/composables/chat/useChatTransport.js', import.meta.url),
-  'utf8'
-)
-
-const loadUseWebSocket = ({ sockets, timers }) => {
-  const moduleSource = source
-    .replace(/^import .* from 'vue'$/m, '')
-    .replace(/^import .* from '\.\.\/api'$/m, '')
-    .replace(/^import .* from 'element-plus'$/m, '')
-    .replace(/^import .* from '\.\.\/i18n'$/m, '')
-    .replace('export function useWebSocket()', 'function useWebSocket()')
-
-  return new Function(
-    'ref',
-    'onUnmounted',
-    'chatApi',
-    'ElMessage',
-    'i18n',
-    'setTimeout',
-    'clearTimeout',
-    'WebSocket',
-    `${moduleSource}\nreturn useWebSocket`
-  )(
-    value => ({ value }),
-    () => {},
-    { createWebSocket: token => {
-      const socket = new FakeWebSocket(token)
+const createConnection = ({
+  sockets = [],
+  timers = [],
+  heartbeatTimers = [],
+  warnings = [],
+  translations = []
+} = {}) => {
+  const manager = createWebSocketConnection({
+    createSocket: token => {
+      const socket = markRaw(new FakeWebSocket(token))
       sockets.push(socket)
       return socket
-    } },
-    { warning: () => {} },
-    { global: { t: key => key } },
-    callback => {
+    },
+    translate: key => {
+      translations.push(key)
+      return key
+    },
+    warn: message => warnings.push(message),
+    scheduleReconnect: callback => {
       timers.push(callback)
       return callback
     },
-    callback => {
+    cancelReconnect: callback => {
       const index = timers.indexOf(callback)
       if (index !== -1) timers.splice(index, 1)
     },
-    { OPEN: 1 }
-  )
+    scheduleHeartbeat: callback => {
+      heartbeatTimers.push(callback)
+      return callback
+    },
+    cancelHeartbeat: callback => {
+      const index = heartbeatTimers.indexOf(callback)
+      if (index !== -1) heartbeatTimers.splice(index, 1)
+    }
+  })
+
+  return { manager, sockets, timers, heartbeatTimers, warnings, translations }
 }
 
-const loadUseChatTransport = ({ manager }) => {
-  const moduleSource = transportSource
-    .replace(/^import .*$/gm, '')
-    .replace('export function useChatTransport()', 'function useChatTransport()')
+const loadUseWebSocket = options => () => createConnection(options).manager
 
-  return new Function(
-    'ref',
-    'ElMessage',
-    'chatApi',
-    'useWebSocket',
-    'i18n',
-    'truncateErrorMessage',
-    'getStreamEventIdentity',
-    'localStorage',
-    `${moduleSource}\nreturn useChatTransport`
-  )(
-    value => ({ value }),
-    { error: () => {} },
-    { completions: async () => ({ data: {} }) },
-    () => manager,
-    { global: { t: key => key } },
-    value => value,
-    () => null,
-    { getItem: () => 'token' }
-  )
+const createTransport = ({
+  manager,
+  api = { completions: async () => ({ data: {} }) },
+  getToken = () => 'token',
+  errors = [],
+  translations = []
+}) => {
+  const transport = createChatTransport({
+    wsManager: manager,
+    api,
+    getToken,
+    reportError: message => errors.push(message),
+    translate: key => {
+      translations.push(key)
+      return key
+    }
+  })
+  return { transport, api, errors, translations }
 }
 
-const createTransportManager = () => {
+const loadUseChatTransport = options => () => createTransport(options).transport
+
+const createTransportManager = ({ sendResult = true } = {}) => {
   const handlers = []
   const sent = []
   const connectCalls = []
   let disconnectCalls = 0
   const manager = {
-    isConnected: { value: false },
+    isConnected: ref(false),
     onMessage(handler) {
       handlers.push(handler)
       return () => {
@@ -104,7 +93,7 @@ const createTransportManager = () => {
     },
     sendMessage(data) {
       sent.push(data)
-      return true
+      return sendResult
     },
     emit(data) {
       if (data.type === 'connection_closed') manager.isConnected.value = false
@@ -129,6 +118,12 @@ class FakeWebSocket {
     this.onopen = null
     this.onclose = null
     this.onerror = null
+    this.onmessage = null
+    this.sent = []
+  }
+
+  send(data) {
+    this.sent.push(data)
   }
 
   close(code, reason) {
@@ -935,4 +930,132 @@ test('cancelled merged work clears only its request callbacks', async () => {
     }),
     messages
   )
+})
+
+test('the same websocket subscriber is registered once and can be cancelled safely', async () => {
+  const sockets = []
+  const timers = []
+  const { manager } = createConnection({ sockets, timers })
+  const messages = []
+  const handler = message => messages.push(message)
+  const cancelFirst = manager.onMessage(handler)
+  const cancelSecond = manager.onMessage(handler)
+
+  const connected = manager.connect('token')
+  sockets[0].readyState = 1
+  sockets[0].onopen()
+  await connected
+
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'first' }) })
+  assert.deepEqual(messages, [{ type: 'first' }])
+
+  cancelFirst()
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'after-first-cancel' }) })
+  assert.deepEqual(messages, [{ type: 'first' }])
+
+  cancelSecond()
+  cancelSecond()
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'after-second-cancel' }) })
+  assert.deepEqual(messages, [{ type: 'first' }])
+})
+
+test('invalid websocket JSON is delivered as a raw message', async () => {
+  const sockets = []
+  const timers = []
+  const { manager } = createConnection({ sockets, timers })
+  const messages = []
+  manager.onMessage(message => messages.push(message))
+
+  const connected = manager.connect('token')
+  sockets[0].readyState = 1
+  sockets[0].onopen()
+  await connected
+
+  sockets[0].onmessage({ data: 'not-json' })
+
+  assert.deepEqual(messages, [{ type: 'raw', data: 'not-json' }])
+})
+
+test('events from an old websocket are ignored after reconnecting', async () => {
+  const sockets = []
+  const timers = []
+  const { manager } = createConnection({ sockets, timers })
+  const events = []
+  manager.onMessage(event => events.push(event))
+
+  const connected = manager.connect('token')
+  sockets[0].readyState = 1
+  sockets[0].onopen()
+  await connected
+
+  sockets[0].onclose({ code: 1006, reason: 'abnormal' })
+  timers.shift()()
+  sockets[1].readyState = 1
+  sockets[1].onopen()
+
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'stale' }) })
+  sockets[0].onclose({ code: 1006, reason: 'stale close' })
+
+  assert.deepEqual(events, [
+    { type: 'connection_closed' },
+    { type: 'connection_reopened' }
+  ])
+  assert.equal(timers.length, 0)
+})
+
+test('dispose cancels heartbeat and rejects a pending connection', async () => {
+  const sockets = []
+  const timers = []
+  const heartbeatTimers = []
+  const { manager } = createConnection({ sockets, timers, heartbeatTimers })
+
+  const pendingConnection = manager.connect('token')
+  manager.startHeartbeat()
+  assert.equal(heartbeatTimers.length, 1)
+
+  sockets[0].readyState = 1
+  heartbeatTimers[0]()
+  assert.deepEqual(sockets[0].sent, [JSON.stringify({ type: 'ping' })])
+
+  manager.dispose()
+
+  assert.equal(heartbeatTimers.length, 0)
+  assert.equal(timers.length, 0)
+  assert.deepEqual(sockets[0].closeEvent, {
+    code: 1000,
+    reason: 'User initiated close'
+  })
+  await assert.rejects(pendingConnection)
+})
+
+test('transport exposes missing-token and websocket-send failure results', async () => {
+  const missingTokenManager = createTransportManager()
+  const missingTokenTransport = createTransport({
+    manager: missingTokenManager.manager,
+    getToken: () => null
+  }).transport
+
+  await assert.rejects(
+    () => missingTokenTransport.wsSend({ message: 'not sent' }),
+    error => error.message === 'chat.not_logged_in'
+  )
+  assert.deepEqual(missingTokenManager.sent, [])
+
+  const failedManager = createTransportManager({ sendResult: false })
+  const errors = []
+  const failedTransport = createTransport({
+    manager: failedManager.manager,
+    errors
+  }).transport
+
+  assert.equal(await failedTransport.wsSend({
+    message: 'send failure',
+    requestId: 'failed-request'
+  }), false)
+  assert.deepEqual(
+    await failedTransport.waitForSubmissionAcknowledgement('failed-request'),
+    { status: 'unknown', data: null }
+  )
+  assert.equal(await failedTransport.resumeSession({ sessionId: 'failed-session' }), false)
+  assert.deepEqual(errors, ['chat.ws_message_send_failed'])
 })

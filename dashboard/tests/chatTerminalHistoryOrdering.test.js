@@ -1,78 +1,13 @@
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
 import test from 'node:test'
 import {
-  findAssistantResponseReplacementIndex,
-  isAssistantResponse,
-  isPlainAssistantResponse,
-  mergeAssistantResponseIntoList
-} from '../src/utils/assistantResponseIdentity.js'
-
-const processorSource = fs.readFileSync(new URL('../src/composables/chat/useMessageProcessor.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-
-const extractInsertAiMessagesByThinking = () => {
-  const startMarker = '  const _insertAiMessagesByThinking = '
-  const start = processorSource.indexOf(startMarker)
-  assert.notEqual(start, -1, 'expected _insertAiMessagesByThinking in useMessageProcessor.js')
-  const endMarker = '\n\n  return {'
-  const end = processorSource.indexOf(endMarker, start)
-  assert.notEqual(end, -1, 'expected end of _insertAiMessagesByThinking in useMessageProcessor.js')
-  const declaration = processorSource.slice(start + 2, end)
-  const expression = declaration.replace(/^const _insertAiMessagesByThinking = /, '')
-  return new Function(
-    'findAssistantResponseReplacementIndex',
-    'getToolMessageDedupeKeys',
-    'isAssistantResponse',
-    'isPlainAssistantResponse',
-    'mergeAssistantResponseIntoList',
-    'resolveAssistantDisplayContent',
-    'findThinkingIndex',
-    'findLastRelatedStreamMessageIndex',
-    `return (${expression})`
-  )(
-    findAssistantResponseReplacementIndex,
-    getToolMessageDedupeKeys,
-    isAssistantResponse,
-    isPlainAssistantResponse,
-    mergeAssistantResponseIntoList,
-    content => content ?? '',
-    () => -1,
-    findLastRelatedStreamMessageIndex
-  )
-}
+  insertTerminalHistory,
+  processStreamToolStart
+} from '../src/composables/chat/terminalHistory.js'
 
 const parseContent = message => {
   if (typeof message?.content !== 'string') return message?.content
   try { return JSON.parse(message.content) } catch { return null }
-}
-
-function getToolMessageDedupeKeys(message) {
-  const content = parseContent(message)
-  const keys = []
-  const toolCalls = Array.isArray(message?.tool_calls)
-    ? message.tool_calls
-    : Array.isArray(content?.tool_calls)
-      ? content.tool_calls
-      : []
-  for (const toolCall of toolCalls) {
-    const id = toolCall?.id || toolCall?.function?.id
-    if (id) keys.push(`tool_call:${id}`)
-  }
-  const toolCallId = message?.tool_call_id || content?.tool_call_id
-  if ((message?.role === 'tool' || content?.role === 'tool') && toolCallId) {
-    keys.push(`tool_result:${toolCallId}`)
-  }
-  return keys
-}
-
-function findLastRelatedStreamMessageIndex(messages, workId, requestId) {
-  if (workId !== undefined && workId !== null && workId !== '') {
-    const stableWorkId = String(workId)
-    const index = messages.findLastIndex(message => message.role !== 'thinking' && String(message.work_id ?? '') === stableWorkId)
-    if (index !== -1) return index
-  }
-  if (requestId === undefined || requestId === null || requestId === '') return -1
-  return messages.findLastIndex(message => message.role !== 'thinking' && message.request_id === requestId)
 }
 
 const toolCallMessage = (id, name) => ({
@@ -91,7 +26,6 @@ const toolResultMessage = id => ({
 })
 
 test('terminal history reconciliation keeps a missing later tool round before the already streamed final assistant', () => {
-  const insertAiMessagesByThinking = extractInsertAiMessagesByThinking()
   const messagesRef = {
     value: [
       { ...toolCallMessage('write-1', 'write_file'), work_id: 'work-1' },
@@ -115,47 +49,44 @@ test('terminal history reconciliation keeps a missing later tool round before th
     ]
   }
 
-  const terminalHistoryMessages = [
-    toolCallMessage('shell-2', 'execute_shell'),
-    toolResultMessage('shell-2'),
-    {
-      id: 'assistant-final-persisted',
-      role: 'assistant',
-      content: '好的，我已经停下了。',
-      response_id: 'response-final',
-      request_id: 'request-stop',
-      work_id: 'work-1',
-      turn: 1,
-      db_id: '42'
-    }
-  ]
-
-  insertAiMessagesByThinking(
+  insertTerminalHistory(
     messagesRef,
-    terminalHistoryMessages,
+    [
+      toolCallMessage('shell-2', 'execute_shell'),
+      toolResultMessage('shell-2'),
+      {
+        id: 'assistant-final-persisted',
+        role: 'assistant',
+        content: '好的，我已经停下了。',
+        response_id: 'response-final',
+        request_id: 'request-stop',
+        work_id: 'work-1',
+        turn: 1,
+        db_id: '42'
+      }
+    ],
     null,
     'request-stop',
     'work-1'
   )
 
-  const relevantOrder = messagesRef.value
-    .map(message => {
-      const keys = getToolMessageDedupeKeys(message)
-      if (keys.includes('tool_call:shell-2')) return 'shell-call'
-      if (keys.includes('tool_result:shell-2')) return 'shell-result'
-      if (message.response_id === 'response-final') return 'final-assistant'
-      return null
-    })
-    .filter(Boolean)
-
   assert.deepEqual(
-    relevantOrder,
-    ['shell-call', 'shell-result', 'final-assistant'],
-    'terminal history reconciliation must preserve server history order'
+    messagesRef.value.map(message => message.id),
+    [
+      'tool-call-write-1',
+      'tool-result-write-1',
+      'user-stop',
+      'tool-call-shell-2',
+      'tool-result-shell-2',
+      'assistant-final-live'
+    ]
   )
+  assert.deepEqual(parseContent(messagesRef.value[3]).tool_calls.map(call => call.id), ['shell-2'])
+  assert.equal(parseContent(messagesRef.value[4]).tool_call_id, 'shell-2')
+  assert.equal(messagesRef.value[5].response_id, 'response-final')
 })
+
 test('terminal history reconciliation does not duplicate an already streamed tool call', () => {
-  const insertAiMessagesByThinking = extractInsertAiMessagesByThinking()
   const messagesRef = {
     value: [
       {
@@ -182,7 +113,7 @@ test('terminal history reconciliation does not duplicate an already streamed too
     ]
   }
 
-  insertAiMessagesByThinking(
+  insertTerminalHistory(
     messagesRef,
     [
       toolCallMessage('shell-live', 'execute_shell'),
@@ -203,51 +134,21 @@ test('terminal history reconciliation does not duplicate an already streamed too
     'work-1'
   )
 
-  const shellCallCount = messagesRef.value.filter(message =>
-    getToolMessageDedupeKeys(message).includes('tool_call:shell-live')
-  ).length
-  const shellResultCount = messagesRef.value.filter(message =>
-    getToolMessageDedupeKeys(message).includes('tool_result:shell-live')
-  ).length
-
-  assert.equal(shellCallCount, 1, 'terminal history must not duplicate an already streamed tool call')
-  assert.equal(shellResultCount, 1, 'terminal history must keep the existing tool result paired with the call')
+  assert.deepEqual(
+    messagesRef.value.map(message => message.id),
+    ['tool-call-shell-live', 'tool-result-shell-live', 'assistant-final-live']
+  )
+  assert.equal(
+    messagesRef.value.filter(message => parseContent(message)?.tool_calls?.some(call => call.id === 'shell-live')).length,
+    1
+  )
+  assert.equal(
+    messagesRef.value.filter(message => parseContent(message)?.tool_call_id === 'shell-live').length,
+    1
+  )
 })
 
-
 test('tool-call conversion preserves both streamed body and archived reasoning', () => {
-  const source = fs.readFileSync(new URL('../src/composables/chat/useMessageProcessor.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-  const startMarker = '  const processStreamToolStart = '
-  const start = source.indexOf(startMarker)
-  assert.notEqual(start, -1)
-  const endMarker = '\n\n  // '
-  const end = source.indexOf(endMarker, start)
-  assert.notEqual(end, -1)
-  const declaration = source.slice(start + 2, end)
-  const expression = declaration.replace(/^const processStreamToolStart = /, '')
-
-  const normalizeMessageContent = content => {
-    try { return typeof content === 'string' ? JSON.parse(content) : content } catch { return content }
-  }
-  const isToolCall = message => {
-    const content = normalizeMessageContent(message?.content)
-    return message?.role === 'assistant' && Array.isArray(content?.tool_calls) && content.tool_calls.length > 0
-  }
-  const processStreamToolStart = new Function(
-    'findToolCallIndex',
-    'normalizeMessageContent',
-    'isToolCall',
-    'insertBeforeThinking',
-    'findLastRelatedStreamMessageIndex',
-    `return (${expression})`
-  )(
-    () => -1,
-    normalizeMessageContent,
-    isToolCall,
-    () => false,
-    () => -1
-  )
-
   const messagesRef = { value: [{
     id: 'assistant-live',
     role: 'assistant',
@@ -269,10 +170,116 @@ test('tool-call conversion preserves both streamed body and archived reasoning',
     'work-1'
   )
 
+  const converted = messagesRef.value[0]
+  const content = parseContent(converted)
   assert.equal(messagesRef.value.length, 1)
-  assert.equal(messagesRef.value[0].reasoning_content, 'persist me')
-  assert.equal(normalizeMessageContent(messagesRef.value[0].content).content, '**Executing Python script**')
-  assert.equal(messagesRef.value[0].turn, 1)
-  assert.equal(messagesRef.value[0].db_id, 42)
-  assert.equal(isToolCall(messagesRef.value[0]), true)
+  assert.equal(content.content, '**Executing Python script**')
+  assert.deepEqual(content.tool_calls, [{ id: 'call-1', name: 'tool', arguments: '{}' }])
+  assert.equal(converted.reasoning_content, 'persist me')
+  assert.equal(converted.response_id, 'response-1')
+  assert.equal(converted.request_id, 'request-1')
+  assert.equal(converted.work_id, 'work-1')
+  assert.equal(converted.turn, 1)
+  assert.equal(converted.db_id, 42)
+})
+
+test('empty terminal history leaves live messages unchanged', () => {
+  const initialMessages = [{ id: 'live', role: 'assistant', content: 'live' }]
+  const messagesRef = { value: initialMessages }
+
+  insertTerminalHistory(messagesRef, [], null, 'request-1', 'work-1')
+  insertTerminalHistory(messagesRef, null, null, 'request-1', 'work-1')
+
+  assert.strictEqual(messagesRef.value, initialMessages)
+  assert.deepEqual(messagesRef.value, [{ id: 'live', role: 'assistant', content: 'live' }])
+})
+
+test('empty assistant body is retained when files or reasoning are present', () => {
+  const messagesRef = { value: [] }
+  const archivedFiles = {
+    id: 'assistant-files',
+    role: 'assistant',
+    content: '',
+    files: [{ name: 'result.txt' }]
+  }
+  const archivedReasoning = {
+    id: 'assistant-reasoning',
+    role: 'assistant',
+    content: '  ',
+    reasoning_content: 'reasoning survives'
+  }
+
+  insertTerminalHistory(messagesRef, [archivedFiles, archivedReasoning])
+
+  assert.deepEqual(messagesRef.value.map(message => message.id), ['assistant-files', 'assistant-reasoning'])
+  assert.deepEqual(messagesRef.value[0].files, [{ name: 'result.txt' }])
+  assert.equal(messagesRef.value[1].reasoning_content, 'reasoning survives')
+})
+
+test('terminal history inserts tool messages before the matching thinking message', () => {
+  const messagesRef = {
+    value: [
+      { id: 'user-1', role: 'user', content: 'run it' },
+      { id: 'thinking-1', role: 'thinking', content: '', request_id: 'request-1' },
+      { id: 'user-2', role: 'user', content: 'still waiting' }
+    ]
+  }
+
+  insertTerminalHistory(
+    messagesRef,
+    [toolCallMessage('shell-1', 'execute_shell'), toolResultMessage('shell-1')],
+    'thinking-1',
+    'request-1'
+  )
+
+  assert.deepEqual(
+    messagesRef.value.map(message => message.id),
+    ['user-1', 'tool-call-shell-1', 'tool-result-shell-1', 'thinking-1', 'user-2']
+  )
+})
+
+test('duplicate terminal history entries are inserted once and keep tool order', () => {
+  const messagesRef = { value: [] }
+  const history = [
+    toolCallMessage('call-a', 'first'),
+    toolCallMessage('call-a', 'first'),
+    toolResultMessage('call-a'),
+    toolResultMessage('call-a'),
+    toolCallMessage('call-b', 'second'),
+    toolResultMessage('call-b')
+  ]
+
+  insertTerminalHistory(messagesRef, history)
+  insertTerminalHistory(messagesRef, history)
+
+  assert.deepEqual(
+    messagesRef.value.map(message => {
+      const content = parseContent(message)
+      return content?.tool_calls ? `call:${content.tool_calls[0].id}` : `result:${content.tool_call_id}`
+    }),
+    ['call:call-a', 'result:call-a', 'call:call-b', 'result:call-b']
+  )
+})
+
+test('duplicate stream tool starts are idempotent', () => {
+  const messagesRef = { value: [] }
+
+  processStreamToolStart(messagesRef, { id: 'call-1', name: 'tool', arguments: '{}' }, null, 'response-1', 'request-1', 'work-1')
+  processStreamToolStart(messagesRef, { id: 'call-1', name: 'updated-tool', arguments: '{"value":1}' }, null, 'response-1', 'request-1', 'work-1')
+
+  const content = parseContent(messagesRef.value[0])
+  assert.equal(messagesRef.value.length, 1)
+  assert.deepEqual(content.tool_calls, [{ id: 'call-1', name: 'updated-tool', arguments: '{"value":1}' }])
+})
+
+test('multiple tool starts with one response share one assistant message', () => {
+  const messagesRef = { value: [] }
+
+  processStreamToolStart(messagesRef, { id: 'call-a', name: 'first', arguments: '{}' }, null, 'response-1', 'request-1', 'work-1')
+  processStreamToolStart(messagesRef, { id: 'call-b', name: 'second', arguments: '{"n":2}' }, null, 'response-1', 'request-1', 'work-1')
+
+  const content = parseContent(messagesRef.value[0])
+  assert.equal(messagesRef.value.length, 1)
+  assert.deepEqual(content.tool_calls.map(toolCall => toolCall.id), ['call-a', 'call-b'])
+  assert.equal(messagesRef.value[0].response_id, 'response-1')
 })

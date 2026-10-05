@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../src/utils/chatPresentation.js'
@@ -17,6 +16,8 @@ test('reasoning collapse identity falls back to work and turn when response iden
     getReasoningCollapseName({ role: 'assistant', work_id: 17, turn: 3 }),
     'reasoning:work:17:turn:3'
   )
+  assert.equal(getReasoningCollapseName({ db_id: 17, id: 42 }), 'reasoning:db:17')
+  assert.equal(getReasoningCollapseName({}), 'reasoning:message:unknown')
 })
 
 test('chat activity notice uses one explicit priority order', () => {
@@ -33,13 +34,6 @@ test('streamed reasoning is followable output just like assistant and tool messa
   assert.equal(isFollowableLlmOutput({ type: 'tool_group', role: 'assistant' }), true)
   assert.equal(isFollowableLlmOutput({ role: 'thinking' }), false)
   assert.equal(isFollowableLlmOutput({ role: 'user' }), false)
-})
-
-test('chat message list routes reasoning through the same output-follow path', () => {
-  const listSource = readFileSync(new URL('../src/components/ChatMessageList.vue', import.meta.url), 'utf8')
-
-  assert.match(
-    listSource,
-    /const isFollowableIncomingMessage = message => \(\s*isFollowableLlmOutput\(message\)/
-  )
+  assert.equal(isFollowableLlmOutput(), false)
+  assert.equal(isFollowableLlmOutput(null), false)
 })
