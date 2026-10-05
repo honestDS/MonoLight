@@ -16,7 +16,7 @@ from app.core.tools import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.dispatcher import provider_state
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 
 
 class _Session:
@@ -161,7 +161,7 @@ def _install_dispatcher_stubs(
             }
         )
         event_log.append("generate")
-        return SimpleNamespace(message=responses.pop(0))
+        return InternalResponse(message=responses.pop(0), model=kwargs["model_id"], usage={})
 
     async def generate_with_stream_callback(**kwargs):
         request_log.append(
@@ -175,7 +175,7 @@ def _install_dispatcher_stubs(
         response_message = responses.pop(0)
         if isinstance(response_message.content, str) and response_message.content:
             await kwargs["on_content"](response_message.content)
-        return SimpleNamespace(message=response_message)
+        return InternalResponse(message=response_message, model=kwargs["model_id"], usage={})
 
     async def isolated_tool(*args, **kwargs):
         if process_tool is not None:

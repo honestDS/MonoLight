@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import path from 'node:path'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
 
 import {
   shouldDeferChatContent,
@@ -10,8 +7,6 @@ import {
   shouldReleaseChatContent,
   shouldReturnToWelcomeAfterSessionDelete
 } from '../src/utils/chatContentReveal.js'
-
-const dashboardDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 test('new-session to existing-session transition defers content until the welcome exit finishes', () => {
   assert.equal(shouldDeferChatContent({
@@ -47,6 +42,19 @@ test('a second session selection during welcome exit remains deferred', () => {
   }), true)
 })
 
+test('empty session ids do not defer or release chat content', () => {
+  assert.equal(shouldDeferChatContent({
+    wasWelcome: true,
+    deferActive: true,
+    sessionId: ''
+  }), false)
+
+  assert.equal(shouldReleaseChatContent({
+    currentSessionId: 'session-b',
+    propertyName: 'transform'
+  }), false)
+})
+
 test('only the current input-area transform transition releases deferred content', () => {
   const base = {
     deferredSessionId: 'session-b',
@@ -60,22 +68,6 @@ test('only the current input-area transform transition releases deferred content
     currentSessionId: 'session-b',
     propertyName: 'transform'
   }), false)
-})
-
-test('welcome exit scrolls revealed history to the bottom after rendering', async () => {
-  const source = await readFile(path.join(dashboardDirectory, 'src/views/ChatView.vue'), 'utf8')
-  const handlerStart = source.indexOf('const handleWelcomeExitTransitionEnd =')
-  const handlerEnd = source.indexOf('const guidanceSubmitting', handlerStart)
-  const handlerSource = source.slice(handlerStart, handlerEnd)
-
-  const releaseIndex = handlerSource.indexOf('deferredContentSessionId.value = null')
-  const renderIndex = handlerSource.indexOf('await nextTick()')
-  const scrollIndex = handlerSource.indexOf("await messageList.value?.scrollToBottom('auto')")
-
-  assert.match(handlerSource, /const handleWelcomeExitTransitionEnd = async \(event\) =>/)
-  assert.ok(releaseIndex >= 0)
-  assert.ok(renderIndex > releaseIndex)
-  assert.ok(scrollIndex > renderIndex)
 })
 
 test('deleting the active session returns the chat to the welcome state only after a successful delete', () => {

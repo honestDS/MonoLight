@@ -73,10 +73,9 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { onBeforeUnmount } from 'vue'
 import { CaretRight, CircleCheckFilled, Clock, List } from '@element-plus/icons-vue'
-import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
-import { normalizeTodoPlan, summarizeTodoPlan } from '../utils/todoPresentation.js'
+import { createSessionTodoOverlay } from '../composables/chat/sessionTodoOverlay.js'
 
 const props = defineProps({
   plan: { type: Object, default: null },
@@ -85,33 +84,16 @@ const props = defineProps({
 
 const emit = defineEmits(['expanded-change'])
 
-const normalizedPlan = computed(() => normalizeTodoPlan(props.plan))
-const summary = computed(() => summarizeTodoPlan(normalizedPlan.value))
-const storedCollapsed = getClientSetting('sessionTodoDrawerCollapsed', true)
-const collapsed = ref(typeof storedCollapsed === 'boolean' ? storedCollapsed : true)
-const expanded = computed(() => summary.value.total > 0 && !collapsed.value && !props.suppressed)
+const {
+  normalizedPlan,
+  summary,
+  expanded,
+  handleDrawerAfterLeave,
+  toggleCollapsed,
+  dispose
+} = createSessionTodoOverlay({ props, emit })
 
-watch(
-  [expanded, () => summary.value.total, () => props.suppressed],
-  ([isExpanded, total, suppressed]) => {
-    if (isExpanded || total === 0 || suppressed) emit('expanded-change', isExpanded)
-  },
-  { immediate: true, flush: 'sync' }
-)
-
-const handleDrawerAfterLeave = () => {
-  // 退出动画完成前保持弹层占用，避免同页低优先级菜单提前互斥。
-  if (!expanded.value) emit('expanded-change', false)
-}
-
-const toggleCollapsed = () => {
-  if (props.suppressed) return
-
-  collapsed.value = !collapsed.value
-  setClientSetting('sessionTodoDrawerCollapsed', collapsed.value)
-}
-
-onBeforeUnmount(() => emit('expanded-change', false))
+onBeforeUnmount(dispose)
 </script>
 
 <style scoped lang="scss" src="../assets/css/SessionTodoPanel.scss"></style>

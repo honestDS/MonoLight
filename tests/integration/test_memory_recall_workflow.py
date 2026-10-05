@@ -38,7 +38,7 @@ from app.models.memory import (
     LongTermMemoryStore,
     LongTermMemoryType,
 )
-from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
@@ -292,7 +292,8 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         assert kwargs["temperature"] == 0.0
         assert "top_p" not in kwargs
         assert "reasoning_effort" not in kwargs
-        return SimpleNamespace(
+        return InternalResponse(
+            model=kwargs["model_id"],
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 tool_calls=[

@@ -414,6 +414,7 @@ import ChatMessageList from '../components/ChatMessageList.vue'
 import SessionTodoPanel from '../components/SessionTodoPanel.vue'
 import HelpTooltip from '../components/HelpTooltip.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
+import { createSessionAgentSettingUpdater } from '../composables/chat/sessionAgentSettings.js'
 import { fileApi, chatApi, profileApi } from '../api'
 import { SESSION_MAX_TURNS_UPPER_BOUND } from '../constants/index.js'
 import {
@@ -670,40 +671,20 @@ watch(currentSessionId, (sessionId, previousSessionId) => {
   if (sessionId !== previousSessionId) moreOptionsVisible.value = false
 }, { flush: 'sync' })
 
-const updateSessionAgentSetting = async (field, value) => {
-  if (agentSettingSubmitting.value || loading.value) return
-
-  if (field === 'max_turns' && (
-    typeof value !== 'number' ||
-    !Number.isInteger(value) ||
-    value < 1 ||
-    value > SESSION_MAX_TURNS_UPPER_BOUND
-  )) {
-    ElMessage.error(t('chat.max_turns_invalid'))
-    return
-  }
-
-  agentSettingSubmitting.value = true
-  const sessionId = currentSessionId.value
-  try {
-    if (!sessionId) {
-      if (field === 'goal_mode') goalModeDefault.value = value
-      if (field === 'max_turns') maxTurnsDefault.value = value
-      return
-    }
-
-    await chatApi.updateSessionSetting(sessionId, { [field]: value })
-    const session = sessions.value.find(item => item.session_id === sessionId)
-    if (session) session[field] = value
-  } catch (error) {
-    ElMessage.error(error.message || t('chat.setting_failed'))
-  } finally {
-    agentSettingSubmitting.value = false
-  }
-}
-
-const updateSessionGoalMode = (value) => updateSessionAgentSetting('goal_mode', value)
-const updateSessionMaxTurns = (value) => updateSessionAgentSetting('max_turns', value)
+const {
+  updateSessionGoalMode,
+  updateSessionMaxTurns
+} = createSessionAgentSettingUpdater({
+  currentSessionId,
+  sessions,
+  goalModeDefault,
+  maxTurnsDefault,
+  agentSettingSubmitting,
+  loading,
+  updateSessionSetting: (sessionId, payload) => chatApi.updateSessionSetting(sessionId, payload),
+  reportError: message => ElMessage.error(message),
+  translate: t
+})
 
 const deferredContentSessionId = ref(null)
 const chatContentVisible = computed(() => shouldExposeChatContent({

@@ -1,0 +1,233 @@
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import text
+
+import app.providers.database.bootstrap as bootstrap
+from app.models.user import User
+
+
+@pytest_asyncio.fixture
+async def isolated_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    database_factory,
+):
+    migration_scripts_dir = tmp_path / "migrations"
+    migration_scripts_dir.mkdir()
+    async with database_factory(create_schema=False, name="database.db") as session_factory:
+        monkeypatch.setattr(bootstrap, "engine", session_factory.kw["bind"])
+        monkeypatch.setattr(bootstrap, "MIGRATION_SCRIPTS_DIR", migration_scripts_dir)
+        yield session_factory, migration_scripts_dir
+
+
+def _write_migration_script(migration_scripts_dir: Path, script_name: str, source: str) -> None:
+    (migration_scripts_dir / script_name).write_text(source, encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_init_database_schema_marks_fresh_migrations_without_importing_scripts(isolated_database):
+    session_factory, migration_scripts_dir = isolated_database
+    migrations = {
+        "migration_001_first.py": """
+MIGRATION_ID = "fresh_migration_001_v1"
+
+
+async def migrate(session):
+    raise RuntimeError("fresh migration function must not execute")
+
+
+raise RuntimeError("fresh migration module must not be imported")
+""",
+        "migration_002_second.py": """
+MIGRATION_ID = "fresh_migration_002_v1"
+
+
+async def migrate(session):
+    raise RuntimeError("fresh migration function must not execute")
+
+
+raise RuntimeError("fresh migration module must not be imported")
+""",
+    }
+    for script_name, source in migrations.items():
+        _write_migration_script(migration_scripts_dir, script_name, source)
+
+    async with session_factory() as session:
+        await bootstrap.init_database_schema(session)
+        await bootstrap.init_database_schema(session)
+
+        migration_records = (await session.execute(text("SELECT migration_id, script_name FROM migration_record ORDER BY migration_id"))).all()
+        trigger_names = (await session.execute(text("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_knowledge_base_collection_owner_%' ORDER BY name"))).scalars().all()
+
+    assert migration_records == [
+        ("fresh_migration_001_v1", "migration_001_first.py"),
+        ("fresh_migration_002_v1", "migration_002_second.py"),
+    ]
+    assert trigger_names == [
+        "trg_knowledge_base_collection_owner_after_insert",
+        "trg_knowledge_base_collection_owner_after_update",
+        "trg_knowledge_base_collection_owner_before_insert",
+        "trg_knowledge_base_collection_owner_before_update",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_repeated_historical_bootstrap_runs_migration_once_for_superuser_without_setup_status(
+    isolated_database,
+):
+    session_factory, migration_scripts_dir = isolated_database
+    script_name = "migration_003_historical_probe.py"
+    migration_id = "historical_migration_003_v1"
+
+    await bootstrap.create_database_tables()
+    async with session_factory() as session:
+        session.add(User(uid="historical-admin", username="historical-admin", is_superuser=True))
+        await session.commit()
+        setup_status = (await session.execute(text("SELECT value FROM system_setting WHERE key = 'setup_status'"))).scalar_one_or_none()
+
+    _write_migration_script(
+        migration_scripts_dir,
+        script_name,
+        f"""
+from sqlalchemy import text
+
+
+MIGRATION_ID = {migration_id!r}
+
+
+async def migrate(session):
+    await session.execute(
+        text("CREATE TABLE migration_execution_marker (value TEXT NOT NULL)")
+    )
+    await session.execute(
+        text("INSERT INTO migration_execution_marker (value) VALUES (:value)"),
+        {{"value": "executed"}},
+    )
+""",
+    )
+
+    async with session_factory() as session:
+        await bootstrap.init_database_schema(session)
+        await bootstrap.init_database_schema(session)
+
+        marker_value = (await session.execute(text("SELECT value FROM migration_execution_marker"))).scalar_one()
+        migration_record = (await session.execute(text("SELECT migration_id, script_name FROM migration_record"))).one()
+
+    assert setup_status is None
+    assert marker_value == "executed"
+    assert migration_record == (migration_id, script_name)
+
+
+@pytest.mark.asyncio
+async def test_historical_migrations_run_in_filename_order_and_commit_each_step(
+    isolated_database,
+):
+    session_factory, migration_scripts_dir = isolated_database
+    await bootstrap.create_database_tables()
+    async with session_factory() as session:
+        session.add(User(uid="ordered-admin", username="ordered-admin", is_superuser=True))
+        await session.commit()
+
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_010_first.py",
+        """
+from sqlalchemy import text
+
+MIGRATION_ID = "ordered_010_v1"
+
+async def migrate(session):
+    await session.execute(text("CREATE TABLE ordered_migration_marker (value TEXT NOT NULL)"))
+    await session.execute(
+        text("INSERT INTO ordered_migration_marker (value) VALUES ('first')")
+    )
+""",
+    )
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_020_second.py",
+        """
+from sqlalchemy import text
+
+MIGRATION_ID = "ordered_020_v1"
+
+async def migrate(session):
+    first = (
+        await session.execute(
+            text("SELECT value FROM ordered_migration_marker ORDER BY rowid LIMIT 1")
+        )
+    ).scalar_one()
+    if first != "first":
+        raise RuntimeError("previous migration is not visible")
+    await session.execute(
+        text("INSERT INTO ordered_migration_marker (value) VALUES ('second')")
+    )
+""",
+    )
+
+    async with session_factory() as session:
+        await bootstrap.init_database_schema(session)
+        values = (await session.execute(text("SELECT value FROM ordered_migration_marker ORDER BY rowid"))).scalars().all()
+        records = (await session.execute(text("SELECT script_name FROM migration_record ORDER BY id"))).scalars().all()
+
+    assert values == ["first", "second"]
+    assert records == ["migration_010_first.py", "migration_020_second.py"]
+
+
+@pytest.mark.asyncio
+async def test_historical_migrations_stop_at_first_failure(
+    isolated_database,
+):
+    session_factory, migration_scripts_dir = isolated_database
+    await bootstrap.create_database_tables()
+    async with session_factory() as session:
+        session.add(User(uid="failure-admin", username="failure-admin", is_superuser=True))
+        await session.commit()
+
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_010_ok.py",
+        """
+from sqlalchemy import text
+
+MIGRATION_ID = "failure_010_v1"
+
+async def migrate(session):
+    await session.execute(text("CREATE TABLE failure_marker (value TEXT NOT NULL)"))
+    await session.execute(text("INSERT INTO failure_marker (value) VALUES ('first')"))
+""",
+    )
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_020_fail.py",
+        """
+MIGRATION_ID = "failure_020_v1"
+
+async def migrate(session):
+    raise RuntimeError("expected migration failure")
+""",
+    )
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_030_must_not_run.py",
+        """
+from sqlalchemy import text
+
+MIGRATION_ID = "failure_030_v1"
+
+async def migrate(session):
+    await session.execute(text("INSERT INTO failure_marker (value) VALUES ('third')"))
+""",
+    )
+
+    async with session_factory() as session:
+        with pytest.raises(RuntimeError, match="expected migration failure"):
+            await bootstrap.init_database_schema(session)
+        await session.rollback()
+        values = (await session.execute(text("SELECT value FROM failure_marker ORDER BY rowid"))).scalars().all()
+        records = (await session.execute(text("SELECT script_name FROM migration_record ORDER BY id"))).scalars().all()
+
+    assert values == ["first"]
+    assert records == ["migration_010_ok.py"]

@@ -17,7 +17,7 @@ from app.core.utils.dispatcher.provider_state import discard_mismatched_provider
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.message import InternalMessage, InternalToolCall, Message, MessageResponse, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageResponse, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.providers.llm.client import LLMClient
@@ -1638,12 +1638,13 @@ async def test_automatic_fallback_uses_selected_rule_reasoning_effort(
         attempts.append(deepcopy(kwargs))
         if len(attempts) == 1:
             raise LLMException(message="ERR_TEST_FALLBACK")
-        return SimpleNamespace(
+        return InternalResponse(
             message=InternalMessage(role=MessageRole.ASSISTANT, content="Answer"),
+            model=kwargs["model_id"],
             finish_reason="stop",
             finish_details=None,
             provider_metadata=None,
-            usage=None,
+            usage={},
         )
 
     async def fake_generate_stream(**kwargs: Any):

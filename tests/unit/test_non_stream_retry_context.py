@@ -487,11 +487,13 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
         model_requests.append(kwargs["messages"])
         if len(model_requests) == 1:
             raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR")
-        return SimpleNamespace(
+        return InternalResponse(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 content="continued response",
-            )
+            ),
+            model=kwargs["model_id"],
+            usage={},
         )
 
     async def save_assistant(*args, **kwargs):
@@ -624,11 +626,13 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
         await kwargs["on_content"]("处理中" if kwargs["model_id"] == "model-1" else "已完成")
         if kwargs["model_id"] == "model-1":
             raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR")
-        return SimpleNamespace(
+        return InternalResponse(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 content="已完成",
-            )
+            ),
+            model=kwargs["model_id"],
+            usage={},
         )
 
     async def save_assistant(*args, **kwargs):
@@ -768,11 +772,12 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
     async def generate(**kwargs):
         model_requests.append(kwargs)
         if kwargs["model_id"] == "model-1":
-            return SimpleNamespace(
+            return InternalResponse(
                 message=InternalMessage(
                     role=MessageRole.ASSISTANT,
                     content="",
                 ),
+                model=kwargs["model_id"],
                 usage={
                     "prompt_tokens": 100,
                     "completion_tokens": 0,
@@ -780,11 +785,12 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
                     "cached_tokens": 100,
                 },
             )
-        return SimpleNamespace(
+        return InternalResponse(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 content="ok",
             ),
+            model=kwargs["model_id"],
             usage={
                 "prompt_tokens": 100,
                 "completion_tokens": 10,
@@ -1181,7 +1187,11 @@ async def _run_audited_interactive_dispatch(
         response_message = responses.pop(0)
         if generate_hook is not None:
             await generate_hook(response_message)
-        return SimpleNamespace(message=response_message, usage=next(response_usage_iterator, None))
+        return InternalResponse(
+            message=response_message,
+            model=kwargs["model_id"],
+            usage=next(response_usage_iterator, {}),
+        )
 
     async def generate_with_stream_callback(**kwargs):
         response = await generate(**kwargs)
