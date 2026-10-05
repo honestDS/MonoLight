@@ -1,6 +1,6 @@
 <template>
   <div class="channel-editor">
-    <div class="channel-editor-config">
+    <div class="channel-editor-config" :class="{ 'channel-editor-config--with-timeout': usage === 'CHAT' || usage === 'RERANK' }">
       <div v-if="usage === 'CHAT'" class="channel-editor-config-item">
         <el-form-item label-width="auto">
           <template #label>
@@ -27,40 +27,39 @@
           </el-form-item>
         </div>
       </template>
-    </div>
-
-    <el-form-item label-width="auto">
-      <template #label>
-        {{ label || $t('profiles.model_id') }}
-        <HelpTooltip :content="$t('profiles.disabled_rule_hint')" />
-      </template>
-      <el-select
-        v-model="selectedRuleKeys"
-        multiple
-        filterable
-        collapse-tags
-        collapse-tags-tooltip
-        :placeholder="$t('profiles.select_models')"
-        class="full-width-input"
-      >
-        <el-option
-          v-for="item in modelOptions"
-          :key="item.key"
-          :label="item.label"
-          :value="item.key"
+      <el-form-item class="channel-editor-model-select" label-width="auto">
+        <template #label>
+          {{ label || $t('profiles.model_id') }}
+          <HelpTooltip :content="$t('profiles.disabled_rule_hint')" />
+        </template>
+        <el-select
+          v-model="selectedRuleKeys"
+          multiple
+          filterable
+          collapse-tags
+          collapse-tags-tooltip
+          :placeholder="$t('profiles.select_models')"
+          class="full-width-input"
         >
-          <div class="channel-option">
-            <span class="channel-option-label">{{ item.label }}</span>
-            <el-tag v-if="item.channel_disabled" type="warning" size="small">
-              {{ $t('profiles.channel_disabled') }}
-            </el-tag>
-            <el-tag v-else-if="item.model_disabled" type="warning" size="small">
-              {{ $t('profiles.model_disabled') }}
-            </el-tag>
-          </div>
-        </el-option>
-      </el-select>
-    </el-form-item>
+          <el-option
+            v-for="item in modelOptions"
+            :key="item.key"
+            :label="item.label"
+            :value="item.key"
+          >
+            <div class="channel-option">
+              <span class="channel-option-label">{{ item.label }}</span>
+              <el-tag v-if="item.channel_disabled" type="warning" size="small">
+                {{ $t('profiles.channel_disabled') }}
+              </el-tag>
+              <el-tag v-else-if="item.model_disabled" type="warning" size="small">
+                {{ $t('profiles.model_disabled') }}
+              </el-tag>
+            </div>
+          </el-option>
+        </el-select>
+      </el-form-item>
+    </div>
 
     <draggable
       v-if="channel.rules && channel.rules.length > 0"

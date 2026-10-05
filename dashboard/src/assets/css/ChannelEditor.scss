@@ -2,6 +2,24 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0 16px;
+
+  > .channel-editor-model-select {
+    flex: 0 0 100%;
+    min-width: 0;
+  }
+
+  &--with-timeout {
+    align-items: flex-end;
+
+    > .channel-editor-config-item {
+      flex: 0 0 auto;
+    }
+
+    > .channel-editor-model-select {
+      flex: 1 1 200px;
+      max-width: 400px;
+    }
+  }
 }
 
 .channel-rule-list {

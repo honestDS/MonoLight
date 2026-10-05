@@ -432,10 +432,17 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 12px;
-  width: auto;
-  margin: 0 0 12px;
+  width: var(--chat-input-width);
+  margin: 0 auto 12px;
   padding: 8px 12px;
   box-sizing: border-box;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@container (max-width: 480px) {
+  .chat-main .input-area .read-only-notice {
+    width: 100%;
+  }
 }
 
 .read-only-notice-text {
