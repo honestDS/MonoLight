@@ -164,7 +164,13 @@
           <h1 class="welcome-greeting">{{ $t('chat.welcome_greeting') }}</h1>
         </div>
 
-        <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
+        <div
+          v-if="isCurrentSessionReadOnly"
+          id="external-session-guidance-notice"
+          class="read-only-notice"
+          role="note"
+        >
+          <el-icon class="read-only-notice-icon" aria-hidden="true"><InfoFilled /></el-icon>
           <span class="read-only-notice-text">{{ $t('chat.external_session_read_only') }}</span>
         </div>
 
@@ -363,6 +369,7 @@
                 <el-input
                   v-model="inputMsg"
                   :placeholder="isCurrentSessionReadOnly ? $t('chat.guidance_placeholder') : $t('chat.input_placeholder')"
+                  :aria-describedby="isCurrentSessionReadOnly ? 'external-session-guidance-notice' : undefined"
                   :disabled="isCurrentSessionReadOnly && guidanceSubmitting"
                   :maxlength="isCurrentSessionReadOnly ? 500 : undefined"
                   :show-word-limit="false"
@@ -408,7 +415,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { ElMessage, ClickOutside as vClickOutside } from 'element-plus'
-import { ChatLineSquare, Delete, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
+import { ChatLineSquare, Delete, InfoFilled, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import SessionTodoPanel from '../components/SessionTodoPanel.vue'

@@ -427,16 +427,23 @@
 }
 
 .chat-main .input-area .read-only-notice {
-  position: static;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
+  align-items: flex-start;
+  gap: 8px;
   width: var(--chat-input-width);
-  margin: 0 auto 12px;
-  padding: 8px 12px;
+  margin: 0 auto 8px;
+  padding: 0 16px;
   box-sizing: border-box;
+  color: var(--color-text-regular);
+  font-size: 13px;
+  line-height: 20px;
   transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.read-only-notice-icon {
+  flex: 0 0 14px;
+  margin-top: 3px;
+  font-size: 14px;
 }
 
 @container (max-width: 480px) {
@@ -446,9 +453,15 @@
 }
 
 .read-only-notice-text {
-  flex: 1 1 220px;
+  flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-main .input-area .read-only-notice {
+    transition: none;
+  }
 }
 
 .chat-main .input-area .toolbar-row .session-profile-setting {
