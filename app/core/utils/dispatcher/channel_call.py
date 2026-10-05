@@ -63,6 +63,7 @@ async def generate_chat_with_fallback(
 ) -> tuple[InternalResponse, ModelChannel, dict[str, Any], ChannelRule, dict[str, Any]]:
     excluded_priorities: set[int] = set()
     context_length_recovery_priorities: set[int] = set()
+    use_session_reasoning_override = True
     selection = await select_channel(db, chat_channel, "CHAT", call_context=call_context, cursor_key=cursor_key)
     if not selection:
         raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
@@ -74,7 +75,7 @@ async def generate_chat_with_fallback(
             session = await session_crud.get_by_session_id(db, session_id)
             if session is not None:
                 await db.refresh(session)
-                if session.uid == uid and session.reasoning_effort is not None:
+                if use_session_reasoning_override and session.uid == uid and session.reasoning_effort is not None:
                     chat_params["reasoning_effort"] = session.reasoning_effort
         if chat_params.get("reasoning_effort") is not None:
             chat_params["temperature"] = None
@@ -173,3 +174,4 @@ async def generate_chat_with_fallback(
                 if isinstance(exc, LLMContextLengthException):
                     raise LLMContextLengthException(provider_message=exc.provider_message) from exc
                 raise
+            use_session_reasoning_override = False

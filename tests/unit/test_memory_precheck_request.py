@@ -397,7 +397,6 @@ def test_precheck_generation_params_force_small_output_and_clean_optional_fields
         protocol="openai_responses",
     )
     assert reasoning_params == {
-        "reasoning_effort": "low",
         "max_tokens": 128,
     }
 
@@ -406,18 +405,16 @@ def test_precheck_generation_params_force_small_output_and_clean_optional_fields
         protocol="openai",
     )
     assert chat_completions_params == {
-        "reasoning_effort": "low",
         "max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
     }
 
 
-def test_internal_task_generation_params_share_reasoning_cleanup_semantics():
+def test_internal_task_generation_params_never_set_reasoning_effort():
     title_params = build_session_title_generation_params(
         model_entry={"reasoning_effort": "max", "max_tokens": 128},
         protocol="openai_responses",
     )
     assert title_params == {
-        "reasoning_effort": "low",
         "max_tokens": 128,
     }
 
@@ -440,32 +437,24 @@ def test_internal_task_generation_params_share_reasoning_cleanup_semantics():
         "max_tokens": 1024,
     }
 
-
-def test_internal_task_generation_params_preserve_disabled_reasoning_without_sampling_params():
-    precheck_params = build_memory_recall_precheck_generation_params(
-        model_entry={"reasoning_effort": "none", "temperature": 0.8},
-        protocol="openai",
-    )
-    assert precheck_params == {
-        "reasoning_effort": "none",
-        "max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
-    }
-
-    title_params = build_session_title_generation_params(
-        model_entry={"reasoning_effort": " NONE ", "temperature": 0.35},
-        protocol="openai_responses",
-    )
-    assert title_params == {
-        "reasoning_effort": "none",
-        "max_tokens": SESSION_TITLE_MAX_OUTPUT_TOKENS,
-    }
-
-    summary_params = build_context_summary_generation_params(
-        model_entry={"reasoning_effort": "none", "temperature": 0.8},
-        protocol="openai_responses",
-        max_output_tokens=1024,
-    )
-    assert summary_params == {
-        "reasoning_effort": "none",
-        "max_tokens": 1024,
-    }
+    disabled_reasoning_params = [
+        build_memory_recall_precheck_generation_params(
+            model_entry={"reasoning_effort": "none", "temperature": 0.8},
+            protocol="openai",
+        ),
+        build_session_title_generation_params(
+            model_entry={"reasoning_effort": " NONE ", "temperature": 0.35},
+            protocol="openai_responses",
+        ),
+        build_context_summary_generation_params(
+            model_entry={"reasoning_effort": "none", "temperature": 0.8},
+            protocol="openai_responses",
+            max_output_tokens=1024,
+        ),
+    ]
+    assert disabled_reasoning_params == [
+        {"max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS},
+        {"max_tokens": SESSION_TITLE_MAX_OUTPUT_TOKENS},
+        {"max_tokens": 1024},
+    ]
+    assert all("reasoning_effort" not in params for params in disabled_reasoning_params)

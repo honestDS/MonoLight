@@ -77,7 +77,7 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(
         max_output_tokens=expected_max_output_tokens,
         temperature=None,
         top_p=None,
-        reasoning_effort="low",
+        reasoning_effort=None,
         safety_margin_tokens=256,
         input_budget_tokens=8000 - expected_max_output_tokens - 256,
         http_proxy="http://proxy.example.com:8080",
@@ -120,7 +120,7 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
         max_output_tokens=512,
         temperature=None,
         top_p=None,
-        reasoning_effort="low",
+        reasoning_effort=None,
         safety_margin_tokens=256,
         input_budget_tokens=7424,
         http_proxy="http://proxy.example.com:8080",
@@ -141,7 +141,7 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
     assert len(request["messages"]) == 1
     assert request["messages"][0].role == MessageRole.USER
     assert request["messages"][0].content == "summarize this history"
-    assert request["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in request
     assert "temperature" not in request
     assert "top_p" not in request
     assert request["max_tokens"] == 512

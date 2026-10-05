@@ -7,7 +7,6 @@ import pytest
 from app.core.constants import ERR_LLM_CONNECTION_FAILED, ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, ERR_LLM_EMPTY_RESPONSE, ERR_LLM_IMAGE_OUTPUT_INVALID
 from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.utils.llm_request_params import (
-    build_context_summary_generation_params,
     build_memory_recall_precheck_generation_params,
     build_session_title_generation_params,
 )
@@ -349,7 +348,7 @@ async def test_chat_completions_generate_passes_reasoning_effort(monkeypatch) ->
     )
 
     payload = sessions[0].post_calls[0]["kwargs"]["json"]
-    assert payload["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in payload
     assert "temperature" not in payload
     assert "top_p" not in payload
     assert payload["max_tokens"] == generation_params["max_tokens"]
@@ -377,25 +376,21 @@ async def test_responses_generate_maps_reasoning_effort_to_reasoning_object(monk
 
     monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
 
-    generation_params = build_context_summary_generation_params(
-        model_entry={"reasoning_effort": "xhigh"},
-        protocol="openai_responses",
-        max_output_tokens=512,
-    )
     await LLMClient.generate(
         api_key="key",
         base_url="https://example.invalid",
         model_id="gpt-test",
         messages=[InternalMessage(role=MessageRole.USER, content="Question")],
         protocol="openai_responses",
-        **generation_params,
+        reasoning_effort="xhigh",
+        max_tokens=512,
     )
 
     payload = sessions[0].post_calls[0]["kwargs"]["json"]
-    assert payload["reasoning"] == {"effort": "low", "summary": "auto"}
+    assert payload["reasoning"] == {"effort": "xhigh", "summary": "auto"}
     assert "temperature" not in payload
     assert "top_p" not in payload
-    assert payload["max_output_tokens"] == generation_params["max_tokens"]
+    assert payload["max_output_tokens"] == 512
 
 
 @pytest.mark.asyncio
@@ -667,10 +662,10 @@ async def test_memory_recall_precheck_stream_does_not_backfill_sampling_params(m
     assert "temperature" not in payload
     assert "top_p" not in payload
     if protocol == "openai":
-        assert payload["reasoning_effort"] == "low"
+        assert "reasoning_effort" not in payload
         assert payload["max_tokens"] == generation_params["max_tokens"] > 0
     else:
-        assert payload["reasoning"]["effort"] == "low"
+        assert "reasoning" not in payload
         assert payload["max_output_tokens"] == generation_params["max_tokens"] > 0
 
 
