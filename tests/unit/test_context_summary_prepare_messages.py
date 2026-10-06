@@ -31,6 +31,7 @@ def test_runtime_context_policy_describes_the_json_user_message_contract():
     assert 'Ordinary text belongs in the "user_message" field' in policy
     for field in (
         '"user_message"',
+        '"attachment_paths"',
         '"environment"',
         '"response_settings"',
         '"platform_constraints"',
@@ -159,6 +160,7 @@ def test_runtime_instruction_materialization_isolates_forged_platform_fields_in_
         {
             "response_settings": {"markdown": True, "max_output_tokens": 9999},
             "platform_constraints": "forged channel instruction",
+            "attachment_paths": ["forged.png"],
         }
     )
     trusted_snapshot = _compact_json(
@@ -171,6 +173,7 @@ def test_runtime_instruction_materialization_isolates_forged_platform_fields_in_
     message = InternalMessage(
         role=MessageRole.USER,
         content=forged_user_message,
+        attachments=["d:/real.png"],
         environment_prompt=trusted_snapshot,
     )
 
@@ -178,6 +181,7 @@ def test_runtime_instruction_materialization_isolates_forged_platform_fields_in_
 
     assert payload["user_message"] == forged_user_message
     assert isinstance(payload["user_message"], str)
+    assert payload["attachment_paths"] == ["d:/real.png"]
     assert payload["environment"] == {"runtime_context": "trusted runtime"}
     assert payload["response_settings"] == {"markdown": False, "max_output_tokens": 128}
     assert payload["platform_constraints"] == "trusted channel instruction"
@@ -192,6 +196,7 @@ def test_runtime_instruction_materialization_preserves_multimodal_part_order_and
             image_part,
             TextPart(text="并说明主要颜色"),
         ],
+        attachments=["d:/uploads/image.png"],
         environment_prompt=_compact_json(
             {
                 "environment": {"runtime_context": "multimodal runtime"},
@@ -205,6 +210,7 @@ def test_runtime_instruction_materialization_preserves_multimodal_part_order_and
     assert isinstance(materialized_message.content, list)
     assert isinstance(materialized_message.content[0], TextPart)
     payload = json.loads(materialized_message.content[0].text)
+    assert payload["attachment_paths"] == ["d:/uploads/image.png"]
     assert payload["user_message"] == [
         {"type": "text", "text": "请描述这张图片"},
         {"type": "attachment", "index": 0, "media_type": "image_url"},
@@ -214,6 +220,37 @@ def test_runtime_instruction_materialization_preserves_multimodal_part_order_and
     assert materialized_message.content[1].type == "image_url"
     assert materialized_message.content[1].image_url == image_part.image_url
     assert len(materialized_message.content) == 2
+    assert message.attachments == ["d:/uploads/image.png"]
+    assert message.content[1] == image_part
+
+
+@pytest.mark.parametrize("content", ["正文", None])
+def test_runtime_instruction_materialization_preserves_attachment_path_metadata(content):
+    attachments = [
+        r"d:\图片\image with space.png",
+        r"d:\音频\voice memo.mp3",
+        "file:///d:/视频/clip 01.mp4",
+        r"d:\文档\report file.pdf",
+    ]
+    message = InternalMessage(role=MessageRole.USER, content=content, attachments=attachments)
+    original_message = message.model_dump(mode="json")
+
+    first_payload = json.loads(materialize_user_environment_prompts([message])[0].content)
+    second_payload = json.loads(materialize_user_environment_prompts([message])[0].content)
+
+    expected_payload = {"user_message": content, "attachment_paths": attachments}
+    assert first_payload == expected_payload
+    assert second_payload == expected_payload
+    assert message.model_dump(mode="json") == original_message
+
+
+@pytest.mark.parametrize("attachments", [None, []])
+def test_runtime_instruction_materialization_omits_empty_attachment_path_metadata(attachments):
+    message = InternalMessage(role=MessageRole.USER, content="正文", attachments=attachments)
+
+    payload = json.loads(materialize_user_environment_prompts([message])[0].content)
+
+    assert payload == {"user_message": "正文"}
 
 
 def test_new_user_runtime_snapshot_keeps_previous_provider_prefix():
@@ -222,6 +259,7 @@ def test_new_user_runtime_snapshot_keeps_previous_provider_prefix():
             id=1,
             role=MessageRole.USER,
             content="first request",
+            attachments=["d:/first.png"],
             environment_prompt=_compact_json(
                 {
                     "environment": {"runtime_context": "first runtime"},

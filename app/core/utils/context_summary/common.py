@@ -52,7 +52,7 @@ class ContextSummaryState:
 def serialize_message(message: InternalMessage) -> str:
     payload = message.model_dump(
         mode="json",
-        exclude={"id", "attachments", "created_at"},
+        exclude={"id", "attachments", "created_at", "assembled_attachment_part_count"},
         exclude_none=True,
     )
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

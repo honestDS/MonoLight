@@ -397,6 +397,7 @@ MESSAGES = {
     "ERR_TOOL_IMAGE_CHANNEL_UNAVAILABLE": "No available image generation channel",
     "ERR_TOOL_IMAGE_EMPTY_RESPONSE": "The image generation model did not return an image",
     "ERR_TOOL_IMAGE_INVALID_ITEM": "The image generation model returned an image item without url or b64_json",
+    "ERR_TOOL_IMAGE_REFERENCE_INVALID": "Invalid reference images: reference_images must contain at most 16 non-empty absolute paths to valid PNG, JPEG, or WEBP images",
     "ERR_TOOL_MULTIMODAL_PATH_INVALID": "The multimodal file path is invalid",
     "ERR_TOOL_MULTIMODAL_PATH_NOT_ABSOLUTE": "The multimodal file path must be absolute",
     "ERR_TOOL_MULTIMODAL_FILE_NOT_FOUND": "The multimodal file does not exist",

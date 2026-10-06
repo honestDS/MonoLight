@@ -168,6 +168,7 @@ def test_serialize_message_supports_multimodal_content():
             ImagePart(image_url={"url": "data:image/png;base64,abc"}),
         ],
         attachments=["ignored.png"],
+        assembled_attachment_part_count=1,
     )
 
     serialized = _serialize_message(message)
@@ -175,6 +176,7 @@ def test_serialize_message_supports_multimodal_content():
     assert '"type":"text"' in serialized
     assert '"type":"image_url"' in serialized
     assert "attachments" not in serialized
+    assert "assembled_attachment_part_count" not in serialized
     assert "created_at" not in serialized
 
 

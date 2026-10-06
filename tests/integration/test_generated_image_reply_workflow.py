@@ -4,6 +4,8 @@ import io
 import json
 import os
 from collections.abc import AsyncGenerator
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +24,15 @@ import app.core.dispatcher as dispatcher_module
 import app.core.dispatchers.background as background_dispatcher_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
 import app.tasks as tasks_module
+import app.transformers.openai.image_generation as image_generation_transformer_module
 from app.api.v1 import files as files_module
 from app.core.dispatchers import ChatDispatcher
 from app.core.paths import get_user_temp_dir
 from app.core.security import get_current_user
+from app.core.tools import get_tools_for_profile
 from app.core.tools.image_generation import ImageGenerationExecutor
 from app.core.utils.background_task_result import build_background_task_success_result
+from app.core.utils.dispatcher.process_single_tool import process_single_tool
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.handler import register_handlers
@@ -76,6 +81,15 @@ _GENERATED_IMAGE_CASES = [
     for with_text in (False, True)
     for output_format in _FORMAT_DETAILS
     for delivery in ("done-terminal", "terminal-only")
+]
+_GENERATE_IMAGE_CASES = [
+    pytest.param(
+        with_reference,
+        output_format,
+        id=f"openai-image-{'reference' if with_reference else 'no-reference'}-{output_format}",
+    )
+    for with_reference in (False, True)
+    for output_format in _FORMAT_DETAILS
 ]
 
 
@@ -313,6 +327,23 @@ def _assert_file_entries(
     return file_entry
 
 
+async def _serialize_multipart_form(form: Any) -> bytes:
+    chunks = bytearray()
+
+    class _Writer:
+        async def write(self, data: bytes) -> None:
+            chunks.extend(data)
+
+        async def write_eof(self) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+    await form.write(_Writer())
+    return bytes(chunks)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stream", "with_text", "output_format", "stream_image_delivery"),
@@ -440,6 +471,252 @@ async def test_native_generated_image_reply_round_trips_through_dispatch_persist
     assert download_response.status_code == 200
     assert download_response.content == expected_bytes
     assert download_response.headers["content-type"].split(";", 1)[0] == expected_mime_type
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("with_reference", "output_format"),
+    _GENERATE_IMAGE_CASES,
+)
+async def test_generate_image_background_workflow_supports_openai_images_and_reference_edits(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_reference: bool,
+    output_format: str,
+) -> None:
+    session_id = f"generated-image-openai-image-{'reference' if with_reference else 'generation'}-{output_format}"
+    expected_bytes, image_data = _image_fixture(output_format)
+    reference_bytes, _ = _image_fixture("png", color=(224, 64, 32))
+    image_model_id = f"image-openai-image-{output_format}"
+    prompt = f"Generate a {output_format} test image through openai-image."
+    initial_message = await _seed_conversation(session_factory, session_id)
+
+    _patch_runtime_database(monkeypatch, session_factory)
+    monkeypatch.setattr(runner_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(files_module, "TEMP_DIR", tmp_path / "temp")
+    monkeypatch.chdir(tmp_path)
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession]:
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user() -> User:
+        return User(uid=UID, username="generated_image_user")
+
+    files_app = FastAPI()
+    files_app.include_router(files_module.router, prefix="/api/v1")
+    files_app.dependency_overrides[get_db] = override_get_db
+    files_app.dependency_overrides[get_current_user] = override_get_current_user
+
+    reference_path: Path | None = None
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=files_app), base_url="http://test") as files_client:
+        if with_reference:
+            upload_response = await files_client.post(
+                "/api/v1/upload",
+                files={"file": ("reference.png", reference_bytes, "image/png")},
+                data={"session_id": session_id},
+            )
+            assert upload_response.status_code == 200
+            reference_path = Path(upload_response.json()["path"])
+            assert reference_path.parent == get_user_temp_dir(os.getcwd(), UID).resolve()
+            assert reference_path.read_bytes() == reference_bytes
+
+        async with session_factory() as db:
+            profile = await db.get(Profile, PROFILE_ID)
+            channel = await db.get(ModelChannel, CHANNEL_ID)
+            assert profile is not None
+            assert channel is not None
+
+            profile_configs = copy.deepcopy(profile.configs)
+            profile_configs["channel"]["image_generation_channel"] = {
+                "rules": [
+                    {
+                        "channel_id": CHANNEL_ID,
+                        "model_id": image_model_id,
+                        "priority": 1,
+                        "weight": 1,
+                    }
+                ]
+            }
+            profile_configs["tool"]["enabled_tools"] = ["generate_image", "send_file_to_user"]
+            profile_configs["tool"]["allowed_operation_dirs"] = [str(tmp_path.resolve())]
+            profile.configs = profile_configs
+            channel.base_url = "https://llm.invalid/v1"
+            channel.model_ids = [
+                *channel.model_ids,
+                {
+                    "model_id": image_model_id,
+                    "usage": "IMAGE_GENERATION",
+                    "protocol": "OPENAI_IMAGE",
+                    "size": "1024x1024",
+                    "quality": "auto",
+                },
+            ]
+            await db.commit()
+            await db.refresh(profile)
+            await db.refresh(channel)
+
+            cfg = ProfileConfig.model_validate(profile.configs)
+            tools, _ = await get_tools_for_profile(db, profile)
+
+            tool_by_name = {tool["function"]["name"]: tool for tool in tools if isinstance(tool, dict) and isinstance(tool.get("function"), dict)}
+            assert {"generate_image", "send_file_to_user"}.issubset(tool_by_name)
+            assert "reference_images" in tool_by_name["generate_image"]["function"]["parameters"]["properties"]
+            assert any(item.get("usage") == "CHAT" and item.get("model_id") == MODEL_ID for item in channel.model_ids)
+            assert any(item.get("usage") == "IMAGE_GENERATION" and item.get("model_id") == image_model_id and item.get("protocol") == "OPENAI_IMAGE" for item in channel.model_ids)
+
+            arguments: dict[str, Any] = {"prompt": prompt}
+            if reference_path is not None:
+                arguments["reference_images"] = [str(reference_path)]
+
+            tool_message = await process_single_tool(
+                InternalToolCall(
+                    id=f"generate-image-openai-image-{output_format}",
+                    name="generate_image",
+                    arguments=arguments,
+                ),
+                db,
+                profile,
+                cfg,
+                [initial_message],
+                "generated_image_user",
+                session_id,
+                1,
+                UID,
+                source_message_id=initial_message.id,
+            )
+
+        queued_payload = json.loads(tool_message.content or "{}")
+        assert queued_payload["status"] == "queued"
+        task_id = queued_payload["task_id"]
+        assert isinstance(task_id, int)
+
+        async with session_factory() as db:
+            queued_task = await db.get(BackgroundTask, task_id)
+            assert queued_task is not None
+            assert queued_task.status == BackgroundTaskStatus.PENDING
+            assert queued_task.arguments == arguments
+            assert set(queued_task.arguments).issubset({"prompt", "reference_images"})
+            assert "protocol" not in queued_task.arguments
+            assert "mask" not in queued_task.arguments
+
+        image_http_calls: list[dict[str, Any]] = []
+
+        class _FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc_value, _traceback):
+                return None
+
+            async def text(self) -> str:
+                return json.dumps({"created": 1, "data": [{"b64_json": image_data}]})
+
+        class _FakeClientSession:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                image_http_calls.append({"session_args": args, "session_kwargs": kwargs})
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc_value, _traceback):
+                return None
+
+            def post(self, url: str, **kwargs: Any) -> _FakeResponse:
+                image_http_calls.append({"url": url, "kwargs": kwargs})
+                return _FakeResponse()
+
+        monkeypatch.setattr(image_generation_transformer_module.aiohttp, "ClientSession", _FakeClientSession)
+        monkeypatch.setattr(image_generation_transformer_module.aiohttp, "TCPConnector", lambda **_kwargs: object())
+
+        await runner_module.run_background_task(task_id, worker_id=f"image-openai-image-{output_format}")
+
+        async with session_factory() as db:
+            completed_task = await db.get(BackgroundTask, task_id)
+            assert completed_task is not None
+            assert completed_task.status == BackgroundTaskStatus.SUCCEEDED
+            assert completed_task.result is not None
+            task_result = copy.deepcopy(completed_task.result)
+
+        assert image_data not in json.dumps(task_result, ensure_ascii=False)
+        assert task_result["status"] == "succeeded"
+        assert task_result["tool_name"] == "generate_image"
+        result_content = task_result["content"]
+        send_arguments = result_content["send_file_to_user"]
+        assert isinstance(send_arguments["files"], list)
+        assert len(send_arguments["files"]) == 1
+        generated_file = send_arguments["files"][0]
+        generated_path = Path(generated_file["path"])
+        assert generated_path.read_bytes() == expected_bytes
+        assert generated_file["mime_type"] == _FORMAT_DETAILS[output_format][1]
+        assert generated_path.suffix == f".{_FORMAT_DETAILS[output_format][2]}"
+
+        send_executor = send_file_to_user_module.SendFileToUserExecutor(project_root=os.getcwd(), uid=UID)
+        send_executor.set_config(cfg)
+        sent_payload = json.loads(await send_executor.execute(**send_arguments))
+        assert sent_payload["status"] == "success"
+        sent_file = _assert_file_entries(
+            sent_payload["files"],
+            expected_bytes=expected_bytes,
+            expected_dir=get_user_temp_dir(os.getcwd(), UID) / "generated_images",
+            expected_mime_type=_FORMAT_DETAILS[output_format][1],
+            expected_suffix=_FORMAT_DETAILS[output_format][2],
+        )
+
+        download_response = await files_client.get(sent_file["download_url"])
+        assert download_response.status_code == 200
+        assert download_response.content == expected_bytes
+        assert download_response.headers["content-type"].split(";", 1)[0] == _FORMAT_DETAILS[output_format][1]
+
+        assert len(image_http_calls) == 2
+        request = image_http_calls[1]
+        assert request["url"] == f"https://llm.invalid/v1/images/{'edits' if with_reference else 'generations'}"
+        if with_reference:
+            form = request["kwargs"].get("data")
+            assert form is not None
+            multipart = form()
+            content_type = multipart.headers["Content-Type"]
+            body = await _serialize_multipart_form(multipart)
+            message = BytesParser(policy=policy.default).parsebytes(f"MIME-Version: 1.0\r\nContent-Type: {content_type}\r\n\r\n".encode() + body)
+            assert message.is_multipart()
+            fields: dict[str, str] = {}
+            file_parts: list[tuple[str | None, str | None, str, bytes | None]] = []
+            for part in message.iter_parts():
+                field_name = part.get_param("name", header="content-disposition")
+                field_data = part.get_payload(decode=True)
+                if part.get_filename() is not None:
+                    file_parts.append((field_name, part.get_filename(), part.get_content_type(), field_data))
+                else:
+                    assert field_name is not None
+                    assert field_data is not None
+                    fields[field_name] = field_data.decode()
+            assert fields == {
+                "model": image_model_id,
+                "prompt": prompt,
+                "n": "1",
+                "size": "1024x1024",
+                "quality": "auto",
+            }
+            assert len(file_parts) == 1
+            field_name, filename, mime_type, file_data = file_parts[0]
+            assert field_name == "image"
+            assert filename is not None and filename.endswith(".png")
+            assert mime_type == "image/png"
+            assert file_data == reference_bytes
+            assert "mask" not in fields
+        else:
+            payload = request["kwargs"].get("json")
+            assert payload == {
+                "model": image_model_id,
+                "prompt": prompt,
+                "n": 1,
+                "size": "1024x1024",
+                "quality": "auto",
+            }
+            assert "mask" not in payload
 
 
 @pytest.mark.asyncio

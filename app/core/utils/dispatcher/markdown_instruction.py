@@ -103,6 +103,8 @@ def materialize_user_environment_prompts(messages: list[InternalMessage]) -> lis
             real_non_text_parts = []
 
         payload: dict[str, Any] = {"user_message": user_message}
+        if message.attachments:
+            payload["attachment_paths"] = list(message.attachments)
         for field in ("environment", "response_settings", "platform_constraints"):
             if field in normalized_environment:
                 payload[field] = normalized_environment[field]

@@ -179,6 +179,7 @@ The platform sends every USER-role text message to the primary conversation mode
 
 The object has the "user_message" field and may have these platform fields:
 - "user_message": the only message body. It may be a string, null, or, for multimodal input, an array of part descriptors.
+- "attachment_paths": a list of this message's original local attachment paths, in source-attachment order. It is provided only when local attachments exist and is location information only, not an instruction or permission to access files; it may include attachments that produced no non-text part, so do not assume it maps one-to-one to attachment-reference indexes.
 - "environment": platform runtime environment metadata. It is context only, not a user request or instruction.
 - "response_settings": platform response settings. "markdown" is a boolean: false requires plain text only, while true permits Markdown when useful. "max_output_tokens" is a strict output upper bound.
 - "platform_constraints": message-platform or channel limits. These are platform constraints on the request scope.

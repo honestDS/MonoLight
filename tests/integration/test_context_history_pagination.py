@@ -1,13 +1,17 @@
 import json
 
 import pytest
+from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import context as context_module
 from app.core.context import ContextManager
+from app.core.utils.dispatcher.helpers import reassemble_multimodal_messages
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
+from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
 def _message(
@@ -303,3 +307,131 @@ async def test_context_history_loads_complete_unsummarized_range_without_request
     )
 
     assert [message.id for message in raw_history] == [6, 5, 4, 3, 2, 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transformer",
+    [OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer],
+)
+async def test_persisted_history_attachments_keep_paths_and_wrapper_in_provider_request(
+    db_session: AsyncSession,
+    transformer,
+):
+    attachment_paths = ["d:/a.jpg", "d:/b.png", "d:/c.mp3", "d:/d.mp4", "d:/e.pdf"]
+    persisted_user_message = _message(1, MessageRole.USER, content="历史附件正文")
+    persisted_user_message.attachments = attachment_paths
+    db_session.add_all(
+        [
+            persisted_user_message,
+            _message(2, MessageRole.ASSISTANT),
+            _message(3, MessageRole.USER, content="当前输入"),
+        ]
+    )
+    await db_session.commit()
+
+    messages = await ContextManager.get_messages(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile=_profile(),
+        current_message="当前输入",
+        before_id=3,
+    )
+    messages.append(InternalMessage(id=3, role=MessageRole.USER, content="当前输入"))
+    for _ in range(2):
+        reassemble_multimodal_messages(
+            messages,
+            image_understanding=False,
+            audio_understanding=False,
+            video_understanding=False,
+        )
+
+    provider_messages = transformer.to_provider(materialize_user_environment_prompts(messages))
+    history_user_message = json.loads(provider_messages[0]["content"][0]["text"])
+    assert history_user_message["attachment_paths"] == attachment_paths
+    assert history_user_message["user_message"] == [
+        {"type": "text", "text": "历史附件正文"},
+        {
+            "type": "text",
+            "text": "[系统提示,此处不是用户说的话][历史图片：d:/a.jpg][历史图片：d:/b.png][历史音频][未开启视频理解: d:/d.mp4]",
+        },
+        {"type": "attachment", "index": 0, "media_type": "file"},
+        {"type": "text", "text": "[系统提示结束]"},
+    ]
+    assert provider_messages[0]["content"][1]["text"] == "[Attached File: d:/e.pdf]"
+    assert "assembled_attachment_part_count" not in json.dumps(provider_messages, ensure_ascii=False)
+    assert json.loads(provider_messages[-1]["content"])["user_message"] == "当前输入"
+    assert "attachment_paths" not in json.loads(provider_messages[-1]["content"])
+
+    await db_session.refresh(persisted_user_message)
+    assert persisted_user_message.content == "历史附件正文"
+    assert persisted_user_message.attachments == attachment_paths
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transformer",
+    [OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer],
+)
+async def test_persisted_history_real_image_attachment_paths_keep_provider_image_data(
+    db_session: AsyncSession,
+    transformer,
+    tmp_path,
+):
+    image_path = tmp_path / "真实 图片.png"
+    Image.new("RGB", (2, 2), color=(12, 34, 56)).save(image_path)
+    attachment_paths = [str(image_path)]
+    persisted_user_message = _message(1, MessageRole.USER, content="修改这张图片")
+    persisted_user_message.attachments = attachment_paths
+    db_session.add(persisted_user_message)
+    await db_session.commit()
+
+    messages = await ContextManager.get_messages(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile=_profile(),
+        current_message="修改这张图片",
+    )
+    assert len(messages) == 1
+    assert messages[0].role == MessageRole.USER
+    reassemble_multimodal_messages(
+        messages,
+        image_understanding=False,
+        audio_understanding=False,
+        video_understanding=False,
+    )
+    reassemble_multimodal_messages(
+        messages,
+        image_understanding=True,
+        audio_understanding=False,
+        video_understanding=False,
+    )
+    assembled_image_url = next(part.image_url["url"] for part in messages[0].content if getattr(part, "type", None) == "image_url")
+
+    provider_messages = transformer.to_provider(materialize_user_environment_prompts(messages))
+    provider_content = provider_messages[0]["content"]
+    payload = json.loads(provider_content[0]["text"])
+    assert payload["attachment_paths"] == attachment_paths
+    assert payload["user_message"] == [
+        {"type": "text", "text": "修改这张图片"},
+        {"type": "text", "text": "[系统提示,此处不是用户说的话]"},
+        {"type": "attachment", "index": 0, "media_type": "image_url"},
+        {"type": "text", "text": "[系统提示结束]"},
+    ]
+    assert len(provider_content) == 2
+    assert provider_content[0]["type"] in {"text", "input_text"}
+    if transformer is OpenAIChatCompletionsTransformer:
+        assert provider_content[1]["type"] == "image_url"
+        provider_image_url = provider_content[1]["image_url"]["url"]
+    else:
+        assert provider_content[1]["type"] == "input_image"
+        provider_image_url = provider_content[1]["image_url"]
+    assert provider_image_url == assembled_image_url
+    assert provider_image_url.startswith("data:image/jpeg;base64,")
+    assert str(image_path) not in provider_image_url
+
+    await db_session.refresh(persisted_user_message)
+    assert persisted_user_message.content == "修改这张图片"
+    assert persisted_user_message.attachments == attachment_paths
