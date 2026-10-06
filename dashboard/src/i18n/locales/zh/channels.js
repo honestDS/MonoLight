@@ -54,7 +54,7 @@ export default {
   max_tokens: '最大输出 Token',
   context_window_k: '上下文限制 K',
   image_understanding: '图像理解',
-  audio_understanding: '音频理解(未实装)',
+  audio_understanding: '音频理解',
   video_understanding: '视频理解(未实装)',
   embedding_dimensions: '向量维度',
   image_generation_size: '图片尺寸',
