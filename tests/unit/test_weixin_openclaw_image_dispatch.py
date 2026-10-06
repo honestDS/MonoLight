@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,10 +12,13 @@ from app.adapters.weixin_openclaw.constants import (
     WEIXIN_OPENCLAW_OUTBOUND_TEXT_CHINESE_CHAR_LIMIT,
     WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT,
 )
-from app.adapters.weixin_openclaw.message import extract_text_and_attachments
+from app.adapters.weixin_openclaw.message import extract_text_and_attachments, merge_message_pair
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, WeixinOpenClawMessage
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.prompts import WEIXIN_OPENCLAW_CONCISE_OUTPUT_SYSTEM_PROMPT
+from app.core.utils.context_messages import to_jsonable
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.models.message import InternalMessage, MessageRole
 
 
 class InboundMediaAdapter:
@@ -705,3 +709,182 @@ async def test_request_json_handles_client_business_codes(monkeypatch, response_
     else:
         assert await client.request_json("POST", "ilink/bot/test", token_required=False) == expected_result
         assert fake_logger.error_messages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("voice_item", "expected_user_message", "expected_title"),
+    [
+        (
+            {"text": "  你好，微信  "},
+            [{"type": "text", "text": "你好，微信", "input_source": "voice"}],
+            "你好，微信",
+        ),
+        ({"text": ""}, "[语音]", "[语音]"),
+        ({"text": " \n\t"}, "[语音]", "[语音]"),
+        ({"text": None}, "[语音]", "[语音]"),
+        ({}, "[语音]", "[语音]"),
+    ],
+    ids=["trimmed-voice-text", "empty-voice-text", "whitespace-voice-text", "null-voice-text", "missing-voice-text"],
+)
+async def test_voice_item_reaches_llm_json_with_voice_marker(
+    monkeypatch,
+    voice_item,
+    expected_user_message,
+    expected_title,
+):
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    adapter.context_tokens = {}
+    captured = {}
+    title_calls = []
+
+    async def chat(**kwargs):
+        captured.update(kwargs)
+        return WeixinOpenClawChatResult()
+
+    async def generate_title(**kwargs):
+        title_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(adapter, "chat", chat)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_selected_profile", generate_title)
+
+    converted = await adapter.convert_message(
+        {
+            "from_user_id": "weixin-user",
+            "context_token": "context-token",
+            "item_list": [{"type": 3, "voice_item": voice_item}],
+        }
+    )
+
+    assert converted is not None
+    handled = await adapter.handle_message(SimpleNamespace(), converted, uid="owner")
+
+    assert handled is True
+    assert converted.attachments == []
+    assert not captured["attachments"]
+
+    materialized = materialize_user_environment_prompts(
+        [
+            InternalMessage(
+                role=MessageRole.USER,
+                content=captured["message"],
+                attachments=captured["attachments"],
+            )
+        ]
+    )
+    payload = json.loads(materialized[0].content)
+    assert payload["user_message"] == expected_user_message
+    assert "attachment_paths" not in payload
+
+    first_message = title_calls[0]["first_message"]
+    assert type(first_message) is str
+    assert first_message == expected_title
+
+
+@pytest.mark.asyncio
+async def test_referenced_voice_text_keeps_voice_source_and_reference_boundary():
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    adapter.context_tokens = {}
+    raw_message = {
+        "from_user_id": "weixin-user",
+        "context_token": "context-token",
+        "item_list": [
+            {
+                "type": 1,
+                "text_item": {"text": "复述引用"},
+                "ref_msg": {
+                    "message_item": {
+                        "type": 3,
+                        "voice_item": {"text": "之前语音"},
+                    }
+                },
+            }
+        ],
+    }
+
+    converted = await adapter.convert_message(raw_message)
+
+    assert converted is not None
+    assert converted.attachments == []
+    payload = json.loads(materialize_user_environment_prompts([InternalMessage(role=MessageRole.USER, content=converted.text, attachments=converted.attachments)])[0].content)
+    assert payload["user_message"] == [
+        {"type": "text", "text": "复述引用"},
+        {"type": "text", "text": "[引用:之前语音]", "input_source": "voice"},
+    ]
+    assert "attachment_paths" not in payload
+    assert converted.raw["item_list"][0]["ref_msg"]["message_item"]["voice_item"]["text"] == "之前语音"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("item_list", "expected_user_message"),
+    [
+        (
+            [
+                {"type": 3, "voice_item": {"text": "说话"}},
+                {"type": 1, "text_item": {"text": "键入"}},
+            ],
+            [
+                {"type": "text", "text": "说话", "input_source": "voice"},
+                {"type": "text", "text": "键入"},
+            ],
+        ),
+        (
+            [
+                {"type": 1, "text_item": {"text": "键入"}},
+                {"type": 3, "voice_item": {"text": "说话"}},
+            ],
+            [
+                {"type": "text", "text": "键入"},
+                {"type": "text", "text": "说话", "input_source": "voice"},
+            ],
+        ),
+        (
+            [
+                {"type": 1, "text_item": {"text": "first"}},
+                {"type": 1, "text_item": {"text": "second"}},
+            ],
+            "first\nsecond",
+        ),
+    ],
+    ids=["voice-first", "voice-last", "plain-only"],
+)
+async def test_merge_message_pair_preserves_voice_source_order_and_metadata(item_list, expected_user_message):
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    adapter.context_tokens = {}
+
+    left = await adapter.convert_message(
+        {
+            "from_user_id": "weixin-user",
+            "context_token": "older",
+            "item_list": [item_list[0]],
+        }
+    )
+    right = await adapter.convert_message(
+        {
+            "from_user_id": "weixin-user",
+            "context_token": "newer",
+            "item_list": [item_list[1]],
+        }
+    )
+
+    assert left is not None
+    assert right is not None
+    left.created_at = 1.0
+    right.created_at = 2.0
+    left.attachments = ["first.virtual"]
+    right.attachments = ["second.virtual"]
+    left_text_snapshot = to_jsonable(left.text)
+    right_text_snapshot = to_jsonable(right.text)
+    merged = merge_message_pair(left, right)
+
+    payload = json.loads(materialize_user_environment_prompts([InternalMessage(role=MessageRole.USER, content=merged.text, attachments=merged.attachments)])[0].content)
+    assert payload["user_message"] == expected_user_message
+    assert payload["attachment_paths"] == ["first.virtual", "second.virtual"]
+    assert merged.attachments == ["first.virtual", "second.virtual"]
+    assert merged.context_token == "newer"
+    assert merged.created_at == 1.0
+    assert merged.raw["messages"] == [left.raw, right.raw]
+    assert to_jsonable(left.text) == left_text_snapshot
+    assert to_jsonable(right.text) == right_text_snapshot

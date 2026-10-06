@@ -92,7 +92,11 @@ def materialize_user_environment_prompts(messages: list[InternalMessage]) -> lis
                     text = part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")
                     if not isinstance(text, str):
                         text = "" if text is None else str(text)
-                    user_message.append({"type": "text", "text": text})
+                    text_part = {"type": "text", "text": text}
+                    input_source = part.get("input_source") if isinstance(part, dict) else getattr(part, "input_source", None)
+                    if isinstance(input_source, str) and input_source == "voice":
+                        text_part["input_source"] = "voice"
+                    user_message.append(text_part)
                     continue
                 media_type = part_type if isinstance(part_type, str) and part_type else "unknown"
                 user_message.append({"type": "attachment", "index": attachment_index, "media_type": media_type})
