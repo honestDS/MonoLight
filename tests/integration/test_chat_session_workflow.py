@@ -1,3 +1,4 @@
+import json
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import timedelta
@@ -27,7 +28,7 @@ from app.handler import register_handlers
 from app.models.audit import AuditConfirmationClaim, AuditRecord
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.channel import ModelChannel
-from app.models.message import Message, MessageRole, MessageType
+from app.models.message import Message, MessageResponse, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
@@ -1695,3 +1696,60 @@ async def test_session_setting_rejects_legacy_reasoning_effort_and_persists_show
         listed_session = next(item for item in listed.json()["data"] if item["session_id"] == session.session_id)
         assert listed_session["show_reasoning"] is False
         assert "reasoning_effort" not in listed_session
+
+
+@pytest.mark.asyncio
+async def test_http_structured_voice_input_persists_message_parts_and_history_shape(
+    chat_session_database: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    _patch_http_submission(monkeypatch, primary_profile)
+    session = ChatSession(
+        session_id="http-structured-voice-session",
+        uid="user-1",
+        profile_id=primary_profile.id,
+        source="http",
+        reply_target_source="http",
+    )
+    chat_session_database.add(session)
+    await chat_session_database.commit()
+
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+    submitted_parts = [
+        {"type": "text", "text": "语音转写内容", "input_source": "voice"},
+        {"type": "text", "text": "键入补充"},
+    ]
+    request_id = "http-structured-voice-request"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/api/v1/chat/completions",
+            json={
+                "message": submitted_parts,
+                "session_id": session.session_id,
+                "request_id": request_id,
+            },
+        )
+
+    assert response.status_code == 200
+    response_data = response.json()["data"]
+    assert response_data["session_id"] == session.session_id
+    assert response_data["request_id"] == request_id
+    work_id = response_data["work_id"]
+    assert isinstance(work_id, int)
+
+    work = await chat_session_database.get(SessionReplyWorkItem, work_id)
+    assert work is not None
+    assert work.source_type == SessionReplySourceType.USER_MESSAGE
+    stored_message = await chat_session_database.get(Message, int(work.source_id))
+    assert stored_message is not None
+    assert stored_message.content is not None
+    assert json.loads(stored_message.content) == submitted_parts
+    history_message = MessageResponse.model_validate(stored_message)
+    assert history_message.content == submitted_parts

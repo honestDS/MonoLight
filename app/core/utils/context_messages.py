@@ -1,6 +1,13 @@
 import json
 
-from app.models.message import InternalMessage
+from pydantic import ValidationError
+
+from app.models.message import (
+    InternalMessage,
+    MessagePart,
+    MessageRole,
+    TextPart,
+)
 
 
 def to_jsonable(value):
@@ -15,6 +22,52 @@ def to_jsonable(value):
 
 def is_context_summary_message(message: InternalMessage) -> bool:
     return isinstance(message.content, str) and message.content.startswith("<conversation_summary ")
+
+
+def merge_user_message_contents(
+    contents: list[str | list[MessagePart] | None],
+) -> str | list[MessagePart]:
+    normalized: list[str | list[MessagePart] | None] = []
+    for content in contents:
+        if not isinstance(content, str):
+            normalized.append(content)
+            continue
+
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            normalized.append(content)
+            continue
+        if not isinstance(parsed, list) or not parsed:
+            normalized.append(content)
+            continue
+
+        try:
+            parsed_content = InternalMessage(
+                role=MessageRole.USER,
+                content=parsed,
+            ).content
+        except ValidationError:
+            normalized.append(content)
+            continue
+        if not isinstance(parsed_content, list) or any(type(part) is MessagePart for part in parsed_content):
+            normalized.append(content)
+            continue
+        normalized.append(parsed_content)
+
+    if not any(isinstance(content, list) for content in normalized):
+        return "\n".join(content or "" for content in normalized)
+
+    merged: list[MessagePart] = []
+    for content in normalized:
+        if isinstance(content, list):
+            merged.extend(content)
+            continue
+        if not content:
+            continue
+        merged.append(TextPart(text=content))
+
+    return merged
 
 
 def message_token_text(msg: InternalMessage) -> str:

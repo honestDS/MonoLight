@@ -43,7 +43,9 @@ from app.core.log import get_logger
 from app.core.message_platforms.outbound_text import split_outbound_text_by_newline
 from app.core.profile_selection import resolve_profile_for_session
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.utils.context_messages import message_token_text
 from app.core.utils.session import generate_session_title_for_selected_profile
+from app.models.message import InternalMessage, MessageRole
 
 logger = get_logger(__name__)
 
@@ -343,7 +345,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 db=db,
                 uid=resolved_uid,
                 session_id=message.session_id,
-                first_message=dispatch_text,
+                first_message=(dispatch_text if isinstance(dispatch_text, str) else message_token_text(InternalMessage(role=MessageRole.USER, content=dispatch_text))),
                 message_platform_id=message_platform_id,
             )
             return True

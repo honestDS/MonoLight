@@ -9,9 +9,17 @@ from app.core.constants import (
 from app.core.context import ContextManager
 from app.core.exceptions import ParameterException
 from app.core.utils.context_budget import measure_context_request_usage
-from app.core.utils.context_messages import message_token_text
+from app.core.utils.context_messages import merge_user_message_contents, message_token_text, to_jsonable
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.message import AudioPart, ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
+from app.models.message import (
+    AudioPart,
+    ImagePart,
+    InternalMessage,
+    InternalToolCall,
+    MessageRole,
+    TextPart,
+    VoiceTextPart,
+)
 
 
 def test_message_token_text_replaces_audio_payload_with_placeholder():
@@ -240,3 +248,91 @@ def test_final_request_budget_preserves_longterm_memory_recall_json():
 
     tool_message = next(message for message in request_messages if message.role == MessageRole.TOOL)
     assert tool_message.content == recall_payload
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        pytest.param(["left", None, "right"], "left\n\nright", id="strings-and-none"),
+        pytest.param(
+            [json.dumps([{"type": "text", "text": "spoken", "input_source": "voice"}])],
+            [{"type": "text", "text": "spoken", "input_source": "voice"}],
+            id="serialized-voice-only",
+        ),
+        pytest.param(
+            [
+                json.dumps([{"type": "text", "text": "spoken", "input_source": "voice"}]),
+                "after",
+            ],
+            [
+                {"type": "text", "text": "spoken", "input_source": "voice"},
+                {"type": "text", "text": "after"},
+            ],
+            id="serialized-voice-then-text",
+        ),
+        pytest.param(
+            [[VoiceTextPart(text="spoken", input_source="voice")], "[]"],
+            [
+                {"type": "text", "text": "spoken", "input_source": "voice"},
+                {"type": "text", "text": "[]"},
+            ],
+            id="existing-voice-plus-empty-json",
+        ),
+        pytest.param(
+            [[VoiceTextPart(text="spoken", input_source="voice")], "[1,2]"],
+            [
+                {"type": "text", "text": "spoken", "input_source": "voice"},
+                {"type": "text", "text": "[1,2]"},
+            ],
+            id="existing-voice-plus-number-json",
+        ),
+        pytest.param(
+            [json.dumps([{"type": "future", "payload": "keep"}])],
+            json.dumps([{"type": "future", "payload": "keep"}]),
+            id="unknown-part-keeps-original-json",
+        ),
+        pytest.param(
+            [
+                json.dumps(
+                    [
+                        {"type": "text", "text": "spoken", "input_source": "voice"},
+                        {"type": "future", "payload": "keep"},
+                    ]
+                )
+            ],
+            json.dumps(
+                [
+                    {"type": "text", "text": "spoken", "input_source": "voice"},
+                    {"type": "future", "payload": "keep"},
+                ]
+            ),
+            id="voice-and-unknown-keep-original-json",
+        ),
+        pytest.param(
+            [
+                json.dumps([{"type": "text", "text": "spoken", "input_source": "voice"}]),
+                json.dumps(
+                    [
+                        {"type": "text", "text": "spoken", "input_source": "voice"},
+                        {"type": "future", "payload": "keep"},
+                    ]
+                ),
+            ],
+            [
+                {"type": "text", "text": "spoken", "input_source": "voice"},
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        [
+                            {"type": "text", "text": "spoken", "input_source": "voice"},
+                            {"type": "future", "payload": "keep"},
+                        ]
+                    ),
+                },
+            ],
+            id="invalid-json-array-becomes-text-part-in-mixed-content",
+        ),
+    ],
+)
+def test_merge_user_message_contents_preserves_text_and_sources(contents, expected):
+    assert to_jsonable(merge_user_message_contents(contents)) == expected

@@ -14,6 +14,8 @@ from app.adapters.weixin_openclaw.constants import (
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawMessage
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.context_messages import merge_user_message_contents
+from app.models.message import TextPart, VoiceTextPart
 
 logger = get_logger(__name__)
 
@@ -105,7 +107,8 @@ def merge_single_poll_messages(messages: list[WeixinOpenClawMessage]) -> list[We
 
 
 def merge_message_pair(left: WeixinOpenClawMessage, right: WeixinOpenClawMessage) -> WeixinOpenClawMessage:
-    text = "\n".join(part for part in (left.text, right.text) if part).strip()
+    merged_text = merge_user_message_contents([left.text, right.text])
+    text = merged_text.strip() if isinstance(merged_text, str) else merged_text
     raw_messages: list[dict[str, Any]] = []
     if isinstance(left.raw, dict) and isinstance(left.raw.get("messages"), list):
         raw_messages.extend(item for item in left.raw["messages"] if isinstance(item, dict))
@@ -131,11 +134,11 @@ def build_attachment_fallback_text(attachments: list[str]) -> str:
     return "\n".join(f"[文件:{Path(item).name}]" for item in attachments)
 
 
-async def extract_text_and_attachments(adapter: Any, item_list: list[dict[str, Any]] | None) -> tuple[str, list[str]]:
+async def extract_text_and_attachments(adapter: Any, item_list: list[dict[str, Any]] | None) -> tuple[str | list[TextPart], list[str]]:
     if not item_list:
         return "", []
 
-    texts: list[str] = []
+    texts: list[TextPart] = []
     attachments: list[str] = []
     for item in item_list:
         item_type = int(item.get("type") or 0)
@@ -143,7 +146,7 @@ async def extract_text_and_attachments(adapter: Any, item_list: list[dict[str, A
         if item_type == TEXT_ITEM_TYPE:
             text = str(item.get("text_item", {}).get("text", "")).strip()
             if text:
-                texts.append(text)
+                texts.append(TextPart(text=text))
         elif item_type == IMAGE_ITEM_TYPE:
             media_path = await adapter.resolve_inbound_image(item)
             if media_path:
@@ -151,13 +154,17 @@ async def extract_text_and_attachments(adapter: Any, item_list: list[dict[str, A
         elif item_type == FILE_ITEM_TYPE:
             media_path = await adapter.resolve_inbound_file(item)
             if media_path:
-                texts.append(f"[文件:{media_path.name}]")
+                texts.append(TextPart(text=f"[文件:{media_path.name}]"))
                 attachments.append(str(media_path))
         elif item_type == VOICE_ITEM_TYPE:
-            voice_text = str(item.get("voice_item", {}).get("text", "")).strip()
-            texts.append(voice_text or SKIPPED_MEDIA_PLACEHOLDERS[VOICE_ITEM_TYPE])
+            voice_item = item.get("voice_item")
+            voice_text = voice_item.get("text") if isinstance(voice_item, dict) else None
+            if isinstance(voice_text, str) and voice_text.strip():
+                texts.append(VoiceTextPart(text=voice_text.strip(), input_source="voice"))
+            else:
+                texts.append(TextPart(text=SKIPPED_MEDIA_PLACEHOLDERS[VOICE_ITEM_TYPE]))
         elif item_type == VIDEO_ITEM_TYPE:
-            texts.append(SKIPPED_MEDIA_PLACEHOLDERS[VIDEO_ITEM_TYPE])
+            texts.append(TextPart(text=SKIPPED_MEDIA_PLACEHOLDERS[VIDEO_ITEM_TYPE]))
         else:
             supported = False
 
@@ -165,10 +172,17 @@ async def extract_text_and_attachments(adapter: Any, item_list: list[dict[str, A
         ref_item = ref.get("message_item") if isinstance(ref, dict) else None
         if isinstance(ref_item, dict):
             ref_text, ref_attachments = await extract_text_and_attachments(adapter, [ref_item])
-            if ref_text:
-                texts.append(f"[引用:{ref_text}]")
+            if isinstance(ref_text, str) and ref_text:
+                texts.append(TextPart(text=f"[引用:{ref_text}]"))
+            elif isinstance(ref_text, list) and ref_text:
+                ref_parts = [part.model_copy(deep=True) for part in ref_text]
+                ref_parts[0].text = f"[引用:{ref_parts[0].text}"
+                ref_parts[-1].text = f"{ref_parts[-1].text}]"
+                texts.extend(ref_parts)
             attachments.extend(ref_attachments)
         elif not supported:
             logger.bind(item_type=item_type, item_keys=list(item.keys())).warning(t("LOG_WEIXIN_OPENCLAW_UNSUPPORTED_ITEM_IGNORED"))
 
-    return "\n".join(texts).strip(), attachments
+    if any(isinstance(part, VoiceTextPart) for part in texts):
+        return texts, attachments
+    return "\n".join(part.text for part in texts).strip(), attachments

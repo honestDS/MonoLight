@@ -12,6 +12,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.session_source import default_show_tool_calls_for_source
+from app.core.utils.context_messages import to_jsonable
 from app.models.message import Message
 from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
@@ -110,9 +111,7 @@ def _serialize_message_content(content: Any) -> str:
         return content
     if content is None:
         return ""
-    if hasattr(content, "model_dump"):
-        content = content.model_dump(mode="json")
-    return json.dumps(content, ensure_ascii=False)
+    return json.dumps(to_jsonable(content), ensure_ascii=False)
 
 
 def build_foreground_message_dedupe_key(session_id: str, message_id: int) -> str:

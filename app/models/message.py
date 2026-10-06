@@ -55,6 +55,10 @@ class TextPart(MessagePart):
     text: str
 
 
+class VoiceTextPart(TextPart):
+    input_source: Literal["voice"]
+
+
 class ImagePart(MessagePart):
     type: Literal["image_url"] = "image_url"
     image_url: dict[str, str]
@@ -129,7 +133,7 @@ class InternalGeneratedImage(BaseModel):
 class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
-    content: str | list[TextPart | ImagePart | AudioPart | FilePart | MessagePart] | None = None
+    content: str | list[VoiceTextPart | TextPart | ImagePart | AudioPart | FilePart | MessagePart] | None = None
     reasoning_content: str | None = None
     refusal: str | None = None
     provider_metadata: dict[str, Any] | None = None
@@ -244,7 +248,7 @@ class MessageResponse(MessageBase):
 
 
 class ChatCompletionRequest(BaseModel):
-    message: str | list[TextPart | ImagePart | AudioPart | FilePart | MessagePart]
+    message: str | list[VoiceTextPart | TextPart | ImagePart | AudioPart | FilePart | MessagePart]
     attachments: list[str] | None = None
     session_id: str | None = None
     request_id: str | None = None

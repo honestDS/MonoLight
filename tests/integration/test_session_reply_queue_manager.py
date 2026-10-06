@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,10 @@ from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem, sess
 from app.core.exceptions import BaseBusinessException
 from app.core.session_reply_queue import manager_result as manager_result_module
 from app.core.session_reply_queue.manager import SessionReplyQueueManager, build_session_reply_work_event_id
-from app.models.message import Message, MessageRole, MessageType
+from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.models.message import ChatCompletionRequest, InternalMessage, Message, MessageRole, MessageType
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -18,6 +22,8 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransformer
+from app.transformers.openai.responses import OpenAIResponsesTransformer
 from tests.integration.session_reply_queue_fixture import (
     concurrent_session_factory as _concurrent_session_factory,
 )
@@ -1030,3 +1036,194 @@ async def test_wait_for_result_restores_persisted_user_error_for_adapter(monkeyp
         "work_id": 7,
         "event_id": build_session_reply_work_event_id(work, error=True),
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["http", "ws", "weixin-openclaw"])
+async def test_foreground_freeze_preserves_voice_source_through_history_and_provider(
+    db_session: AsyncSession,
+    source: str,
+):
+    manager = SessionReplyQueueManager()
+    request = ChatCompletionRequest(
+        message=[{"type": "text", "text": "语音转写内容", "input_source": "voice"}],
+        attachments=["virtual.png"],
+    )
+    first_message, first_work = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message=request.message,
+        attachments=request.attachments,
+        source=source,
+    )
+    second_message, second_work = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message="普通文本",
+        attachments=["virtual.pdf", "virtual.png"],
+        source=source,
+    )
+
+    first_work.status = SessionReplyWorkStatus.RUNNING
+    first_work.locked_by = "worker-1"
+    db_session.add(first_work)
+    await db_session.commit()
+
+    first_result = await manager.freeze_foreground_input(db_session, work=first_work, worker_id="worker-1")
+    await db_session.refresh(first_work)
+    second_result = await manager.freeze_foreground_input(db_session, work=first_work, worker_id="worker-1")
+
+    expected_message_ids = [first_message.id, second_message.id]
+    assert first_result == second_result
+    frozen_content, frozen_attachments, frozen_message_ids = first_result
+    assert frozen_message_ids == expected_message_ids
+    assert frozen_attachments == ["virtual.png", "virtual.pdf"]
+    assert [part.model_dump(mode="json") for part in frozen_content] == [
+        {"type": "text", "text": "语音转写内容", "input_source": "voice"},
+        {"type": "text", "text": "普通文本"},
+    ]
+    assert first_work.input_message_ids == expected_message_ids
+    await db_session.refresh(second_work)
+    assert second_work.status == SessionReplyWorkStatus.MERGED
+    assert second_work.merged_into_id == first_work.id
+
+    for transformer in (OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer):
+        model_message = InternalMessage(
+            role=MessageRole.USER,
+            content=frozen_content,
+            attachments=frozen_attachments,
+        )
+        materialized_message = materialize_user_environment_prompts([model_message])[0]
+        provider_message = transformer.to_provider([materialized_message])[0]
+        provider_content = provider_message["content"]
+        provider_text = provider_content if isinstance(provider_content, str) else provider_content[0]["text"]
+        provider_payload = json.loads(provider_text)
+        assert provider_payload["user_message"] == [
+            {"type": "text", "text": "语音转写内容", "input_source": "voice"},
+            {"type": "text", "text": "普通文本"},
+        ]
+        assert provider_payload["attachment_paths"] == ["virtual.png", "virtual.pdf"]
+
+    history_result = await db_session.execute(select(Message).where(Message.id.in_(expected_message_ids)))
+    history_by_id = {message.id: message for message in history_result.scalars().all()}
+    history_rows = [history_by_id[message_id] for message_id in expected_message_ids]
+    stored_contents = [message.content for message in history_rows]
+    assert json.loads(history_rows[0].content) == [
+        {"type": "text", "text": "语音转写内容", "input_source": "voice"},
+    ]
+    assert history_rows[1].content == "普通文本"
+    history_messages = parse_db_messages_to_internal(history_rows)
+    assert [message.id for message in history_messages] == expected_message_ids
+    materialized_history = materialize_user_environment_prompts(history_messages)
+    history_payloads = [json.loads(message.content) for message in materialized_history]
+    assert history_payloads[0]["user_message"] == [
+        {"type": "text", "text": "语音转写内容", "input_source": "voice"},
+    ]
+    assert history_payloads[1]["user_message"] == "普通文本"
+    assert [message.content for message in history_rows] == stored_contents
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["queue", "legacy"])
+async def test_running_foreground_append_preserves_voice_source(db_session: AsyncSession, mode: str):
+    manager = SessionReplyQueueManager()
+    initial_message, first_work = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message="初始普通输入",
+        attachments=None,
+        source="http",
+    )
+    first_work.status = SessionReplyWorkStatus.RUNNING
+    first_work.locked_by = "worker-1"
+    db_session.add(first_work)
+    await db_session.commit()
+    _, _, frozen_message_ids = await manager.freeze_foreground_input(
+        db_session,
+        work=first_work,
+        worker_id="worker-1",
+    )
+    assert frozen_message_ids == [initial_message.id]
+
+    voice_request = ChatCompletionRequest(
+        message=[{"type": "text", "text": "追加语音转写", "input_source": "voice"}],
+        attachments=["virtual.png", "shared.pdf"],
+    )
+    voice_message, _ = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message=voice_request.message,
+        attachments=voice_request.attachments,
+        source="http",
+    )
+    text_message, _ = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message="补充文字",
+        attachments=["shared.pdf", "virtual.png"],
+        source="http",
+    )
+    expected_message_ids = (voice_message.id, text_message.id)
+    voice_row = await db_session.get(Message, voice_message.id)
+    text_row = await db_session.get(Message, text_message.id)
+    original_contents = (voice_row.content, text_row.content)
+    assert json.loads(voice_row.content) == [
+        {"type": "text", "text": "追加语音转写", "input_source": "voice"},
+    ]
+    assert text_row.content == "补充文字"
+
+    if mode == "queue":
+        batch = await manager.absorb_contiguous_foreground_messages(
+            db_session,
+            work_id=first_work.id,
+            worker_id="worker-1",
+        )
+    else:
+        batch = await fetch_and_merge_new_user_messages(db_session, "session-1", "user-1")
+
+    assert batch is not None
+    assert batch.source_message_ids == expected_message_ids
+    assert len(batch.messages) == 1
+    appended_message = batch.messages[0]
+    assert appended_message.attachments == ["virtual.png", "shared.pdf"]
+
+    for transformer in (OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer):
+        materialized_message = materialize_user_environment_prompts([appended_message])[0]
+        provider_message = transformer.to_provider([materialized_message])[0]
+        provider_content = provider_message["content"]
+        provider_text = provider_content if isinstance(provider_content, str) else provider_content[0]["text"]
+        provider_payload = json.loads(provider_text)
+        assert provider_payload["user_message"] == [
+            {"type": "text", "text": "追加语音转写", "input_source": "voice"},
+            {"type": "text", "text": "补充文字"},
+        ]
+        assert provider_payload["attachment_paths"] == ["virtual.png", "shared.pdf"]
+
+    persisted_rows = list((await db_session.execute(select(Message).where(Message.id.in_(expected_message_ids)))).scalars().all())
+    persisted_by_id = {message.id: message for message in persisted_rows}
+    persisted_messages = [persisted_by_id[message_id] for message_id in expected_message_ids]
+    for message in persisted_messages:
+        await db_session.refresh(message)
+    assert [message.content for message in persisted_messages] == list(original_contents)
+    assert all(message.is_processed is True for message in persisted_messages)
+    initial_row = await db_session.get(Message, initial_message.id)
+    await db_session.refresh(initial_row)
+    assert initial_row.content == "初始普通输入"
+    assert initial_row.is_processed is True
+    assert initial_message.id not in batch.source_message_ids
+
+    await db_session.refresh(first_work)
+    if mode == "queue":
+        assert first_work.input_message_ids == [initial_message.id, *expected_message_ids]
+    else:
+        assert first_work.input_message_ids == [initial_message.id]

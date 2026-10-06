@@ -8,8 +8,9 @@ from app.core.constants import (
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
+from app.core.utils.context_messages import merge_user_message_contents
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.message import InternalMessage, Message, MessagePart, MessageRole, MessageType
 from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
@@ -33,7 +34,7 @@ class SessionReplyFreeze:
         *,
         work: SessionReplyWorkItem,
         worker_id: str,
-    ) -> tuple[str, list[str], list[int]]:
+    ) -> tuple[str | list[MessagePart], list[str], list[int]]:
         if work.input_message_ids:
             return await self._load_frozen_input(db, work.input_message_ids)
 
@@ -273,7 +274,11 @@ class SessionReplyFreeze:
             return None
         return [messages_by_id[message_id] for message_id in message_ids]
 
-    async def _load_frozen_input(self, db: AsyncSession, message_ids: list[int]) -> tuple[str, list[str], list[int]]:
+    async def _load_frozen_input(
+        self,
+        db: AsyncSession,
+        message_ids: list[int],
+    ) -> tuple[str | list[MessagePart], list[str], list[int]]:
         result = await db.execute(select(Message).where(Message.id.in_(message_ids)))
         messages = self._reorder_messages_by_ids(list(result.scalars().all()), message_ids)
         if messages is None:
@@ -282,7 +287,7 @@ class SessionReplyFreeze:
         return content, attachments, message_ids
 
     @staticmethod
-    def _merge_messages(messages: list[Message]) -> tuple[str, list[str], list[int]]:
+    def _merge_messages(messages: list[Message]) -> tuple[str | list[MessagePart], list[str], list[int]]:
         contents = [message.content or "" for message in messages]
         attachments: list[str] = []
         seen: set[str] = set()
@@ -291,4 +296,4 @@ class SessionReplyFreeze:
                 if attachment not in seen:
                     seen.add(attachment)
                     attachments.append(attachment)
-        return "\n".join(contents), attachments, [message.id for message in messages if message.id is not None]
+        return merge_user_message_contents(contents), attachments, [message.id for message in messages if message.id is not None]
