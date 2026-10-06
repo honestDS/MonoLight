@@ -7,7 +7,7 @@ import { PAGE_SIZE } from '../../constants'
 import i18n from '../../i18n'
 import { resolveHistoryRequest } from './historyPagination.js'
 import { formatSessionActivityTime } from './sessionActivity.js'
-import { createSessionListLoadingPoller } from './sessionListLoading.js'
+import { createSessionListPoller } from './sessionListLoading.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -33,7 +33,7 @@ export function useSessionManager() {
   // 加载历史记录的回调（由外部注入）
   let loadHistoryCallback = null
   let sessionsUpdatedCallback = null
-  let pendingSubmissionCallback = null
+  let disposed = false
 
   // ==================== 会话管理方法 ====================
   
@@ -46,48 +46,47 @@ export function useSessionManager() {
     sessionsUpdatedCallback = callback
   }
 
-  const setPendingSubmissionCallback = (callback) => {
-    pendingSubmissionCallback = callback
-  }
+  const fetchSessions = async () => {
+    const res = await chatApi.sessionsList()
+    if (disposed) return sessions.value
 
-  const fetchSessions = async ({ showLoading = false, silentError = false } = {}) => {
-    if (showLoading) sessionsLoading.value = true
-    try {
-      const res = await chatApi.sessionsList()
-      sessions.value = res.data.data || []
-      if (sessionsUpdatedCallback) {
-        sessionsUpdatedCallback(sessions.value)
-      }
-    } catch (err) {
-      if (!silentError) {
-        ElMessage.error(err.message || t('chat.load_sessions_failed'))
-      }
-    } finally {
-      if (showLoading) sessionsLoading.value = false
+    sessions.value = res.data.data || []
+    if (sessionsUpdatedCallback) {
+      sessionsUpdatedCallback(sessions.value)
     }
     return sessions.value
   }
 
-  const sessionLoadingPoller = createSessionListLoadingPoller({
-    refreshSessions: () => fetchSessions({ silentError: true }),
-    hasPendingSubmissions: () => Boolean(pendingSubmissionCallback?.())
+  const sessionListPoller = createSessionListPoller({
+    refreshSessions: fetchSessions
   })
 
   /**
-   * 加载会话列表。列表中存在后台回复时，自动保持轻量刷新直到全部完成。
+   * 加载会话列表。页面存续期间持续刷新。
    */
   const loadSessions = async () => {
-    const nextSessions = await fetchSessions({ showLoading: true })
-    sessionLoadingPoller.sync(nextSessions)
-    return nextSessions
+    sessionsLoading.value = true
+    try {
+      return await sessionListPoller.refreshNow()
+    } catch (err) {
+      if (!disposed) {
+        ElMessage.error(err.message || t('chat.load_sessions_failed'))
+      }
+      return sessions.value
+    } finally {
+      sessionsLoading.value = false
+    }
   }
 
-  const refreshSessionLoadingState = () => sessionLoadingPoller.refreshNow()
+  const refreshSessionLoadingState = () => sessionListPoller.refreshNow().catch(err => {
+    console.error(err)
+    return sessions.value
+  })
 
   onScopeDispose(() => {
+    disposed = true
     sessionsUpdatedCallback = null
-    pendingSubmissionCallback = null
-    sessionLoadingPoller.dispose()
+    sessionListPoller.dispose()
   })
 
   // 使用删除确认组合式函数
@@ -252,7 +251,6 @@ export function useSessionManager() {
     // 方法
     setLoadHistoryCallback,
     setSessionsUpdatedCallback,
-    setPendingSubmissionCallback,
     loadSessions,
     refreshSessionLoadingState,
     selectSession,

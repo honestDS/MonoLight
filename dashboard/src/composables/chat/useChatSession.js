@@ -567,7 +567,10 @@ export function useChatSession() {
     )
   }
 
-  const syncIncrementalSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
+  const syncIncrementalSessionHistory = async (
+    sessionId = sessionManager.currentSessionId.value,
+    isCurrentSync = () => true
+  ) => {
     if (!sessionId || sessionId !== sessionManager.currentSessionId.value) {
       return { hasMore: false }
     }
@@ -581,6 +584,8 @@ export function useChatSession() {
       sessionScopeActive
       && sessionId === sessionManager.currentSessionId.value
       && historyMergeTracker.isLatest(requestId)
+      && initialHistoryLoaded.value
+      && isCurrentSync()
     )
     const result = await syncIncrementalHistory({
       initialAfterId: getIncrementalHistoryCursor(
@@ -634,14 +639,14 @@ export function useChatSession() {
   const startHttpHistoryBackgroundTaskSync = httpHistorySync.start
 
   watch(
-    () => [
-      transport.transportMode.value,
-      sessionManager.currentSessionId.value,
-      isCurrentSessionReadOnly.value,
-      initialHistoryLoaded.value
+    [
+      () => transport.transportMode.value,
+      () => sessionManager.currentSessionId.value,
+      () => isCurrentSessionReadOnly.value,
+      () => initialHistoryLoaded.value
     ],
     () => httpHistorySync.handleSessionChanged(),
-    { immediate: true }
+    { immediate: true, flush: 'sync' }
   )
 
   onScopeDispose(() => {
@@ -654,7 +659,6 @@ export function useChatSession() {
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     sessionManager.setSessionsUpdatedCallback(null)
-    sessionManager.setPendingSubmissionCallback(null)
     transport.setReconnectHandler(null)
     transport.disconnectWebSocket()
   })
@@ -726,6 +730,11 @@ export function useChatSession() {
     messageProcessor,
     api: chatApi,
     mergeLatestSessionHistory,
+    getHistoryCursor: sessionId => getIncrementalHistoryCursor(
+      chatState.messages.value,
+      incrementalHistoryCursors.get(sessionId)
+    ),
+    mergeIncrementalSessionHistory: syncIncrementalSessionHistory,
     reportError: message => ElMessage.error(message),
     translate: t
   })
@@ -734,15 +743,14 @@ export function useChatSession() {
   const handleSessionsUpdated = sessions => {
     try {
       void processHttpSessionSnapshot(sessions).catch(err => {
-        console.error('HTTP session list work processing failed:', err)
+        console.error('Session list processing failed:', err)
       })
     } catch (err) {
-      console.error('HTTP session list update callback failed:', err)
+      console.error('Session list update callback failed:', err)
     }
   }
 
   sessionManager.setSessionsUpdatedCallback(handleSessionsUpdated)
-  sessionManager.setPendingSubmissionCallback(() => transport.transportMode.value === 'http' && [...pendingHttpRequests.values()].some(p => p.sessionId === normalizeHttpIdentity(sessionManager.currentSessionId.value)))
 
   watch(
     () => transport.transportMode.value,

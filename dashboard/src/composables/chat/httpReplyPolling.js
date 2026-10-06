@@ -1,4 +1,5 @@
 import { hasHttpResultMessage, shouldFetchHttpWorkStatus } from './sessionListLoading.js'
+import { getLatestPersistedMessageId } from './historyIncrementalSync.js'
 
 export const normalizeHttpIdentity = value => (
   value === undefined || value === null || value === '' ? null : String(value)
@@ -21,6 +22,8 @@ export function createHttpReplyPolling({
   messageProcessor,
   api,
   mergeLatestSessionHistory,
+  getHistoryCursor = () => getLatestPersistedMessageId(chatState.messages.value),
+  mergeIncrementalSessionHistory,
   reportError,
   translate
 }) {
@@ -30,6 +33,7 @@ export function createHttpReplyPolling({
   const fetchingHttpWorks = new Set()
   const resolvedHttpWorks = new Set()
   let httpPollingStateVersion = 0
+  let externalHistoryState = null
 
   const trackHttpSubmission = (requestId, sessionId, workId = null) => {
     const normalizedRequestId = normalizeHttpIdentity(requestId)
@@ -50,6 +54,7 @@ export function createHttpReplyPolling({
     observedHttpLatestMessageIds.clear()
     fetchingHttpWorks.clear()
     resolvedHttpWorks.clear()
+    externalHistoryState = null
   }
 
   const isCurrentWritableHttpSession = sessionId => (
@@ -165,6 +170,59 @@ export function createHttpReplyPolling({
     void mergeLatestSessionHistory(normalizedSessionId).catch(err => {
       console.error('HTTP session list history merge failed:', err)
     })
+  }
+
+  const maybeMergeExternalSessionHistory = async (rawSessionId, session) => {
+    const normalizedSessionId = normalizeHttpIdentity(rawSessionId)
+    if (!normalizedSessionId) return
+
+    if (externalHistoryState?.sessionId !== normalizedSessionId) {
+      externalHistoryState = {
+        sessionId: normalizedSessionId,
+        processedLatestMessageId: 0,
+        fetching: false
+      }
+    }
+
+    const syncState = externalHistoryState
+    if (!initialHistoryLoaded.value || syncState.fetching) return
+
+    const rawLatestMessageId = session?.latest_message_id
+    if (typeof rawLatestMessageId !== 'number' && typeof rawLatestMessageId !== 'string') return
+
+    const latestMessageId = Number(rawLatestMessageId)
+    if (!Number.isSafeInteger(latestMessageId) || latestMessageId <= 0) return
+
+    if (latestMessageId <= Math.max(
+      getHistoryCursor(rawSessionId),
+      syncState.processedLatestMessageId
+    )) return
+
+    const stateVersion = httpPollingStateVersion
+    syncState.fetching = true
+    const isCurrentSync = () => (
+      externalHistoryState === syncState
+      && stateVersion === httpPollingStateVersion
+      && normalizeHttpIdentity(sessionManager.currentSessionId.value) === normalizedSessionId
+      && isCurrentSessionReadOnly.value
+      && initialHistoryLoaded.value
+    )
+
+    try {
+      const result = await mergeIncrementalSessionHistory(rawSessionId, isCurrentSync)
+      if (
+        result?.hasMore === false
+        && result?.cancelled !== true
+        && isCurrentSync()
+      ) {
+        syncState.processedLatestMessageId = latestMessageId
+      }
+      return result
+    } catch (error) {
+      if (isCurrentSync()) throw error
+    } finally {
+      syncState.fetching = false
+    }
   }
 
   const applyHttpWorkStatus = (work, statusData, sessionId) => {
@@ -295,14 +353,20 @@ export function createHttpReplyPolling({
   const processHttpSessionSnapshot = async (sessions) => {
     if (
       !Array.isArray(sessions)
-      || transport.transportMode.value !== 'http'
       || !sessionManager.currentSessionId.value
-      || isCurrentSessionReadOnly.value
     ) return
 
-    const sessionId = normalizeHttpIdentity(sessionManager.currentSessionId.value)
+    const rawSessionId = sessionManager.currentSessionId.value
+    const sessionId = normalizeHttpIdentity(rawSessionId)
     const session = sessions.find(item => normalizeHttpIdentity(item?.session_id) === sessionId)
     if (!session) return
+
+    if (isCurrentSessionReadOnly.value) {
+      await maybeMergeExternalSessionHistory(rawSessionId, session)
+      return
+    }
+
+    if (transport.transportMode.value !== 'http') return
 
     maybeMergeHttpSessionHistory(sessionId, session.latest_message_id)
 
