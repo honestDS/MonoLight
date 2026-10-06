@@ -90,12 +90,14 @@ async def _persist_interactive_work_stream_event(
 
 
 async def _publish_newly_dequeued_request_ids(
-    db,
     stream_state: _InteractiveWorkStreamEventState,
 ) -> None:
     work = stream_state.work
-    await db.refresh(work)
-    request_ids = [request_id for request_id in get_work_request_ids(work) if request_id not in stream_state.dequeued_request_ids]
+    async with AsyncSessionLocal() as request_db:
+        work_snapshot = await session_reply_work_item_crud.get(request_db, work.id)
+        if work_snapshot is None:
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
+        request_ids = [request_id for request_id in get_work_request_ids(work_snapshot) if request_id not in stream_state.dequeued_request_ids]
     if not request_ids:
         return
     await _persist_interactive_work_stream_event(
@@ -111,13 +113,12 @@ async def _publish_newly_dequeued_request_ids(
 
 
 async def _publish_interactive_work_stream_event(
-    db,
     stream_state: _InteractiveWorkStreamEventState,
     event: dict[str, Any],
 ) -> None:
     work = stream_state.work
     if event.get("type") == "agent_loop_start":
-        await _publish_newly_dequeued_request_ids(db, stream_state)
+        await _publish_newly_dequeued_request_ids(stream_state)
     persisted_event = await _persist_interactive_work_stream_event(stream_state, event)
 
     response_id = event.get("response_id")
@@ -162,7 +163,7 @@ async def _fetch_additional_foreground_user_messages(
         worker_id=worker_id,
     )
     if batch is not None:
-        await _publish_newly_dequeued_request_ids(db, stream_state)
+        await _publish_newly_dequeued_request_ids(stream_state)
     return batch
 
 
@@ -294,7 +295,6 @@ async def _dispatch_interactive_work(
             request_metadata_callback=partial(_persist_interactive_work_request_metadata, work=work),
             context_summary_lifecycle_callback=partial(
                 _publish_interactive_work_stream_event,
-                db,
                 stream_state,
             )
             if context_summary_events_requested
@@ -327,7 +327,7 @@ async def _dispatch_interactive_work(
             error_message = str(event.get("message") or t(ERR_LLM_UNEXPECTED_ERROR))
             raise RuntimeError(error_message)
         else:
-            await _publish_interactive_work_stream_event(db, stream_state, event)
+            await _publish_interactive_work_stream_event(stream_state, event)
     if not isinstance(response, dict):
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     return response
