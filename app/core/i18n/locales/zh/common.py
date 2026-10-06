@@ -397,6 +397,7 @@ MESSAGES = {
     "ERR_TOOL_IMAGE_CHANNEL_UNAVAILABLE": "当前没有可用的图片生成渠道",
     "ERR_TOOL_IMAGE_EMPTY_RESPONSE": "图片生成模型未返回图片",
     "ERR_TOOL_IMAGE_INVALID_ITEM": "图片生成模型返回的图片项缺少 url 或 b64_json",
+    "ERR_TOOL_IMAGE_REFERENCE_INVALID": "参考图参数无效：reference_images 必须是最多 16 个非空绝对路径，仅支持有效的 PNG、JPEG 或 WEBP 图片",
     "ERR_TOOL_MULTIMODAL_PATH_INVALID": "多模态文件路径无效",
     "ERR_TOOL_MULTIMODAL_PATH_NOT_ABSOLUTE": "多模态文件路径必须是绝对路径",
     "ERR_TOOL_MULTIMODAL_FILE_NOT_FOUND": "多模态文件不存在",

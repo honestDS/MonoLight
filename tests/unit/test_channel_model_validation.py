@@ -677,6 +677,7 @@ def test_channel_response_defaults_missing_http_proxy_to_none() -> None:
         (ModelUsage.EMBEDDING, ModelProtocol.OPENAI),
         (ModelUsage.RERANK, ModelProtocol.OPENAI_IMAGE),
         (ModelUsage.IMAGE_GENERATION, ModelProtocol.COHERE_RERANK),
+        (ModelUsage.IMAGE_GENERATION, ModelProtocol.OPENAI_RESPONSES),
     ],
 )
 def test_model_rejects_protocol_for_different_usage(usage: ModelUsage, protocol: ModelProtocol) -> None:

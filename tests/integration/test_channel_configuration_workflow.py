@@ -12,8 +12,10 @@ from sqlmodel import SQLModel, select
 import app.core.crypto as crypto_module
 from app.api.v1.channels import router as channels_router
 from app.api.v1.memories import router as memories_router
+from app.core.constants import ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID
 from app.core.crud.channel.channel import channel_crud
 from app.core.crud.memory.store import memory_store_crud
+from app.core.i18n import t
 from app.core.security import get_current_user
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
@@ -102,6 +104,88 @@ def _assert_standard(response: httpx.Response, code: int) -> dict:
     assert payload["code"] == code
     assert set(payload) == {"code", "message", "data"}
     return payload
+
+
+@pytest.mark.asyncio
+async def test_channel_configuration_enforces_usage_protocol_contract(
+    channel_config_app: FastAPI,
+    channel_config_db: AsyncSession,
+) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=channel_config_app),
+        base_url="http://test",
+    ) as client:
+        channel_types = _assert_standard(await client.get("/api/v1/channels/types"), 200)
+        assert channel_types["data"]["model_protocols"]["IMAGE_GENERATION"] == ["OPENAI_IMAGE"]
+        assert "OPENAI_RESPONSES" in channel_types["data"]["model_protocols"]["CHAT"]
+
+        chat_model = _chat_model("chat-model")
+        chat_model["protocol"] = "OPENAI_RESPONSES"
+        image_model = {
+            "model_id": "image-model",
+            "usage": "IMAGE_GENERATION",
+            "protocol": "OPENAI_IMAGE",
+            "size": "1024x1024",
+            "quality": "auto",
+            "is_enabled": True,
+            "description": "organization image model",
+        }
+        created = _assert_standard(
+            await client.post(
+                "/api/v1/channels/create",
+                json={
+                    "name": "protocol-channel",
+                    "api_key": "protocol-api-key",
+                    "base_url": "https://llm.example/v1",
+                    "is_active": True,
+                    "model_ids": [chat_model, image_model],
+                },
+            ),
+            200,
+        )
+        channel_id = created["data"]["id"]
+
+        persisted = _assert_standard(
+            await client.get("/api/v1/channels/get", params={"channel_id": channel_id}),
+            200,
+        )
+        assert [(item["usage"], item["protocol"]) for item in persisted["data"]["model_ids"]] == [
+            ("CHAT", "OPENAI_RESPONSES"),
+            ("IMAGE_GENERATION", "OPENAI_IMAGE"),
+        ]
+        persisted_channel = await channel_crud.get(channel_config_db, channel_id)
+        assert persisted_channel is not None
+        assert [(item["usage"], item["protocol"]) for item in persisted_channel.model_ids] == [
+            ("CHAT", "OPENAI_RESPONSES"),
+            ("IMAGE_GENERATION", "OPENAI_IMAGE"),
+        ]
+
+        invalid_image_model = {**image_model, "protocol": "OPENAI_RESPONSES"}
+        invalid_response = await client.post(
+            "/api/v1/channels/update",
+            params={"channel_id": channel_id},
+            json={"model_ids": [chat_model, invalid_image_model]},
+        )
+        assert invalid_response.status_code == 200
+        invalid_payload = invalid_response.json()
+        assert invalid_payload["code"] == 422
+        assert t(ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID) in invalid_payload["message"]
+        assert invalid_payload["data"] is None
+
+        unchanged = _assert_standard(
+            await client.get("/api/v1/channels/get", params={"channel_id": channel_id}),
+            200,
+        )
+        assert [(item["usage"], item["protocol"]) for item in unchanged["data"]["model_ids"]] == [
+            ("CHAT", "OPENAI_RESPONSES"),
+            ("IMAGE_GENERATION", "OPENAI_IMAGE"),
+        ]
+        persisted_channel = await channel_crud.get(channel_config_db, channel_id)
+        assert persisted_channel is not None
+        assert [(item["usage"], item["protocol"]) for item in persisted_channel.model_ids] == [
+            ("CHAT", "OPENAI_RESPONSES"),
+            ("IMAGE_GENERATION", "OPENAI_IMAGE"),
+        ]
 
 
 @pytest.mark.asyncio

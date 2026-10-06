@@ -73,21 +73,22 @@ class MessageAssembler:
             is_history: 是否为历史消息
         """
         if not message.attachments and isinstance(message.content, str):
+            message.assembled_attachment_part_count = 0
             return message
 
         content_parts = []
         if isinstance(message.content, list):
-            # 幂等保证：每个 attachment 恰好衍生一个 content_part，重复组装时
-            # 剔除上一次由 attachments 衍生的尾部 parts，仅保留原始 parts，
-            # 避免多次组装（prepare/降级换渠道等）导致内容累积重复。
-            if message.attachments:
-                original_count = max(0, len(message.content) - len(message.attachments))
-                content_parts.extend(message.content[:original_count])
-            else:
-                content_parts.extend(message.content)
+            # 幂等保证：按上次实际生成的附件片段数量剔除尾部 parts，兼容旧消息
+            # 中每个 attachment 一个片段的检查点，仅保留原始 parts，避免重复累积。
+            attachment_part_count = message.assembled_attachment_part_count
+            if attachment_part_count is None:
+                attachment_part_count = len(message.attachments or [])
+            original_count = max(0, len(message.content) - attachment_part_count)
+            content_parts.extend(message.content[:original_count])
         elif isinstance(message.content, str) and message.content:
             content_parts.append(TextPart(text=message.content))
 
+        attachment_parts = []
         if message.attachments:
             for attachment in message.attachments:
                 ext = os.path.splitext(attachment)[1].lower()
@@ -95,7 +96,7 @@ class MessageAssembler:
                 # 图片处理
                 if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
                     if is_history:
-                        content_parts.append(TextPart(text="[系统提示,此处不是用户说的话][历史图片][系统提示结束]"))
+                        attachment_parts.append(TextPart(text=f"[历史图片：{attachment}]"))
                     elif image_understanding:
                         try:
                             path = attachment
@@ -104,40 +105,57 @@ class MessageAssembler:
                             if os.path.exists(path):
                                 encoded_string = MessageAssembler._compress_image_to_base64(path, max_size_kb=500)
                                 mime_type = "image/jpeg"
-                                content_parts.append(ImagePart(image_url={"url": f"data:{mime_type};base64,{encoded_string}"}))
+                                attachment_parts.append(ImagePart(image_url={"url": f"data:{mime_type};base64,{encoded_string}"}))
                             else:
-                                content_parts.append(TextPart(text=f"[图片丢失: {attachment}]"))
+                                attachment_parts.append(TextPart(text=f"[图片丢失: {attachment}]"))
                         except Exception as e:
                             logger.bind().error(t("LOG_IMAGE_PROCESS_FAILED", attachment=attachment, error=str(e)))
-                            content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][图片处理失败: {attachment}][系统提示结束]"))
+                            attachment_parts.append(TextPart(text=f"[图片处理失败: {attachment}]"))
                     else:
-                        content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][未开启图像理解无法解析图片: {attachment}][系统提示结束]"))
+                        attachment_parts.append(TextPart(text=f"[未开启图像理解无法解析图片: {attachment}]"))
 
                 # 音频文件处理
                 elif ext in [".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".wma"]:
                     if is_history:
-                        content_parts.append(TextPart(text="[系统提示,此处不是用户说的话][历史音频][系统提示结束]"))
+                        attachment_parts.append(TextPart(text="[历史音频]"))
                     elif audio_understanding:
                         path = attachment[8:] if attachment.startswith("file:///") else attachment
-                        content_parts.append(
+                        attachment_parts.append(
                             AudioPart(
                                 path=path,
                                 format=os.path.splitext(path)[1].lower().lstrip("."),
                             )
                         )
                     else:
-                        content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][未开启音频理解: {attachment}][系统提示结束]"))
+                        attachment_parts.append(TextPart(text=f"[未开启音频理解: {attachment}]"))
 
                 # 视频文件处理
                 elif ext in [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"]:
                     if video_understanding:
-                        content_parts.append(FilePart(path=attachment))
+                        attachment_parts.append(FilePart(path=attachment))
                     else:
-                        content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][未开启视频理解: {attachment}][系统提示结束]"))
+                        attachment_parts.append(TextPart(text=f"[未开启视频理解: {attachment}]"))
 
                 else:
                     # 其他文件
-                    content_parts.append(FilePart(path=attachment))
+                    attachment_parts.append(FilePart(path=attachment))
+
+        if attachment_parts:
+            attachment_parts = [
+                TextPart(text="[系统提示,此处不是用户说的话]"),
+                *attachment_parts,
+                TextPart(text="[系统提示结束]"),
+            ]
+            merged_attachment_parts = []
+            for part in attachment_parts:
+                if isinstance(part, TextPart) and merged_attachment_parts and isinstance(merged_attachment_parts[-1], TextPart):
+                    merged_attachment_parts[-1].text += part.text
+                else:
+                    merged_attachment_parts.append(part)
+            attachment_parts = merged_attachment_parts
+            content_parts.extend(attachment_parts)
+
+        message.assembled_attachment_part_count = len(attachment_parts)
 
         message.content = content_parts
         return message

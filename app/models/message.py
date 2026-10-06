@@ -139,6 +139,7 @@ class InternalMessage(BaseModel):
     tool_calls: list[InternalToolCall] | None = None
     tool_call_id: str | None = None
     attachments: list[str] | None = None
+    assembled_attachment_part_count: int | None = PyField(default=None, ge=0, repr=False)
     created_at: float = PyField(default_factory=lambda: time.time())
 
     def discard_provider_state(self) -> None:

@@ -1,36 +1,64 @@
 import base64
+import binascii
+import io
 import json
 import mimetypes
 import ssl
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import aiohttp
+from PIL import Image
 
 from app.core.channel_router import select_channel
 from app.core.constants import (
+    ERR_FILE_EXTENSION_BLOCKED,
+    ERR_FILE_NOT_FOUND,
+    ERR_FILE_PATH_NOT_ABSOLUTE,
+    ERR_FILE_SENSITIVE_NOT_ALLOWED,
+    ERR_FILE_SINGLE_SIZE_LIMIT_EXCEEDED,
+    ERR_FILE_TOOL_NOT_REGULAR,
+    ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED,
     ERR_IMAGE_CONTENT_TYPE_UNSUPPORTED,
+    ERR_LLM_IMAGE_OUTPUT_INVALID,
     ERR_TOOL_IMAGE_CHANNEL_NOT_CONFIGURED,
     ERR_TOOL_IMAGE_CHANNEL_UNAVAILABLE,
     ERR_TOOL_IMAGE_EMPTY_RESPONSE,
     ERR_TOOL_IMAGE_INVALID_ITEM,
     ERR_TOOL_IMAGE_PROMPT_REQUIRED,
+    ERR_TOOL_IMAGE_REFERENCE_INVALID,
+    ERR_TOOL_OPERATION_DIRS_UNCONFIGURED,
+    ERR_TOOL_PATH_OUTSIDE_ALLOWED_OPERATION_DIRS,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
+    IMAGE_GENERATION_MAX_INPUT_BYTES,
+    IMAGE_GENERATION_MAX_REFERENCE_IMAGES,
     MSG_TOOL_IMAGE_SEND_INSTRUCTION,
 )
-from app.core.exceptions import BaseBusinessException
+from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
+from app.core.utils.operation_directories import (
+    get_allowed_operation_dirs,
+    is_path_within_allowed_operation_dirs,
+    normalize_allowed_operation_dirs,
+)
 from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.providers.image_generation import ImageGenerationClient
 
 from .base import BaseExecutor
-from .send_file_to_user import _encode_token
+from .send_file_to_user import (
+    DEFAULT_MAX_SINGLE_FILE_SIZE_MB,
+    DEFAULT_MAX_TOTAL_FILE_SIZE_MB,
+    _encode_token,
+    _is_sensitive_path,
+    _normalize_blocked_extensions,
+)
 
 logger = get_logger(__name__)
 
@@ -38,7 +66,7 @@ IMAGE_GENERATION_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "generate_image",
-        "description": "Generate one image using the selected profile's configured image generation model. Use it when the user asks to create, draw, render, or generate an image.",
+        "description": "Create, generate, or edit images using the selected profile's configured image generation model. Supports text-to-image generation, generation from local reference images, and image editing.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -58,6 +86,12 @@ IMAGE_GENERATION_TOOL_SCHEMA = {
                     "description": "Image quality.",
                     "default": "auto",
                 },
+                "reference_images": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": IMAGE_GENERATION_MAX_REFERENCE_IMAGES,
+                    "description": "Optional existing absolute local image paths, including uploaded images, previously generated images, or images in configured authorized directories.",
+                },
             },
             "required": ["prompt"],
         },
@@ -67,6 +101,113 @@ IMAGE_GENERATION_TOOL_SCHEMA = {
 
 class ImageGenerationExecutor(BaseExecutor):
     requires_audit = False
+
+    def _get_image_input_limits(self) -> tuple[int, int, set[str]]:
+        tool_config = getattr(self.cfg, "tool", None)
+        configured_single_size_mb = getattr(tool_config, "file_send_max_single_size_mb", DEFAULT_MAX_SINGLE_FILE_SIZE_MB) if tool_config else DEFAULT_MAX_SINGLE_FILE_SIZE_MB
+        configured_total_size_mb = getattr(tool_config, "file_send_max_total_size_mb", DEFAULT_MAX_TOTAL_FILE_SIZE_MB) if tool_config else DEFAULT_MAX_TOTAL_FILE_SIZE_MB
+        configured_blocked_extensions = getattr(tool_config, "file_send_blocked_extensions", []) if tool_config else []
+
+        def size_limit(value: Any, default_mb: int) -> int:
+            try:
+                return max(1, int(float(value or default_mb) * 1024 * 1024))
+            except (TypeError, ValueError):
+                return max(1, int(float(default_mb) * 1024 * 1024))
+
+        single_size_limit = min(size_limit(configured_single_size_mb, DEFAULT_MAX_SINGLE_FILE_SIZE_MB), IMAGE_GENERATION_MAX_INPUT_BYTES)
+        total_size_limit = size_limit(configured_total_size_mb, DEFAULT_MAX_TOTAL_FILE_SIZE_MB)
+        blocked_extensions = _normalize_blocked_extensions(configured_blocked_extensions if isinstance(configured_blocked_extensions, list) else [])
+        return single_size_limit, total_size_limit, blocked_extensions
+
+    @staticmethod
+    def _resolve_image_input_path(raw_path: str, allowed_dirs: list[str], blocked_extensions: set[str]) -> Path:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            raise ValueError(t(ERR_FILE_PATH_NOT_ABSOLUTE))
+
+        try:
+            resolved_path = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            raise ValueError(t(ERR_FILE_NOT_FOUND))
+
+        if not is_path_within_allowed_operation_dirs(resolved_path, allowed_dirs):
+            raise ValueError(t(ERR_TOOL_PATH_OUTSIDE_ALLOWED_OPERATION_DIRS))
+        if _is_sensitive_path(resolved_path):
+            raise ValueError(t(ERR_FILE_SENSITIVE_NOT_ALLOWED))
+        if resolved_path.suffix.lower() in blocked_extensions:
+            raise ValueError(t(ERR_FILE_EXTENSION_BLOCKED))
+        if not resolved_path.exists():
+            raise ValueError(t(ERR_FILE_NOT_FOUND))
+        if not resolved_path.is_file():
+            raise ValueError(t(ERR_FILE_TOOL_NOT_REGULAR))
+        return resolved_path
+
+    @staticmethod
+    def _read_bounded_image_file(path: Path, max_bytes: int, overflow_error: str) -> bytes:
+        try:
+            with path.open("rb") as image_file:
+                image_bytes = image_file.read(max_bytes + 1)
+        except OSError as exc:
+            raise ValueError(t(ERR_FILE_NOT_FOUND)) from exc
+        if len(image_bytes) > max_bytes:
+            raise ValueError(t(overflow_error))
+        return image_bytes
+
+    @staticmethod
+    def _inspect_image_bytes(image_bytes: bytes, error_key: str) -> tuple[str, str]:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(image_bytes)) as image:
+                    image_format = (image.format or "").upper()
+                    image.verify()
+        except Exception as exc:
+            raise ValueError(t(error_key)) from exc
+
+        format_details = {
+            "PNG": (".png", "image/png"),
+            "JPEG": (".jpg", "image/jpeg"),
+            "WEBP": (".webp", "image/webp"),
+        }.get(image_format)
+        if not format_details:
+            raise ValueError(t(error_key))
+        return format_details
+
+    def _load_local_image_inputs(
+        self,
+        reference_paths: list[str],
+    ) -> list[tuple[str, bytes, str]]:
+        allowed_dirs = get_allowed_operation_dirs(self.cfg)
+        if not normalize_allowed_operation_dirs(allowed_dirs):
+            raise ValueError(t(ERR_TOOL_OPERATION_DIRS_UNCONFIGURED))
+
+        single_size_limit, total_size_limit, blocked_extensions = self._get_image_input_limits()
+        total_size = 0
+        reference_payloads: list[tuple[str, bytes, str]] = []
+
+        for raw_path in reference_paths:
+            resolved_path = self._resolve_image_input_path(raw_path, allowed_dirs, blocked_extensions)
+            image_bytes = self._read_bounded_image_file(
+                resolved_path,
+                single_size_limit,
+                ERR_FILE_SINGLE_SIZE_LIMIT_EXCEEDED,
+            )
+            extension, mime_type = self._inspect_image_bytes(
+                image_bytes,
+                ERR_TOOL_IMAGE_REFERENCE_INVALID,
+            )
+            if total_size + len(image_bytes) > total_size_limit:
+                raise ValueError(t(ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED))
+            total_size += len(image_bytes)
+            reference_payloads.append(
+                (
+                    f"{resolved_path.stem or 'image'}{extension}",
+                    image_bytes,
+                    mime_type,
+                )
+            )
+
+        return reference_payloads
 
     def _get_channel_config(self) -> ChannelConfig | None:
         channel_group = getattr(self.cfg, "channel", None)
@@ -80,12 +221,12 @@ class ImageGenerationExecutor(BaseExecutor):
         return image_dir
 
     async def _write_image_file(self, image_bytes: bytes, file_name: str, mime_type: str) -> dict[str, Any]:
-        image_path = (self._get_generated_image_dir() / file_name).resolve()
-
-        def write_image():
+        def write_image() -> Path:
+            image_path = (self._get_generated_image_dir() / file_name).resolve()
             image_path.write_bytes(image_bytes)
+            return image_path
 
-        await self.run_sync(write_image)
+        image_path = await self.run_sync(write_image)
         token = _encode_token({"path": str(image_path), "uid": self.uid, "id": uuid.uuid4().hex})
         return {
             "id": token,
@@ -100,8 +241,16 @@ class ImageGenerationExecutor(BaseExecutor):
 
     async def _save_base64_image(self, b64_json: str) -> dict[str, Any]:
         self._log_image_save_started(source="base64")
-        image_bytes = base64.b64decode(b64_json)
-        file_item = await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}.png", "image/png")
+        try:
+            image_bytes = base64.b64decode(b64_json, validate=True)
+        except (binascii.Error, TypeError, ValueError) as exc:
+            raise ValueError(t(ERR_LLM_IMAGE_OUTPUT_INVALID)) from exc
+        extension, mime_type = await self.run_sync(
+            self._inspect_image_bytes,
+            image_bytes,
+            ERR_LLM_IMAGE_OUTPUT_INVALID,
+        )
+        file_item = await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}{extension}", mime_type)
         self._log_image_saved(file_item, source="base64")
         return file_item
 
@@ -181,6 +330,7 @@ class ImageGenerationExecutor(BaseExecutor):
         prompt: str,
         size: str | None = None,
         quality: str | None = None,
+        reference_images: list[str] | None = None,
         **kwargs: Any,
     ) -> str:
         if not self.db or not self.profile or not self.cfg:
@@ -199,6 +349,25 @@ class ImageGenerationExecutor(BaseExecutor):
         prompt_text = (prompt or "").strip()
         if not prompt_text:
             return json.dumps({"status": "failed", "error": t(ERR_TOOL_IMAGE_PROMPT_REQUIRED)}, ensure_ascii=False)
+
+        if reference_images is None:
+            normalized_reference_images: list[str] = []
+        elif not isinstance(reference_images, list) or len(reference_images) > IMAGE_GENERATION_MAX_REFERENCE_IMAGES:
+            return json.dumps({"status": "failed", "error": t(ERR_TOOL_IMAGE_REFERENCE_INVALID)}, ensure_ascii=False)
+        else:
+            normalized_reference_images = list(reference_images)
+            if any(not isinstance(path, str) or not path.strip() for path in normalized_reference_images):
+                return json.dumps({"status": "failed", "error": t(ERR_TOOL_IMAGE_REFERENCE_INVALID)}, ensure_ascii=False)
+
+        reference_payloads: list[tuple[str, bytes, str]] = []
+        if normalized_reference_images:
+            try:
+                reference_payloads = await self.run_sync(
+                    self._load_local_image_inputs,
+                    normalized_reference_images,
+                )
+            except Exception as exc:
+                return json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False)
 
         excluded_priorities: set[int] = set()
         last_error = ""
@@ -226,6 +395,11 @@ class ImageGenerationExecutor(BaseExecutor):
             try:
                 resolved_size = size or model_entry.get("size") or "1024x1024"
                 resolved_quality = quality or model_entry.get("quality") or "auto"
+                input_kwargs: dict[str, Any] = {}
+                if reference_payloads:
+                    input_kwargs = {
+                        "reference_images": reference_payloads,
+                    }
                 await self.db.commit()
                 response = await ImageGenerationClient.generate_image(
                     api_key=channel.get_decrypted_api_key(),
@@ -239,20 +413,13 @@ class ImageGenerationExecutor(BaseExecutor):
                     timeout=float(getattr(getattr(self.cfg, "tool", None), "image_generation_timeout", 60.0) or 60.0),
                     http_proxy=get_channel_http_proxy(channel),
                     custom_headers=get_model_custom_headers(model_entry),
+                    **input_kwargs,
                 )
                 images = response.get("data") if isinstance(response, dict) else None
                 if not isinstance(images, list) or not images:
-                    return json.dumps(
-                        {
-                            "status": "failed",
-                            "error": t(ERR_TOOL_IMAGE_EMPTY_RESPONSE),
-                            "model": model_entry["model_id"],
-                        },
-                        ensure_ascii=False,
-                    )
+                    raise LLMException(ERR_TOOL_IMAGE_EMPTY_RESPONSE)
 
                 image = images[0] if isinstance(images[0], dict) else {}
-                model_name = response.get("model", model_entry["model_id"]) if isinstance(response, dict) else model_entry["model_id"]
 
                 if image.get("url"):
                     file_item = await self._save_downloaded_image(str(image["url"]))
@@ -262,14 +429,7 @@ class ImageGenerationExecutor(BaseExecutor):
                     file_item = await self._save_base64_image(str(image["b64_json"]))
                     return self._build_success_payload(file_item)
 
-                return json.dumps(
-                    {
-                        "status": "failed",
-                        "error": t(ERR_TOOL_IMAGE_INVALID_ITEM),
-                        "model": model_name,
-                    },
-                    ensure_ascii=False,
-                )
+                raise LLMException(ERR_TOOL_IMAGE_INVALID_ITEM)
             except BaseBusinessException as exc:
                 last_error = t(exc.message, default=exc.message, **exc.kwargs)
             except Exception as exc:

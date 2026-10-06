@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.api.v1 import channels
+from app.core.constants import ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID
 from app.models.channel import ModelProtocol
 from app.models.message import InternalMessage, InternalResponse, MessageRole
 
@@ -203,3 +204,24 @@ async def test_channel_image_generation_returns_latency(monkeypatch) -> None:
         "image": {"url": "https://example.invalid/apple.png"},
         "latency_ms": 456.7,
     }
+
+
+@pytest.mark.asyncio
+async def test_channel_image_generation_rejects_chat_protocol(monkeypatch) -> None:
+    async def generate_image(**_kwargs):
+        raise AssertionError("image generation must not be called")
+
+    monkeypatch.setattr(channels.ImageGenerationClient, "generate_image", generate_image)
+
+    with pytest.raises(channels.ParameterException) as exc_info:
+        await channels.test_channel_image_generation(
+            channels.ChannelImageGenerationTestRequest(
+                protocol=ModelProtocol.OPENAI_RESPONSES,
+                api_key="key",
+                base_url="https://example.invalid",
+                model_id="model",
+            ),
+            _admin={},
+        )
+
+    assert exc_info.value.message == ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID
