@@ -1,11 +1,15 @@
 import asyncio
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.util import await_only
 from sqlmodel import select
 
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem
+from app.core.session_reply_queue import executor_interactive as executor_interactive_module
+from app.models.message import InternalMessage, MessageRole
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -13,6 +17,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.providers.database.client import CancellationSafeAsyncSession
 from tests.integration.session_reply_queue_fixture import concurrent_session_factory as _concurrent_session_factory
 from tests.integration.session_reply_queue_fixture import db_session as _db_session
 from tests.integration.session_reply_queue_test_support import AsyncBarrier, enqueue
@@ -472,3 +477,132 @@ async def test_scheduled_claim_respects_profile_limit_and_still_claims_other_wor
     assert claimed.id == foreground.id
     await db_session.refresh(scheduled)
     assert scheduled.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_class", [AsyncSession, CancellationSafeAsyncSession])
+async def test_stream_events_publish_while_generation_transaction_is_committing(
+    concurrent_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch,
+    session_class: type[AsyncSession],
+):
+    engine = concurrent_session_factory.kw["bind"]
+    session_factory = async_sessionmaker(bind=engine, class_=session_class, expire_on_commit=False)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+
+    crud = CRUDSessionReplyWorkItem()
+    async with session_factory() as setup_db:
+        work = await enqueue(
+            crud,
+            setup_db,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=1,
+            dedupe_key="foreground-message:1",
+        )
+        work.status = SessionReplyWorkStatus.RUNNING
+        work.locked_by = "worker-1"
+        work.lock_until = 9999999999
+        work.execution_state = {
+            "stream_requested": True,
+            "request_ids": ["request-1"],
+        }
+        await setup_db.commit()
+        assert work.id is not None
+        work_id = work.id
+
+    async with session_factory() as generation_db:
+        generation_work = await crud.get(generation_db, work_id)
+        assert generation_work is not None
+        assert generation_work.execution_state["request_ids"] == ["request-1"]
+
+        async with session_factory() as update_db:
+            updated = await crud.update_claimed(
+                update_db,
+                work_id=work_id,
+                worker_id="worker-1",
+                values={
+                    "execution_state": {
+                        "stream_requested": True,
+                        "request_ids": ["request-1", "request-2", "request-2"],
+                    }
+                },
+            )
+            assert updated is True
+
+        commit_prepared = asyncio.Event()
+        release_commit = asyncio.Event()
+        commit_task: asyncio.Task[None] | None = None
+        commit_listener = None
+
+        async def controlled_dispatch_stream(**kwargs):
+            nonlocal commit_task, commit_listener
+            generation_connection = await kwargs["db"].connection()
+            generation_sync_connection = generation_connection.sync_connection
+
+            def pause_generation_commit(connection):
+                if connection is generation_sync_connection:
+                    commit_prepared.set()
+                    await_only(asyncio.wait_for(release_commit.wait(), timeout=5))
+
+            event.listen(engine.sync_engine, "commit", pause_generation_commit)
+            commit_listener = pause_generation_commit
+            commit_task = asyncio.create_task(kwargs["db"].commit())
+            await asyncio.wait_for(commit_prepared.wait(), timeout=5)
+            yield {
+                "type": "agent_loop_start",
+                "turn": 0,
+                "response_id": "response-recall",
+            }
+            release_commit.set()
+            await asyncio.wait_for(asyncio.shield(commit_task), timeout=5)
+            yield {
+                "type": "agent_loop_start",
+                "turn": 1,
+                "response_id": "response-main",
+            }
+            yield {
+                "type": "done",
+                "response": {"history": [], "files": None},
+                "response_id": "response-main",
+            }
+
+        monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch_stream", controlled_dispatch_stream)
+        try:
+            response = await executor_interactive_module._dispatch_interactive_work(
+                generation_db,
+                work=generation_work,
+                worker_id="worker-1",
+                message="queued message",
+                initial_message=InternalMessage(id=1, role=MessageRole.USER, content="queued message"),
+                history_before_id=1,
+                frozen_user_message_ids=[1],
+                attachments=None,
+                allow_additional_user_messages=False,
+                execution_resume_state=None,
+            )
+        finally:
+            release_commit.set()
+            try:
+                if commit_task is not None:
+                    await asyncio.wait_for(asyncio.shield(commit_task), timeout=5)
+            finally:
+                if commit_listener is not None:
+                    event.remove(engine.sync_engine, "commit", commit_listener)
+
+    assert response == {"history": [], "files": None, "response_id": "response-main"}
+    assert generation_work.execution_state["request_ids"] == ["request-1"]
+
+    async with session_factory() as verify_db:
+        result = await verify_db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == work_id).order_by(SessionReplyStreamEvent.sequence_no))
+        events = list(result.scalars().all())
+
+    assert [stream_event.event["type"] for stream_event in events] == [
+        "input_dequeued",
+        "agent_loop_start",
+        "agent_loop_start",
+    ]
+    assert [stream_event.sequence_no for stream_event in events] == [1, 2, 3]
+    assert events[0].event["request_ids"] == ["request-1", "request-2"]
+    assert sum(stream_event.event["type"] == "input_dequeued" for stream_event in events) == 1
+    assert [stream_event.work_id for stream_event in events] == [work_id, work_id, work_id]
+    assert [stream_event.event["work_id"] for stream_event in events] == [work_id, work_id, work_id]

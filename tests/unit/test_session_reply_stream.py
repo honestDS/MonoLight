@@ -1412,6 +1412,10 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     async def get_latest_sequence(db, *, work_id):
         return 0
 
+    async def get_work_snapshot(_db, work_id):
+        assert work_id == work.id
+        return SimpleNamespace(**deepcopy(vars(work)))
+
     async def publish(db, *, work_id, sequence_no, event, commit=True):
         assert commit is False
         published.append((sequence_no, event))
@@ -1521,6 +1525,11 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         executor_interactive_module.session_reply_stream_event_crud,
         "get_latest_sequence",
         get_latest_sequence,
+    )
+    monkeypatch.setattr(
+        executor_interactive_module.session_reply_work_item_crud,
+        "get",
+        get_work_snapshot,
     )
     monkeypatch.setattr(
         executor_interactive_module.session_reply_stream_event_crud,
