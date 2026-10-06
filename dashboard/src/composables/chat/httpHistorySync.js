@@ -44,30 +44,22 @@ export const createHttpHistorySyncController = ({
     if (isLoading()) return
 
     const syncVersion = version
+    const isCurrentSync = () => syncVersion === version && sessionId === getSessionId() && shouldContinue()
     syncing = true
     try {
       const hasPendingActivity = await fetchPendingActivity(sessionId)
-      if (
-        syncVersion !== version
-        || !canSync()
-        || sessionId !== getSessionId()
-        || trackedSessionId !== sessionId
-      ) return
+      if (!isCurrentSync()) return
 
       if (hasPendingActivity) return
 
-      const mergeResult = await mergeLatestHistory(sessionId)
-      if (
-        syncVersion === version
-        && canSync()
-        && sessionId === getSessionId()
-        && trackedSessionId === sessionId
-        && mergeResult?.hasMore !== true
-      ) {
+      const mergeResult = await mergeLatestHistory(sessionId, isCurrentSync)
+      if (isCurrentSync() && mergeResult?.hasMore !== true) {
         trackedSessionId = null
       }
     } catch (error) {
-      onError(error)
+      if (isCurrentSync()) {
+        onError(error)
+      }
     } finally {
       if (syncVersion === version) {
         syncing = false

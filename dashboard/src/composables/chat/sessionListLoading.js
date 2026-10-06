@@ -1,8 +1,5 @@
 const DEFAULT_POLL_INTERVAL_MS = 1500
 
-export const hasLoadingSessions = sessions =>
-  Array.isArray(sessions) && sessions.some(session => session?.is_loading === true)
-
 export const hasHttpResultMessage = (messages, resultMessageId) => {
   const normalizedResultMessageId = Number(resultMessageId)
   if (!Number.isSafeInteger(normalizedResultMessageId) || normalizedResultMessageId <= 0) return false
@@ -33,13 +30,12 @@ export const shouldFetchHttpWorkStatus = ({
     && (hasPendingRequest || activeStatuses.includes(previousStatus))
 }
 
-export const createSessionListLoadingPoller = ({
+export const createSessionListPoller = ({
   refreshSessions,
   intervalMs = DEFAULT_POLL_INTERVAL_MS,
   schedule = (callback, delay) => setTimeout(callback, delay),
   cancel = timer => clearTimeout(timer),
-  hasPendingSubmissions = () => false,
-  maxPendingIdleRefreshes = 8
+  onError = console.error
 }) => {
   if (typeof refreshSessions !== 'function') {
     throw new TypeError('refreshSessions must be a function')
@@ -49,7 +45,6 @@ export const createSessionListLoadingPoller = ({
   let refreshPromise = null
   let refreshRequested = false
   let disposed = false
-  let pendingIdleRefreshes = 0
 
   const stop = () => {
     if (timer === null) return
@@ -57,22 +52,13 @@ export const createSessionListLoadingPoller = ({
     timer = null
   }
 
-  const sync = sessions => {
+  const sync = () => {
     stop()
     if (disposed) return
 
-    if (!hasLoadingSessions(sessions)) {
-      if (!hasPendingSubmissions()) {
-        pendingIdleRefreshes = 0
-        return
-      }
-      if (pendingIdleRefreshes >= maxPendingIdleRefreshes) return
-      pendingIdleRefreshes += 1
-    }
-
-    timer = schedule(async () => {
+    timer = schedule(() => {
       timer = null
-      await refreshNow()
+      return refreshNow().catch(onError)
     }, intervalMs)
   }
 
@@ -89,13 +75,13 @@ export const createSessionListLoadingPoller = ({
         refreshRequested = false
         sessions = await refreshSessions()
       }
-      if (!disposed) sync(sessions)
       return sessions
     })()
 
     refreshPromise = pending
     return pending.finally(() => {
       if (refreshPromise === pending) refreshPromise = null
+      if (!disposed) sync()
     })
   }
 
