@@ -251,7 +251,8 @@ def validate_organization_submission_store(store: LongTermMemoryStore) -> None:
         migration_status = LongTermMemoryMigrationStatus(store.migration_status) if store.migration_status is not None else None
     except (TypeError, ValueError) as exc:
         raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT) from exc
-    if index_status != LongTermMemoryIndexStatus.READY or migration_status in {
+    # PENDING is not reindexing; candidates are filtered by per-record index readiness.
+    if index_status not in {LongTermMemoryIndexStatus.PENDING, LongTermMemoryIndexStatus.READY} or migration_status in {
         LongTermMemoryMigrationStatus.PREPARING,
         LongTermMemoryMigrationStatus.BUILDING,
         LongTermMemoryMigrationStatus.CATCHING_UP,

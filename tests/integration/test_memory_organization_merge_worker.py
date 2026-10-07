@@ -263,6 +263,8 @@ async def _configure_store(
     migration_job_id: int | None = None,
     migration_status: LongTermMemoryMigrationStatus | None = None,
     capacity_status: LongTermMemoryCapacityStatus = LongTermMemoryCapacityStatus.NORMAL,
+    index_status: LongTermMemoryIndexStatus = LongTermMemoryIndexStatus.READY,
+    index_revision: int = INDEX_REVISION,
 ) -> None:
     async with session_factory() as db:
         await memory_store_crud.create(
@@ -279,8 +281,8 @@ async def _configure_store(
             migration_status=migration_status,
             migration_delta_high_watermark=0,
             migration_delta_applied_watermark=0,
-            index_revision=INDEX_REVISION,
-            index_status=LongTermMemoryIndexStatus.READY,
+            index_revision=index_revision,
+            index_status=index_status,
             capacity_status=capacity_status,
         )
 
@@ -414,6 +416,8 @@ async def _prepare_merge(
     max_attempts: int = 3,
     migration_job_id: int | None = None,
     initial_capacity_status: LongTermMemoryCapacityStatus = LongTermMemoryCapacityStatus.NORMAL,
+    index_status: LongTermMemoryIndexStatus = LongTermMemoryIndexStatus.READY,
+    index_revision: int = INDEX_REVISION,
 ) -> tuple[int, int, tuple[int, ...]]:
     await _configure_store(
         session_factory,
@@ -421,6 +425,8 @@ async def _prepare_merge(
         migration_job_id=migration_job_id,
         migration_status=(LongTermMemoryMigrationStatus.BUILDING if migration_job_id is not None else None),
         capacity_status=initial_capacity_status,
+        index_status=index_status,
+        index_revision=index_revision,
     )
     backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
     async with session_factory() as db:
@@ -445,7 +451,7 @@ async def _prepare_merge(
         snapshot = build_organization_snapshot(
             records,
             active_embedding_revision=ACTIVE_EMBEDDING_REVISION,
-            index_revision=INDEX_REVISION,
+            index_revision=index_revision,
             policy_version=POLICY_VERSION,
         )
         organization_model = _organization_model(snapshot.count)
@@ -490,7 +496,7 @@ async def _prepare_merge(
             group_index=0,
             snapshot_digest=snapshot.digest,
             active_embedding_revision=ACTIVE_EMBEDDING_REVISION,
-            index_revision=INDEX_REVISION,
+            index_revision=index_revision,
             policy_version=POLICY_VERSION,
             commit=False,
         )
@@ -767,9 +773,18 @@ async def test_running_organization_merge_cancelled_after_external_call_cleans_o
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("index_status", "index_revision"),
+    [
+        (LongTermMemoryIndexStatus.READY, INDEX_REVISION),
+        (LongTermMemoryIndexStatus.PENDING, 0),
+    ],
+)
 async def test_organization_merge_update_publishes_version_and_replaces_vector(
     memory_session_factory: async_sessionmaker[AsyncSession],
     vector_backend: _FakeVectorBackend,
+    index_status: LongTermMemoryIndexStatus,
+    index_revision: int,
 ) -> None:
     uid = "organization-merge-update-worker"
     _parent_id, child_id, _source_ids = await _prepare_merge(
@@ -782,6 +797,8 @@ async def test_organization_merge_update_publishes_version_and_replaces_vector(
         pinned_ids=frozenset({1}),
         target_content="organized update content",
         target_memory_key="organized-update-key",
+        index_status=index_status,
+        index_revision=index_revision,
     )
     before = await _get_record(memory_session_factory, uid=uid, memory_id=1)
     assert before is not None
@@ -847,7 +864,12 @@ async def test_organization_merge_update_publishes_version_and_replaces_vector(
         assert "organized update content" not in json.dumps(finished.result)
         async with memory_session_factory() as db:
             assert await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.DELETE_CLEANUP) == 0
+            store = await memory_store_crud.get_by_uid(db, uid=uid)
             assert await memory_record_crud.count_active(db, uid=uid) == 1
+            assert store is not None
+            assert store.index_status == index_status
+            assert store.index_revision == index_revision
+            assert await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.REINDEX) == 0
     finally:
         await consumer.stop()
 

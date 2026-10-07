@@ -636,9 +636,97 @@ async def test_organization_rejects_missing_store_or_model_configuration(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("trigger", "record_count"),
+    [("manual", 0), ("manual", 2), ("auto", 45)],
+)
+async def test_initial_embedding_allows_organization_without_reindex(
+    db_session: AsyncSession,
+    trigger: str,
+    record_count: int,
+) -> None:
+    uid = f"initial-embedding-organization-{trigger}-{record_count}"
+    channel = await _create_channel(db_session)
+    assert channel.id is not None
+    await memory_store_crud.create(
+        db_session,
+        uid=uid,
+        organization_channel_id=channel.id,
+        organization_model_id="organization-model",
+        auto_organize_enabled=trigger == "auto",
+    )
+    await memory_store_crud.activate_initial_embedding_if_unconfigured(
+        db_session,
+        uid=uid,
+        expected_active_revision=0,
+        active_embedding_channel_id=7,
+        active_embedding_model_id="embedding-model",
+        active_embedding_dimensions=3,
+        active_embedding_signature="embedding-signature",
+        active_collection_name=f"memory-{uid}",
+        commit=False,
+    )
+
+    configured_store = await memory_store_crud.get_by_uid(db_session, uid=uid)
+    assert configured_store is not None
+    assert configured_store.active_embedding_revision == 1
+    assert configured_store.index_status == LongTermMemoryIndexStatus.PENDING
+    assert configured_store.index_revision == 0
+
+    records: list[LongTermMemoryRecord] = []
+    for index in range(record_count):
+        records.append(
+            await _create_record(
+                db_session,
+                uid=uid,
+                memory_key=f"initial-embedding-memory-{index:02d}",
+                content=f"initial embedding content {index}",
+                index_status=LongTermMemoryRecordIndexStatus.READY,
+                with_vector=True,
+            )
+        )
+    await db_session.commit()
+
+    assert await memory_job_crud.list_unfinished_by_uid(db_session, uid=uid) == []
+
+    manager = MemoryJobManager()
+    submission = await manager.submit_auto_organization(db_session, uid=uid) if trigger == "auto" else await manager.submit_organization(db_session, uid=uid)
+
+    assert submission is not None
+    assert submission.created is True
+    persisted_job = await memory_job_crud.get_by_active_mutation_key(
+        db_session,
+        uid=uid,
+        active_mutation_key=build_memory_organization_active_mutation_key(uid),
+    )
+    assert persisted_job is not None
+    assert persisted_job.id == submission.job.id
+    assert persisted_job.operation == LongTermMemoryMutationOperation.ORGANIZE
+    assert persisted_job.payload["trigger"] == trigger
+    snapshot = persisted_job.payload["snapshot"]
+    assert snapshot["index_revision"] == 0
+    assert snapshot["count"] == record_count
+    assert [item["memory_id"] for item in snapshot["items"]] == sorted(record.id for record in records)
+
+    current_store = await memory_store_crud.get_by_uid(db_session, uid=uid)
+    assert current_store is not None
+    assert current_store.index_status == LongTermMemoryIndexStatus.PENDING
+    assert current_store.index_revision == 0
+    assert (
+        await memory_job_crud.count(
+            db_session,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.REINDEX,
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "maintenance_state",
     [
         (LongTermMemoryIndexStatus.REINDEXING, None),
+        (LongTermMemoryIndexStatus.FAILED, None),
         (LongTermMemoryIndexStatus.READY, LongTermMemoryMigrationStatus.PREPARING),
         (LongTermMemoryIndexStatus.READY, LongTermMemoryMigrationStatus.BUILDING),
         (LongTermMemoryIndexStatus.READY, LongTermMemoryMigrationStatus.CATCHING_UP),
