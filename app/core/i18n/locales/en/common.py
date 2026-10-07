@@ -318,6 +318,7 @@ MESSAGES = {
     "MSG_BACKGROUND_TASK_QUEUED": "Tool {tool_name} has been queued as a background task. The system will automatically trigger a follow-up reply when it finishes; do not wait or query the background task list now, and do not proactively send the task result. Only query its status if the user explicitly asks later.",
     "ERR_TOOL_NOT_ENABLED": "Tool {tool_name} is not enabled in the selected profile",
     "ERR_TOOL_NOT_REGISTERED": "Tool {tool_name} is not registered",
+    "ERR_TOOL_EXECUTION_TIMEOUT": "Timed out waiting for tool {tool_name} after {timeout} seconds. The underlying operation may still be running; verify its result before retrying.",
     "ERR_BACKGROUND_TASK_UNSUPPORTED": "Tool {tool_name} does not support background execution",
     "ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE": "Database context is not available",
     "ERR_FILE_TOKEN_INVALID": "Invalid file token",

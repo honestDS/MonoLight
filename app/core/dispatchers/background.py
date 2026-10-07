@@ -66,6 +66,7 @@ from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, 
 from app.core.utils.dispatcher.markdown_instruction import apply_platform_constraints_to_message, materialize_user_environment_prompts
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import (
+    get_tool_execution_status,
     prevalidate_tool_round,
     prevalidate_tool_round_protocol,
 )
@@ -81,16 +82,6 @@ from app.models.message import InternalMessage, MessageRole
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
-
-
-def _tool_result_succeeded(content: str | None) -> bool:
-    try:
-        payload = json.loads(content or "{}")
-    except (TypeError, ValueError):
-        return True
-    if not isinstance(payload, dict):
-        return True
-    return not (payload.get("error") or payload.get("status") == "failed" or (isinstance(payload.get("exit_code"), int) and payload["exit_code"] != 0))
 
 
 class BackgroundDispatcherMixin:
@@ -641,10 +632,9 @@ class BackgroundDispatcherMixin:
                     )
 
         if audit_round is not None and audit_claim_token is not None:
-            audit_all_succeeded = True
             for tool_response in tool_responses:
-                execution_succeeded = _tool_result_succeeded(tool_response.content)
-                audit_all_succeeded = audit_all_succeeded and execution_succeeded
+                execution_status = AuditExecutionStatus(get_tool_execution_status(tool_response))
+                execution_succeeded = execution_status == AuditExecutionStatus.SUCCEEDED
                 result_summary = serialize_execution_summary(
                     tool_response.content,
                     max_chars=1000,
@@ -652,17 +642,17 @@ class BackgroundDispatcherMixin:
                 await audit_crud.finish_execution_attempt(
                     db,
                     execution_record_id=audit_execution_ids[tool_response.tool_call_id],
-                    status=AuditExecutionStatus.SUCCEEDED if execution_succeeded else AuditExecutionStatus.FAILED,
+                    status=execution_status,
                     result_summary=result_summary,
                     error=None if execution_succeeded else result_summary,
                 )
-            await audit_crud.finish_execution_round(
+            actual_record = await audit_crud.finish_execution_round_if_complete(
                 db,
                 audit_record_id=audit_round.audit_record_id,
                 claim_token=audit_claim_token,
-                status=AuditRecordStatus.SUCCEEDED if audit_all_succeeded else AuditRecordStatus.FAILED,
-                error_reason=None if audit_all_succeeded else "一个或多个工具执行失败",
             )
+            if actual_record is None:
+                raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
             await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
             if audit_execution_binding_callback is not None:
                 await audit_execution_binding_callback(None)

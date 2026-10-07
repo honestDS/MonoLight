@@ -318,6 +318,7 @@ MESSAGES = {
     "MSG_BACKGROUND_TASK_QUEUED": "工具 {tool_name} 已加入后台任务队列。系统会在任务完成后自动触发后续回复；当前不要等待或查询后台任务列表，也不要主动发送任务结果。仅当用户之后明确要求查看任务状态时再查询。",
     "ERR_TOOL_NOT_ENABLED": "工具 {tool_name} 未在当前配置中启用",
     "ERR_TOOL_NOT_REGISTERED": "工具 {tool_name} 未注册",
+    "ERR_TOOL_EXECUTION_TIMEOUT": "工具 {tool_name} 等待执行结果超时: {timeout} 秒。底层操作可能仍在执行，重试前请先核实结果。",
     "ERR_BACKGROUND_TASK_UNSUPPORTED": "工具 {tool_name} 不支持后台执行",
     "ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE": "数据库上下文不可用",
     "ERR_FILE_TOKEN_INVALID": "文件令牌无效",

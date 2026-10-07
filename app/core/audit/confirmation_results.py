@@ -1,4 +1,5 @@
 import json
+from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,6 +100,7 @@ async def replace_pending_tool_result(
     pending_message: Message,
     original_tool_call_id: str,
     content: str | None,
+    tool_execution_status: Literal["succeeded", "failed", "execution_unknown"] | None = None,
     audit_record_id: int | None = None,
 ) -> str | None:
     replacement_content = content
@@ -126,6 +128,7 @@ async def replace_pending_tool_result(
         role=MessageRole.TOOL,
         tool_call_id=original_tool_call_id,
         content=replacement_content,
+        tool_execution_status=tool_execution_status,
     )
     serialized_content = stored_tool_result.model_dump_json(exclude_none=True)
     if audit_record_id is not None:

@@ -5,6 +5,7 @@ import re
 import time
 from typing import (
     Any,
+    Literal,
 )
 
 from sqlalchemy.ext.asyncio import (
@@ -16,12 +17,14 @@ from app.core.constants import (
     END_SESSION_TOOL_NAME,
     ERR_BACKGROUND_TASK_UNSUPPORTED,
     ERR_TOOL_ARGUMENT_SCHEMA_INVALID,
+    ERR_TOOL_EXECUTION_TIMEOUT,
     ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
     ERR_TOOL_NOT_ENABLED,
     ERR_TOOL_NOT_REGISTERED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
+    TOOL_TIMEOUT_EXCLUDED_TOOL_NAMES,
 )
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.dispatch_context import DispatchMode, build_dispatch_context
@@ -110,6 +113,25 @@ def get_queued_background_task_id(content: str | None) -> int | None:
         return None
     task_id = payload.get("task_id")
     return task_id if isinstance(task_id, int) and task_id > 0 else None
+
+
+def get_tool_execution_status(tool_result: InternalMessage) -> Literal["succeeded", "failed", "execution_unknown"]:
+    if tool_result.tool_execution_status:
+        return tool_result.tool_execution_status
+    try:
+        payload = json.loads(tool_result.content or "{}")
+    except (TypeError, ValueError):
+        return "succeeded"
+    if not isinstance(payload, dict):
+        return "succeeded"
+    if payload.get("status") == "execution_unknown":
+        return "execution_unknown"
+    if payload.get("error") or payload.get("status") == "failed":
+        return "failed"
+    exit_code = payload.get("exit_code")
+    if isinstance(exit_code, int) and exit_code != 0:
+        return "failed"
+    return "succeeded"
 
 
 def get_handed_off_terminal_session_id(content: str | None) -> str | None:
@@ -475,17 +497,17 @@ async def process_single_tool(
     LogManager.log_tool_call(turn, tool_name, log_args, session_id, uid)
 
     if not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
-        cmd_result = _build_tool_disabled_result(tool_name)
+        tool_result = _build_tool_disabled_result(tool_name)
     elif missing_arguments:
-        cmd_result = _build_missing_required_arguments_result(tool_name, missing_arguments)
+        tool_result = _build_missing_required_arguments_result(tool_name, missing_arguments)
     elif unsupported_arguments:
-        cmd_result = _build_unsupported_arguments_result(tool_name, unsupported_arguments)
+        tool_result = _build_unsupported_arguments_result(tool_name, unsupported_arguments)
     elif run_in_background and not allow_background_submission:
-        cmd_result = _build_background_task_unsupported_result(tool_name)
+        tool_result = _build_background_task_unsupported_result(tool_name)
     else:
-        cmd_result = None
+        tool_result = None
 
-    if cmd_result is None and run_in_background:
+    if tool_result is None and run_in_background:
         from app.core.background_tasks.manager import background_task_manager
 
         await ensure_session_reply_work_claim(db)
@@ -502,9 +524,9 @@ async def process_single_tool(
             messages=messages,
             context_summary_boundary_message_id=context_summary_boundary_message_id,
         )
-        cmd_result = _build_background_task_queued_result(tool_name, task.id)
+        tool_result = _build_background_task_queued_result(tool_name, task.id)
 
-    if cmd_result is None:
+    if tool_result is None:
         await ensure_session_reply_work_claim(db, commit=True)
         executor_cls = TOOL_EXECUTOR_MAP.get(tool_name)
         if executor_cls:
@@ -533,14 +555,19 @@ async def process_single_tool(
                     dispatch_context=dispatch_context,
                 )
 
+            execution_timeout = None if tool_name in TOOL_TIMEOUT_EXCLUDED_TOOL_NAMES else cfg.tool.tool_timeout
             current_coro = instance.execute(**args)
             task = asyncio.create_task(current_coro)
             if active_tasks is not None:
                 active_tasks.add(task)
 
+            timeout_context = asyncio.timeout(execution_timeout)
             start_time = time.perf_counter()
             try:
-                cmd_result = await task
+                async with timeout_context:
+                    tool_result = await task
+                if timeout_context.expired():
+                    raise TimeoutError
             except asyncio.CancelledError:
                 duration = time.perf_counter() - start_time
 
@@ -554,13 +581,30 @@ async def process_single_tool(
                 if not task.done():
                     task.cancel()
                 raise
+            except TimeoutError as exc:
+                if timeout_context.expired():
+                    tool_result = json.dumps(
+                        {
+                            "status": "execution_unknown",
+                            "tool_name": tool_name,
+                            "error_code": ERR_TOOL_EXECUTION_TIMEOUT,
+                            "error": t(
+                                ERR_TOOL_EXECUTION_TIMEOUT,
+                                tool_name=tool_name,
+                                timeout=execution_timeout,
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+                else:
+                    tool_result = _build_tool_error_result(tool_name, format_exception_message(exc))
             except Exception as exc:
-                cmd_result = _build_tool_error_result(tool_name, format_exception_message(exc))
+                tool_result = _build_tool_error_result(tool_name, format_exception_message(exc))
             finally:
                 if active_tasks is not None:
                     active_tasks.discard(task)
         else:
-            cmd_result = json.dumps(
+            tool_result = json.dumps(
                 {"error": t(ERR_TOOL_NOT_REGISTERED, tool_name=tool_name)},
                 ensure_ascii=False,
             )
@@ -568,8 +612,9 @@ async def process_single_tool(
     tool_msg = InternalMessage(
         role=MessageRole.TOOL,
         tool_call_id=tool_call.id,
-        content=cmd_result,
+        content=tool_result,
     )
+    tool_msg.tool_execution_status = get_tool_execution_status(tool_msg)
     if tool_result_round_budget_tokens is None:
         tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
     else:
