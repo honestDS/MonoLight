@@ -156,6 +156,8 @@ class InternalMessage(BaseModel):
     guidance_prompt: str | None = None
     tool_calls: list[InternalToolCall] | None = None
     tool_call_id: str | None = None
+    # 工具执行状态独立于可截断的结果正文。
+    tool_execution_status: Literal["succeeded", "failed", "execution_unknown"] | None = None
     attachments: list[str] | None = None
     assembled_attachment_part_count: int | None = PyField(default=None, ge=0, repr=False)
     created_at: float = PyField(default_factory=lambda: time.time())

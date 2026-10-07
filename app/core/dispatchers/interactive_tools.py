@@ -31,6 +31,7 @@ from app.core.utils.dispatcher.markdown_instruction import materialize_user_envi
 from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
     get_queued_background_task_id,
+    get_tool_execution_status,
     prevalidate_tool_round,
     prevalidate_tool_round_protocol,
 )
@@ -53,7 +54,6 @@ from .interactive_helpers import (
     _mark_claimed_audit_execution_unknown,
     _ParallelToolExecutionContext,
     _save_execution_checkpoint,
-    _tool_result_succeeded,
     update_memory_recall_boundary,
 )
 
@@ -444,6 +444,7 @@ async def handle_interactive_tool_round(
     audit_execution_ids: dict[str, int] = {}
     audit_execution_checkpoint_state: dict[str, Any] | None = None
     audit_all_succeeded = True
+    audit_has_unknown_result = False
     if audit_round is not None:
         claimed_record = None
         try:
@@ -599,8 +600,10 @@ async def handle_interactive_tool_round(
                 queued_task_id = get_queued_background_task_id(tool_res.content)
                 terminal_session_id = get_handed_off_terminal_session_id(tool_res.content) if tool_call is not None and tool_call.name == "execute_shell" else None
                 if queued_task_id is None and terminal_session_id is None:
-                    execution_succeeded = _tool_result_succeeded(tool_res.content)
+                    execution_status = AuditExecutionStatus(get_tool_execution_status(tool_res))
+                    execution_succeeded = execution_status == AuditExecutionStatus.SUCCEEDED
                     audit_all_succeeded = audit_all_succeeded and execution_succeeded
+                    audit_has_unknown_result = audit_has_unknown_result or execution_status == AuditExecutionStatus.EXECUTION_UNKNOWN
                     result_summary = serialize_execution_summary(
                         tool_res.content,
                         max_chars=1000,
@@ -608,7 +611,7 @@ async def handle_interactive_tool_round(
                     await audit_crud.finish_execution_attempt(
                         state.db,
                         execution_record_id=execution_id,
-                        status=AuditExecutionStatus.SUCCEEDED if execution_succeeded else AuditExecutionStatus.FAILED,
+                        status=execution_status,
                         result_summary=result_summary,
                         error=None if execution_succeeded else result_summary,
                     )
@@ -675,16 +678,24 @@ async def handle_interactive_tool_round(
                 claim_token=audit_claim_token,
             )
         else:
+            if audit_has_unknown_result:
+                execution_round_status = AuditRecordStatus.EXECUTION_UNKNOWN
+                error_reason = t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN)
+            elif audit_all_succeeded:
+                execution_round_status = AuditRecordStatus.SUCCEEDED
+                error_reason = None
+            else:
+                execution_round_status = AuditRecordStatus.FAILED
+                error_reason = t(ERR_AUDIT_EXECUTION_CLAIM_FAILED)
             legacy_round_finished = await audit_crud.finish_execution_round(
                 state.db,
                 audit_record_id=audit_round.audit_record_id,
                 claim_token=audit_claim_token,
-                status=AuditRecordStatus.SUCCEEDED if audit_all_succeeded else AuditRecordStatus.FAILED,
-                error_reason=None if audit_all_succeeded else t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
+                status=execution_round_status,
+                error_reason=error_reason,
             )
             if not legacy_round_finished:
                 raise AuditExecutionStatePersistenceError(cause=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
-            execution_round_status = AuditRecordStatus.SUCCEEDED if audit_all_succeeded else AuditRecordStatus.FAILED
         if execution_round_status is not None and state.checkpoint_state.callback is not None:
             await _save_execution_checkpoint(
                 state.checkpoint_state,

@@ -42,6 +42,7 @@ from app.core.utils.dispatcher.helpers import dump_background_proactive_history
 from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
     get_queued_background_task_id,
+    get_tool_execution_status,
     prevalidate_tool_round,
     prevalidate_tool_round_protocol,
     process_single_tool,
@@ -173,6 +174,7 @@ async def _append_confirmed_tool_result(
         pending_message=replacement_state.pending_tool_results[original_tool_call_id],
         original_tool_call_id=original_tool_call_id,
         content=tool_result.content,
+        tool_execution_status=tool_result.tool_execution_status,
         audit_record_id=replacement_state.audit_record_id,
     )
     stored_tool_result = tool_result.model_copy(deep=True)
@@ -504,13 +506,10 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     protocol=confirmed_tool_protocol,
                 )
                 await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
-                try:
-                    result_payload = json.loads(tool_result.content or "{}")
-                except (TypeError, ValueError):
-                    result_payload = {}
                 terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == "execute_shell" else None
                 if get_queued_background_task_id(tool_result.content) is None and terminal_session_id is None:
-                    succeeded = not (isinstance(result_payload, dict) and (result_payload.get("error") or result_payload.get("status") == "failed" or (isinstance(result_payload.get("exit_code"), int) and result_payload["exit_code"] != 0)))
+                    execution_status = AuditExecutionStatus(get_tool_execution_status(tool_result))
+                    succeeded = execution_status == AuditExecutionStatus.SUCCEEDED
                     all_succeeded = all_succeeded and succeeded
                     result_summary = serialize_execution_summary(
                         tool_result.content,
@@ -519,7 +518,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     await audit_crud.finish_execution_attempt(
                         db,
                         execution_record_id=execution.id,
-                        status=AuditExecutionStatus.SUCCEEDED if succeeded else AuditExecutionStatus.FAILED,
+                        status=execution_status,
                         result_summary=result_summary,
                         error=None if succeeded else result_summary,
                     )

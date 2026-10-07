@@ -1,5 +1,4 @@
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, MutableSet
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,16 +22,6 @@ from app.core.utils.dispatcher.markdown_instruction import ensure_user_runtime_i
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, MessageRole
-
-
-def _tool_result_succeeded(content: str | None) -> bool:
-    try:
-        payload = json.loads(content or "{}")
-    except (TypeError, ValueError):
-        return True
-    if not isinstance(payload, dict):
-        return True
-    return not (payload.get("error") or payload.get("status") == "failed" or (isinstance(payload.get("exit_code"), int) and payload["exit_code"] != 0))
 
 
 def collect_pending_multimodal_file_inputs(messages: list[InternalMessage]) -> list[dict[str, str]]:
