@@ -15,8 +15,10 @@ from app.core.crud.session.message import (
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.models.message import (
     InternalMessage,
+    MessageContentFormat,
     MessageRole,
     MessageType,
+    decode_message_content,
 )
 
 
@@ -82,6 +84,18 @@ async def save_message(
         "role": role,
         "type": msg_type,
         "content": _to_storable_content(content, msg_type),
+        "content_format": (
+            MessageContentFormat.PARTS
+            if msg_type
+            in {
+                MessageType.TEXT,
+                MessageType.AUDIT_DECISION,
+                MessageType.BACKGROUND_TASK_RESULT,
+                MessageType.OUTBOUND_TEXT_REFINEMENT,
+            }
+            and isinstance(getattr(content, "content", None), list)
+            else MessageContentFormat.TEXT
+        ),
         "reasoning_content": reasoning_content_to_save,
         "provider_metadata": provider_metadata_to_save,
         "environment_prompt": environment_prompt_to_save,
@@ -108,13 +122,15 @@ async def save_message(
             dedupe_key=dedupe_key,
             commit=commit,
         )
-    return InternalMessage(
-        id=db_obj.id,
-        role=role,
-        content=db_obj.content,
-        reasoning_content=db_obj.reasoning_content,
-        provider_metadata=db_obj.provider_metadata,
-        environment_prompt=db_obj.environment_prompt,
-        attachments=db_obj.attachments,
-        created_at=db_obj.created_at.timestamp(),
-    )
+    message_kwargs = {
+        "id": db_obj.id,
+        "content": decode_message_content(db_obj.content, db_obj.content_format),
+        "reasoning_content": db_obj.reasoning_content,
+        "provider_metadata": db_obj.provider_metadata,
+        "environment_prompt": db_obj.environment_prompt,
+        "attachments": db_obj.attachments,
+        "created_at": db_obj.created_at.timestamp(),
+    }
+    if role == MessageRole.USER and msg_type == MessageType.TEXT:
+        return InternalMessage.from_user_input(**message_kwargs)
+    return InternalMessage(role=role, **message_kwargs)

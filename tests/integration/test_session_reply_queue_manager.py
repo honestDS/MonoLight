@@ -3,18 +3,35 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
+from app.adapters.weixin_openclaw.message import extract_text_and_attachments
+from app.core.constants import ERR_CHAT_REQUEST_ID_CONFLICT
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem, session_reply_work_item_crud
-from app.core.exceptions import BaseBusinessException
+from app.core.exceptions import BaseBusinessException, ParameterException
 from app.core.session_reply_queue import manager_result as manager_result_module
 from app.core.session_reply_queue.manager import SessionReplyQueueManager, build_session_reply_work_event_id
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.message import ChatCompletionRequest, InternalMessage, Message, MessageRole, MessageType
+from app.models.message import (
+    ChatCompletionRequest,
+    FilePart,
+    ImagePart,
+    InternalMessage,
+    Message,
+    MessageContentFormat,
+    MessageResponse,
+    MessageRole,
+    MessageType,
+    TextPart,
+    VoiceTextPart,
+)
+from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -1227,3 +1244,351 @@ async def test_running_foreground_append_preserves_voice_source(db_session: Asyn
         assert first_work.input_message_ids == [initial_message.id, *expected_message_ids]
     else:
         assert first_work.input_message_ids == [initial_message.id]
+
+
+@pytest.mark.asyncio
+async def test_weixin_voice_and_attachments_survive_queue_and_multimodal_assembly(db_session: AsyncSession, tmp_path):
+    image_path = tmp_path / "inbound.png"
+    Image.new("RGB", (2, 2), color="red").save(image_path)
+    file_path = tmp_path / "notes.pdf"
+
+    async def resolve_inbound_image(_item):
+        return image_path
+
+    async def resolve_inbound_file(_item):
+        return file_path
+
+    item_list = [
+        {"type": 3, "voice_item": {"text": "语音正文"}},
+        {"type": 2, "image_item": {}},
+        {"type": 4, "file_item": {}},
+    ]
+    extracted_content, attachment_paths = await extract_text_and_attachments(
+        SimpleNamespace(
+            resolve_inbound_image=resolve_inbound_image,
+            resolve_inbound_file=resolve_inbound_file,
+        ),
+        item_list,
+    )
+
+    assert isinstance(extracted_content, list)
+    assert [part.model_dump(mode="json") for part in extracted_content] == [
+        {"type": "text", "text": "语音正文", "input_source": "voice"},
+        {"type": "text", "text": f"[文件:{file_path.name}]"},
+    ]
+    assert attachment_paths == [str(image_path), str(file_path)]
+
+    manager = SessionReplyQueueManager()
+    initial_message, work = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message=extracted_content,
+        attachments=attachment_paths,
+        source="weixin-openclaw",
+    )
+    assert initial_message.assembled_attachment_part_count == 0
+    stored_row = await db_session.get(Message, initial_message.id)
+    assert stored_row is not None
+    original_content = stored_row.content
+    original_attachments = list(stored_row.attachments or [])
+
+    work.status = SessionReplyWorkStatus.RUNNING
+    work.locked_by = "worker-1"
+    db_session.add(work)
+    await db_session.commit()
+    frozen_content, frozen_attachments, frozen_message_ids = await manager.freeze_foreground_input(
+        db_session,
+        work=work,
+        worker_id="worker-1",
+    )
+
+    assert frozen_message_ids == [initial_message.id]
+    assert frozen_attachments == attachment_paths
+    assert isinstance(frozen_content, list)
+    assert [part.model_dump(mode="json") for part in frozen_content] == [
+        {"type": "text", "text": "语音正文", "input_source": "voice"},
+        {"type": "text", "text": f"[文件:{file_path.name}]"},
+    ]
+
+    assembled = InternalMessage.from_user_input(
+        content=frozen_content,
+        attachments=frozen_attachments,
+    )
+    disabled = MessageAssembler.assemble(
+        assembled,
+        image_understanding=False,
+        audio_understanding=False,
+        video_understanding=False,
+    )
+    disabled_dump = disabled.model_dump(mode="json")
+    assert disabled.attachments == attachment_paths
+    assert sum(isinstance(part, VoiceTextPart) and part.text == "语音正文" and part.input_source == "voice" for part in disabled.content) == 1
+    assert sum(isinstance(part, TextPart) and part.text == f"[文件:{file_path.name}]" for part in disabled.content) == 1
+    assert not any(isinstance(part, ImagePart) for part in disabled.content)
+    assert sum(isinstance(part, FilePart) for part in disabled.content) == 1
+    assert any(isinstance(part, TextPart) and f"[未开启图像理解无法解析图片: {image_path}]" in part.text for part in disabled.content)
+    for _ in range(2):
+        assert (
+            MessageAssembler.assemble(
+                disabled,
+                image_understanding=False,
+                audio_understanding=False,
+                video_understanding=False,
+            ).model_dump(mode="json")
+            == disabled_dump
+        )
+
+    restored = InternalMessage.model_validate(disabled_dump)
+    enabled = MessageAssembler.assemble(
+        restored,
+        image_understanding=True,
+        audio_understanding=False,
+        video_understanding=False,
+    )
+    enabled_dump = enabled.model_dump(mode="json")
+    assert enabled.attachments == attachment_paths
+    assert sum(isinstance(part, VoiceTextPart) and part.text == "语音正文" and part.input_source == "voice" for part in enabled.content) == 1
+    assert sum(isinstance(part, TextPart) and part.text == f"[文件:{file_path.name}]" for part in enabled.content) == 1
+    assert sum(isinstance(part, ImagePart) for part in enabled.content) == 1
+    assert sum(isinstance(part, FilePart) for part in enabled.content) == 1
+    assert (
+        MessageAssembler.assemble(
+            enabled,
+            image_understanding=True,
+            audio_understanding=False,
+            video_understanding=False,
+        ).model_dump(mode="json")
+        == enabled_dump
+    )
+    restored_enabled = InternalMessage.model_validate(enabled_dump)
+    assert (
+        MessageAssembler.assemble(
+            restored_enabled,
+            image_understanding=True,
+            audio_understanding=False,
+            video_understanding=False,
+        ).model_dump(mode="json")
+        == enabled_dump
+    )
+
+    materialized = materialize_user_environment_prompts([enabled])[0]
+    for transformer, image_provider_type in (
+        (OpenAIChatCompletionsTransformer, "image_url"),
+        (OpenAIResponsesTransformer, "input_image"),
+    ):
+        provider_message = transformer.to_provider([materialized])[0]
+        provider_content = provider_message["content"]
+        assert isinstance(provider_content, list)
+        provider_payload = json.loads(provider_content[0]["text"])
+        assert provider_payload["user_message"][0] == {
+            "type": "text",
+            "text": "语音正文",
+            "input_source": "voice",
+        }
+        assert provider_payload["user_message"][1] == {"type": "text", "text": f"[文件:{file_path.name}]"}
+        assert provider_payload["attachment_paths"] == attachment_paths
+        assert sum(part.get("type") == image_provider_type for part in provider_content) == 1
+
+    await db_session.refresh(stored_row)
+    assert stored_row.content == original_content
+    assert stored_row.attachments == original_attachments
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "literal_text",
+    [
+        json.dumps([{"type": "text", "text": "普通文本"}], ensure_ascii=False),
+        json.dumps([{"type": "text", "text": "原始语音", "input_source": "voice"}], ensure_ascii=False),
+        json.dumps([{"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}}], ensure_ascii=False),
+        json.dumps([{"type": "audio", "format": "wav", "data": "YQ=="}], ensure_ascii=False),
+        json.dumps([{"type": "file", "path": "virtual.txt"}], ensure_ascii=False),
+    ],
+)
+@pytest.mark.parametrize("mode", ["freeze", "queue", "legacy"])
+async def test_plain_json_text_remains_text_across_freeze_history_and_provider(
+    db_session: AsyncSession,
+    literal_text: str,
+    mode: str,
+):
+    manager = SessionReplyQueueManager()
+    voice_content = [VoiceTextPart(text="真实语音", input_source="voice")]
+    expected_parts = [
+        voice_content[0].model_dump(mode="json"),
+        TextPart(text=literal_text).model_dump(mode="json"),
+    ]
+
+    async def enqueue_message(message):
+        return await manager._enqueue_foreground_message(
+            db_session,
+            uid="user-1",
+            session_id="session-1",
+            profile=SimpleNamespace(id=1),
+            message=message,
+            attachments=None,
+            source="http",
+        )
+
+    first_message, first_work = await enqueue_message(voice_content if mode == "freeze" else "初始普通输入")
+    first_work.status = SessionReplyWorkStatus.RUNNING
+    first_work.locked_by = "worker-1"
+    db_session.add(first_work)
+    await db_session.commit()
+
+    if mode == "freeze":
+        voice_message = first_message
+        literal_message, _ = await enqueue_message(literal_text)
+        frozen_content, _, source_message_ids = await manager.freeze_foreground_input(
+            db_session,
+            work=first_work,
+            worker_id="worker-1",
+        )
+        output_content = frozen_content
+        assert source_message_ids == [voice_message.id, literal_message.id]
+    else:
+        _, _, initial_message_ids = await manager.freeze_foreground_input(
+            db_session,
+            work=first_work,
+            worker_id="worker-1",
+        )
+        assert initial_message_ids == [first_message.id]
+        voice_message, _ = await enqueue_message(voice_content)
+        literal_message, _ = await enqueue_message(literal_text)
+        if mode == "queue":
+            batch = await manager.absorb_contiguous_foreground_messages(
+                db_session,
+                work_id=first_work.id,
+                worker_id="worker-1",
+            )
+        else:
+            batch = await fetch_and_merge_new_user_messages(db_session, "session-1", "user-1")
+        assert batch is not None
+        assert batch.source_message_ids == (voice_message.id, literal_message.id)
+        assert len(batch.messages) == 1
+        assert batch.messages[0].assembled_attachment_part_count == 0
+        output_content = batch.messages[0].content
+
+    assert isinstance(output_content, list)
+    assert [part.model_dump(mode="json") for part in output_content] == expected_parts
+
+    voice_row = await db_session.get(Message, voice_message.id)
+    literal_row = await db_session.get(Message, literal_message.id)
+    assert voice_row is not None
+    assert literal_row is not None
+    original_contents = (voice_row.content, literal_row.content)
+    await db_session.refresh(voice_row)
+    await db_session.refresh(literal_row)
+    assert voice_row.content_format == MessageContentFormat.PARTS
+    assert literal_row.content_format == MessageContentFormat.TEXT
+    assert voice_row.content == original_contents[0]
+    assert literal_row.content == literal_text == original_contents[1]
+    assert json.loads(voice_row.content) == expected_parts[:1]
+
+    voice_response = MessageResponse.model_validate(voice_row)
+    literal_response = MessageResponse.model_validate(literal_row)
+    assert voice_response.content == expected_parts[:1]
+    assert literal_response.content == literal_text
+
+    parsed_history = parse_db_messages_to_internal([voice_row, literal_row])
+    assert [message.id for message in parsed_history] == [voice_message.id, literal_message.id]
+    assert isinstance(parsed_history[0].content, list)
+    assert [part.model_dump(mode="json") for part in parsed_history[0].content] == expected_parts[:1]
+    assert parsed_history[1].content == literal_text
+
+    provider_input = InternalMessage(role=MessageRole.USER, content=output_content)
+    media_provider_types = {"image_url", "input_image", "input_audio", "audio", "file", "input_file"}
+    for transformer in (OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer):
+        materialized = materialize_user_environment_prompts([provider_input])[0]
+        provider_message = transformer.to_provider([materialized])[0]
+        provider_content = provider_message["content"]
+        provider_parts = provider_content if isinstance(provider_content, list) else []
+        provider_text = provider_content if isinstance(provider_content, str) else next(part["text"] for part in provider_parts if isinstance(part, dict) and isinstance(part.get("text"), str))
+        provider_payload = json.loads(provider_text)
+        assert provider_payload["user_message"] == expected_parts
+        assert not any(isinstance(part, dict) and part.get("type") in media_provider_types for part in provider_parts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_is_parts", [True, False])
+async def test_idempotent_submit_distinguishes_content_format(database_factory, first_is_parts: bool):
+    parts = [VoiceTextPart(text="转写", input_source="voice")]
+    literal = json.dumps([part.model_dump(mode="json") for part in parts], ensure_ascii=False)
+    first_input = parts if first_is_parts else literal
+    other_input = literal if first_is_parts else parts
+    expected_content_format = MessageContentFormat.PARTS if first_is_parts else MessageContentFormat.TEXT
+
+    async with database_factory() as session_factory:
+        async with session_factory() as db_session:
+            profile = Profile(id=1, uid="user-1", name="format-identity", configs={})
+            db_session.add(profile)
+            await db_session.commit()
+
+            manager = SessionReplyQueueManager()
+            first_message, first_work, _first_status, _first_events = await manager.submit_user_message(
+                db_session,
+                uid="user-1",
+                session_id="session-1",
+                profile=profile,
+                message=first_input,
+                attachments=None,
+                source="http",
+                request_id="format-identity",
+                idempotent_http_request=True,
+            )
+            repeated_message, repeated_work, _repeated_status, _repeated_events = await manager.submit_user_message(
+                db_session,
+                uid="user-1",
+                session_id="session-1",
+                profile=profile,
+                message=first_input,
+                attachments=None,
+                source="http",
+                request_id="format-identity",
+                idempotent_http_request=True,
+            )
+
+            expected_content = parts if first_is_parts else literal
+            assert first_message.id == repeated_message.id
+            assert first_work.id == repeated_work.id
+            assert first_message.content == expected_content
+            assert repeated_message.content == expected_content
+            assert first_message.assembled_attachment_part_count == 0
+            assert repeated_message.assembled_attachment_part_count == 0
+            assert type(repeated_message.content) is type(first_message.content)
+            assert isinstance(first_message.content, list) is first_is_parts
+            assert isinstance(repeated_message.content, list) is first_is_parts
+
+            with pytest.raises(ParameterException) as exc_info:
+                await manager.submit_user_message(
+                    db_session,
+                    uid="user-1",
+                    session_id="session-1",
+                    profile=profile,
+                    message=other_input,
+                    attachments=None,
+                    source="http",
+                    request_id="format-identity",
+                    idempotent_http_request=True,
+                )
+            assert exc_info.value.message == ERR_CHAT_REQUEST_ID_CONFLICT
+
+            rows = list(
+                (
+                    await db_session.execute(
+                        select(Message).where(
+                            Message.session_id == "session-1",
+                            Message.uid == "user-1",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 1
+            persisted = rows[0]
+            assert persisted.id == first_message.id
+            assert persisted.content_format == expected_content_format
+            assert persisted.content == literal
+            assert persisted.content.encode("utf-8") == literal.encode("utf-8")

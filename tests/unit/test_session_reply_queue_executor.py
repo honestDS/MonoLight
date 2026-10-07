@@ -131,6 +131,7 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
 
     async def dispatch(**kwargs):
         dispatch_kwargs.update(kwargs)
+        assert kwargs["persisted_initial_message"].assembled_attachment_part_count == 0
         assert await kwargs["context_summary_work_validity_checker"]() is True
         await kwargs["execution_checkpoint_callback"](
             {

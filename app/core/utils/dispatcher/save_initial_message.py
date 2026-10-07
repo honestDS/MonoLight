@@ -42,8 +42,7 @@ async def save_initial_message(
         if session is None:
             raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
 
-    initial_msg_obj = InternalMessage(
-        role=MessageRole.USER,
+    initial_msg_obj = InternalMessage.from_user_input(
         content=message,
         attachments=attachments,
     )

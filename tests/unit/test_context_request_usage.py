@@ -13,6 +13,7 @@ from app.core.utils.context_messages import merge_user_message_contents, message
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
     AudioPart,
+    FilePart,
     ImagePart,
     InternalMessage,
     InternalToolCall,
@@ -256,7 +257,7 @@ def test_final_request_budget_preserves_longterm_memory_recall_json():
         pytest.param(["left", None, "right"], "left\n\nright", id="strings-and-none"),
         pytest.param(
             [json.dumps([{"type": "text", "text": "spoken", "input_source": "voice"}])],
-            [{"type": "text", "text": "spoken", "input_source": "voice"}],
+            json.dumps([{"type": "text", "text": "spoken", "input_source": "voice"}]),
             id="serialized-voice-only",
         ),
         pytest.param(
@@ -264,11 +265,95 @@ def test_final_request_budget_preserves_longterm_memory_recall_json():
                 json.dumps([{"type": "text", "text": "spoken", "input_source": "voice"}]),
                 "after",
             ],
+            json.dumps([{"type": "text", "text": "spoken", "input_source": "voice"}]) + "\nafter",
+            id="serialized-voice-then-text",
+        ),
+        pytest.param(
+            [json.dumps([TextPart(text="plain").model_dump()])],
+            json.dumps([TextPart(text="plain").model_dump()]),
+            id="serialized-text-part-array-only",
+        ),
+        pytest.param(
+            [
+                [VoiceTextPart(text="spoken", input_source="voice")],
+                json.dumps([TextPart(text="plain").model_dump()]),
+            ],
             [
                 {"type": "text", "text": "spoken", "input_source": "voice"},
-                {"type": "text", "text": "after"},
+                {"type": "text", "text": json.dumps([TextPart(text="plain").model_dump()])},
             ],
-            id="serialized-voice-then-text",
+            id="serialized-text-part-array-with-voice",
+        ),
+        pytest.param(
+            [
+                [VoiceTextPart(text="spoken", input_source="voice")],
+                json.dumps([VoiceTextPart(text="serialized", input_source="voice").model_dump()]),
+            ],
+            [
+                {"type": "text", "text": "spoken", "input_source": "voice"},
+                {
+                    "type": "text",
+                    "text": json.dumps([VoiceTextPart(text="serialized", input_source="voice").model_dump()]),
+                },
+            ],
+            id="serialized-voice-part-array-with-voice",
+        ),
+        pytest.param(
+            [json.dumps([ImagePart(image_url={"url": "https://example.test/image.png"}).model_dump()])],
+            json.dumps([ImagePart(image_url={"url": "https://example.test/image.png"}).model_dump()]),
+            id="serialized-image-part-array-only",
+        ),
+        pytest.param(
+            [
+                [VoiceTextPart(text="spoken", input_source="voice")],
+                json.dumps([ImagePart(image_url={"url": "https://example.test/image.png"}).model_dump()]),
+            ],
+            [
+                {"type": "text", "text": "spoken", "input_source": "voice"},
+                {
+                    "type": "text",
+                    "text": json.dumps([ImagePart(image_url={"url": "https://example.test/image.png"}).model_dump()]),
+                },
+            ],
+            id="serialized-image-part-array-with-voice",
+        ),
+        pytest.param(
+            [json.dumps([AudioPart(format="mp3", data="YQ==").model_dump()])],
+            json.dumps([AudioPart(format="mp3", data="YQ==").model_dump()]),
+            id="serialized-audio-part-array-only",
+        ),
+        pytest.param(
+            [
+                [VoiceTextPart(text="spoken", input_source="voice")],
+                json.dumps([AudioPart(format="mp3", data="YQ==").model_dump()]),
+            ],
+            [
+                {"type": "text", "text": "spoken", "input_source": "voice"},
+                {
+                    "type": "text",
+                    "text": json.dumps([AudioPart(format="mp3", data="YQ==").model_dump()]),
+                },
+            ],
+            id="serialized-audio-part-array-with-voice",
+        ),
+        pytest.param(
+            [json.dumps([FilePart(path="/tmp/example.txt").model_dump()])],
+            json.dumps([FilePart(path="/tmp/example.txt").model_dump()]),
+            id="serialized-file-part-array-only",
+        ),
+        pytest.param(
+            [
+                [VoiceTextPart(text="spoken", input_source="voice")],
+                json.dumps([FilePart(path="/tmp/example.txt").model_dump()]),
+            ],
+            [
+                {"type": "text", "text": "spoken", "input_source": "voice"},
+                {
+                    "type": "text",
+                    "text": json.dumps([FilePart(path="/tmp/example.txt").model_dump()]),
+                },
+            ],
+            id="serialized-file-part-array-with-voice",
         ),
         pytest.param(
             [[VoiceTextPart(text="spoken", input_source="voice")], "[]"],
@@ -310,7 +395,7 @@ def test_final_request_budget_preserves_longterm_memory_recall_json():
         ),
         pytest.param(
             [
-                json.dumps([{"type": "text", "text": "spoken", "input_source": "voice"}]),
+                [VoiceTextPart(text="spoken", input_source="voice")],
                 json.dumps(
                     [
                         {"type": "text", "text": "spoken", "input_source": "voice"},

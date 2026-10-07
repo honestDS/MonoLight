@@ -1,11 +1,8 @@
 import json
 
-from pydantic import ValidationError
-
 from app.models.message import (
     InternalMessage,
     MessagePart,
-    MessageRole,
     TextPart,
 )
 
@@ -27,39 +24,11 @@ def is_context_summary_message(message: InternalMessage) -> bool:
 def merge_user_message_contents(
     contents: list[str | list[MessagePart] | None],
 ) -> str | list[MessagePart]:
-    normalized: list[str | list[MessagePart] | None] = []
-    for content in contents:
-        if not isinstance(content, str):
-            normalized.append(content)
-            continue
-
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
-            normalized.append(content)
-            continue
-        if not isinstance(parsed, list) or not parsed:
-            normalized.append(content)
-            continue
-
-        try:
-            parsed_content = InternalMessage(
-                role=MessageRole.USER,
-                content=parsed,
-            ).content
-        except ValidationError:
-            normalized.append(content)
-            continue
-        if not isinstance(parsed_content, list) or any(type(part) is MessagePart for part in parsed_content):
-            normalized.append(content)
-            continue
-        normalized.append(parsed_content)
-
-    if not any(isinstance(content, list) for content in normalized):
-        return "\n".join(content or "" for content in normalized)
+    if not any(isinstance(content, list) for content in contents):
+        return "\n".join(content or "" for content in contents)
 
     merged: list[MessagePart] = []
-    for content in normalized:
+    for content in contents:
         if isinstance(content, list):
             merged.extend(content)
             continue

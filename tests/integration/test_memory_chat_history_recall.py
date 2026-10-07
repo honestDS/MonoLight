@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session.message import message_crud
 from app.core.memory import chat_history as chat_history_module
-from app.models.message import Message, MessageRole, MessageType
+from app.models.message import Message, MessageContentFormat, MessageRole, MessageType
 
 _MISSING = object()
 
@@ -18,6 +18,7 @@ def _message(
     session_id: str = "session-1",
     role: MessageRole = MessageRole.USER,
     message_type: MessageType = MessageType.TEXT,
+    content_format: MessageContentFormat = MessageContentFormat.TEXT,
     content: str | None | object = _MISSING,
     created_at: datetime | None = None,
 ) -> Message:
@@ -28,6 +29,7 @@ def _message(
         profile_id=1,
         role=role,
         type=message_type,
+        content_format=content_format,
         content=f"message-{message_id}" if content is _MISSING else content,
         is_processed=True,
     )
@@ -139,7 +141,7 @@ async def test_chat_history_recall_parses_plain_and_multimodal_text(db_session: 
     await _commit(
         db_session,
         _message(1, content="plain needle"),
-        _message(2, content=multimodal_content),
+        _message(2, content=multimodal_content, content_format=MessageContentFormat.PARTS),
     )
 
     result = await chat_history_module.chat_history_recall_service.recall(db_session, "user-1", "visual caption", top_k=10)

@@ -5,7 +5,7 @@ from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.utils.context_messages import merge_user_message_contents
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, decode_message_content
 
 
 async def fetch_and_merge_new_user_messages(
@@ -39,8 +39,12 @@ async def fetch_and_merge_new_user_messages(
     merged_content = []
     merged_attachments = []
     for message in user_messages:
-        if message.content:
-            merged_content.append(str(message.content).strip())
+        content = decode_message_content(message.content, message.content_format)
+        if content:
+            if isinstance(content, list):
+                merged_content.append(content)
+            else:
+                merged_content.append(content.strip())
         if message.attachments:
             merged_attachments.extend(message.attachments)
 
@@ -51,9 +55,8 @@ async def fetch_and_merge_new_user_messages(
     await db.commit()
 
     # 返回合并后的单条 InternalMessage
-    combined_message = InternalMessage(
+    combined_message = InternalMessage.from_user_input(
         id=source_message_ids[-1],
-        role=MessageRole.USER,
         content=merge_user_message_contents(merged_content) if merged_content else None,
         attachments=list(dict.fromkeys(merged_attachments)) if merged_attachments else None,
     )
