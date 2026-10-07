@@ -7,7 +7,6 @@ from app.core.constants import (
     ERR_MEMORY_CAPACITY_PENDING,
     ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED,
     ERR_MEMORY_JOB_TARGET_STATE_CONFLICT,
-    ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     ERR_MEMORY_NOT_CONFIGURED,
     ERR_MEMORY_OVER_LIMIT,
     ERR_MEMORY_RECORD_NOT_FOUND,
@@ -20,13 +19,15 @@ from app.core.embedding.common import (
     load_embedding_runtime_config,
 )
 from app.core.memory import (
+    MemoryConflictError,
     MemoryValidationError,
     build_memory_active_mutation_key,
     build_memory_record_snapshot,
 )
+from app.core.memory.organization import (
+    validate_organization_submission_store,
+)
 from app.models.memory import (
-    LongTermMemoryIndexStatus,
-    LongTermMemoryMigrationStatus,
     LongTermMemoryMutationJob,
     LongTermMemoryMutationOperation,
     LongTermMemoryRecordIndexStatus,
@@ -55,18 +56,9 @@ def _validate_organization_store_snapshot(store: Any, payload: dict[str, Any]) -
         _,
     ) = _validate_active_store(store)
     try:
-        index_status = LongTermMemoryIndexStatus(store.index_status)
-        migration_status = LongTermMemoryMigrationStatus(store.migration_status) if store.migration_status is not None else None
-    except (TypeError, ValueError) as exc:
-        raise _deterministic(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT) from exc
-    if index_status != LongTermMemoryIndexStatus.READY or migration_status in {
-        LongTermMemoryMigrationStatus.PREPARING,
-        LongTermMemoryMigrationStatus.BUILDING,
-        LongTermMemoryMigrationStatus.CATCHING_UP,
-        LongTermMemoryMigrationStatus.VALIDATING,
-        LongTermMemoryMigrationStatus.SWITCHING,
-    }:
-        raise _deterministic(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
+        validate_organization_submission_store(store)
+    except MemoryConflictError as exc:
+        raise _deterministic(exc.message) from exc
     if active_revision != payload["active_embedding_revision"] or store.index_revision != payload["index_revision"]:
         raise _deterministic(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
     return (
