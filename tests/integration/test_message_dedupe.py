@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import (
@@ -158,6 +159,71 @@ async def test_save_message_round_trips_text_content_formats():
     assert isinstance(parsed_text.content, str)
     assert persisted_parts.content == serialized_parts
     assert persisted_text.content == serialized_parts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("execution_status", "content", "expected_status"),
+    [
+        ("succeeded", "{}", "succeeded"),
+        ("failed", "{}", "failed"),
+        ("execution_unknown", "{}", "execution_unknown"),
+        (None, "{}", "succeeded"),
+        (None, json.dumps({"status": "failed"}), "failed"),
+        (None, json.dumps({"status": "execution_unknown"}), "execution_unknown"),
+    ],
+)
+async def test_save_message_round_trips_tool_execution_status(
+    db_session: AsyncSession,
+    execution_status: str | None,
+    content: str,
+    expected_status: str,
+):
+    saved_tool = await save_message(
+        db_session,
+        TEST_SESSION_ID,
+        TEST_UID,
+        MessageRole.TOOL,
+        MessageType.TOOL_RESULT,
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="round-trip-tool-call",
+            content=content,
+            tool_execution_status=execution_status,
+        ),
+        1,
+    )
+    saved_next = await save_message(
+        db_session,
+        TEST_SESSION_ID,
+        TEST_UID,
+        MessageRole.ASSISTANT,
+        MessageType.TEXT,
+        InternalMessage(role=MessageRole.ASSISTANT, content="next message"),
+        1,
+    )
+
+    db_session.expunge_all()
+    persisted_tool = await db_session.get(Message, saved_tool.id)
+    persisted_next = await db_session.get(Message, saved_next.id)
+
+    assert persisted_tool is not None
+    assert persisted_next is not None
+    parsed_tool, parsed_next = parse_db_messages_to_internal([persisted_tool, persisted_next])
+
+    assert parsed_tool.id == saved_tool.id
+    assert parsed_tool.role == MessageRole.TOOL
+    assert parsed_tool.tool_call_id == "round-trip-tool-call"
+    assert parsed_tool.content == content
+    assert parsed_tool.tool_execution_status == execution_status
+    assert get_tool_execution_status(parsed_tool) == expected_status
+
+    assert parsed_next.role == MessageRole.ASSISTANT
+    assert parsed_next.content == "next message"
+    assert parsed_next.tool_execution_status is None
+
+    if execution_status is None:
+        assert "tool_execution_status" not in json.loads(persisted_tool.content)
 
 
 @pytest.mark.asyncio

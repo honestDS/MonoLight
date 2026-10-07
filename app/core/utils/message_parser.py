@@ -61,6 +61,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             content = (msg.content or "").strip()
             tool_calls = None
             tool_call_id = None
+            tool_execution_status = None
             refusal = None
             provider_metadata = msg.provider_metadata if isinstance(msg.provider_metadata, dict) else None
 
@@ -83,6 +84,8 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                         if "tool_call_id" in parsed:
                             tool_call_id = parsed["tool_call_id"]
                             content = parsed.get("content")
+                        if m_type == MessageType.TOOL_RESULT:
+                            tool_execution_status = parsed.get("tool_execution_status")
                         if isinstance(parsed.get("refusal"), str):
                             refusal = parsed["refusal"]
                             content = parsed.get("content")
@@ -116,6 +119,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 "attachments": msg.attachments,
                 "tool_calls": tool_calls,
                 "tool_call_id": tool_call_id,
+                "tool_execution_status": tool_execution_status,
             }
             if role == MessageRole.USER and m_type == MessageType.TEXT:
                 parsed_history.append(InternalMessage.from_user_input(**message_kwargs))

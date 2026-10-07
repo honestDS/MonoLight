@@ -23,6 +23,8 @@ from app.core.session_reply_queue import executor_confirmed as executor_confirme
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.tools.file_tool import FILE_TOOL_SCHEMA
 from app.core.tools.file_tool import executor as file_tool_executor_module
+from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.time import get_local_time
 from app.models.audit import (
     AuditExecutionRecord,
@@ -469,9 +471,13 @@ async def test_file_tool_timeout_persists_execution_unknown_audit_state(
         assert len(tool_messages) == 1
         assert len(versions) == 3
 
-        stored_message = InternalMessage.model_validate_json(tool_messages[0].content or "{}")
+        (stored_message,) = parse_db_messages_to_internal(tool_messages)
         stored_version = InternalMessage.model_validate_json(versions[-1].content)
+        assert stored_message.id == tool_messages[0].id
+        assert stored_message.role == MessageRole.TOOL
+        assert stored_message.tool_call_id == "original-file-call"
         assert stored_message.tool_execution_status == "execution_unknown"
+        assert get_tool_execution_status(stored_message) == "execution_unknown"
         assert stored_version.tool_execution_status == "execution_unknown"
         if not exhausted_budget:
             payload = json.loads(stored_version.content or "{}")
@@ -577,8 +583,12 @@ async def test_background_unconfirmed_file_tool_timeout_persists_execution_unkno
                 assert executions[0].attempt_no == 1
                 assert executions[0].status == AuditExecutionStatus.EXECUTION_UNKNOWN
                 assert len(tool_messages) == 1
-                tool_result = InternalMessage.model_validate_json(tool_messages[0].content or "{}")
+                (tool_result,) = parse_db_messages_to_internal(tool_messages)
+                assert tool_result.id == tool_messages[0].id
+                assert tool_result.role == MessageRole.TOOL
+                assert tool_result.tool_call_id == "unconfirmed-file-call"
                 assert tool_result.tool_execution_status == "execution_unknown"
+                assert get_tool_execution_status(tool_result) == "execution_unknown"
                 if not exhausted_budget:
                     payload = json.loads(tool_result.content or "{}")
                     assert payload["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
@@ -696,8 +706,12 @@ async def test_interactive_unconfirmed_file_tool_timeout_persists_execution_unkn
                 assert executions[0].attempt_no == 1
                 assert executions[0].status == AuditExecutionStatus.EXECUTION_UNKNOWN
                 assert len(tool_messages) == 1
-                tool_result = InternalMessage.model_validate_json(tool_messages[0].content or "{}")
+                (tool_result,) = parse_db_messages_to_internal(tool_messages)
+                assert tool_result.id == tool_messages[0].id
+                assert tool_result.role == MessageRole.TOOL
+                assert tool_result.tool_call_id == "unconfirmed-file-call"
                 assert tool_result.tool_execution_status == "execution_unknown"
+                assert get_tool_execution_status(tool_result) == "execution_unknown"
                 if not exhausted_budget:
                     payload = json.loads(tool_result.content or "{}")
                     assert payload["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
