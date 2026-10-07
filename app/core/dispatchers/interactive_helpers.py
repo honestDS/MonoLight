@@ -76,8 +76,7 @@ def build_pending_multimodal_input_message(
     paths = list(dict.fromkeys(item["path"] for item in pending_inputs))
     messages = list(dict.fromkeys(item["message"] for item in pending_inputs))
     return MessageAssembler.assemble(
-        InternalMessage(
-            role=MessageRole.USER,
+        InternalMessage.from_user_input(
             content="\n\n".join(messages),
             attachments=paths,
         ),

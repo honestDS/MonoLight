@@ -30,7 +30,14 @@ from app.core.crud.session.session import session_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import get_current_locale, t
 from app.models.audit import AuditRecordStatus
-from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.message import (
+    InternalMessage,
+    Message,
+    MessageContentFormat,
+    MessageRole,
+    MessageType,
+    decode_message_content,
+)
 from app.models.profile import Profile
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -68,12 +75,13 @@ class SessionReplySubmission:
         idempotent_http_request: bool = False,
     ) -> tuple[InternalMessage, SessionReplyWorkItem, str, list[dict[str, Any]]]:
         profile_id = profile.id if profile and profile.id else -1
+        content_format = MessageContentFormat.PARTS if isinstance(message, list) else MessageContentFormat.TEXT
         serialized_message = _serialize_message_content(message)
         request_digest = hashlib.sha256(json.dumps([uid, session_id, request_id], separators=(",", ":")).encode("utf-8")).hexdigest()
         idempotent_dedupe_key = f"http:{request_digest[:58]}"
 
         def validate_idempotent_message(message_row: Message) -> None:
-            if message_row.uid != uid or message_row.session_id != session_id or message_row.content != serialized_message or (message_row.attachments or []) != (attachments or []):
+            if message_row.uid != uid or message_row.session_id != session_id or message_row.content_format != content_format or message_row.content != serialized_message or (message_row.attachments or []) != (attachments or []):
                 raise ParameterException(ERR_CHAT_REQUEST_ID_CONFLICT)
 
         async def existing_idempotent_submission(
@@ -91,10 +99,9 @@ class SessionReplySubmission:
             if existing_work is None:
                 raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
             return (
-                InternalMessage(
+                InternalMessage.from_user_input(
                     id=message_row.id,
-                    role=MessageRole.USER,
-                    content=message_row.content,
+                    content=decode_message_content(message_row.content, message_row.content_format),
                     attachments=message_row.attachments,
                     guidance_prompt=message_row.guidance_prompt,
                     created_at=message_row.created_at.timestamp(),
@@ -121,6 +128,7 @@ class SessionReplySubmission:
                     uid=uid,
                     role=MessageRole.USER,
                     type=MessageType.TEXT,
+                    content_format=content_format,
                     content=serialized_message,
                     attachments=attachments,
                     profile_id=profile_id,
@@ -201,6 +209,7 @@ class SessionReplySubmission:
                     uid=uid,
                     role=MessageRole.USER,
                     type=MessageType.AUDIT_DECISION,
+                    content_format=content_format,
                     content=decision_raw_message,
                     attachments=None,
                     profile_id=profile_id,
@@ -208,6 +217,7 @@ class SessionReplySubmission:
                 )
             else:
                 message_row.type = MessageType.AUDIT_DECISION
+                message_row.content_format = content_format
                 message_row.content = decision_raw_message
                 message_row.attachments = None
                 message_row.profile_id = profile_id
@@ -274,6 +284,7 @@ class SessionReplySubmission:
                     uid=uid,
                     role=MessageRole.USER,
                     type=MessageType.TEXT,
+                    content_format=content_format,
                     content=_serialize_message_content(message),
                     attachments=attachments,
                     profile_id=profile_id,
@@ -281,6 +292,7 @@ class SessionReplySubmission:
                 )
             else:
                 message_row.type = MessageType.TEXT
+                message_row.content_format = content_format
                 message_row.content = _serialize_message_content(message)
                 message_row.attachments = attachments
                 message_row.profile_id = profile_id
@@ -345,6 +357,7 @@ class SessionReplySubmission:
                 uid=uid,
                 role=MessageRole.USER,
                 type=MessageType.AUDIT_DECISION,
+                content_format=content_format,
                 content=decision_raw_message,
                 attachments=None,
                 profile_id=profile_id,
@@ -352,6 +365,7 @@ class SessionReplySubmission:
             )
         else:
             message_row.type = MessageType.AUDIT_DECISION
+            message_row.content_format = content_format
             message_row.content = decision_raw_message
             message_row.attachments = None
             message_row.profile_id = profile_id
@@ -386,10 +400,9 @@ class SessionReplySubmission:
                     )
                     if existing_work is not None:
                         return (
-                            InternalMessage(
+                            InternalMessage.from_user_input(
                                 id=message_row.id,
-                                role=MessageRole.USER,
-                                content=message_row.content,
+                                content=decode_message_content(message_row.content, message_row.content_format),
                                 attachments=message_row.attachments,
                                 guidance_prompt=message_row.guidance_prompt,
                                 created_at=message_row.created_at.timestamp(),
@@ -405,6 +418,7 @@ class SessionReplySubmission:
                     if message_was_existing:
                         raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
                 message_row.type = MessageType.TEXT
+                message_row.content_format = content_format
                 message_row.content = _serialize_message_content(message)
                 message_row.attachments = attachments
                 message_row.profile_id = profile_id
@@ -504,10 +518,9 @@ class SessionReplySubmission:
             work=work,
         )
         return (
-            InternalMessage(
+            InternalMessage.from_user_input(
                 id=message_row.id,
-                role=MessageRole.USER,
-                content=message_row.content,
+                content=decode_message_content(message_row.content, message_row.content_format),
                 guidance_prompt=message_row.guidance_prompt,
                 created_at=message_row.created_at.timestamp(),
             ),

@@ -10,7 +10,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
 from app.core.utils.context_messages import merge_user_message_contents
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage, Message, MessagePart, MessageRole, MessageType
+from app.models.message import InternalMessage, Message, MessagePart, MessageRole, MessageType, decode_message_content
 from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
@@ -241,9 +241,8 @@ class SessionReplyFreeze:
             None,
         )
         source_message_ids = tuple(dict.fromkeys(message_ids))
-        combined_message = InternalMessage(
+        combined_message = InternalMessage.from_user_input(
             id=source_message_ids[-1],
-            role=MessageRole.USER,
             content=content or None,
             attachments=attachments or None,
             guidance_prompt=latest_guidance_prompt,
@@ -288,7 +287,7 @@ class SessionReplyFreeze:
 
     @staticmethod
     def _merge_messages(messages: list[Message]) -> tuple[str | list[MessagePart], list[str], list[int]]:
-        contents = [message.content or "" for message in messages]
+        contents = [decode_message_content(message.content, message.content_format) or "" for message in messages]
         attachments: list[str] = []
         seen: set[str] = set()
         for message in messages:

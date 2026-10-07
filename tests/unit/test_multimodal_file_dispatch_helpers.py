@@ -8,7 +8,16 @@ from app.core.dispatchers.interactive_helpers import (
     collect_pending_multimodal_file_inputs,
 )
 from app.core.utils.message_assembler import MessageAssembler
-from app.models.message import InternalMessage, InternalToolCall, MessageRole, TextPart
+from app.models.message import (
+    AudioPart,
+    FilePart,
+    ImagePart,
+    InternalMessage,
+    InternalToolCall,
+    MessageRole,
+    TextPart,
+    VoiceTextPart,
+)
 
 
 def _success_result(path, message="不是用户的新输入", modality="image"):
@@ -294,7 +303,83 @@ def test_message_assembler_keeps_mixed_attachment_contract_stable_across_capabil
         assert restored.attachments == false_attachments_snapshot
 
 
-def test_message_assembler_replaces_old_per_image_history_wrappers_after_restore():
+@pytest.mark.parametrize(
+    "attachments",
+    [
+        [],
+        ["virtual/single.txt"],
+        [
+            "virtual/first.jpg",
+            "virtual/second.mp3",
+            "virtual/third.mp4",
+            "virtual/fourth.pdf",
+            "virtual/fifth.bin",
+            "virtual/sixth.txt",
+        ],
+    ],
+)
+def test_message_assembler_preserves_mixed_content_parts_across_reassembly(attachments):
+    original_parts = [
+        VoiceTextPart(text="语音正文", input_source="voice"),
+        TextPart(text="普通正文"),
+        ImagePart(image_url={"url": "data:image/png;base64,original"}),
+        AudioPart(format="mp3", path="virtual/original.mp3"),
+        FilePart(path="virtual/original.pdf"),
+    ]
+    message = InternalMessage.from_user_input(
+        content=original_parts,
+        attachments=attachments,
+    )
+    original_message_dump = message.model_dump(mode="json")
+    expected_prefix = original_message_dump["content"]
+
+    assembled = MessageAssembler.assemble(
+        message,
+        image_understanding=False,
+        audio_understanding=False,
+        video_understanding=False,
+    )
+    first_content = assembled.model_dump(mode="json")["content"]
+    assert first_content[: len(expected_prefix)] == expected_prefix
+
+    for _ in range(2):
+        assembled = MessageAssembler.assemble(
+            message,
+            image_understanding=False,
+            audio_understanding=False,
+            video_understanding=False,
+        )
+        assert assembled.model_dump(mode="json")["content"] == first_content
+
+    restored = InternalMessage.model_validate(message.model_dump(mode="json"))
+    assert restored.model_dump(mode="json")["content"] == first_content
+    restored = MessageAssembler.assemble(
+        restored,
+        image_understanding=False,
+        audio_understanding=False,
+        video_understanding=False,
+    )
+    assert restored.model_dump(mode="json")["content"] == first_content
+
+    switched = MessageAssembler.assemble(
+        restored,
+        image_understanding=False,
+        audio_understanding=True,
+        video_understanding=True,
+    )
+    switched_content = switched.model_dump(mode="json")["content"]
+    assert switched_content[: len(expected_prefix)] == expected_prefix
+
+    expected_switched = MessageAssembler.assemble(
+        InternalMessage.model_validate(original_message_dump),
+        image_understanding=False,
+        audio_understanding=True,
+        video_understanding=True,
+    )
+    assert switched_content == expected_switched.model_dump(mode="json")["content"]
+
+
+def test_message_assembler_replaces_legacy_checkpoint_attachment_parts_without_explicit_count():
     attachments = ["checkpoint-first.jpg", "checkpoint-second.png"]
     message = InternalMessage(
         role=MessageRole.USER,

@@ -33,9 +33,8 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
     content, attachments, message_ids = await session_reply_queue_manager.freeze_foreground_input(db, work=work, worker_id=worker_id)
     await db.refresh(work)
     execution_state = work.execution_state or {}
-    initial_message = InternalMessage(
+    initial_message = InternalMessage.from_user_input(
         id=message_ids[-1],
-        role=MessageRole.USER,
         content=content,
         attachments=attachments or None,
         guidance_prompt=execution_state.get("guidance_prompt"),

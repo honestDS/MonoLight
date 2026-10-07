@@ -78,10 +78,11 @@ class MessageAssembler:
 
         content_parts = []
         if isinstance(message.content, list):
-            # 幂等保证：按上次实际生成的附件片段数量剔除尾部 parts，兼容旧消息
-            # 中每个 attachment 一个片段的检查点，仅保留原始 parts，避免重复累积。
+            # 仅移除明确记录的生成片段，未组装消息的原始片段全部保留。
             attachment_part_count = message.assembled_attachment_part_count
             if attachment_part_count is None:
+                # 旧 checkpoint 没有记录实际生成片段数量；旧格式每个附件
+                # 恰好生成一个尾部片段，因此仅在未知旧状态下使用该兼容规则。
                 attachment_part_count = len(message.attachments or [])
             original_count = max(0, len(message.content) - attachment_part_count)
             content_parts.extend(message.content[:original_count])

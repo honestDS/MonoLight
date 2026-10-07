@@ -11,7 +11,7 @@ from app.core.exceptions import LLMException
 from app.core.utils.dispatcher.helpers import get_multimodal_from_entry, resolve_chat_params
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage
 
 
 class DispatcherValidationMixin:
@@ -42,7 +42,10 @@ class DispatcherValidationMixin:
         img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
         chat_params = resolve_chat_params(model_entry, chat_channel)
 
-        validation_msg = InternalMessage(role=MessageRole.USER, content=copy.deepcopy(message), attachments=copy.deepcopy(attachments))
+        validation_msg = InternalMessage.from_user_input(
+            content=copy.deepcopy(message),
+            attachments=copy.deepcopy(attachments),
+        )
         if validation_msg.attachments or isinstance(validation_msg.content, list):
             validation_msg = MessageAssembler.assemble(
                 validation_msg,

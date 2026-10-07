@@ -8,6 +8,7 @@ from app.models.message import (
     Message,
     MessageRole,
     MessageType,
+    decode_message_content,
 )
 
 
@@ -96,34 +97,30 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                     content = strip_session_todo_snapshot(content)
                     if isinstance(msg.model_context_suffix, str) and msg.model_context_suffix:
                         content = f"{content}\n\n{msg.model_context_suffix}"
-            elif m_type == MessageType.TEXT and content.startswith("[") and content.endswith("]"):
-                try:
-                    parsed_content = json.loads(content)
-                    if isinstance(parsed_content, list):
-                        content = parsed_content
-                except json.JSONDecodeError:
-                    pass
+            elif m_type == MessageType.TEXT:
+                content = decode_message_content(msg.content or "", msg.content_format)
 
             if role == MessageRole.ERR:
                 role = MessageRole.ASSISTANT
             if not content and refusal:
                 content = refusal
 
-            parsed_history.append(
-                InternalMessage(
-                    id=msg.id,
-                    role=role,
-                    content=content,
-                    reasoning_content=msg.reasoning_content,
-                    refusal=refusal,
-                    provider_metadata=provider_metadata,
-                    environment_prompt=msg.environment_prompt,
-                    guidance_prompt=msg.guidance_prompt,
-                    attachments=msg.attachments,
-                    tool_calls=tool_calls,
-                    tool_call_id=tool_call_id,
-                )
-            )
+            message_kwargs = {
+                "id": msg.id,
+                "content": content,
+                "reasoning_content": msg.reasoning_content,
+                "refusal": refusal,
+                "provider_metadata": provider_metadata,
+                "environment_prompt": msg.environment_prompt,
+                "guidance_prompt": msg.guidance_prompt,
+                "attachments": msg.attachments,
+                "tool_calls": tool_calls,
+                "tool_call_id": tool_call_id,
+            }
+            if role == MessageRole.USER and m_type == MessageType.TEXT:
+                parsed_history.append(InternalMessage.from_user_input(**message_kwargs))
+            else:
+                parsed_history.append(InternalMessage(role=role, **message_kwargs))
         except Exception:
             continue
     return _remove_completed_file_send_chains(parsed_history)

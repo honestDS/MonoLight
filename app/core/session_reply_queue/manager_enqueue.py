@@ -14,7 +14,14 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import get_current_locale, t
-from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.message import (
+    InternalMessage,
+    Message,
+    MessageContentFormat,
+    MessageRole,
+    MessageType,
+    decode_message_content,
+)
 from app.models.profile import Profile
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -153,6 +160,7 @@ class SessionReplyEnqueue:
                 uid=uid,
                 role=MessageRole.USER,
                 type=MessageType.TEXT,
+                content_format=MessageContentFormat.PARTS if isinstance(message, list) else MessageContentFormat.TEXT,
                 content=_serialize_message_content(message),
                 attachments=attachments,
                 profile_id=profile_id,
@@ -210,10 +218,9 @@ class SessionReplyEnqueue:
         else:
             await db.flush()
         return (
-            InternalMessage(
+            InternalMessage.from_user_input(
                 id=message_row.id,
-                role=MessageRole.USER,
-                content=message_row.content,
+                content=decode_message_content(message_row.content, message_row.content_format),
                 attachments=message_row.attachments,
                 guidance_prompt=message_row.guidance_prompt,
                 created_at=message_row.created_at.timestamp(),

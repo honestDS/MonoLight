@@ -7,9 +7,9 @@ from typing import (
     Literal,
 )
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, TypeAdapter, ValidationInfo, field_validator
 from pydantic import Field as PyField
-from sqlalchemy import ForeignKeyConstraint, Text
+from sqlalchemy import ForeignKeyConstraint, String, Text
 from sqlmodel import (
     JSON,
     Column,
@@ -46,6 +46,11 @@ class MessageType(StrEnum):
     OUTBOUND_TEXT_REFINEMENT = "outbound_text_refinement"
 
 
+class MessageContentFormat(StrEnum):
+    TEXT = "text"
+    PARTS = "parts"
+
+
 class MessagePart(BaseModel):
     type: str
 
@@ -74,6 +79,15 @@ class AudioPart(MessagePart):
 class FilePart(MessagePart):
     type: Literal["file"] = "file"
     path: str
+
+
+def decode_message_content(
+    content: str | None,
+    content_format: MessageContentFormat,
+) -> str | list[MessagePart] | None:
+    if content_format == MessageContentFormat.PARTS and content is not None:
+        return TypeAdapter(list[VoiceTextPart | TextPart | ImagePart | AudioPart | FilePart | MessagePart]).validate_json(content)
+    return content
 
 
 class InternalToolCall(BaseModel):
@@ -146,6 +160,22 @@ class InternalMessage(BaseModel):
     assembled_attachment_part_count: int | None = PyField(default=None, ge=0, repr=False)
     created_at: float = PyField(default_factory=lambda: time.time())
 
+    @classmethod
+    def from_user_input(
+        cls,
+        *,
+        content: Any = None,
+        attachments: list[str] | None = None,
+        **kwargs: Any,
+    ) -> "InternalMessage":
+        return cls(
+            role=MessageRole.USER,
+            content=content,
+            attachments=attachments,
+            assembled_attachment_part_count=0,
+            **kwargs,
+        )
+
     def discard_provider_state(self) -> None:
         self.reasoning_content = None
         self.provider_metadata = {}
@@ -180,6 +210,14 @@ class MessageBase(SQLModel):
     uid: str = Field(index=True, max_length=100)
     role: MessageRole = Field(max_length=20)
     type: MessageType = Field(default=MessageType.TEXT, max_length=40)
+    content_format: MessageContentFormat = Field(
+        default=MessageContentFormat.TEXT,
+        sa_column=Column(
+            String(20),
+            nullable=False,
+            server_default=MessageContentFormat.TEXT.value,
+        ),
+    )
     content: str | None = Field(default=None)
     attachments: list[str] | None = Field(default=None, sa_column=Column(JSON))
     is_processed: bool = Field(default=False)
@@ -228,14 +266,17 @@ class MessageResponse(MessageBase):
     @field_validator("content", mode="before")
     @classmethod
     def parse_content(cls, v, info: ValidationInfo):
-        if isinstance(v, str):
+        content_format = info.data.get("content_format", MessageContentFormat.TEXT)
+        if isinstance(v, str) and content_format == MessageContentFormat.PARTS:
+            parts = decode_message_content(v, content_format)
+            if parts is not None:
+                return [part.model_dump(mode="json") for part in parts]
+        if isinstance(v, str) and info.data.get("type") == MessageType.AUDIT_CONFIRMATION:
             try:
                 parsed = json.loads(v)
-                if isinstance(parsed, list):
+                if isinstance(parsed, dict):
                     return parsed
-                if isinstance(parsed, dict) and info.data.get("type") == MessageType.AUDIT_CONFIRMATION:
-                    return parsed
-            except Exception:
+            except json.JSONDecodeError:
                 pass
         return v
 

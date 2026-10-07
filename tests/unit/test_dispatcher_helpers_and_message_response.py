@@ -2,12 +2,20 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, ERR_VALIDATION_FAILED
 from app.core.exceptions import LLMContextLengthException, ParameterException
 from app.core.i18n import t
 from app.core.utils.dispatcher import channel_call, helpers, provider_state
-from app.models.message import InternalMessage, InternalResponse, MessageResponse, MessageRole, MessageType
+from app.models.message import (
+    InternalMessage,
+    InternalResponse,
+    MessageContentFormat,
+    MessageResponse,
+    MessageRole,
+    MessageType,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +44,10 @@ class CapturingLogger:
         self.errors.append(message)
 
 
-def _build_message_response(content: str) -> MessageResponse:
+def _build_message_response(
+    content: str,
+    content_format: MessageContentFormat = MessageContentFormat.TEXT,
+) -> MessageResponse:
     return MessageResponse(
         id=1,
         profile_id=1,
@@ -44,6 +55,7 @@ def _build_message_response(content: str) -> MessageResponse:
         uid="user-1",
         role=MessageRole.USER,
         type=MessageType.TEXT,
+        content_format=content_format,
         content=content,
         created_at=datetime(2026, 7, 11, tzinfo=UTC),
     )
@@ -85,10 +97,46 @@ def test_message_response_keeps_plain_json_object_as_text():
     assert response.content == '{"answer": 42}'
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        '[{"type": "text", "text": "hello"}]',
+        '[{"type": "text", "text": "hello", "input_source": "voice"}]',
+        '[{"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}}]',
+        '[{"type": "audio", "format": "wav", "path": "/tmp/audio.wav"}]',
+        '[{"type": "file", "path": "/tmp/file.txt"}]',
+    ],
+)
+def test_message_response_keeps_valid_parts_json_as_text_by_default(content):
+    response = _build_message_response(content)
+
+    assert response.content == content
+
+
 def test_message_response_restores_structured_content_list():
-    response = _build_message_response('[{"type": "text", "text": "hello"}]')
+    response = _build_message_response(
+        '[{"type": "text", "text": "hello"}]',
+        content_format=MessageContentFormat.PARTS,
+    )
 
     assert response.content == [{"type": "text", "text": "hello"}]
+
+
+def test_message_response_restores_voice_and_text_parts():
+    response = _build_message_response(
+        '[{"type": "text", "text": "spoken", "input_source": "voice"}, {"type": "text", "text": "typed"}]',
+        content_format=MessageContentFormat.PARTS,
+    )
+
+    assert response.content == [
+        {"type": "text", "text": "spoken", "input_source": "voice"},
+        {"type": "text", "text": "typed"},
+    ]
+
+
+def test_message_response_rejects_invalid_parts_json():
+    with pytest.raises(ValidationError):
+        _build_message_response("[1,2]", content_format=MessageContentFormat.PARTS)
 
 
 class _TrackingSession:
