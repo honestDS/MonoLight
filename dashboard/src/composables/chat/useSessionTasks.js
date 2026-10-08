@@ -39,9 +39,13 @@ export const useSessionTasks = () => {
   const openSession = sessionId => {
     if (typeof sessionId !== 'string' || sessionId.trim() === '') return
     try {
+      let openToken = String(++openSequence)
+      if (openToken === String(route.query?.task_open)) {
+        openToken = String(++openSequence)
+      }
       const navigation = router.push({
         path: '/',
-        query: { session_id: sessionId, task_open: String(++openSequence) }
+        query: { session_id: sessionId, task_open: openToken }
       })
       if (navigation && typeof navigation.catch === 'function') {
         navigation.catch(navigationError => console.error(navigationError))

@@ -15,6 +15,7 @@ import {
   shallowRef,
   watch
 } from 'vue'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { createSessionTaskController } from '../src/composables/chat/sessionTasks.js'
 import {
   createSessionActivityController,
@@ -167,7 +168,8 @@ const createHarness = (t, options = {}) => {
 
   const route = reactive({
     path: options.routePath || '/profiles',
-    fullPath: options.routePath || '/profiles'
+    fullPath: options.routePath || '/profiles',
+    query: options.query || {}
   })
   const navigations = []
   const router = {
@@ -620,6 +622,83 @@ test('a single successful task keeps a permanent toast until its card opens the 
 
   await harness.refreshAndFlush()
   assert.equal(harness.notifications.length, 1)
+})
+
+test('openSession skips task token collisions after rebuilding and reopening the same task', async t => {
+  const attachMemoryRouter = async routeQuery => {
+    const realRouter = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { render: () => null } }]
+    })
+    await realRouter.push('/?session_id=A&task_open=1')
+    await realRouter.isReady()
+
+    const harness = createHarness(t, {
+      routePath: realRouter.currentRoute.value.path,
+      query: routeQuery || { ...realRouter.currentRoute.value.query }
+    })
+    harness.route.fullPath = realRouter.currentRoute.value.fullPath
+    const syncRoute = () => {
+      const currentRoute = realRouter.currentRoute.value
+      harness.route.path = currentRoute.path
+      harness.route.fullPath = currentRoute.fullPath
+      harness.route.query = { ...currentRoute.query }
+    }
+    const recordPush = harness.router.push
+    harness.router.push = async location => {
+      recordPush(location)
+      const navigation = await realRouter.push(location)
+      syncRoute()
+      return navigation
+    }
+    return { harness, realRouter }
+  }
+  const settleRouter = async () => {
+    await nextTick()
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const { harness, realRouter } = await attachMemoryRouter()
+  const initialFullPath = realRouter.currentRoute.value.fullPath
+  for (const invalidSessionId of ['', '  ', null, undefined, 0]) {
+    harness.instance.openSession(invalidSessionId)
+  }
+  await settleRouter()
+  assert.equal(harness.router.navigations.length, 0)
+  assert.equal(realRouter.currentRoute.value.fullPath, initialFullPath)
+
+  harness.instance.openSession('A')
+  await settleRouter()
+  assert.equal(realRouter.currentRoute.value.query.session_id, 'A')
+  assert.equal(realRouter.currentRoute.value.query.task_open, '2')
+  assert.notEqual(realRouter.currentRoute.value.fullPath, initialFullPath)
+  assert.equal(harness.route.query.task_open, '2')
+  assert.equal(harness.router.navigations.length, 1)
+
+  harness.instance.openSession('A')
+  await settleRouter()
+  assert.equal(realRouter.currentRoute.value.query.task_open, '3')
+  assert.equal(harness.route.query.task_open, '3')
+  assert.equal(harness.router.navigations.length, 2)
+
+  await realRouter.push({ path: '/', query: { session_id: 'A', task_open: '4' } })
+  await settleRouter()
+  harness.route.path = realRouter.currentRoute.value.path
+  harness.route.fullPath = realRouter.currentRoute.value.fullPath
+  harness.route.query = { ...realRouter.currentRoute.value.query }
+  harness.instance.openSession('A')
+  await settleRouter()
+  assert.equal(realRouter.currentRoute.value.query.task_open, '5')
+  assert.equal(harness.route.query.task_open, '5')
+  assert.equal(harness.router.navigations.length, 3)
+
+  const arrayCase = await attachMemoryRouter({ session_id: 'A', task_open: ['1'] })
+  assert.deepEqual(arrayCase.harness.route.query.task_open, ['1'])
+  arrayCase.harness.instance.openSession('A')
+  await settleRouter()
+  assert.equal(arrayCase.realRouter.currentRoute.value.query.task_open, '2')
+  assert.equal(arrayCase.harness.route.query.task_open, '2')
+  assert.equal(arrayCase.harness.router.navigations.length, 1)
 })
 
 test('a single task notification button stops bubbling before card navigation', async t => {
