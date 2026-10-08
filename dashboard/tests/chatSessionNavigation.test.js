@@ -51,7 +51,29 @@ const stripImports = source => {
   return keptLines.join('\n')
 }
 
-const chatViewScript = stripImports(scriptMatch[1])
+const useChatViewLayoutScript = stripImports(readFileSync(
+  new URL('../src/composables/chat/useChatViewLayout.js', import.meta.url),
+  'utf8'
+)).replace(/\bexport\s+function\b/g, 'function')
+const useChatViewSettingsScript = stripImports(readFileSync(
+  new URL('../src/composables/chat/useChatViewSettings.js', import.meta.url),
+  'utf8'
+)).replace(/\bexport\s+function\b/g, 'function')
+const useChatComposerScript = stripImports(readFileSync(
+  new URL('../src/composables/chat/useChatComposer.js', import.meta.url),
+  'utf8'
+)).replace(/\bexport\s+function\b/g, 'function')
+const useChatViewNavigationScript = stripImports(readFileSync(
+  new URL('../src/composables/chat/useChatViewNavigation.js', import.meta.url),
+  'utf8'
+)).replace(/\bexport\s+function\b/g, 'function')
+const chatViewScript = [
+  useChatViewLayoutScript,
+  useChatViewSettingsScript,
+  useChatComposerScript,
+  useChatViewNavigationScript,
+  stripImports(scriptMatch[1])
+].join('\n')
 
 const createDeferred = () => {
   let resolve
