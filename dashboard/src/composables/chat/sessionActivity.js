@@ -20,6 +20,7 @@ const sessionActivityFields = [
   'latest_message_id',
   'last_active',
   'source',
+  'is_loading',
   'is_reply_running'
 ]
 
@@ -50,6 +51,12 @@ export const mergeSessionActivities = (sessions, activities) => {
 
     const activity = activitiesBySessionId.get(session.session_id)
     return activity ? { ...session, ...activity } : session
+  }).sort((left, right) => {
+    const leftTimestamp = Date.parse(left?.last_active)
+    const rightTimestamp = Date.parse(right?.last_active)
+    const leftTime = Number.isFinite(leftTimestamp) ? leftTimestamp : -Infinity
+    const rightTime = Number.isFinite(rightTimestamp) ? rightTimestamp : -Infinity
+    return leftTime === rightTime ? 0 : rightTime - leftTime
   })
 }
 
@@ -207,6 +214,7 @@ export const createSessionActivityController = ({
       const { lightweight, bySessionId } = normalizeActivities(response)
       const sessions = getSessions()
       const completeIds = knownSessionIds(sessions)
+      const missing = [...completeIds].some(sessionId => !bySessionId.has(sessionId))
 
       for (const sessionId of activityCache.keys()) {
         if (!bySessionId.has(sessionId)) activityCache.delete(sessionId)
@@ -260,7 +268,7 @@ export const createSessionActivityController = ({
       }
 
       notify(onActivityUpdated, lightweight)
-      if (discovered || observationRefresh) {
+      if (discovered || missing || observationRefresh) {
         const refreshPromise = refreshSessions({ coalesce: true })
         refreshPromise.catch(error => {
           if (disposed) return

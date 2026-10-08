@@ -368,13 +368,15 @@ async def get_reply_work_status(
 @router.get("/sessions/activity")
 async def get_user_sessions_activity(db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)):
     uid = getattr(current_user, "uid", None)
-    sessions = await session_crud.get_user_activity(db, uid=uid)
+    is_admin = getattr(current_user, "is_superuser", False)
+    sessions = await session_crud.get_user_activity(db, uid=uid, is_admin=is_admin)
     data = [
         {
             "session_id": row.session_id,
             "latest_message_id": row.latest_message_id,
             "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
             "source": row.source or "http",
+            "is_loading": bool(row.is_loading),
             "is_reply_running": bool(row.is_reply_running),
         }
         for row in sessions

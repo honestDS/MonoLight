@@ -17,7 +17,6 @@ from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SESSION_REPLY_ACTIVE_STATUSES,
-    SESSION_REPLY_TERMINAL_STATUSES,
     SessionReplySourceType,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
@@ -32,19 +31,13 @@ ACTIVITY_FIELDS = {
     "last_active",
     "source",
     "is_reply_running",
+    "is_loading",
 }
 INTERACTIVE_WORK_TYPES = (
     SessionReplyWorkType.FOREGROUND_REPLY,
     SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
 )
-STATUS_CASES = (
-    [(work_type, status, True) for work_type in INTERACTIVE_WORK_TYPES for status in SESSION_REPLY_ACTIVE_STATUSES]
-    + [(work_type, status, False) for work_type in INTERACTIVE_WORK_TYPES for status in SESSION_REPLY_TERMINAL_STATUSES]
-    + [
-        (SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkStatus.RUNNING, False),
-        (SessionReplyWorkType.SCHEDULED_TASK_SUMMARY, SessionReplyWorkStatus.RUNNING, False),
-    ]
-)
+STATUS_CASES = [(work_type, status, work_type in INTERACTIVE_WORK_TYPES and status in SESSION_REPLY_ACTIVE_STATUSES) for work_type in SessionReplyWorkType for status in SessionReplyWorkStatus]
 
 
 @pytest_asyncio.fixture
@@ -183,6 +176,7 @@ async def test_activity_returns_all_owned_sessions_with_exact_projection_and_iso
             "last_active": "2026-02-02 03:04:05",
             "source": "websocket",
             "is_reply_running": False,
+            "is_loading": False,
         },
         {
             "session_id": "empty-session",
@@ -190,6 +184,7 @@ async def test_activity_returns_all_owned_sessions_with_exact_projection_and_iso
             "last_active": "2026-02-01 01:02:03",
             "source": "http",
             "is_reply_running": False,
+            "is_loading": False,
         },
     ]
     assert all(set(row) == ACTIVITY_FIELDS for row in data)
@@ -198,12 +193,99 @@ async def test_activity_returns_all_owned_sessions_with_exact_projection_and_iso
     admin_response = await client.get("/api/v1/chat/sessions/activity")
     assert [row["session_id"] for row in admin_response.json()["data"]] == [
         "message-session",
+        "other-session",
         "empty-session",
     ]
 
     auth_state.update(uid="user-2", is_superuser=False)
     other_response = await client.get("/api/v1/chat/sessions/activity")
     assert [row["session_id"] for row in other_response.json()["data"]] == ["other-session"]
+
+
+@pytest.mark.asyncio
+async def test_activity_and_full_list_reflect_admin_cross_user_updates(api_context) -> None:
+    db, auth_state, client = api_context
+    await _add_users(db, "user-1", "user-2")
+    admin_session_id = "admin-session"
+    other_session_id = "other-session"
+    admin_session = _make_session(
+        admin_session_id,
+        "user-1",
+        created_at=datetime(2026, 8, 1, 1, 2, 3),
+    )
+    other_session = _make_session(
+        other_session_id,
+        "user-2",
+        created_at=datetime(2026, 8, 1, 2, 3, 4),
+    )
+    db.add_all([admin_session, other_session])
+    await db.commit()
+    auth_state["is_superuser"] = True
+
+    activity_response = await client.get("/api/v1/chat/sessions/activity")
+    full_response = await client.get("/api/v1/chat/sessions/list")
+    assert activity_response.status_code == 200
+    assert full_response.status_code == 200
+    activity_data = activity_response.json()["data"]
+    full_data = full_response.json()["data"]
+    activity_by_session = {row["session_id"]: row for row in activity_data}
+    full_by_session = {row["session_id"]: row for row in full_data}
+    assert set(activity_by_session) == set(full_by_session) == {admin_session_id, other_session_id}
+    assert {session_id: {field: row[field] for field in ACTIVITY_FIELDS} for session_id, row in activity_by_session.items()} == {session_id: {field: row[field] for field in ACTIVITY_FIELDS} for session_id, row in full_by_session.items()}
+
+    other_message = await _persist_message(
+        db,
+        session_id=other_session_id,
+        uid="user-2",
+        created_at=datetime(2026, 8, 2, 3, 4, 5),
+    )
+    await db.commit()
+    work = await _add_work(
+        db,
+        session_id=other_session_id,
+        uid="user-2",
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        status=SessionReplyWorkStatus.RUNNING,
+    )
+
+    activity_response = await client.get("/api/v1/chat/sessions/activity")
+    full_response = await client.get("/api/v1/chat/sessions/list")
+    assert activity_response.status_code == 200
+    assert full_response.status_code == 200
+    activity_data = activity_response.json()["data"]
+    full_data = full_response.json()["data"]
+    activity_by_session = {row["session_id"]: row for row in activity_data}
+    full_by_session = {row["session_id"]: row for row in full_data}
+    assert set(activity_by_session) == set(full_by_session) == {admin_session_id, other_session_id}
+    assert activity_by_session[other_session_id]["latest_message_id"] == other_message.id
+    assert activity_by_session[other_session_id]["last_active"] == "2026-08-02 03:04:05"
+    assert activity_by_session[other_session_id]["is_reply_running"] is True
+    assert {session_id: {field: row[field] for field in ACTIVITY_FIELDS} for session_id, row in activity_by_session.items()} == {session_id: {field: row[field] for field in ACTIVITY_FIELDS} for session_id, row in full_by_session.items()}
+
+    assert await session_reply_work_item_crud.mark_terminal(
+        db,
+        work_id=work.id,
+        worker_id="worker",
+        status=SessionReplyWorkStatus.SUCCEEDED,
+    )
+    await db.commit()
+
+    activity_response = await client.get("/api/v1/chat/sessions/activity")
+    full_response = await client.get("/api/v1/chat/sessions/list")
+    assert activity_response.status_code == 200
+    assert full_response.status_code == 200
+    activity_data = activity_response.json()["data"]
+    full_data = full_response.json()["data"]
+    activity_by_session = {row["session_id"]: row for row in activity_data}
+    full_by_session = {row["session_id"]: row for row in full_data}
+    assert set(activity_by_session) == set(full_by_session) == {admin_session_id, other_session_id}
+    assert activity_by_session[other_session_id]["is_reply_running"] is False
+    assert {session_id: {field: row[field] for field in ACTIVITY_FIELDS} for session_id, row in activity_by_session.items()} == {session_id: {field: row[field] for field in ACTIVITY_FIELDS} for session_id, row in full_by_session.items()}
+
+    auth_state["is_superuser"] = False
+    regular_response = await client.get("/api/v1/chat/sessions/activity")
+    assert regular_response.status_code == 200
+    assert {row["session_id"] for row in regular_response.json()["data"]} == {admin_session_id}
 
 
 @pytest.mark.asyncio
@@ -233,14 +315,15 @@ async def test_activity_does_not_truncate_owned_sessions_over_one_hundred(api_co
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("work_type", "status", "expected"), STATUS_CASES)
-async def test_activity_projects_interactive_work_statuses_only(
+@pytest.mark.parametrize(("work_type", "status", "expected_reply"), STATUS_CASES)
+async def test_activity_projects_sidebar_loading_and_interactive_reply_statuses(
     api_context,
     work_type: SessionReplyWorkType,
     status: SessionReplyWorkStatus,
-    expected: bool,
+    expected_reply: bool,
 ) -> None:
     db, _auth_state, client = api_context
+    await _add_users(db, "user-1")
     session = _make_session(
         "status-session",
         "user-1",
@@ -258,7 +341,14 @@ async def test_activity_projects_interactive_work_statuses_only(
 
     response = await client.get("/api/v1/chat/sessions/activity")
     assert response.status_code == 200
-    assert response.json()["data"][0]["is_reply_running"] is expected
+    activity_row = response.json()["data"][0]
+    assert activity_row["is_loading"] is (status in SESSION_REPLY_ACTIVE_STATUSES)
+    assert activity_row["is_reply_running"] is expected_reply
+
+    full_response = await client.get("/api/v1/chat/sessions/list")
+    assert full_response.status_code == 200
+    full_row = full_response.json()["data"][0]
+    assert {field: full_row[field] for field in ACTIVITY_FIELDS} == activity_row
 
 
 @pytest.mark.asyncio
@@ -291,6 +381,7 @@ async def test_activity_stays_running_for_older_active_work_with_newer_terminal_
     response = await client.get("/api/v1/chat/sessions/activity")
     assert response.status_code == 200
     assert response.json()["data"][0]["is_reply_running"] is True
+    assert response.json()["data"][0]["is_loading"] is True
 
 
 @pytest.mark.asyncio
@@ -417,6 +508,7 @@ async def test_activity_uses_one_lightweight_select_without_message_or_full_work
             "last_active": "2026-07-01 01:02:03",
             "source": "http",
             "is_reply_running": True,
+            "is_loading": True,
         }
     ]
     assert len(statements) == 1
