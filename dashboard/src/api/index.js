@@ -90,6 +90,7 @@ export const chatApi = {
   // 获取会话列表
   sessionsList: () => request.get('/chat/sessions/list'),
   sessionsActivity: () => request.get('/chat/sessions/activity'),
+  markSessionRead: (sessionId, messageId) => request.post('/chat/sessions/read', { session_id: sessionId, message_id: messageId }),
   // 删除会话
   deleteSession: (sessionId) => request.post(`/chat/sessions/delete?session_id=${sessionId}`),
   stopSession: sessionId => request.post('/chat/sessions/stop', null, { params: { session_id: sessionId } }),

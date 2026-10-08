@@ -155,6 +155,7 @@
         :current-session-info="currentSessionInfo"
         :show-request-metadata="sessionEngaged"
         :hide-empty-tip="!currentSessionId"
+        @read-message="handleSessionRead"
         @audit-decision="handleAuditDecision"
       />
 
@@ -413,14 +414,16 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch, inject } from 'vue'
 import { ElMessage, ClickOutside as vClickOutside } from 'element-plus'
 import { ChatLineSquare, Delete, InfoFilled, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import SessionTodoPanel from '../components/SessionTodoPanel.vue'
 import HelpTooltip from '../components/HelpTooltip.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
+import { SESSION_TASKS_KEY } from '../composables/chat/useSessionTasks.js'
 import { createSessionAgentSettingUpdater } from '../composables/chat/sessionAgentSettings.js'
 import { fileApi, chatApi, profileApi } from '../api'
 import { SESSION_MAX_TURNS_UPPER_BOUND } from '../constants/index.js'
@@ -438,6 +441,10 @@ import {
 } from '../utils/chatContentReveal'
 
 const { t } = useI18n()
+const route = useRoute()
+let navigationVersion = 0
+let disposed = false
+const isValidTaskSessionId = sid => typeof sid === 'string' && sid.length > 0 && sid.length <= 100
 
 const formatSessionSource = (source) => {
   if (source === 'http') return t('chat.session_source_http')
@@ -446,6 +453,7 @@ const formatSessionSource = (source) => {
 }
 
 const chat = useChatSession()
+const sessionTaskService = inject(SESSION_TASKS_KEY, null)
 const profiles = ref([])
 const currentUid = ref(null)
 const profilesLoading = ref(false)
@@ -653,6 +661,21 @@ const {
   currentTodoPlan
 } = chat
 
+const handleSessionRead = ({ session_id: sid, message_id: messageId }) => {
+  if (
+    sid !== currentSessionId.value ||
+    !currentUid.value ||
+    currentSession.value?.uid !== currentUid.value
+  ) return
+  void sessionTaskService?.readSession(sid, messageId)
+}
+
+watch(
+  [currentUid, () => currentSession.value?.uid],
+  () => messageList.value?.reportRead?.(),
+  { flush: 'post' }
+)
+
 const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(
   currentSession.value,
   newSessionProfileOverrideId.value
@@ -794,6 +817,7 @@ const {
 } = chat
 
 const handleSelectSession = (session) => {
+  navigationVersion++
   closeSessionsPanel()
   moreOptionsVisible.value = false
   const sessionId = session?.session_id
@@ -808,11 +832,28 @@ const handleSelectSession = (session) => {
 }
 
 const handleCreateNewSession = () => {
+  navigationVersion++
   closeSessionsPanel()
   moreOptionsVisible.value = false
   deferredContentSessionId.value = null
   createNewSession()
 }
+
+watch(() => [route.query.session_id, route.query.task_open], async ([sid, openToken]) => {
+  if (!isValidTaskSessionId(sid)) return
+  const version = ++navigationVersion
+  await loadSessions()
+  if (
+    disposed ||
+    version !== navigationVersion ||
+    route.path !== '/' ||
+    route.query.session_id !== sid ||
+    route.query.task_open !== openToken
+  ) return
+  const session = sessions.value.find(item => item.session_id === sid)
+  if (session) handleSelectSession(session)
+  else ElMessage.warning(t('chat.task_session_unavailable'))
+}, { immediate: true })
 
 const handleWelcomeExitTransitionEnd = async (event) => {
   if (!shouldReleaseChatContent({
@@ -1029,7 +1070,7 @@ const handlePaste = (e) => {
 }
 
 onMounted(() => {
-  loadSessions()
+  if (!isValidTaskSessionId(route.query.session_id)) loadSessions()
   loadProfiles()
   if (messageList.value) {
     messageList.value.addEventListener('scroll', handleScroll)
@@ -1037,6 +1078,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  disposed = true
+  navigationVersion++
   if (messageList.value) {
     messageList.value.removeEventListener('scroll', handleScroll)
   }

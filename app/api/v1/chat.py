@@ -31,6 +31,7 @@ from app.core.constants import (
     ERR_SESSION_ID_REQUIRED,
     ERR_SESSION_NO_PERMISSION,
     ERR_SESSION_NOT_FOUND,
+    ERR_SESSION_READ_MESSAGE_INVALID,
     ERR_SESSION_READ_ONLY,
     ERR_SESSION_TRANSPORT_CHANGE_ACTIVE,
     GUIDANCE_MESSAGE_PREFIX,
@@ -378,6 +379,14 @@ async def get_user_sessions_activity(db: AsyncSession = Depends(get_db), current
             "source": row.source or "http",
             "is_loading": bool(row.is_loading),
             "is_reply_running": bool(row.is_reply_running),
+            "title": row.title,
+            "is_owned": row.uid == uid,
+            "last_read_message_id": row.last_read_message_id if row.uid == uid else None,
+            "last_read_at": row.last_read_at.strftime("%Y-%m-%d %H:%M:%S") if row.uid == uid and row.last_read_at else None,
+            "is_running": bool(row.is_running) if row.uid == uid else False,
+            "completed_message_id": row.completed_message_id if row.uid == uid else None,
+            "completed_status": row.completed_status.value if row.uid == uid and row.completed_status else None,
+            "has_unread_result": bool(row.has_unread_result) if row.uid == uid else False,
         }
         for row in sessions
     ]
@@ -522,6 +531,53 @@ class SessionGuidanceRequest(BaseModel):
 
     session_id: str
     content: str = Field(max_length=10000)
+
+
+class SessionReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, max_length=100)
+    message_id: StrictInt = Field(gt=0)
+
+
+@router.post("/sessions/read")
+async def mark_session_read(
+    request: SessionReadRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    session = await session_crud.get_by_session_id(db, request.session_id)
+    if not session:
+        return StandardResponse.error(code=404, message=ERR_SESSION_NOT_FOUND)
+    if session.uid != uid:
+        return StandardResponse.error(code=403, message=ERR_SESSION_NO_PERMISSION)
+
+    message = await message_crud.get(db, request.message_id)
+    if not message or message.session_id != request.session_id or message.uid != uid:
+        return StandardResponse.error(code=400, message=ERR_SESSION_READ_MESSAGE_INVALID)
+
+    await session_crud.mark_read(
+        db,
+        uid=uid,
+        session_id=request.session_id,
+        message_id=request.message_id,
+        commit=True,
+    )
+    db.expire(session)
+    session = await session_crud.get_by_session_id(db, request.session_id)
+    if not session:
+        return StandardResponse.error(code=404, message=ERR_SESSION_NOT_FOUND)
+    if session.last_read_message_id is None or session.last_read_message_id < request.message_id:
+        return StandardResponse.error(code=400, message=ERR_SESSION_READ_MESSAGE_INVALID)
+
+    return StandardResponse.success(
+        data={
+            "session_id": session.session_id,
+            "last_read_message_id": session.last_read_message_id,
+            "last_read_at": session.last_read_at.strftime("%Y-%m-%d %H:%M:%S") if session.last_read_at else None,
+        }
+    )
 
 
 @router.post("/sessions/guidance")

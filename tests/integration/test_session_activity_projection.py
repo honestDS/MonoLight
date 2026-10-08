@@ -329,7 +329,7 @@ async def test_concurrent_writers_keep_maximum_id_and_time(activity_session_fact
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("has_existing_message", [False, True], ids=["empty", "existing"])
-async def test_http_idempotent_submission_rolls_back_reserved_message_when_enqueue_fails(
+async def test_http_idempotent_submission_rolls_back_persisted_message_when_enqueue_fails(
     activity_session_factory,
     monkeypatch,
     has_existing_message: bool,
@@ -349,13 +349,13 @@ async def test_http_idempotent_submission_rolls_back_reserved_message_when_enque
     activity_before = await _activity(activity_session_factory)
 
     async def fail_enqueue(*args, **kwargs):
-        raise RuntimeError("enqueue failed after reservation")
+        raise RuntimeError("enqueue failed after message persistence")
 
     with monkeypatch.context() as patch:
         patch.setattr(session_reply_work_item_crud, "enqueue", fail_enqueue)
         async with activity_session_factory() as db:
             manager = SessionReplyQueueManager()
-            with pytest.raises(RuntimeError, match="enqueue failed after reservation"):
+            with pytest.raises(RuntimeError, match="enqueue failed after message persistence"):
                 await manager.submit_user_message(
                     db,
                     uid=UID,

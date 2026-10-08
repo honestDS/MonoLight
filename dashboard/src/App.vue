@@ -169,6 +169,13 @@
               <img :src="githubIcon" alt="GitHub" class="github-icon">
             </a>
             <LanguageSwitcher class="header-lang-switcher" />
+            <SessionTaskCenter
+              :tasks="sessionTasks"
+              :error="sessionTaskError"
+              :loading="sessionTasksLoading"
+              @refresh="refreshSessionTasks"
+              @open="openTaskSession"
+            />
             <el-button type="text" @click="logout">{{ $t('common.logout') }}</el-button>
           </div>
 
@@ -191,8 +198,10 @@
 
 <script>
 import { useResizeObserver } from './composables/useResizeObserver'
+import { useSessionTasks } from './composables/chat/useSessionTasks.js'
 import { routeNameMap } from './constants'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
+import SessionTaskCenter from './components/SessionTaskCenter.vue'
 import githubIcon from './assets/svg/github.svg'
 import logoImage from '../../logo.jpg'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
@@ -204,7 +213,18 @@ useResizeObserver()
 export default {
   name: 'App',
   components: {
-    LanguageSwitcher
+    LanguageSwitcher,
+    SessionTaskCenter
+  },
+  setup() {
+    const service = useSessionTasks()
+    return {
+      sessionTasks: service.tasks,
+      sessionTaskError: service.error,
+      sessionTasksLoading: service.loading,
+      refreshSessionTasks: service.refresh,
+      openTaskSession: service.openSession
+    }
   },
   data() {
     return {

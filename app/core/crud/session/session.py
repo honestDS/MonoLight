@@ -8,27 +8,88 @@ from app.core.crud.base import CRUDBase
 from app.core.crud.profile.profile import profile_crud
 from app.core.session_source import default_show_tool_calls_for_source
 from app.core.utils.request_token_baseline import MAIN_DIALOGUE_REQUEST_PURPOSE
+from app.core.utils.time import get_local_time
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.message import Message
 from app.models.session import ChatSession
-from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkType
+from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 
 
 class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
     async def get_user_activity(self, db: AsyncSession, *, uid: str, is_admin: bool = False) -> list[Any]:
         last_active = func.coalesce(ChatSession.last_message_at, ChatSession.created_at).label("last_active")
-        active_reply_work = select(1).where(
-            SessionReplyWorkItem.session_id == ChatSession.session_id,
-            SessionReplyWorkItem.uid == ChatSession.uid,
-            SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+        active_reply_work = (
+            select(1)
+            .where(
+                SessionReplyWorkItem.session_id == ChatSession.session_id,
+                SessionReplyWorkItem.uid == ChatSession.uid,
+                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+            )
+            .correlate(ChatSession)
         )
         is_loading = exists(active_reply_work).label("is_loading")
         is_reply_running = exists(active_reply_work.where(SessionReplyWorkItem.work_type.in_([SessionReplyWorkType.FOREGROUND_REPLY, SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION]))).label("is_reply_running")
+        active_background_task = (
+            select(1)
+            .where(
+                BackgroundTask.session_id == ChatSession.session_id,
+                BackgroundTask.uid == ChatSession.uid,
+                or_(
+                    BackgroundTask.status.in_((BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING)),
+                    and_(
+                        BackgroundTask.auto_reply.is_(True),
+                        BackgroundTask.reply_status.in_((BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING)),
+                        BackgroundTask.status != BackgroundTaskStatus.CANCELLED,
+                    ),
+                ),
+            )
+            .correlate(ChatSession)
+        )
+        is_running = or_(exists(active_reply_work), exists(active_background_task)).label("is_running")
+        completed_message_id = (
+            select(SessionReplyWorkItem.result_message_id)
+            .where(
+                SessionReplyWorkItem.session_id == ChatSession.session_id,
+                SessionReplyWorkItem.uid == ChatSession.uid,
+                SessionReplyWorkItem.status.in_((SessionReplyWorkStatus.SUCCEEDED, SessionReplyWorkStatus.FAILED)),
+                SessionReplyWorkItem.result_message_id.is_not(None),
+            )
+            .order_by(SessionReplyWorkItem.result_message_id.desc(), SessionReplyWorkItem.id.desc())
+            .limit(1)
+            .correlate(ChatSession)
+            .scalar_subquery()
+            .label("completed_message_id")
+        )
+        completed_status = (
+            select(SessionReplyWorkItem.status)
+            .where(
+                SessionReplyWorkItem.session_id == ChatSession.session_id,
+                SessionReplyWorkItem.uid == ChatSession.uid,
+                SessionReplyWorkItem.status.in_((SessionReplyWorkStatus.SUCCEEDED, SessionReplyWorkStatus.FAILED)),
+                SessionReplyWorkItem.result_message_id.is_not(None),
+            )
+            .order_by(SessionReplyWorkItem.result_message_id.desc(), SessionReplyWorkItem.id.desc())
+            .limit(1)
+            .correlate(ChatSession)
+            .scalar_subquery()
+            .label("completed_status")
+        )
+        has_unread_result = (completed_message_id > func.coalesce(ChatSession.last_read_message_id, 0)).label("has_unread_result")
         stmt = select(
             ChatSession.session_id,
+            ChatSession.uid,
+            ChatSession.title,
+            ChatSession.source,
             ChatSession.latest_message_id,
             last_active,
-            ChatSession.source,
+            ChatSession.last_read_message_id,
+            ChatSession.last_read_at,
             is_loading,
             is_reply_running,
+            is_running,
+            completed_message_id,
+            completed_status,
+            has_unread_result,
         ).order_by(last_active.desc(), ChatSession.session_id.asc())
         if not is_admin:
             stmt = stmt.where(ChatSession.uid == uid)
@@ -69,6 +130,46 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             .with_for_update()
         )
         return result.scalars().first()
+
+    async def mark_read(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        message_id: int,
+        commit: bool = True,
+    ) -> bool:
+        message_exists = (
+            select(1)
+            .where(
+                Message.id == message_id,
+                Message.uid == ChatSession.uid,
+                Message.session_id == ChatSession.session_id,
+            )
+            .correlate(ChatSession)
+        )
+        result = await db.execute(
+            update(ChatSession)
+            .where(
+                ChatSession.session_id == session_id,
+                ChatSession.uid == uid,
+                or_(
+                    ChatSession.last_read_message_id.is_(None),
+                    ChatSession.last_read_message_id < message_id,
+                ),
+                exists(message_exists),
+            )
+            .values(
+                last_read_message_id=message_id,
+                last_read_at=get_local_time(),
+            )
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return (result.rowcount or 0) == 1
 
     async def has_profile_override(self, db: AsyncSession, profile_id: int) -> bool:
         result = await db.execute(select(ChatSession.session_id).where(ChatSession.profile_override_id == profile_id).limit(1))

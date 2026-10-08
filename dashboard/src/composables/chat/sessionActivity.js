@@ -97,6 +97,8 @@ const validateSessions = (sessions) => {
 export const createSessionActivityController = ({
   fetchSessions,
   fetchActivity,
+  nextSequence,
+  getActivitySequence,
   getSessions,
   setSessions,
   getCurrentSessionId,
@@ -115,6 +117,7 @@ export const createSessionActivityController = ({
   let replyObservation = null
   const activityCache = new Map()
   const unknownSessionIds = new Set()
+  const takeSequence = typeof nextSequence === 'function' ? nextSequence : () => ++requestSequence
 
   const notify = (callback, value) => Promise.resolve()
     .then(() => !disposed ? callback(value) : undefined)
@@ -139,7 +142,7 @@ export const createSessionActivityController = ({
 
       while (!disposed) {
         fullTrailing = false
-        const sequence = ++requestSequence
+        const sequence = takeSequence()
         fullRequestSequence = sequence
 
         try {
@@ -202,14 +205,16 @@ export const createSessionActivityController = ({
     if (disposed) return Promise.resolve([])
     if (activityPromise) return activityPromise
 
-    const sequence = ++requestSequence
+    const sequence = typeof getActivitySequence === 'function'
+      ? getActivitySequence()
+      : takeSequence()
     const pending = (async () => {
       const response = await fetchActivity()
       if (!Array.isArray(response)) throw new TypeError('fetchActivity must return an array')
       if (disposed) return []
 
+      if (sequence <= fullSequence || sequence <= latestActivitySequence) return []
       latestActivitySequence = sequence
-      if (sequence <= fullSequence) return []
 
       const { lightweight, bySessionId } = normalizeActivities(response)
       const sessions = getSessions()

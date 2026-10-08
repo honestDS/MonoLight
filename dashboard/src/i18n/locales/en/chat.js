@@ -136,5 +136,21 @@ export default {
   new_messages: 'View new messages',
   not_logged_in: 'Not logged in',
   ws_connect_failed: 'The live connection could not be restored. Try again later or refresh the conversation.',
-  ws_message_send_failed: 'Live message updates could not be restored. Try again later or refresh the conversation.'
+  ws_message_send_failed: 'Live message updates could not be restored. Try again later or refresh the conversation.',
+  task_center_title: 'Session tasks',
+  task_center_empty: 'No running or unread tasks',
+  task_running: 'In progress',
+  task_running_unread: 'In progress · Unread',
+  task_entry_label: '{title}: {status}',
+  task_completed_unread: 'Completed · Unread',
+  task_failed_unread: 'Failed · Unread',
+  task_unread: 'Unread result',
+  task_open_session: 'View session',
+  task_refresh: 'Refresh tasks',
+  task_load_failed: 'Could not load task status. Refresh to try again.',
+  task_notification_title: 'Session task completed',
+  task_failure_notification_title: 'Session task failed',
+  task_notification_message: '“{title}” has a new result. Click to view the session.',
+  task_session_unavailable: 'The session was deleted or is not available to you.',
+  task_summary: '{running} running, {unread} unread'
 }

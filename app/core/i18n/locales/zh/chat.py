@@ -7,6 +7,7 @@ MESSAGES = {
     "ERR_SESSION_NO_PERMISSION": "无权操作此会话",
     "ERR_SESSION_GUIDANCE_EXTERNAL_ONLY": "只有外部消息平台会话可添加引导",
     "ERR_SESSION_READ_ONLY": "该会话来自外部消息平台，网页端仅允许查看",
+    "ERR_SESSION_READ_MESSAGE_INVALID": "已读标记中的消息不存在或不属于当前会话",
     "ERR_SESSION_TRANSPORT_CHANGE_ACTIVE": "当前回复仍在处理中，请等待本轮处理完成后再切换发送方式",
     "MSG_SESSION_UPDATED": "会话设置已更新",
     "ERR_NO_VALID_CHANNEL": "未配置有效的模型渠道",
