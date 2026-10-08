@@ -659,6 +659,7 @@ export function useChatSession() {
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     sessionManager.setSessionsUpdatedCallback(null)
+    sessionManager.setSessionActivityUpdatedCallback(null)
     transport.setReconnectHandler(null)
     transport.disconnectWebSocket()
   })
@@ -750,7 +751,13 @@ export function useChatSession() {
     }
   }
 
+  const handleSessionActivityUpdated = activities => {
+    if (!isCurrentSessionReadOnly.value) return
+    return processHttpSessionSnapshot(activities)
+  }
+
   sessionManager.setSessionsUpdatedCallback(handleSessionsUpdated)
+  sessionManager.setSessionActivityUpdatedCallback(handleSessionActivityUpdated)
 
   watch(
     () => transport.transportMode.value,

@@ -2,7 +2,7 @@ from typing import (
     Any,
 )
 
-from sqlalchemy import and_, exists, or_, update
+from sqlalchemy import case, exists, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
@@ -24,9 +24,69 @@ from app.models.message import (
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkType
 from app.models.user import User
+from app.providers.database import ensure_sqlite_outer_transaction
 
 
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
+    async def persist(self, db: AsyncSession, *, message: Message, commit: bool = True) -> Message:
+        db.add(message)
+        await db.flush()
+        await db.execute(
+            update(ChatSession)
+            .where(
+                ChatSession.session_id == message.session_id,
+                ChatSession.uid == message.uid,
+            )
+            .values(
+                latest_message_id=case(
+                    (
+                        or_(
+                            ChatSession.latest_message_id.is_(None),
+                            ChatSession.latest_message_id < message.id,
+                        ),
+                        message.id,
+                    ),
+                    else_=ChatSession.latest_message_id,
+                ),
+                last_message_at=case(
+                    (
+                        or_(
+                            ChatSession.last_message_at.is_(None),
+                            ChatSession.last_message_at < message.created_at,
+                        ),
+                        message.created_at,
+                    ),
+                    else_=ChatSession.last_message_at,
+                ),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+            await db.refresh(message)
+        return message
+
+    async def create(
+        self,
+        db: AsyncSession,
+        *,
+        obj_in: MessageCreate | dict[str, Any],
+        update_dict: dict[str, Any] = None,
+        commit: bool = True,
+    ) -> Message:
+        if isinstance(obj_in, dict):
+            obj_in_data = obj_in
+        else:
+            obj_in_data = obj_in.model_dump()
+
+        if update_dict:
+            obj_in_data.update(update_dict)
+        db_obj = Message.model_validate(obj_in_data)
+        await self.persist(db, message=db_obj, commit=commit)
+        if not commit:
+            await db.refresh(db_obj)
+        return db_obj
+
     async def count_by_sessions(
         self,
         db: AsyncSession,
@@ -58,13 +118,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             profile_id=profile_id,
             is_processed=False,
         )
-        db.add(message)
-        if commit:
-            await db.commit()
-            await db.refresh(message)
-        else:
-            await db.flush()
-        return message
+        return await self.persist(db, message=message, commit=commit)
 
     async def activate_and_get_guidance_prompt(
         self,
@@ -288,10 +342,8 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         obj_in_data = obj_in if isinstance(obj_in, dict) else obj_in.model_dump()
         db_obj = Message.model_validate({**obj_in_data, "dedupe_key": dedupe_key})
         if commit:
-            db.add(db_obj)
             try:
-                await db.commit()
-                await db.refresh(db_obj)
+                await self.persist(db, message=db_obj, commit=True)
                 return db_obj
             except IntegrityError:
                 await db.rollback()
@@ -300,10 +352,10 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                     raise
                 return existing
 
+        await ensure_sqlite_outer_transaction(db)
         try:
             async with db.begin_nested():
-                db.add(db_obj)
-                await db.flush()
+                await self.persist(db, message=db_obj, commit=False)
         except IntegrityError:
             existing = await self.get_by_dedupe_key(db, dedupe_key)
             if existing is None:
@@ -460,16 +512,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return list(result.scalars().all())
 
     async def get_user_sessions(self, db: AsyncSession, uid: str = None, is_admin: bool = False) -> list[Any]:
-        session_activity_stmt = select(
-            Message.session_id.label("session_id"),
-            func.max(Message.created_at).label("last_active"),
-            func.max(Message.id).label("latest_message_id"),
-            Message.uid.label("uid"),
-        )
-        if not is_admin:
-            session_activity_stmt = session_activity_stmt.where(Message.uid == uid)
-        session_activity = session_activity_stmt.group_by(Message.session_id, Message.uid).subquery()
-        last_active = func.coalesce(session_activity.c.last_active, ChatSession.created_at).label("last_active")
+        last_active = func.coalesce(ChatSession.last_message_at, ChatSession.created_at).label("last_active")
         active_reply_work = select(1).where(
             SessionReplyWorkItem.session_id == ChatSession.session_id,
             SessionReplyWorkItem.uid == ChatSession.uid,
@@ -482,7 +525,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             select(
                 ChatSession.session_id,
                 last_active,
-                session_activity.c.latest_message_id,
+                ChatSession.latest_message_id,
                 is_loading,
                 is_reply_running,
                 ChatSession.uid,
@@ -500,14 +543,6 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 ChatSession.llm_request_metadata,
             )
             .join(User, ChatSession.uid == User.uid)
-            .join(
-                session_activity,
-                and_(
-                    session_activity.c.session_id == ChatSession.session_id,
-                    session_activity.c.uid == ChatSession.uid,
-                ),
-                isouter=True,
-            )
             .order_by(desc(last_active))
         )
         if not is_admin:

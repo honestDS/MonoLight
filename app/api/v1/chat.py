@@ -365,6 +365,23 @@ async def get_reply_work_status(
     return StandardResponse.success(data=status)
 
 
+@router.get("/sessions/activity")
+async def get_user_sessions_activity(db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    uid = getattr(current_user, "uid", None)
+    sessions = await session_crud.get_user_activity(db, uid=uid)
+    data = [
+        {
+            "session_id": row.session_id,
+            "latest_message_id": row.latest_message_id,
+            "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
+            "source": row.source or "http",
+            "is_reply_running": bool(row.is_reply_running),
+        }
+        for row in sessions
+    ]
+    return StandardResponse.success(data=data, message=MSG_SESSION_LIST_SUCCESS)
+
+
 @router.get("/sessions/list")
 async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)):
     uid = getattr(current_user, "uid", None)

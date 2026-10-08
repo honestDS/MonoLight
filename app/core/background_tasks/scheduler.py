@@ -5,6 +5,7 @@ from sqlalchemy import update
 
 from app.core.crud.account.user import user_crud
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.i18n import t
@@ -128,8 +129,7 @@ class ScheduledTaskScheduler:
             profile_id=profile.id,
             is_processed=True,
         )
-        db.add(trigger_message)
-        await db.flush()
+        await message_crud.persist(db, message=trigger_message, commit=False)
         await db.execute(update(ScheduledTask).where(ScheduledTask.id == scheduled_task.id).values(last_message_id=trigger_message.id).execution_options(synchronize_session=False))
         await session_reply_queue_manager.enqueue_scheduled_summary(
             db,

@@ -6,7 +6,7 @@ import { useDeleteConfirm } from '../useDeleteConfirm'
 import { PAGE_SIZE } from '../../constants'
 import i18n from '../../i18n'
 import { resolveHistoryRequest } from './historyPagination.js'
-import { formatSessionActivityTime } from './sessionActivity.js'
+import { createSessionActivityController, formatSessionActivityTime } from './sessionActivity.js'
 import { createSessionListPoller } from './sessionListLoading.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
@@ -33,6 +33,7 @@ export function useSessionManager() {
   // 加载历史记录的回调（由外部注入）
   let loadHistoryCallback = null
   let sessionsUpdatedCallback = null
+  let activityUpdatedCallback = null
   let disposed = false
 
   // ==================== 会话管理方法 ====================
@@ -46,28 +47,47 @@ export function useSessionManager() {
     sessionsUpdatedCallback = callback
   }
 
-  const fetchSessions = async () => {
-    const res = await chatApi.sessionsList()
-    if (disposed) return sessions.value
-
-    sessions.value = res.data.data || []
-    if (sessionsUpdatedCallback) {
-      sessionsUpdatedCallback(sessions.value)
-    }
-    return sessions.value
+  const setSessionActivityUpdatedCallback = (callback) => {
+    activityUpdatedCallback = callback
   }
 
-  const sessionListPoller = createSessionListPoller({
-    refreshSessions: fetchSessions
+  const fetchSessions = async () => {
+    const res = await chatApi.sessionsList()
+    return res.data.data || []
+  }
+
+  const fetchActivity = async () => {
+    const res = await chatApi.sessionsActivity()
+    return res.data.data || []
+  }
+
+  const sessionActivityController = createSessionActivityController({
+    fetchSessions,
+    fetchActivity,
+    getSessions: () => sessions.value,
+    setSessions: value => {
+      sessions.value = value
+    },
+    getCurrentSessionId: () => currentSessionId.value,
+    onSessionsUpdated: value => sessionsUpdatedCallback
+      ? sessionsUpdatedCallback(value)
+      : undefined,
+    onActivityUpdated: value => activityUpdatedCallback
+      ? activityUpdatedCallback(value)
+      : undefined
+  })
+
+  const sessionActivityPoller = createSessionListPoller({
+    refreshSessions: sessionActivityController.refreshActivity
   })
 
   /**
-   * 加载会话列表。页面存续期间持续刷新。
+   * 加载完整会话列表，定时轮询仅刷新活动字段。
    */
   const loadSessions = async () => {
     sessionsLoading.value = true
     try {
-      return await sessionListPoller.refreshNow()
+      return await sessionActivityController.refreshSessions()
     } catch (err) {
       if (!disposed) {
         ElMessage.error(err.message || t('chat.load_sessions_failed'))
@@ -75,10 +95,11 @@ export function useSessionManager() {
       return sessions.value
     } finally {
       sessionsLoading.value = false
+      if (!disposed) sessionActivityPoller.sync()
     }
   }
 
-  const refreshSessionLoadingState = () => sessionListPoller.refreshNow().catch(err => {
+  const refreshSessionLoadingState = () => sessionActivityController.refreshSessions().catch(err => {
     console.error(err)
     return sessions.value
   })
@@ -86,7 +107,9 @@ export function useSessionManager() {
   onScopeDispose(() => {
     disposed = true
     sessionsUpdatedCallback = null
-    sessionListPoller.dispose()
+    activityUpdatedCallback = null
+    sessionActivityController.dispose()
+    sessionActivityPoller.dispose()
   })
 
   // 使用删除确认组合式函数
@@ -94,6 +117,7 @@ export function useSessionManager() {
 
   // 选择会话；disconnect 控制是否断开连接，loadHistory 控制是否重载历史
   const selectSession = (session, disconnectCallback = null, disconnect = true, loadHistory = true) => {
+    sessionActivityController.resetReplyObservation()
     if (disconnect && disconnectCallback) {
       disconnectCallback()
     }    
@@ -149,6 +173,7 @@ export function useSessionManager() {
 
   // 新建会话，可传入断开连接回调
   const createNewSession = (disconnectCallback = null) => {
+    sessionActivityController.resetReplyObservation()
     // 断开连接（如果有回调）
     if (disconnectCallback) {
       disconnectCallback()
@@ -209,19 +234,31 @@ export function useSessionManager() {
       }
 
       // 执行打字机效果
-      const session = sessions.value[sessionIdx]
       typingSessionId.value = sessionId
       const targetTitle = newTitle
-      session.title = ''
+      sessions.value[sessionIdx].title = ''
       
       let i = 0
       const timer = setInterval(() => {
+        if (disposed) {
+          clearInterval(timer)
+          if (typingSessionId.value === sessionId) typingSessionId.value = null
+          return
+        }
+
+        const session = sessions.value.find(s => s.session_id === sessionId)
+        if (!session) {
+          clearInterval(timer)
+          if (typingSessionId.value === sessionId) typingSessionId.value = null
+          return
+        }
+
         if (i < targetTitle.length) {
-          session.title += targetTitle[i]
+          session.title = targetTitle.slice(0, i + 1)
           i++
         } else {
           clearInterval(timer)
-          typingSessionId.value = null
+          if (typingSessionId.value === sessionId) typingSessionId.value = null
         }
       }, 100)
     } catch (err) {
@@ -251,6 +288,7 @@ export function useSessionManager() {
     // 方法
     setLoadHistoryCallback,
     setSessionsUpdatedCallback,
+    setSessionActivityUpdatedCallback,
     loadSessions,
     refreshSessionLoadingState,
     selectSession,

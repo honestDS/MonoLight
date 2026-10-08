@@ -55,3 +55,21 @@ class ChatSession(SQLModel, table=True):
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),
     )
+    latest_message_id: int | None = Field(
+        default=None,
+        description="会话全部入库消息的最大编号",
+    )
+    last_message_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True)),
+        description="会话全部入库消息 created_at 的最大值",
+    )
+    last_read_message_id: int | None = Field(
+        default=None,
+        description="预留的用户已读消息编号",
+    )
+    last_read_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True)),
+        description="预留的用户确认已读时间",
+    )
