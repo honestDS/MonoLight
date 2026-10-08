@@ -1,7 +1,93 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../src/utils/chatPresentation.js'
+import {
+  getMessageListScrollState,
+  getReasoningCollapseName,
+  isFollowableLlmOutput,
+  resolveChatActivityNotice,
+} from '../src/utils/chatPresentation.js'
+
+test('message list scroll state handles visible and overflowing content', () => {
+  assert.deepEqual(getMessageListScrollState({ scrollHeight: 0, clientHeight: 480, scrollTop: 0 }), {
+    hasOverflow: false,
+    atBottom: true,
+    bottomDistance: 0,
+  })
+  assert.deepEqual(getMessageListScrollState({ scrollHeight: 320, clientHeight: 480, scrollTop: 0 }), {
+    hasOverflow: false,
+    atBottom: true,
+    bottomDistance: 0,
+  })
+  assert.deepEqual(getMessageListScrollState({ scrollHeight: 480, clientHeight: 480, scrollTop: 0 }), {
+    hasOverflow: false,
+    atBottom: true,
+    bottomDistance: 0,
+  })
+
+  const maxScrollTop = 600
+  assert.deepEqual(getMessageListScrollState({ scrollHeight: 1000, clientHeight: 400, scrollTop: 0 }), {
+    hasOverflow: true,
+    atBottom: false,
+    bottomDistance: maxScrollTop,
+  })
+  assert.deepEqual(getMessageListScrollState({ scrollHeight: 1000, clientHeight: 400, scrollTop: 300 }), {
+    hasOverflow: true,
+    atBottom: false,
+    bottomDistance: 300,
+  })
+  assert.deepEqual(getMessageListScrollState({ scrollHeight: 1000, clientHeight: 400, scrollTop: maxScrollTop }), {
+    hasOverflow: true,
+    atBottom: true,
+    bottomDistance: 0,
+  })
+  assert.equal(getMessageListScrollState({ scrollHeight: 1000, clientHeight: 400, scrollTop: 576 }).atBottom, true)
+  assert.equal(getMessageListScrollState({ scrollHeight: 1000, clientHeight: 400, scrollTop: 575 }).atBottom, false)
+})
+
+test('message list scroll state clamps scroll position and rejects invalid measurements', () => {
+  assert.deepEqual(getMessageListScrollState({ scrollHeight: 1000, clientHeight: 400, scrollTop: -50 }), {
+    hasOverflow: true,
+    atBottom: false,
+    bottomDistance: 600,
+  })
+  assert.deepEqual(getMessageListScrollState({ scrollHeight: 1000, clientHeight: 400, scrollTop: 9999 }), {
+    hasOverflow: true,
+    atBottom: true,
+    bottomDistance: 0,
+  })
+
+  const invalidMeasurements = [
+    { scrollHeight: 100, clientHeight: 0, scrollTop: 0 },
+    { scrollHeight: 100, clientHeight: -1, scrollTop: 0 },
+    { scrollHeight: 100, clientHeight: Number.NaN, scrollTop: 0 },
+    { scrollHeight: 100, clientHeight: Number.POSITIVE_INFINITY, scrollTop: 0 },
+    { scrollHeight: 100, clientHeight: undefined, scrollTop: 0 },
+    { scrollHeight: 100, clientHeight: null, scrollTop: 0 },
+    { scrollHeight: 100, clientHeight: '400', scrollTop: 0 },
+    { scrollHeight: Number.NaN, clientHeight: 100, scrollTop: 0 },
+    { scrollHeight: 100, clientHeight: 100, scrollTop: null },
+    { scrollHeight: 100, clientHeight: 100, scrollTop: '0' },
+  ]
+  for (const metrics of invalidMeasurements) assert.equal(getMessageListScrollState(metrics), null)
+})
+
+test('message list scroll state reflects measurement changes without retaining state', () => {
+  const initiallyVisible = getMessageListScrollState({ scrollHeight: 320, clientHeight: 400, scrollTop: 0 })
+  const contentGrew = getMessageListScrollState({ scrollHeight: 600, clientHeight: 400, scrollTop: 0 })
+  const windowGrew = getMessageListScrollState({ scrollHeight: 600, clientHeight: 700, scrollTop: 0 })
+  const contentCollapsed = getMessageListScrollState({ scrollHeight: 320, clientHeight: 400, scrollTop: 180 })
+
+  assert.equal(initiallyVisible.hasOverflow, false)
+  assert.equal(contentGrew.hasOverflow, true)
+  assert.equal(contentGrew.atBottom, false)
+  assert.equal(windowGrew.hasOverflow, false)
+  assert.deepEqual(contentCollapsed, { hasOverflow: false, atBottom: true, bottomDistance: 0 })
+  assert.deepEqual(
+    getMessageListScrollState({ scrollHeight: 600, clientHeight: 400, scrollTop: 200 }),
+    getMessageListScrollState({ scrollHeight: 600, clientHeight: 400, scrollTop: 200 })
+  )
+})
 
 test('reasoning collapse identity survives transient reasoning becoming a tool group', () => {
   const transient = { role: 'reasoning', response_id: 'response-1', work_id: 'work-1', turn: 2 }

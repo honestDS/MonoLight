@@ -161,9 +161,27 @@ const createHarness = (t, options = {}) => {
     },
     listenerCount: type => listeners.get(type)?.size || 0
   }
+  const documentListeners = new Map()
   const document = {
     hidden: false,
-    visibilityState: 'visible'
+    visibilityState: 'visible',
+    addEventListener: (type, listener) => {
+      const entries = documentListeners.get(type) || new Set()
+      entries.add(listener)
+      documentListeners.set(type, entries)
+    },
+    removeEventListener: (type, listener) => {
+      const entries = documentListeners.get(type)
+      if (!entries) return
+      entries.delete(listener)
+      if (entries.size === 0) documentListeners.delete(type)
+    },
+    dispatch: (type, event = {}) => {
+      for (const listener of [...(documentListeners.get(type) || [])]) {
+        listener({ ...event, type })
+      }
+    },
+    listenerCount: type => documentListeners.get(type)?.size || 0
   }
 
   const route = reactive({
@@ -344,7 +362,7 @@ const createHarness = (t, options = {}) => {
     setVisibility: hidden => {
       document.hidden = hidden
       document.visibilityState = hidden ? 'hidden' : 'visible'
-      window.dispatch('visibilitychange')
+      document.dispatch('visibilitychange')
     },
     setToken: token => {
       if (token === null) storage.removeItem('token')
@@ -362,6 +380,7 @@ const createHarness = (t, options = {}) => {
       await flushMicrotasks()
     },
     readSession: (...args) => provided.get(loaded.SESSION_TASKS_KEY).readSession(...args),
+    setViewingSession: sessionId => provided.get(loaded.SESSION_TASKS_KEY).setViewingSession(sessionId),
     unmount: () => {
       if (harness.unmounted) return
       harness.unmounted = true
@@ -437,11 +456,14 @@ test('protected routes restore tasks and keep one poller, while logged-out and s
 test('identity changes discard stale responses and logout clears tasks, polling, and its notification', async t => {
   const oldResponse = createDeferred()
   const currentResponse = createDeferred()
+  const lateResponse = createDeferred()
   const harness = createHarness(t, {
+    routePath: '/',
     token: 'user-a',
     fetchActivity: call => {
       if (call === 0) return oldResponse.promise
       if (call === 1) return currentResponse.promise
+      if (call === 2) return lateResponse.promise
       return [createTask('current-session', {
         completed_message_id: 21,
         completed_status: 'succeeded'
@@ -450,6 +472,7 @@ test('identity changes discard stale responses and logout clears tasks, polling,
   })
   assert.equal(harness.fetchCallCount(), 1)
 
+  harness.setViewingSession('stale-session')
   harness.setToken('user-b')
   assert.equal(harness.fetchCallCount(), 2)
   oldResponse.resolve([createTask('stale-session', {
@@ -460,22 +483,31 @@ test('identity changes discard stale responses and logout clears tasks, polling,
   assert.deepEqual(harness.instance.tasks.value, [])
   assert.equal(harness.notifications.length, 0)
 
-  const currentRefresh = harness.instance.refresh()
   currentResponse.resolve([createTask('current-session', {
     completed_message_id: 21,
     completed_status: 'succeeded'
   })])
-  await currentRefresh
   await flushMicrotasks()
   assert.deepEqual(harness.instance.tasks.value.map(task => task.session_id), ['current-session'])
   assert.equal(harness.notifications.length, 1)
+  assert.deepEqual(harness.readCalls, [])
 
   const timerBeforeLogout = harness.timers.pending[0]
+  const lateRefresh = harness.instance.refresh()
+  await flushMicrotasks()
+  assert.equal(harness.fetchCallCount(), 3)
   harness.setToken(null)
+  lateResponse.resolve([createTask('late-session', {
+    completed_message_id: 22,
+    completed_status: 'succeeded'
+  })])
+  await lateRefresh
+  await flushMicrotasks()
   assert.deepEqual(harness.instance.tasks.value, [])
   assert.equal(harness.timers.pending.length, 0)
   assert.equal(harness.timers.cancelled.includes(timerBeforeLogout), true)
   assert.deepEqual(harness.closedNotifications.map(notification => notification.title), ['会话任务已完成'])
+  assert.equal(harness.document.listenerCount('visibilitychange'), 1)
 })
 
 test('completed tasks batch into one permanent toast, retain the full list, and open sessions without marking read', async t => {
@@ -790,7 +822,7 @@ test('a single failed task has an explicit failure title and notification entrie
   assert.equal(independentHarness.notifications[2].closed, false)
 })
 
-test('readSession keeps the badge until the service acknowledges the read cursor', async t => {
+test('readSession closes the local badge before the service acknowledges the read cursor', async t => {
   const readResponse = createDeferred()
   const harness = createHarness(t, {
     fetchActivity: () => [createTask('read-session', {
@@ -806,8 +838,10 @@ test('readSession keeps the badge until the service acknowledges the read cursor
   const pendingRead = harness.readSession('read-session', 60)
   await flushMicrotasks()
   assert.deepEqual(harness.readCalls, [['read-session', 60]])
-  assert.equal(harness.instance.tasks.value[0].has_unread_result, true)
-  assert.equal(notification.closed, false)
+  assert.deepEqual(harness.instance.tasks.value, [])
+  assert.equal(notification.closed, true)
+  assert.equal(harness.activity.snapshot.value.activities[0].has_unread_result, false)
+  assert.equal(harness.activity.snapshot.value.activities[0].last_read_message_id, null)
   assert.deepEqual(harness.router.navigations, [])
 
   readResponse.resolve({ last_read_message_id: 60 })
@@ -816,7 +850,241 @@ test('readSession keeps the badge until the service acknowledges the read cursor
   assert.deepEqual(harness.instance.tasks.value, [])
   assert.equal(notification.closed, true)
   assert.equal(harness.closedNotifications.length, 1)
+  assert.equal(harness.activity.snapshot.value.activities[0].last_read_message_id, 60)
   assert.deepEqual(harness.router.navigations, [])
+})
+
+test('a registered chat session auto-reads pending successful and failed results', async t => {
+  for (const [index, status] of ['succeeded', 'failed'].entries()) {
+    const response = createDeferred()
+    const sessionId = `viewed-${status}`
+    const messageId = index + 1
+    const harness = createHarness(t, {
+      routePath: '/',
+      fetchActivity: () => response.promise
+    })
+
+    harness.setViewingSession(sessionId)
+    response.resolve([createTask(sessionId, {
+      completed_message_id: messageId,
+      completed_status: status
+    })])
+    await flushMicrotasks()
+
+    assert.deepEqual(harness.readCalls, [[sessionId, messageId]])
+    assert.deepEqual(harness.instance.tasks.value, [])
+    assert.equal(harness.notifications.length, 0)
+    assert.equal(harness.activity.snapshot.value.activities[0].has_unread_result, false)
+    assert.equal(harness.activity.snapshot.value.activities[0].last_read_message_id, messageId)
+  }
+})
+
+test('a background result keeps its badge and creates one notification beside the viewed session', async t => {
+  const response = createDeferred()
+  const harness = createHarness(t, {
+    routePath: '/',
+    fetchActivity: () => response.promise
+  })
+
+  harness.setViewingSession('foreground-session')
+  response.resolve([
+    createTask('foreground-session', {
+      completed_message_id: 10,
+      completed_status: 'succeeded'
+    }),
+    createTask('background-session', {
+      completed_message_id: 11,
+      completed_status: 'succeeded'
+    })
+  ])
+  await flushMicrotasks()
+
+  assert.deepEqual(harness.readCalls, [['foreground-session', 10]])
+  assert.deepEqual(harness.instance.tasks.value.map(task => task.session_id), ['background-session'])
+  assert.equal(harness.instance.tasks.value[0].has_unread_result, true)
+  assert.equal(harness.notifications.length, 1)
+  const notification = harness.notifications[0]
+  const [button] = notificationButtons(notification)
+  assert.equal(notificationButtons(notification).length, 1)
+  button.props.onClick({ stopPropagation: () => {} })
+  assert.equal(notification.closed, true)
+  assert.equal(harness.router.navigations.length, 1)
+  assert.equal(harness.router.navigations[0].path, '/')
+  assert.equal(harness.router.navigations[0].query.session_id, 'background-session')
+  assert.deepEqual(harness.readCalls, [['foreground-session', 10]])
+  assert.equal(harness.instance.tasks.value[0].has_unread_result, true)
+
+  await harness.refreshAndFlush()
+  assert.equal(harness.notifications.length, 1)
+  assert.equal(harness.instance.tasks.value[0].has_unread_result, true)
+  assert.deepEqual(harness.readCalls, [['foreground-session', 10]])
+})
+
+test('entering a notified session closes its single toast before a read acknowledgement', async t => {
+  const readResponse = createDeferred()
+  const harness = createHarness(t, {
+    routePath: '/',
+    fetchActivity: () => [createTask('single-viewed', {
+      completed_message_id: 20,
+      completed_status: 'succeeded'
+    })],
+    markRead: () => readResponse.promise
+  })
+
+  await harness.refreshAndFlush()
+  const notification = harness.notifications[0]
+  harness.setViewingSession('single-viewed')
+  assert.equal(notification.closed, true)
+  assert.equal(harness.instance.tasks.value.length, 0)
+  assert.equal(harness.activity.snapshot.value.activities[0].last_read_message_id, null)
+
+  await flushMicrotasks()
+  assert.deepEqual(harness.readCalls, [['single-viewed', 20]])
+  assert.equal(harness.closedNotifications.length, 1)
+
+  readResponse.resolve({ last_read_message_id: 20 })
+  await flushMicrotasks()
+  assert.equal(harness.activity.snapshot.value.activities[0].last_read_message_id, 20)
+  assert.equal(notification.closed, true)
+})
+
+test('entering a merged notification removes one entry while leaving the others clickable', async t => {
+  const readResponse = createDeferred()
+  const harness = createHarness(t, {
+    routePath: '/',
+    fetchActivity: () => [
+      createTask('merged-first', { completed_message_id: 21, completed_status: 'succeeded' }),
+      createTask('merged-second', { completed_message_id: 22, completed_status: 'succeeded' }),
+      createTask('merged-third', { completed_message_id: 23, completed_status: 'succeeded' })
+    ],
+    markRead: () => readResponse.promise
+  })
+
+  await harness.refreshAndFlush()
+  const notification = harness.notifications[0]
+  harness.setViewingSession('merged-first')
+  assert.equal(notification.closed, false)
+  assert.deepEqual(Array.from(notificationButtons(notification), button => button.key), [
+    'merged-second',
+    'merged-third'
+  ])
+
+  await flushMicrotasks()
+  assert.deepEqual(harness.readCalls, [['merged-first', 21]])
+  const [remainingButton] = notificationButtons(notification)
+  remainingButton.props.onClick({ stopPropagation: () => {} })
+  assert.equal(notification.closed, true)
+  assert.equal(harness.router.navigations.length, 1)
+  assert.equal(harness.router.navigations[0].query.session_id, 'merged-second')
+
+  readResponse.resolve({ last_read_message_id: 21 })
+  await flushMicrotasks()
+})
+
+test('a route session query is navigation intent and does not mark an unregistered session read', async t => {
+  const harness = createHarness(t, {
+    routePath: '/',
+    query: { session_id: 'query-only', task_open: '1' },
+    fetchActivity: () => [createTask('query-only', {
+      completed_message_id: 30,
+      completed_status: 'succeeded'
+    })]
+  })
+
+  await harness.refreshAndFlush()
+
+  assert.deepEqual(harness.readCalls, [])
+  assert.equal(harness.instance.tasks.value[0].session_id, 'query-only')
+  assert.equal(harness.instance.tasks.value[0].has_unread_result, true)
+  assert.equal(harness.notifications.length, 1)
+})
+
+test('an owned=false session is never auto-read by a registered view', async t => {
+  const response = createDeferred()
+  const harness = createHarness(t, {
+    routePath: '/',
+    fetchActivity: () => response.promise
+  })
+
+  harness.setViewingSession('admin-session')
+  response.resolve([createTask('admin-session', {
+    is_owned: false,
+    completed_message_id: 31,
+    completed_status: 'succeeded'
+  })])
+  await flushMicrotasks()
+
+  assert.deepEqual(harness.readCalls, [])
+  assert.deepEqual(harness.instance.tasks.value, [])
+  assert.equal(harness.notifications.length, 0)
+  assert.equal(harness.activity.snapshot.value.activities[0].is_owned, false)
+  assert.equal(harness.activity.snapshot.value.activities[0].completed_message_id, 31)
+})
+
+test('cleared, rerouted, and hidden views notify, then visible registration reads once without replaying', async t => {
+  let activity = [createTask('view-lifecycle', { is_running: true })]
+  const readResponse = createDeferred()
+  const harness = createHarness(t, {
+    routePath: '/',
+    fetchActivity: () => activity,
+    markRead: (_sessionId, messageId) => messageId === 3
+      ? readResponse.promise
+      : { last_read_message_id: messageId }
+  })
+  await flushMicrotasks()
+
+  harness.setViewingSession('view-lifecycle')
+  harness.setViewingSession(null)
+  activity = [createTask('view-lifecycle', {
+    completed_message_id: 1,
+    completed_status: 'succeeded'
+  })]
+  await harness.refreshAndFlush()
+  assert.equal(harness.instance.tasks.value[0].has_unread_result, true)
+  assert.equal(harness.notifications.length, 1)
+  assert.equal(harness.notifications[0].closed, false)
+
+  await harness.setRoute('/memories')
+  activity = [createTask('view-lifecycle', {
+    completed_message_id: 2,
+    completed_status: 'succeeded'
+  })]
+  await harness.refreshAndFlush()
+  assert.equal(harness.instance.tasks.value[0].has_unread_result, true)
+  assert.equal(harness.notifications.length, 2)
+  assert.equal(harness.notifications[1].closed, false)
+
+  await harness.setRoute('/')
+  harness.setViewingSession('view-lifecycle')
+  await flushMicrotasks()
+  assert.deepEqual(harness.readCalls, [['view-lifecycle', 2]])
+  assert.equal(harness.notifications[1].closed, true)
+
+  harness.setVisibility(true)
+  activity = [createTask('view-lifecycle', {
+    completed_message_id: 3,
+    completed_status: 'succeeded'
+  })]
+  await harness.refreshAndFlush()
+  assert.equal(harness.instance.tasks.value[0].has_unread_result, true)
+  assert.equal(harness.notifications.length, 3)
+  assert.equal(harness.notifications[2].closed, false)
+
+  harness.setVisibility(false)
+  await flushMicrotasks()
+  assert.deepEqual(harness.readCalls, [['view-lifecycle', 2], ['view-lifecycle', 3]])
+  assert.equal(harness.notifications[2].closed, true)
+  assert.equal(harness.instance.tasks.value.length, 0)
+
+  harness.setViewingSession(null)
+  await harness.refreshAndFlush()
+  assert.equal(harness.notifications.length, 3)
+  assert.deepEqual(harness.instance.tasks.value, [])
+
+  readResponse.resolve({ last_read_message_id: 3 })
+  await flushMicrotasks()
+  assert.equal(harness.notifications.length, 3)
+  assert.deepEqual(harness.instance.tasks.value, [])
 })
 
 test('a failed fetch preserves the visible list and a later poll clears the error', async t => {
@@ -854,6 +1122,7 @@ test('unmount removes listeners, stops polling, and prevents a pending notificat
   })
   const refresh = harness.instance.refresh()
   await batchSeen.promise
+  assert.equal(harness.document.listenerCount('visibilitychange'), 1)
   harness.unmount()
   await refresh
   await flushMicrotasks()
@@ -861,6 +1130,7 @@ test('unmount removes listeners, stops polling, and prevents a pending notificat
   assert.equal(harness.notifications.length, 0)
   assert.equal(harness.window.listenerCount('storage'), 0)
   assert.equal(harness.window.listenerCount('focus'), 0)
+  assert.equal(harness.document.listenerCount('visibilitychange'), 0)
   assert.equal(harness.timers.pending.length, 0)
 
   const fetchesAfterUnmount = harness.fetchCallCount()

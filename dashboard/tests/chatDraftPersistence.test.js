@@ -374,7 +374,12 @@ const createUseSessionTasks = ({ chatApi, storage, route, router, provided, noti
         addEventListener: () => {},
         removeEventListener: () => {}
       },
-      document: { hidden: false, visibilityState: 'visible' },
+      document: {
+        hidden: false,
+        visibilityState: 'visible',
+        addEventListener: () => {},
+        removeEventListener: () => {}
+      },
       console: quietConsole
     },
     ['SESSION_TASKS_KEY', 'SESSION_ACTIVITY_KEY', 'useSessionTasks'],

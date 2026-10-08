@@ -18,6 +18,7 @@ export const useSessionTasks = () => {
   const standalonePaths = ['/login', '/setup', '/backend-unavailable']
   let controller
   let identity = null
+  let viewingSession = null
   let identityVersion = 0
   let requestSequence = 0
   let refreshSequence = 0
@@ -153,11 +154,18 @@ export const useSessionTasks = () => {
     const nextIdentity = readIdentity()
     if (nextIdentity !== identity) {
       identity = nextIdentity
+      viewingSession = null
       identityVersion += 1
       loading.value = false
       error.value = false
     }
     return controller.setIdentity(nextIdentity)
+  }
+  const syncViewingSession = () => {
+    const sessionId = route.path === '/' && document.visibilityState === 'visible'
+      ? viewingSession
+      : null
+    controller.setViewingSession(sessionId)
   }
   const fetchActivity = async () => {
     try {
@@ -207,6 +215,13 @@ export const useSessionTasks = () => {
     readSession: (...args) => {
       syncIdentity()
       return controller.readSession(...args)
+    },
+    setViewingSession: sessionId => {
+      syncIdentity()
+      viewingSession = typeof sessionId === 'string' && sessionId.trim() !== ''
+        ? sessionId
+        : null
+      syncViewingSession()
     }
   })
   provide(SESSION_ACTIVITY_KEY, {
@@ -214,19 +229,31 @@ export const useSessionTasks = () => {
     nextSequence
   })
   const onStorage = event => {
-    if (event.key === 'token' || event.key === null) syncIdentity()
+    if (event.key === 'token' || event.key === null) {
+      syncIdentity()
+      syncViewingSession()
+    }
   }
   const onFocus = () => {
     syncIdentity()
+    syncViewingSession()
     refresh()
   }
-  const stopIdentityWatch = watch(() => route.fullPath, syncIdentity, { immediate: true })
+  const onVisibilityChange = () => {
+    syncViewingSession()
+  }
+  const stopIdentityWatch = watch(() => route.fullPath, () => {
+    syncIdentity()
+    syncViewingSession()
+  }, { immediate: true, flush: 'sync' })
   window.addEventListener('storage', onStorage)
   window.addEventListener('focus', onFocus)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   onBeforeUnmount(() => {
     stopIdentityWatch()
     window.removeEventListener('storage', onStorage)
     window.removeEventListener('focus', onFocus)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
     controller.dispose()
   })
   return { tasks, error, loading, refresh, openSession, activitySnapshot }

@@ -13,17 +13,6 @@ const closeHandle = (handle, reportError) => {
     else if (typeof handle.close === 'function') handle.close()
   } catch (error) { reportError(error) }
 }
-export const getSessionReadCursor = (options = {}) => {
-  const { messages, historyLoaded, visible, focused, atBottom } = options || {}
-  if (historyLoaded !== true || visible !== true || focused !== true || atBottom !== true
-    || !Array.isArray(messages)) return 0
-  let cursor = 0
-  for (const message of messages) {
-    if (!isRecord(message) || message.role === 'thinking') continue
-    if (isPositive(message.db_id)) cursor = Math.max(cursor, message.db_id)
-  }
-  return cursor
-}
 export const createSessionTaskController = ({
   fetchActivity,
   markRead,
@@ -40,6 +29,7 @@ export const createSessionTaskController = ({
   if (typeof markRead !== 'function') throw new TypeError('markRead must be a function')
   let activities = []
   let identity = null
+  let viewingSession = null
   let generation = 0
   let poller = null
   let disposed = false
@@ -54,6 +44,7 @@ export const createSessionTaskController = ({
   const isCurrent = requestGeneration => !disposed && identity !== null
     && requestGeneration === generation
   const confirmed = sessionId => confirmedRead.get(sessionId) || 0
+  const observed = sessionId => readStates.get(sessionId)?.observed || 0
   const visible = list => list.filter(activity => activity.is_owned === true
     && (activity.is_running || activity.has_unread_result))
   const canReadSession = sessionId => {
@@ -69,6 +60,17 @@ export const createSessionTaskController = ({
   }
   const closeAllNotifications = () => {
     for (const sessionId of notifications.keys()) closeNotification(sessionId)
+  }
+  const queueRead = (sessionId, messageId) => {
+    let state = readStates.get(sessionId)
+    if (!state) {
+      state = { observed: 0, desired: 0, promise: null }
+      readStates.set(sessionId, state)
+    }
+    if (messageId <= state.observed) return false
+    state.observed = messageId
+    if (messageId > state.desired && messageId > confirmed(sessionId)) state.desired = messageId
+    return true
   }
   const permanentReadError = error => {
     const status = error?.response?.data?.code
@@ -87,23 +89,35 @@ export const createSessionTaskController = ({
     for (const [sessionId, cursor] of serverRead) {
       if (cursor > confirmed(sessionId)) confirmedRead.set(sessionId, cursor)
     }
+    let queuedReadSession = null
+    if (viewingSession !== null) {
+      let result = 0
+      for (const activity of snapshot) {
+        if (activity.is_owned === true && activity.session_id === viewingSession
+          && isPositive(activity.completed_message_id) && isTerminal(activity.completed_status)) {
+          result = Math.max(result, activity.completed_message_id)
+        }
+      }
+      if (result > 0 && queueRead(viewingSession, result)) queuedReadSession = viewingSession
+    }
     activities = snapshot.map(activity => {
       if (activity.is_owned !== true) return activity
       const serverCursor = serverRead.get(activity.session_id) || 0
-      const readCursor = Math.max(confirmed(activity.session_id), serverCursor)
+      const confirmedCursor = Math.max(confirmed(activity.session_id), serverCursor)
+      const readCursor = Math.max(confirmedCursor, observed(activity.session_id))
       const nextActivity = {
         ...activity,
         has_unread_result: isPositive(activity.completed_message_id)
           && activity.completed_message_id > readCursor
       }
-      if (readCursor > 0 || activity.last_read_message_id !== null) {
-        nextActivity.last_read_message_id = readCursor
+      if (confirmedCursor > 0 || activity.last_read_message_id !== null) {
+        nextActivity.last_read_message_id = confirmedCursor
       }
       return nextActivity
     })
     for (const [sessionId, entry] of notifications) {
       const activity = activities.find(item => item.is_owned === true && item.session_id === sessionId)
-      if (!activity || activity.is_running || !activity.has_unread_result
+      if (sessionId === viewingSession || !activity || activity.is_running || !activity.has_unread_result
         || !isTerminal(activity.completed_status) || activity.completed_message_id !== entry.messageId) {
         closeNotification(sessionId)
       }
@@ -121,19 +135,24 @@ export const createSessionTaskController = ({
     for (const activity of activities) {
       if (activity.is_owned !== true) continue
       const result = activity.completed_message_id
-      const desired = readStates.get(activity.session_id)?.desired || 0
       if (activity.is_running || !activity.has_unread_result || !isTerminal(activity.completed_status)
-        || result <= desired || result <= (notified.get(activity.session_id) || 0)) continue
+        || result <= (notified.get(activity.session_id) || 0)) continue
       closeNotification(activity.session_id)
       notified.set(activity.session_id, result)
+      if (activity.session_id === viewingSession) continue
       let handle
       try { handle = onNotify(activity) } catch (error) { reportError(error) }
       if (!isCurrent(requestGeneration)) {
         closeHandle(handle, reportError)
         return currentTasks
       }
+      if (activity.session_id === viewingSession) {
+        closeHandle(handle, reportError)
+        continue
+      }
       notifications.set(activity.session_id, { messageId: result, handle })
     }
+    if (queuedReadSession !== null && isCurrent(requestGeneration)) pumpRead(queuedReadSession)
     return currentTasks
   }
 
@@ -249,6 +268,7 @@ export const createSessionTaskController = ({
     generation += 1
     const changeGeneration = generation
     identity = token
+    viewingSession = null
     closeAllNotifications()
     activities = []
     latestSequence = null
@@ -274,16 +294,23 @@ export const createSessionTaskController = ({
       || !canReadSession(sessionId)) {
       return Promise.resolve(undefined)
     }
-    let state = readStates.get(sessionId)
-    if (!state) {
-      state = { desired: 0, promise: null }
-      readStates.set(sessionId, state)
-    }
-    if (messageId <= Math.max(state.desired, confirmed(sessionId))) {
-      return state.promise || Promise.resolve(undefined)
-    }
-    state.desired = messageId
+    const state = readStates.get(sessionId)
+    if (!queueRead(sessionId, messageId)) return state?.promise || Promise.resolve(undefined)
+    const requestGeneration = generation
+    publish(activities, requestGeneration)
     return pumpRead(sessionId)
+  }
+  const setViewingSession = sessionId => {
+    if (sessionId !== null && !isSessionId(sessionId)) {
+      throw new TypeError('viewing session must be a non-empty string or null')
+    }
+    if (disposed || identity === null) return
+    if (sessionId === viewingSession) {
+      if (sessionId !== null) closeNotification(sessionId)
+      return
+    }
+    viewingSession = sessionId
+    if (sessionId !== null) return publish(activities, generation)
   }
   const dispose = () => {
     if (disposed) return
@@ -298,8 +325,9 @@ export const createSessionTaskController = ({
     readStates.clear()
     notified.clear()
     identity = null
+    viewingSession = null
     call(onTasksUpdated, [])
     call(onActivityUpdated, null)
   }
-  return { setIdentity, refresh, readSession, dispose }
+  return { setIdentity, setViewingSession, refresh, readSession, dispose }
 }
