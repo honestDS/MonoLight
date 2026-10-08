@@ -116,14 +116,13 @@ class SessionReplySubmission:
                 [],
             )
 
-        async def reserve_idempotent_message() -> tuple[Message, bool]:
+        async def persist_idempotent_message() -> tuple[Message, bool]:
             existing_message_row = await message_crud.get_by_dedupe_key(db, idempotent_dedupe_key)
             if existing_message_row is not None:
                 message_row = existing_message_row
                 message_was_existing = True
             else:
-                # Keep the creator flag across the unique-key race instead of
-                # inferring it from the row returned after an insert conflict.
+                # 通过创建标记区分本次写入与唯一键竞争后复用的消息。
                 message_row = Message(
                     session_id=session_id,
                     uid=uid,
@@ -161,7 +160,7 @@ class SessionReplySubmission:
         await expire_confirmation_by_session(db, uid=uid, session_id=session_id)
 
         if idempotent_http_request:
-            idempotent_message_row, idempotent_message_was_existing = await reserve_idempotent_message()
+            idempotent_message_row, idempotent_message_was_existing = await persist_idempotent_message()
             if idempotent_message_was_existing:
                 return await existing_idempotent_submission(idempotent_message_row)
 
@@ -381,14 +380,12 @@ class SessionReplySubmission:
             commit=False,
         )
         if claimed_record is None or claim_token is None:
-            # The competing transaction already consumed this confirmation. Its
-            # rollback removed the provisional decision message, so persist the
-            # original input once as ordinary foreground work without parsing it again.
+            # 竞争事务已处理此确认并回滚本次确认消息，原始输入按普通前台工作入队，不再解析确认。
             if idempotent_http_request:
                 message_row = idempotent_message_row
                 message_was_existing = idempotent_message_was_existing
                 if message_row is None:
-                    message_row, message_was_existing = await reserve_idempotent_message()
+                    message_row, message_was_existing = await persist_idempotent_message()
                 if message_row.id is not None:
                     existing_work = await session_reply_work_item_crud.get_by_input_message(
                         db,

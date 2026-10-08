@@ -354,7 +354,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
@@ -382,6 +382,7 @@ import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
 import { getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../utils/chatPresentation.js'
 import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
+import { getSessionReadCursor } from '../composables/chat/sessionTasks.js'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -398,7 +399,7 @@ const props = defineProps({
   showRequestMetadata: { type: Boolean, default: true },
   hideEmptyTip: { type: Boolean, default: false }
 })
-const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
+const emit = defineEmits(['update:activeCollapse', 'audit-decision', 'read-message'])
 const { t } = useI18n()
 const storedRequestMetadataCollapsed = getClientSetting('requestMetadataCollapsed', true)
 const requestMetadataCollapsed = ref(typeof storedRequestMetadataCollapsed === 'boolean' ? storedRequestMetadataCollapsed : true)
@@ -699,11 +700,22 @@ const refreshLatestLlmMessageVisibility = () => {
   if (canFollowOutput()) unreadMessageKeys.value = []
   return latestLlmMessageVisible.value
 }
+const reportReadMessage = () => {
+  if (document.visibilityState !== 'visible' || !document.hasFocus() || !messagesLayoutReady.value || !props.initialHistoryLoaded) return
+  const listElement = virtualList.value?.$el
+  if (!listElement || !(listElement.getBoundingClientRect().height > 0)) return
+  const bottomDistance = getMessageListBottomDistance()
+  if (!Number.isFinite(bottomDistance) || bottomDistance > OUTPUT_FOLLOW_BOTTOM_TOLERANCE) return
+  const cursor = getSessionReadCursor({ messages: props.messages, historyLoaded: true, visible: true, focused: true, atBottom: true })
+  if (!props.currentSessionId || cursor === 0) return
+  emit('read-message', { session_id: props.currentSessionId, message_id: cursor })
+}
 const scheduleUnreadVisibilityCheck = () => {
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
   visibilityFrameId = requestAnimationFrame(() => {
     visibilityFrameId = null
     refreshLatestLlmMessageVisibility()
+    reportReadMessage()
   })
 }
 const clearTransientUserScrollCandidate = () => {
@@ -806,6 +818,12 @@ const handleChangedIncomingMessages = async (changedMessages, replaceUnread = fa
 watch(() => props.currentSessionId, () => {
   reasoningCollapseModel.value = []
 })
+
+watch(
+  () => [props.currentSessionId, props.initialHistoryLoaded, messagesLayoutReady.value, getSessionReadCursor({ messages: props.messages, historyLoaded: true, visible: true, focused: true, atBottom: true })],
+  () => scheduleUnreadVisibilityCheck(),
+  { flush: 'post' }
+)
 
 watch(
   () => [props.currentSessionId, props.initialHistoryLoaded],
@@ -917,6 +935,12 @@ const handlePointerDown = () => {
 const endPointerScrollSession = () => {
   pointerScrollSession = false
 }
+const handleWindowFocus = () => scheduleUnreadVisibilityCheck()
+const handleDocumentVisibilityChange = () => scheduleUnreadVisibilityCheck()
+onMounted(() => {
+  window.addEventListener('focus', handleWindowFocus)
+  document.addEventListener('visibilitychange', handleDocumentVisibilityChange)
+})
 window.addEventListener('pointerup', endPointerScrollSession)
 window.addEventListener('pointercancel', endPointerScrollSession)
 const handleVirtualScroll = (offset) => {
@@ -1177,6 +1201,8 @@ onUnmounted(() => {
   messageListUnmounted = true
   window.clearInterval(auditCountdownTimer)
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
+  window.removeEventListener('focus', handleWindowFocus)
+  document.removeEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.removeEventListener('pointerup', endPointerScrollSession)
   window.removeEventListener('pointercancel', endPointerScrollSession)
   resetUserScrollCandidates()
@@ -1206,6 +1232,7 @@ defineExpose({
   canFollowOutput,
   scrollToBottom,
   scrollTo,
+  reportRead: scheduleUnreadVisibilityCheck,
   addEventListener: (type, listener) => {
     if (type === 'scroll') scrollListeners.add(listener)
   },

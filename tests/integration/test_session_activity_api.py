@@ -33,11 +33,37 @@ ACTIVITY_FIELDS = {
     "is_reply_running",
     "is_loading",
 }
+ACTIVITY_EXTENDED_FIELDS = {
+    "title",
+    "is_owned",
+    "last_read_message_id",
+    "last_read_at",
+    "is_running",
+    "completed_message_id",
+    "completed_status",
+    "has_unread_result",
+}
+ACTIVITY_RESPONSE_FIELDS = ACTIVITY_FIELDS | ACTIVITY_EXTENDED_FIELDS
 INTERACTIVE_WORK_TYPES = (
     SessionReplyWorkType.FOREGROUND_REPLY,
     SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
 )
 STATUS_CASES = [(work_type, status, work_type in INTERACTIVE_WORK_TYPES and status in SESSION_REPLY_ACTIVE_STATUSES) for work_type in SessionReplyWorkType for status in SessionReplyWorkStatus]
+
+
+def _activity_defaults(*, is_owned: bool, **overrides: object) -> dict[str, object]:
+    defaults: dict[str, object] = {
+        "title": None,
+        "is_owned": is_owned,
+        "last_read_message_id": None,
+        "last_read_at": None,
+        "is_running": False,
+        "completed_message_id": None,
+        "completed_status": None,
+        "has_unread_result": False,
+    }
+    defaults.update(overrides)
+    return defaults
 
 
 @pytest_asyncio.fixture
@@ -82,11 +108,13 @@ def _make_session(
     *,
     created_at: datetime,
     source: str = "http",
+    title: str | None = None,
 ) -> ChatSession:
     return ChatSession(
         session_id=session_id,
         uid=uid,
         source=source,
+        title=title,
         created_at=created_at,
     )
 
@@ -155,7 +183,7 @@ async def test_activity_returns_all_owned_sessions_with_exact_projection_and_iso
     base = datetime(2026, 2, 1, 1, 2, 3)
     empty_session = _make_session("empty-session", "user-1", created_at=base, source="")
     message_session = _make_session("message-session", "user-1", created_at=base, source="websocket")
-    other_session = _make_session("other-session", "user-2", created_at=base + timedelta(days=1))
+    other_session = _make_session("other-session", "user-2", created_at=base + timedelta(days=1), title="Other session")
     db.add_all([empty_session, message_session, other_session])
     await db.commit()
     message = await _persist_message(
@@ -177,6 +205,7 @@ async def test_activity_returns_all_owned_sessions_with_exact_projection_and_iso
             "source": "websocket",
             "is_reply_running": False,
             "is_loading": False,
+            **_activity_defaults(is_owned=True),
         },
         {
             "session_id": "empty-session",
@@ -185,16 +214,41 @@ async def test_activity_returns_all_owned_sessions_with_exact_projection_and_iso
             "source": "http",
             "is_reply_running": False,
             "is_loading": False,
+            **_activity_defaults(is_owned=True),
         },
     ]
-    assert all(set(row) == ACTIVITY_FIELDS for row in data)
+    assert all(set(row) == ACTIVITY_RESPONSE_FIELDS for row in data)
 
     auth_state["is_superuser"] = True
     admin_response = await client.get("/api/v1/chat/sessions/activity")
-    assert [row["session_id"] for row in admin_response.json()["data"]] == [
-        "message-session",
-        "other-session",
-        "empty-session",
+    assert admin_response.json()["data"] == [
+        {
+            "session_id": "message-session",
+            "latest_message_id": message.id,
+            "last_active": "2026-02-02 03:04:05",
+            "source": "websocket",
+            "is_reply_running": False,
+            "is_loading": False,
+            **_activity_defaults(is_owned=True),
+        },
+        {
+            "session_id": "other-session",
+            "latest_message_id": None,
+            "last_active": "2026-02-02 01:02:03",
+            "source": "http",
+            "is_reply_running": False,
+            "is_loading": False,
+            **_activity_defaults(is_owned=False, title="Other session"),
+        },
+        {
+            "session_id": "empty-session",
+            "latest_message_id": None,
+            "last_active": "2026-02-01 01:02:03",
+            "source": "http",
+            "is_reply_running": False,
+            "is_loading": False,
+            **_activity_defaults(is_owned=True),
+        },
     ]
 
     auth_state.update(uid="user-2", is_superuser=False)
@@ -348,7 +402,7 @@ async def test_activity_projects_sidebar_loading_and_interactive_reply_statuses(
     full_response = await client.get("/api/v1/chat/sessions/list")
     assert full_response.status_code == 200
     full_row = full_response.json()["data"][0]
-    assert {field: full_row[field] for field in ACTIVITY_FIELDS} == activity_row
+    assert {field: full_row[field] for field in ACTIVITY_FIELDS} == {field: activity_row[field] for field in ACTIVITY_FIELDS}
 
 
 @pytest.mark.asyncio
@@ -418,7 +472,7 @@ async def test_activity_matches_full_list_and_successful_work_remains_recoverabl
     assert full_response.status_code == 200
     activity_row = activity_response.json()["data"][0]
     full_row = full_response.json()["data"][0]
-    assert {field: full_row[field] for field in ACTIVITY_FIELDS} == activity_row
+    assert {field: full_row[field] for field in ACTIVITY_FIELDS} == {field: activity_row[field] for field in ACTIVITY_FIELDS}
     assert full_row["reply_works"] == [
         {
             "work_id": work.id,
@@ -454,7 +508,7 @@ async def test_activity_matches_full_list_and_successful_work_remains_recoverabl
     activity_after_row = activity_after.json()["data"][0]
     full_after_row = full_after.json()["data"][0]
     assert activity_after_row["is_reply_running"] is False
-    assert {field: full_after_row[field] for field in ACTIVITY_FIELDS} == activity_after_row
+    assert {field: full_after_row[field] for field in ACTIVITY_FIELDS} == {field: activity_after_row[field] for field in ACTIVITY_FIELDS}
     assert full_after_row["reply_works"] == [
         {
             "work_id": work.id,
@@ -509,12 +563,15 @@ async def test_activity_uses_one_lightweight_select_without_message_or_full_work
             "source": "http",
             "is_reply_running": True,
             "is_loading": True,
+            **_activity_defaults(is_owned=True, is_running=True),
         }
     ]
     assert len(statements) == 1
     sql = statements[0].lower()
     assert "from message" not in sql
     assert "join message" not in sql
-    assert "select session_reply_work_item." not in sql
+    assert "content" not in sql
+    assert "llm_request_metadata" not in sql
+    assert "execution_state" not in sql
     assert "row_number" not in sql
     assert " over " not in sql

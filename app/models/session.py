@@ -36,7 +36,7 @@ class ChatSession(SQLModel, table=True):
         default="http",
         max_length=50,
         index=True,
-        description="预留兼容字段，当前不参与会话来源判断、消息投递或网页通信模式切换",
+        description="历史兼容字段，当前不参与会话来源判断、消息投递或网页通信模式切换",
     )
     title: str | None = Field(default=None, max_length=255)
     enable_markdown: bool = Field(default=False)
@@ -66,10 +66,10 @@ class ChatSession(SQLModel, table=True):
     )
     last_read_message_id: int | None = Field(
         default=None,
-        description="预留的用户已读消息编号",
+        description="会话所属用户在网页端确认已读的最大消息编号，仅单调递增",
     )
     last_read_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True)),
-        description="预留的用户确认已读时间",
+        description="会话所属用户的已读消息编号最近一次向前推进的时间",
     )

@@ -1,5 +1,5 @@
 // 会话管理 composable：列表、选择与新建会话
-import { onScopeDispose, ref } from 'vue'
+import { inject, onScopeDispose, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { useDeleteConfirm } from '../useDeleteConfirm'
@@ -7,11 +7,13 @@ import { PAGE_SIZE } from '../../constants'
 import i18n from '../../i18n'
 import { resolveHistoryRequest } from './historyPagination.js'
 import { createSessionActivityController, formatSessionActivityTime } from './sessionActivity.js'
-import { createSessionListPoller } from './sessionListLoading.js'
+import { SESSION_ACTIVITY_KEY } from './useSessionTasks.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
 export function useSessionManager() {
+  const activityService = inject(SESSION_ACTIVITY_KEY, null)
+
   // ==================== 状态定义 ====================
   
   // 会话相关状态
@@ -57,8 +59,7 @@ export function useSessionManager() {
   }
 
   const fetchActivity = async () => {
-    const res = await chatApi.sessionsActivity()
-    return res.data.data || []
+    return activityService?.snapshot?.value?.activities || []
   }
 
   const sessionActivityController = createSessionActivityController({
@@ -69,6 +70,8 @@ export function useSessionManager() {
       sessions.value = value
     },
     getCurrentSessionId: () => currentSessionId.value,
+    nextSequence: activityService?.nextSequence,
+    getActivitySequence: () => activityService?.snapshot?.value?.sequence ?? 0,
     onSessionsUpdated: value => sessionsUpdatedCallback
       ? sessionsUpdatedCallback(value)
       : undefined,
@@ -77,12 +80,14 @@ export function useSessionManager() {
       : undefined
   })
 
-  const sessionActivityPoller = createSessionListPoller({
-    refreshSessions: sessionActivityController.refreshActivity
-  })
+  const stopActivityWatch = activityService
+    ? watch(activityService.snapshot, snapshot => {
+      if (snapshot) void sessionActivityController.refreshActivity().catch(console.error)
+    }, { flush: 'sync' })
+    : null
 
   /**
-   * 加载完整会话列表，定时轮询仅刷新活动字段。
+   * 按需加载完整会话列表，活动字段由全局活动快照同步。
    */
   const loadSessions = async () => {
     sessionsLoading.value = true
@@ -95,7 +100,6 @@ export function useSessionManager() {
       return sessions.value
     } finally {
       sessionsLoading.value = false
-      if (!disposed) sessionActivityPoller.sync()
     }
   }
 
@@ -108,8 +112,8 @@ export function useSessionManager() {
     disposed = true
     sessionsUpdatedCallback = null
     activityUpdatedCallback = null
+    stopActivityWatch?.()
     sessionActivityController.dispose()
-    sessionActivityPoller.dispose()
   })
 
   // 使用删除确认组合式函数

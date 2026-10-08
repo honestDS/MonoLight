@@ -7,6 +7,7 @@ MESSAGES = {
     "ERR_SESSION_NO_PERMISSION": "No permission to operate on this session",
     "ERR_SESSION_GUIDANCE_EXTERNAL_ONLY": "Guidance can only be added to external message platform sessions",
     "ERR_SESSION_READ_ONLY": "This session comes from an external message platform and is read-only on the web",
+    "ERR_SESSION_READ_MESSAGE_INVALID": "The read marker message does not exist or does not belong to this session.",
     "ERR_SESSION_TRANSPORT_CHANGE_ACTIVE": "A reply is still being processed. Wait for the current turn to finish before changing the sending mode.",
     "MSG_SESSION_UPDATED": "Session settings updated",
     "ERR_NO_VALID_CHANNEL": "No valid model channel configured",
