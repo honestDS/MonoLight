@@ -8,8 +8,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.session_reply_queue.manager import SessionReplyQueueManager
 from app.models.message import Message, MessageCreate, MessageRole, MessageType
+from app.models.profile import Profile
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import SessionReplyWorkItem
 
 SESSION_ID = "activity-projection-session"
 UID = "activity-projection-user"
@@ -321,3 +325,110 @@ async def test_concurrent_writers_keep_maximum_id_and_time(activity_session_fact
     activity = await _activity(activity_session_factory)
     assert activity["latest_message_id"] == 800
     assert activity["last_message_at"] == datetime(2026, 5, 1, 1, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_existing_message", [False, True], ids=["empty", "existing"])
+async def test_http_idempotent_submission_rolls_back_reserved_message_when_enqueue_fails(
+    activity_session_factory,
+    monkeypatch,
+    has_existing_message: bool,
+):
+    profile = Profile(id=1, uid=UID, name="activity projection profile")
+    async with activity_session_factory() as db:
+        db.add(profile)
+        if has_existing_message:
+            await message_crud.create(
+                db,
+                obj_in=_message_data(content="existing message"),
+                commit=False,
+            )
+        await db.commit()
+
+    message_rows_before = await _message_rows(activity_session_factory)
+    activity_before = await _activity(activity_session_factory)
+
+    async def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("enqueue failed after reservation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(session_reply_work_item_crud, "enqueue", fail_enqueue)
+        async with activity_session_factory() as db:
+            manager = SessionReplyQueueManager()
+            with pytest.raises(RuntimeError, match="enqueue failed after reservation"):
+                await manager.submit_user_message(
+                    db,
+                    uid=UID,
+                    session_id=SESSION_ID,
+                    profile=profile,
+                    message="rollback request",
+                    attachments=None,
+                    source="http",
+                    request_id="rollback-request",
+                    idempotent_http_request=True,
+                )
+            await db.rollback()
+
+    assert await _message_rows(activity_session_factory) == message_rows_before
+    assert await _activity(activity_session_factory) == activity_before
+    async with activity_session_factory() as db:
+        result = await db.execute(
+            select(SessionReplyWorkItem.id).where(
+                SessionReplyWorkItem.session_id == SESSION_ID,
+                SessionReplyWorkItem.uid == UID,
+            )
+        )
+        assert result.scalars().all() == []
+
+    async with activity_session_factory() as db:
+        retry_profile = await db.get(Profile, 1)
+        manager = SessionReplyQueueManager()
+        retry_message, retry_work, _retry_status, _retry_events = await manager.submit_user_message(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile=retry_profile,
+            message="rollback request",
+            attachments=None,
+            source="http",
+            request_id="rollback-request",
+            idempotent_http_request=True,
+        )
+        duplicate_message, duplicate_work, _duplicate_status, _duplicate_events = await manager.submit_user_message(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile=retry_profile,
+            message="rollback request",
+            attachments=None,
+            source="http",
+            request_id="rollback-request",
+            idempotent_http_request=True,
+        )
+
+    assert duplicate_message.id == retry_message.id
+    assert duplicate_work.id == retry_work.id
+
+    final_message_rows = await _message_rows(activity_session_factory)
+    assert len(final_message_rows) == len(message_rows_before) + 1
+    assert retry_message.id in {message_id for message_id, _ in final_message_rows}
+
+    async with activity_session_factory() as db:
+        result = await db.execute(
+            select(SessionReplyWorkItem.id, SessionReplyWorkItem.source_id).where(
+                SessionReplyWorkItem.session_id == SESSION_ID,
+                SessionReplyWorkItem.uid == UID,
+            )
+        )
+        work_rows = result.all()
+    assert len(work_rows) == 1
+    assert work_rows[0][0] == retry_work.id
+    assert work_rows[0][1] == str(retry_message.id)
+
+    final_activity = await _activity(activity_session_factory)
+    retry_created_at = next(created_at for message_id, created_at in final_message_rows if message_id == retry_message.id)
+    assert retry_message.created_at == retry_created_at.timestamp()
+    assert final_activity["latest_message_id"] == retry_message.id
+    assert final_activity["last_message_at"] == retry_created_at
+    assert final_activity["last_read_message_id"] == activity_before["last_read_message_id"]
+    assert final_activity["last_read_at"] == activity_before["last_read_at"]

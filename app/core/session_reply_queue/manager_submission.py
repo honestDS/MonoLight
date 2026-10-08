@@ -44,6 +44,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
     SessionReplyWorkType,
 )
+from app.providers.database import ensure_sqlite_outer_transaction
 
 from .manager_common import (
     _serialize_message_content,
@@ -135,6 +136,7 @@ class SessionReplySubmission:
                     is_processed=False,
                     dedupe_key=idempotent_dedupe_key,
                 )
+                await ensure_sqlite_outer_transaction(db)
                 try:
                     async with db.begin_nested():
                         await message_crud.persist(db, message=message_row, commit=False)

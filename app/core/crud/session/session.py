@@ -13,27 +13,26 @@ from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, Se
 
 
 class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
-    async def get_user_activity(self, db: AsyncSession, *, uid: str) -> list[Any]:
+    async def get_user_activity(self, db: AsyncSession, *, uid: str, is_admin: bool = False) -> list[Any]:
         last_active = func.coalesce(ChatSession.last_message_at, ChatSession.created_at).label("last_active")
-        is_reply_running = exists(
-            select(1).where(
-                SessionReplyWorkItem.session_id == ChatSession.session_id,
-                SessionReplyWorkItem.uid == ChatSession.uid,
-                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
-                SessionReplyWorkItem.work_type.in_([SessionReplyWorkType.FOREGROUND_REPLY, SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION]),
-            )
-        ).label("is_reply_running")
-        result = await db.execute(
-            select(
-                ChatSession.session_id,
-                ChatSession.latest_message_id,
-                last_active,
-                ChatSession.source,
-                is_reply_running,
-            )
-            .where(ChatSession.uid == uid)
-            .order_by(last_active.desc(), ChatSession.session_id.asc())
+        active_reply_work = select(1).where(
+            SessionReplyWorkItem.session_id == ChatSession.session_id,
+            SessionReplyWorkItem.uid == ChatSession.uid,
+            SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
         )
+        is_loading = exists(active_reply_work).label("is_loading")
+        is_reply_running = exists(active_reply_work.where(SessionReplyWorkItem.work_type.in_([SessionReplyWorkType.FOREGROUND_REPLY, SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION]))).label("is_reply_running")
+        stmt = select(
+            ChatSession.session_id,
+            ChatSession.latest_message_id,
+            last_active,
+            ChatSession.source,
+            is_loading,
+            is_reply_running,
+        ).order_by(last_active.desc(), ChatSession.session_id.asc())
+        if not is_admin:
+            stmt = stmt.where(ChatSession.uid == uid)
+        result = await db.execute(stmt)
         return list(result.all())
 
     async def list_by_profile_reference(
