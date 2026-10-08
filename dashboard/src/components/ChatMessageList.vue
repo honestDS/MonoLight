@@ -328,7 +328,7 @@
     </div>
     <Transition name="new-message-indicator">
       <button
-        v-if="unreadMessageKeys.length > 0 && !canFollowOutput()"
+        v-if="unreadMessageKeys.length > 0 && !canFollowOutput() && messagesLayoutReady && scrollState?.hasOverflow"
         type="button"
         class="new-message-indicator"
         :aria-label="$t('chat.new_messages')"
@@ -380,9 +380,8 @@ import {
 } from '../utils'
 import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
-import { getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../utils/chatPresentation.js'
+import { getMessageListScrollState, getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../utils/chatPresentation.js'
 import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
-import { getSessionReadCursor } from '../composables/chat/sessionTasks.js'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -399,7 +398,7 @@ const props = defineProps({
   showRequestMetadata: { type: Boolean, default: true },
   hideEmptyTip: { type: Boolean, default: false }
 })
-const emit = defineEmits(['update:activeCollapse', 'audit-decision', 'read-message'])
+const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
 const storedRequestMetadataCollapsed = getClientSetting('requestMetadataCollapsed', true)
 const requestMetadataCollapsed = ref(typeof storedRequestMetadataCollapsed === 'boolean' ? storedRequestMetadataCollapsed : true)
@@ -433,6 +432,7 @@ let transientUserScrollCandidateTimer = null
 let lastVirtualScrollOffset = null
 let messageListUnmounted = false
 const messagesLayoutReady = ref(false)
+const scrollState = ref(null)
 const scrollListeners = new Set()
 const codeRefs = new Map()
 const collapseModel = computed({
@@ -655,7 +655,6 @@ const isIncomingMessage = message => message.type === 'tool_group' || (
 const isFollowableIncomingMessage = message => (
   isFollowableLlmOutput(message) || (props.currentSessionReadOnly && message.role === 'user')
 )
-const OUTPUT_FOLLOW_BOTTOM_TOLERANCE = 24
 let messageListAtBottom = true
 const setOutputFollowState = (shouldFollow) => {
   if (shouldFollow) {
@@ -667,21 +666,22 @@ const setOutputFollowState = (shouldFollow) => {
   followsOutput.value = false
   bottomScrollRequest += 1
 }
-const canFollowOutput = () => followsOutput.value && latestLlmMessageVisible.value
-const getMessageListBottomDistance = (offset) => {
-  const list = virtualList.value
-  const currentOffset = Number.isFinite(offset) ? offset : list?.scrollOffset
-  if (!list || !Number.isFinite(currentOffset)) return null
-  const bottomDistance = list.scrollSize - list.viewportSize - currentOffset
-  return Number.isFinite(bottomDistance) ? Math.max(0, bottomDistance) : null
-}
+const canFollowOutput = () => scrollState.value?.hasOverflow === false || (followsOutput.value && latestLlmMessageVisible.value)
 const updateMessageListBottomState = (offset) => {
-  const bottomDistance = getMessageListBottomDistance(offset)
-  if (bottomDistance === null) return messageListAtBottom
-  messageListAtBottom = bottomDistance <= OUTPUT_FOLLOW_BOTTOM_TOLERANCE
+  const listElement = virtualList.value?.$el
+  const nextScrollState = getMessageListScrollState({
+    scrollHeight: listElement?.scrollHeight,
+    clientHeight: listElement?.clientHeight,
+    scrollTop: Number.isFinite(offset) ? offset : listElement?.scrollTop
+  })
+  scrollState.value = nextScrollState
+  if (!nextScrollState) return messageListAtBottom
+  messageListAtBottom = nextScrollState.atBottom
+  if (!nextScrollState.hasOverflow) setOutputFollowState(true)
   return messageListAtBottom
 }
 const calculateLatestLlmMessageVisible = () => {
+  if (scrollState.value?.hasOverflow === false) return true
   const latestMessage = [...displayMessages.value].reverse().find(isFollowableIncomingMessage)
   const listElement = virtualList.value?.$el
   if (!latestMessage || !listElement) return messageListAtBottom
@@ -695,29 +695,37 @@ const calculateLatestLlmMessageVisible = () => {
   const messageRect = messageElement.getBoundingClientRect()
   return messageRect.bottom > viewportRect.top && messageRect.top < viewportRect.bottom
 }
-const refreshLatestLlmMessageVisibility = () => {
+const refreshLatestLlmMessageVisibility = (offset) => {
+  updateMessageListBottomState(offset)
   latestLlmMessageVisible.value = calculateLatestLlmMessageVisible()
   if (canFollowOutput()) unreadMessageKeys.value = []
   return latestLlmMessageVisible.value
 }
-const reportReadMessage = () => {
-  if (document.visibilityState !== 'visible' || !document.hasFocus() || !messagesLayoutReady.value || !props.initialHistoryLoaded) return
-  const listElement = virtualList.value?.$el
-  if (!listElement || !(listElement.getBoundingClientRect().height > 0)) return
-  const bottomDistance = getMessageListBottomDistance()
-  if (!Number.isFinite(bottomDistance) || bottomDistance > OUTPUT_FOLLOW_BOTTOM_TOLERANCE) return
-  const cursor = getSessionReadCursor({ messages: props.messages, historyLoaded: true, visible: true, focused: true, atBottom: true })
-  if (!props.currentSessionId || cursor === 0) return
-  emit('read-message', { session_id: props.currentSessionId, message_id: cursor })
-}
 const scheduleUnreadVisibilityCheck = () => {
+  if (messageListUnmounted) return
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
   visibilityFrameId = requestAnimationFrame(() => {
     visibilityFrameId = null
+    if (messageListUnmounted) return
     refreshLatestLlmMessageVisibility()
-    reportReadMessage()
   })
 }
+let messageListResizeObserver = null
+const bindMessageListResizeObserver = () => {
+  if (messageListResizeObserver === null) {
+    messageListResizeObserver = new ResizeObserver(() => scheduleUnreadVisibilityCheck())
+  }
+  messageListResizeObserver.disconnect()
+  const listElement = virtualList.value?.$el
+  if (messageListUnmounted || !listElement) {
+    scheduleUnreadVisibilityCheck()
+    return
+  }
+  messageListResizeObserver.observe(listElement)
+  if (listElement.firstElementChild) messageListResizeObserver.observe(listElement.firstElementChild)
+  scheduleUnreadVisibilityCheck()
+}
+watch(virtualList, bindMessageListResizeObserver, { flush: 'post' })
 const clearTransientUserScrollCandidate = () => {
   transientUserScrollCandidate = false
   if (transientUserScrollCandidateTimer !== null) {
@@ -820,7 +828,7 @@ watch(() => props.currentSessionId, () => {
 })
 
 watch(
-  () => [props.currentSessionId, props.initialHistoryLoaded, messagesLayoutReady.value, getSessionReadCursor({ messages: props.messages, historyLoaded: true, visible: true, focused: true, atBottom: true })],
+  () => [props.currentSessionId, props.initialHistoryLoaded, messagesLayoutReady.value],
   () => scheduleUnreadVisibilityCheck(),
   { flush: 'post' }
 )
@@ -862,6 +870,7 @@ watch(() => props.currentSessionId, () => {
   maintainScrollPosition.value = false
   bottomScrollRequest += 1
   messageListAtBottom = true
+  scrollState.value = null
   latestLlmMessageVisible.value = true
   followsOutput.value = true
   resetUserScrollCandidates()
@@ -940,11 +949,12 @@ const handleDocumentVisibilityChange = () => scheduleUnreadVisibilityCheck()
 onMounted(() => {
   window.addEventListener('focus', handleWindowFocus)
   document.addEventListener('visibilitychange', handleDocumentVisibilityChange)
+  bindMessageListResizeObserver()
 })
 window.addEventListener('pointerup', endPointerScrollSession)
 window.addEventListener('pointercancel', endPointerScrollSession)
 const handleVirtualScroll = (offset) => {
-  const currentOffset = Number.isFinite(offset) ? offset : virtualList.value?.scrollOffset
+  const currentOffset = Number.isFinite(offset) ? offset : virtualList.value?.$el?.scrollTop
   const hasValidOffset = Number.isFinite(currentOffset)
   const hasScrollBaseline = Number.isFinite(lastVirtualScrollOffset)
   const offsetChanged = hasScrollBaseline && hasValidOffset && currentOffset !== lastVirtualScrollOffset
@@ -960,7 +970,7 @@ const handleVirtualScroll = (offset) => {
   }
   if (hasValidOffset) lastVirtualScrollOffset = currentOffset
 
-  refreshLatestLlmMessageVisibility()
+  refreshLatestLlmMessageVisibility(currentOffset)
   scheduleUnreadVisibilityCheck()
 }
 const captureScrollAnchor = () => {
@@ -1201,6 +1211,7 @@ onUnmounted(() => {
   messageListUnmounted = true
   window.clearInterval(auditCountdownTimer)
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
+  if (messageListResizeObserver !== null) messageListResizeObserver.disconnect()
   window.removeEventListener('focus', handleWindowFocus)
   document.removeEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.removeEventListener('pointerup', endPointerScrollSession)
@@ -1232,7 +1243,6 @@ defineExpose({
   canFollowOutput,
   scrollToBottom,
   scrollTo,
-  reportRead: scheduleUnreadVisibilityCheck,
   addEventListener: (type, listener) => {
     if (type === 'scroll') scrollListeners.add(listener)
   },

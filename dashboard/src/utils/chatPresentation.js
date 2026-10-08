@@ -1,4 +1,20 @@
 const normalizeIdentity = value => value === undefined || value === null || value === '' ? null : String(value)
+const MESSAGE_LIST_BOTTOM_TOLERANCE = 24
+
+export const getMessageListScrollState = (metrics = {}) => {
+  const { scrollHeight, clientHeight, scrollTop } = metrics || {}
+  if (![scrollHeight, clientHeight, scrollTop].every(Number.isFinite) || scrollHeight < 0 || clientHeight <= 0) {
+    return null
+  }
+
+  const maxScrollTop = Math.max(0, scrollHeight - clientHeight)
+  const bottomDistance = Math.max(0, maxScrollTop - Math.max(0, scrollTop))
+  return {
+    hasOverflow: maxScrollTop > 0,
+    atBottom: bottomDistance <= MESSAGE_LIST_BOTTOM_TOLERANCE,
+    bottomDistance,
+  }
+}
 
 export const getReasoningCollapseName = (message) => {
   const responseId = normalizeIdentity(message?.response_id)

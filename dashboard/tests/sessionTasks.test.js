@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createSessionTaskController, getSessionReadCursor } from '../src/composables/chat/sessionTasks.js'
+import { createSessionTaskController } from '../src/composables/chat/sessionTasks.js'
 
 const createDeferred = () => {
   let resolve
@@ -109,57 +109,6 @@ const latestUpdate = fixture => fixture.updates[fixture.updates.length - 1]
 const latestActivityUpdate = fixture => fixture.activitiesUpdates[fixture.activitiesUpdates.length - 1]
 
 const sessionIds = tasks => tasks.map(task => task.session_id)
-
-test('getSessionReadCursor requires a real visible focused history at the bottom', () => {
-  const messages = [
-    { role: 'thinking', db_id: 100 },
-    { role: 'assistant', localid: 99 },
-    { role: 'user', db_id: 4 },
-    { role: 'assistant', db_id: 12 },
-    { role: 'tool', db_id: '20' },
-    { role: 'assistant', db_id: 12.5 },
-    { role: 'assistant', db_id: 0 },
-    { role: 'assistant', db_id: -1 },
-    { role: 'assistant', db_id: Number.MAX_SAFE_INTEGER + 1 },
-    { role: 'assistant', db_id: true },
-    null,
-    ['not-a-message']
-  ]
-
-  assert.equal(getSessionReadCursor({
-    messages,
-    historyLoaded: true,
-    visible: true,
-    focused: true,
-    atBottom: true
-  }), 12)
-
-  for (const flag of ['historyLoaded', 'visible', 'focused', 'atBottom']) {
-    assert.equal(getSessionReadCursor({
-      messages,
-      historyLoaded: true,
-      visible: true,
-      focused: true,
-      atBottom: true,
-      [flag]: false
-    }), 0)
-  }
-
-  assert.equal(getSessionReadCursor({
-    messages: [],
-    historyLoaded: true,
-    visible: true,
-    focused: true,
-    atBottom: true
-  }), 0)
-  assert.equal(getSessionReadCursor({
-    messages: null,
-    historyLoaded: true,
-    visible: true,
-    focused: true,
-    atBottom: true
-  }), 0)
-})
 
 test('an initial snapshot restores completed unread results and only newer results notify again', async () => {
   const snapshots = [
@@ -360,6 +309,140 @@ test('reading a completed result removes it while preserving a still-running ses
   replacement.controller.dispose()
 })
 
+test('viewing an existing completed result hides it before read acknowledgement', async () => {
+  const acknowledgement = createDeferred()
+  const readRequests = []
+  const fixture = createFixture({
+    fetchTasks: async () => [createTask('viewed-session', {
+      completed_message_id: 61,
+      completed_status: 'succeeded'
+    })],
+    markRead: async (sessionId, messageId) => {
+      readRequests.push([sessionId, messageId])
+      return acknowledgement.promise
+    }
+  })
+
+  await fixture.controller.setIdentity('view-user')
+  assert.deepEqual(sessionIds(latestUpdate(fixture)), ['viewed-session'])
+  assert.equal(fixture.notifications.length, 1)
+
+  fixture.controller.setViewingSession('viewed-session')
+  await flushMicrotasks()
+  assert.deepEqual(readRequests, [['viewed-session', 61]])
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
+  assert.deepEqual(fixture.closed, ['viewed-session'])
+
+  acknowledgement.resolve({ session_id: 'viewed-session', last_read_message_id: 61 })
+  await flushMicrotasks()
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, 61)
+  fixture.controller.dispose()
+})
+
+test('a view registered before the first snapshot auto-reads its result without notifying it', async () => {
+  for (const scenario of [
+    { name: 'success', error: null },
+    { name: 'failure', error: new Error('automatic read failed') }
+  ]) {
+    const firstSnapshot = createDeferred()
+    const readRequests = []
+    const fixture = createFixture({
+      fetchTasks: async () => firstSnapshot.promise,
+      markRead: async (sessionId, messageId) => {
+        readRequests.push([sessionId, messageId])
+        if (scenario.error) throw scenario.error
+        return { session_id: sessionId, last_read_message_id: messageId }
+      }
+    })
+
+    const identity = fixture.controller.setIdentity(`view-before-${scenario.name}`)
+    await flushMicrotasks()
+    fixture.controller.setViewingSession('current-session')
+    firstSnapshot.resolve([
+      createTask('current-session', {
+        completed_message_id: 62,
+        completed_status: 'failed'
+      }),
+      createTask('background-session', {
+        completed_message_id: 63,
+        completed_status: 'succeeded'
+      })
+    ])
+    await identity
+    await flushMicrotasks()
+
+    assert.deepEqual(readRequests, [['current-session', 62]])
+    assert.deepEqual(sessionIds(latestUpdate(fixture)), ['background-session'])
+    assert.deepEqual(fixture.notifications.map(task => task.session_id), ['background-session'])
+    const current = latestActivityUpdate(fixture).activities
+      .find(activity => activity.session_id === 'current-session')
+    assert.equal(current.has_unread_result, false)
+    assert.equal(current.last_read_message_id, scenario.error ? null : 62)
+    if (scenario.error) assert.deepEqual(fixture.errors, [scenario.error])
+    fixture.controller.dispose()
+  }
+})
+
+test('viewing an old running result reads it without hiding work and ignores stale snapshots after leaving', async () => {
+  const running = createTask('running-view', {
+    is_running: true,
+    completed_message_id: 64,
+    completed_status: 'succeeded'
+  })
+  const higher = createTask('running-view', {
+    completed_message_id: 65,
+    completed_status: 'failed'
+  })
+  const newer = createTask('running-view', {
+    completed_message_id: 66,
+    completed_status: 'succeeded'
+  })
+  const snapshots = [[running], [higher], [newer], [higher], [newer]]
+  const readRequests = []
+  const fixture = createFixture({
+    fetchTasks: async () => snapshots.shift() || [],
+    markRead: async (sessionId, messageId) => {
+      readRequests.push([sessionId, messageId])
+      return { session_id: sessionId, last_read_message_id: messageId }
+    }
+  })
+
+  await fixture.controller.setIdentity('running-view-user')
+  fixture.controller.setViewingSession('running-view')
+  await flushMicrotasks()
+  assert.deepEqual(readRequests, [['running-view', 64]])
+  assert.deepEqual(sessionIds(latestUpdate(fixture)), ['running-view'])
+  assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, 64)
+
+  await fixture.controller.refresh()
+  await flushMicrotasks()
+  assert.deepEqual(readRequests, [
+    ['running-view', 64],
+    ['running-view', 65]
+  ])
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, 65)
+
+  fixture.controller.setViewingSession(null)
+  await fixture.controller.refresh()
+  assert.deepEqual(sessionIds(latestUpdate(fixture)), ['running-view'])
+  assert.equal(latestUpdate(fixture)[0].has_unread_result, true)
+  assert.deepEqual(fixture.notifications.map(task => [task.session_id, task.completed_message_id]), [
+    ['running-view', 66]
+  ])
+
+  await fixture.controller.refresh()
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(fixture.notifications.length, 1)
+  await fixture.controller.refresh()
+  assert.deepEqual(sessionIds(latestUpdate(fixture)), ['running-view'])
+  assert.equal(fixture.notifications.length, 1)
+  fixture.controller.dispose()
+})
+
 test('deleting a task and then receiving an empty snapshot converges and closes its notification', async () => {
   const running = createTask('running-session', { is_running: true })
   const snapshots = [
@@ -477,6 +560,144 @@ test('polling keeps one 1500 timer, shares its start sequence with reads, and pr
   fixture.controller.dispose()
 })
 
+test('automatic reads serialize the highest cursor and ignore duplicate or old snapshots', async () => {
+  const firstSnapshot = createDeferred()
+  const firstAcknowledgement = createDeferred()
+  const secondAcknowledgement = createDeferred()
+  const readRequests = []
+  let fetchCount = 0
+  const fixture = createFixture({
+    fetchTasks: async () => {
+      fetchCount += 1
+      if (fetchCount === 1) return firstSnapshot.promise
+      if (fetchCount === 2 || fetchCount === 4) {
+        return [createTask('merge-session', {
+          completed_message_id: 68,
+          completed_status: 'succeeded'
+        })]
+      }
+      return [createTask('merge-session', {
+        completed_message_id: 67,
+        completed_status: 'succeeded'
+      })]
+    },
+    markRead: (sessionId, messageId) => {
+      readRequests.push([sessionId, messageId])
+      return messageId === 67
+        ? firstAcknowledgement.promise
+        : secondAcknowledgement.promise
+    }
+  })
+
+  const identity = fixture.controller.setIdentity('merge-user')
+  await flushMicrotasks()
+  fixture.controller.setViewingSession('merge-session')
+  firstSnapshot.resolve([createTask('merge-session', {
+    completed_message_id: 67,
+    completed_status: 'succeeded'
+  })])
+  await identity
+  await flushMicrotasks()
+  assert.deepEqual(readRequests, [['merge-session', 67]])
+
+  await fixture.controller.refresh()
+  assert.deepEqual(readRequests, [['merge-session', 67]])
+  await fixture.controller.refresh()
+  assert.deepEqual(readRequests, [['merge-session', 67]])
+  await fixture.controller.refresh()
+  assert.deepEqual(readRequests, [['merge-session', 67]])
+  assert.deepEqual(latestUpdate(fixture), [])
+
+  firstAcknowledgement.resolve({ session_id: 'merge-session', last_read_message_id: 67 })
+  await flushMicrotasks()
+  assert.deepEqual(readRequests, [
+    ['merge-session', 67],
+    ['merge-session', 68]
+  ])
+
+  secondAcknowledgement.resolve({ session_id: 'merge-session', last_read_message_id: 68 })
+  await flushMicrotasks()
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, 68)
+  fixture.controller.dispose()
+})
+
+test('a failed automatic read retries after leaving while the local result stays read', async () => {
+  const failure = new Error('temporary automatic read failure')
+  let attempt = 0
+  const readRequests = []
+  const fixture = createFixture({
+    fetchTasks: async () => [createTask('retry-view', {
+      completed_message_id: 69,
+      completed_status: 'failed'
+    })],
+    markRead: async (sessionId, messageId) => {
+      attempt += 1
+      readRequests.push([sessionId, messageId])
+      if (attempt === 1) throw failure
+      return { session_id: sessionId, last_read_message_id: messageId }
+    }
+  })
+
+  await fixture.controller.setIdentity('retry-view-user')
+  fixture.controller.setViewingSession('retry-view')
+  await flushMicrotasks()
+  assert.deepEqual(readRequests, [['retry-view', 69]])
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
+  assert.deepEqual(fixture.errors, [failure])
+
+  fixture.controller.setViewingSession(null)
+  await fixture.timers.tick()
+  await flushMicrotasks()
+  assert.deepEqual(readRequests, [
+    ['retry-view', 69],
+    ['retry-view', 69]
+  ])
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, 69)
+  fixture.controller.dispose()
+})
+
+test('unknown, unowned, and null viewing sessions do not auto-read and invalid ids are rejected', async () => {
+  const readRequests = []
+  const fixture = createFixture({
+    fetchTasks: async () => [
+      createTask('owned-result', {
+        completed_message_id: 70,
+        completed_status: 'succeeded'
+      }),
+      createTask('other-result', {
+        is_owned: false,
+        completed_message_id: 71,
+        completed_status: 'failed'
+      })
+    ],
+    markRead: async (sessionId, messageId) => {
+      readRequests.push([sessionId, messageId])
+      return { session_id: sessionId, last_read_message_id: messageId }
+    }
+  })
+
+  await fixture.controller.setIdentity('viewing-user')
+  for (const sessionId of ['missing-result', 'other-result', null]) {
+    fixture.controller.setViewingSession(sessionId)
+    await fixture.controller.refresh()
+  }
+
+  assert.deepEqual(readRequests, [])
+  assert.deepEqual(sessionIds(latestUpdate(fixture)), ['owned-result'])
+  assert.equal(latestUpdate(fixture)[0].has_unread_result, true)
+  assert.deepEqual(fixture.notifications.map(task => task.session_id), ['owned-result'])
+  assert.throws(() => fixture.controller.setViewingSession(''), TypeError)
+  assert.throws(() => fixture.controller.setViewingSession('   '), TypeError)
+  assert.throws(() => fixture.controller.setViewingSession(123), TypeError)
+  fixture.controller.dispose()
+})
+
 test('a read for an unknown session can finish before the first snapshot and suppresses its later notification', async () => {
   const firstSnapshot = createDeferred()
   const readRequests = []
@@ -555,7 +776,7 @@ test('a late snapshot that started before markRead cannot revive an already-read
   fixture.controller.dispose()
 })
 
-test('a failed markRead is not optimistic and is retried by the next polling round', async () => {
+test('a failed markRead keeps the result locally read and retries by the next polling round', async () => {
   const failure = new Error('temporary read failure')
   let attempt = 0
   const fixture = createFixture({
@@ -573,8 +794,9 @@ test('a failed markRead is not optimistic and is retried by the next polling rou
   await fixture.controller.setIdentity('user-9')
   await fixture.controller.readSession('retry-session', 100)
   assert.equal(attempt, 1)
-  assert.equal(latestUpdate(fixture)[0].has_unread_result, true)
-  assert.equal(latestUpdate(fixture)[0].last_read_message_id, null)
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
   assert.deepEqual(fixture.errors, [failure])
   assert.equal(fixture.timers.pending.length, 1)
 
@@ -621,7 +843,7 @@ test('concurrent reads for one session serialize, merge the highest cursor, and 
   fixture.controller.dispose()
 })
 
-test('a smaller markRead cursor is rejected without falsely marking the result read', async () => {
+test('a smaller markRead cursor keeps the result locally read without server confirmation', async () => {
   const errors = []
   const fixture = createFixture({
     fetchTasks: async () => [createTask('short-cursor', {
@@ -636,8 +858,9 @@ test('a smaller markRead cursor is rejected without falsely marking the result r
   errors.push(...fixture.errors)
   assert.equal(errors.length, 1)
   assert.equal(errors[0] instanceof TypeError, true)
-  assert.equal(latestUpdate(fixture)[0].has_unread_result, true)
-  assert.equal(latestUpdate(fixture)[0].last_read_message_id, null)
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
   fixture.controller.dispose()
 })
 
@@ -778,10 +1001,10 @@ test('identity changes, logout, and dispose invalidate late work; the same ident
   })
   await disposed.controller.setIdentity('user-dispose')
   assert.equal(disposed.notifications.length, 1)
-  const updatesBeforeDispose = disposed.updates.length
-  const activitiesUpdatesBeforeDispose = disposed.activitiesUpdates.length
   const read = disposed.controller.readSession('dispose-session', 140)
   await flushMicrotasks()
+  const updatesBeforeDispose = disposed.updates.length
+  const activitiesUpdatesBeforeDispose = disposed.activitiesUpdates.length
   disposed.controller.dispose()
   assert.equal(disposed.timers.pending.length, 0)
   assert.equal(disposed.updates.length, updatesBeforeDispose + 1)
@@ -797,7 +1020,89 @@ test('identity changes, logout, and dispose invalidate late work; the same ident
   assert.equal(disposed.notifications.length, 1)
 })
 
-test('business read refusals stop retries while preserving unread results and polling', async () => {
+test('identity changes, logout, and dispose clear automatic read state before old work completes', async () => {
+  const oldAcknowledgement = createDeferred()
+  const logoutSnapshot = createDeferred()
+  const readRequests = []
+  let fetchCount = 0
+  const fixture = createFixture({
+    fetchTasks: async () => {
+      fetchCount += 1
+      if (fetchCount === 1) {
+        return [createTask('old-identity-session', {
+          completed_message_id: 72,
+          completed_status: 'succeeded'
+        })]
+      }
+      if (fetchCount === 2) {
+        return [createTask('new-identity-session', {
+          completed_message_id: 73,
+          completed_status: 'failed'
+        })]
+      }
+      return logoutSnapshot.promise
+    },
+    markRead: (sessionId, messageId) => {
+      readRequests.push([sessionId, messageId])
+      return oldAcknowledgement.promise
+    }
+  })
+
+  await fixture.controller.setIdentity('old-identity')
+  fixture.controller.setViewingSession('old-identity-session')
+  await flushMicrotasks()
+  assert.deepEqual(readRequests, [['old-identity-session', 72]])
+
+  await fixture.controller.setIdentity('new-identity')
+  assert.deepEqual(sessionIds(latestUpdate(fixture)), ['new-identity-session'])
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
+  oldAcknowledgement.resolve({
+    session_id: 'old-identity-session',
+    last_read_message_id: 72
+  })
+  await flushMicrotasks()
+  assert.deepEqual(sessionIds(latestUpdate(fixture)), ['new-identity-session'])
+  assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
+
+  const staleLogoutRefresh = fixture.controller.refresh()
+  await flushMicrotasks()
+  await fixture.controller.setIdentity(null)
+  logoutSnapshot.resolve([createTask('stale-logout-session', {
+    completed_message_id: 74,
+    completed_status: 'succeeded'
+  })])
+  await staleLogoutRefresh
+  assert.deepEqual(latestUpdate(fixture), [])
+  assert.equal(latestActivityUpdate(fixture), null)
+
+  const disposeAcknowledgement = createDeferred()
+  const disposed = createFixture({
+    fetchTasks: async () => [createTask('dispose-view-session', {
+      completed_message_id: 75,
+      completed_status: 'succeeded'
+    })],
+    markRead: async (sessionId, messageId) => {
+      readRequests.push([sessionId, messageId])
+      return disposeAcknowledgement.promise
+    }
+  })
+  await disposed.controller.setIdentity('dispose-identity')
+  disposed.controller.setViewingSession('dispose-view-session')
+  await flushMicrotasks()
+  const updatesBeforeDispose = disposed.updates.length
+  const activitiesBeforeDispose = disposed.activitiesUpdates.length
+  disposed.controller.dispose()
+  assert.deepEqual(latestUpdate(disposed), [])
+  assert.equal(latestActivityUpdate(disposed), null)
+  disposeAcknowledgement.resolve({ last_read_message_id: 75 })
+  await flushMicrotasks()
+  assert.equal(disposed.updates.length, updatesBeforeDispose + 1)
+  assert.equal(disposed.activitiesUpdates.length, activitiesBeforeDispose + 1)
+  assert.deepEqual(latestUpdate(disposed), [])
+  assert.equal(latestActivityUpdate(disposed), null)
+})
+
+test('business read refusals stop retries while preserving local read state and polling', async () => {
   for (const code of [400, 403, 404]) {
     const readRequests = []
     const refusal = new Error(`read refused with business code ${code}`)
@@ -826,12 +1131,54 @@ test('business read refusals stop retries while preserving unread results and po
     await fixture.controller.readSession(`refused-${code}`, 150 + code)
     assert.deepEqual(readRequests, [[`refused-${code}`, 150 + code]])
     assert.deepEqual(fixture.errors, [refusal])
-    assert.equal(latestUpdate(fixture)[0].has_unread_result, true)
+    assert.deepEqual(latestUpdate(fixture), [])
+    assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+    assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
 
     await fixture.timers.tick()
     assert.deepEqual(readRequests, [[`refused-${code}`, 150 + code]])
-    assert.equal(latestUpdate(fixture)[0].has_unread_result, true)
+    assert.deepEqual(latestUpdate(fixture), [])
+    assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+    assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
     assert.equal(fixture.timers.pending.length, 1)
+    fixture.controller.dispose()
+  }
+})
+
+test('permanent automatic read refusals do not retry after repeated focus and refresh', async () => {
+  for (const code of [400, 403, 404]) {
+    const refusal = new Error(`automatic read refused with business code ${code}`)
+    refusal.response = { status: 200, data: { code } }
+    const readRequests = []
+    const fixture = createFixture({
+      fetchTasks: async () => [createTask(`auto-refused-${code}`, {
+        completed_message_id: 176 + code,
+        completed_status: 'failed'
+      })],
+      markRead: async (sessionId, messageId) => {
+        readRequests.push([sessionId, messageId])
+        throw refusal
+      }
+    })
+
+    await fixture.controller.setIdentity(`auto-refused-user-${code}`)
+    fixture.controller.setViewingSession(`auto-refused-${code}`)
+    await flushMicrotasks()
+    assert.deepEqual(readRequests, [[`auto-refused-${code}`, 176 + code]])
+    assert.deepEqual(latestUpdate(fixture), [])
+    assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
+    assert.equal(latestActivityUpdate(fixture).activities[0].last_read_message_id, null)
+    assert.deepEqual(fixture.errors, [refusal])
+
+    fixture.controller.setViewingSession(null)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      fixture.controller.setViewingSession(`auto-refused-${code}`)
+      await fixture.controller.refresh()
+      fixture.controller.setViewingSession(null)
+    }
+    assert.deepEqual(readRequests, [[`auto-refused-${code}`, 176 + code]])
+    assert.deepEqual(latestUpdate(fixture), [])
+    assert.equal(latestActivityUpdate(fixture).activities[0].has_unread_result, false)
     fixture.controller.dispose()
   }
 })

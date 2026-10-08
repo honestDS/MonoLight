@@ -155,7 +155,6 @@
         :current-session-info="currentSessionInfo"
         :show-request-metadata="sessionEngaged"
         :hide-empty-tip="!currentSessionId"
-        @read-message="handleSessionRead"
         @audit-decision="handleAuditDecision"
       />
 
@@ -662,19 +661,12 @@ const {
   currentTodoPlan
 } = chat
 
-const handleSessionRead = ({ session_id: sid, message_id: messageId }) => {
-  if (
-    sid !== currentSessionId.value ||
-    !currentUid.value ||
-    currentSession.value?.uid !== currentUid.value
-  ) return
-  void sessionTaskService?.readSession(sid, messageId)
-}
-
 watch(
-  [currentUid, () => currentSession.value?.uid],
-  () => messageList.value?.reportRead?.(),
-  { flush: 'post' }
+  [currentSessionId, () => route.path],
+  ([sessionId, path]) => {
+    sessionTaskService?.setViewingSession(path === '/' ? sessionId : null)
+  },
+  { immediate: true, flush: 'sync' }
 )
 
 const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(
@@ -1119,6 +1111,7 @@ onUnmounted(() => {
   if (messageList.value) {
     messageList.value.removeEventListener('scroll', handleScroll)
   }
+  sessionTaskService?.setViewingSession(null)
   disconnectWebSocket()
 })
 </script>
