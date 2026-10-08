@@ -418,7 +418,7 @@ import { ref, onMounted, onUnmounted, computed, nextTick, watch, inject } from '
 import { ElMessage, ClickOutside as vClickOutside } from 'element-plus'
 import { ChatLineSquare, Delete, InfoFilled, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import SessionTodoPanel from '../components/SessionTodoPanel.vue'
 import HelpTooltip from '../components/HelpTooltip.vue'
@@ -442,6 +442,7 @@ import {
 
 const { t } = useI18n()
 const route = useRoute()
+const router = useRouter()
 let navigationVersion = 0
 let disposed = false
 const isValidTaskSessionId = sid => typeof sid === 'string' && sid.length > 0 && sid.length <= 100
@@ -816,7 +817,19 @@ const {
   handleScroll
 } = chat
 
+const syncSessionQuery = (sessionId) => {
+  if (disposed || route.path !== '/') return
+
+  const query = { ...route.query }
+  delete query.task_open
+  if (isValidTaskSessionId(sessionId)) query.session_id = sessionId
+  else delete query.session_id
+
+  router.replace({ path: route.path, query, hash: route.hash }).catch(console.error)
+}
+
 const handleSelectSession = (session) => {
+  const previousSessionId = currentSessionId.value
   navigationVersion++
   closeSessionsPanel()
   moreOptionsVisible.value = false
@@ -829,19 +842,33 @@ const handleSelectSession = (session) => {
 
   deferredContentSessionId.value = shouldDefer ? sessionId : null
   selectSession(session)
+  if (currentSessionId.value === previousSessionId) syncSessionQuery(currentSessionId.value)
 }
 
 const handleCreateNewSession = () => {
+  const previousSessionId = currentSessionId.value
   navigationVersion++
   closeSessionsPanel()
   moreOptionsVisible.value = false
   deferredContentSessionId.value = null
   createNewSession()
+  if (currentSessionId.value === previousSessionId) syncSessionQuery(currentSessionId.value)
 }
 
+watch(currentSessionId, sessionId => {
+  navigationVersion++
+  syncSessionQuery(sessionId)
+}, { flush: 'sync' })
+
 watch(() => [route.query.session_id, route.query.task_open], async ([sid, openToken]) => {
-  if (!isValidTaskSessionId(sid)) return
   const version = ++navigationVersion
+  if (route.path !== '/') return
+  if (sid === undefined && currentSessionId.value) {
+    handleCreateNewSession()
+    return
+  }
+  if (!isValidTaskSessionId(sid)) return
+  if (sid === currentSessionId.value && openToken === undefined) return
   await loadSessions()
   if (
     disposed ||
@@ -852,7 +879,10 @@ watch(() => [route.query.session_id, route.query.task_open], async ([sid, openTo
   ) return
   const session = sessions.value.find(item => item.session_id === sid)
   if (session) handleSelectSession(session)
-  else ElMessage.warning(t('chat.task_session_unavailable'))
+  else {
+    ElMessage.warning(t('chat.task_session_unavailable'))
+    syncSessionQuery(currentSessionId.value)
+  }
 }, { immediate: true })
 
 const handleWelcomeExitTransitionEnd = async (event) => {
