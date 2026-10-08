@@ -5,170 +5,65 @@ import { useChatState } from './useChatState'
 import { useChatDrafts } from './useChatDrafts.js'
 import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
-import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
-import { createContextSummaryTracker } from './contextSummaryTracker.js'
-import { createHistoryMergeTracker } from './historyMergeTracker.js'
-import { getIncrementalHistoryCursor, syncIncrementalHistory } from './historyIncrementalSync.js'
-import { applyResumedTurnEnd, createSessionReconnectHandler, getHistoryMessageCursor, getInitialResumeLoading, resumeSessionStream } from './streamResume.js'
-import { withSessionActivity } from './sessionActivity.js'
-import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
+import { useMessageProcessor } from './useMessageProcessor'
 import { createSessionAgentSettings } from './sessionAgentSettings.js'
 import { createReplyController } from './replyControl.js'
-import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMessages } from './auditConfirmationState.js'
-import { createHttpHistorySyncController } from './httpHistorySync.js'
-import { createHttpReplyPolling, normalizeHttpIdentity } from './httpReplyPolling.js'
-import { activateSelectedSessionTransportMode, persistSessionTransportMode, resolveSessionTransportMode, resumeSelectedSessionByTransport } from './sessionTransportMode.js'
-import { createTransportNotifier } from './transportNotifications.js'
-import { isMainDialogueRequestMetadata, mergeLlmRequestMetadata, normalizeLlmRequestMetadata, shouldReplaceLlmRequestMetadata } from './llmRequestMetadata.js'
-import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
-import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
+import { createHttpReplyPolling } from './httpReplyPolling.js'
 import {
-  mergeTodoPlan,
-  normalizeTodoPlan,
-  readTodoPlanFromTransport
-} from '../../utils/todoPresentation.js'
-import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
+  activateSelectedSessionTransportMode,
+  persistSessionTransportMode,
+  resolveSessionTransportMode,
+  resumeSelectedSessionByTransport
+} from './sessionTransportMode.js'
+import { createTransportNotifier } from './transportNotifications.js'
+import { withSessionActivity } from './sessionActivity.js'
+import { getInitialResumeLoading } from './streamResume.js'
+import { useChatHistory } from './useChatHistory.js'
+import { useChatSessionEvents } from './useChatSessionEvents.js'
+import { useChatHttpSend } from './useChatHttpSend.js'
+import { useChatWebSocketSend } from './useChatWebSocketSend.js'
+import { useChatStreamResume } from './useChatStreamResume.js'
+import {
+  formatTimestamp,
+  getMessageTimestamp,
+  getToolCallArguments,
+  getToolCallContent,
+  getToolCallName,
+  getToolCalls,
+  getToolResultContent,
+  getToolResultName,
+  isToolCall,
+  isToolResult
+} from '../../utils'
 import { shouldReturnToWelcomeAfterSessionDelete } from '../../utils/chatContentReveal.js'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
-import { truncateErrorMessage } from '../../utils/errorMessage.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
-const HTTP_HISTORY_FAST_SYNC_INTERVAL_MS = 2000
-const HTTP_HISTORY_INCREMENTAL_PAGE_SIZE = 50
-const HTTP_HISTORY_INCREMENTAL_MAX_PAGES = 4
-
-const normalizeHistoryMessage = (message) => {
-  const normalizedMessage = {
-    ...message,
-    db_id: message?.db_id ?? message?.id
-  }
-  const content = normalizeMessageContent(message?.content)
-  if (message?.type === 'background_result' && content?.type === 'background_tool_result') {
-    return {
-      ...normalizedMessage,
-      role: 'background_system',
-      content: JSON.stringify(content)
-    }
-  }
-  return normalizedMessage
-}
-
-const getAuditConfirmationRecordId = (message) => {
-  if (message?.type !== 'audit_confirmation') return null
-  try {
-    const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
-    return payload?.audit_record_id ? String(payload.audit_record_id) : null
-  } catch {
-    return null
-  }
-}
-
-const parseAuditConfirmationResponse = (response) => {
-  for (const content of [response?.choices?.[0]?.message?.content, response?.content]) {
-    try {
-      const payload = typeof content === 'string' ? JSON.parse(content) : content
-      if (payload?.type === 'audit_confirmation') return payload
-    } catch {}
-  }
-  return null
-}
-
-const getLocalMessageType = (message) => {
-  if (message?.type === 'audit_decision' && message.role === 'user') return 'user'
-  if (message?.type && message.type !== 'text') return message.type
-  if (isToolCall(message)) return 'tool_call'
-  if (isToolResult(message)) return 'tool_result'
-  return message?.role || message?.type || 'message'
-}
-
-const findTransientHistoryMessageIndex = (messages, historyMessage) => {
-  const historyContent = normalizeMessageContent(historyMessage?.content)
-  const historyType = getLocalMessageType(historyMessage)
-  return messages.findIndex(message => {
-    if (message?.db_id) return false
-    if (getLocalMessageType(message) !== historyType) return false
-    return JSON.stringify(normalizeMessageContent(message?.content)) === JSON.stringify(historyContent)
-  })
-}
 
 export function useChatSession({ currentUid = ref(null) } = {}) {
-  // ==================== 组合各模块 ====================
-
-  // 1. 消息状态
+  // ==================== 基础状态与模块 ====================
   const chatState = useChatState()
-  
-  // 新增附件状态
-  const attachments = ref([])
-  const contextSummaryWorkKeys = ref(new Set())
-  const contextSummaryRequestKeys = new Map()
-  const contextSummaryTracker = createContextSummaryTracker()
-  const llmRequestMetadataBySession = ref(new Map())
-  const workLifecycleTracker = createWorkLifecycleTracker()
-  const historyMergeTracker = createHistoryMergeTracker()
-  const initialHistoryLoaded = ref(true)
-  const pendingHttpRequests = new Map()
-  const incrementalHistoryCursors = new Map()
+  const sessionManager = useSessionManager()
   let sessionScopeActive = true
 
-  const trackHttpSubmission = (...args) => httpReplyPolling.trackHttpSubmission(...args)
-  const resetHttpPollingState = () => httpReplyPolling.resetHttpPollingState()
-  
-  // 默认 Markdown 开关状态（用于未选择会话时）
+  const attachments = ref([])
   const enableMarkdownDefault = ref(false)
   const showToolCallsDefault = ref(true)
   const showReasoningDefault = ref(true)
   const newSessionProfileOverrideId = ref(null)
-  
-  // 2. 会话管理
-  const sessionManager = useSessionManager()
-  const currentTodoPlan = ref(null)
-  const skipTodoInitialLoadSessionIds = new Set()
-  let todoLoadVersion = 0
 
-  const applyTodoPlan = (plan, sessionId = sessionManager.currentSessionId.value) => {
-    if (!sessionId || sessionId !== sessionManager.currentSessionId.value) return
-    currentTodoPlan.value = mergeTodoPlan(currentTodoPlan.value, plan)
-  }
-
-  const applyTodoTransportPayload = (payload, sessionId = payload?.session_id || sessionManager.currentSessionId.value) => {
-    const plan = readTodoPlanFromTransport(payload)
-    if (plan) applyTodoPlan(plan, sessionId)
-  }
-
-  const markNewSessionTodoKnownEmpty = (sessionId) => {
-    if (sessionId) skipTodoInitialLoadSessionIds.add(sessionId)
-  }
-
-  watch(
-    () => sessionManager.currentSessionId.value,
-    async (sessionId) => {
-      const requestVersion = ++todoLoadVersion
-      currentTodoPlan.value = null
-      if (!sessionId) return
-      if (skipTodoInitialLoadSessionIds.delete(sessionId)) {
-        currentTodoPlan.value = normalizeTodoPlan(null)
-        return
-      }
-      try {
-        const response = await chatApi.sessionTodo(sessionId)
-        if (requestVersion !== todoLoadVersion || sessionId !== sessionManager.currentSessionId.value) return
-        applyTodoPlan(response.data?.data, sessionId)
-      } catch {
-        if (requestVersion === todoLoadVersion && sessionId === sessionManager.currentSessionId.value) {
-          currentTodoPlan.value = null
-        }
-      }
-    },
-    { immediate: true }
-  )
-  const isContextSummarizing = computed(() => contextSummaryWorkKeys.value.size > 0)
   const currentSession = computed(() =>
     sessionManager.sessions.value.find(
       session => session.session_id === sessionManager.currentSessionId.value
     ) || null
   )
-  const { goalModeDefault, maxTurnsDefault, currentSessionGoalMode, currentSessionMaxTurns } = createSessionAgentSettings({
+  const {
+    goalModeDefault,
+    maxTurnsDefault,
+    currentSessionGoalMode,
+    currentSessionMaxTurns
+  } = createSessionAgentSettings({
     sessionManager,
     currentSession
   })
@@ -216,12 +111,6 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
       }
     }
   })
-  const llmRequestMetadata = computed(() => {
-    const sessionId = sessionManager.currentSessionId.value
-    if (!sessionId) return null
-    return llmRequestMetadataBySession.value.get(sessionId)
-      || normalizeLlmRequestMetadata(currentSession.value?.llm_request_metadata)
-  })
   const isCurrentSessionReadOnly = computed(() => {
     const source = currentSession.value?.source
     return Boolean(source && !['http', 'ws'].includes(source))
@@ -232,6 +121,61 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     currentSessionId: sessionManager.currentSessionId,
     isCurrentSessionReadOnly
   })
+  const transport = useChatTransport()
+  const messageProcessor = useMessageProcessor()
+
+  const transportNotifier = createTransportNotifier({
+    translate: t,
+    showMessage: options => ElMessage(options)
+  })
+  const modeSettingSubmitting = ref(false)
+
+  // ==================== 历史与会话事件 ====================
+  const history = useChatHistory({
+    chatState,
+    sessionManager,
+    transport,
+    isCurrentSessionReadOnly,
+    currentSessionShowToolCalls,
+    isSessionScopeActive: () => sessionScopeActive,
+    api: chatApi
+  })
+  const initialHistoryLoaded = history.initialHistoryLoaded
+  const events = useChatSessionEvents({
+    chatState,
+    sessionManager,
+    currentSession,
+    currentSessionShowToolCalls,
+    messageProcessor,
+    mergeLatestSessionHistory: history.mergeLatestSessionHistory,
+    api: chatApi
+  })
+  const {
+    currentTodoPlan,
+    applyTodoTransportPayload,
+    markNewSessionTodoKnownEmpty,
+    contextSummaryWorkKeys,
+    contextSummaryRequestKeys,
+    contextSummaryTracker,
+    workLifecycleTracker,
+    isContextSummarizing,
+    llmRequestMetadata,
+    processAiResponse,
+    createLifecycleCallbacks,
+    finishRequestLifecycle,
+    getCompletedWorkId,
+    shouldProcessCompletedWork,
+    refreshSessionLoadingState,
+    applyAuditConfirmationStatus,
+    applyAuditToolResultsUpdate,
+    applyNonStreamSessionEvents,
+    updateLlmRequestMetadata
+  } = events
+
+  const pendingHttpRequests = new Map()
+  let httpReplyPolling
+  const resetHttpPollingState = () => httpReplyPolling.resetHttpPollingState()
+
   const {
     isStopping,
     isReplyRunning,
@@ -251,22 +195,16 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     stopSession: sid => chatApi.stopSession(sid),
     isSessionScopeActive: () => sessionScopeActive,
     resetHttpPollingState,
-    mergeLatestSessionHistory: sid => mergeLatestSessionHistory(sid),
+    mergeLatestSessionHistory: history.mergeLatestSessionHistory,
     reportError: message => ElMessage.error(message),
     translate: t
   })
 
-  // 3. 通信层
-  const transport = useChatTransport()
-  const transportNotifier = createTransportNotifier({
-    translate: t,
-    showMessage: options => ElMessage(options)
-  })
-  const modeSettingSubmitting = ref(false)
   const transportModeChangeBlocked = computed(() => (
     Boolean(chatState.loading.value || currentSession.value?.is_reply_running || isStopping.value)
   ))
 
+  let resumeSelectedSessionStream
   const setTransportMode = async (mode, { notifyError = true } = {}) => {
     if (modeSettingSubmitting.value) return false
 
@@ -310,419 +248,8 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     }
   }
 
-  // 4. 消息处理
-  const messageProcessor = useMessageProcessor()
-  const filterNewMessages = (messages) => filterToolOutputMessages(
-    messages,
-    currentSessionShowToolCalls.value
-  )
-  const processAiResponse = (response, thinkingId = null, requestId = null) => {
-    messageProcessor.processAiResponse(
-      chatState.messages,
-      filterResponseHistoryToolOutput(response, currentSessionShowToolCalls.value),
-      thinkingId,
-      requestId
-    )
-  }
-  const selectNewSession = (session) => {
-    historyMergeTracker.invalidate()
-    const activeSession = withSessionActivity(session)
-    const sessionIndex = sessionManager.sessions.value.findIndex(item => item.session_id === activeSession.session_id)
-    if (sessionIndex === -1) {
-      sessionManager.sessions.value.unshift(activeSession)
-    } else {
-      sessionManager.sessions.value[sessionIndex] = {
-        ...sessionManager.sessions.value[sessionIndex],
-        ...activeSession
-      }
-    }
-    sessionManager.selectSession(activeSession, null, false, false)
-    chatDrafts.adoptSessionId(activeSession.session_id)
-  }
-
-  const applyLifecycleEvent = (updateMessages, event, isCurrentRequestSession) => {
-    if (!isCurrentRequestSession()) return
-    const currentSessionId = sessionManager.currentSessionId.value
-    if (event?.session_id && currentSessionId && event.session_id !== currentSessionId) return
-
-    chatState.messages.value = updateMessages(chatState.messages.value, event)
-    void nextTick(() => {
-      if (isCurrentRequestSession()) chatState.followOutputToBottom('auto')
-    })
-  }
-
-  const updateLlmRequestMetadata = (event, isCurrentRequestSession) => {
-    if (!isCurrentRequestSession()) return
-    const currentSessionId = sessionManager.currentSessionId.value
-    const sessionId = event?.session_id || currentSessionId
-    if (!sessionId || sessionId !== currentSessionId) return
-
-    const metadata = normalizeLlmRequestMetadata(event)
-    if (!metadata) return
-    if (!isMainDialogueRequestMetadata(metadata)) return
-
-    const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
-    const currentMetadata = llmRequestMetadataBySession.value.get(sessionId)
-      || normalizeLlmRequestMetadata(sessionManager.sessions.value[sessionIndex]?.llm_request_metadata)
-    if (!shouldReplaceLlmRequestMetadata(currentMetadata, metadata)) return
-
-    const nextMetadata = mergeLlmRequestMetadata(currentMetadata, metadata)
-
-    const nextMetadataBySession = new Map(llmRequestMetadataBySession.value)
-    nextMetadataBySession.set(sessionId, nextMetadata)
-    llmRequestMetadataBySession.value = nextMetadataBySession
-
-    if (sessionIndex !== -1) {
-      sessionManager.sessions.value[sessionIndex] = {
-        ...sessionManager.sessions.value[sessionIndex],
-        llm_request_metadata: nextMetadata
-      }
-    }
-  }
-
-  const refreshSessionLoadingState = () => {
-    void sessionManager.refreshSessionLoadingState()
-  }
-
-  const createLifecycleCallbacks = isCurrentRequestSession => ({
-    onInputAccepted: () => {
-      refreshSessionLoadingState()
-    },
-    onInputQueued: event => {
-      refreshSessionLoadingState()
-      applyLifecycleEvent(workLifecycleTracker.markInputQueued, event, isCurrentRequestSession)
-    },
-    onInputDequeued: event => applyLifecycleEvent(workLifecycleTracker.markInputsDequeued, event, isCurrentRequestSession),
-    onAgentLoopStart: event => applyLifecycleEvent(workLifecycleTracker.startAgentLoop, event, isCurrentRequestSession),
-    onAgentLoopOutput: event => {
-      // 跨过一次实际绘制，确保 agent_loop_start 创建的 thinking 已显示一帧。
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        applyLifecycleEvent(workLifecycleTracker.stopAgentLoop, event, isCurrentRequestSession)
-      }))
-    },
-    onLlmRequestMetadata: event => updateLlmRequestMetadata(event, isCurrentRequestSession),
-    onTodoUpdate: event => {
-      if (isCurrentRequestSession()) applyTodoTransportPayload(event)
-    },
-    onWorkFinished: event => {
-      refreshSessionLoadingState()
-      applyLifecycleEvent(workLifecycleTracker.finishWorkLifecycle, event, isCurrentRequestSession)
-      if (
-        isCurrentRequestSession()
-        && (!event?.session_id || event.session_id === sessionManager.currentSessionId.value)
-      ) {
-        contextSummaryTracker.endContextSummaryWork(
-          contextSummaryWorkKeys.value,
-          contextSummaryRequestKeys,
-          event,
-          event.request_id
-        )
-        for (const requestId of [
-          event.request_id,
-          ...(Array.isArray(event.request_ids) ? event.request_ids : [])
-        ]) {
-          if (requestId === undefined || requestId === null || requestId === '') continue
-          contextSummaryTracker.clearContextSummaryRequest(
-            contextSummaryWorkKeys.value,
-            contextSummaryRequestKeys,
-            requestId
-          )
-        }
-      }
-    }
-  })
-
-  const finishRequestLifecycle = (requestId, isCurrentRequestSession) => {
-    if (!requestId) return
-    applyLifecycleEvent(
-      workLifecycleTracker.finishWorkLifecycle,
-      { request_ids: [requestId] },
-      isCurrentRequestSession
-    )
-  }
-
-  const getCompletedWorkId = (data) => data?.work_id ?? data?.response?.work_id
-
-  const shouldProcessCompletedWork = (data) => {
-    const workId = getCompletedWorkId(data)
-    return !workLifecycleTracker.isWorkTerminal(workId)
-      || workLifecycleTracker.isAcceptedTerminalEvent(data)
-  }
-
-  const rejectReadOnlySession = () => {
-    if (!isCurrentSessionReadOnly.value) return false
-    ElMessage.warning(t('chat.external_session_read_only'))
-    return true
-  }
-
-  let restoringHistoryScroll = false
-
-  // ==================== 设置模块间连接 ====================
-  
-  const loadInitialSessionHistory = async (pageCount) => {
-    const requestedSessionId = sessionManager.currentSessionId.value
-    const historyData = await sessionManager.loadSessionHistory(pageCount)
-    if (requestedSessionId !== sessionManager.currentSessionId.value) return
-
-    restoringHistoryScroll = true
-    try {
-      const visibleHistoryData = filterNewMessages(historyData)
-      if (visibleHistoryData.length > 0) {
-        // 插入到消息列表开头
-        chatState.insertMessage(0, visibleHistoryData.map(normalizeHistoryMessage), true)
-      }
-      initialHistoryLoaded.value = true
-      await nextTick()
-      if (visibleHistoryData.length > 0) {
-        await chatState.scrollToBottom('auto')
-      }
-    } finally {
-      requestAnimationFrame(() => {
-        restoringHistoryScroll = false
-      })
-    }
-    return historyData
-  }
-
-  // 设置会话管理的历史记录加载回调
-  sessionManager.setLoadHistoryCallback((pageCount) => loadInitialSessionHistory(pageCount))
-
-  const reloadCurrentSessionHistory = async () => {
-    if (!sessionManager.currentSessionId.value) return
-    initialHistoryLoaded.value = false
-    chatState.clearMessages()
-    sessionManager.resetPagination()
-    await loadInitialSessionHistory(2)
-  }
-
-  const mergeSessionHistoryPage = historyData => {
-    if (!Array.isArray(historyData) || historyData.length === 0) return
-
-    const existingKeys = new Set(chatState.messages.value.flatMap(m => [...getMessageDedupeKeys(m)]))
-    let mergedMessages = [...chatState.messages.value]
-    let changed = false
-    for (const item of historyData) {
-      const message = normalizeHistoryMessage({ ...item, db_id: item.id })
-      if (isAssistantResponse(message)) {
-        const replacementIndex = findAssistantResponseReplacementIndex(mergedMessages, message)
-        if (replacementIndex !== -1) {
-          mergedMessages = mergeAssistantResponseIntoList(mergedMessages, message)
-          getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
-          changed = true
-          continue
-        }
-        if (isPlainAssistantResponse(message)) {
-          mergedMessages.push(message)
-          getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
-          changed = true
-          continue
-        }
-      }
-
-      const auditRecordId = getAuditConfirmationRecordId(message)
-      if (auditRecordId) {
-        const existingIndex = mergedMessages.findIndex(existing => getAuditConfirmationRecordId(existing) === auditRecordId)
-        if (existingIndex !== -1) {
-          mergedMessages[existingIndex] = mergeRemoteMessage(mergedMessages[existingIndex], message)
-          getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
-          changed = true
-          continue
-        }
-      }
-      const replacementIndex = findMessageReplacementIndex(mergedMessages, message)
-      if (replacementIndex !== -1) {
-        mergedMessages[replacementIndex] = mergeRemoteMessage(mergedMessages[replacementIndex], message)
-        getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
-        changed = true
-        continue
-      }
-      const transientIndex = findTransientHistoryMessageIndex(mergedMessages, message)
-      if (transientIndex !== -1) {
-        const localMessage = mergedMessages[transientIndex]
-        mergedMessages[transientIndex] = mergeRemoteMessage(localMessage, message)
-        getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
-        changed = true
-        continue
-      }
-      const messageKeys = getMessageDedupeKeys(message)
-      if ([...messageKeys].some(key => existingKeys.has(key))) continue
-      mergedMessages.push(message)
-      messageKeys.forEach(key => existingKeys.add(key))
-      changed = true
-    }
-    if (changed) {
-      chatState.messages.value = mergedMessages
-    }
-  }
-
-  const mergeLatestSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
-    if (!sessionId || sessionId !== sessionManager.currentSessionId.value || !initialHistoryLoaded.value) return
-
-    const requestId = historyMergeTracker.begin()
-    const response = await chatApi.sessionsHistory(sessionId, 1, 20)
-    if (
-      sessionId !== sessionManager.currentSessionId.value
-      || !historyMergeTracker.isLatest(requestId)
-    ) return
-    mergeSessionHistoryPage(filterNewMessages(response.data?.data || []))
-  }
-
-  const ensureIncrementalHistoryCursor = sessionId => {
-    if (!sessionId || incrementalHistoryCursors.has(sessionId)) return
-    incrementalHistoryCursors.set(
-      sessionId,
-      getIncrementalHistoryCursor(chatState.messages.value)
-    )
-  }
-
-  const syncIncrementalSessionHistory = async (
-    sessionId = sessionManager.currentSessionId.value,
-    isCurrentSync = () => true
-  ) => {
-    if (!sessionId || sessionId !== sessionManager.currentSessionId.value) {
-      return { hasMore: false }
-    }
-    if (!initialHistoryLoaded.value) {
-      return { hasMore: true }
-    }
-
-    ensureIncrementalHistoryCursor(sessionId)
-    const requestId = historyMergeTracker.begin()
-    const isCurrentMerge = () => (
-      sessionScopeActive
-      && sessionId === sessionManager.currentSessionId.value
-      && historyMergeTracker.isLatest(requestId)
-      && initialHistoryLoaded.value
-      && isCurrentSync()
-    )
-    const result = await syncIncrementalHistory({
-      initialAfterId: getIncrementalHistoryCursor(
-        chatState.messages.value,
-        incrementalHistoryCursors.get(sessionId)
-      ),
-      pageSize: HTTP_HISTORY_INCREMENTAL_PAGE_SIZE,
-      maxPages: HTTP_HISTORY_INCREMENTAL_MAX_PAGES,
-      isCurrent: isCurrentMerge,
-      fetchPage: async ({ afterId, limit }) => {
-        const res = await chatApi.sessionsHistory(sessionId, 1, limit, { after_id: afterId })
-        return res.data?.data || []
-      },
-      mergePage: historyData => {
-        if (isCurrentMerge()) {
-          mergeSessionHistoryPage(filterNewMessages(historyData))
-        }
-      }
-    })
-    if (!isCurrentMerge()) return { hasMore: true }
-    if (!result.cancelled) {
-      incrementalHistoryCursors.set(sessionId, result.lastMessageId)
-    }
-    return result
-  }
-
-  const canSyncCurrentSessionHistory = () => (
-    sessionScopeActive
-    && initialHistoryLoaded.value
-    && !isCurrentSessionReadOnly.value
-    && transport.transportMode.value === 'http'
-  )
-
-  const httpHistorySync = createHttpHistorySyncController({
-    getSessionId: () => sessionManager.currentSessionId.value,
-    canSync: canSyncCurrentSessionHistory,
-    isLoading: () => chatState.loading.value,
-    onTrackingStarted: ensureIncrementalHistoryCursor,
-    fetchPendingActivity: async sessionId => {
-      const response = await chatApi.backgroundTaskPendingActivity(sessionId)
-      return response.data?.data?.has_pending_activity === true
-    },
-    mergeLatestHistory: syncIncrementalSessionHistory,
-    intervalMs: HTTP_HISTORY_FAST_SYNC_INTERVAL_MS,
-    onError: err => {
-      console.error('HTTP session history synchronization failed:', err)
-    }
-  })
-
-  const stopHttpHistorySync = httpHistorySync.stop
-  const startHttpHistoryBackgroundTaskSync = httpHistorySync.start
-
-  watch(
-    [
-      () => transport.transportMode.value,
-      () => sessionManager.currentSessionId.value,
-      () => isCurrentSessionReadOnly.value,
-      () => initialHistoryLoaded.value
-    ],
-    () => httpHistorySync.handleSessionChanged(),
-    { immediate: true, flush: 'sync' }
-  )
-
-  onScopeDispose(() => {
-    sessionScopeActive = false
-    transportNotifier.close()
-    stopHttpHistorySync()
-    incrementalHistoryCursors.clear()
-    resetHttpPollingState()
-    clearSubmissions()
-    contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
-    workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
-    sessionManager.setSessionsUpdatedCallback(null)
-    sessionManager.setSessionActivityUpdatedCallback(null)
-    transport.setReconnectHandler(null)
-    transport.disconnectWebSocket()
-  })
-
-  const applyAuditConfirmationStatus = (data) => {
-    if (contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) return
-    if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-    const result = applyAuditConfirmationStatusToMessages(chatState.messages.value, data)
-    if (result.updated) {
-      chatState.messages.value = result.messages
-    } else {
-      void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
-        console.error('Audit confirmation history merge failed:', err)
-      })
-    }
-
-    if (Array.isArray(data.tool_results) || data.tool_result) {
-      applyAuditToolResultsUpdate({
-        ...data,
-        messages: Array.isArray(data.tool_results) ? data.tool_results : [data.tool_result]
-      }, { skipSequenceGuard: true })
-    }
-  }
-
-  const applyAuditToolResultsUpdate = (data, { skipSequenceGuard = false } = {}) => {
-    if (!skipSequenceGuard && contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) return
-    if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-    const result = applyAuditToolResultsUpdateToMessages(
-      chatState.messages.value,
-      data,
-      currentSessionShowToolCalls.value
-    )
-    if (result.updated) {
-      chatState.messages.value = result.messages
-    }
-
-    void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
-      console.error('Audit tool result history merge failed:', err)
-    })
-  }
-
-  const applyNonStreamSessionEvents = (response) => {
-    const events = Array.isArray(response?.session_events) ? response.session_events : []
-    for (const event of events) {
-      if (event?.type === 'audit_confirmation_status') {
-        applyAuditConfirmationStatus(event)
-      } else if (event?.type === 'audit_tool_results_update') {
-        applyAuditToolResultsUpdate(event)
-      } else if (event?.type === 'todo_update') {
-        applyTodoTransportPayload(event)
-      }
-    }
-  }
-
-  const httpReplyPolling = createHttpReplyPolling({
+  // ==================== HTTP 轮询与会话回调 ====================
+  httpReplyPolling = createHttpReplyPolling({
     transport,
     sessionManager,
     isCurrentSessionReadOnly,
@@ -732,22 +259,20 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     workLifecycleTracker,
     applyTodoTransportPayload,
     updateLlmRequestMetadata,
-    startHttpHistoryBackgroundTaskSync,
+    startHttpHistoryBackgroundTaskSync: history.startHttpHistoryBackgroundTaskSync,
     applyNonStreamSessionEvents,
     shouldProcessCompletedWork,
     processAiResponse,
     messageProcessor,
     api: chatApi,
-    mergeLatestSessionHistory,
-    getHistoryCursor: sessionId => getIncrementalHistoryCursor(
-      chatState.messages.value,
-      incrementalHistoryCursors.get(sessionId)
-    ),
-    mergeIncrementalSessionHistory: syncIncrementalSessionHistory,
+    mergeLatestSessionHistory: history.mergeLatestSessionHistory,
+    getHistoryCursor: history.getHistoryCursor,
+    mergeIncrementalSessionHistory: history.syncIncrementalSessionHistory,
     reportError: message => ElMessage.error(message),
     translate: t
   })
   const { processHttpSessionSnapshot } = httpReplyPolling
+  const trackHttpSubmission = (...args) => httpReplyPolling.trackHttpSubmission(...args)
 
   const handleSessionsUpdated = sessions => {
     try {
@@ -782,175 +307,114 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     }
   )
 
-  const resumeSelectedSessionStream = async (session, historyData = []) => {
-    const sessionId = session?.session_id
-    const latestSession = sessionManager.sessions.value.find(item => item.session_id === sessionId) || session
-    const isCurrentSession = () => (
-      sessionScopeActive
-      && sessionId === sessionManager.currentSessionId.value
-    )
-    if (!isCurrentSession()) return
-
-    const mergeResumedHistory = () => {
-      if (!isCurrentSession()) return
-      void mergeLatestSessionHistory(sessionId).catch(err => {
-        console.error('WebSocket resume history merge failed:', err)
-      })
-    }
-
-    const callbacks = {
-      ...createLifecycleCallbacks(isCurrentSession),
-      deferLoadingUntilResumeComplete: true,
-      onContextSummaryStart: (data) => {
-        if (
-          !isCurrentSession()
-          || contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionId)
-          || workLifecycleTracker.isWorkTerminal(data.work_id)
-        ) return
-        contextSummaryTracker.startContextSummaryWork(
-          contextSummaryWorkKeys.value,
-          contextSummaryRequestKeys,
-          data,
-          data.request_id
-        )
-      },
-      onContextSummaryEnd: (data) => {
-        if (!isCurrentSession() || contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionId)) return
-        contextSummaryTracker.endContextSummaryWork(
-          contextSummaryWorkKeys.value,
-          contextSummaryRequestKeys,
-          data,
-          data.request_id
-        )
-      },
-      onReasoning: (text, turn, responseId, requestId, workId, eventId) => {
-        if (!isCurrentSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        messageProcessor.processStreamReasoning(
-          chatState.messages,
-          text,
-          turn,
-          responseId,
-          requestId,
-          workId,
-          eventId
-        )
-      },
-      onContent: (text, turn, _thinkingId, finishReason, responseId, requestId, workId, eventId) => {
-        if (!isCurrentSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        messageProcessor.processStreamContent(
-          chatState.messages,
-          text,
-          turn,
-          null,
-          finishReason,
-          responseId,
-          requestId,
-          workId,
-          eventId
-        )
-      },
-      onToolStart: (toolCall, _thinkingId, responseId, requestId, workId) => {
-        if (!isCurrentSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        if (!currentSessionShowToolCalls.value) return
-        messageProcessor.processStreamToolStart(chatState.messages, toolCall, null, responseId, requestId, workId)
-      },
-      onToolEnd: (toolEnd, responseId, requestId, workId) => {
-        if (!isCurrentSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        if (!currentSessionShowToolCalls.value) return
-        messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestId, workId)
-      },
-      onComplete: (data, _thinkingId, requestId, eventType) => {
-        if (!isCurrentSession()) return
-        if (eventType === 'turn_end') {
-          if (workLifecycleTracker.isWorkTerminal(getCompletedWorkId(data))) return
-          chatState.messages.value = applyResumedTurnEnd(chatState.messages.value, data, requestId)
-        }
-        mergeResumedHistory()
-      },
-      onResumeComplete: () => {
-        refreshSessionLoadingState()
-        mergeResumedHistory()
-      },
-      onError: (errorMessage, _thinkingId, requestId, errorData = {}) => {
-        if (!isCurrentSession()) return
-        const inserted = messageProcessor.processStreamError(
-          chatState.messages,
-          errorMessage,
-          null,
-          requestId,
-          errorData.work_id,
-          errorData.event_id
-        )
-        if (inserted) ElMessage.error(errorMessage || t('chat.stream_error'))
-        mergeResumedHistory()
-      },
-      onProactiveReply: mergeResumedHistory,
-      onProactiveReplyError: (data) => {
-        if (!isCurrentSession()) return
-        const errorMessage = truncateErrorMessage(data.content || data.message || 'Background proactive reply failed')
-        const inserted = messageProcessor.processStreamError(
-          chatState.messages,
-          errorMessage,
-          null,
-          null,
-          data.work_id,
-          data.event_id
-        )
-        if (inserted) ElMessage.error(errorMessage)
-        mergeResumedHistory()
-      },
-      onAuditConfirmationStatus: applyAuditConfirmationStatus,
-      onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
-      setLoading: (value) => {
-        if (!isCurrentSession()) return
-        if (!value && chatState.messages.value.some(message => message.role === 'thinking')) return
-        chatState.loading.value = value
+  const selectNewSession = (session) => {
+    history.invalidateHistory()
+    const activeSession = withSessionActivity(session)
+    const sessionIndex = sessionManager.sessions.value.findIndex(item => item.session_id === activeSession.session_id)
+    if (sessionIndex === -1) {
+      sessionManager.sessions.value.unshift(activeSession)
+    } else {
+      sessionManager.sessions.value[sessionIndex] = {
+        ...sessionManager.sessions.value[sessionIndex],
+        ...activeSession
       }
     }
-
-    try {
-      await resumeSessionStream({
-        session,
-        latestSession,
-        transportMode: transport.transportMode.value,
-        isCurrentSession,
-        setLoading: value => { chatState.loading.value = value },
-        resume: () => transport.resumeSession({
-          sessionId,
-          historyMessageId: getHistoryMessageCursor(historyData),
-          callbacks
-        })
-      })
-    } catch (err) {
-      console.error('WebSocket会话恢复失败:', err)
-    }
+    sessionManager.selectSession(activeSession, null, false, false)
+    chatDrafts.adoptSessionId(activeSession.session_id)
   }
 
-  transport.setReconnectHandler(createSessionReconnectHandler({
-    getCurrentSessionId: () => sessionManager.currentSessionId.value,
-    getSession: sessionId => sessionManager.sessions.value.find(item => item.session_id === sessionId),
-    getHistoryMessages: () => chatState.messages.value,
-    resumeSession: resumeSelectedSessionStream
-  }))
+  // ==================== 会话恢复 ====================
+  const streamResume = useChatStreamResume({
+    chatState,
+    sessionManager,
+    transport,
+    currentSessionShowToolCalls,
+    isSessionScopeActive: () => sessionScopeActive,
+    createLifecycleCallbacks,
+    contextSummaryTracker,
+    contextSummaryWorkKeys,
+    contextSummaryRequestKeys,
+    workLifecycleTracker,
+    messageProcessor,
+    mergeLatestSessionHistory: history.mergeLatestSessionHistory,
+    refreshSessionLoadingState,
+    applyAuditConfirmationStatus,
+    applyAuditToolResultsUpdate,
+    getCompletedWorkId,
+    notify: ElMessage,
+    translate: t
+  })
+  resumeSelectedSessionStream = streamResume.resumeSelectedSessionStream
 
-  // ==================== 核心发送方法 ====================
+  // ==================== 发送入口 ====================
+  const sendOptions = {
+    chatState,
+    sessionManager,
+    transport,
+    attachments,
+    enableMarkdownDefault,
+    newSessionProfileOverrideId,
+    currentSessionShowToolCalls,
+    currentSessionShowReasoning,
+    currentSessionGoalMode,
+    currentSessionMaxTurns,
+    isStopping,
+    rejectReadOnlySession: () => {
+      if (!isCurrentSessionReadOnly.value) return false
+      ElMessage.warning(t('chat.external_session_read_only'))
+      return true
+    },
+    isSessionScopeActive: () => sessionScopeActive,
+    trackSubmission,
+    markNewSessionTodoKnownEmpty,
+    selectNewSession,
+    workLifecycleTracker,
+    api: chatApi,
+    notify: ElMessage,
+    translate: t
+  }
+  const { httpSend } = useChatHttpSend({
+    ...sendOptions,
+    trackHttpSubmission,
+    ensureIncrementalHistoryCursor: history.ensureIncrementalHistoryCursor,
+    applyNonStreamSessionEvents,
+    finishRequestLifecycle
+  })
+  const { wsSend } = useChatWebSocketSend({
+    ...sendOptions,
+    createLifecycleCallbacks,
+    contextSummaryTracker,
+    contextSummaryWorkKeys,
+    contextSummaryRequestKeys,
+    messageProcessor,
+    processAiResponse,
+    updateLlmRequestMetadata,
+    mergeLatestSessionHistory: history.mergeLatestSessionHistory,
+    applyAuditConfirmationStatus,
+    applyAuditToolResultsUpdate,
+    getCompletedWorkId,
+    shouldProcessCompletedWork,
+    finishRequestLifecycle,
+    setTransportMode,
+    transportNotifier,
+    httpSend
+  })
 
-  /**
-   * 连续发送时先插入用户消息，再直接发送。
-   * queued 状态由服务端 input_queued 事件设置。
-   */
-  const enqueueMessage = (text, attachments = []) => {
+  const send = async () => {
     if (isStopping.value) return
-    if (rejectReadOnlySession()) return
+    if (sendOptions.rejectReadOnlySession()) return
+    if (transport.transportMode.value === 'ws') {
+      return wsSend(chatState.inputMsg.value, attachments.value.map(a => a.path))
+    }
+    return httpSend(chatState.inputMsg.value, attachments.value.map(a => a.path))
+  }
+
+  const enqueueMessage = (text, queuedAttachments = []) => {
+    if (isStopping.value) return
+    if (sendOptions.rejectReadOnlySession()) return
 
     const userMsgId = Date.now() + Math.random()
-    
-    // 添加用户消息到界面
-    const attachmentsToSent = attachments.map(a => a.path)
+    const attachmentsToSent = queuedAttachments.map(a => a.path)
     chatState.addMessage({
       id: userMsgId,
       role: 'user',
@@ -958,10 +422,8 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
       attachments: attachmentsToSent,
       created_at: Date.now() / 1000
     })
-    
     nextTick(() => chatState.scrollToBottom())
-    
-    // 不排队，直接调用底层的发送机制
+
     if (transport.transportMode.value === 'ws') {
       wsSend(text, attachmentsToSent, userMsgId)
     } else {
@@ -969,639 +431,11 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     }
   }
 
-  /**
-   * 发送消息（统一入口）
-   */
-  const send = async () => {
-    if (isStopping.value) return
-    if (rejectReadOnlySession()) return
-    if (transport.transportMode.value === 'ws') {
-      return wsSend(chatState.inputMsg.value, attachments.value.map(a => a.path))
-    } else {
-      return httpSend(chatState.inputMsg.value, attachments.value.map(a => a.path))
-    }
-  }
-
-  /**
-   * HTTP 方式发送消息
-   */
-  const httpSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
-    if (isStopping.value) return
-    if (rejectReadOnlySession()) return
-
-    const text = textParam !== null ? textParam : chatState.inputMsg.value
-    const attachmentsToSent = attachmentsParam !== null ? attachmentsParam : attachments.value.map(a => a.path)
-    
-    if (!text.trim() && attachmentsToSent.length === 0) return
-    
-    const userMsgId = existingMsgId || Date.now()
-    
-    // 如果没有现成的消息 ID（非队列来的），则添加用户消息
-    const requestId = `req_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
-    if (!existingMsgId) {
-      chatState.addMessage({
-        id: userMsgId,
-        role: 'user',
-        content: text,
-        attachments: attachmentsToSent,
-        created_at: Date.now() / 1000,
-        request_id: requestId
-      })
-      
-      chatState.inputMsg.value = ''
-      attachments.value = []
-    } else {
-      // 请求 ID 必须在服务端生命周期事件抵达前写入消息。
-      const queuedMessage = chatState.messages.value.find(m => m.id === existingMsgId)
-      if (queuedMessage) queuedMessage.request_id = requestId
-    }
-    chatState.messages.value = workLifecycleTracker.startRequestLifecycle(
-      chatState.messages.value,
-      { request_id: requestId }
-    )
-    chatState.loading.value = true
-    nextTick(() => chatState.scrollToBottom())
-
-    const requestSessionId = sessionManager.currentSessionId.value
-    const newProfileOverrideId = getNewSessionProfileOverrideId(
-      requestSessionId,
-      newSessionProfileOverrideId.value
-    )
-    await performHttpSend(
-      text,
-      attachmentsToSent,
-      userMsgId,
-      requestSessionId,
-      requestId,
-      newProfileOverrideId,
-      currentSessionShowToolCalls.value,
-      currentSessionShowReasoning.value,
-      currentSessionGoalMode.value,
-      currentSessionMaxTurns.value
-    )
-  }
-
-  /**
-   * 实际执行 HTTP 请求（支持自动二次请求）
-   */
-  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true, goalMode = true, maxTurns = 5) => {
-    if (requestSessionId) {
-      ensureIncrementalHistoryCursor(requestSessionId)
-    }
-    const isCurrentRequestSession = () => (
-      sessionScopeActive
-      && requestSessionId === sessionManager.currentSessionId.value
-    )
-    try {
-      const response = await trackSubmission(
-        () => requestSessionId,
-        () => transport.httpSend({
-          message: text,
-          sessionId: requestSessionId,
-          attachments: attachmentsToSent,
-          requestId,
-          profileOverrideId,
-          showToolCalls,
-          showReasoning,
-          goalMode,
-          maxTurns
-        })
-      )
-
-      // 处理后端生成的 UUID (新建会话模式)
-      if (response.choices?.[0]?.finish_reason === 'new_session') {
-        if (requestSessionId !== sessionManager.currentSessionId.value) return
-        const newId = response.choices[0].message.content
-        console.log('HTTP 模式同步新会话 ID 并触发标题生成:', newId)
-        
-        // 1. 设置当前会话 ID (静默选择)
-        markNewSessionTodoKnownEmpty(newId)
-        selectNewSession({
-          session_id: newId,
-          title: t('chat.default_title'),
-          enable_markdown: enableMarkdownDefault.value,
-          show_tool_calls: showToolCalls,
-          show_reasoning: showReasoning,
-          goal_mode: goalMode,
-          max_turns: maxTurns,
-          profile_override_id: profileOverrideId,
-          source: 'http'
-        })
-        
-        // 同步新建会话的 Markdown 设置
-        if (enableMarkdownDefault.value) {
-          chatApi.updateSessionSetting(newId, { enable_markdown: true }).catch(() => {})
-        }
-        
-        // 2. 收到 ID 后立即调用标题生成
-        sessionManager.updateSessionTitle(newId, text)
-        
-        // 3. 自动发起第二次真实请求
-        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId, showToolCalls, showReasoning, goalMode, maxTurns)
-      }
-
-      if (requestSessionId !== sessionManager.currentSessionId.value) return
-
-      if (!requestSessionId) throw new Error(t('chat.send_failed'))
-
-      const responseSessionId = normalizeHttpIdentity(response?.session_id)
-      const currentSessionId = normalizeHttpIdentity(sessionManager.currentSessionId.value)
-      const workId = normalizeHttpIdentity(response?.work_id)
-      if (
-        !workId
-        || !responseSessionId
-        || responseSessionId !== normalizeHttpIdentity(requestSessionId)
-        || responseSessionId !== currentSessionId
-      ) throw new Error('Invalid HTTP submission acknowledgement')
-
-      trackHttpSubmission(requestId, requestSessionId, workId)
-      applyNonStreamSessionEvents(response)
-
-      const submissionStatus = String(response?.submission_status || '').toLowerCase()
-      if (submissionStatus.includes('queued')) {
-        chatState.messages.value = workLifecycleTracker.markInputQueued(
-          chatState.messages.value,
-          { request_id: requestId, work_id: workId, session_id: requestSessionId }
-        )
-      } else {
-        chatState.messages.value = workLifecycleTracker.markInputsDequeued(
-          chatState.messages.value,
-          { request_ids: [requestId], work_id: workId, session_id: requestSessionId }
-        )
-      }
-      void sessionManager.refreshSessionLoadingState()
-
-    } catch (err) {
-      if (requestSessionId !== sessionManager.currentSessionId.value) return
-
-      const hasBusinessRejection = Boolean(err?.response?.data?.code)
-      if (!requestSessionId || hasBusinessRejection) {
-        finishRequestLifecycle(requestId, isCurrentRequestSession)
-        ElMessage.error(err.message || t('chat.send_failed'))
-        if (!chatState.messages.value.some(message => message.role === 'thinking')) {
-          chatState.loading.value = false
-        }
-        return
-      }
-
-      trackHttpSubmission(requestId, requestSessionId)
-      const normalizedRequestId = normalizeHttpIdentity(requestId)
-      chatState.messages.value = chatState.messages.value.filter(message => {
-        if (message?.role !== 'thinking') return true
-        const messageRequestIds = [
-          message.request_id,
-          ...(Array.isArray(message.request_ids) ? message.request_ids : [])
-        ].map(normalizeHttpIdentity)
-        return !messageRequestIds.includes(normalizedRequestId)
-      })
-      if (!chatState.messages.value.some(message => message.role === 'thinking')) {
-        chatState.loading.value = false
-      }
-      ElMessage.warning(t('chat.submit_outcome_unknown'))
-      void sessionManager.refreshSessionLoadingState()
-    }
-  }
-
-  /**
-   * WebSocket 方式发送消息
-   */
-  const wsSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
-    if (isStopping.value) return
-    if (rejectReadOnlySession()) return
-
-    const text = textParam !== null ? textParam : chatState.inputMsg.value
-    const attachmentsToSent = attachmentsParam !== null ? attachmentsParam : attachments.value.map(a => a.path)
-    
-    if (!text.trim() && attachmentsToSent.length === 0) return
-    
-    const userMsgId = existingMsgId || Date.now()
-    
-    // request_id 使用唯一的标识符
-    const requestId = `req_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
-
-    // 如果没有现成的消息 ID（非队列来的），则添加用户消息
-    if (!existingMsgId) {
-      chatState.addMessage({ 
-        id: userMsgId, 
-        role: 'user', 
-        content: text, 
-        attachments: attachmentsToSent,
-        created_at: Date.now() / 1000,
-        request_id: requestId
-      })
-      
-      chatState.inputMsg.value = ''
-      attachments.value = []
-    } else {
-      // 请求 ID 必须在服务端生命周期事件抵达前写入消息。
-      const msg = chatState.messages.value.find(m => m.id === existingMsgId)
-      if (msg) {
-        msg.request_id = requestId
-      }
-    }
-    chatState.messages.value = workLifecycleTracker.startRequestLifecycle(
-      chatState.messages.value,
-      { request_id: requestId }
-    )
-    chatState.loading.value = true
-    nextTick(() => chatState.scrollToBottom())
-
-    let requestSessionId = sessionManager.currentSessionId.value
-    const newProfileOverrideId = getNewSessionProfileOverrideId(
-      requestSessionId,
-      newSessionProfileOverrideId.value
-    )
-    const showToolCalls = currentSessionShowToolCalls.value
-    const showReasoning = currentSessionShowReasoning.value
-    const goalMode = currentSessionGoalMode.value
-    const maxTurns = currentSessionMaxTurns.value
-    const isCurrentRequestSession = () => (
-      sessionScopeActive
-      && requestSessionId === sessionManager.currentSessionId.value
-    )
-
-    // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
-    const callbacks = {
-      ...createLifecycleCallbacks(isCurrentRequestSession),
-      onContextSummaryStart: (data) => {
-        if (
-          isCurrentRequestSession()
-          && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)
-          && !workLifecycleTracker.isWorkTerminal(data.work_id)
-        ) {
-          contextSummaryTracker.startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
-        }
-      },
-      onContextSummaryEnd: (data) => {
-        if (isCurrentRequestSession() && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
-          contextSummaryTracker.endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
-        }
-      },
-      onReasoning: (text, turn, responseId, requestIdParam, workId, eventId) => {
-        if (!isCurrentRequestSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        messageProcessor.processStreamReasoning(chatState.messages, text, turn, responseId, requestIdParam, workId, eventId)
-      },
-      onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam, workId, eventId) => {
-        if (!isCurrentRequestSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        messageProcessor.processStreamContent(chatState.messages, text, turn, null, finishReason, responseId, requestIdParam, workId, eventId)
-      },
-      onToolStart: (toolCall, thinkingIdParam, responseId, requestIdParam, workId) => {
-        if (!isCurrentRequestSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        if (!currentSessionShowToolCalls.value) return
-        messageProcessor.processStreamToolStart(chatState.messages, toolCall, null, responseId, requestIdParam, workId)
-      },
-      onToolEnd: (toolEnd, responseId, requestIdParam, workId) => {
-        if (!isCurrentRequestSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        if (!currentSessionShowToolCalls.value) return
-        messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam, workId)
-      },
-      onError: (errorMessage, thinkingIdParam, requestIdParam, errorData = {}) => {
-        contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
-        if (!isCurrentRequestSession()) return
-        const inserted = messageProcessor.processStreamError(
-          chatState.messages,
-          errorMessage,
-          null,
-          requestIdParam || requestId,
-          errorData.work_id,
-          errorData.event_id
-        )
-        if (inserted) {
-          ElMessage.error(errorMessage || t('chat.stream_error'))
-        }
-      },
-      onProactiveReply: (data) => {
-        if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-        if (
-          data.llm_request_metadata
-          && (data.llm_request_metadata.request_purpose || !data.source || data.source === 'foreground')
-        ) {
-          updateLlmRequestMetadata({
-            ...data.llm_request_metadata,
-            session_id: data.session_id || sessionManager.currentSessionId.value
-          }, isCurrentRequestSession)
-        }
-        if (
-          Array.isArray(data?.request_ids) &&
-          data.request_ids.some(id => String(id) === String(requestId))
-        ) {
-          if (shouldApplyOwnProactiveReply(workLifecycleTracker, data, requestId)) {
-            processAiResponse(data, null, requestId)
-          }
-          return
-        }
-        const workId = data.work_id
-        if (
-          workId !== undefined &&
-          workId !== null &&
-          workId !== '' &&
-          chatState.messages.value.some(message =>
-            message.work_id !== undefined &&
-            message.work_id !== null &&
-            message.work_id !== '' &&
-            String(message.work_id) === String(workId)
-          )
-        ) return
-        void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
-          console.error('Proactive reply history merge failed:', err)
-        })
-      },
-      onProactiveReplyError: (data) => {
-        if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-        const errorMessage = truncateErrorMessage(data.content || data.message || 'Background proactive reply failed')
-        const inserted = messageProcessor.processStreamError(
-          chatState.messages,
-          errorMessage,
-          null,
-          null,
-          data.work_id,
-          data.event_id
-        )
-        if (inserted) {
-          ElMessage.error(errorMessage)
-        }
-        void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
-          console.error('Proactive reply error history merge failed:', err)
-        })
-      },
-      onAuditConfirmationStatus: applyAuditConfirmationStatus,
-      onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
-      onSessionId: (newSessionId) => {
-        if (requestSessionId !== sessionManager.currentSessionId.value) return
-        requestSessionId = newSessionId
-        console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
-        // 1. 更新本地状态（静默同步）
-        markNewSessionTodoKnownEmpty(newSessionId)
-        selectNewSession({
-          session_id: newSessionId,
-          title: t('chat.default_title'),
-          enable_markdown: enableMarkdownDefault.value,
-          show_tool_calls: showToolCalls,
-          show_reasoning: showReasoning,
-          goal_mode: goalMode,
-          max_turns: maxTurns,
-          profile_override_id: newProfileOverrideId,
-          source: 'ws'
-        })
-        
-        // 同步新建会话的 Markdown 设置
-        if (enableMarkdownDefault.value) {
-          chatApi.updateSessionSetting(newSessionId, { enable_markdown: true }).catch(() => {})
-        }
-        
-        // 2. 收到 ID 后立即调用标题生成
-        sessionManager.updateSessionTitle(newSessionId, text)
-      },
-      onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
-        if (eventType !== 'turn_end') {
-          contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
-        }
-        if (!isCurrentRequestSession()) return
-        if (data.session_id && data.session_id !== requestSessionId) return
-
-        // 每个 response_id 只保留一条正文；工具轮次的正文归入工具消息
-        if (eventType === 'turn_end') {
-          if (workLifecycleTracker.isWorkTerminal(getCompletedWorkId(data))) return
-          const displayContent = resolveAssistantDisplayContent(data.content, data.refusal, data.finish_reason)
-          const hasDisplayContent = typeof displayContent === 'string'
-            ? Boolean(displayContent.trim())
-            : displayContent !== undefined && displayContent !== null
-          const hasTurnBody = (typeof data.content === 'string'
-            ? Boolean(data.content.trim())
-            : data.content !== undefined && data.content !== null) ||
-            (typeof data.refusal === 'string' && Boolean(data.refusal.trim()))
-          const responseFields = {
-            ...(data.message_id !== null && data.message_id !== undefined && data.message_id !== '' ? { db_id: data.message_id } : {}),
-            ...(typeof data.finish_reason === 'string' && data.finish_reason ? { finish_reason: data.finish_reason } : {}),
-            ...(data.finish_details && typeof data.finish_details === 'object' && Object.keys(data.finish_details).length > 0 ? { finish_details: data.finish_details } : {}),
-            ...(typeof data.reasoning_content === 'string' && data.reasoning_content.trim() ? { reasoning_content: data.reasoning_content } : {}),
-            ...(typeof data.refusal === 'string' && data.refusal ? { refusal: data.refusal } : {}),
-            ...(data.provider_metadata && typeof data.provider_metadata === 'object' && Object.keys(data.provider_metadata).length > 0 ? { provider_metadata: data.provider_metadata } : {}),
-            ...(data.message_provider_metadata && typeof data.message_provider_metadata === 'object' && Object.keys(data.message_provider_metadata).length > 0 ? { message_provider_metadata: data.message_provider_metadata } : {})
-          }
-          if (data.response_id) {
-            const matchingIndexes = chatState.messages.value
-              .map((message, index) => ({ message, index }))
-              .filter(item => item.message.response_id === data.response_id && item.message.role === 'assistant')
-            const toolItem = matchingIndexes.find(item => isToolCall(item.message))
-            const plainItems = matchingIndexes.filter(item => !isToolCall(item.message))
-            const targetItem = toolItem || plainItems[0]
-
-            if (targetItem) {
-              const targetMessage = targetItem.message
-              const targetContent = toolItem
-                ? normalizeMessageContent(targetMessage.content)?.content
-                : targetMessage.content
-              const targetHasContent = typeof targetContent === 'string'
-                ? Boolean(targetContent.trim())
-                : targetContent !== undefined && targetContent !== null
-              const shouldApplyDisplayContent = hasDisplayContent && (hasTurnBody || !targetHasContent)
-              const updatedMessage = !shouldApplyDisplayContent
-                ? { ...targetMessage, ...responseFields, work_id: targetMessage.work_id || data.work_id }
-                : toolItem
-                  ? {
-                      ...targetMessage,
-                      content: JSON.stringify({
-                        ...normalizeMessageContent(targetMessage.content),
-                        content: displayContent
-                      }),
-                      ...responseFields,
-                      work_id: targetMessage.work_id || data.work_id
-                    }
-                  : { ...targetMessage, content: displayContent, ...responseFields, work_id: targetMessage.work_id || data.work_id }
-              const duplicateIndexes = new Set(
-                matchingIndexes
-                  .filter(item => item.index !== targetItem.index)
-                  .map(item => item.index)
-              )
-              chatState.messages.value = chatState.messages.value
-                .map((message, index) => index === targetItem.index ? updatedMessage : message)
-                .filter((_, index) => !duplicateIndexes.has(index))
-            } else if (hasDisplayContent) {
-              messageProcessor.processStreamContent(
-                chatState.messages,
-                displayContent,
-                data.turn,
-                null,
-                data.finish_reason,
-                data.response_id,
-                requestIdParam,
-                data.work_id,
-                data.event_id
-              )
-              const createdIndex = chatState.messages.value.findLastIndex(message =>
-                message.response_id === data.response_id && message.role === 'assistant' && !isToolCall(message)
-              )
-              if (createdIndex !== -1) {
-                chatState.messages.value[createdIndex] = {
-                  ...chatState.messages.value[createdIndex],
-                  ...responseFields
-                }
-              }
-            }
-          } else {
-            const relatedIndex = chatState.messages.value.findLastIndex(message =>
-              message.role === 'assistant' &&
-              !isToolCall(message) &&
-              (data.work_id !== undefined && data.work_id !== null
-                ? String(message.work_id) === String(data.work_id)
-                : requestIdParam !== undefined && requestIdParam !== null && message.request_id === requestIdParam)
-            )
-            if (relatedIndex !== -1) {
-              const relatedMessage = chatState.messages.value[relatedIndex]
-              const relatedHasContent = typeof relatedMessage.content === 'string'
-                ? Boolean(relatedMessage.content.trim())
-                : relatedMessage.content !== undefined && relatedMessage.content !== null
-              chatState.messages.value[relatedIndex] = {
-                ...relatedMessage,
-                ...(hasDisplayContent && (hasTurnBody || !relatedHasContent) ? { content: displayContent } : {}),
-                ...responseFields,
-                work_id: relatedMessage.work_id || data.work_id
-              }
-            } else if (hasDisplayContent) {
-              messageProcessor.processStreamContent(
-                chatState.messages,
-                displayContent,
-                data.turn,
-                null,
-                data.finish_reason,
-                data.response_id,
-                requestIdParam,
-                data.work_id,
-                data.event_id
-              )
-              const createdIndex = chatState.messages.value.findLastIndex(message =>
-                message.role === 'assistant' &&
-                !isToolCall(message) &&
-                (data.work_id !== undefined && data.work_id !== null
-                  ? String(message.work_id) === String(data.work_id)
-                  : requestIdParam !== undefined && requestIdParam !== null && message.request_id === requestIdParam)
-              )
-              if (createdIndex !== -1) {
-                chatState.messages.value[createdIndex] = {
-                  ...chatState.messages.value[createdIndex],
-                  ...responseFields
-                }
-              }
-            }
-          }
-          messageProcessor.finalizeStreamReasoning(
-            chatState.messages,
-            data.reasoning_content,
-            data.turn,
-            data.response_id,
-            requestIdParam,
-            data.work_id
-          )
-          return // turn_end 时不需要执行 done 的历史比对和占位符清理
-        }
-
-        if (!shouldProcessCompletedWork(data)) return
-
-        const completedResponse = data.response || data
-        const auditConfirmation = parseAuditConfirmationResponse(completedResponse)
-        if (auditConfirmation) {
-          const auditRecordId = String(auditConfirmation.audit_record_id || '')
-          const existingIndex = chatState.messages.value.findIndex(message => getAuditConfirmationRecordId(message) === auditRecordId)
-          if (existingIndex === -1) {
-            processAiResponse(completedResponse, null, requestIdParam)
-          } else {
-            const existingMessage = chatState.messages.value[existingIndex]
-            chatState.messages.value[existingIndex] = {
-              ...existingMessage,
-              type: 'audit_confirmation',
-              content: JSON.stringify(auditConfirmation),
-              request_id: existingMessage.request_id || requestIdParam
-            }
-          }
-          chatState.loading.value = false
-          return
-        }
-
-        // 已确认工具执行通过独立 done 返回完整正文，不会再发送 content 增量事件。
-        const finalResponse = {
-          ...completedResponse,
-          ...(completedResponse?.work_id == null && data.work_id != null ? { work_id: data.work_id } : {}),
-          ...(completedResponse?.response_id == null && data.response_id != null ? { response_id: data.response_id } : {}),
-          ...(completedResponse?.message_id == null && data.message_id != null ? { message_id: data.message_id } : {}),
-          ...(completedResponse?.files == null && data.files != null ? { files: data.files } : {})
-        }
-        processAiResponse(finalResponse, null, requestIdParam ?? requestId)
-
-      },
-      setLoading: (val) => {
-        if (!isCurrentRequestSession()) return
-        if (!val && chatState.messages.value.some(message => message.role === 'thinking')) return
-        chatState.loading.value = val
-      }
-    }
-    
-    const handleWsSendFailure = async () => {
-      contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
-      if (!isCurrentRequestSession()) return
-
-      finishRequestLifecycle(requestId, isCurrentRequestSession)
-      if (!chatState.messages.value.some(message => message.role === 'thinking')) {
-        chatState.loading.value = false
-      }
-
-      const switched = await setTransportMode('http', { notifyError: false })
-      if (!switched) {
-        transportNotifier.show('fallback_blocked')
-        return
-      }
-
-      transportNotifier.show('fallback_retrying')
-      await httpSend(text, attachmentsToSent, userMsgId)
-    }
-
-    return trackSubmission(
-      () => requestSessionId,
-      async () => {
-        try {
-          const sent = await transport.wsSend({
-            message: text,
-            sessionId: requestSessionId,
-            attachments: attachmentsToSent,
-            requestId,
-            profileOverrideId: newProfileOverrideId,
-            showToolCalls,
-            showReasoning,
-            goalMode,
-            maxTurns,
-            callbacks
-          })
-          if (!sent) {
-            await handleWsSendFailure()
-            return
-          }
-
-          const acknowledgement = await transport.waitForSubmissionAcknowledgement(requestId)
-          if (acknowledgement.status === 'unknown') {
-            if (isCurrentRequestSession()) {
-              transportNotifier.show('submission_unknown')
-            }
-            void sessionManager.refreshSessionLoadingState()
-          }
-        } catch (e) {
-          console.error('WebSocket发送失败:', e)
-          await handleWsSendFailure()
-        }
-      }
-    )
-  }
-
   // ==================== 会话选择 ====================
-  
-  // 选择会话；session 为会话对象
   const selectSession = (session) => {
     transportNotifier.close()
     resetHttpPollingState()
-    historyMergeTracker.invalidate()
+    history.invalidateHistory()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     chatState.messages.value = workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = false
@@ -1617,7 +451,7 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
 
     chatState.loading.value = getInitialResumeLoading({ session, transportMode: transport.transportMode.value })
 
-    const historyLoadPromise = loadInitialSessionHistory(2).catch(err => {
+    const historyLoadPromise = history.loadInitialSessionHistory(2).catch(err => {
       console.error('Session history load before WebSocket resume failed:', err)
     })
     void Promise.all([historyLoadPromise, loadingRefreshPromise])
@@ -1632,13 +466,10 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
       }))
   }
 
-  /**
-   * 新建会话
-   */
-  const createNewSession = () => {    
+  const createNewSession = () => {
     transportNotifier.close()
     resetHttpPollingState()
-    historyMergeTracker.invalidate()
+    history.invalidateHistory()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     chatState.messages.value = workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = true
@@ -1652,7 +483,6 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     showReasoningDefault.value = true
     goalModeDefault.value = true
     maxTurnsDefault.value = 5
-    // 新建会话时重置加载状态，解除模式锁定
     chatState.loading.value = false
   }
 
@@ -1669,62 +499,20 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     return deleted
   }
 
-  // ==================== 滚动事件 ====================
-  
-  /**
-   * 处理滚动事件
-   */
-  const handleScroll = async () => {
-    const messageList = chatState.messageList.value
-    if (!messageList || restoringHistoryScroll || chatState.messages.value.length === 0 || !sessionManager.hasMore.value || sessionManager.historyLoading.value) return
-    if (messageList.scrollTop > 500) return
+  onScopeDispose(() => {
+    sessionScopeActive = false
+    transportNotifier.close()
+    history.disposeHistory()
+    resetHttpPollingState()
+    clearSubmissions()
+    contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
+    workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
+    sessionManager.setSessionsUpdatedCallback(null)
+    sessionManager.setSessionActivityUpdatedCallback(null)
+    transport.setReconnectHandler(null)
+    transport.disconnectWebSocket()
+  })
 
-    const historyData = await sessionManager.loadSessionHistory(1)
-    if (!historyData?.length) return
-
-    const existingKeys = new Set(chatState.messages.value.flatMap(message => [...getMessageDedupeKeys(message)]))
-    const uniqueMessages = filterNewMessages(historyData)
-      .map(normalizeHistoryMessage)
-      .filter((message) => {
-        const messageKeys = getMessageDedupeKeys(message)
-        if ([...messageKeys].some(key => existingKeys.has(key))) return false
-        messageKeys.forEach(key => existingKeys.add(key))
-        return true
-      })
-    if (!uniqueMessages.length) return
-
-    const anchor = messageList.captureScrollAnchor()
-    restoringHistoryScroll = true
-    try {
-      chatState.insertMessage(0, uniqueMessages)
-      await nextTick()
-      await messageList.restoreScrollAnchor(anchor)
-    } finally {
-      requestAnimationFrame(() => {
-        restoringHistoryScroll = false
-      })
-    }
-  }
-
-  /**
-   * 绑定滚动事件
-   */
-  const bindScrollEvent = () => {
-    if (chatState.messageList.value) {
-      chatState.messageList.value.addEventListener('scroll', handleScroll)
-    }
-  }
-
-  /**
-   * 移除滚动事件
-   */
-  const unbindScrollEvent = () => {
-    if (chatState.messageList.value) {
-      chatState.messageList.value.removeEventListener('scroll', handleScroll)
-    }
-  }
-
-  // ==================== 返回导出 ====================
   return {
     // 状态 - 消息相关
     messages: chatState.messages,
@@ -1734,8 +522,8 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     isContextSummarizing,
     llmRequestMetadata,
     initialHistoryLoaded,
-    
-    // 新增附件状态导出
+
+    // 状态 - 附件与默认设置
     attachments,
     enableMarkdownDefault,
     showToolCallsDefault,
@@ -1762,20 +550,20 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     isCurrentSessionReadOnly,
     isStopping,
     isReplyRunning,
-    
+
     // 状态 - 通信相关
     transportMode: transport.transportMode,
     wsConnected: transport.wsConnected,
     modeSettingSubmitting,
     transportModeChangeBlocked,
-    
+
     // 方法 - 会话
     loadSessions: sessionManager.loadSessions,
     handleDeleteSession,
     selectSession,
     createNewSession,
-    reloadCurrentSessionHistory,
-    
+    reloadCurrentSessionHistory: history.reloadCurrentSessionHistory,
+
     // 方法 - 发送
     send,
     stopReply,
@@ -1785,7 +573,7 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     initWebSocket: transport.initWebSocket,
     disconnectWebSocket: transport.disconnectWebSocket,
     setTransportMode,
-    
+
     // 工具函数
     formatTimestamp,
     isToolCall,
@@ -1797,10 +585,10 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     getToolResultName,
     getToolResultContent,
     getMessageTimestamp,
-    
+
     // 滚动事件
-    handleScroll,
-    bindScrollEvent,
-    unbindScrollEvent
+    handleScroll: history.handleScroll,
+    bindScrollEvent: history.bindScrollEvent,
+    unbindScrollEvent: history.unbindScrollEvent
   }
 }
