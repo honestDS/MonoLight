@@ -166,8 +166,7 @@ class SessionReplyEnqueue:
                 profile_id=profile_id,
                 is_processed=False,
             )
-            db.add(message_row)
-            await db.flush()
+            await message_crud.persist(db, message=message_row, commit=False)
         elif message_row.uid != uid or message_row.session_id != session_id or message_row.profile_id != profile_id:
             raise ValueError(t(ERR_PERSISTED_USER_MESSAGE_MISMATCH))
 

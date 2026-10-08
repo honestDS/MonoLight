@@ -356,6 +356,7 @@ export function createHttpReplyPolling({
       || !sessionManager.currentSessionId.value
     ) return
 
+    const stateVersion = httpPollingStateVersion
     const rawSessionId = sessionManager.currentSessionId.value
     const sessionId = normalizeHttpIdentity(rawSessionId)
     const session = sessions.find(item => normalizeHttpIdentity(item?.session_id) === sessionId)
@@ -374,6 +375,8 @@ export function createHttpReplyPolling({
     const activeStatuses = ['ready_for_llm', 'running', 'waiting_external_work']
     let hasActiveResult = false
     for (const work of works) {
+      if (stateVersion !== httpPollingStateVersion) return
+
       const workId = normalizeHttpIdentity(work?.work_id)
       const status = String(work?.status || '').toLowerCase()
       if (!workId || !status) continue
@@ -402,6 +405,11 @@ export function createHttpReplyPolling({
       })) continue
 
       const result = await fetchHttpWorkStatus(work, sessionId)
+      if (
+        stateVersion !== httpPollingStateVersion
+        || !isCurrentWritableHttpSession(sessionId)
+      ) return
+
       if (result?.active) hasActiveResult = true
       if (
         result?.succeeded
@@ -412,7 +420,10 @@ export function createHttpReplyPolling({
       }
     }
 
-    if (!isCurrentWritableHttpSession(sessionId)) return
+    if (
+      stateVersion !== httpPollingStateVersion
+      || !isCurrentWritableHttpSession(sessionId)
+    ) return
     const currentSnapshot = sessionManager.sessions.value.find(
       item => normalizeHttpIdentity(item?.session_id) === sessionId
     )

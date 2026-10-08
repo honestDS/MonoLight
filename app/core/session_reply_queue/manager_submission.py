@@ -137,8 +137,7 @@ class SessionReplySubmission:
                 )
                 try:
                     async with db.begin_nested():
-                        db.add(message_row)
-                        await db.flush()
+                        await message_crud.persist(db, message=message_row, commit=False)
                 except IntegrityError:
                     message_row = await message_crud.get_by_dedupe_key(db, idempotent_dedupe_key)
                     if message_row is None:
@@ -222,8 +221,7 @@ class SessionReplySubmission:
                 message_row.attachments = None
                 message_row.profile_id = profile_id
                 message_row.is_processed = False
-            db.add(message_row)
-            await db.flush()
+            await message_crud.persist(db, message=message_row, commit=False)
             await audit_crud.close_pending(
                 db,
                 audit_record_id=current_confirmation_id,
@@ -297,9 +295,8 @@ class SessionReplySubmission:
                 message_row.attachments = attachments
                 message_row.profile_id = profile_id
                 message_row.is_processed = False
-            db.add(message_row)
             try:
-                await db.flush()
+                await message_crud.persist(db, message=message_row, commit=False)
                 invalid_input_feedback = t(
                     ERR_AUDIT_HIGH_RISK_CONFIRMATION_INVALID_INPUT if requires_high_risk_override else ERR_AUDIT_CONFIRMATION_INVALID_INPUT,
                     locale=current_confirmation.language,
@@ -370,8 +367,7 @@ class SessionReplySubmission:
             message_row.attachments = None
             message_row.profile_id = profile_id
             message_row.is_processed = True
-        db.add(message_row)
-        await db.flush()
+        await message_crud.persist(db, message=message_row, commit=False)
         claimed_record, claim_token = await audit_crud.claim_pending_for_execution(
             db,
             audit_record_id=current_confirmation_id,
@@ -423,8 +419,7 @@ class SessionReplySubmission:
                 message_row.attachments = attachments
                 message_row.profile_id = profile_id
                 message_row.is_processed = False
-                db.add(message_row)
-                await db.flush()
+                await message_crud.persist(db, message=message_row, commit=False)
             else:
                 message_row = None
             initial_message, work = await self._enqueue_foreground_message(

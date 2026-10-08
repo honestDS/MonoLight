@@ -20,6 +20,7 @@ from app.core.constants import (
     GUIDANCE_MESSAGE_SUFFIX,
     SESSION_MAX_TURNS_UPPER_BOUND,
 )
+from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.security import get_current_user
 from app.core.session_reply_queue.manager import session_reply_queue_manager
@@ -1178,8 +1179,7 @@ async def test_http_session_recovers_in_progress_work_through_list_and_status(
             content="completed reply",
             is_processed=True,
         )
-        chat_session_database.add(success_message)
-        await chat_session_database.flush()
+        await message_crud.persist(chat_session_database, message=success_message, commit=False)
         assert success_message.id is not None
         active_work.status = SessionReplyWorkStatus.SUCCEEDED
         active_work.result_message_id = success_message.id
@@ -1228,8 +1228,7 @@ async def test_http_session_recovers_in_progress_work_through_list_and_status(
             content="worker failed",
             is_processed=True,
         )
-        chat_session_database.add(failure_message)
-        await chat_session_database.flush()
+        await message_crud.persist(chat_session_database, message=failure_message, commit=False)
         assert failure_message.id is not None
         failed_work.status = SessionReplyWorkStatus.FAILED
         failed_work.result_message_id = failure_message.id

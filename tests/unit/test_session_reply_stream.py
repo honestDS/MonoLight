@@ -964,6 +964,11 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
             if getattr(instance, "id", None) is None:
                 instance.id = 11
 
+    async def persist(db, *, message, commit=True):
+        db.add(message)
+        await db.flush()
+        return message
+
     async def upsert_profile(*args, **kwargs):
         return SimpleNamespace(show_tool_calls=show_tool_calls)
 
@@ -977,6 +982,10 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
     monkeypatch.setattr(
         "app.core.session_reply_queue.manager_enqueue.session_crud.upsert_profile",
         upsert_profile,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager_enqueue.message_crud.persist",
+        persist,
     )
     monkeypatch.setattr(
         "app.core.session_reply_queue.manager_enqueue.session_reply_work_item_crud.enqueue",
@@ -1031,6 +1040,11 @@ async def test_http_foreground_can_request_summary_events_without_content_stream
             if getattr(instance, "id", None) is None:
                 instance.id = 11
 
+    async def persist(db, *, message, commit=True):
+        db.add(message)
+        await db.flush()
+        return message
+
     async def upsert_profile(*args, **kwargs):
         return SimpleNamespace(
             session_id=kwargs["session_id"],
@@ -1046,6 +1060,10 @@ async def test_http_foreground_can_request_summary_events_without_content_stream
     monkeypatch.setattr(
         "app.core.session_reply_queue.manager_enqueue.session_crud.upsert_profile",
         upsert_profile,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager_enqueue.message_crud.persist",
+        persist,
     )
     monkeypatch.setattr(
         "app.core.session_reply_queue.manager_enqueue.session_reply_work_item_crud.enqueue",

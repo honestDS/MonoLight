@@ -2,6 +2,7 @@ import json
 
 from sqlalchemy import update
 
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
@@ -85,8 +86,7 @@ async def trigger_background_task_reply(task_id: int) -> None:
             is_processed=True,
             dedupe_key=_build_background_message_dedupe_key(task_id, "result"),
         )
-        db.add(result_message)
-        await db.flush()
+        await message_crud.persist(db, message=result_message, commit=False)
         await session_reply_queue_manager.enqueue_background_summary(
             db,
             uid=task.uid,
