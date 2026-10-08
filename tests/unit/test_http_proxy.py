@@ -48,11 +48,25 @@ def test_build_aiohttp_proxy_kwargs_omits_proxy_auth_without_credentials() -> No
     assert kwargs == {"proxy": "http://proxy.example.com:8080"}
 
 
-def test_build_aiohttp_proxy_kwargs_decodes_credentials_and_removes_userinfo_from_proxy() -> None:
-    kwargs = build_aiohttp_proxy_kwargs("http://user%40name:password%3Awith%2Fslash@proxy.example.com:8080")
-
-    assert kwargs["proxy"] == "http://proxy.example.com:8080"
-    assert kwargs["proxy_headers"]["Proxy-Authorization"] == ("Basic dXNlckBuYW1lOnBhc3N3b3JkOndpdGgvc2xhc2g=")
+@pytest.mark.parametrize(
+    ("proxy", "expected_normalized_proxy"),
+    [
+        (
+            "http://user:pass@proxy.example.com:8080",
+            "http://user:pass@proxy.example.com:8080",
+        ),
+        (
+            "http://user%40name:password%3Awith%2Fslash@PROXY.EXAMPLE.COM:8080/",
+            "http://user%40name:password%3Awith%2Fslash@proxy.example.com:8080",
+        ),
+        (
+            "http://user:pass@[2001:db8::1]:8080",
+            "http://user:pass@[2001:db8::1]:8080",
+        ),
+    ],
+)
+def test_build_aiohttp_proxy_kwargs_preserves_normalized_authenticated_proxy_url(proxy: str, expected_normalized_proxy: str) -> None:
+    assert build_aiohttp_proxy_kwargs(proxy) == {"proxy": expected_normalized_proxy}
 
 
 def test_normalize_http_proxy_canonicalizes_encoded_credentials() -> None:
@@ -108,8 +122,8 @@ async def test_chat_completions_list_models_passes_normalized_proxy_to_fake_aioh
     assert len(sessions) == 1
     get_call = sessions[0].get_calls[0]
     assert get_call["url"] == "https://example.invalid/v1/models"
-    assert get_call["kwargs"]["proxy"] == "http://proxy.example.com:8080"
-    assert get_call["kwargs"]["proxy_headers"]["Proxy-Authorization"] == ("Basic dXNlckBuYW1lOnBhc3N3b3JkOndpdGgvc2xhc2g=")
+    assert get_call["kwargs"]["proxy"] == "http://user%40name:password%3Awith%2Fslash@proxy.example.com:8080"
+    assert "proxy_headers" not in get_call["kwargs"]
 
 
 @pytest.mark.asyncio

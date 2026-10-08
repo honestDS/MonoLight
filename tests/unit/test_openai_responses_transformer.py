@@ -309,8 +309,8 @@ async def test_responses_generate_passes_normalized_http_proxy_kwargs(monkeypatc
     )
 
     post_kwargs = sessions[0].post_calls[0]["kwargs"]
-    assert post_kwargs["proxy"] == "http://proxy.example.com:8080"
-    assert post_kwargs["proxy_headers"]["Proxy-Authorization"] == ("Basic dXNlckBuYW1lOnBhc3N3b3JkOndpdGgvc2xhc2g=")
+    assert post_kwargs["proxy"] == "http://user%40name:password%3Awith%2Fslash@proxy.example.com:8080"
+    assert "proxy_headers" not in post_kwargs
     assert post_kwargs["headers"]["user-agent"] == "MyClient/1.0"
     assert post_kwargs["headers"]["accept-language"] == "en-US"
 

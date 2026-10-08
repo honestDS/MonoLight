@@ -4,8 +4,6 @@ import string
 import unicodedata
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
-import aiohttp
-
 from app.core.constants import ERR_CHANNEL_HTTP_PROXY_INVALID
 from app.core.i18n import t
 
@@ -85,16 +83,7 @@ def build_aiohttp_proxy_kwargs(value: str | None) -> dict:
     normalized = normalize_http_proxy(value)
     if normalized is None:
         return {}
-
-    parsed = urlsplit(normalized)
-    hostname = parsed.hostname or ""
-    if ":" in hostname:
-        hostname = f"[{hostname}]"
-    proxy = urlunsplit(("http", f"{hostname}:{parsed.port}", "", "", ""))
-    kwargs = {"proxy": proxy}
-    if parsed.username is not None and parsed.password is not None:
-        kwargs["proxy_headers"] = {"Proxy-Authorization": aiohttp.encode_basic_auth(unquote(parsed.username), unquote(parsed.password))}
-    return kwargs
+    return {"proxy": normalized}
 
 
 def get_channel_http_proxy(channel: object) -> str | None:

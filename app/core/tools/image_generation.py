@@ -41,7 +41,7 @@ from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
-from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs, get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.operation_directories import (
     get_allowed_operation_dirs,
@@ -272,28 +272,35 @@ class ImageGenerationExecutor(BaseExecutor):
             size=file_item["size"],
         ).info(t("LOG_IMAGE_GENERATION_SAVE_SUCCEEDED"))
 
-    async def _download_remote_image(self, url: str) -> tuple[bytes, str]:
+    async def _download_remote_image(self, url: str, *, http_proxy: str | None = None) -> tuple[bytes, str]:
         client_timeout = aiohttp.ClientTimeout(total=float(getattr(getattr(self.cfg, "tool", None), "image_generation_timeout", 60.0) or 60.0))
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
             try:
-                return await self._fetch_remote_image(session, url)
+                return await self._fetch_remote_image(session, url, http_proxy=http_proxy)
             except aiohttp.ClientConnectorCertificateError:
-                return await self._fetch_remote_image(session, url, ssl=False)
+                return await self._fetch_remote_image(session, url, ssl=False, http_proxy=http_proxy)
             except aiohttp.ClientConnectorSSLError as exc:
                 if not isinstance(exc.__cause__, ssl.SSLCertVerificationError):
                     raise
-                return await self._fetch_remote_image(session, url, ssl=False)
+                return await self._fetch_remote_image(session, url, ssl=False, http_proxy=http_proxy)
 
-    async def _fetch_remote_image(self, session: aiohttp.ClientSession, url: str, ssl: bool | None = None) -> tuple[bytes, str]:
-        async with session.get(url, ssl=ssl) as response:
+    async def _fetch_remote_image(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        ssl: bool | None = None,
+        *,
+        http_proxy: str | None = None,
+    ) -> tuple[bytes, str]:
+        async with session.get(url, ssl=ssl, **build_aiohttp_proxy_kwargs(http_proxy)) as response:
             response.raise_for_status()
             content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
             image_bytes = await response.read()
             return image_bytes, content_type or "application/octet-stream"
 
-    async def _save_downloaded_image(self, url: str) -> dict[str, Any]:
+    async def _save_downloaded_image(self, url: str, *, http_proxy: str | None = None) -> dict[str, Any]:
         self._log_image_save_started(source="remote_url", source_url=url)
-        image_bytes, content_type = await self._download_remote_image(url)
+        image_bytes, content_type = await self._download_remote_image(url, http_proxy=http_proxy)
         if not content_type.startswith("image/"):
             raise ValueError(t(ERR_IMAGE_CONTENT_TYPE_UNSUPPORTED, content_type=content_type))
         extension = mimetypes.guess_extension(content_type) or ".img"
@@ -393,6 +400,7 @@ class ImageGenerationExecutor(BaseExecutor):
 
             channel, model_entry, rule = selection
             try:
+                http_proxy = get_channel_http_proxy(channel)
                 resolved_size = size or model_entry.get("size") or "1024x1024"
                 resolved_quality = quality or model_entry.get("quality") or "auto"
                 input_kwargs: dict[str, Any] = {}
@@ -411,7 +419,7 @@ class ImageGenerationExecutor(BaseExecutor):
                     n=1,
                     quality=resolved_quality,
                     timeout=float(getattr(getattr(self.cfg, "tool", None), "image_generation_timeout", 60.0) or 60.0),
-                    http_proxy=get_channel_http_proxy(channel),
+                    http_proxy=http_proxy,
                     custom_headers=get_model_custom_headers(model_entry),
                     **input_kwargs,
                 )
@@ -422,7 +430,7 @@ class ImageGenerationExecutor(BaseExecutor):
                 image = images[0] if isinstance(images[0], dict) else {}
 
                 if image.get("url"):
-                    file_item = await self._save_downloaded_image(str(image["url"]))
+                    file_item = await self._save_downloaded_image(str(image["url"]), http_proxy=http_proxy)
                     return self._build_success_payload(file_item)
 
                 if image.get("b64_json"):
