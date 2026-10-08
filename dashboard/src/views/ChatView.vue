@@ -453,10 +453,10 @@ const formatSessionSource = (source) => {
   return source
 }
 
-const chat = useChatSession()
+const currentUid = ref(null)
+const chat = useChatSession({ currentUid })
 const sessionTaskService = inject(SESSION_TASKS_KEY, null)
 const profiles = ref([])
-const currentUid = ref(null)
 const profilesLoading = ref(false)
 const profileSettingSubmitting = ref(false)
 const toolOutputSettingSubmitting = ref(false)
@@ -939,7 +939,13 @@ const send = async () => {
           await messageList.value?.scrollToBottom('auto')
         }
       }
-      inputMsg.value = ''
+      if (
+        sessionId === currentSessionId.value &&
+        isCurrentSessionReadOnly.value &&
+        inputMsg.value.trim() === content
+      ) {
+        inputMsg.value = ''
+      }
       ElMessage.success(t('chat.guidance_created'))
       void loadSessions()
     } catch (error) {

@@ -2,6 +2,7 @@
 import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatState } from './useChatState'
+import { useChatDrafts } from './useChatDrafts.js'
 import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
@@ -91,7 +92,7 @@ const findTransientHistoryMessageIndex = (messages, historyMessage) => {
   })
 }
 
-export function useChatSession() {
+export function useChatSession({ currentUid = ref(null) } = {}) {
   // ==================== 组合各模块 ====================
 
   // 1. 消息状态
@@ -225,6 +226,12 @@ export function useChatSession() {
     const source = currentSession.value?.source
     return Boolean(source && !['http', 'ws'].includes(source))
   })
+  const chatDrafts = useChatDrafts({
+    inputMsg: chatState.inputMsg,
+    currentUid,
+    currentSessionId: sessionManager.currentSessionId,
+    isCurrentSessionReadOnly
+  })
   const {
     isStopping,
     isReplyRunning,
@@ -330,6 +337,7 @@ export function useChatSession() {
       }
     }
     sessionManager.selectSession(activeSession, null, false, false)
+    chatDrafts.adoptSessionId(activeSession.session_id)
   }
 
   const applyLifecycleEvent = (updateMessages, event, isCurrentRequestSession) => {
@@ -1605,7 +1613,7 @@ export function useChatSession() {
       console.error('Session loading state refresh before WebSocket resume failed:', err)
     })
     chatState.clearMessages()
-    chatState.inputMsg.value = ''
+    chatDrafts.restoreSession()
 
     chatState.loading.value = getInitialResumeLoading({ session, transportMode: transport.transportMode.value })
 
@@ -1638,7 +1646,7 @@ export function useChatSession() {
     sessionManager.createNewSession(transport.disconnectWebSocket)
     refreshSessionLoadingState()
     chatState.clearMessages()
-    chatState.inputMsg.value = ''
+    chatDrafts.restoreSession()
     newSessionProfileOverrideId.value = null
     showToolCallsDefault.value = true
     showReasoningDefault.value = true
@@ -1650,6 +1658,7 @@ export function useChatSession() {
 
   const handleDeleteSession = async (sessionId, name, options = {}) => {
     const deleted = await sessionManager.handleDeleteSession(sessionId, name, options)
+    if (deleted) chatDrafts.removeDraft(sessionId)
     if (shouldReturnToWelcomeAfterSessionDelete({
       deleted,
       deletedSessionId: sessionId,
