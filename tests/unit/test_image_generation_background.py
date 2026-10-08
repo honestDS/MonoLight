@@ -1,9 +1,11 @@
 import base64
 import io
 import json
+import ssl
 from pathlib import Path
 from types import SimpleNamespace
 
+import aiohttp
 import pytest
 from PIL import Image
 
@@ -798,3 +800,310 @@ async def test_image_generation_input_precheck_does_not_fallback(
     _assert_failed(result, ERR_FILE_NOT_FOUND)
     assert image_generation_executor.channel_calls == []
     assert image_generation_executor.remote_calls == []
+
+
+class _ImageDownloadResponse:
+    def __init__(self, image_bytes):
+        self.image_bytes = image_bytes
+        self.headers = {"Content-Type": "image/png"}
+
+    def raise_for_status(self):
+        return None
+
+    async def read(self):
+        return self.image_bytes
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_proxy", "expected_proxy"),
+    [
+        (None, None),
+        (
+            "HTTP://PROXY.EXAMPLE:8080/",
+            "http://proxy.example:8080",
+        ),
+        (
+            "HTTP://Proxy%40User:p%2Fss@PROXY.EXAMPLE:8080/",
+            "http://Proxy%40User:p%2Fss@proxy.example:8080",
+        ),
+    ],
+    ids=["no-proxy", "proxy", "authenticated-proxy"],
+)
+async def test_image_generation_downloads_url_with_channel_proxy(
+    image_generation_executor,
+    monkeypatch,
+    raw_proxy,
+    expected_proxy,
+):
+    channel = SimpleNamespace(
+        base_url="https://example.invalid",
+        http_proxy=raw_proxy,
+        get_decrypted_api_key=lambda: "api-key",
+    )
+    model_entry = {
+        "model_id": "image-model",
+        "usage": "IMAGE_GENERATION",
+        "protocol": "OPENAI_IMAGE",
+        "size": "1024x1024",
+        "quality": "auto",
+        "advanced_settings": {
+            "custom_headers": {"X-Image-Model": "model-header"},
+        },
+    }
+    channel_calls = image_generation_executor.channel_calls
+    generation_calls = image_generation_executor.remote_calls
+    download_calls = []
+    generated_bytes = _image_bytes("PNG")
+    image_url = "https://images.example/generated.png"
+
+    async def fake_select_channel(*args, **kwargs):
+        channel_calls.append((args, kwargs))
+        if 1 in kwargs.get("excluded_priorities", set()):
+            return None
+        return channel, model_entry, SimpleNamespace(priority=1)
+
+    async def fake_generate_image(**kwargs):
+        generation_calls.append(kwargs)
+        return {
+            "model": "image-model",
+            "data": [{"url": image_url}],
+        }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        def get(self, url, **kwargs):
+            download_calls.append((url, kwargs))
+            return _ImageDownloadResponse(generated_bytes)
+
+    monkeypatch.setattr(image_generation_module, "select_channel", fake_select_channel)
+    monkeypatch.setattr(
+        image_generation_module.ImageGenerationClient,
+        "generate_image",
+        fake_generate_image,
+    )
+    monkeypatch.setattr(image_generation_module.aiohttp, "ClientSession", FakeSession)
+
+    payload = json.loads(await image_generation_executor.executor.execute(prompt="a cat"))
+
+    assert payload["status"] == "success"
+    output_file = payload["send_file_to_user"]["files"][0]
+    assert Path(output_file["path"]).read_bytes() == generated_bytes
+
+    assert len(generation_calls) == 1
+    assert generation_calls[0]["protocol"] == "openai_image"
+    assert generation_calls[0]["http_proxy"] == expected_proxy
+    assert generation_calls[0]["api_key"] == "api-key"
+    assert generation_calls[0]["custom_headers"] == {"x-image-model": "model-header"}
+
+    assert len(download_calls) == 1
+    downloaded_url, download_kwargs = download_calls[0]
+    assert downloaded_url == image_url
+    expected_download_kwargs = {"ssl": None}
+    if expected_proxy is not None:
+        expected_download_kwargs["proxy"] = expected_proxy
+    assert download_kwargs == expected_download_kwargs
+    assert "api_key" not in download_kwargs
+    assert "headers" not in download_kwargs
+    assert "custom_headers" not in download_kwargs
+    assert len(channel_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "connector_error_type",
+    [aiohttp.ClientConnectorCertificateError, aiohttp.ClientConnectorSSLError],
+)
+async def test_image_generation_download_retry_keeps_authenticated_proxy(
+    image_generation_executor,
+    monkeypatch,
+    connector_error_type,
+):
+    generated_bytes = _image_bytes("PNG")
+    image_url = "https://images.example/generated.png"
+    raw_proxy = "HTTP://Proxy%40User:p%2Fss@PROXY.EXAMPLE:8080/"
+    expected_proxy = "http://Proxy%40User:p%2Fss@proxy.example:8080"
+    connection_key = SimpleNamespace(
+        host="images.example",
+        port=443,
+        is_ssl=True,
+        ssl=None,
+    )
+    certificate_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+    connector_error = connector_error_type(connection_key, certificate_error)
+    connector_error.__cause__ = certificate_error
+    download_calls = []
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        def get(self, url, **kwargs):
+            download_calls.append((url, kwargs))
+            if len(download_calls) == 1:
+                raise connector_error
+            return _ImageDownloadResponse(generated_bytes)
+
+    monkeypatch.setattr(image_generation_module.aiohttp, "ClientSession", FakeSession)
+
+    result = await image_generation_executor.executor._download_remote_image(
+        image_url,
+        http_proxy=raw_proxy,
+    )
+
+    assert result == (generated_bytes, "image/png")
+    assert [url for url, _kwargs in download_calls] == [image_url, image_url]
+    assert [kwargs["proxy"] for _url, kwargs in download_calls] == [
+        expected_proxy,
+        expected_proxy,
+    ]
+    assert [kwargs["ssl"] for _url, kwargs in download_calls] == [None, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("secondary_proxy", "expected_secondary_proxy"),
+    [
+        (
+            "HTTP://Secondary%40User:Secondary%2FPass@SECONDARY.EXAMPLE:9090/",
+            "http://Secondary%40User:Secondary%2FPass@secondary.example:9090",
+        ),
+        (None, None),
+    ],
+    ids=["secondary-proxy", "secondary-no-proxy"],
+)
+async def test_image_generation_fallback_download_uses_secondary_channel_proxy(
+    image_generation_executor,
+    monkeypatch,
+    secondary_proxy,
+    expected_secondary_proxy,
+):
+    primary_proxy = "HTTP://Primary%40User:Primary%2FPass@PRIMARY.EXAMPLE:8080/"
+    expected_primary_proxy = "http://Primary%40User:Primary%2FPass@primary.example:8080"
+    primary_url = "https://images.example/primary.png"
+    secondary_url = "https://images.example/secondary.png"
+    secondary_bytes = _image_bytes("PNG")
+    primary_channel = SimpleNamespace(
+        base_url="https://primary.example",
+        http_proxy=primary_proxy,
+        get_decrypted_api_key=lambda: "primary-key",
+    )
+    secondary_channel = SimpleNamespace(
+        base_url="https://secondary.example",
+        http_proxy=secondary_proxy,
+        get_decrypted_api_key=lambda: "secondary-key",
+    )
+    primary_model = {
+        "model_id": "primary-model",
+        "usage": "IMAGE_GENERATION",
+        "protocol": "OPENAI_IMAGE",
+        "size": "1024x1024",
+        "quality": "auto",
+    }
+    secondary_model = {
+        "model_id": "secondary-model",
+        "usage": "IMAGE_GENERATION",
+        "protocol": "OPENAI_IMAGE",
+        "size": "1024x1024",
+        "quality": "auto",
+    }
+    selection_calls = []
+    generation_calls = []
+    download_calls = []
+
+    async def fake_select_channel(*args, **kwargs):
+        excluded_priorities = set(kwargs["excluded_priorities"])
+        selection_calls.append(excluded_priorities)
+        if 1 not in excluded_priorities:
+            return primary_channel, primary_model, SimpleNamespace(priority=1)
+        if 2 not in excluded_priorities:
+            return secondary_channel, secondary_model, SimpleNamespace(priority=2)
+        return None
+
+    async def fake_generate_image(**kwargs):
+        generation_calls.append(kwargs)
+        image_url = {
+            "primary-model": primary_url,
+            "secondary-model": secondary_url,
+        }[kwargs["model_id"]]
+        return {
+            "model": kwargs["model_id"],
+            "data": [{"url": image_url}],
+        }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        def get(self, url, **kwargs):
+            download_calls.append((url, kwargs))
+            if url == primary_url:
+                raise aiohttp.ClientConnectionError("primary image download failed")
+            return _ImageDownloadResponse(secondary_bytes)
+
+    monkeypatch.setattr(image_generation_module, "select_channel", fake_select_channel)
+    monkeypatch.setattr(
+        image_generation_module.ImageGenerationClient,
+        "generate_image",
+        fake_generate_image,
+    )
+    monkeypatch.setattr(image_generation_module.aiohttp, "ClientSession", FakeSession)
+
+    payload = json.loads(await image_generation_executor.executor.execute(prompt="fallback image"))
+
+    assert payload["status"] == "success"
+    output_file = payload["send_file_to_user"]["files"][0]
+    assert Path(output_file["path"]).read_bytes() == secondary_bytes
+    assert output_file["mime_type"] == "image/png"
+
+    assert selection_calls == [set(), {1}]
+    assert [call["model_id"] for call in generation_calls] == [
+        "primary-model",
+        "secondary-model",
+    ]
+    assert [call["api_key"] for call in generation_calls] == [
+        "primary-key",
+        "secondary-key",
+    ]
+    assert [call["http_proxy"] for call in generation_calls] == [
+        expected_primary_proxy,
+        expected_secondary_proxy,
+    ]
+    assert [url for url, _kwargs in download_calls] == [primary_url, secondary_url]
+    assert download_calls[0][1] == {
+        "ssl": None,
+        "proxy": expected_primary_proxy,
+    }
+    if expected_secondary_proxy is None:
+        assert download_calls[1][1] == {"ssl": None}
+    else:
+        assert download_calls[1][1] == {
+            "ssl": None,
+            "proxy": expected_secondary_proxy,
+        }
