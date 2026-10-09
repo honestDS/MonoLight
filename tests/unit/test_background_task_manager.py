@@ -8,6 +8,92 @@ from app.core.background_tasks.manager import BackgroundTaskManager
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
+@pytest.mark.parametrize("next_round_role", [MessageRole.USER, MessageRole.ASSISTANT])
+def test_build_submission_context_removes_only_current_sibling_tool_result(next_round_role):
+    historical_assistant = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="reused", name="historical_tool", arguments={"value": "history"})],
+        created_at=2.0,
+    )
+    historical_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="old-result", created_at=3.0)
+    target_call = InternalToolCall(id="target", name="target_tool", arguments={"value": "target"})
+    current_assistant = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[target_call, InternalToolCall(id="reused", name="sibling_tool", arguments={"value": "current"})],
+        created_at=4.0,
+    )
+    current_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="current-result", created_at=6.0)
+    next_round_boundary = InternalMessage(role=next_round_role, content="next-round", created_at=7.0)
+    later_assistant = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="reused", name="later_tool", arguments={"value": "later"})],
+        created_at=8.0,
+    )
+    later_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="later-result", created_at=9.0)
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="runtime system prompt", created_at=1.0),
+        historical_assistant,
+        historical_result,
+        current_assistant,
+        InternalMessage(role=MessageRole.SYSTEM, content="system between turns", created_at=5.0),
+        current_result,
+        next_round_boundary,
+        later_assistant,
+        later_result,
+    ]
+    original_messages = [message.model_dump(mode="json") for message in messages]
+
+    submission_context = manager_module._build_submission_context(messages, "target")
+
+    expected_context = [
+        historical_assistant.model_dump(mode="json", exclude_none=True),
+        historical_result.model_dump(mode="json", exclude_none=True),
+        InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[target_call], created_at=4.0).model_dump(mode="json", exclude_none=True),
+        next_round_boundary.model_dump(mode="json", exclude_none=True),
+        later_assistant.model_dump(mode="json", exclude_none=True),
+        later_result.model_dump(mode="json", exclude_none=True),
+    ]
+    assert submission_context == expected_context
+    assert [message.model_dump(mode="json") for message in messages] == original_messages
+
+
+def test_build_submission_context_without_matching_target_only_excludes_system_messages():
+    historical_assistant = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="reused", name="historical_tool", arguments={"value": "history"})],
+        created_at=2.0,
+    )
+    historical_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="old-result", created_at=3.0)
+    later_assistant = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="reused", name="later_tool", arguments={"value": "later"})],
+        created_at=5.0,
+    )
+    later_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="later-result", created_at=6.0)
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="runtime system prompt", created_at=1.0),
+        historical_assistant,
+        historical_result,
+        InternalMessage(role=MessageRole.USER, content="next-round", created_at=4.0),
+        later_assistant,
+        later_result,
+        InternalMessage(role=MessageRole.SYSTEM, content="trailing system prompt", created_at=7.0),
+    ]
+    original_messages = [message.model_dump(mode="json") for message in messages]
+
+    submission_context = manager_module._build_submission_context(messages, "target")
+
+    expected_context = [
+        historical_assistant.model_dump(mode="json", exclude_none=True),
+        historical_result.model_dump(mode="json", exclude_none=True),
+        messages[3].model_dump(mode="json", exclude_none=True),
+        later_assistant.model_dump(mode="json", exclude_none=True),
+        later_result.model_dump(mode="json", exclude_none=True),
+    ]
+    assert submission_context == expected_context
+    assert [message.model_dump(mode="json") for message in messages] == original_messages
+
+
 @pytest.mark.asyncio
 async def test_submit_persists_submission_context_with_task_record(monkeypatch):
     manager = BackgroundTaskManager()

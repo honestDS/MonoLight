@@ -1,12 +1,15 @@
+import asyncio
 import base64
 import copy
 import io
 import json
 import os
+from collections import Counter, deque
 from collections.abc import AsyncGenerator
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -18,10 +21,15 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
+import app.core.background_tasks.manager as manager_module
+import app.core.background_tasks.reply_trigger as reply_trigger_module
 import app.core.background_tasks.runner as runner_module
 import app.core.crud.channel.cursor as channel_cursor_module
+import app.core.crud.session.reply_work_item as reply_work_item_module
 import app.core.dispatcher as dispatcher_module
 import app.core.dispatchers.background as background_dispatcher_module
+import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
+import app.core.session_reply_queue.executor_metadata as executor_metadata_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
 import app.tasks as tasks_module
 import app.transformers.openai.image_generation as image_generation_transformer_module
@@ -34,6 +42,7 @@ from app.core.tools.image_generation import ImageGenerationExecutor
 from app.core.utils.background_task_result import build_background_task_success_result
 from app.core.utils.dispatcher.process_single_tool import process_single_tool
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
+from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.handler import register_handlers
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
@@ -41,6 +50,7 @@ from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.models.user import User
 from app.providers.database import get_db
 from app.providers.image_generation import ImageGenerationClient
@@ -342,6 +352,804 @@ async def _serialize_multipart_form(form: Any) -> bytes:
 
     await form.write(_Writer())
     return bytes(chunks)
+
+
+@pytest_asyncio.fixture
+async def batch_image_workflow(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncGenerator[SimpleNamespace]:
+    session_id = "batch-image-workflow"
+    expected_bytes, image_data = _image_fixture("png")
+    model_outputs: deque[list[dict[str, Any]]] = deque()
+    gateway_requests: list[dict[str, Any]] = []
+    image_requests: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    active_prompts: set[str] = set()
+    gates: dict[str, asyncio.Event] = {}
+    started_queue: asyncio.Queue[str] = asyncio.Queue()
+    run_handles: dict[int, asyncio.Task] = {}
+    workflow = SimpleNamespace(peak_active=0)
+
+    async def fake_generate_image(**kwargs: Any) -> dict[str, Any]:
+        image_requests.append(copy.deepcopy(kwargs))
+        prompt = kwargs.get("prompt")
+        if not isinstance(prompt, str):
+            raise AssertionError("image generation prompt must be a string")
+        gate = gates.setdefault(prompt, asyncio.Event())
+        active_prompts.add(prompt)
+        workflow.peak_active = max(workflow.peak_active, len(active_prompts))
+        await started_queue.put(prompt)
+        try:
+            await gate.wait()
+            return {
+                "created": 1,
+                "data": [{"b64_json": image_data}],
+                "model": kwargs.get("model_id", "background-image-model"),
+            }
+        finally:
+            active_prompts.discard(prompt)
+
+    async def fake_post(_transformer: OpenAIResponsesTransformer, **kwargs: Any) -> dict[str, Any]:
+        payload = copy.deepcopy(kwargs["payload"])
+        gateway_requests.append(payload)
+        input_items = payload.get("input") if isinstance(payload.get("input"), list) else []
+        function_ids: list[str] = []
+        call_ids: list[str] = []
+        output_call_ids: list[str] = []
+        seen_call_ids: set[str] = set()
+        seen_output_call_ids: set[str] = set()
+        for item in input_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                function_id = item.get("id") or item.get("call_id")
+                call_id = item.get("call_id") or item.get("id")
+                assert isinstance(function_id, str) and function_id
+                assert isinstance(call_id, str) and call_id
+                assert function_id not in function_ids
+                assert call_id not in seen_call_ids
+                function_ids.append(function_id)
+                call_ids.append(call_id)
+                seen_call_ids.add(call_id)
+            elif item.get("type") == "function_call_output":
+                output_call_id = item.get("call_id") or item.get("id")
+                assert isinstance(output_call_id, str) and output_call_id
+                assert output_call_id not in seen_output_call_ids
+                assert output_call_id in seen_call_ids
+                output_call_ids.append(output_call_id)
+                seen_output_call_ids.add(output_call_id)
+
+        assert set(call_ids) == set(output_call_ids)
+        if not model_outputs:
+            raise AssertionError("no preset model response")
+        output = copy.deepcopy(model_outputs.popleft())
+        return {
+            "id": f"batch-response-{len(gateway_requests)}",
+            "object": "response",
+            "status": "completed",
+            "model": MODEL_ID,
+            "output": output,
+            "usage": {"input_tokens": 9, "output_tokens": 7, "total_tokens": 16},
+        }
+
+    async def capture_event(_uid: str, _session_id: str, event: dict[str, Any]) -> None:
+        events.append(copy.deepcopy(event))
+
+    _patch_runtime_database(monkeypatch, session_factory)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ImageGenerationClient, "generate_image", fake_generate_image)
+    monkeypatch.setattr(OpenAIResponsesTransformer, "_post_json", fake_post)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_event)
+
+    initial_message = await _seed_conversation(session_factory, session_id)
+    async with session_factory() as db:
+        profile = await db.get(Profile, PROFILE_ID)
+        channel = await db.get(ModelChannel, CHANNEL_ID)
+        assert profile is not None
+        assert channel is not None
+
+        profile_configs = copy.deepcopy(profile.configs)
+        profile_configs["channel"]["image_generation_channel"] = {
+            "rules": [
+                {
+                    "channel_id": CHANNEL_ID,
+                    "model_id": "background-image-model",
+                    "priority": 1,
+                    "weight": 1,
+                }
+            ]
+        }
+        profile_configs["tool"].update(
+            {
+                "enabled_tools": ["generate_image", "file_tool"],
+                "max_parallel_tools": 5,
+                "background_task_max_concurrency": 2,
+                "executor_max_workers": 1,
+                "allowed_operation_dirs": [str(tmp_path.resolve())],
+            }
+        )
+        channel.model_ids = [
+            *channel.model_ids,
+            {
+                "model_id": "background-image-model",
+                "usage": "IMAGE_GENERATION",
+                "protocol": "OPENAI_IMAGE",
+                "size": "1024x1024",
+                "quality": "auto",
+            },
+        ]
+        validated_config = ProfileConfig.model_validate(profile_configs)
+        profile.configs = validated_config.model_dump(mode="json")
+        await db.commit()
+        await db.refresh(profile)
+
+    manager = manager_module.BackgroundTaskManager()
+    monkeypatch.setattr(manager_module, "background_task_manager", manager)
+
+    async def observed_run_background_task(task_id: int) -> None:
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise AssertionError("background task wrapper requires an asyncio task")
+        run_handles[task_id] = current_task
+        await runner_module.run_background_task(task_id)
+
+    monkeypatch.setattr(manager_module, "run_background_task", observed_run_background_task)
+    for module in (
+        manager_module,
+        runner_module,
+        reply_trigger_module,
+        background_dispatcher_module,
+        executor_lifecycle_module,
+        executor_metadata_module,
+    ):
+        monkeypatch.setattr(module, "AsyncSessionLocal", session_factory)
+
+    first_dispatch = True
+
+    async def dispatch_round(tool_calls: list[InternalToolCall], user_text: str) -> dict[str, Any]:
+        nonlocal first_dispatch
+        if first_dispatch:
+            async with session_factory() as db:
+                persisted = await db.get(Message, initial_message.id)
+                assert persisted is not None
+                persisted.content = user_text
+                persisted.is_processed = False
+                await db.commit()
+                persisted_initial_message = InternalMessage.from_user_input(
+                    id=persisted.id,
+                    content=persisted.content,
+                    attachments=persisted.attachments,
+                    created_at=persisted.created_at.timestamp(),
+                )
+            first_dispatch = False
+        else:
+            async with session_factory() as db:
+                persisted_initial_message = await save_message(
+                    db,
+                    session_id,
+                    UID,
+                    MessageRole.USER,
+                    MessageType.TEXT,
+                    InternalMessage.from_user_input(content=user_text),
+                    PROFILE_ID,
+                    is_processed=False,
+                )
+
+        if tool_calls:
+            model_outputs.append(
+                [
+                    {
+                        "type": "function_call",
+                        "id": tool_call.id,
+                        "call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                        "status": "completed",
+                    }
+                    for tool_call in tool_calls
+                ]
+            )
+        model_outputs.append(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Image generation tasks accepted.",
+                        }
+                    ],
+                }
+            ]
+        )
+
+        assert persisted_initial_message.id is not None
+        async with session_factory() as db:
+            return await ChatDispatcher.dispatch(
+                db,
+                message=user_text,
+                uid=UID,
+                session_id=session_id,
+                persisted_initial_message=persisted_initial_message,
+                persisted_profile_id=PROFILE_ID,
+                frozen_user_message_ids=[persisted_initial_message.id],
+                history_before_id=persisted_initial_message.id,
+                session_source="http",
+            )
+
+    async def tasks() -> list[BackgroundTask]:
+        async with session_factory() as db:
+            result = await db.execute(select(BackgroundTask).where(BackgroundTask.session_id == session_id).order_by(BackgroundTask.id.asc()))
+            return list(result.scalars().all())
+
+    async def summarize(task_id: int) -> tuple[Any, BackgroundTask, Message]:
+        async with session_factory() as db:
+            task = await db.get(BackgroundTask, task_id)
+            if task is None or task.session_id != session_id or task.status != BackgroundTaskStatus.SUCCEEDED:
+                raise AssertionError("background image task is not completed")
+            prompt = (task.arguments or {}).get("prompt")
+            model_outputs.append(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": f"Completed: {prompt}"}],
+                    }
+                ]
+            )
+
+        await reply_trigger_module.trigger_background_task_reply(task_id)
+        worker_id = "batch-image-summary-worker"
+        async with session_factory() as db:
+            work = await reply_work_item_module.session_reply_work_item_crud.claim_next(
+                db,
+                worker_id=worker_id,
+                lease_seconds=300,
+            )
+            if work is None or work.work_type != SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY or work.source_id != str(task_id):
+                raise AssertionError("background image summary work item was not claimed")
+            assert work.id is not None
+            work_id = work.id
+
+        await executor_lifecycle_module.execute_session_reply_work(work_id, worker_id)
+        async with session_factory() as db:
+            work = await reply_work_item_module.session_reply_work_item_crud.get(db, work_id)
+            task = await db.get(BackgroundTask, task_id)
+            if work is None or task is None or work.result_message_id is None:
+                raise AssertionError("background image summary result was not persisted")
+            result_message = await db.get(Message, work.result_message_id)
+            if result_message is None:
+                raise AssertionError("background image summary message was not persisted")
+            return work, task, result_message
+
+    workflow.factory = session_factory
+    workflow.session_id = session_id
+    workflow.profile = profile
+    workflow.manager = manager
+    workflow.gates = gates
+    workflow.started_queue = started_queue
+    workflow.run_handles = run_handles
+    workflow.gateway_requests = gateway_requests
+    workflow.image_requests = image_requests
+    workflow.events = events
+    workflow.active_prompts = active_prompts
+    workflow.expected_bytes = expected_bytes
+    workflow.image_data = image_data
+    workflow.model_outputs = model_outputs
+    workflow.dispatch_round = dispatch_round
+    workflow.tasks = tasks
+    workflow.summarize = summarize
+
+    try:
+        yield workflow
+    finally:
+        await manager.stop()
+
+
+async def _complete_single_round_image_tasks(
+    workflow: SimpleNamespace,
+    pending_tasks: list[BackgroundTask],
+) -> None:
+    task_ids = [task.id for task in pending_tasks]
+    assert all(isinstance(task_id, int) for task_id in task_ids)
+    prompts_by_task_id: dict[int, str] = {}
+    submission_snapshots: dict[int, list[dict[str, Any]]] = {}
+    for task in pending_tasks:
+        assert task.id is not None
+        prompt = (task.arguments or {}).get("prompt")
+        assert isinstance(prompt, str)
+        prompts_by_task_id[task.id] = prompt
+        extra = task.extra
+        assert isinstance(extra, dict)
+        submission_context = extra.get("submission_context")
+        assert isinstance(submission_context, list)
+        submission_snapshots[task.id] = copy.deepcopy(submission_context)
+
+    async with workflow.factory() as db:
+        result = await db.execute(select(Message).where(Message.session_id == workflow.session_id).order_by(Message.id.asc()))
+        source_messages = {message.id: message.content for message in result.scalars().all() if message.id is not None}
+
+    expected_running_count = min(2, len(pending_tasks))
+    await workflow.manager.schedule(workflow.profile)
+    started_prompts = [await asyncio.wait_for(workflow.started_queue.get(), timeout=10) for _ in range(expected_running_count)]
+    assert len(set(started_prompts)) == expected_running_count
+    assert set(started_prompts) == {prompts_by_task_id[task.id] for task in pending_tasks[:expected_running_count] if task.id is not None}
+    assert len(workflow.active_prompts) == expected_running_count
+
+    persisted_tasks = await workflow.tasks()
+    assert len(persisted_tasks) == len(pending_tasks)
+    running_ids = {task.id for task in persisted_tasks if task.status == BackgroundTaskStatus.RUNNING}
+    pending_ids = {task.id for task in persisted_tasks if task.status == BackgroundTaskStatus.PENDING}
+    assert running_ids == {next(task.id for task in pending_tasks if task.arguments.get("prompt") == prompt) for prompt in started_prompts}
+    assert pending_ids == {task.id for task in pending_tasks if task.id not in running_ids}
+    initial_task_states = {task.id: (task.status, task.attempt_count) for task in persisted_tasks}
+
+    image_request_count = len(workflow.image_requests)
+    await workflow.manager.schedule(workflow.profile)
+    assert len(workflow.image_requests) == image_request_count
+    assert workflow.started_queue.empty()
+    persisted_tasks = await workflow.tasks()
+    assert len(persisted_tasks) == len(pending_tasks)
+    assert {task.id: (task.status, task.attempt_count) for task in persisted_tasks} == initial_task_states
+
+    started_task_ids = {task.id for task in pending_tasks[:expected_running_count]}
+    completed_task_ids: set[int] = set()
+    generated_paths: set[Path] = set()
+    completed_work_ids: set[int] = set()
+    for task in pending_tasks:
+        assert task.id is not None
+        prompt = prompts_by_task_id[task.id]
+        assert task.id in started_task_ids
+        assert prompt in workflow.active_prompts
+        gate = workflow.gates.get(prompt)
+        assert gate is not None
+        gate.set()
+        run_handle = workflow.run_handles.get(task.id)
+        assert run_handle is not None
+        await asyncio.wait_for(asyncio.shield(run_handle), timeout=10)
+
+        async with workflow.factory() as db:
+            completed_task = await db.get(BackgroundTask, task.id)
+            assert completed_task is not None
+            assert completed_task.status == BackgroundTaskStatus.SUCCEEDED
+            assert completed_task.attempt_count == 1
+            assert completed_task.result is not None
+            assert completed_task.extra.get("submission_context") == submission_snapshots[task.id]
+            completed_result = copy.deepcopy(completed_task.result)
+
+        assert completed_result["status"] == "succeeded"
+        assert completed_result["tool_name"] == "generate_image"
+        result_content = completed_result["content"]
+        assert result_content["status"] == "success"
+        send_file_arguments = result_content["send_file_to_user"]
+        files = send_file_arguments["files"]
+        assert isinstance(files, list)
+        assert len(files) == 1
+        generated_path = Path(files[0]["path"])
+        expected_dir = (get_user_temp_dir(os.getcwd(), UID) / "generated_images").resolve()
+        assert generated_path.parent == expected_dir
+        assert generated_path.suffix.lower() == ".png"
+        assert files[0]["mime_type"] == "image/png"
+        assert generated_path.read_bytes() == workflow.expected_bytes
+        assert generated_path.resolve() not in generated_paths
+        generated_paths.add(generated_path.resolve())
+        assert workflow.image_data not in json.dumps(completed_result, ensure_ascii=False)
+
+        gateway_request_start = len(workflow.gateway_requests)
+        event_start = len(workflow.events)
+        work, replied_task, result_message = await workflow.summarize(task.id)
+        assert work.status == SessionReplyWorkStatus.SUCCEEDED
+        assert work.result_message_id == result_message.id
+        assert replied_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+        assert replied_task.extra.get("submission_context") == submission_snapshots[task.id]
+        assert result_message.role == MessageRole.ASSISTANT
+        assert result_message.type == MessageType.TEXT
+        assert result_message.content == f"Completed: {prompt}"
+        completed_work_ids.add(work.id)
+
+        new_events = workflow.events[event_start:]
+        assert len(new_events) == 1
+        event_payload = new_events[0]
+        assert event_payload["type"] == "proactive_reply"
+        assert event_payload["task_id"] == task.id
+        assert event_payload["message_id"] == result_message.id
+        assert event_payload["content"] == f"Completed: {prompt}"
+
+        new_gateway_requests = workflow.gateway_requests[gateway_request_start:]
+        assert len(new_gateway_requests) == 1
+        input_items = new_gateway_requests[0]["input"]
+        function_calls = [item for item in input_items if item.get("type") == "function_call"]
+        function_outputs = [item for item in input_items if item.get("type") == "function_call_output"]
+        assert len(function_calls) == 1
+        assert len(function_outputs) == 1
+        assert function_calls[0]["call_id"] == task.tool_call_id
+        assert function_outputs[0]["call_id"] == task.tool_call_id
+        assert function_calls[0]["name"] == "generate_image"
+        assert json.loads(function_calls[0]["arguments"]) == task.arguments
+        assert json.loads(function_outputs[0]["output"]) == completed_result
+        assert workflow.image_data not in json.dumps(new_gateway_requests[0], ensure_ascii=False)
+
+        completed_task_ids.add(task.id)
+        await workflow.manager.schedule(workflow.profile)
+        unstarted_tasks = [candidate for candidate in pending_tasks if candidate.id not in started_task_ids]
+        if unstarted_tasks:
+            next_prompt = await asyncio.wait_for(workflow.started_queue.get(), timeout=10)
+            assert next_prompt in {prompts_by_task_id[candidate.id] for candidate in unstarted_tasks}
+            next_task = next(candidate for candidate in unstarted_tasks if prompts_by_task_id[candidate.id] == next_prompt)
+            assert next_task.id not in started_task_ids
+            started_task_ids.add(next_task.id)
+        else:
+            assert workflow.started_queue.empty()
+
+    assert completed_task_ids == set(task_ids)
+    assert len(completed_work_ids) == len(pending_tasks)
+    persisted_tasks = await workflow.tasks()
+    assert len(persisted_tasks) == len(pending_tasks)
+    assert all(task.status == BackgroundTaskStatus.SUCCEEDED for task in persisted_tasks)
+    assert all(task.attempt_count == 1 for task in persisted_tasks)
+    assert all(task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED for task in persisted_tasks)
+    for task in persisted_tasks:
+        assert task.id is not None
+        assert task.extra.get("submission_context") == submission_snapshots[task.id]
+
+    assert Counter(request["prompt"] for request in workflow.image_requests) == Counter(prompts_by_task_id.values())
+    assert len(workflow.image_requests) == len(pending_tasks)
+    assert all(request["n"] == 1 for request in workflow.image_requests)
+    assert all(request["model_id"] == "background-image-model" for request in workflow.image_requests)
+    assert all(request["protocol"] == "openai_image" for request in workflow.image_requests)
+    assert workflow.peak_active == min(2, len(pending_tasks))
+    assert workflow.active_prompts == set()
+
+    generated_dir = (get_user_temp_dir(os.getcwd(), UID) / "generated_images").resolve()
+    generated_files = [path.resolve() for path in generated_dir.iterdir() if path.is_file() and not path.name.startswith(".")]
+    assert len(generated_files) == len(pending_tasks)
+    assert len(set(generated_files)) == len(generated_files)
+    assert set(generated_files) == generated_paths
+    assert all(path.suffix.lower() == ".png" and path.read_bytes() == workflow.expected_bytes for path in generated_files)
+
+    async with workflow.factory() as db:
+        for message_id, content in source_messages.items():
+            source_message = await db.get(Message, message_id)
+            assert source_message is not None
+            assert source_message.content == content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested_count",
+    [
+        pytest.param(1, id="requested-1"),
+        pytest.param(3, id="requested-3"),
+        pytest.param(5, id="requested-5"),
+    ],
+)
+async def test_batch_image_generation_within_limit_is_queued_and_completed(
+    batch_image_workflow: SimpleNamespace,
+    requested_count: int,
+) -> None:
+    tool_calls = [
+        InternalToolCall(
+            id=f"batch-generate-image-{requested_count}-{index + 1}",
+            name="generate_image",
+            arguments={"prompt": f"Batch image prompt {index + 1}"},
+        )
+        for index in range(requested_count)
+    ]
+    response = await batch_image_workflow.dispatch_round(
+        tool_calls,
+        f"Queue {requested_count} background image tasks.",
+    )
+
+    assert response["choices"][0]["message"]["content"] == "Image generation tasks accepted."
+    assert batch_image_workflow.image_requests == []
+
+    pending_tasks = await batch_image_workflow.tasks()
+    assert len(pending_tasks) == requested_count
+    async with batch_image_workflow.factory() as db:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == batch_image_workflow.session_id,
+                Message.role == MessageRole.ASSISTANT,
+                Message.type == MessageType.TOOL_CALL,
+            )
+            .order_by(Message.id.asc())
+        )
+        assistant_tool_messages = list(result.scalars().all())
+    assert len(assistant_tool_messages) == 1
+    persisted_assistant = InternalMessage.model_validate_json(assistant_tool_messages[0].content or "{}")
+    persisted_calls = persisted_assistant.tool_calls or []
+    assert len(persisted_calls) == requested_count
+    assert len({tool_call.id for tool_call in persisted_calls}) == requested_count
+    assert [(tool_call.name, tool_call.arguments) for tool_call in persisted_calls] == [(tool_call.name, tool_call.arguments) for tool_call in tool_calls]
+    expected_calls = {tool_call.id: tool_call for tool_call in persisted_calls}
+    assert {task.tool_call_id for task in pending_tasks} == set(expected_calls)
+    for task in pending_tasks:
+        assert task.status == BackgroundTaskStatus.PENDING
+        assert task.tool_name == "generate_image"
+        assert task.arguments == expected_calls[task.tool_call_id].arguments
+        assert task.attempt_count == 0
+        assert task.auto_reply is True
+        assert task.reply_status == BackgroundTaskReplyStatus.PENDING
+
+    async with batch_image_workflow.factory() as db:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == batch_image_workflow.session_id,
+                Message.role == MessageRole.TOOL,
+                Message.type == MessageType.TOOL_RESULT,
+            )
+            .order_by(Message.id.asc())
+        )
+        tool_messages = list(result.scalars().all())
+    assert len(tool_messages) == requested_count
+    queued_by_call_id: dict[str, dict[str, Any]] = {}
+    for message in tool_messages:
+        internal_message = InternalMessage.model_validate_json(message.content or "{}")
+        assert internal_message.role == MessageRole.TOOL
+        assert internal_message.tool_call_id is not None
+        assert internal_message.tool_call_id not in queued_by_call_id
+        payload = json.loads(internal_message.content or "{}")
+        assert payload["status"] == "queued"
+        assert payload["tool_name"] == "generate_image"
+        queued_by_call_id[internal_message.tool_call_id] = payload
+
+    assert set(queued_by_call_id) == set(expected_calls)
+    task_by_call_id = {task.tool_call_id: task for task in pending_tasks}
+    for call_id, payload in queued_by_call_id.items():
+        assert payload["task_id"] == task_by_call_id[call_id].id
+
+    await _complete_single_round_image_tasks(batch_image_workflow, pending_tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested_count",
+    [
+        pytest.param(5, id="requested-5"),
+        pytest.param(7, id="requested-7"),
+    ],
+)
+async def test_mixed_tools_share_round_image_submission_limit(
+    batch_image_workflow: SimpleNamespace,
+    tmp_path: Path,
+    requested_count: int,
+) -> None:
+    input_paths = [tmp_path / "mixed-input-1.txt", tmp_path / "mixed-input-2.txt"]
+    input_contents = ["mixed-file-marker-1", "mixed-file-marker-2"]
+    for path, content in zip(input_paths, input_contents):
+        path.write_text(content, encoding="utf-8")
+    rejected_write_path = tmp_path / "must-not-be-written.txt"
+    rejected_write_content = "must-not-be-written-marker"
+    image_prompts = [
+        "Mixed round image prompt 1",
+        "Mixed round image prompt 2",
+        "Mixed round image prompt 3",
+    ]
+    rejected_image_prompt = "Mixed round rejected image prompt"
+
+    tool_calls = [
+        InternalToolCall(
+            id="mixed-file-read-1",
+            name="file_tool",
+            arguments={"operation": "read", "path": str(input_paths[0])},
+        ),
+        InternalToolCall(
+            id="mixed-generate-image-1",
+            name="generate_image",
+            arguments={"prompt": image_prompts[0]},
+        ),
+        InternalToolCall(
+            id="mixed-file-read-2",
+            name="file_tool",
+            arguments={"operation": "read", "path": str(input_paths[1])},
+        ),
+        InternalToolCall(
+            id="mixed-generate-image-2",
+            name="generate_image",
+            arguments={"prompt": image_prompts[1]},
+        ),
+        InternalToolCall(
+            id="mixed-generate-image-3",
+            name="generate_image",
+            arguments={"prompt": image_prompts[2]},
+        ),
+    ]
+    if requested_count == 7:
+        tool_calls.extend(
+            [
+                InternalToolCall(
+                    id="mixed-generate-image-rejected",
+                    name="generate_image",
+                    arguments={"prompt": rejected_image_prompt},
+                ),
+                InternalToolCall(
+                    id="mixed-file-write-rejected",
+                    name="file_tool",
+                    arguments={
+                        "operation": "write",
+                        "path": str(rejected_write_path),
+                        "content": rejected_write_content,
+                    },
+                ),
+            ]
+        )
+
+    response = await batch_image_workflow.dispatch_round(
+        tool_calls,
+        f"Submit {requested_count} mixed tools in one round.",
+    )
+
+    assert response["choices"][0]["message"]["content"] == "Image generation tasks accepted."
+    assert batch_image_workflow.image_requests == []
+
+    input_items = batch_image_workflow.gateway_requests[-1]["input"]
+    function_calls = [item for item in input_items if item.get("type") == "function_call"]
+    assert len(function_calls) == requested_count
+    assert [(item["name"], json.loads(item["arguments"])) for item in function_calls] == [(tool_call.name, tool_call.arguments) for tool_call in tool_calls]
+    call_ids = [item["call_id"] for item in function_calls]
+    assert len(set(call_ids)) == requested_count
+
+    async with batch_image_workflow.factory() as db:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == batch_image_workflow.session_id,
+                Message.role == MessageRole.TOOL,
+                Message.type == MessageType.TOOL_RESULT,
+            )
+            .order_by(Message.id.asc())
+        )
+        tool_messages = list(result.scalars().all())
+    assert len(tool_messages) == requested_count
+    result_by_call_id: dict[str, dict[str, Any]] = {}
+    for message in tool_messages:
+        internal_message = InternalMessage.model_validate_json(message.content or "{}")
+        assert internal_message.role == MessageRole.TOOL
+        assert internal_message.tool_call_id is not None
+        assert internal_message.tool_call_id not in result_by_call_id
+        result_by_call_id[internal_message.tool_call_id] = json.loads(internal_message.content or "{}")
+    assert set(result_by_call_id) == set(call_ids)
+
+    for call_id, path, marker in zip(call_ids[::2], input_paths, input_contents):
+        result_payload = result_by_call_id[call_id]
+        assert result_payload["status"] == "success"
+        assert result_payload["operation"] == "read"
+        assert marker in result_payload["content"]
+        assert path.read_text(encoding="utf-8") == marker
+
+    image_call_ids = [call_ids[index] for index in (1, 3, 4)]
+    image_call_arguments = {call_id: tool_calls[index].arguments for call_id, index in zip(image_call_ids, (1, 3, 4))}
+    pending_tasks = await batch_image_workflow.tasks()
+    assert len(pending_tasks) == 3
+    assert {task.tool_call_id for task in pending_tasks} == set(image_call_ids)
+    task_by_call_id = {task.tool_call_id: task for task in pending_tasks}
+    for call_id, arguments in image_call_arguments.items():
+        task = task_by_call_id[call_id]
+        assert task.status == BackgroundTaskStatus.PENDING
+        assert task.tool_name == "generate_image"
+        assert task.attempt_count == 0
+        assert task.arguments == arguments
+        queued_payload = result_by_call_id[call_id]
+        assert queued_payload["status"] == "queued"
+        assert queued_payload["tool_name"] == "generate_image"
+        assert queued_payload["task_id"] == task.id
+
+    if requested_count == 7:
+        for call_id in call_ids[5:]:
+            rejected_payload = result_by_call_id[call_id]
+            assert rejected_payload["status"] == "failed"
+            assert rejected_payload["error"] == "parallel_limit_exceeded"
+            assert rejected_payload["requested"] == 7
+            assert rejected_payload["limit"] == 5
+            assert rejected_payload["executed"] is False
+            assert "task_id" not in rejected_payload
+        assert not rejected_write_path.exists()
+
+    await _complete_single_round_image_tasks(batch_image_workflow, pending_tasks)
+
+    await batch_image_workflow.manager.schedule(batch_image_workflow.profile)
+    scheduled_tasks = await batch_image_workflow.tasks()
+    assert len(scheduled_tasks) == 3
+    assert {task.id for task in scheduled_tasks} == {task.id for task in pending_tasks}
+    assert Counter(request["prompt"] for request in batch_image_workflow.image_requests) == Counter(image_prompts)
+    assert len(batch_image_workflow.image_requests) == 3
+    assert rejected_image_prompt not in {request["prompt"] for request in batch_image_workflow.image_requests}
+    assert len(batch_image_workflow.events) == 3
+    assert {event["task_id"] for event in batch_image_workflow.events} == {task.id for task in pending_tasks}
+    assert batch_image_workflow.started_queue.empty()
+    assert batch_image_workflow.active_prompts == set()
+    assert all(path.read_text(encoding="utf-8") == content for path, content in zip(input_paths, input_contents))
+    if requested_count == 7:
+        assert not rejected_write_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_batch_image_generation_over_limit_rejects_excess_without_running(
+    batch_image_workflow: SimpleNamespace,
+) -> None:
+    tool_calls = [
+        InternalToolCall(
+            id=f"batch-generate-image-over-limit-{index + 1}",
+            name="generate_image",
+            arguments={"prompt": f"Over-limit background image prompt {index + 1}"},
+        )
+        for index in range(8)
+    ]
+    response = await batch_image_workflow.dispatch_round(
+        tool_calls,
+        "Queue eight background image tasks over the parallel limit.",
+    )
+
+    assert response["choices"][0]["message"]["content"] == "Image generation tasks accepted."
+    assert batch_image_workflow.image_requests == []
+
+    input_items = batch_image_workflow.gateway_requests[-1]["input"]
+    function_calls = [item for item in input_items if item.get("type") == "function_call"]
+    assert len(function_calls) == 8
+    assert [(item["name"], json.loads(item["arguments"])) for item in function_calls] == [(tool_call.name, tool_call.arguments) for tool_call in tool_calls]
+    call_ids = [item["call_id"] for item in function_calls]
+    assert len(set(call_ids)) == 8
+
+    async with batch_image_workflow.factory() as db:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == batch_image_workflow.session_id,
+                Message.role == MessageRole.TOOL,
+                Message.type == MessageType.TOOL_RESULT,
+            )
+            .order_by(Message.id.asc())
+        )
+        tool_messages = list(result.scalars().all())
+    assert len(tool_messages) == 8
+    result_by_call_id: dict[str, dict[str, Any]] = {}
+    for message in tool_messages:
+        internal_message = InternalMessage.model_validate_json(message.content or "{}")
+        assert internal_message.role == MessageRole.TOOL
+        assert internal_message.tool_call_id is not None
+        assert internal_message.tool_call_id not in result_by_call_id
+        result_by_call_id[internal_message.tool_call_id] = json.loads(internal_message.content or "{}")
+    assert set(result_by_call_id) == set(call_ids)
+
+    pending_tasks = await batch_image_workflow.tasks()
+    assert len(pending_tasks) == 5
+    assert [task.tool_call_id for task in pending_tasks] == call_ids[:5]
+    for index, task in enumerate(pending_tasks):
+        assert task.status == BackgroundTaskStatus.PENDING
+        assert task.tool_name == "generate_image"
+        assert task.attempt_count == 0
+        assert task.arguments == tool_calls[index].arguments
+        queued_payload = result_by_call_id[call_ids[index]]
+        assert queued_payload["status"] == "queued"
+        assert queued_payload["tool_name"] == "generate_image"
+        assert queued_payload["task_id"] == task.id
+
+    for call_id in call_ids[5:]:
+        rejected_payload = result_by_call_id[call_id]
+        assert rejected_payload["status"] == "failed"
+        assert rejected_payload["error"] == "parallel_limit_exceeded"
+        assert rejected_payload["requested"] == 8
+        assert rejected_payload["limit"] == 5
+        assert rejected_payload["executed"] is False
+        assert "task_id" not in rejected_payload
+
+    await _complete_single_round_image_tasks(batch_image_workflow, pending_tasks)
+
+    await batch_image_workflow.manager.schedule(batch_image_workflow.profile)
+    scheduled_tasks = await batch_image_workflow.tasks()
+    assert len(scheduled_tasks) == 5
+    assert [task.tool_call_id for task in scheduled_tasks] == call_ids[:5]
+    assert len(batch_image_workflow.image_requests) == 5
+    assert Counter(request["prompt"] for request in batch_image_workflow.image_requests) == Counter(tool_call.arguments["prompt"] for tool_call in tool_calls[:5])
+    assert batch_image_workflow.started_queue.empty()
+    assert batch_image_workflow.active_prompts == set()
+    assert len(batch_image_workflow.events) == 5
+    assert {event["task_id"] for event in batch_image_workflow.events} == {task.id for task in pending_tasks}
 
 
 @pytest.mark.asyncio
@@ -1229,3 +2037,383 @@ async def test_mixed_image_sources_share_per_user_temp_size_quota(
         deleted_count, current_size = tasks_module._cleanup_temp_dir_by_size(max_size_bytes)
         assert deleted_count == 0
         assert current_size == max_size_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("round_two_count", "completion_order"),
+    [
+        pytest.param(3, (0, 1, 2, 3, 4, 5, 6, 7), id="fifo"),
+        pytest.param(3, (1, 2, 3, 4, 5, 6, 7, 0), id="later-round-first"),
+        pytest.param(3, (1, 2, 3, 4, 5, 0, 7, 6), id="interleaved"),
+        pytest.param(5, (1, 2, 3, 4, 5, 6, 7, 8, 9, 0), id="later-round-first-full-limit"),
+    ],
+)
+async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
+    batch_image_workflow: SimpleNamespace,
+    round_two_count: int,
+    completion_order: tuple[int, ...],
+) -> None:
+    workflow = batch_image_workflow
+    round_one_prompts = [f"round-one image {index}" for index in range(1, 6)]
+    round_two_prompts = [f"round-two image {index}" for index in range(1, round_two_count + 1)]
+    all_prompts = round_one_prompts + round_two_prompts
+    total_task_count = 5 + round_two_count
+
+    def build_tool_calls(prefix: str, prompts: list[str]) -> list[InternalToolCall]:
+        return [
+            InternalToolCall(
+                id=f"{prefix}-image-{index}",
+                name="generate_image",
+                arguments={"prompt": prompt},
+            )
+            for index, prompt in enumerate(prompts, start=1)
+        ]
+
+    def input_item_maps(payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        input_items = payload.get("input")
+        assert isinstance(input_items, list)
+        function_calls: dict[str, dict[str, Any]] = {}
+        function_outputs: dict[str, dict[str, Any]] = {}
+        for item in input_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                call_id = item.get("call_id") or item.get("id")
+                assert isinstance(call_id, str) and call_id
+                assert call_id not in function_calls
+                function_calls[call_id] = copy.deepcopy(item)
+            elif item.get("type") == "function_call_output":
+                call_id = item.get("call_id") or item.get("id")
+                assert isinstance(call_id, str) and call_id
+                assert call_id not in function_outputs
+                function_outputs[call_id] = copy.deepcopy(item)
+        assert set(function_calls) == set(function_outputs)
+        return function_calls, function_outputs
+
+    async def assert_persisted_state(completed_ids: set[int], started_ids: set[int], tasks: list[BackgroundTask]) -> None:
+        async with workflow.factory() as db:
+            result = await db.execute(select(BackgroundTask).where(BackgroundTask.session_id == workflow.session_id).order_by(BackgroundTask.id.asc()))
+            persisted_tasks = list(result.scalars().all())
+        assert [task.id for task in persisted_tasks] == [task.id for task in tasks]
+        persisted_by_id = {task.id: task for task in persisted_tasks}
+        task_by_id = {task.id: task for task in tasks}
+        assert all(isinstance(task_id, int) for task_id in persisted_by_id)
+        expected_running_ids = started_ids - completed_ids
+        expected_pending_ids = set(task_by_id) - started_ids
+        assert {task.id for task in persisted_tasks if task.status == BackgroundTaskStatus.RUNNING} == expected_running_ids
+        assert {task.id for task in persisted_tasks if task.status == BackgroundTaskStatus.PENDING} == expected_pending_ids
+        assert {task.id for task in persisted_tasks if task.status == BackgroundTaskStatus.SUCCEEDED} == completed_ids
+        assert len(expected_running_ids) <= 2
+        assert workflow.active_prompts == {task_by_id[task_id].arguments["prompt"] for task_id in expected_running_ids}
+        for task_id in completed_ids:
+            task = persisted_by_id[task_id]
+            assert task.attempt_count == 1
+            assert task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+        for task_id in set(task_by_id):
+            assert persisted_by_id[task_id].attempt_count == (1 if task_id in started_ids else 0)
+
+    round_one_response = await workflow.dispatch_round(
+        build_tool_calls("round-one", round_one_prompts),
+        "round-one batch request",
+    )
+    assert round_one_response["choices"][0]["message"]["content"] == "Image generation tasks accepted."
+    assert len(workflow.gateway_requests) == 2
+    round_one_payload = copy.deepcopy(workflow.gateway_requests[-1])
+    round_one_calls, round_one_outputs = input_item_maps(round_one_payload)
+    assert len(round_one_calls) == 5
+    assert set(round_one_calls) == set(round_one_outputs)
+    serialized_round_one = json.dumps(round_one_payload, ensure_ascii=False)
+    assert "round-one batch request" in serialized_round_one
+    assert "round-two batch request" not in serialized_round_one
+
+    round_one_tasks = await workflow.tasks()
+    assert len(round_one_tasks) == 5
+    assert [task.arguments["prompt"] for task in round_one_tasks] == round_one_prompts
+    assert all(task.status == BackgroundTaskStatus.PENDING for task in round_one_tasks)
+    assert all(task.attempt_count == 0 for task in round_one_tasks)
+    round_one_task_ids = [task.id for task in round_one_tasks]
+    assert all(isinstance(task_id, int) for task_id in round_one_task_ids)
+    round_one_submission_snapshots: dict[int, list[dict[str, Any]]] = {}
+    round_one_queued_payloads: dict[str, dict[str, Any]] = {}
+    for task in round_one_tasks:
+        assert task.id is not None
+        assert task.reply_status == BackgroundTaskReplyStatus.PENDING
+        assert isinstance(task.extra, dict)
+        submission_context = task.extra.get("submission_context")
+        assert isinstance(submission_context, list)
+        round_one_submission_snapshots[task.id] = copy.deepcopy(submission_context)
+        assert isinstance(task.tool_call_id, str)
+        assert task.tool_call_id in round_one_calls
+        call_item = round_one_calls[task.tool_call_id]
+        assert call_item["name"] == "generate_image"
+        assert json.loads(call_item["arguments"]) == task.arguments
+        queued_item = round_one_outputs[task.tool_call_id]
+        queued_payload = json.loads(queued_item["output"])
+        assert queued_payload["status"] == "queued"
+        assert queued_payload["tool_name"] == "generate_image"
+        assert queued_payload["task_id"] == task.id
+        round_one_queued_payloads[task.tool_call_id] = copy.deepcopy(queued_payload)
+
+    await workflow.manager.schedule(workflow.profile)
+    initial_started_prompts = [await asyncio.wait_for(workflow.started_queue.get(), timeout=10) for _ in range(2)]
+    assert len(set(initial_started_prompts)) == 2
+    initial_started_ids = {task.id for task in round_one_tasks if task.arguments["prompt"] in initial_started_prompts}
+    assert initial_started_ids == set(round_one_task_ids[:2])
+    assert set(workflow.gates) == set(initial_started_prompts)
+    assert all(not workflow.gates[prompt].is_set() for prompt in initial_started_prompts)
+    assert len(workflow.image_requests) == 2
+    await assert_persisted_state(set(), initial_started_ids, round_one_tasks)
+
+    round_two_response = await workflow.dispatch_round(
+        build_tool_calls("round-two", round_two_prompts),
+        "round-two batch request",
+    )
+    assert round_two_response["choices"][0]["message"]["content"] == "Image generation tasks accepted."
+    assert len(workflow.gateway_requests) == 4
+    round_two_payload = copy.deepcopy(workflow.gateway_requests[-1])
+    round_two_calls, round_two_outputs = input_item_maps(round_two_payload)
+    assert len(round_two_calls) == total_task_count
+    assert set(round_two_calls) == set(round_two_outputs)
+    assert set(round_one_calls).issubset(round_two_calls)
+    serialized_round_two = json.dumps(round_two_payload, ensure_ascii=False)
+    assert "round-one batch request" in serialized_round_two
+    assert "round-two batch request" in serialized_round_two
+
+    tasks = await workflow.tasks()
+    assert len(tasks) == total_task_count
+    assert [task.id for task in tasks[:5]] == round_one_task_ids
+    assert [task.arguments["prompt"] for task in tasks] == all_prompts
+    round_two_tasks = tasks[5:]
+    assert len(round_two_tasks) == round_two_count
+    round_two_task_ids = [task.id for task in round_two_tasks]
+    assert all(isinstance(task_id, int) for task_id in round_two_task_ids)
+    assert not set(round_one_task_ids) & set(round_two_task_ids)
+    round_two_submission_snapshots: dict[int, list[dict[str, Any]]] = {}
+    round_two_call_ids: set[str] = set()
+    for task in tasks:
+        assert task.id is not None
+        assert isinstance(task.tool_call_id, str)
+        assert task.tool_call_id in round_two_calls
+        call_item = round_two_calls[task.tool_call_id]
+        assert call_item["name"] == "generate_image"
+        assert json.loads(call_item["arguments"]) == task.arguments
+        output_item = round_two_outputs[task.tool_call_id]
+        output_payload = json.loads(output_item["output"])
+        assert output_payload["status"] == "queued"
+        assert output_payload["tool_name"] == "generate_image"
+        assert output_payload["task_id"] == task.id
+        assert isinstance(task.extra, dict)
+        submission_context = task.extra.get("submission_context")
+        assert isinstance(submission_context, list)
+        if task.id in round_one_submission_snapshots:
+            assert task.extra.get("submission_context") == round_one_submission_snapshots[task.id]
+            assert output_payload == round_one_queued_payloads[task.tool_call_id]
+        else:
+            round_two_call_ids.add(task.tool_call_id)
+            round_two_submission_snapshots[task.id] = copy.deepcopy(submission_context)
+    assert len(round_two_call_ids) == round_two_count
+    assert round_two_call_ids == {task.tool_call_id for task in round_two_tasks if task.tool_call_id is not None}
+    await workflow.manager.schedule(workflow.profile)
+    assert len(workflow.image_requests) == 2
+    assert workflow.active_prompts == set(initial_started_prompts)
+    assert workflow.started_queue.empty()
+    await assert_persisted_state(set(), initial_started_ids, tasks)
+
+    async with workflow.factory() as db:
+        result = await db.execute(select(Message).where(Message.session_id == workflow.session_id).order_by(Message.id.asc()))
+        source_messages = {message.id: message.content for message in result.scalars().all() if message.id is not None}
+
+    prompt_by_task_id = {task.id: task.arguments["prompt"] for task in tasks}
+    completed_ids: set[int] = set()
+    started_ids = set(initial_started_ids)
+    generated_paths: set[Path] = set()
+    completed_work_ids: dict[int, int] = {}
+    result_message_ids: set[int] = set()
+    summary_payloads: list[dict[str, Any]] = []
+
+    for task_index in completion_order:
+        task = tasks[task_index]
+        assert task.id is not None
+        assert task.id in started_ids
+        prompt = prompt_by_task_id[task.id]
+        assert prompt in workflow.active_prompts
+        gate = workflow.gates.get(prompt)
+        assert gate is not None
+        assert not gate.is_set()
+        run_handle = workflow.run_handles.get(task.id)
+        assert run_handle is not None
+        assert not run_handle.done()
+        gate.set()
+        await asyncio.wait_for(asyncio.shield(run_handle), timeout=10)
+
+        async with workflow.factory() as db:
+            completed_task = await db.get(BackgroundTask, task.id)
+            assert completed_task is not None
+            assert completed_task.status == BackgroundTaskStatus.SUCCEEDED
+            assert completed_task.attempt_count == 1
+            assert completed_task.result is not None
+            completed_result = copy.deepcopy(completed_task.result)
+            assert completed_task.extra.get("submission_context") == (round_one_submission_snapshots.get(task.id, round_two_submission_snapshots.get(task.id)))
+
+        assert completed_result["status"] == "succeeded"
+        assert completed_result["tool_name"] == "generate_image"
+        result_content = completed_result["content"]
+        assert result_content["status"] == "success"
+        files = result_content["send_file_to_user"]["files"]
+        assert isinstance(files, list)
+        assert len(files) == 1
+        generated_path = Path(files[0]["path"])
+        expected_dir = (get_user_temp_dir(os.getcwd(), UID) / "generated_images").resolve()
+        assert generated_path.parent == expected_dir
+        assert generated_path.suffix.lower() == ".png"
+        assert files[0]["mime_type"] == "image/png"
+        assert generated_path.read_bytes() == workflow.expected_bytes
+        assert generated_path.resolve() not in generated_paths
+        generated_paths.add(generated_path.resolve())
+        assert workflow.image_data not in json.dumps(completed_result, ensure_ascii=False)
+
+        gateway_request_start = len(workflow.gateway_requests)
+        event_start = len(workflow.events)
+        work, replied_task, result_message = await workflow.summarize(task.id)
+        assert work.status == SessionReplyWorkStatus.SUCCEEDED
+        assert work.result_message_id == result_message.id
+        assert replied_task.id == task.id
+        assert replied_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+        assert replied_task.extra.get("submission_context") == (round_one_submission_snapshots.get(task.id, round_two_submission_snapshots.get(task.id)))
+        assert result_message.id is not None
+        assert result_message.role == MessageRole.ASSISTANT
+        assert result_message.type == MessageType.TEXT
+        assert result_message.content == f"Completed: {prompt}"
+        assert work.id is not None
+        completed_work_ids[task.id] = work.id
+        result_message_ids.add(result_message.id)
+
+        new_events = workflow.events[event_start:]
+        assert len(new_events) == 1
+        event_payload = new_events[0]
+        assert event_payload["type"] == "proactive_reply"
+        assert event_payload["task_id"] == task.id
+        assert event_payload["message_id"] == result_message.id
+        assert event_payload["content"] == f"Completed: {prompt}"
+
+        new_gateway_requests = workflow.gateway_requests[gateway_request_start:]
+        assert len(new_gateway_requests) == 1
+        summary_payload = new_gateway_requests[0]
+        summary_payloads.append(copy.deepcopy(summary_payload))
+        summary_calls, summary_outputs = input_item_maps(summary_payload)
+        if task_index < 5:
+            expected_call_ids = {task.tool_call_id}
+            serialized_summary = json.dumps(summary_payload, ensure_ascii=False)
+            assert "round-one batch request" in serialized_summary
+            assert "round-two batch request" not in serialized_summary
+        else:
+            expected_call_ids = set(round_one_calls) | {task.tool_call_id}
+            serialized_summary = json.dumps(summary_payload, ensure_ascii=False)
+            assert "round-one batch request" in serialized_summary
+            assert "round-two batch request" in serialized_summary
+            assert not (set(round_two_call_ids) - {task.tool_call_id}) & set(summary_calls)
+        assert set(summary_calls) == expected_call_ids
+        assert set(summary_outputs) == expected_call_ids
+        for call_id in expected_call_ids:
+            call_item = summary_calls[call_id]
+            assert call_item["name"] == "generate_image"
+            expected_task = task if call_id == task.tool_call_id else next(candidate for candidate in round_one_tasks if candidate.tool_call_id == call_id)
+            assert json.loads(call_item["arguments"]) == expected_task.arguments
+            output_payload = json.loads(summary_outputs[call_id]["output"])
+            if call_id == task.tool_call_id:
+                assert output_payload == completed_result
+            else:
+                assert output_payload == round_one_queued_payloads[call_id]
+        assert workflow.image_data not in json.dumps(summary_payload, ensure_ascii=False)
+
+        completed_ids.add(task.id)
+        await workflow.manager.schedule(workflow.profile)
+        unstarted_tasks = [candidate for candidate in tasks if candidate.id not in started_ids]
+        if unstarted_tasks:
+            next_prompt = await asyncio.wait_for(workflow.started_queue.get(), timeout=10)
+            assert next_prompt in {prompt_by_task_id[candidate.id] for candidate in unstarted_tasks}
+            next_task = next(candidate for candidate in unstarted_tasks if prompt_by_task_id[candidate.id] == next_prompt)
+            assert next_task.id is not None
+            assert next_task.id not in started_ids
+            started_ids.add(next_task.id)
+        else:
+            assert workflow.started_queue.empty()
+        await assert_persisted_state(completed_ids, started_ids, tasks)
+
+    assert completed_ids == {task.id for task in tasks}
+    assert len(completed_work_ids) == total_task_count
+    assert len(result_message_ids) == total_task_count
+    assert [event["task_id"] for event in workflow.events] == [tasks[index].id for index in completion_order]
+    assert len(summary_payloads) == total_task_count
+    assert len(workflow.gateway_requests) == 4 + total_task_count
+    assert len(workflow.image_requests) == total_task_count
+    assert Counter(request["prompt"] for request in workflow.image_requests) == Counter(all_prompts)
+    assert all(request["n"] == 1 for request in workflow.image_requests)
+    assert all(request["model_id"] == "background-image-model" for request in workflow.image_requests)
+    assert all(request["protocol"] == "openai_image" for request in workflow.image_requests)
+    assert workflow.peak_active == 2
+    assert workflow.active_prompts == set()
+    assert workflow.started_queue.empty()
+
+    generated_dir = (get_user_temp_dir(os.getcwd(), UID) / "generated_images").resolve()
+    generated_files = [path.resolve() for path in generated_dir.iterdir() if path.is_file() and not path.name.startswith(".")]
+    assert len(generated_files) == total_task_count
+    assert set(generated_files) == generated_paths
+    assert all(path.suffix.lower() == ".png" and path.read_bytes() == workflow.expected_bytes for path in generated_files)
+
+    async with workflow.factory() as db:
+        result = await db.execute(select(BackgroundTask).where(BackgroundTask.session_id == workflow.session_id).order_by(BackgroundTask.id.asc()))
+        persisted_tasks = list(result.scalars().all())
+        result = await db.execute(select(SessionReplyWorkItem).order_by(SessionReplyWorkItem.id.asc()))
+        work_items = list(result.scalars().all())
+        result = await db.execute(select(Message).where(Message.session_id == workflow.session_id).order_by(Message.id.asc()))
+        messages = list(result.scalars().all())
+    assert len(persisted_tasks) == total_task_count
+    assert all(task.status == BackgroundTaskStatus.SUCCEEDED for task in persisted_tasks)
+    assert all(task.attempt_count == 1 for task in persisted_tasks)
+    assert all(task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED for task in persisted_tasks)
+    for task in persisted_tasks:
+        assert task.id is not None
+        expected_snapshot = round_one_submission_snapshots.get(task.id, round_two_submission_snapshots.get(task.id))
+        assert task.extra.get("submission_context") == expected_snapshot
+    assert len(work_items) == total_task_count
+    assert all(work_item.status == SessionReplyWorkStatus.SUCCEEDED for work_item in work_items)
+    assert {work_item.id for work_item in work_items} == set(completed_work_ids.values())
+    assert {work_item.source_id for work_item in work_items} == {str(task.id) for task in tasks}
+    result_messages = [message for message in messages if message.id in result_message_ids]
+    assert len(result_messages) == total_task_count
+    assert {message.content for message in result_messages} == {f"Completed: {prompt}" for prompt in all_prompts}
+    for message_id, content in source_messages.items():
+        source_message = next(message for message in messages if message.id == message_id)
+        assert source_message.content == content
+
+    work_snapshot = {work_item.id: (work_item.status, work_item.work_type, work_item.source_id, work_item.result_message_id) for work_item in work_items}
+    message_snapshot = {message.id: (message.role, message.type, message.content) for message in messages if message.id is not None}
+    gateway_count = len(workflow.gateway_requests)
+    event_count = len(workflow.events)
+    for task in tasks:
+        assert task.id is not None
+        await reply_trigger_module.trigger_background_task_reply(task.id)
+        await executor_lifecycle_module.execute_session_reply_work(
+            completed_work_ids[task.id],
+            "batch-image-summary-worker",
+        )
+
+    assert len(workflow.gateway_requests) == gateway_count
+    assert len(workflow.events) == event_count
+    async with workflow.factory() as db:
+        result = await db.execute(select(SessionReplyWorkItem).order_by(SessionReplyWorkItem.id.asc()))
+        repeated_work_items = list(result.scalars().all())
+        result = await db.execute(select(Message).where(Message.session_id == workflow.session_id).order_by(Message.id.asc()))
+        repeated_messages = list(result.scalars().all())
+        leftover = await reply_work_item_module.session_reply_work_item_crud.claim_next(
+            db,
+            worker_id="batch-image-summary-worker",
+            lease_seconds=300,
+        )
+    repeated_work_snapshot = {work_item.id: (work_item.status, work_item.work_type, work_item.source_id, work_item.result_message_id) for work_item in repeated_work_items}
+    repeated_message_snapshot = {message.id: (message.role, message.type, message.content) for message in repeated_messages if message.id is not None}
+    assert repeated_work_snapshot == work_snapshot
+    assert repeated_message_snapshot == message_snapshot
+    assert leftover is None
