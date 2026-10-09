@@ -1,0 +1,59 @@
+.collapsible-message-text {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.collapsible-message-text__viewport {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.collapsible-message-text__content {
+  display: flow-root;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.collapsible-message-text__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  margin: 4px 0 0 auto;
+  border: 0;
+  border-radius: var(--radius-circle);
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: center;
+  white-space: normal;
+  cursor: pointer;
+}
+
+.collapsible-message-text__toggle:hover {
+  background: rgba(var(--color-white-rgb), 0.12);
+}
+
+.collapsible-message-text__toggle:focus-visible {
+  outline: 2px solid rgba(var(--color-white-rgb), 0.85);
+  outline-offset: 2px;
+}
+
+.collapsible-message-text__icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  transition: transform 160ms ease;
+}
+
+.collapsible-message-text__icon.is-expanded {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collapsible-message-text__icon {
+    transition: none;
+  }
+}

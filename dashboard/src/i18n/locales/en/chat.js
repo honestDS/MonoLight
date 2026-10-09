@@ -4,6 +4,8 @@ export default {
   llm_request_metadata_label: 'LLM request token information',
   collapse_request_metadata: 'Collapse information overview',
   expand_request_metadata: 'Expand information overview',
+  collapse_message: 'Collapse',
+  expand_message: 'Show more',
   request_metadata_short_label: 'Info overview',
   todo_title: 'Tasks',
   todo_progress: '{completed}/{total}',

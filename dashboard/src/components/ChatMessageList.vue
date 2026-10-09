@@ -253,51 +253,69 @@
           <div v-if="typeof getMessageText(msg) === 'string' && getMessageText(msg).trim() && currentSessionEnableMarkdown" class="content markdown-body">
             <div v-if="msg.status === 'queued'" class="queued-indicator">
               <img src="@/assets/svg/wait.svg" class="is-loading" />
-            </div><div v-html="renderMarkdown(getMessageText(msg))"></div>
+            </div><CollapsibleMessageText
+              :enabled="msg.role === 'user'"
+              :expanded="expandedUserMessages.has(getDisplayKey(msg))"
+              @update:expanded="setUserMessageExpanded(msg, $event)"
+            >
+              <div v-html="renderMarkdown(getMessageText(msg))"></div>
+            </CollapsibleMessageText>
           </div>
           <div v-else-if="typeof getMessageText(msg) === 'string' && getMessageText(msg).trim() && !currentSessionEnableMarkdown" class="content" style="white-space: pre-wrap;">
             <div v-if="msg.status === 'queued'" class="queued-indicator">
               <img src="@/assets/svg/wait.svg" class="is-loading" />
-            </div><template v-for="(part, idx) in renderTextWithLinks(getMessageText(msg))" :key="idx">
-              <el-link
-                v-if="part.type === 'link'"
-                :href="part.href"
-                class="message-link"
-                type="primary"
-                target="_blank"
-                rel="noopener noreferrer"
-                underline="always"
-              >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
-            </template>
+            </div><CollapsibleMessageText
+              :enabled="msg.role === 'user'"
+              :expanded="expandedUserMessages.has(getDisplayKey(msg))"
+              @update:expanded="setUserMessageExpanded(msg, $event)"
+            >
+              <template v-for="(part, idx) in renderTextWithLinks(getMessageText(msg))" :key="idx">
+                <el-link
+                  v-if="part.type === 'link'"
+                  :href="part.href"
+                  class="message-link"
+                  type="primary"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  underline="always"
+                >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
+              </template>
+            </CollapsibleMessageText>
           </div>
           <div v-else-if="Array.isArray(msg.content)" class="content">
             <div v-if="msg.status === 'queued'" class="queued-indicator">
               <img src="@/assets/svg/wait.svg" class="is-loading" />
-            </div><div v-for="(part, idx) in msg.content" :key="idx" class="message-part">
-              <div v-if="part.type === 'text'" class="text-part">
-                <template v-for="(textPart, textIdx) in renderTextWithLinks(part.text)" :key="textIdx">
-                  <el-link
-                    v-if="textPart.type === 'link'"
-                    :href="textPart.href"
-                    class="message-link"
-                    type="primary"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    underline="always"
-                  >{{ textPart.text }}</el-link><span v-else>{{ textPart.text }}</span>
-                </template>
+            </div><CollapsibleMessageText
+              :enabled="msg.role === 'user'"
+              :expanded="expandedUserMessages.has(getDisplayKey(msg))"
+              @update:expanded="setUserMessageExpanded(msg, $event)"
+            >
+              <div v-for="(part, idx) in msg.content" :key="idx" class="message-part">
+                <div v-if="part.type === 'text'" class="text-part">
+                  <template v-for="(textPart, textIdx) in renderTextWithLinks(part.text)" :key="textIdx">
+                    <el-link
+                      v-if="textPart.type === 'link'"
+                      :href="textPart.href"
+                      class="message-link"
+                      type="primary"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      underline="always"
+                    >{{ textPart.text }}</el-link><span v-else>{{ textPart.text }}</span>
+                  </template>
+                </div>
+                <el-image
+                  v-else-if="part.type === 'image_url'"
+                  :src="part.image_url.url"
+                  :preview-src-list="[part.image_url.url]"
+                  preview-teleported
+                  :hide-on-click-modal="true"
+                  class="msg-image"
+                  @load="handleImageLoad"
+                ></el-image>
+                <div v-else class="text-part">{{ JSON.stringify(part) }}</div>
               </div>
-              <el-image
-                v-else-if="part.type === 'image_url'"
-                :src="part.image_url.url"
-                :preview-src-list="[part.image_url.url]"
-                preview-teleported
-                :hide-on-click-modal="true"
-                class="msg-image"
-                @load="handleImageLoad"
-              ></el-image>
-              <div v-else class="text-part">{{ JSON.stringify(part) }}</div>
-            </div>
+            </CollapsibleMessageText>
           </div>
 
           <div v-if="getMessageFiles(msg).length > 0" class="message-attachments message-sent-files">
@@ -365,6 +383,7 @@ import 'highlight.js/styles/github.css'
 import 'github-markdown-css/github-markdown.css'
 import VirtualizedCode from './VirtualizedCode.vue'
 import ThinkingBlock from './ThinkingBlock.vue'
+import CollapsibleMessageText from './CollapsibleMessageText.vue'
 import { fileApi } from '../api'
 import {
   formatTimestamp,
@@ -645,6 +664,7 @@ const activityNotice = computed(() => {
 const unreadMessageKeys = ref([])
 const latestLlmMessageVisible = ref(true)
 const followsOutput = ref(true)
+const expandedUserMessages = ref(new Set())
 let unreadTrackingReady = false
 let unreadTrackingGeneration = 0
 let visibilityFrameId = null
@@ -709,6 +729,15 @@ const scheduleUnreadVisibilityCheck = () => {
     if (messageListUnmounted) return
     refreshLatestLlmMessageVisibility()
   })
+}
+const setUserMessageExpanded = (msg, expanded) => {
+  const key = getDisplayKey(msg)
+  if (expanded) {
+    expandedUserMessages.value.add(key)
+  } else {
+    expandedUserMessages.value.delete(key)
+  }
+  scheduleUnreadVisibilityCheck()
 }
 let messageListResizeObserver = null
 const bindMessageListResizeObserver = () => {
@@ -825,6 +854,7 @@ const handleChangedIncomingMessages = async (changedMessages, replaceUnread = fa
 
 watch(() => props.currentSessionId, () => {
   reasoningCollapseModel.value = []
+  expandedUserMessages.value.clear()
 })
 
 watch(
