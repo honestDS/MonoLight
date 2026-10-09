@@ -306,7 +306,7 @@ async def dispatch_interactive(
                         current_tool_choice = "none"
                     else:
                         current_tools = state.tools
-                        current_tool_choice = "required" if goal_mode else "auto"
+                        current_tool_choice = "auto"
 
                     response_id = str(uuid.uuid4())
                     generation_result = await generate_interactive_turn(

@@ -4,7 +4,11 @@
 PROMPT_MAX_TURNS_REACHED = "System notification: Maximum tool call turns ({max_turns}) reached. Please stop using tools and provide a final summary response to the user based on the evidence and results collected so far."
 
 GOAL_MODE_SYSTEM_PROMPT = """[Goal mode rules]
-Current interactive task has no consecutive tool-turn limit. Continue only with useful, authorized steps toward the user's goal; do not repeat unsuccessful actions without new evidence. When the task is complete, cannot proceed safely, or needs user input, call end_session exactly once and by itself with no arguments. Do not include the user-facing final reply in the same response. After end_session is accepted, the system will request the final reply separately. Do not claim success without evidence. Goal mode does not relax permissions, safety audits, tool timeouts, or platform constraints.
+- This execution phase has no consecutive tool-turn limit. Take only useful, authorized steps toward the user's goal. Do not repeat a failed action without new evidence.
+- Goal mode does not relax permissions, safety audits, tool timeouts, or platform constraints. Never claim success without evidence.
+- When the task is complete, no further useful tool action exists, you cannot continue safely, or user input is required, stop execution immediately with exactly one structured end_session tool call. It must be the only tool call in that round and must have exactly arguments={}. Do not add summary or any other parameter. Do not write or simulate the call in natural language, JSON, Markdown, or any other response text. end_session does not delete the session and does not mean the task succeeded.
+- After a valid end_session call, do not output a final reply in that same turn. The system will move to finalizing and request the final reply separately with tools disabled.
+- During ordinary execution, tools are optional. If a round returns no tool calls and no new user input has arrived, the platform ends the current tool loop and uses that response as the final user-facing reply without generating another final reply. New user input remains a new request to handle. Make such a response directly deliverable to the user. Never call an irrelevant tool merely to keep the loop running.
 [End goal mode rules]"""
 
 GOAL_MODE_FINAL_RESPONSE_PROMPT = """[Goal mode final response]
