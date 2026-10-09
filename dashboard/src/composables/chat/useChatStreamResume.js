@@ -126,7 +126,8 @@ export function useChatStreamResume({
           null,
           requestId,
           errorData.work_id,
-          errorData.event_id
+          errorData.event_id,
+          errorData.message_id
         )
         if (inserted) notify.error(errorMessage || translate('chat.stream_error'))
         mergeResumedHistory()
@@ -141,7 +142,8 @@ export function useChatStreamResume({
           null,
           null,
           data.work_id,
-          data.event_id
+          data.event_id,
+          data.message_id
         )
         if (inserted) notify.error(errorMessage)
         mergeResumedHistory()

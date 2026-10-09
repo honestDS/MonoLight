@@ -7,9 +7,15 @@ from sqlalchemy.util import await_only
 from sqlmodel import select
 
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
+from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
+from app.core.session_reply_queue.manager import SessionReplyQueueManager
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole
+from app.models.profile import Profile
+from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -17,6 +23,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.user import User
 from app.providers.database.client import CancellationSafeAsyncSession
 from tests.integration.session_reply_queue_fixture import concurrent_session_factory as _concurrent_session_factory
 from tests.integration.session_reply_queue_fixture import db_session as _db_session
@@ -606,3 +613,134 @@ async def test_stream_events_publish_while_generation_transaction_is_committing(
     assert sum(stream_event.event["type"] == "input_dequeued" for stream_event in events) == 1
     assert [stream_event.work_id for stream_event in events] == [work_id, work_id, work_id]
     assert [stream_event.event["work_id"] for stream_event in events] == [work_id, work_id, work_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "work_type",
+    [SessionReplyWorkType.FOREGROUND_REPLY, SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY],
+)
+async def test_failed_reply_reuses_persisted_message_id_across_notification_history_and_stream_replay(
+    database_factory,
+    monkeypatch,
+    work_type: SessionReplyWorkType,
+):
+    uid = "reply-failure-user"
+    session_id = f"reply-failure-session-{work_type.value}"
+    worker_id = "reply-failure-worker"
+    request_ids = ["reply-request-1", "reply-request-2"]
+    user_error = "测试错误" + "完整错误正文" * 100
+    crud = CRUDSessionReplyWorkItem()
+
+    async with database_factory(foreign_keys=True, wal=True) as session_factory:
+        async with session_factory() as db:
+            profile = Profile(id=1, uid=uid, name="reply failure profile", configs={})
+            db.add_all(
+                [
+                    User(uid=uid, username="reply-failure-user"),
+                    profile,
+                    ChatSession(session_id=session_id, uid=uid, profile_id=profile.id, source="http", reply_target_source="http"),
+                ]
+            )
+            await db.flush()
+
+            task = None
+            if work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
+                task = BackgroundTask(
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile.id,
+                    tool_call_id="reply-failure-tool-call",
+                    tool_name="reply-failure-tool",
+                    status=BackgroundTaskStatus.SUCCEEDED,
+                    arguments={},
+                    result={"status": "succeeded"},
+                    auto_reply=True,
+                    reply_status=BackgroundTaskReplyStatus.RUNNING,
+                )
+                db.add(task)
+                await db.flush()
+
+            source_id = task.id if task is not None else 1
+            work, created = await crud.enqueue(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile.id,
+                work_type=work_type,
+                source_type=SessionReplySourceType.BACKGROUND_TASK if task is not None else SessionReplySourceType.USER_MESSAGE,
+                source_id=source_id,
+                dedupe_key=f"reply-failure:{work_type.value}",
+            )
+            assert created is True
+            work.execution_state = {"request_ids": request_ids}
+            db.add(work)
+            await db.commit()
+
+            claimed = await crud.claim_next(db, worker_id=worker_id, lease_seconds=300)
+            assert claimed is not None
+            assert claimed.id is not None
+            work_id = claimed.id
+
+        sent_events: list[dict] = []
+
+        async def collect_session_event(_uid: str, _session_id: str, event: dict) -> None:
+            sent_events.append(event)
+
+        monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", session_factory)
+        monkeypatch.setattr("app.providers.database.AsyncSessionLocal", session_factory)
+        monkeypatch.setattr(executor_lifecycle_module, "send_session_event", collect_session_event)
+
+        await executor_lifecycle_module.fail_session_reply_work(
+            work_id,
+            worker_id,
+            "worker failure",
+            user_error=user_error,
+        )
+        await executor_lifecycle_module.fail_session_reply_work(
+            work_id,
+            worker_id,
+            "worker failure",
+            user_error=user_error,
+        )
+
+        async with session_factory() as db:
+            persisted_work = await crud.get(db, work_id)
+            assert persisted_work is not None
+            history = await message_crud.get_history(db, session_id=session_id, uid=uid)
+            error_messages = [message for message in history if message.role == MessageRole.ERR]
+            assert len(error_messages) == 1
+            error_message = error_messages[0]
+            assert error_message.id is not None
+            assert error_message.content == user_error
+            assert persisted_work.result_message_id == error_message.id
+            assert persisted_work.status == SessionReplyWorkStatus.FAILED
+
+            if task is not None:
+                persisted_task = await db.get(BackgroundTask, task.id)
+                assert persisted_task is not None
+                assert persisted_task.status == BackgroundTaskStatus.SUCCEEDED
+                assert persisted_task.reply_status == BackgroundTaskReplyStatus.FAILED
+
+        assert len(sent_events) == 1
+        notification = sent_events[0]
+        assert notification["type"] == "proactive_reply_error"
+        assert notification["message_id"] == error_message.id
+        assert notification["event_id"]
+        assert notification["work_id"] == work_id
+        assert notification["request_ids"] == request_ids
+        assert notification["content"] == user_error
+
+        manager = SessionReplyQueueManager()
+        stream_events = [event async for event in manager.wait_for_stream(work_id)]
+        replayed_events = [event async for event in manager.wait_for_stream(work_id, resume_mode=True)]
+
+        assert len(stream_events) == 1
+        assert len(replayed_events) == 1
+        for stream_event in [stream_events[0], replayed_events[0]]:
+            assert stream_event["type"] == "error"
+            assert stream_event["message_id"] == error_message.id
+            assert stream_event["event_id"] == notification["event_id"]
+            assert stream_event["work_id"] == notification["work_id"] == work_id
+            assert stream_event["request_ids"] == notification["request_ids"] == request_ids
+            assert stream_event["message"] == error_message.content == user_error

@@ -148,7 +148,8 @@ export function useChatWebSocketSend({
           null,
           requestIdParam || requestId,
           errorData.work_id,
-          errorData.event_id
+          errorData.event_id,
+          errorData.message_id
         )
         if (inserted) {
           notify.error(errorMessage || translate('chat.stream_error'))
@@ -199,7 +200,8 @@ export function useChatWebSocketSend({
           null,
           null,
           data.work_id,
-          data.event_id
+          data.event_id,
+          data.message_id
         )
         if (inserted) {
           notify.error(errorMessage)

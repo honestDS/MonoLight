@@ -183,14 +183,17 @@ class SessionReplyResult:
                     return
                 if work.status == SessionReplyWorkStatus.FAILED:
                     error_content = await _get_work_failure_content(db, work)
-                    yield {
-                        "event_id": build_session_reply_work_event_id(work, error=True),
-                        "type": "error",
-                        "message": error_content,
-                        "session_id": work.session_id,
-                        "work_id": target_work_id,
-                        "request_ids": get_work_request_ids(work),
-                    }
+                    yield build_identified_work_response(
+                        work,
+                        {
+                            "event_id": build_session_reply_work_event_id(work, error=True),
+                            "type": "error",
+                            "message": error_content,
+                            "session_id": work.session_id,
+                            "work_id": target_work_id,
+                            "request_ids": get_work_request_ids(work),
+                        },
+                    )
                     return
                 if work.status == SessionReplyWorkStatus.CANCELLED:
                     yield {
