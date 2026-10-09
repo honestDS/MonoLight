@@ -16,11 +16,11 @@
               <el-form-item :label="$t('channels.channel_name')">
                 <el-input v-model="form.name" :placeholder="$t('channels.channel_name_placeholder')" />
               </el-form-item>
-              <el-form-item :label="$t('channels.api_key')">
-                <el-input v-model="form.api_key" type="password" show-password :placeholder="$t('channels.api_key_placeholder')" />
-              </el-form-item>
               <el-form-item :label="$t('channels.base_url')">
                 <el-input v-model="form.base_url" :placeholder="$t('channels.base_url_placeholder')" />
+              </el-form-item>
+              <el-form-item :label="$t('channels.api_key')">
+                <el-input v-model="form.api_key" type="password" show-password :placeholder="$t('channels.api_key_placeholder')" />
               </el-form-item>
               <el-form-item :label="$t('channels.http_proxy')" :error="proxyError" class="http-proxy-form-item">
                 <div class="http-proxy-input-wrapper">

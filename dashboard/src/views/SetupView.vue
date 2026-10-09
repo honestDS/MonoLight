@@ -175,7 +175,10 @@
                             {{ t('channels.detect_model_list') }}
                           </el-button>
                           <el-select
-                            v-model="selectedDetectedModel"
+                            v-model="selectedDetectedModels"
+                            multiple
+                            collapse-tags
+                            collapse-tags-tooltip
                             class="channel-model-detect-select"
                             popper-class="channel-model-detect-popper"
                             filterable
@@ -199,36 +202,41 @@
                     </div>
 
                     <ChannelModelEntry
-                      :entry="form.channel"
-                      :index="0"
+                      v-for="(entry, idx) in form.channel.model_ids"
+                      :key="getModelEntryState(entry).id"
+                      :entry="entry"
+                      :index="idx"
                       :model-usages="['CHAT']"
                       :model-protocols="SETUP_PROTOCOLS"
-                      :reasoning-effort-options="reasoningEffortOptions"
-                      model-id-prop="model_id"
-                      protocol-prop="protocol"
-                      :model-id-error="modelIdError"
-                      :protocol-error="protocolError"
-                      :advanced-settings-draft="advancedSettingsDraft"
-                      :advanced-settings-error="advancedSettingsError"
-                      :advanced-settings-expanded="advancedSettingsExpanded"
+                      :reasoning-effort-options="getModelEntryState(entry).reasoningEffortOptions"
+                      :model-id-error="getModelEntryState(entry).modelIdError"
+                      :protocol-error="getModelEntryState(entry).protocolError"
+                      :advanced-settings-draft="getModelEntryState(entry).advancedSettingsDraft"
+                      :advanced-settings-error="getModelEntryState(entry).advancedSettingsError"
+                      :advanced-settings-expanded="getModelEntryState(entry).advancedSettingsExpanded ? [idx] : []"
                       :custom-headers-placeholder="customHeadersPlaceholder"
-                      :testing="modelTestState?.status === 'running'"
-                      :test-state="modelTestState"
-                      :detecting-metadata="detectingMetadata"
-                      :metadata-detection-disabled="detectingMetadata"
-                      :show-remove="false"
+                      :testing="getModelEntryState(entry).testState?.status === 'running'"
+                      :test-state="getModelEntryState(entry).testState"
+                      :detecting-metadata="detectingMetadataEntry === entry"
+                      :metadata-detection-disabled="detectingMetadataEntry !== null && detectingMetadataEntry !== entry"
+                      :show-remove="form.channel.model_ids.length > 1"
                       :show-enabled="false"
-                      @test-chat="openChatTestDialog"
-                      @detect-metadata="detectModelMetadata"
-                      @model-id-input="handleModelIdInput"
-                      @protocol-change="handleProtocolChange"
-                      @advanced-settings-input="handleAdvancedSettingsInput"
-                      @fill-headers-template="fillCustomHeadersTemplate"
-                      @test-config-change="clearChannelTest"
-                      @view-test-result="openModelTestResult"
-                      @update:advanced-settings-draft="value => advancedSettingsDraft = value"
-                      @update:advanced-settings-expanded="value => advancedSettingsExpanded = value"
+                      @test-chat="openChatTestDialog(entry)"
+                      @detect-metadata="detectModelMetadata(entry)"
+                      @model-id-input="handleModelIdInput(entry)"
+                      @protocol-change="handleProtocolChange(entry)"
+                      @advanced-settings-input="handleAdvancedSettingsInput(entry)"
+                      @fill-headers-template="fillCustomHeadersTemplate(entry)"
+                      @test-config-change="clearChannelTest(entry)"
+                      @view-test-result="openModelTestResult(entry)"
+                      @remove="removeModelEntry(entry)"
+                      @update:advanced-settings-draft="value => getModelEntryState(entry).advancedSettingsDraft = value"
+                      @update:advanced-settings-expanded="value => getModelEntryState(entry).advancedSettingsExpanded = Array.isArray(value) && value.length > 0"
                     />
+
+                    <el-button type="primary" :icon="Plus" @click="addModelEntry">
+                      {{ t('channels.add_model') }}
+                    </el-button>
                   </el-form>
 
                   <div v-if="activeStep === 2 && profileGuideLoading" class="setup-status">
@@ -384,7 +392,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, ArrowRight, Check, Loading, Refresh, Setting } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, Check, Loading, Plus, Refresh, Setting } from '@element-plus/icons-vue'
 import { openRouterApi, profileApi, promptApi, setupApi } from '@/api'
 import LanguageSwitcher from '@/components/LanguageSwitcher.vue'
 import ChannelModelEntry from '@/components/ChannelModelEntry.vue'
@@ -417,6 +425,7 @@ import {
   validateSetupHttpProxy,
   validateSetupProtocol,
   validateSetupUsername,
+  addSetupDetectedModels,
 } from '@/utils/setupForm'
 import {
   HOME_PATH,
@@ -453,7 +462,7 @@ const profileGuideResource = reactive({
   profile_id: null,
   channel_id: null,
   channel_name: '',
-  model_id: '',
+  model_ids: [],
 })
 
 const profileGuideForm = reactive({
@@ -474,28 +483,23 @@ const form = reactive({
     base_url: '',
     api_key: '',
     http_proxy: '',
-    ...defaultModelEntry(),
+    model_ids: [defaultModelEntry()],
   },
   profile: {
     name: 'default',
   },
 })
 
-const modelIdError = ref('')
-const protocolError = ref('')
 const proxyError = ref('')
-const advancedSettingsDraft = ref(formatAdvancedSettings(form.channel.advanced_settings))
-const advancedSettingsError = ref('')
-const advancedSettingsExpanded = ref([])
-const reasoningEffortOptions = ref([])
+const modelEntryStates = reactive(new Map())
 const detectedModels = ref([])
-const selectedDetectedModel = ref('')
+const selectedDetectedModels = ref([])
 const detectingModels = ref(false)
-const detectingMetadata = ref(false)
-const modelTestState = ref(null)
+const detectingMetadataEntry = ref(null)
 const modelTestResultDialogVisible = ref(false)
-const activeModelTestResultId = ref('setup-model-test')
+const activeModelTestResultId = ref('')
 const chatTestDialogVisible = ref(false)
+const chatTestEntry = ref(null)
 const chatTestPromptError = ref('')
 const chatTestForm = reactive({
   testMode: 'non_stream',
@@ -504,6 +508,29 @@ const chatTestForm = reactive({
 const channelTestManager = createChannelTestManager()
 
 let openRouterModelsCache = null
+let nextModelEntryId = 0
+
+function getModelEntryState(entry) {
+  let state = modelEntryStates.get(entry)
+  if (!state) {
+    state = {
+      id: `setup-model-${++nextModelEntryId}`,
+      modelIdError: '',
+      protocolError: '',
+      advancedSettingsDraft: formatAdvancedSettings(entry?.advanced_settings),
+      advancedSettingsError: '',
+      advancedSettingsExpanded: false,
+      reasoningEffortOptions: [],
+      testState: null,
+    }
+    modelEntryStates.set(entry, state)
+  }
+  return modelEntryStates.get(entry)
+}
+
+function isEntryActive(entry) {
+  return form.channel.model_ids.includes(entry)
+}
 
 const createSetupValidator = validator => (_rule, value, callback) => {
   const error = validator(value)
@@ -537,8 +564,6 @@ const channelRules = {
   name: [{ validator: createSetupValidator(validateSetupName), trigger: 'blur' }],
   base_url: [{ validator: createSetupValidator(validateSetupBaseUrl), trigger: 'blur' }],
   api_key: [{ validator: createSetupValidator(validateSetupApiKey), trigger: 'blur' }],
-  model_id: [{ validator: createSetupValidator(validateSetupModelId), trigger: 'blur' }],
-  protocol: [{ validator: createSetupValidator(validateSetupProtocol), trigger: 'change' }],
   http_proxy: [{ validator: validateChannelProxyRule, trigger: 'blur' }],
 }
 
@@ -568,26 +593,31 @@ const completionErrorMessage = computed(() => {
 })
 
 const modelTestResults = computed(() => {
-  if (!modelTestState.value) return []
+  return form.channel.model_ids
+    .map((entry, idx) => {
+      const state = getModelEntryState(entry)
+      if (!state.testState) return null
 
-  const modelId = typeof form.channel.model_id === 'string' ? form.channel.model_id.trim() : ''
-  return [{
-    id: 'setup-model-test',
-    label: modelId || `${t('channels.model_entry')} #1`,
-    state: modelTestState.value,
-  }]
+      const modelId = typeof entry.model_id === 'string' ? entry.model_id.trim() : ''
+      return {
+        id: state.id,
+        label: modelId || `${t('channels.model_entry')} #${idx + 1}`,
+        state: state.testState,
+      }
+    })
+    .filter(Boolean)
 })
 
 const profileGuideAuditModelOptions = computed(() => {
-  const { channel_id, channel_name, model_id } = profileGuideResource
-  if (channel_id === null || channel_id === undefined || !channel_name || !model_id) return []
+  const { channel_id, channel_name, model_ids } = profileGuideResource
+  if (channel_id === null || channel_id === undefined || !channel_name || !Array.isArray(model_ids)) return []
 
-  return [{
+  return model_ids.filter(Boolean).map(model_id => ({
     key: `${channel_id}::${model_id}`,
     label: `${channel_name} / ${model_id}`,
     channel_id,
     model_id,
-  }]
+  }))
 })
 
 let unsubscribeSetupStatus
@@ -611,41 +641,66 @@ async function refreshStatus() {
   }
 }
 
-function clearChannelTest() {
-  channelTestManager.cancel(form.channel)
-  modelTestState.value = null
-  modelTestResultDialogVisible.value = false
+function syncModelTestResultDialog() {
+  const results = modelTestResults.value
+  if (results.length === 0) {
+    modelTestResultDialogVisible.value = false
+    activeModelTestResultId.value = ''
+    return
+  }
+
+  if (!results.some(result => result.id === activeModelTestResultId.value)) {
+    activeModelTestResultId.value = results[0].id
+  }
+}
+
+function clearChannelTest(entry) {
+  channelTestManager.cancel(entry)
+  if (isEntryActive(entry)) {
+    getModelEntryState(entry).testState = null
+  }
+  syncModelTestResultDialog()
 }
 
 function invalidateChannelTests() {
   channelTestManager.invalidate()
-  modelTestState.value = null
+  for (const entry of form.channel.model_ids) {
+    getModelEntryState(entry).testState = null
+  }
   modelTestResultDialogVisible.value = false
+  activeModelTestResultId.value = ''
 }
 
-function beginChannelTest(state) {
-  const token = channelTestManager.begin(form.channel)
+function beginChannelTest(entry, testState) {
+  if (!isEntryActive(entry)) return null
+  const token = channelTestManager.begin(entry)
   if (!token) return null
-  modelTestState.value = state
+  const state = getModelEntryState(entry)
+  state.testState = testState
+  activeModelTestResultId.value = state.id
   modelTestResultDialogVisible.value = true
   return token
 }
 
-function openModelTestResult() {
-  if (!modelTestState.value) return
-  activeModelTestResultId.value = 'setup-model-test'
+function openModelTestResult(entry) {
+  if (!isEntryActive(entry)) return
+  const state = getModelEntryState(entry)
+  if (!state.testState) return
+  activeModelTestResultId.value = state.id
   modelTestResultDialogVisible.value = true
 }
 
 function resetDetectedModels() {
-  selectedDetectedModel.value = ''
+  selectedDetectedModels.value = []
   detectedModels.value = []
 }
 
 function syncDetectedSelection() {
-  const modelId = typeof form.channel.model_id === 'string' ? form.channel.model_id.trim() : ''
-  const matched = detectedModels.value.find(model => model.id.trim() === modelId)
-  selectedDetectedModel.value = matched?.id || ''
+  selectedDetectedModels.value = detectedModels.value
+    .filter(model => form.channel.model_ids.some(entry => (
+      typeof entry.model_id === 'string' && entry.model_id.trim() === model.id.trim()
+    )))
+    .map(model => model.id)
 }
 
 function validateChannelHttpProxy() {
@@ -657,45 +712,147 @@ function validateChannelHttpProxy() {
   return valid
 }
 
-function validateAndMergeAdvancedSettings() {
-  const result = parseAdvancedSettingsDraft(advancedSettingsDraft.value, t)
-  advancedSettingsError.value = result.error
+function validateModelAdvancedSettings(entry) {
+  if (!isEntryActive(entry)) return null
+
+  const state = getModelEntryState(entry)
+  const result = parseAdvancedSettingsDraft(state.advancedSettingsDraft, t)
+  state.advancedSettingsError = result.error
   if (result.error) {
-    advancedSettingsExpanded.value = [0]
+    state.advancedSettingsExpanded = true
     ElMessage.warning(result.error)
     return null
   }
-  return mergeCustomHeaders(form.channel, result.value)
+  return mergeCustomHeaders(entry, result.value)
 }
 
-function handleModelIdInput() {
-  modelIdError.value = ''
-  reasoningEffortOptions.value = []
-  clearChannelTest()
+function validateAllAdvancedSettings() {
+  let firstError = ''
+  for (const entry of form.channel.model_ids) {
+    const state = getModelEntryState(entry)
+    const result = parseAdvancedSettingsDraft(state.advancedSettingsDraft, t)
+    state.advancedSettingsError = result.error
+    if (result.error) {
+      state.advancedSettingsExpanded = true
+      if (!firstError) firstError = result.error
+      continue
+    }
+    mergeCustomHeaders(entry, result.value)
+  }
+
+  if (firstError) {
+    ElMessage.warning(firstError)
+    return false
+  }
+  return true
+}
+
+function formatSetupValidationError(error) {
+  return error ? t('setup.' + error.key, error.params) : ''
+}
+
+function validateModelEntries() {
+  if (form.channel.model_ids.length === 0) {
+    ElMessage.warning(t('channels.fill_required'))
+    return false
+  }
+
+  let firstError = ''
+  const seenModelIds = new Map()
+  for (const entry of form.channel.model_ids) {
+    const state = getModelEntryState(entry)
+    state.modelIdError = formatSetupValidationError(validateSetupModelId(entry.model_id))
+    state.protocolError = formatSetupValidationError(validateSetupProtocol(entry.protocol))
+
+    if (!firstError && state.modelIdError) firstError = state.modelIdError
+    if (!firstError && state.protocolError) firstError = state.protocolError
+
+    const modelId = typeof entry.model_id === 'string' ? entry.model_id.trim() : ''
+    if (!modelId) continue
+    if (seenModelIds.has(modelId)) {
+      const previousEntry = seenModelIds.get(modelId)
+      const previousState = getModelEntryState(previousEntry)
+      state.modelIdError = t('channels.model_id_duplicate')
+      previousState.modelIdError = t('channels.model_id_duplicate')
+      if (!firstError) firstError = state.modelIdError
+    } else {
+      seenModelIds.set(modelId, entry)
+    }
+  }
+
+  if (firstError) {
+    ElMessage.warning(firstError)
+    return false
+  }
+  return true
+}
+
+function handleModelIdInput(entry) {
+  if (!isEntryActive(entry)) return
+  const state = getModelEntryState(entry)
+  state.modelIdError = ''
+  state.reasoningEffortOptions = []
+  clearChannelTest(entry)
   syncDetectedSelection()
 }
 
-function handleProtocolChange() {
-  protocolError.value = ''
-  clearChannelTest()
+function handleProtocolChange(entry) {
+  if (!isEntryActive(entry)) return
+  getModelEntryState(entry).protocolError = ''
+  clearChannelTest(entry)
 }
 
-function handleAdvancedSettingsInput() {
-  advancedSettingsError.value = ''
+function handleAdvancedSettingsInput(entry) {
+  if (!isEntryActive(entry)) return
+  getModelEntryState(entry).advancedSettingsError = ''
 }
 
-function fillCustomHeadersTemplate() {
-  clearChannelTest()
-  advancedSettingsDraft.value = JSON.stringify(customHeadersTemplate, null, 2)
-  advancedSettingsError.value = ''
+function fillCustomHeadersTemplate(entry) {
+  if (!isEntryActive(entry)) return
+  clearChannelTest(entry)
+  const state = getModelEntryState(entry)
+  state.advancedSettingsDraft = JSON.stringify(customHeadersTemplate, null, 2)
+  state.advancedSettingsError = ''
 }
 
-function handleDetectedModelChange(value) {
-  if (typeof value !== 'string' || !value.trim()) return
-  clearChannelTest()
-  form.channel.model_id = value
-  modelIdError.value = ''
-  reasoningEffortOptions.value = []
+function handleDetectedModelChange(values) {
+  if (!Array.isArray(values)) return
+  const touchedEntries = addSetupDetectedModels(form.channel.model_ids, values)
+  for (const touchedEntry of touchedEntries) {
+    const entry = form.channel.model_ids.find(candidate => candidate.model_id === touchedEntry.model_id)
+    if (!entry) continue
+    clearChannelTest(entry)
+    const state = getModelEntryState(entry)
+    state.modelIdError = ''
+    state.reasoningEffortOptions = []
+  }
+  syncDetectedSelection()
+}
+
+function addModelEntry() {
+  form.channel.model_ids.push(defaultModelEntry())
+  const entry = form.channel.model_ids[form.channel.model_ids.length - 1]
+  getModelEntryState(entry)
+}
+
+function removeModelEntry(entry) {
+  if (form.channel.model_ids.length <= 1) return
+  const index = form.channel.model_ids.indexOf(entry)
+  if (index < 0) return
+
+  clearChannelTest(entry)
+  if (chatTestEntry.value === entry) {
+    chatTestDialogVisible.value = false
+    resetChatTestDialogState()
+  }
+  if (detectingMetadataEntry.value === entry) {
+    detectingMetadataEntry.value = null
+  }
+
+  form.channel.model_ids.splice(index, 1)
+  modelEntryStates.delete(entry)
+  syncDetectedSelection()
+  syncModelTestResultDialog()
 }
 
 async function detectModelList() {
@@ -748,18 +905,21 @@ function formatErrorDetail(error) {
   return truncateErrorMessage(message)
 }
 
-async function detectModelMetadata() {
-  const entry = form.channel
+async function detectModelMetadata(entry) {
+  if (!isEntryActive(entry)) return
+  if (detectingMetadataEntry.value) return
   if (entry.usage !== 'CHAT') {
     return ElMessage.warning(t('channels.model_metadata_chat_only'))
   }
   if (typeof entry.model_id !== 'string' || !entry.model_id.trim()) {
-    modelIdError.value = t('channels.model_id_required')
+    getModelEntryState(entry).modelIdError = t('channels.model_id_required')
     return ElMessage.warning(t('channels.model_id_required'))
   }
 
-  detectingMetadata.value = true
-  reasoningEffortOptions.value = []
+  const requestedModelId = entry.model_id.trim()
+  detectingMetadataEntry.value = entry
+  const state = getModelEntryState(entry)
+  state.reasoningEffortOptions = []
   try {
     if (!openRouterModelsCache) {
       const res = await openRouterApi.models()
@@ -772,33 +932,40 @@ async function detectModelMetadata() {
       openRouterModelsCache = models
     }
 
-    const matches = getOpenRouterModelMatches(openRouterModelsCache, entry.model_id)
+    const matches = getOpenRouterModelMatches(openRouterModelsCache, requestedModelId)
     if (matches.length === 0) {
-      throw new Error(t('channels.model_metadata_not_found', { model: entry.model_id.trim() }))
+      throw new Error(t('channels.model_metadata_not_found', { model: requestedModelId }))
     }
     if (matches.length > 1) {
       throw new Error(t('channels.model_metadata_ambiguous', { models: matches.map(model => model.id).join(', ') }))
     }
 
+    if (!isEntryActive(entry) || typeof entry.model_id !== 'string' || entry.model_id.trim() !== requestedModelId) return
     const { fields: filledFields, model } = applyOpenRouterModelMetadata(entry, matches[0])
     const reasoningEfforts = getOpenRouterReasoningEfforts(model)
-    reasoningEffortOptions.value = reasoningEfforts
     if (filledFields.length === 0) {
       throw new Error(t('channels.model_metadata_no_mappable_fields'))
     }
 
+    state.reasoningEffortOptions = reasoningEfforts
+    clearChannelTest(entry)
     ElMessage.success(t('channels.model_metadata_detect_success', {
-      model: typeof model.id === 'string' && model.id.trim() ? model.id : entry.model_id.trim(),
+      model: typeof model.id === 'string' && model.id.trim() ? model.id : requestedModelId,
       fields: filledFields.map(field => t('channels.' + field)).join(', '),
     }))
   } catch (error) {
+    if (!isEntryActive(entry) || typeof entry.model_id !== 'string' || entry.model_id.trim() !== requestedModelId) return
     ElMessage.error(error.message || t('channels.model_metadata_detect_failed'))
   } finally {
-    detectingMetadata.value = false
+    if (detectingMetadataEntry.value === entry) {
+      detectingMetadataEntry.value = null
+    }
   }
 }
 
-function openChatTestDialog() {
+function openChatTestDialog(entry) {
+  if (!isEntryActive(entry)) return
+  chatTestEntry.value = entry
   chatTestForm.testMode = 'non_stream'
   chatTestForm.prompt = ''
   chatTestPromptError.value = ''
@@ -806,6 +973,7 @@ function openChatTestDialog() {
 }
 
 function resetChatTestDialogState() {
+  chatTestEntry.value = null
   chatTestForm.testMode = 'non_stream'
   chatTestForm.prompt = ''
   chatTestPromptError.value = ''
@@ -818,18 +986,21 @@ function confirmChatTest() {
     return
   }
 
+  const entry = chatTestEntry.value
+  if (!entry) return
   const testMode = chatTestForm.testMode
   chatTestDialogVisible.value = false
-  void testChatModel(testMode, prompt)
+  void testChatModel(entry, testMode, prompt)
 }
 
-async function testChatModel(testMode, prompt) {
-  const entry = form.channel
+async function testChatModel(entry, testMode, prompt) {
+  if (!isEntryActive(entry)) return
+  const state = getModelEntryState(entry)
   if (entry.usage !== 'CHAT') {
     return ElMessage.warning(t('channels.chat_test_chat_only'))
   }
   if (!entry.protocol) {
-    protocolError.value = t('channels.model_protocol_required')
+    state.protocolError = t('channels.model_protocol_required')
     return ElMessage.warning(t('channels.model_protocol_required'))
   }
   if (!form.channel.base_url || !form.channel.base_url.trim()) {
@@ -839,14 +1010,14 @@ async function testChatModel(testMode, prompt) {
     return ElMessage.warning(t('channels.model_list_api_key_required'))
   }
   if (typeof entry.model_id !== 'string' || !entry.model_id.trim()) {
-    modelIdError.value = t('channels.model_id_required')
+    state.modelIdError = t('channels.model_id_required')
     return ElMessage.warning(t('channels.model_id_required'))
   }
   if (!validateChannelHttpProxy()) return
-  const advancedSettings = validateAndMergeAdvancedSettings()
+  const advancedSettings = validateModelAdvancedSettings(entry)
   if (!advancedSettings) return
 
-  const token = beginChannelTest({
+  const token = beginChannelTest(entry, {
     status: 'running',
     kind: 'CHAT',
     testMode,
@@ -870,8 +1041,8 @@ async function testChatModel(testMode, prompt) {
       prompt,
       advanced_settings: advancedSettings,
     }, { signal: token.signal })
-    if (!channelTestManager.isCurrent(token)) return
-    modelTestState.value = {
+    if (!isEntryActive(entry) || !channelTestManager.isCurrent(token)) return
+    getModelEntryState(entry).testState = {
       status: 'success',
       kind: 'CHAT',
       testMode,
@@ -879,8 +1050,8 @@ async function testChatModel(testMode, prompt) {
       error: '',
     }
   } catch (error) {
-    if (channelTestManager.isCurrent(token)) {
-      modelTestState.value = {
+    if (isEntryActive(entry) && channelTestManager.isCurrent(token)) {
+      getModelEntryState(entry).testState = {
         status: 'error',
         kind: 'CHAT',
         testMode,
@@ -914,8 +1085,11 @@ async function validateForm(formRef) {
 
 async function validateStep(index) {
   if (index === 1) {
-    if (!validateChannelHttpProxy()) return false
-    if (!validateAndMergeAdvancedSettings()) return false
+    const modelsValid = validateModelEntries()
+    const advancedSettingsValid = validateAllAdvancedSettings()
+    const proxyValid = validateChannelHttpProxy()
+    const formValid = await validateForm(channelFormRef)
+    return modelsValid && advancedSettingsValid && proxyValid && formValid
   }
 
   const formRefs = [adminFormRef, channelFormRef]
@@ -952,7 +1126,8 @@ async function completeSetup() {
   invalidTokenResponse.value = false
 
   try {
-    const response = await setupApi.complete(buildSetupRequest(form))
+    const request = buildSetupRequest(form)
+    const response = await setupApi.complete(request)
     const tokenData = readSetupTokenData(response)
     const { access_token, token_type, profile_id, channel_id } = tokenData || {}
 
@@ -976,8 +1151,8 @@ async function completeSetup() {
     localStorage.setItem('token', access_token)
     profileGuideResource.profile_id = profile_id
     profileGuideResource.channel_id = channel_id
-    profileGuideResource.channel_name = typeof form.channel.name === 'string' ? form.channel.name.trim() : ''
-    profileGuideResource.model_id = typeof form.channel.model_id === 'string' ? form.channel.model_id.trim() : ''
+    profileGuideResource.channel_name = request.channel.name
+    profileGuideResource.model_ids = request.channel.model_ids.map(model => model.model_id)
     profileGuideActive.value = true
     setupStatusState.setReady(false)
     invalidateChannelTests()

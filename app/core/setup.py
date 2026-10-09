@@ -51,23 +51,16 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
             commit=False,
         )
 
-        reasoning_efforts = request.channel.reasoning_efforts if "reasoning_efforts" in request.channel.model_fields_set else ([request.channel.reasoning_effort] if request.channel.reasoning_effort is not None else [])
-        model_item = ChannelModelItem(
-            model_id=request.channel.model_id,
-            usage=ModelUsage.CHAT,
-            protocol=request.channel.protocol,
-            image_understanding=request.channel.image_understanding,
-            audio_understanding=request.channel.audio_understanding,
-            video_understanding=request.channel.video_understanding,
-            context_window_k=request.channel.context_window_k,
-            temperature=request.channel.temperature,
-            top_p=request.channel.top_p,
-            reasoning_effort=request.channel.reasoning_effort,
-            reasoning_efforts=reasoning_efforts,
-            max_tokens=request.channel.max_tokens,
-            description=request.channel.description,
-            advanced_settings=request.channel.advanced_settings,
-        )
+        model_items = []
+        for model in request.channel.model_ids:
+            reasoning_efforts = model.reasoning_efforts if "reasoning_efforts" in model.model_fields_set else ([model.reasoning_effort] if model.reasoning_effort is not None else [])
+            model_items.append(
+                ChannelModelItem(
+                    **model.model_dump(exclude={"reasoning_efforts"}),
+                    usage=ModelUsage.CHAT,
+                    reasoning_efforts=reasoning_efforts,
+                )
+            )
         channel = await channel_crud.create_with_plain_api_key(
             db,
             obj_in=ChannelCreate(
@@ -75,7 +68,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
                 api_key=request.channel.api_key,
                 base_url=request.channel.base_url,
                 http_proxy=request.channel.http_proxy,
-                model_ids=[model_item.model_dump(mode="json")],
+                model_ids=[model_item.model_dump(mode="json") for model_item in model_items],
             ),
             commit=False,
         )
@@ -94,7 +87,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
                     "rules": [
                         {
                             "channel_id": channel.id,
-                            "model_id": request.channel.model_id,
+                            "model_id": request.channel.model_ids[0].model_id,
                             "priority": 1,
                             "weight": 100,
                             "is_enabled": True,
@@ -105,7 +98,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
                     "rules": [
                         {
                             "channel_id": channel.id,
-                            "model_id": request.channel.model_id,
+                            "model_id": request.channel.model_ids[0].model_id,
                             "priority": 1,
                             "weight": 100,
                             "is_enabled": True,

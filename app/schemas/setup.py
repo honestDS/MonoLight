@@ -8,6 +8,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.constants import ERR_CHANNEL_MODEL_IDS_DUPLICATED
+from app.core.i18n import t
 from app.core.utils.http_proxy import normalize_http_proxy
 from app.core.validation import (
     validate_base_url,
@@ -28,13 +30,9 @@ class SetupAdminInput(UserCreate):
     """初始化管理员输入。"""
 
 
-class SetupChannelInput(BaseModel):
-    """初始化聊天渠道输入。"""
+class SetupModelInput(BaseModel):
+    """初始化聊天模型输入。"""
 
-    name: str = Field(..., min_length=1, max_length=100, description="渠道名称")
-    base_url: str = Field(..., max_length=2048, description="渠道 API 基础地址")
-    api_key: str = Field(..., min_length=1, description="渠道 API 密钥")
-    http_proxy: str | None = Field(None, description="渠道 HTTP 代理地址")
     model_id: str = Field(..., min_length=1, max_length=255, description="聊天模型标识符")
     protocol: Annotated[
         ModelProtocol,
@@ -63,6 +61,30 @@ class SetupChannelInput(BaseModel):
         description="模型高级设置",
     )
 
+    @model_validator(mode="after")
+    def validate_chat_model_fields(self) -> "SetupModelInput":
+        self.model_id, self.protocol = validate_chat_model(self.model_id, self.protocol)
+        return self
+
+
+class SetupChannelInput(BaseModel):
+    """初始化聊天渠道输入。"""
+
+    name: str = Field(..., min_length=1, max_length=100, description="渠道名称")
+    base_url: str = Field(..., max_length=2048, description="渠道 API 基础地址")
+    api_key: str = Field(..., min_length=1, description="渠道 API 密钥")
+    http_proxy: str | None = Field(None, description="渠道 HTTP 代理地址")
+    model_ids: list[SetupModelInput] = Field(..., min_length=1, description="聊天模型配置")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_model_input(cls, value: object) -> object:
+        if not isinstance(value, dict) or "model_ids" in value:
+            return value
+
+        model_input = {field_name: value[field_name] for field_name in SetupModelInput.model_fields if field_name in value}
+        return {**value, "model_ids": [model_input]}
+
     @field_validator("base_url")
     @classmethod
     def validate_base_url_field(cls, value: str) -> str:
@@ -79,8 +101,18 @@ class SetupChannelInput(BaseModel):
         return normalize_http_proxy(value)
 
     @model_validator(mode="after")
-    def validate_chat_model_fields(self) -> "SetupChannelInput":
-        self.model_id, self.protocol = validate_chat_model(self.model_id, self.protocol)
+    def validate_unique_model_ids(self) -> "SetupChannelInput":
+        model_ids: set[str] = set()
+        for model in self.model_ids:
+            if model.model_id in model_ids:
+                raise ValueError(
+                    t(
+                        ERR_CHANNEL_MODEL_IDS_DUPLICATED,
+                        usage=ModelUsage.CHAT.value,
+                        model_id=model.model_id,
+                    )
+                )
+            model_ids.add(model.model_id)
         return self
 
 
