@@ -1,5 +1,4 @@
 import {
-  applyResumedTurnEnd,
   createSessionReconnectHandler,
   getHistoryMessageCursor,
   resumeSessionStream
@@ -111,7 +110,7 @@ export function useChatStreamResume({
         if (!isCurrentSession()) return
         if (eventType === 'turn_end') {
           if (workLifecycleTracker.isWorkTerminal(getCompletedWorkId(data))) return
-          chatState.messages.value = applyResumedTurnEnd(chatState.messages.value, data, requestId)
+          messageProcessor.processStreamTurnEnd(chatState.messages, data, requestId)
         }
         mergeResumedHistory()
       },

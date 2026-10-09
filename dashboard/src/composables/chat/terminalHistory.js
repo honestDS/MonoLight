@@ -2,6 +2,7 @@ import {
   findAssistantResponseReplacementIndex,
   isAssistantResponse,
   isPlainAssistantResponse,
+  mergeAssistantResponse,
   mergeAssistantResponseIntoList
 } from '../../utils/assistantResponseIdentity.js'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
@@ -133,7 +134,12 @@ export const insertTerminalHistory = (
           : displayContent !== undefined && displayContent !== null
         const hasFiles = Array.isArray(message.files) && message.files.length > 0
         const hasReasoning = typeof message.reasoning_content === 'string' && Boolean(message.reasoning_content.trim())
-        if (!hasDisplayContent && !hasFiles && !hasReasoning) continue
+        if (
+          !hasDisplayContent &&
+          !hasFiles &&
+          !hasReasoning &&
+          findAssistantResponseReplacementIndex(messagesRef.value, message) === -1
+        ) continue
       }
     }
 
@@ -173,8 +179,31 @@ export const insertTerminalHistory = (
     const message = orderedMessages[index]
     let existingIndex = findExistingMessageIndex(message)
     if (existingIndex !== -1) {
-      if (getToolMessageDedupeKeys(message).length === 0 && isAssistantResponse(message)) {
-        messagesRef.value = mergeAssistantResponseIntoList(messagesRef.value, message)
+      const existingMessage = messagesRef.value[existingIndex]
+      const messageKeys = getToolMessageDedupeKeys(message)
+      if (isAssistantResponse(message)) {
+        const mergedMessage = messageKeys.length > 0
+          ? mergeAssistantResponse(existingMessage, message)
+          : message
+        if (messageKeys.length > 0) {
+          messagesRef.value[existingIndex] = mergedMessage
+          if (findAssistantResponseReplacementIndex(messagesRef.value, mergedMessage) !== -1) {
+            messagesRef.value = mergeAssistantResponseIntoList(messagesRef.value, mergedMessage)
+          }
+        } else {
+          messagesRef.value = mergeAssistantResponseIntoList(messagesRef.value, mergedMessage)
+        }
+        existingIndex = findExistingMessageIndex(mergedMessage)
+      } else {
+        messagesRef.value[existingIndex] = {
+          ...existingMessage,
+          ...message,
+          id: existingMessage.id ?? message.id,
+          response_id: existingMessage.response_id ?? message.response_id,
+          request_id: existingMessage.request_id ?? message.request_id,
+          work_id: existingMessage.work_id ?? message.work_id,
+          turn: existingMessage.turn ?? message.turn
+        }
         existingIndex = findExistingMessageIndex(message)
       }
       if (existingIndex !== -1) insertionCursor = existingIndex + 1

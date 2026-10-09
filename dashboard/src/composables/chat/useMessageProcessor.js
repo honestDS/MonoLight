@@ -2,11 +2,12 @@
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
-import { getMessageDedupeKeys, isToolCall, isToolResult, normalizeMessageContent } from '../../utils'
+import { findAssistantResponseReplacementIndex, getMessageDedupeKeys, isAssistantResponse, isToolCall, isToolResult, normalizeMessageContent } from '../../utils'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { appendStreamReasoning, finalizeStreamReasoning as finalizeReasoning } from './reasoningTracker.js'
 import { insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
 import { insertTerminalHistory, processStreamError, processStreamToolStart } from './terminalHistory.js'
+import { applyResumedTurnEnd } from './streamResume.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -93,42 +94,61 @@ const removeMessageIndexes = (messagesRef, indexes) => {
 export function useMessageProcessor() {
   // ==================== 消息处理方法 ====================
 
-  const seenContentEvents = new Map()
-  const seenReasoningEvents = new Set()
-  const shouldSkipRepeatedContentEvent = (text, responseId, workId, turn, requestId, eventId) => {
-    const stableId = normalizeStableId(responseId) || (normalizeStableId(workId) && turn !== undefined && turn !== null
-      ? `work:${normalizeStableId(workId)}:${turn}`
-      : null)
-    if (!stableId) return false
+  const streamEventsByIdentity = new Map()
+  const getStreamEventScope = (responseId, workId, turn, requestId) => {
+    const stableResponseId = normalizeStableId(responseId)
+    if (stableResponseId) return `response:${stableResponseId}`
+    const stableWorkId = normalizeStableId(workId)
+    if (stableWorkId && turn !== undefined && turn !== null) return `work:${stableWorkId}:${String(turn)}`
+    const stableRequestId = normalizeStableId(requestId)
+    if (stableRequestId && turn !== undefined && turn !== null) return `request:${stableRequestId}:${String(turn)}`
+    return null
+  }
+  const shouldSkipRepeatedStreamEvent = (kind, text, responseId, workId, turn, requestId, eventId) => {
+    const stableEventId = normalizeStableId(eventId)
+    const scope = getStreamEventScope(responseId, workId, turn, requestId)
+    if (!scope && !stableEventId) return false
 
-    const eventKey = eventId
-      ? `event:${eventId}`
-      : `content:${stableId}:${text}`
-    const requestKey = normalizeStableId(requestId) || 'unknown'
-    const requestKeys = seenContentEvents.get(eventKey)
-    if (requestKeys?.has(requestKey)) {
-      return Boolean(eventId)
+    const scopeKey = scope || 'event'
+    const eventKey = `${kind}:${stableEventId ? `event:${stableEventId}` : `text:${text}`}`
+    const stableRequestId = normalizeStableId(requestId)
+    const requestKey = stableRequestId || 'unknown'
+    let eventsByRequest = streamEventsByIdentity.get(scopeKey)
+    if (!eventsByRequest) {
+      eventsByRequest = new Map()
+      streamEventsByIdentity.set(scopeKey, eventsByRequest)
     }
+    const requestKeys = eventsByRequest.get(eventKey)
+    if (stableEventId && requestKeys) return true
 
-    const isReplayFromAnotherRequest = Boolean(requestKeys && requestId && [...requestKeys].some(key => key !== requestKey && key !== 'unknown'))
+    const isReplayFromAnotherRequest = Boolean(
+      requestKeys
+      && stableRequestId
+      && [...requestKeys].some(key => key !== requestKey && key !== 'unknown')
+    )
     const nextRequestKeys = requestKeys || new Set()
     nextRequestKeys.add(requestKey)
-    seenContentEvents.set(eventKey, nextRequestKeys)
-    if (seenContentEvents.size > 2000) {
-      seenContentEvents.delete(seenContentEvents.keys().next().value)
-    }
+    eventsByRequest.set(eventKey, nextRequestKeys)
     return isReplayFromAnotherRequest
+  }
+  const hasFinalizedStreamMessage = (messages, responseId, workId, turn, requestId) => findStreamMessageIndexes(
+    messages,
+    responseId,
+    workId,
+    turn,
+    requestId,
+    message => message.role === 'assistant'
+      && (message._stream_finalized === true || normalizeStableId(message.db_id))
+  ).length > 0
+  const resetStreamState = () => {
+    streamEventsByIdentity.clear()
   }
 
   // 处理流式的增量文本推送事件
   const processStreamReasoning = (messagesRef, text, turn, responseId, requestId, workId, eventId) => {
     if (typeof text !== 'string' || !text) return
-    const stableResponseId = normalizeStableId(responseId)
-    const stableWorkId = normalizeStableId(workId)
-    const eventKey = eventId || `reasoning:${stableResponseId || stableWorkId || requestId || 'unknown'}:${turn ?? ''}:${text}`
-    if (seenReasoningEvents.has(eventKey)) return
-    seenReasoningEvents.add(eventKey)
-    if (seenReasoningEvents.size > 2000) seenReasoningEvents.delete(seenReasoningEvents.values().next().value)
+    if (hasFinalizedStreamMessage(messagesRef.value, responseId, workId, turn, requestId)) return
+    if (shouldSkipRepeatedStreamEvent('reasoning', text, responseId, workId, turn, requestId, eventId)) return
     messagesRef.value = appendStreamReasoning(messagesRef.value, text, { turn, responseId, requestId, workId })
   }
 
@@ -137,12 +157,15 @@ export function useMessageProcessor() {
   }
 
   const processStreamContent = (messagesRef, text, turn, thinkingId, finishReason, responseId, requestId, workId, eventId) => {
+    if (typeof text !== 'string' || !text) return
+
     // 识别排队状态
     if (finishReason === 'queued') {
       return
     }
 
-    if (shouldSkipRepeatedContentEvent(text, responseId, workId, turn, requestId, eventId)) return
+    if (hasFinalizedStreamMessage(messagesRef.value, responseId, workId, turn, requestId)) return
+    if (shouldSkipRepeatedStreamEvent('content', text, responseId, workId, turn, requestId, eventId)) return
 
     // 1. 优先复用当前轮次已有的正文消息，避免同一 response_id 被工具消息抢占后重复创建正文
     const matchingMessages = findStreamMessageIndexes(
@@ -288,6 +311,16 @@ export function useMessageProcessor() {
     messagesRef.value.push(newMsg)
   }
 
+  const processStreamTurnEnd = (messagesRef, data, requestId = null) => {
+    messagesRef.value = applyResumedTurnEnd(messagesRef.value, data, requestId, resolveAssistantDisplayContent)
+    streamEventsByIdentity.delete(getStreamEventScope(
+      data?.response_id,
+      data?.work_id,
+      data?.turn,
+      data?.request_id ?? requestId
+    ))
+  }
+
   // 处理完整的 AI 响应消息，WS 和 HTTP 共用
   const processAiResponse = (messagesRef, response, thinkingId, requestId = null) => {
     const workId = response.work_id
@@ -405,8 +438,88 @@ export function useMessageProcessor() {
       finalAiMsg.message_provider_metadata = messageProviderMetadata
     }
 
+    if (isAssistantResponse(finalAiMsg)) {
+      finalAiMsg._stream_finalized = true
+      const hasReasoning = message => typeof message?.reasoning_content === 'string' && message.reasoning_content.trim()
+      const hasRealResponseIdentity = message => {
+        const responseId = normalizeStableId(message?.response_id)
+        const workId = normalizeStableId(message?.work_id)
+        return Boolean(responseId && (!workId || responseId !== `session-reply-work:${workId}`))
+      }
+      const isWeakOrdinaryResponse = !isToolCall(finalAiMsg) && !hasRealResponseIdentity(finalAiMsg)
+      if (isWeakOrdinaryResponse) {
+        const ordinaryResponseCandidates = messagesRef.value
+          .filter(message => isAssistantResponse(message) && !isToolCall(message) && hasRealResponseIdentity(message))
+        const existingResponseIndex = findAssistantResponseReplacementIndex(ordinaryResponseCandidates, finalAiMsg)
+        const existingResponse = existingResponseIndex === -1
+          ? null
+          : ordinaryResponseCandidates[existingResponseIndex]
+        if (existingResponse) {
+          finalAiMsg.response_id = existingResponse.response_id
+          if (finalAiMsg.turn === undefined || finalAiMsg.turn === null) {
+            finalAiMsg.turn = existingResponse.turn
+          }
+        }
+      }
+      const hasWeakResponseId = !hasRealResponseIdentity(finalAiMsg)
+      const existingAssistantIndex = findAssistantResponseReplacementIndex(messagesRef.value, finalAiMsg)
+      const existingAssistant = existingAssistantIndex === -1 ? null : messagesRef.value[existingAssistantIndex]
+      if (
+        !hasReasoning(finalAiMsg)
+        && hasReasoning(existingAssistant)
+        && (!isWeakOrdinaryResponse || !isToolCall(existingAssistant))
+      ) {
+        finalAiMsg.reasoning_content = existingAssistant.reasoning_content
+      }
+
+      const reasoningCandidates = messagesRef.value
+        .filter(message => message.role === 'reasoning')
+        .filter(candidate => !isWeakOrdinaryResponse || !messagesRef.value.some(otherMessage => (
+          isToolCall(otherMessage)
+          && matchesStreamIdentity(
+            otherMessage,
+            candidate.response_id,
+            candidate.work_id,
+            candidate.turn,
+            candidate.request_id
+          )
+        )))
+        .map(message => ({ ...message, role: 'assistant' }))
+      const reasoningIndex = findAssistantResponseReplacementIndex(reasoningCandidates, finalAiMsg)
+      const temporaryReasoning = reasoningIndex === -1 ? null : reasoningCandidates[reasoningIndex]
+      const hasRealTemporaryResponse = hasRealResponseIdentity(temporaryReasoning)
+      if (hasRealTemporaryResponse && hasWeakResponseId) {
+        finalAiMsg.response_id = temporaryReasoning.response_id
+        if (finalAiMsg.turn === undefined || finalAiMsg.turn === null) {
+          finalAiMsg.turn = temporaryReasoning.turn
+        }
+      }
+
+      if (!hasReasoning(finalAiMsg) && hasReasoning(temporaryReasoning)) {
+        finalAiMsg.reasoning_content = temporaryReasoning.reasoning_content
+      }
+    }
+
     aiMessagesToInsert.push(finalAiMsg)
     _insertAiMessagesByThinking(messagesRef, aiMessagesToInsert, thinkingId, requestId, workId)
+    for (const incoming of aiMessagesToInsert) {
+      if (!isAssistantResponse(incoming)) continue
+      const idx = findAssistantResponseReplacementIndex(messagesRef.value, incoming)
+      if (idx === -1) continue
+      const canonical = messagesRef.value[idx]
+      messagesRef.value = finalizeReasoning(messagesRef.value, canonical.reasoning_content, {
+        turn: canonical.turn,
+        responseId: canonical.response_id,
+        requestId: canonical.request_id,
+        workId: canonical.work_id
+      })
+      streamEventsByIdentity.delete(getStreamEventScope(
+        canonical.response_id,
+        canonical.work_id,
+        canonical.turn,
+        canonical.request_id
+      ))
+    }
   }
 
   // 处理工具调用消息
@@ -470,8 +583,10 @@ export function useMessageProcessor() {
     finalizeStreamReasoning,
     processStreamToolStart,
     processStreamToolEnd,
+    processStreamTurnEnd,
     processStreamError,
     processAiResponse,
+    resetStreamState,
     handleToolCallMessage,
     handleNewSession,
     cleanupThinkingMessage,

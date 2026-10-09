@@ -51,10 +51,41 @@ const getLocalMessageType = (message) => {
 const findTransientHistoryMessageIndex = (messages, historyMessage) => {
   const historyContent = normalizeMessageContent(historyMessage?.content)
   const historyType = getLocalMessageType(historyMessage)
-  return messages.findIndex(message => {
+  const parseSafePositiveInteger = value => {
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+  }
+  const incomingId = historyType === 'user'
+    ? parseSafePositiveInteger(historyMessage?.db_id ?? historyMessage?.id)
+    : null
+
+  return messages.findIndex((message, index) => {
     if (message?.db_id) return false
     if (getLocalMessageType(message) !== historyType) return false
-    return JSON.stringify(normalizeMessageContent(message?.content)) === JSON.stringify(historyContent)
+    if (JSON.stringify(normalizeMessageContent(message?.content)) !== JSON.stringify(historyContent)) return false
+    if (JSON.stringify(message?.attachments ?? []) !== JSON.stringify(historyMessage?.attachments ?? [])) return false
+
+    const messageRequestId = message?.request_id
+    const historyRequestId = historyMessage?.request_id
+    if (
+      messageRequestId != null && messageRequestId !== '' &&
+      historyRequestId != null && historyRequestId !== '' &&
+      messageRequestId !== historyRequestId
+    ) return false
+
+    if (historyType !== 'user' || incomingId === null) return true
+
+    const hasEarlierUser = messages.slice(0, index).some(otherMessage => {
+      if (otherMessage?.role !== 'user') return false
+      const boundaryId = parseSafePositiveInteger(otherMessage?.db_id ?? otherMessage?.message_id)
+      return boundaryId !== null && boundaryId >= incomingId
+    })
+    const hasLaterUser = messages.slice(index + 1).some(otherMessage => {
+      if (otherMessage?.role !== 'user') return false
+      const boundaryId = parseSafePositiveInteger(otherMessage?.db_id ?? otherMessage?.message_id)
+      return boundaryId !== null && boundaryId <= incomingId
+    })
+    return !hasEarlierUser && !hasLaterUser
   })
 }
 

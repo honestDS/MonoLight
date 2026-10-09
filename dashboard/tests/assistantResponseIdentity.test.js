@@ -710,3 +710,174 @@ test('tool-call stream and persisted history converge through turn_end while ret
   assert.equal(content.content, 'persisted final')
   assert.deepEqual(content.tool_calls, toolCalls)
 })
+
+test('repeated history merges collapse all database-id duplicates while preserving unrelated messages', () => {
+  const databaseCopies = [
+    liveResponse({
+      id: 'assistant-db-number',
+      db_id: 21,
+      response_id: undefined,
+      work_id: undefined,
+      content: 'first body'
+    }),
+    liveResponse({
+      id: 'assistant-db-string-1',
+      db_id: '21',
+      response_id: undefined,
+      work_id: undefined,
+      content: 'second body'
+    }),
+    liveResponse({
+      id: 'assistant-db-string-2',
+      db_id: '21',
+      response_id: undefined,
+      work_id: undefined,
+      content: 'third body'
+    }),
+    liveResponse({
+      id: 'assistant-db-other',
+      db_id: 22,
+      response_id: undefined,
+      work_id: undefined,
+      content: 'unrelated body'
+    })
+  ]
+  const history = liveResponse({
+    id: 'assistant-db-history',
+    db_id: 21,
+    response_id: undefined,
+    work_id: undefined,
+    content: 'history body'
+  })
+
+  const firstMerge = mergeAssistantResponseIntoList(databaseCopies, history)
+  const replayed = mergeAssistantResponseIntoList(firstMerge, {
+    ...history,
+    id: 'assistant-db-history-replayed'
+  })
+  const matching = replayed.filter(message => String(message.db_id) === '21')
+  const unrelated = replayed.filter(message => String(message.db_id) === '22')
+
+  assert.equal(replayed.length, 2)
+  assert.equal(matching.length, 1)
+  assert.equal(unrelated.length, 1)
+  assert.equal(unrelated[0].content, 'unrelated body')
+})
+
+test('turn_end collapses all copies of one real response without merging another same-work turn', () => {
+  const responseCopies = [1, 2, 3].map(copy => liveResponse({
+    id: `assistant-response-shared-${copy}`,
+    db_id: undefined,
+    response_id: 'response-shared',
+    work_id: 7,
+    turn: 'turn-1',
+    content: `shared body ${copy}`
+  }))
+  const otherTurn = liveResponse({
+    id: 'assistant-response-other',
+    db_id: undefined,
+    response_id: 'response-other',
+    work_id: 7,
+    turn: 'turn-1',
+    content: 'other body'
+  })
+  const turnEnd = liveResponse({
+    id: 'assistant-turn-end-shared',
+    type: 'turn_end',
+    db_id: 31,
+    response_id: 'response-shared',
+    work_id: 7,
+    turn: 'turn-1',
+    content: 'final shared body'
+  })
+
+  const merged = mergeAssistantResponseIntoList(
+    [...responseCopies, otherTurn],
+    turnEnd
+  )
+  const shared = merged.filter(message => message.response_id === 'response-shared')
+  const other = merged.filter(message => message.response_id === 'response-other')
+
+  assert.equal(merged.length, 2)
+  assert.equal(shared.length, 1)
+  assert.equal(shared[0].db_id, '31')
+  assert.equal(shared[0].content, 'final shared body')
+  assert.equal(other.length, 1)
+  assert.equal(other[0].content, 'other body')
+})
+
+test('synthetic done bridges db-only history and live response while retaining the real response identity', () => {
+  const history = liveResponse({
+    id: 'assistant-history-db-only',
+    db_id: 42,
+    response_id: undefined,
+    work_id: undefined,
+    content: 'persisted body'
+  })
+  const live = liveResponse({
+    id: 'assistant-live-real',
+    db_id: undefined,
+    response_id: 'response-real-42',
+    work_id: 7,
+    content: 'stream body'
+  })
+  const syntheticDone = liveResponse({
+    id: 'assistant-done-synthetic',
+    type: 'done',
+    db_id: 42,
+    response_id: 'session-reply-work:7',
+    work_id: 7,
+    content: 'final body'
+  })
+
+  const merged = mergeAssistantResponseIntoList([history, live], syntheticDone)
+
+  assert.equal(merged.length, 1)
+  assert.equal(merged[0].db_id, '42')
+  assert.equal(merged[0].response_id, 'response-real-42')
+  assert.notEqual(merged[0].response_id, 'session-reply-work:7')
+  assert.equal(merged[0].content, 'final body')
+})
+
+test('weak database history merge preserves the real response and complete tool message over a synthetic duplicate', () => {
+  const toolCalls = [{ id: 'call-db-duplicate', type: 'function', function: { name: 'lookup' } }]
+  const completeToolContent = JSON.stringify({
+    role: 'assistant',
+    content: 'complete body',
+    tool_calls: toolCalls
+  })
+  const synthetic = liveResponse({
+    id: 'assistant-db-synthetic',
+    db_id: '55',
+    response_id: 'session-reply-work:7',
+    work_id: 7,
+    content: JSON.stringify({ role: 'assistant', content: 'partial body' }),
+    reasoning_content: null
+  })
+  const real = liveResponse({
+    id: 'assistant-db-real',
+    db_id: 55,
+    response_id: 'response-real-tools',
+    work_id: 7,
+    content: completeToolContent,
+    reasoning_content: 'complete reasoning'
+  })
+  const weakHistory = liveResponse({
+    id: 'assistant-db-weak-history',
+    db_id: '55',
+    response_id: undefined,
+    work_id: undefined,
+    content: '',
+    reasoning_content: null
+  })
+
+  const merged = mergeAssistantResponseIntoList([synthetic, real], weakHistory)
+  const content = JSON.parse(merged[0].content)
+
+  assert.equal(merged.length, 1)
+  assert.equal(merged[0].db_id, '55')
+  assert.equal(merged[0].response_id, 'response-real-tools')
+  assert.equal(merged[0].reasoning_content, 'complete reasoning')
+  assert.equal(content.content, 'complete body')
+  assert.deepEqual(content.tool_calls, toolCalls)
+})

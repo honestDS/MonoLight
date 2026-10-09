@@ -19,6 +19,9 @@ import * as profileOptions from '../src/utils/profileOptions.js'
 import * as todoPresentation from '../src/utils/todoPresentation.js'
 import * as toolOutputVisibility from '../src/utils/toolOutputVisibility.js'
 import * as errorMessage from '../src/utils/errorMessage.js'
+import * as reasoningTracker from '../src/composables/chat/reasoningTracker.js'
+import * as thinkingTracker from '../src/composables/chat/thinkingTracker.js'
+import * as terminalHistory from '../src/composables/chat/terminalHistory.js'
 import * as contextSummaryTracker from '../src/composables/chat/contextSummaryTracker.js'
 import * as historyMergeTracker from '../src/composables/chat/historyMergeTracker.js'
 import * as historyIncrementalSync from '../src/composables/chat/historyIncrementalSync.js'
@@ -320,27 +323,6 @@ const createFakeNotification = notifications => options => {
   notifications.push(entry)
   return entry.handle
 }
-
-const createMessageProcessor = () => ({
-  processAiResponse(messagesRef, response, _thinkingId, requestId) {
-    const choice = response?.choices?.[0]
-    const content = choice?.message?.content ?? response?.content
-    if (content === undefined || content === null) return
-    messagesRef.value.push({
-      role: 'assistant',
-      content,
-      request_id: requestId,
-      response_id: response?.response_id,
-      work_id: response?.work_id
-    })
-  },
-  processStreamReasoning: () => {},
-  finalizeStreamReasoning: () => {},
-  processStreamContent: () => {},
-  processStreamToolStart: () => {},
-  processStreamToolEnd: () => {},
-  processStreamError: () => true
-})
 
 const createUseSessionTasks = ({ chatApi, storage, route, router, provided, notifications, timers, onBeforeUnmount }) => {
   const controllerFactory = options => {
@@ -654,6 +636,26 @@ export const createHarness = async (t, options = {}) => {
     cancel: timers.cancel
   })
 
+  const messageProcessor = loadPath(
+    '../src/composables/chat/useMessageProcessor.js',
+    {
+      ElMessage,
+      chatApi,
+      i18n,
+      ...utils,
+      ...errorMessage,
+      appendStreamReasoning: reasoningTracker.appendStreamReasoning,
+      finalizeReasoning: reasoningTracker.finalizeStreamReasoning,
+      insertMessageBeforeThinking: thinkingTracker.insertMessageBeforeThinking,
+      removeThinkingMessageByIdentity: thinkingTracker.removeThinkingMessageByIdentity,
+      insertTerminalHistory: terminalHistory.insertTerminalHistory,
+      processStreamError: terminalHistory.processStreamError,
+      processStreamToolStart: terminalHistory.processStreamToolStart,
+      applyResumedTurnEnd: streamResume.applyResumedTurnEnd
+    },
+    ['resolveAssistantDisplayContent', 'useMessageProcessor']
+  )
+
   const sessionDependencies = {
     computed,
     nextTick,
@@ -668,8 +670,8 @@ export const createHarness = async (t, options = {}) => {
     }),
     useSessionManager,
     useChatTransport,
-    resolveAssistantDisplayContent: (content, refusal) => content ?? refusal ?? '',
-    useMessageProcessor: () => createMessageProcessor(),
+    resolveAssistantDisplayContent: messageProcessor.resolveAssistantDisplayContent,
+    useMessageProcessor: messageProcessor.useMessageProcessor,
     ...contextSummaryTracker,
     ...historyMergeTracker,
     ...historyIncrementalSync,

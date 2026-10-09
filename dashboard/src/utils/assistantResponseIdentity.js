@@ -63,6 +63,21 @@ const isWeakResponseIdentity = (responseId, workId) => (
   !hasIdentity(responseId) || isSyntheticWorkResponseId(responseId, workId)
 )
 
+const getPreferredResponseId = (localMessage, remoteMessage) => {
+  const localResponseId = getMessageIdentity(localMessage, 'response_id')
+  const remoteResponseId = getMessageIdentity(remoteMessage, 'response_id')
+  const localWorkId = getMessageIdentity(localMessage, 'work_id')
+  const remoteWorkId = getMessageIdentity(remoteMessage, 'work_id')
+
+  if (hasIdentity(localResponseId) && !isSyntheticWorkResponseId(localResponseId, localWorkId)) {
+    return localResponseId
+  }
+  if (hasIdentity(remoteResponseId) && !isSyntheticWorkResponseId(remoteResponseId, remoteWorkId)) {
+    return remoteResponseId
+  }
+  return localResponseId ?? remoteResponseId
+}
+
 const mergeRemoteMessage = (localMessage, remoteMessage) => {
   const remoteReasoning = typeof remoteMessage?.reasoning_content === 'string' && remoteMessage.reasoning_content.trim()
     ? remoteMessage.reasoning_content
@@ -71,7 +86,7 @@ const mergeRemoteMessage = (localMessage, remoteMessage) => {
     ...localMessage,
     ...remoteMessage,
     id: localMessage?.id ?? remoteMessage?.id,
-    response_id: localMessage?.response_id ?? remoteMessage?.response_id,
+    response_id: getPreferredResponseId(localMessage, remoteMessage),
     request_id: localMessage?.request_id ?? remoteMessage?.request_id,
     work_id: localMessage?.work_id ?? remoteMessage?.work_id,
     turn: localMessage?.turn ?? remoteMessage?.turn,
@@ -132,20 +147,24 @@ const getAssistantResponseReplacementIndices = (messages, incomingMessage) => {
   }
 
   if (incomingDbId !== null) {
-    const replacementIndex = messages.findIndex(message => (
-      canUseCandidate(message, true) && getMessageDbId(message) === incomingDbId
-    ))
-    addReplacementIndex(replacementIndex)
+    messages.forEach((message, index) => {
+      if (canUseCandidate(message, true) && getMessageDbId(message) === incomingDbId) {
+        addReplacementIndex(index)
+      }
+    })
   }
 
   if (hasIdentity(incomingResponseId) && !syntheticWorkResponse) {
     const stableResponseId = String(incomingResponseId)
-    const replacementIndex = messages.findIndex(message => (
-      canUseCandidate(message)
-      && hasIdentity(getMessageIdentity(message, 'response_id'))
-      && String(getMessageIdentity(message, 'response_id')) === stableResponseId
-    ))
-    addReplacementIndex(replacementIndex)
+    messages.forEach((message, index) => {
+      if (
+        canUseCandidate(message)
+        && hasIdentity(getMessageIdentity(message, 'response_id'))
+        && String(getMessageIdentity(message, 'response_id')) === stableResponseId
+      ) {
+        addReplacementIndex(index)
+      }
+    })
   }
 
   // 合成会话回复曾复用 work id，只能回退到最后一个匹配回合；真实 response id 可
@@ -235,45 +254,68 @@ export const mergeAssistantResponse = (localMessage, remoteMessage) => {
     ...mergedMessage,
     ...(!remoteHasContent && localMessage?.content !== undefined ? { content: localMessage.content } : {}),
     ...(remoteDbId ? { db_id: remoteDbId } : localDbId ? { db_id: localDbId } : {}),
-    ...(localMessage?.response_id == null && remoteMessage?.response_id != null ? { response_id: remoteMessage.response_id } : {}),
     ...(localMessage?.work_id == null && remoteMessage?.work_id != null ? { work_id: remoteMessage.work_id } : {}),
     ...(localMessage?.request_id == null && remoteMessage?.request_id != null ? { request_id: remoteMessage.request_id } : {})
   }
 }
+
+const hasRealResponseIdentity = (message) => {
+  const responseId = getMessageIdentity(message, 'response_id')
+  return hasIdentity(responseId)
+    && !isSyntheticWorkResponseId(responseId, getMessageIdentity(message, 'work_id'))
+}
+
+const getAssistantResponseCandidatePriority = (message) => (
+  (getMessageDbId(message) !== null ? 2 : 0)
+  + (hasRealResponseIdentity(message) ? 1 : 0)
+)
+
+const getPreferredAssistantResponseIndex = (messages, replacementIndices) => (
+  replacementIndices.reduce((preferredIndex, index) => (
+    getAssistantResponseCandidatePriority(messages[index])
+      > getAssistantResponseCandidatePriority(messages[preferredIndex])
+      ? index
+      : preferredIndex
+  ), replacementIndices[0])
+)
 
 export const mergeAssistantResponseIntoList = (messages, remoteMessage) => {
   const replacementIndices = getAssistantResponseReplacementIndices(messages, remoteMessage)
   if (replacementIndices.length === 0) return [...messages, remoteMessage]
 
   const replacementIndex = replacementIndices[0]
+  const preferredIndex = getPreferredAssistantResponseIndex(messages, replacementIndices)
   const mergedMessage = replacementIndices
-    .slice(1)
-    .reduce((primary, index) => {
-      const merged = mergeAssistantResponse(messages[index], primary)
-      const getPreferredField = field => {
-        const primaryValue = getMessageIdentity(primary, field)
-        return hasIdentity(primaryValue) ? primaryValue : getMessageIdentity(merged, field)
-      }
-      const id = hasIdentity(primary?.id) ? primary.id : merged?.id
-      const dbId = hasIdentity(primary?.db_id) ? primary.db_id : merged?.db_id
-      const messageId = hasIdentity(primary?.message_id) ? primary.message_id : merged?.message_id
-      const responseId = getPreferredField('response_id')
-      const requestId = getPreferredField('request_id')
-      const workId = getPreferredField('work_id')
-      const turn = getPreferredField('turn')
-
-      return {
-        ...merged,
-        ...(hasIdentity(id) ? { id } : {}),
-        ...(hasIdentity(dbId) ? { db_id: dbId } : {}),
-        ...(hasIdentity(messageId) ? { message_id: messageId } : {}),
-        ...(hasIdentity(responseId) ? { response_id: responseId } : {}),
-        ...(hasIdentity(requestId) ? { request_id: requestId } : {}),
-        ...(hasIdentity(workId) ? { work_id: workId } : {}),
-        ...(hasIdentity(turn) ? { turn } : {})
-      }
-    }, messages[replacementIndex])
-  const finalMessage = mergeAssistantResponse(mergedMessage, remoteMessage)
+    .filter(index => index !== preferredIndex)
+    .reduce((primary, index) => mergeAssistantResponse(messages[index], primary), messages[preferredIndex])
+  const firstMessage = messages[replacementIndex]
+  const getPreferredField = field => {
+    const preferredValue = getMessageIdentity(messages[preferredIndex], field)
+    return hasIdentity(preferredValue) ? preferredValue : getMessageIdentity(mergedMessage, field)
+  }
+  const realResponseMessage = replacementIndices
+    .map(index => messages[index])
+    .find(hasRealResponseIdentity)
+  const id = hasIdentity(firstMessage?.id) ? firstMessage.id : mergedMessage?.id
+  const dbId = hasIdentity(firstMessage?.db_id) ? firstMessage.db_id : mergedMessage?.db_id
+  const messageId = hasIdentity(firstMessage?.message_id) ? firstMessage.message_id : mergedMessage?.message_id
+  const responseId = realResponseMessage
+    ? getMessageIdentity(realResponseMessage, 'response_id')
+    : getPreferredField('response_id')
+  const requestId = getPreferredField('request_id')
+  const workId = getPreferredField('work_id')
+  const turn = getPreferredField('turn')
+  const mergedCandidates = {
+    ...mergedMessage,
+    ...(hasIdentity(id) ? { id } : {}),
+    ...(hasIdentity(dbId) ? { db_id: dbId } : {}),
+    ...(hasIdentity(messageId) ? { message_id: messageId } : {}),
+    ...(hasIdentity(responseId) ? { response_id: responseId } : {}),
+    ...(hasIdentity(requestId) ? { request_id: requestId } : {}),
+    ...(hasIdentity(workId) ? { work_id: workId } : {}),
+    ...(hasIdentity(turn) ? { turn } : {})
+  }
+  const finalMessage = mergeAssistantResponse(mergedCandidates, remoteMessage)
   const mergedIndices = new Set(replacementIndices.slice(1))
 
   return messages.map((message, index) => (

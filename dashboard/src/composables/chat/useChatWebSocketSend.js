@@ -1,8 +1,6 @@
 import { nextTick } from 'vue'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions.js'
-import { isToolCall, normalizeMessageContent } from '../../utils'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
-import { resolveAssistantDisplayContent } from './useMessageProcessor'
 import { shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
 import {
   getAuditConfirmationRecordId,
@@ -245,140 +243,9 @@ export function useChatWebSocketSend({
         if (!isCurrentRequestSession()) return
         if (data.session_id && data.session_id !== requestSessionId) return
 
-        // 每个 response_id 只保留一条正文；工具轮次的正文归入工具消息
         if (eventType === 'turn_end') {
           if (workLifecycleTracker.isWorkTerminal(getCompletedWorkId(data))) return
-          const displayContent = resolveAssistantDisplayContent(data.content, data.refusal, data.finish_reason)
-          const hasDisplayContent = typeof displayContent === 'string'
-            ? Boolean(displayContent.trim())
-            : displayContent !== undefined && displayContent !== null
-          const hasTurnBody = (typeof data.content === 'string'
-            ? Boolean(data.content.trim())
-            : data.content !== undefined && data.content !== null) ||
-            (typeof data.refusal === 'string' && Boolean(data.refusal.trim()))
-          const responseFields = {
-            ...(data.message_id !== null && data.message_id !== undefined && data.message_id !== '' ? { db_id: data.message_id } : {}),
-            ...(typeof data.finish_reason === 'string' && data.finish_reason ? { finish_reason: data.finish_reason } : {}),
-            ...(data.finish_details && typeof data.finish_details === 'object' && Object.keys(data.finish_details).length > 0 ? { finish_details: data.finish_details } : {}),
-            ...(typeof data.reasoning_content === 'string' && data.reasoning_content.trim() ? { reasoning_content: data.reasoning_content } : {}),
-            ...(typeof data.refusal === 'string' && data.refusal ? { refusal: data.refusal } : {}),
-            ...(data.provider_metadata && typeof data.provider_metadata === 'object' && Object.keys(data.provider_metadata).length > 0 ? { provider_metadata: data.provider_metadata } : {}),
-            ...(data.message_provider_metadata && typeof data.message_provider_metadata === 'object' && Object.keys(data.message_provider_metadata).length > 0 ? { message_provider_metadata: data.message_provider_metadata } : {})
-          }
-          if (data.response_id) {
-            const matchingIndexes = chatState.messages.value
-              .map((message, index) => ({ message, index }))
-              .filter(item => item.message.response_id === data.response_id && item.message.role === 'assistant')
-            const toolItem = matchingIndexes.find(item => isToolCall(item.message))
-            const plainItems = matchingIndexes.filter(item => !isToolCall(item.message))
-            const targetItem = toolItem || plainItems[0]
-
-            if (targetItem) {
-              const targetMessage = targetItem.message
-              const targetContent = toolItem
-                ? normalizeMessageContent(targetMessage.content)?.content
-                : targetMessage.content
-              const targetHasContent = typeof targetContent === 'string'
-                ? Boolean(targetContent.trim())
-                : targetContent !== undefined && targetContent !== null
-              const shouldApplyDisplayContent = hasDisplayContent && (hasTurnBody || !targetHasContent)
-              const updatedMessage = !shouldApplyDisplayContent
-                ? { ...targetMessage, ...responseFields, work_id: targetMessage.work_id || data.work_id }
-                : toolItem
-                  ? {
-                      ...targetMessage,
-                      content: JSON.stringify({
-                        ...normalizeMessageContent(targetMessage.content),
-                        content: displayContent
-                      }),
-                      ...responseFields,
-                      work_id: targetMessage.work_id || data.work_id
-                    }
-                  : { ...targetMessage, content: displayContent, ...responseFields, work_id: targetMessage.work_id || data.work_id }
-              const duplicateIndexes = new Set(
-                matchingIndexes
-                  .filter(item => item.index !== targetItem.index)
-                  .map(item => item.index)
-              )
-              chatState.messages.value = chatState.messages.value
-                .map((message, index) => index === targetItem.index ? updatedMessage : message)
-                .filter((_, index) => !duplicateIndexes.has(index))
-            } else if (hasDisplayContent) {
-              messageProcessor.processStreamContent(
-                chatState.messages,
-                displayContent,
-                data.turn,
-                null,
-                data.finish_reason,
-                data.response_id,
-                requestIdParam,
-                data.work_id,
-                data.event_id
-              )
-              const createdIndex = chatState.messages.value.findLastIndex(message =>
-                message.response_id === data.response_id && message.role === 'assistant' && !isToolCall(message)
-              )
-              if (createdIndex !== -1) {
-                chatState.messages.value[createdIndex] = {
-                  ...chatState.messages.value[createdIndex],
-                  ...responseFields
-                }
-              }
-            }
-          } else {
-            const relatedIndex = chatState.messages.value.findLastIndex(message =>
-              message.role === 'assistant' &&
-              !isToolCall(message) &&
-              (data.work_id !== undefined && data.work_id !== null
-                ? String(message.work_id) === String(data.work_id)
-                : requestIdParam !== undefined && requestIdParam !== null && message.request_id === requestIdParam)
-            )
-            if (relatedIndex !== -1) {
-              const relatedMessage = chatState.messages.value[relatedIndex]
-              const relatedHasContent = typeof relatedMessage.content === 'string'
-                ? Boolean(relatedMessage.content.trim())
-                : relatedMessage.content !== undefined && relatedMessage.content !== null
-              chatState.messages.value[relatedIndex] = {
-                ...relatedMessage,
-                ...(hasDisplayContent && (hasTurnBody || !relatedHasContent) ? { content: displayContent } : {}),
-                ...responseFields,
-                work_id: relatedMessage.work_id || data.work_id
-              }
-            } else if (hasDisplayContent) {
-              messageProcessor.processStreamContent(
-                chatState.messages,
-                displayContent,
-                data.turn,
-                null,
-                data.finish_reason,
-                data.response_id,
-                requestIdParam,
-                data.work_id,
-                data.event_id
-              )
-              const createdIndex = chatState.messages.value.findLastIndex(message =>
-                message.role === 'assistant' &&
-                !isToolCall(message) &&
-                (data.work_id !== undefined && data.work_id !== null
-                  ? String(message.work_id) === String(data.work_id)
-                  : requestIdParam !== undefined && requestIdParam !== null && message.request_id === requestIdParam)
-              )
-              if (createdIndex !== -1) {
-                chatState.messages.value[createdIndex] = {
-                  ...chatState.messages.value[createdIndex],
-                  ...responseFields
-                }
-              }
-            }
-          }
-          messageProcessor.finalizeStreamReasoning(
-            chatState.messages,
-            data.reasoning_content,
-            data.turn,
-            data.response_id,
-            requestIdParam,
-            data.work_id
-          )
+          messageProcessor.processStreamTurnEnd(chatState.messages, data, requestIdParam ?? requestId)
           return // turn_end 时不需要执行 done 的历史比对和占位符清理
         }
 
