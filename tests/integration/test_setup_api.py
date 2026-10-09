@@ -21,6 +21,9 @@ import app.core.crypto as crypto_module
 import app.core.setup as setup_service
 import app.providers.database.bootstrap as database_bootstrap
 from app.core.constants import (
+    CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
     ERR_CHANNEL_NAME_EXISTS,
     ERR_SETUP_ALREADY_COMPLETED,
     ERR_SETUP_CONFLICT,
@@ -44,6 +47,7 @@ from app.core.constants import (
 )
 from app.core.crud.system.setting import DEFAULT_SYSTEM_SETTINGS
 from app.core.i18n import t
+from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.security import verify_password
 from app.core.system_secrets import SystemSecrets, SystemSecretsError
 from app.handler import register_handlers
@@ -896,6 +900,203 @@ async def test_setup_complete_rejects_invalid_model_arrays_without_creating_reco
     database = await _read_setup_data(setup_session_factory)
     assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
     assert _business_record_counts(database) == {"users": 0, "channels": 0, "prompts": 0, "profiles": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["zh", "en"])
+@pytest.mark.parametrize(
+    ("model_style", "context_window_k", "max_tokens", "include_max_tokens", "model_index", "expected_max_tokens"),
+    [
+        pytest.param("flat", 1, 20480, True, 0, 20480, id="flat-context1-max20480"),
+        pytest.param("flat", 1, 744, True, 0, 744, id="flat-context1-max744"),
+        pytest.param("flat", 1, 745, True, 0, 745, id="flat-context1-max745"),
+        pytest.param("flat", 1, None, False, 0, 20480, id="flat-context1-max-omitted"),
+        pytest.param("flat", 1, None, True, 0, 20480, id="flat-context1-max-none"),
+        pytest.param("list", 12, 20480, True, 1, 20480, id="list-context12-second-max20480"),
+    ],
+)
+async def test_setup_complete_rejects_model_token_budget_without_writes(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    locale: str,
+    model_style: str,
+    context_window_k: int,
+    max_tokens: int | None,
+    include_max_tokens: bool,
+    model_index: int,
+    expected_max_tokens: int,
+) -> None:
+    locale_token = set_current_locale(locale)
+    try:
+        payload = _setup_payload(channel_name="setup-budget-channel", api_key="setup-budget-api-key")
+        if model_style == "flat":
+            payload["channel"]["context_window_k"] = context_window_k
+            if include_max_tokens:
+                payload["channel"]["max_tokens"] = max_tokens
+        else:
+            second_model: dict[str, Any] = {
+                "model_id": "setup-budget-invalid-model",
+                "protocol": "OPENAI",
+                "context_window_k": context_window_k,
+            }
+            if include_max_tokens:
+                second_model["max_tokens"] = max_tokens
+            payload["channel"] = {
+                "name": "setup-budget-channel",
+                "base_url": "https://api.example.test/v1",
+                "api_key": "setup-budget-api-key",
+                "model_ids": [
+                    {
+                        "model_id": "setup-budget-first-model",
+                        "protocol": "OPENAI",
+                        "context_window_k": 64,
+                        "max_tokens": 1024,
+                    },
+                    second_model,
+                ],
+            }
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=setup_app, raise_app_exceptions=False),
+            base_url="http://test",
+        ) as client:
+            status_response = await client.get("/api/v1/setup/status")
+            _assert_standard_response(status_response, 200)
+            setup_token = _setup_cookie_value(status_response)
+            assert client.cookies.get(SETUP_SESSION_COOKIE_NAME) == setup_token
+            before = await _read_setup_data(setup_session_factory)
+
+            response = await client.post("/api/v1/setup/complete", json=payload)
+
+        body = _assert_standard_response(response, 422)
+        assert body["data"] is None
+        expected_reason = t(
+            ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+            max_tokens=expected_max_tokens,
+            safety_margin_tokens=CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+            context_window_k=context_window_k,
+            context_window_tokens=context_window_k * CONTEXT_WINDOW_TOKENS_PER_K,
+        )
+        assert f"channel.model_ids.{model_index}" in body["message"]
+        assert expected_reason in body["message"]
+        response_text = response.text.lower()
+        assert TEST_PASSWORD not in response.text
+        assert "setup-budget-api-key" not in response.text
+        assert "value error" not in response_text
+        assert "value_error" not in response_text
+        assert "pydantic" not in response_text
+        assert "input should" not in response_text
+
+        after = await _read_setup_data(setup_session_factory)
+        assert after["settings"] == before["settings"]
+        assert after["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+        assert _business_record_counts(after) == _business_record_counts(before)
+    finally:
+        reset_current_locale(locale_token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["zh", "en"])
+@pytest.mark.parametrize("model_style", ["flat", "list"])
+async def test_setup_complete_can_retry_invalid_model_token_budget_with_same_cookie(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    locale: str,
+    model_style: str,
+) -> None:
+    locale_token = set_current_locale(locale)
+    try:
+        first_model_id = TEST_MODEL_ID if model_style == "flat" else "setup-retry-first-model"
+        second_model_id = "setup-retry-second-model"
+        payload = _setup_payload(channel_name="setup-retry-channel", api_key="setup-retry-api-key")
+        if model_style == "flat":
+            payload["channel"].update({"context_window_k": 1, "max_tokens": 744})
+            model_index = 0
+        else:
+            payload["channel"] = {
+                "name": "setup-retry-channel",
+                "base_url": "https://api.example.test/v1",
+                "api_key": "setup-retry-api-key",
+                "model_ids": [
+                    {
+                        "model_id": first_model_id,
+                        "protocol": "OPENAI",
+                        "context_window_k": 64,
+                        "max_tokens": 1024,
+                    },
+                    {
+                        "model_id": second_model_id,
+                        "protocol": "OPENAI",
+                        "context_window_k": 1,
+                        "max_tokens": 744,
+                    },
+                ],
+            }
+            model_index = 1
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=setup_app, raise_app_exceptions=False),
+            base_url="http://test",
+        ) as client:
+            status_response = await client.get("/api/v1/setup/status")
+            _assert_standard_response(status_response, 200)
+            setup_token = _setup_cookie_value(status_response)
+            assert client.cookies.get(SETUP_SESSION_COOKIE_NAME) == setup_token
+            before = await _read_setup_data(setup_session_factory)
+
+            failed_response = await client.post("/api/v1/setup/complete", json=payload)
+            failed_body = _assert_standard_response(failed_response, 422)
+            assert failed_body["data"] is None
+            expected_reason = t(
+                ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+                max_tokens=744,
+                safety_margin_tokens=CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+                context_window_k=1,
+                context_window_tokens=CONTEXT_WINDOW_TOKENS_PER_K,
+            )
+            assert f"channel.model_ids.{model_index}" in failed_body["message"]
+            assert expected_reason in failed_body["message"]
+            failed_response_text = failed_response.text.lower()
+            assert TEST_PASSWORD not in failed_response.text
+            assert "setup-retry-api-key" not in failed_response.text
+            assert "value error" not in failed_response_text
+            assert "value_error" not in failed_response_text
+            assert "pydantic" not in failed_response_text
+            assert "input should" not in failed_response_text
+
+            failed_database = await _read_setup_data(setup_session_factory)
+            assert failed_database["settings"] == before["settings"]
+            assert failed_database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+            assert _business_record_counts(failed_database) == _business_record_counts(before)
+
+            if model_style == "flat":
+                payload["channel"]["max_tokens"] = 743
+            else:
+                payload["channel"]["model_ids"][1]["max_tokens"] = 743
+
+            retry_response = await client.post("/api/v1/setup/complete", json=payload)
+            _assert_standard_response(retry_response, 200)
+
+        database = await _read_setup_data(setup_session_factory)
+        assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_COMPLETED
+        assert _business_record_counts(database) == {"users": 1, "channels": 1, "prompts": 1, "profiles": 1}
+
+        channel = database["channels"][0]
+        models = {model["model_id"]: model for model in channel.model_ids}
+        assert models[first_model_id]["model_id"] == first_model_id
+        if model_style == "list":
+            assert models[first_model_id]["context_window_k"] == 64
+            assert models[first_model_id]["max_tokens"] == 1024
+        assert models[second_model_id if model_style == "list" else first_model_id]["max_tokens"] == 743
+
+        profile = database["profiles"][0]
+        for channel_name in ("chat_channel", "context_summary_channel"):
+            rules = profile.configs["channel"][channel_name]["rules"]
+            assert len(rules) == 1
+            assert rules[0]["channel_id"] == channel.id
+            assert rules[0]["model_id"] == first_model_id
+    finally:
+        reset_current_locale(locale_token)
 
 
 @pytest.mark.asyncio

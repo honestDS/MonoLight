@@ -1,3 +1,9 @@
+import {
+  CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+  CONTEXT_WINDOW_TOKENS_PER_K,
+  DEFAULT_CHAT_MAX_TOKENS,
+} from '../constants/channelModel.js'
+
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -138,8 +144,21 @@ export function applyOpenRouterModelMetadata(entry, model) {
   const contextLength = getContextLength(model)
 
   if (contextLength !== null) {
-    entry.context_window_k = Math.max(1, Math.floor(contextLength / 1000))
+    entry.context_window_k = Math.max(1, Math.floor(contextLength / CONTEXT_WINDOW_TOKENS_PER_K))
     fields.push('context_window_k')
+
+    const contextTokens = entry.context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
+    const maxAllowedTokens = contextTokens - CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS - 1
+    const effectiveMaxTokens = entry.max_tokens ?? DEFAULT_CHAT_MAX_TOKENS
+    if (
+      (entry.usage === undefined || entry.usage === 'CHAT') &&
+      Number.isSafeInteger(contextTokens) &&
+      Number.isSafeInteger(effectiveMaxTokens) &&
+      effectiveMaxTokens > maxAllowedTokens
+    ) {
+      entry.max_tokens = maxAllowedTokens
+      fields.push('max_tokens')
+    }
   }
 
   const inputModalities = model.architecture?.input_modalities

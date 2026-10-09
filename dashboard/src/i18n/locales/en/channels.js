@@ -140,5 +140,6 @@ export default {
   model_metadata_invalid_response: 'OpenRouter returned invalid model information',
   model_metadata_no_mappable_fields: 'OpenRouter returned no mappable parameters',
   model_metadata_detect_success: 'Detected parameters from OpenRouter for {model}: {fields}',
+  model_metadata_max_tokens_adjusted: 'The detected context window is {context_window_k}K. The previous output limit does not fit, so maximum output tokens was adjusted to {max_tokens}.',
   model_metadata_detect_failed: 'Failed to detect parameters from OpenRouter'
 }

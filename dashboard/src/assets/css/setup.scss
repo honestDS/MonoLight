@@ -275,7 +275,6 @@
 
 .setup-error {
   min-width: 0;
-  margin: 0;
   padding: 10px 12px;
   color: var(--setup-error);
   background: var(--setup-error-bg);
@@ -283,6 +282,7 @@
   font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+  border-radius: var(--radius-4);
   word-break: break-word;
 }
 

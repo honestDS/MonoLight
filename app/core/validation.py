@@ -9,6 +9,7 @@ from app.core.constants import (
     ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED,
     ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID,
     ERR_PASSWORD_TOO_LONG_BYTES,
+    ERR_USERNAME_FORMAT,
     ERR_VALIDATION_FAILED,
 )
 from app.core.i18n import t
@@ -25,7 +26,7 @@ def validate_password(password: str, *, require_non_empty: bool = True, minimum_
             raise ValueError(t("missing"))
         return password
     if len(password) < minimum_length:
-        raise ValueError(t("string_too_short"))
+        raise ValueError(t("string_too_short", min_length=minimum_length))
     if len(password.encode("utf-8")) > 72:
         raise PydanticCustomError(ERR_PASSWORD_TOO_LONG_BYTES, t(ERR_PASSWORD_TOO_LONG_BYTES))
     return password
@@ -35,11 +36,11 @@ def validate_username(username: str) -> str:
     if not isinstance(username, str) or not username:
         raise ValueError(t("missing"))
     if len(username) < 3:
-        raise ValueError(t("string_too_short"))
+        raise ValueError(t("string_too_short", min_length=3))
     if len(username) > 50:
-        raise ValueError(t("string_too_long"))
+        raise ValueError(t("string_too_long", max_length=50))
     if _USERNAME_PATTERN.fullmatch(username) is None:
-        raise ValueError(t(ERR_VALIDATION_FAILED))
+        raise ValueError(t(ERR_USERNAME_FORMAT))
     return username
 
 
