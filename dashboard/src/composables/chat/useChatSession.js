@@ -138,6 +138,7 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     isCurrentSessionReadOnly,
     currentSessionShowToolCalls,
     isSessionScopeActive: () => sessionScopeActive,
+    resetStreamState: messageProcessor.resetStreamState,
     api: chatApi
   })
   const initialHistoryLoaded = history.initialHistoryLoaded
@@ -446,6 +447,7 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     const loadingRefreshPromise = sessionManager.refreshSessionLoadingState().catch(err => {
       console.error('Session loading state refresh before WebSocket resume failed:', err)
     })
+    messageProcessor.resetStreamState()
     chatState.clearMessages()
     chatDrafts.restoreSession()
 
@@ -476,6 +478,7 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     transport.setTransportMode('ws')
     sessionManager.createNewSession(transport.disconnectWebSocket)
     refreshSessionLoadingState()
+    messageProcessor.resetStreamState()
     chatState.clearMessages()
     chatDrafts.restoreSession()
     newSessionProfileOverrideId.value = null
@@ -506,6 +509,7 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     resetHttpPollingState()
     clearSubmissions()
     contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
+    messageProcessor.resetStreamState()
     workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     sessionManager.setSessionsUpdatedCallback(null)
     sessionManager.setSessionActivityUpdatedCallback(null)

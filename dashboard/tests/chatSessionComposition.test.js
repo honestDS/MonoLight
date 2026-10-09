@@ -194,7 +194,7 @@ test('composed websocket send merges turn_end into the existing tool message', a
   let r1Messages = chat.messages.value.filter(message => message.response_id === 'r1')
   assert.equal(r1Messages.length, 1)
   assert.equal(JSON.parse(r1Messages[0].content).content, 'final body')
-  assert.equal(r1Messages[0].db_id, 77)
+  assert.equal(String(r1Messages[0].db_id), '77')
   assert.equal(r1Messages[0].reasoning_content, 'reasoning')
   assert.equal(
     chat.messages.value.find(message => message.response_id === 'r2').content,
@@ -269,4 +269,231 @@ test('composed HTTP send does not resubmit an outcome with unknown confirmation'
   await chat.loadSessions()
   await harness.flush()
   assert.equal(harness.apiState.completionRequests.length, 1)
+})
+
+test('composed websocket scroll history reconciles overlapping local messages', async t => {
+  const initialHistory = Array.from({ length: 40 }, (_, index) => ({
+    id: 1000 + index,
+    role: 'user',
+    content: `initial-${index}`
+  }))
+  const olderHistory = [
+    { id: 100, role: 'user', content: 'older-first' },
+    { id: 101, role: 'assistant', content: 'older-second' },
+    { id: 102, role: 'user', content: 'same prompt', attachments: ['local-file.txt'] }
+  ]
+  const historyPage = [
+    ...olderHistory,
+    { id: 1200, role: 'user', content: 'same prompt', attachments: ['other-file.txt'] },
+    { id: 1201, role: 'user', content: 'same prompt', attachments: ['local-file.txt'] },
+    { id: 1202, role: 'user', content: 'same prompt' },
+    {
+      id: 301,
+      role: 'assistant',
+      response_id: 'response-1',
+      content: 'assistant answer',
+      reasoning_content: 'reasoning'
+    },
+    ...Array.from({ length: 13 }, (_, index) => ({
+      id: 400 + index,
+      role: 'user',
+      content: `older-filler-${index}`
+    }))
+  ]
+  const harness = await createHarness(t, {
+    sessions: [createSession('A', { source: 'ws' })],
+    initialRoute: { path: '/', query: { session_id: 'A' } },
+    sessionsHistory: ({ index }) => index === 0 ? initialHistory : historyPage
+  })
+  const { chat } = harness
+
+  await harness.flush()
+  assert.ok(chat.messages.value.length >= initialHistory.length)
+  assert.equal(chat.hasMore.value, true)
+
+  const localUser = {
+    id: 1700000000000,
+    role: 'user',
+    content: 'same prompt',
+    request_id: 'request-local',
+    attachments: ['local-file.txt']
+  }
+  chat.messages.value.push(
+    localUser,
+    {
+      id: 'assistant-local',
+      db_id: 301,
+      role: 'assistant',
+      response_id: 'response-1',
+      content: 'assistant answer',
+      reasoning_content: 'reasoning'
+    }
+  )
+  chat.messageList.value = {
+    scrollTop: 0,
+    captureScrollAnchor: () => ({ top: 0 }),
+    restoreScrollAnchor: async () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {}
+  }
+
+  await chat.handleScroll()
+  await harness.flush()
+  assert.equal(chat.hasMore.value, true)
+
+  assert.deepEqual(
+    Array.from(chat.messages.value.slice(0, olderHistory.length), message => message.db_id),
+    olderHistory.map(message => message.id)
+  )
+
+  const samePromptUsers = chat.messages.value.filter(message => (
+    message.role === 'user' && message.content === 'same prompt'
+  ))
+  assert.equal(samePromptUsers.length, 4)
+  const reconciledUser = samePromptUsers.find(message => message.id === localUser.id)
+  assert.ok(reconciledUser)
+  assert.equal(reconciledUser.request_id, localUser.request_id)
+  assert.deepEqual(Array.from(reconciledUser.attachments), localUser.attachments)
+  assert.equal(reconciledUser.db_id, 1201)
+  const samePromptUsersByDbId = new Map(
+    Array.from(samePromptUsers, message => [message.db_id, message])
+  )
+  assert.deepEqual(
+    Array.from(samePromptUsersByDbId.get(102).attachments),
+    ['local-file.txt']
+  )
+  assert.deepEqual(
+    Array.from(samePromptUsersByDbId.get(1200).attachments),
+    ['other-file.txt']
+  )
+  assert.deepEqual(
+    Array.from(samePromptUsersByDbId.get(1201).attachments),
+    ['local-file.txt']
+  )
+  assert.equal(samePromptUsersByDbId.get(1202).attachments, undefined)
+  assert.deepEqual(
+    Array.from(samePromptUsers, message => message.db_id).sort((left, right) => left - right),
+    [102, 1200, 1201, 1202]
+  )
+
+  const reasoningMessages = chat.messages.value.filter(message => (
+    message.role === 'assistant' && message.response_id === 'response-1'
+  ))
+  assert.equal(reasoningMessages.length, 1)
+  assert.equal(reasoningMessages[0].reasoning_content, 'reasoning')
+
+  const snapshot = messages => JSON.stringify(messages, (key, value) => (
+    key === 'db_id' && value != null ? String(value) : value
+  ))
+  const firstPageSnapshot = snapshot(chat.messages.value)
+  await chat.handleScroll()
+  await harness.flush()
+  assert.equal(snapshot(chat.messages.value), firstPageSnapshot)
+  assert.equal(harness.apiState.historyRequests.length, 3)
+})
+
+test('composed initial history preserves local input and streaming response', async t => {
+  const harness = await createHarness(t, {
+    sessions: [createSession('A', { source: 'ws' })],
+    initialRoute: { path: '/', query: { session_id: 'A' } },
+    sessionsHistory: ({ index, pending }) => index === 0 ? pending.promise : []
+  })
+  const { chat } = harness
+
+  await harness.flush()
+  const sendPromise = chat.wsSend('正在输入')
+  await harness.flush()
+
+  const request = harness.wsManager.sent.filter(item => item.type === 'chat').at(-1)
+  assert.ok(request)
+  await receiveWs(harness, {
+    type: 'input_accepted',
+    session_id: 'A',
+    request_id: request.request_id
+  })
+  await sendPromise
+
+  const streamEvent = {
+    session_id: 'A',
+    request_id: request.request_id,
+    work_id: 'work-stream-1',
+    response_id: 'response-stream-1',
+    turn: 1
+  }
+  await receiveWs(harness, { type: 'agent_loop_start', ...streamEvent })
+  await receiveWs(harness, { type: 'content', ...streamEvent, content: '当次流式正文' })
+  await receiveWs(harness, { type: 'agent_loop_output', ...streamEvent })
+
+  harness.apiState.historyRequests[0].pending.resolve([
+    { id: 1, role: 'user', content: '旧问题' },
+    { id: 2, role: 'assistant', content: '旧回复' }
+  ])
+  await harness.flush()
+
+  const messages = chat.messages.value
+  assert.deepEqual(
+    Array.from(messages.slice(0, 2), message => String(message.db_id)),
+    ['1', '2']
+  )
+  assert.equal(
+    messages.filter(message => message.role === 'user' && message.content === '正在输入').length,
+    1
+  )
+  const streamMessages = messages.filter(message => message.response_id === 'response-stream-1')
+  assert.equal(streamMessages.length, 1)
+  assert.equal(streamMessages[0].content, '当次流式正文')
+})
+
+test('composed initial history deduplicates database ids without deduplicating distinct responses', async t => {
+  const harness = await createHarness(t, {
+    sessions: [createSession('A', { source: 'ws' })],
+    initialRoute: { path: '/', query: { session_id: 'A' } },
+    sessionsHistory: ({ index }) => index === 0 ? [
+      { id: 1, role: 'user', content: '重复问题' },
+      { id: 1, role: 'user', content: '重复问题' },
+      {
+        id: 2,
+        role: 'assistant',
+        response_id: 'response-2',
+        content: '相同正文',
+        reasoning_content: '回复二推理'
+      },
+      {
+        id: 2,
+        role: 'assistant',
+        response_id: 'response-2',
+        content: '相同正文',
+        reasoning_content: '回复二推理'
+      },
+      {
+        id: 3,
+        role: 'assistant',
+        response_id: 'response-3',
+        content: '相同正文',
+        reasoning_content: '回复三推理'
+      }
+    ] : []
+  })
+  const { chat } = harness
+
+  await harness.flush()
+
+  const messages = chat.messages.value
+  const messagesByDbId = new Map()
+  for (const message of messages) {
+    const dbId = String(message.db_id)
+    messagesByDbId.set(dbId, [...(messagesByDbId.get(dbId) || []), message])
+  }
+  assert.equal(messagesByDbId.get('1').length, 1)
+  assert.equal(messagesByDbId.get('2').length, 1)
+  assert.equal(messagesByDbId.get('3').length, 1)
+
+  const sameContentResponses = messages.filter(message => (
+    message.role === 'assistant' && message.content === '相同正文'
+  ))
+  assert.equal(sameContentResponses.length, 2)
+  assert.deepEqual(
+    Array.from(sameContentResponses, message => [String(message.db_id), message.response_id]),
+    [['2', 'response-2'], ['3', 'response-3']]
+  )
 })

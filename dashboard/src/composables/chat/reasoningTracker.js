@@ -12,16 +12,20 @@ const matchesThinking = (message, responseId, requestId, workId) => {
 const matchesReasoning = (message, responseId, requestId, workId, turn) => {
   if (message?.role !== 'reasoning') return false
   const stableResponseId = normalizeIdentity(responseId)
-  if (stableResponseId && normalizeIdentity(message.response_id) === stableResponseId) return true
+  const messageResponseId = normalizeIdentity(message.response_id)
+  if (stableResponseId && messageResponseId) return messageResponseId === stableResponseId
   const stableWorkId = normalizeIdentity(workId)
-  if (stableWorkId && normalizeIdentity(message.work_id) === stableWorkId && (turn === undefined || turn === null || message.turn === turn)) return true
+  const messageWorkId = normalizeIdentity(message.work_id)
+  if (stableWorkId && messageWorkId && messageWorkId !== stableWorkId) return false
+  if (stableWorkId && messageWorkId === stableWorkId && (turn === undefined || turn === null || message.turn === turn)) return true
   return Boolean(requestId && message.request_id === requestId && (turn === undefined || turn === null || message.turn === turn))
 }
 
 const matchesAssistant = (message, responseId, workId, turn) => {
   if (message?.role !== 'assistant') return false
   const stableResponseId = normalizeIdentity(responseId)
-  if (stableResponseId && normalizeIdentity(message.response_id) === stableResponseId) return true
+  const messageResponseId = normalizeIdentity(message.response_id)
+  if (stableResponseId && messageResponseId) return messageResponseId === stableResponseId
   const stableWorkId = normalizeIdentity(workId)
   return Boolean(
     stableWorkId

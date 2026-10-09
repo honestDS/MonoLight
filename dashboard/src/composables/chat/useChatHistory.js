@@ -24,6 +24,7 @@ const HTTP_HISTORY_INCREMENTAL_MAX_PAGES = 4
 
 export function useChatHistory({
   chatState,
+  resetStreamState,
   sessionManager,
   transport,
   isCurrentSessionReadOnly,
@@ -51,8 +52,8 @@ export function useChatHistory({
     try {
       const visibleHistoryData = filterNewMessages(historyData)
       if (visibleHistoryData.length > 0) {
-        // 插入到消息列表开头
-        chatState.insertMessage(0, visibleHistoryData.map(normalizeHistoryMessage), true)
+        // 合并历史并保留加载期间已收到的消息
+        mergeSessionHistoryPage(visibleHistoryData, { prepend: true })
       }
       initialHistoryLoaded.value = true
       await nextTick()
@@ -72,17 +73,27 @@ export function useChatHistory({
   const reloadCurrentSessionHistory = async () => {
     if (!sessionManager.currentSessionId.value) return
     initialHistoryLoaded.value = false
+    resetStreamState()
     chatState.clearMessages()
     sessionManager.resetPagination()
     await loadInitialSessionHistory(2)
   }
 
-  const mergeSessionHistoryPage = historyData => {
-    if (!Array.isArray(historyData) || historyData.length === 0) return
+  const mergeSessionHistoryPage = (historyData, { prepend = false } = {}) => {
+    if (!Array.isArray(historyData) || historyData.length === 0) return false
 
     const existingKeys = new Set(chatState.messages.value.flatMap(m => [...getMessageDedupeKeys(m)]))
     let mergedMessages = [...chatState.messages.value]
+    let insertPosition = 0
     let changed = false
+    const addMessage = message => {
+      if (prepend) {
+        mergedMessages.splice(insertPosition, 0, message)
+        insertPosition += 1
+      } else {
+        mergedMessages.push(message)
+      }
+    }
     for (const item of historyData) {
       const message = normalizeHistoryMessage({ ...item, db_id: item.id })
       if (isAssistantResponse(message)) {
@@ -94,7 +105,7 @@ export function useChatHistory({
           continue
         }
         if (isPlainAssistantResponse(message)) {
-          mergedMessages.push(message)
+          addMessage(message)
           getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
           changed = true
           continue
@@ -128,13 +139,14 @@ export function useChatHistory({
       }
       const messageKeys = getMessageDedupeKeys(message)
       if ([...messageKeys].some(key => existingKeys.has(key))) continue
-      mergedMessages.push(message)
+      addMessage(message)
       messageKeys.forEach(key => existingKeys.add(key))
       changed = true
     }
     if (changed) {
       chatState.messages.value = mergedMessages
     }
+    return changed
   }
 
   const mergeLatestSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
@@ -247,21 +259,10 @@ export function useChatHistory({
     const historyData = await sessionManager.loadSessionHistory(1)
     if (!historyData?.length) return
 
-    const existingKeys = new Set(chatState.messages.value.flatMap(message => [...getMessageDedupeKeys(message)]))
-    const uniqueMessages = filterNewMessages(historyData)
-      .map(normalizeHistoryMessage)
-      .filter((message) => {
-        const messageKeys = getMessageDedupeKeys(message)
-        if ([...messageKeys].some(key => existingKeys.has(key))) return false
-        messageKeys.forEach(key => existingKeys.add(key))
-        return true
-      })
-    if (!uniqueMessages.length) return
-
     const anchor = messageList.captureScrollAnchor()
     restoringHistoryScroll = true
     try {
-      chatState.insertMessage(0, uniqueMessages)
+      if (!mergeSessionHistoryPage(filterNewMessages(historyData), { prepend: true })) return
       await nextTick()
       await messageList.restoreScrollAnchor(anchor)
     } finally {
