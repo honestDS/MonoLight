@@ -20,6 +20,8 @@ export default {
   llm_request_metadata_label: 'LLM 请求 Token 信息',
   collapse_request_metadata: '折叠信息概览',
   expand_request_metadata: '展开信息概览',
+  collapse_message: '折叠',
+  expand_message: '展开',
   request_metadata_short_label: '信息概览',
   todo_title: '任务清单',
   todo_progress: '{completed}/{total}',
