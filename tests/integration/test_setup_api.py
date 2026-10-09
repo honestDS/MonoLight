@@ -53,7 +53,7 @@ from app.models.prompt import PromptLibrary
 from app.models.system_setting import SystemSetting
 from app.models.user import User
 from app.providers.database import get_db
-from app.schemas.setup import SetupAdminInput, SetupChannelInput, SetupCompleteRequest, SetupProfileInput
+from app.schemas.setup import SetupAdminInput, SetupChannelInput, SetupCompleteRequest, SetupModelInput, SetupProfileInput
 from main import register_dashboard
 
 FIXED_ACCESS_TOKEN = "setup-api-fixed-token"
@@ -747,6 +747,158 @@ async def test_setup_probe_routes_reject_completed_or_configuring_state(
 
 
 @pytest.mark.asyncio
+async def test_setup_complete_persists_multiple_models_and_binds_profile_to_first_model(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first_model_id = "setup-first-chat-model"
+    second_model_id = "setup-second-responses-model"
+    payload = {
+        "admin": {"username": TEST_USERNAME, "password": TEST_PASSWORD},
+        "channel": {
+            "name": "setup-multi-channel",
+            "base_url": "https://api.example.test/v1",
+            "api_key": "setup-multi-api-key",
+            "http_proxy": "http://proxy.example.test:8080",
+            "model_ids": [
+                {
+                    "model_id": first_model_id,
+                    "protocol": "OPENAI",
+                    "image_understanding": True,
+                    "audio_understanding": False,
+                    "video_understanding": True,
+                    "context_window_k": 64,
+                    "temperature": 0.2,
+                    "top_p": 0.7,
+                    "reasoning_efforts": ["low", "high"],
+                    "max_tokens": 512,
+                    "description": "First chat model",
+                    "advanced_settings": {"custom_headers": {"X-Setup-First": "first"}},
+                },
+                {
+                    "model_id": second_model_id,
+                    "protocol": "OPENAI_RESPONSES",
+                    "image_understanding": False,
+                    "audio_understanding": True,
+                    "video_understanding": False,
+                    "context_window_k": 128,
+                    "temperature": 0.8,
+                    "top_p": 0.95,
+                    "reasoning_efforts": ["medium"],
+                    "max_tokens": 1024,
+                    "description": "Second responses model",
+                    "advanced_settings": {"custom_headers": {"X-Setup-Second": "second"}},
+                },
+            ],
+        },
+        "profile": {"name": "setup-multi-profile"},
+    }
+
+    response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=payload)
+    body = _assert_standard_response(response, 200)
+    database = await _read_setup_data(setup_session_factory)
+
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_COMPLETED
+    assert len(database["users"]) == 1
+    assert len(database["channels"]) == 1
+    assert len(database["prompts"]) == 1
+    assert len(database["profiles"]) == 1
+
+    channel = database["channels"][0]
+    assert body["data"]["channel_id"] == channel.id
+    assert channel.api_key.startswith(ENCRYPTED_API_KEY_PREFIX)
+    assert channel.api_key != "setup-multi-api-key"
+    assert channel.get_decrypted_api_key() == "setup-multi-api-key"
+    assert channel.http_proxy == "http://proxy.example.test:8080"
+    assert len(channel.model_ids) == 2
+
+    models = {model["model_id"]: model for model in channel.model_ids}
+    assert set(models) == {first_model_id, second_model_id}
+    first_model = models[first_model_id]
+    assert first_model["usage"] == ModelUsage.CHAT.value
+    assert first_model["protocol"] == ModelProtocol.OPENAI.value
+    assert first_model["image_understanding"] is True
+    assert first_model["audio_understanding"] is False
+    assert first_model["video_understanding"] is True
+    assert first_model["context_window_k"] == 64
+    assert first_model["temperature"] == 0.2
+    assert first_model["top_p"] == 0.7
+    assert first_model["reasoning_efforts"] == ["low", "high"]
+    assert first_model["max_tokens"] == 512
+    assert first_model["description"] == "First chat model"
+    assert first_model["advanced_settings"] == {"custom_headers": {"x-setup-first": "first"}}
+
+    second_model = models[second_model_id]
+    assert second_model["usage"] == ModelUsage.CHAT.value
+    assert second_model["protocol"] == ModelProtocol.OPENAI_RESPONSES.value
+    assert second_model["image_understanding"] is False
+    assert second_model["audio_understanding"] is True
+    assert second_model["video_understanding"] is False
+    assert second_model["context_window_k"] == 128
+    assert second_model["temperature"] == 0.8
+    assert second_model["top_p"] == 0.95
+    assert second_model["reasoning_efforts"] == ["medium"]
+    assert second_model["max_tokens"] == 1024
+    assert second_model["description"] == "Second responses model"
+    assert second_model["advanced_settings"] == {"custom_headers": {"x-setup-second": "second"}}
+
+    profile = database["profiles"][0]
+    assert profile.is_default is True
+    assert profile.prompt_id == database["prompts"][0].id
+    assert body["data"]["profile_id"] == profile.id
+    for channel_name in ("chat_channel", "context_summary_channel"):
+        rules = profile.configs["channel"][channel_name]["rules"]
+        assert len(rules) == 1
+        assert rules[0]["channel_id"] == channel.id
+        assert rules[0]["model_id"] == first_model_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_model_ids",
+    [
+        [],
+        [
+            {"model_id": " model-a ", "protocol": "OPENAI", "context_window_k": 64},
+            {"model_id": "model-a", "protocol": "OPENAI", "context_window_k": 64},
+        ],
+        [
+            {"model_id": "first-model", "protocol": "OPENAI", "context_window_k": 64},
+            {"model_id": "", "protocol": "OPENAI", "context_window_k": 64},
+        ],
+        [
+            {"model_id": "first-model", "protocol": "OPENAI", "context_window_k": 64},
+            {"model_id": "second-model", "protocol": "INVALID", "context_window_k": 64},
+        ],
+        [
+            {"model_id": "first-model", "protocol": "OPENAI", "context_window_k": 64},
+            {"model_id": "second-model", "protocol": "OPENAI"},
+        ],
+    ],
+)
+async def test_setup_complete_rejects_invalid_model_arrays_without_creating_records(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    invalid_model_ids: list[dict[str, Any]],
+) -> None:
+    payload = _setup_payload()
+    payload["channel"] = {
+        "name": "setup-invalid-models-channel",
+        "base_url": "https://api.example.test/v1",
+        "api_key": "setup-invalid-models-api-key",
+        "http_proxy": None,
+        "model_ids": invalid_model_ids,
+    }
+
+    response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=payload)
+    _assert_standard_response(response, 422)
+
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+    assert _business_record_counts(database) == {"users": 0, "channels": 0, "prompts": 0, "profiles": 0}
+
+
+@pytest.mark.asyncio
 async def test_setup_complete_returns_token_data_and_creates_initial_records(
     setup_app: FastAPI,
     setup_session_factory: async_sessionmaker[AsyncSession],
@@ -1181,6 +1333,18 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
             "base_url",
             "api_key",
             "http_proxy",
+            "model_ids",
+        }
+    )
+    assert set(channel_schema["required"]) == {"name", "base_url", "api_key", "model_ids"}
+    model_ids_schema = channel_schema["properties"]["model_ids"]
+    assert model_ids_schema["type"] == "array"
+    assert model_ids_schema["minItems"] == 1
+    model_schema = _object_schema(openapi, model_ids_schema["items"])
+    assert (
+        set(model_schema["properties"])
+        == set(SetupModelInput.model_fields)
+        == {
             "model_id",
             "protocol",
             "image_understanding",
@@ -1196,10 +1360,10 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
             "advanced_settings",
         }
     )
-    reasoning_efforts_schema = channel_schema["properties"]["reasoning_efforts"]
+    reasoning_efforts_schema = model_schema["properties"]["reasoning_efforts"]
     assert reasoning_efforts_schema["type"] == "array"
     assert reasoning_efforts_schema["items"] == {"type": "string", "minLength": 1, "maxLength": 64}
-    protocol_schema = _resolve_schema(openapi, channel_schema["properties"]["protocol"])
+    protocol_schema = _resolve_schema(openapi, model_schema["properties"]["protocol"])
     assert set(protocol_schema["enum"]) == {protocol.value for protocol in MODEL_PROTOCOLS_BY_USAGE[ModelUsage.CHAT]}
     assert set(profile_schema["properties"]) == set(SetupProfileInput.model_fields) == {"name"}
     assert set(SetupCompleteRequest.model_fields) == {"admin", "channel", "profile"}

@@ -1,3 +1,4 @@
+import { defaultModelEntry } from '../constants/index.js'
 import { isValidHttpProxy, normalizeHttpProxy } from './channelHttpProxy.js'
 import { getModelReasoningEfforts } from './channelModelMetadata.js'
 
@@ -154,6 +155,70 @@ export function validateSetupProtocol(value) {
   return null
 }
 
+function serializeSetupModel(model) {
+  const source = model && typeof model === 'object' ? model : {}
+
+  return {
+    model_id: trimmedString(source.model_id),
+    protocol: stringValue(source.protocol),
+    image_understanding: Boolean(source.image_understanding),
+    audio_understanding: Boolean(source.audio_understanding),
+    video_understanding: Boolean(source.video_understanding),
+    context_window_k: source.context_window_k,
+    temperature: source.temperature,
+    top_p: source.top_p,
+    reasoning_efforts: getModelReasoningEfforts(source),
+    max_tokens: source.max_tokens,
+    description: stringValue(source.description),
+    advanced_settings: isPlainObject(source.advanced_settings)
+      ? { ...source.advanced_settings }
+      : {}
+  }
+}
+
+export function addSetupDetectedModels(entries, values) {
+  if (!Array.isArray(entries) || !Array.isArray(values)) {
+    return []
+  }
+
+  const existingIds = new Set()
+  for (const entry of entries) {
+    if (entry && typeof entry === 'object') {
+      const modelId = trimmedString(entry.model_id)
+      if (modelId) {
+        existingIds.add(modelId)
+      }
+    }
+  }
+
+  const touchedEntries = []
+  for (const value of values) {
+    if (typeof value !== 'string') {
+      continue
+    }
+
+    const modelId = value.trim()
+    if (!modelId || existingIds.has(modelId)) {
+      continue
+    }
+
+    const emptyEntry = entries.find(
+      entry => entry && typeof entry === 'object' && !trimmedString(entry.model_id)
+    )
+    const entry = emptyEntry || defaultModelEntry()
+
+    if (!emptyEntry) {
+      entries.push(entry)
+    }
+
+    entry.model_id = modelId
+    existingIds.add(modelId)
+    touchedEntries.push(entry)
+  }
+
+  return touchedEntries
+}
+
 export function buildSetupRequest(form) {
   const source = form && typeof form === 'object' ? form : {}
   const admin = source.admin && typeof source.admin === 'object' ? source.admin : {}
@@ -169,21 +234,10 @@ export function buildSetupRequest(form) {
       name: trimmedString(channel.name),
       base_url: trimmedString(channel.base_url),
       api_key: stringValue(channel.api_key),
-      model_id: trimmedString(channel.model_id),
-      protocol: stringValue(channel.protocol),
       http_proxy: normalizeHttpProxy(channel.http_proxy) || null,
-      image_understanding: Boolean(channel.image_understanding),
-      audio_understanding: Boolean(channel.audio_understanding),
-      video_understanding: Boolean(channel.video_understanding),
-      context_window_k: channel.context_window_k,
-      temperature: channel.temperature,
-      top_p: channel.top_p,
-      reasoning_efforts: getModelReasoningEfforts(channel),
-      max_tokens: channel.max_tokens,
-      description: stringValue(channel.description),
-      advanced_settings: isPlainObject(channel.advanced_settings)
-        ? { ...channel.advanced_settings }
-        : {}
+      model_ids: Array.isArray(channel.model_ids)
+        ? channel.model_ids.map(serializeSetupModel)
+        : []
     },
     profile: {
       name: trimmedString(profile.name)

@@ -46,10 +46,14 @@ test('reasoning candidates remain preserved from metadata through setup requests
 
   const request = buildSetupRequest({
     channel: {
-      reasoning_efforts: ['manual', 'low', 'high'],
-      reasoning_effort: 'legacy'
+      model_ids: [
+        {
+          reasoning_efforts: ['manual', 'low', 'high'],
+          reasoning_effort: 'legacy'
+        }
+      ]
     }
   })
-  assert.deepEqual(request.channel.reasoning_efforts, ['manual', 'low', 'high'])
-  assert.equal(Object.hasOwn(request.channel, 'reasoning_effort'), false)
+  assert.deepEqual(request.channel.model_ids[0].reasoning_efforts, ['manual', 'low', 'high'])
+  assert.equal(Object.hasOwn(request.channel.model_ids[0], 'reasoning_effort'), false)
 })

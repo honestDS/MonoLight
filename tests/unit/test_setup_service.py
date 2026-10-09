@@ -155,7 +155,7 @@ def test_setup_schema_rejects_missing_url() -> None:
 
 def test_setup_schema_rejects_missing_context_window() -> None:
     payload = make_setup_request().model_dump(mode="json")
-    del payload["channel"]["context_window_k"]
+    del payload["channel"]["model_ids"][0]["context_window_k"]
 
     with pytest.raises(ValidationError):
         SetupCompleteRequest.model_validate(payload)
@@ -175,7 +175,136 @@ def test_setup_schema_rejects_non_chat_protocol() -> None:
 def test_setup_schema_accepts_chat_protocols(protocol: ModelProtocol) -> None:
     request = make_setup_request(protocol=protocol)
 
-    assert request.channel.protocol == protocol
+    assert request.channel.model_ids[0].protocol == protocol
+
+
+def test_setup_schema_accepts_independent_model_configurations() -> None:
+    payload = make_setup_request().model_dump(mode="json")
+    payload["channel"].update(
+        {
+            "model_id": "legacy-model",
+            "protocol": ModelProtocol.OPENAI.value,
+            "context_window_k": 32,
+            "model_ids": [
+                {
+                    "model_id": "chat-model",
+                    "protocol": ModelProtocol.OPENAI.value,
+                    "context_window_k": 64,
+                    "image_understanding": True,
+                },
+                {
+                    "model_id": "responses-model",
+                    "protocol": ModelProtocol.OPENAI_RESPONSES.value,
+                    "context_window_k": 128,
+                    "temperature": 0.7,
+                },
+            ],
+        }
+    )
+
+    request = SetupCompleteRequest.model_validate(payload)
+
+    assert request.channel.model_ids[0].model_id == "chat-model"
+    assert request.channel.model_ids[0].protocol == ModelProtocol.OPENAI
+    assert request.channel.model_ids[0].context_window_k == 64
+    assert request.channel.model_ids[0].image_understanding is True
+    assert request.channel.model_ids[1].model_id == "responses-model"
+    assert request.channel.model_ids[1].protocol == ModelProtocol.OPENAI_RESPONSES
+    assert request.channel.model_ids[1].context_window_k == 128
+    assert request.channel.model_ids[1].temperature == 0.7
+
+
+@pytest.mark.parametrize("model_ids", [[], None], ids=["empty-list", "null"])
+def test_setup_schema_rejects_empty_model_list_even_with_legacy_fields(
+    model_ids: list[dict[str, object]] | None,
+) -> None:
+    payload = make_setup_request().model_dump(mode="json")
+    payload["channel"].update(
+        {
+            "model_id": "legacy-model",
+            "protocol": ModelProtocol.OPENAI.value,
+            "context_window_k": 64,
+            "model_ids": model_ids,
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        SetupCompleteRequest.model_validate(payload)
+
+
+def test_setup_schema_rejects_duplicate_model_ids_after_normalization() -> None:
+    payload = make_setup_request().model_dump(mode="json")
+    payload["channel"]["model_ids"] = [
+        {
+            "model_id": "shared-model",
+            "protocol": ModelProtocol.OPENAI.value,
+            "context_window_k": 64,
+        },
+        {
+            "model_id": " shared-model ",
+            "protocol": ModelProtocol.OPENAI_RESPONSES.value,
+            "context_window_k": 128,
+        },
+    ]
+
+    with pytest.raises(ValidationError):
+        SetupCompleteRequest.model_validate(payload)
+
+
+def test_setup_schema_rejects_blank_second_model_id() -> None:
+    payload = make_setup_request().model_dump(mode="json")
+    payload["channel"]["model_ids"] = [
+        {
+            "model_id": "chat-model",
+            "protocol": ModelProtocol.OPENAI.value,
+            "context_window_k": 64,
+        },
+        {
+            "model_id": "   ",
+            "protocol": ModelProtocol.OPENAI_RESPONSES.value,
+            "context_window_k": 128,
+        },
+    ]
+
+    with pytest.raises(ValidationError):
+        SetupCompleteRequest.model_validate(payload)
+
+
+def test_setup_schema_rejects_non_chat_protocol_in_second_model() -> None:
+    payload = make_setup_request().model_dump(mode="json")
+    payload["channel"]["model_ids"] = [
+        {
+            "model_id": "chat-model",
+            "protocol": ModelProtocol.OPENAI.value,
+            "context_window_k": 64,
+        },
+        {
+            "model_id": "embedding-model",
+            "protocol": ModelProtocol.OPENAI_EMBEDDING.value,
+            "context_window_k": 128,
+        },
+    ]
+
+    with pytest.raises(ValidationError):
+        SetupCompleteRequest.model_validate(payload)
+
+
+def test_setup_schema_rejects_missing_context_window_in_second_model() -> None:
+    payload = make_setup_request().model_dump(mode="json")
+    payload["channel"]["model_ids"] = [
+        {
+            "model_id": "chat-model",
+            "protocol": ModelProtocol.OPENAI.value,
+            "context_window_k": 64,
+        },
+        {
+            "model_id": "responses-model",
+            "protocol": ModelProtocol.OPENAI_RESPONSES.value,
+        },
+    ]
+
+    with pytest.raises(ValidationError):
+        SetupCompleteRequest.model_validate(payload)
 
 
 @pytest.mark.asyncio
