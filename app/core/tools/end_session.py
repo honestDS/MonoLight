@@ -7,9 +7,10 @@ END_SESSION_TOOL_SCHEMA = {
     "function": {
         "name": END_SESSION_TOOL_NAME,
         "description": (
-            "Call this tool exactly once by itself after completing the task, when the task cannot proceed safely, or when user input is required. "
-            "This tool takes no arguments and only signals that the execution phase has ended. Do not include a user-facing final reply in the same response; "
-            "the system will request the final reply separately."
+            "This is a control signal for goal mode to end the current task execution/tool loop. It does not delete or close a chat session and does not mean the task succeeded. "
+            "Use it when the task is complete, no further useful and authorized tool action is needed, continuation is unsafe, or user input is required; do not call unrelated tools merely to continue. "
+            "Invoke it exactly once as a real structured tool call, with this as the only tool call in the response and arguments exactly {}. Do not include a summary or any other fields, and do not merely name the tool or simulate JSON in text. "
+            "Do not provide a user-facing final reply in the same response; after accepting this signal, the system will request the final reply separately."
         ),
         "parameters": {
             "type": "object",

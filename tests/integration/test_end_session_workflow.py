@@ -460,7 +460,7 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
     response = _response_from_dispatch_result(result, stream=stream)
 
     assert len(calls) == 2
-    assert calls[0]["tool_choice"] == "required"
+    assert calls[0]["tool_choice"] == "auto"
     assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
     assert calls[1]["tool_choice"] == "none"
     assert calls[1]["tools"] == []
@@ -530,6 +530,99 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
 
     if stream:
         assert termination_extra["response_id"] == agent_loop_start_events[0]["response_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+@pytest.mark.parametrize("show_tool_calls", [False, True], ids=["hide-tools", "show-tools"])
+@pytest.mark.parametrize("goal_mode", [False, True], ids=["legacy-mode", "goal-mode"])
+@pytest.mark.parametrize("empty_tool_calls", [None, []], ids=["none-tool-calls", "empty-tool-calls"])
+@pytest.mark.parametrize("has_prior_tool_round", [False, True], ids=["without-tool-round", "with-tool-round"])
+async def test_no_tool_call_round_returns_response_without_extra_final_generation(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    show_tool_calls: bool,
+    goal_mode: bool,
+    empty_tool_calls: list[InternalToolCall] | None,
+    has_prior_tool_round: bool,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = f"end-session-no-tool-final-{int(stream)}-{int(show_tool_calls)}-{int(goal_mode)}-{int(empty_tool_calls is None)}-{int(has_prior_tool_round)}"
+    initial_message = await _seed_conversation(session_factory, session_id, goal_mode=goal_mode, max_turns=5)
+    final_reasoning = "本轮无工具调用，直接返回最终回复"
+    final_response = _final_response()
+    final_response.message.tool_calls = empty_tool_calls
+    final_response.message.reasoning_content = final_reasoning
+    responses: list[InternalResponse] = []
+    if has_prior_tool_round:
+        responses.append(
+            _response_for_tool_calls(
+                [
+                    InternalToolCall(
+                        id="prior-todo-read",
+                        name=MANAGE_TODO_TOOL_NAME,
+                        arguments={"operation": "read"},
+                    )
+                ],
+                reasoning=None,
+            )
+        )
+    responses.append(final_response)
+    calls = _patch_llm(monkeypatch, responses, stream=stream)
+
+    result = await _dispatch(
+        session_factory,
+        initial_message,
+        session_id=session_id,
+        stream=stream,
+        show_tool_calls=show_tool_calls,
+    )
+    response = _response_from_dispatch_result(result, stream=stream)
+    expected_turn = 1 + int(has_prior_tool_round)
+
+    assert len(calls) == expected_turn
+    assert all(call["tool_choice"] == "auto" for call in calls)
+    for call in calls:
+        assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in call["tools"]) is goal_mode
+
+    choice = response["choices"][0]
+    assert choice["message"]["content"] == SUMMARY
+    assert choice["message"]["reasoning_content"] == final_reasoning
+    assert choice["finish_reason"] == "stop"
+    final_history_message = response["history"][-1]
+    assert final_history_message["role"] == MessageRole.ASSISTANT
+    assert final_history_message["content"] == SUMMARY
+    assert final_history_message["reasoning_content"] == final_reasoning
+    assert not final_history_message.get("tool_calls")
+
+    messages = await _list_messages(session_factory, session_id)
+    tool_call_rows = [message for message in messages if message.type == MessageType.TOOL_CALL]
+    tool_result_rows = [message for message in messages if message.type == MessageType.TOOL_RESULT]
+    assistant_text_rows = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+    assert len(tool_call_rows) == len(tool_result_rows) == int(has_prior_tool_round)
+    assert len(assistant_text_rows) == 1
+    assert assistant_text_rows[0].content == SUMMARY
+    assert assistant_text_rows[0].reasoning_content == final_reasoning
+    assert all(END_SESSION_TOOL_NAME not in (message.content or "") for message in [*tool_call_rows, *tool_result_rows])
+    for row in tool_result_rows:
+        outer_payload = json.loads(row.content or "")
+        inner_payload = json.loads(outer_payload["content"])
+        assert inner_payload["status"] == "success"
+
+    if stream:
+        content_events = [event for event in result if event.get("type") == "content"]
+        reasoning_events = [event for event in result if event.get("type") == "reasoning"]
+        turn_end_events = [event for event in result if event.get("type") == "turn_end"]
+        final_turn_end_events = [event for event in turn_end_events if event.get("content") == SUMMARY]
+        done_events = [event for event in result if event.get("type") == "done"]
+        assert [event["content"] for event in content_events] == [SUMMARY]
+        assert [event["content"] for event in reasoning_events] == [final_reasoning]
+        assert len(final_turn_end_events) == 1
+        assert turn_end_events[-1]["turn"] == expected_turn
+        assert final_turn_end_events[0]["message_id"] == assistant_text_rows[0].id
+        assert final_turn_end_events[0]["reasoning_content"] == final_reasoning
+        assert len(done_events) == 1
 
 
 @pytest.mark.asyncio
@@ -634,7 +727,7 @@ async def test_goal_mode_continues_beyond_configured_and_legacy_turn_limits_then
     response = _response_from_dispatch_result(result, stream=stream)
 
     assert len(calls) == 27
-    assert all(call["tool_choice"] == "required" for call in calls[:-1])
+    assert all(call["tool_choice"] == "auto" for call in calls[:-1])
     assert calls[-1]["tool_choice"] == "none"
     assert calls[-1]["tools"] == []
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=1)
@@ -866,7 +959,7 @@ async def test_execution_resume_state_restarts_over_limit_and_preserves_mode_con
     response = _response_from_dispatch_result(result, stream=stream)
 
     assert len(calls) == (2 if goal_mode else 1)
-    assert calls[0]["tool_choice"] == ("required" if goal_mode else "none")
+    assert calls[0]["tool_choice"] == ("auto" if goal_mode else "none")
     has_end_session = any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
     assert has_end_session is goal_mode
     goal_mode_messages = [message for message in calls[0]["messages"] if message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_SYSTEM_PROMPT]
