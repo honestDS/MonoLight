@@ -591,6 +591,13 @@ const detectModelMetadata = async (entry, idx) => {
       model: typeof model.id === 'string' && model.id.trim() ? model.id : entry.model_id.trim(),
       fields: filledFields.map(field => t('channels.' + field)).join(', ')
     }))
+    if (filledFields.includes('max_tokens')) {
+      clearModelTest(entry)
+      ElMessage.warning(t('channels.model_metadata_max_tokens_adjusted', {
+        context_window_k: entry.context_window_k,
+        max_tokens: entry.max_tokens
+      }))
+    }
   } catch (err) {
     ElMessage.error(err.message || t('channels.model_metadata_detect_failed'))
   } finally {

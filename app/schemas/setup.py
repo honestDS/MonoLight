@@ -18,6 +18,7 @@ from app.core.validation import (
 from app.models.channel import (
     MODEL_PROTOCOLS_BY_USAGE,
     ChannelModelAdvancedSettings,
+    ChannelModelItem,
     ModelProtocol,
     ModelUsage,
     ReasoningEffort,
@@ -64,6 +65,7 @@ class SetupModelInput(BaseModel):
     @model_validator(mode="after")
     def validate_chat_model_fields(self) -> "SetupModelInput":
         self.model_id, self.protocol = validate_chat_model(self.model_id, self.protocol)
+        ChannelModelItem(**self.model_dump(), usage=ModelUsage.CHAT)
         return self
 
 

@@ -1,4 +1,5 @@
 import { getModelReasoningEfforts } from '../utils/channelModelMetadata.js'
+import { DEFAULT_CHAT_MAX_TOKENS } from './channelModel.js'
 
 // 公共常量
 // 分页相关
@@ -103,7 +104,7 @@ export const defaultModelEntry = () => ({
   temperature: 0.7,
   top_p: 1,
   reasoning_efforts: [],
-  max_tokens: 20480,
+  max_tokens: DEFAULT_CHAT_MAX_TOKENS,
   embedding_dimensions: null,
   embedding_timeout: 30,
   rerank_timeout: 15,

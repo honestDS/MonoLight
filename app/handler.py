@@ -8,9 +8,21 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core.constants import ERR_DB_OPERATION_FAILED, ERR_FAVICON_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_PASSWORD_TOO_LONG_BYTES, ERR_VALIDATION_FAILED
+from app.core.constants import (
+    ERR_DB_OPERATION_FAILED,
+    ERR_FAVICON_NOT_FOUND,
+    ERR_INTERNAL_SERVER_ERROR,
+    ERR_REQUEST_VALIDATION_FAILED,
+    ERR_USERNAME_FORMAT,
+    ERR_VALIDATION_FAILED,
+    MSG_VALIDATION_ERROR_SEPARATOR,
+    MSG_VALIDATION_FIELD_ERROR,
+    MSG_VALIDATION_PASSWORD,
+    MSG_VALIDATION_REQUEST,
+    MSG_VALIDATION_USERNAME,
+)
 from app.core.crud.system.setting import system_setting_crud
-from app.core.exceptions import BaseBusinessException, LLMException, ParameterException, ServerException
+from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import normalize_locale
@@ -48,19 +60,29 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     error_msgs = []
-    message_key = ERR_VALIDATION_FAILED
+    field_labels = {"username": MSG_VALIDATION_USERNAME, "password": MSG_VALIDATION_PASSWORD}
     for error in exc.errors():
-        field = error.get("loc")[-1]
-        err_type = error.get("type")
-        if err_type == ERR_PASSWORD_TOO_LONG_BYTES:
-            message_key = ERR_PASSWORD_TOO_LONG_BYTES
-        msg = t(err_type, default=err_type)
-        if msg == err_type:
-            msg = error.get("msg")
-        error_msgs.append(f"[{field}] {msg}")
+        loc = error.get("loc") or ()
+        if loc and loc[0] in {"body", "query", "path", "header", "cookie"}:
+            loc = loc[1:]
+        err_type = error.get("type") or ""
+        ctx = error.get("ctx") if isinstance(error.get("ctx"), dict) else {}
+        field = t(MSG_VALIDATION_REQUEST) if not loc or err_type == "json_invalid" else ".".join(t(field_labels[part]) if part in field_labels else str(part) for part in loc)
 
-    validation_exc = ParameterException(message_key, code=422, detail=" | ".join(error_msgs))
-    return JSONResponse(status_code=422, content=StandardResponse.error(code=422, message=validation_exc.message, detail=" | ".join(error_msgs)).model_dump())
+        if err_type == "string_pattern_mismatch" and loc and str(loc[-1]) == "username":
+            reason = t(ERR_USERNAME_FORMAT)
+        elif err_type == "value_error" and "error" in ctx:
+            reason = t(str(ctx["error"]), default=str(ctx["error"]))
+        else:
+            reason = t(err_type, default=error.get("msg") or t(ERR_VALIDATION_FAILED), **ctx)
+        error_msgs.append(t(MSG_VALIDATION_FIELD_ERROR, field=field, error=reason))
+
+    if error_msgs:
+        detail = t(MSG_VALIDATION_ERROR_SEPARATOR).join(error_msgs)
+        response = StandardResponse.error(code=422, message=ERR_REQUEST_VALIDATION_FAILED, detail=detail)
+    else:
+        response = StandardResponse.error(code=422, message=ERR_VALIDATION_FAILED)
+    return JSONResponse(status_code=422, content=response.model_dump())
 
 
 async def business_exception_handler(request: Request, exc: BaseBusinessException):

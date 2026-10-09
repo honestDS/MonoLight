@@ -366,6 +366,195 @@ test('validates every model entry and allows each error to be corrected', async 
   assert.deepEqual(normalize(second.advanced_settings), { custom_headers: { 'x-request': 'accepted' } })
 })
 
+test('submits model budgets to the backend and preserves corrected retries', async t => {
+  const harness = createHarness(t)
+  configureChannel(harness)
+  harness.module.form.admin.username = 'valid-user'
+  harness.module.form.admin.password = 'password-one'
+  harness.module.form.admin.password_confirm = 'password-one'
+  harness.module.adminFormRef.value = { validate: async () => true }
+
+  const first = harness.module.form.channel.model_ids[0]
+  configureEntry(harness, first, {
+    model_id: 'model-a',
+    protocol: 'OPENAI',
+    context_window_k: 64,
+    temperature: 0.2,
+    top_p: 0.85,
+    max_tokens: 128,
+    advancedDraft: '{"x-model":"a"}',
+  })
+  harness.module.addModelEntry()
+  const second = harness.module.form.channel.model_ids[1]
+  configureEntry(harness, second, {
+    model_id: 'model-b',
+    protocol: 'OPENAI_RESPONSES',
+    context_window_k: 1,
+    temperature: 0.8,
+    top_p: 0.7,
+    max_tokens: 744,
+    advancedDraft: '{"x-model":"b"}',
+  })
+
+  assert.equal(await harness.module.validateStep(0), true)
+  assert.equal(await harness.module.validateStep(1), true)
+  assert.equal(harness.messages.some(message => message.type === 'warning'), false)
+
+  const completion = harness.module.completeSetup()
+  const request = await harness.apiState.completeStarted.promise
+  assert.equal(harness.apiState.completeRequests.length, 1)
+  assert.deepEqual(
+    normalize(request.payload.channel.model_ids[0]),
+    {
+      model_id: 'model-a',
+      protocol: 'OPENAI',
+      image_understanding: false,
+      audio_understanding: false,
+      video_understanding: false,
+      context_window_k: 64,
+      temperature: 0.2,
+      top_p: 0.85,
+      reasoning_efforts: [],
+      max_tokens: 128,
+      description: '',
+      advanced_settings: { custom_headers: { 'x-model': 'a' } },
+    },
+  )
+  assert.equal(request.payload.channel.model_ids[1].model_id, 'model-b')
+  assert.equal(request.payload.channel.model_ids[1].max_tokens, 744)
+
+  const backendMessage = 'The selected model budget was rejected by the backend.'
+  const backendError = Object.assign(new Error('request failed'), {
+    response: {
+      data: {
+        code: 422,
+        message: backendMessage,
+        data: null,
+      },
+    },
+  })
+  request.deferred.reject(backendError)
+  await completion
+
+  assert.ok(harness.messages.some(message => (
+    message.type === 'error' && message.value === backendMessage
+  )))
+  assert.equal(harness.module.submitting.value, false)
+  assert.equal(harness.storage.getItem('token'), null)
+  assert.deepEqual(
+    {
+      username: harness.module.form.admin.username,
+      password: harness.module.form.admin.password,
+      password_confirm: harness.module.form.admin.password_confirm,
+      api_key: harness.module.form.channel.api_key,
+      base_url: harness.module.form.channel.base_url,
+    },
+    {
+      username: 'valid-user',
+      password: 'password-one',
+      password_confirm: 'password-one',
+      api_key: 'test-key',
+      base_url: 'https://api.example.test',
+    },
+  )
+
+  second.max_tokens = 743
+  const retryCompletion = harness.module.completeSetup()
+  await harness.flush()
+  assert.equal(harness.apiState.completeRequests.length, 2)
+  const retryRequest = harness.apiState.completeRequests[1]
+  assert.deepEqual(
+    normalize(retryRequest.payload.channel.model_ids[0]),
+    normalize(request.payload.channel.model_ids[0]),
+  )
+  assert.equal(retryRequest.payload.channel.model_ids[1].max_tokens, 743)
+
+  retryRequest.deferred.resolve({
+    data: {
+      data: {
+        access_token: 'setup-token',
+        token_type: 'bearer',
+        profile_id: 7,
+        channel_id: 22,
+      },
+    },
+  })
+  await retryCompletion
+  assert.equal(harness.storage.getItem('token'), 'setup-token')
+})
+
+test('serializes nullish and zero max output budgets without frontend rejection', async t => {
+  const cases = [
+    { name: 'null', maxTokens: null, backendRejects: true },
+    { name: 'omitted', backendRejects: true },
+    { name: 'zero', maxTokens: 0, backendRejects: false },
+  ]
+
+  for (const budgetCase of cases) {
+    const harness = createHarness(t)
+    configureChannel(harness)
+    harness.module.form.admin.username = 'valid-user'
+    harness.module.form.admin.password = 'password-one'
+    harness.module.form.admin.password_confirm = 'password-one'
+    harness.module.adminFormRef.value = { validate: async () => true }
+
+    const entry = harness.module.form.channel.model_ids[0]
+    const entryValues = {
+      model_id: `model-${budgetCase.name}`,
+      protocol: 'OPENAI',
+      context_window_k: 1,
+    }
+    if (Object.prototype.hasOwnProperty.call(budgetCase, 'maxTokens')) {
+      entryValues.max_tokens = budgetCase.maxTokens
+    }
+    configureEntry(harness, entry, entryValues)
+    if (budgetCase.name === 'omitted') delete entry.max_tokens
+
+    assert.equal(await harness.module.validateStep(1), true)
+    const completion = harness.module.completeSetup()
+    const request = await harness.apiState.completeStarted.promise
+    assert.equal(harness.apiState.completeRequests.length, 1)
+    const normalizedModel = normalize(request.payload.channel.model_ids[0])
+    if (budgetCase.name === 'omitted') {
+      assert.equal(Object.prototype.hasOwnProperty.call(normalizedModel, 'max_tokens'), false)
+    } else {
+      assert.equal(normalizedModel.max_tokens, budgetCase.maxTokens)
+    }
+
+    if (budgetCase.backendRejects) {
+      const backendMessage = `Backend rejected ${budgetCase.name} max_tokens.`
+      request.deferred.reject(Object.assign(new Error('request failed'), {
+        response: {
+          data: {
+            code: 422,
+            message: backendMessage,
+            data: null,
+          },
+        },
+      }))
+      await completion
+      assert.ok(harness.messages.some(message => (
+        message.type === 'error' && message.value === backendMessage
+      )))
+      assert.equal(harness.storage.getItem('token'), null)
+    } else {
+      request.deferred.resolve({
+        data: {
+          data: {
+            access_token: 'setup-token',
+            token_type: 'bearer',
+            profile_id: 7,
+            channel_id: 22,
+          },
+        },
+      })
+      await completion
+      assert.equal(harness.storage.getItem('token'), 'setup-token')
+    }
+    assert.equal(harness.module.submitting.value, false)
+  }
+})
+
 test('cancels stale model tests without affecting the other model', async t => {
   const harness = createHarness(t)
   configureChannel(harness)
@@ -465,11 +654,46 @@ test('keeps metadata tied to its entry across rename and deletion races', async 
   await newRun
 
   assert.equal(second.context_window_k, 12)
+  assert.equal(second.max_tokens, 11743)
   assert.equal(second.image_understanding, true)
   assert.equal(second.audio_understanding, false)
   assert.equal(second.description, 'new capability')
   assert.deepEqual(normalize(second.reasoning_efforts), ['low', 'high'])
+  assert.equal(first.context_window_k, 64)
+  assert.equal(first.max_tokens, 20480)
+  assert.equal(harness.module.form.channel.model_ids.includes(first), false)
+  assert.ok(harness.messages.some(message => (
+    message.type === 'warning' && message.value === 'channels.model_metadata_max_tokens_adjusted'
+  )))
   assert.equal(harness.module.detectingMetadataEntry.value, null)
+})
+
+test('keeps a valid max token budget when metadata context permits it', async t => {
+  const harness = createHarness(t)
+  const entry = harness.module.form.channel.model_ids[0]
+  entry.model_id = 'safe-model'
+  entry.max_tokens = 128
+
+  const run = harness.module.detectModelMetadata(entry)
+  assert.equal(harness.apiState.metadataRequests.length, 1)
+  harness.apiState.metadataRequests[0].deferred.resolve({
+    data: {
+      data: [{
+        id: 'safe-model',
+        context_length: 1000,
+      }],
+    },
+  })
+  await run
+
+  assert.equal(entry.context_window_k, 1)
+  assert.equal(entry.max_tokens, 128)
+  assert.equal(
+    harness.messages.some(message => (
+      message.type === 'warning' && message.value === 'channels.model_metadata_max_tokens_adjusted'
+    )),
+    false,
+  )
 })
 
 test('builds audit candidates from the complete request snapshot', async t => {

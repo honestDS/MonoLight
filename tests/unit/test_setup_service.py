@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,17 +11,26 @@ from pydantic import ValidationError
 
 import app.api.v1.auth as auth
 from app.core.constants import (
+    CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    DEFAULT_CHAT_MAX_TOKENS,
+    ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
     ERR_PASSWORD_TOO_LONG_BYTES,
     ERR_USER_NOT_FOUND_OR_DISABLED,
+    ERR_USERNAME_FORMAT,
     ERR_VALIDATION_FAILED,
+    MSG_VALIDATION_PASSWORD,
+    MSG_VALIDATION_USERNAME,
 )
 from app.core.exceptions import AuthException
 from app.core.i18n import t
+from app.core.i18n.context import reset_current_locale, set_current_locale
+from app.core.validation import validate_password, validate_username
 from app.handler import validation_exception_handler
 from app.models.channel import ModelProtocol
 from app.models.user import UserCreate, UserUpdate
 from app.schemas.auth import LoginRequest
-from app.schemas.setup import SetupCompleteRequest
+from app.schemas.setup import SetupCompleteRequest, SetupModelInput
 
 TEST_USERNAME = "setup_admin"
 TEST_PASSWORD = "correct-password-123"
@@ -115,12 +125,14 @@ async def test_validation_exception_handler_translates_password_byte_limit(
 
     assert response.status_code == 422
     assert body["code"] == 422
-    assert body["message"] == t(ERR_PASSWORD_TOO_LONG_BYTES)
+    assert set(body) == {"code", "message", "data"}
+    assert t(MSG_VALIDATION_PASSWORD) in body["message"]
+    assert t(ERR_PASSWORD_TOO_LONG_BYTES) in body["message"]
     assert body["data"] is None
 
 
 @pytest.mark.asyncio
-async def test_validation_exception_handler_keeps_generic_validation_message() -> None:
+async def test_validation_exception_handler_translates_field_validation_message() -> None:
     with pytest.raises(ValidationError) as exc_info:
         UserCreate(username="ab", password="valid_password")
 
@@ -129,8 +141,128 @@ async def test_validation_exception_handler_keeps_generic_validation_message() -
 
     assert response.status_code == 422
     assert body["code"] == 422
-    assert body["message"] == t(ERR_VALIDATION_FAILED)
+    assert t(MSG_VALIDATION_USERNAME) in body["message"]
+    assert t("string_too_short", min_length=3) in body["message"]
+    assert body["message"] != t(ERR_VALIDATION_FAILED)
     assert body["data"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["zh", "en"])
+@pytest.mark.parametrize(
+    ("username", "password", "expected_errors"),
+    [
+        pytest.param(
+            "123",
+            "123",
+            ((MSG_VALIDATION_PASSWORD, "string_too_short", {"min_length": 8}),),
+            id="password-too-short",
+        ),
+        pytest.param(
+            "ab",
+            "123",
+            (
+                (MSG_VALIDATION_USERNAME, "string_too_short", {"min_length": 3}),
+                (MSG_VALIDATION_PASSWORD, "string_too_short", {"min_length": 8}),
+            ),
+            id="username-and-password-too-short",
+        ),
+        pytest.param(
+            "bad.name",
+            "valid_password",
+            ((MSG_VALIDATION_USERNAME, ERR_USERNAME_FORMAT, {}),),
+            id="username-format",
+        ),
+        pytest.param(
+            "u" * 51,
+            "valid_password",
+            ((MSG_VALIDATION_USERNAME, "string_too_long", {"max_length": 50}),),
+            id="username-too-long",
+        ),
+        pytest.param(
+            "valid_user",
+            "p" * 73,
+            ((MSG_VALIDATION_PASSWORD, "string_too_long", {"max_length": 72}),),
+            id="password-too-long",
+        ),
+        pytest.param(
+            "ab",
+            "中" * 25,
+            (
+                (MSG_VALIDATION_USERNAME, "string_too_short", {"min_length": 3}),
+                (MSG_VALIDATION_PASSWORD, ERR_PASSWORD_TOO_LONG_BYTES, {}),
+            ),
+            id="username-short-and-password-too-many-bytes",
+        ),
+    ],
+)
+async def test_validation_exception_handler_translates_model_errors(
+    locale: str,
+    username: str,
+    password: str,
+    expected_errors: tuple[tuple[str, str, dict[str, int]], ...],
+) -> None:
+    locale_token = set_current_locale(locale)
+    try:
+        payload = make_setup_request().model_dump(mode="json")
+        payload["admin"]["username"] = username
+        payload["admin"]["password"] = password
+
+        with pytest.raises(ValidationError) as exc_info:
+            SetupCompleteRequest.model_validate(payload)
+
+        response = await validation_exception_handler(SimpleNamespace(), RequestValidationError(exc_info.value.errors()))
+        body = json.loads(response.body)
+        message = body["message"]
+        expected_fields = {field_key for field_key, _, _ in expected_errors}
+
+        assert response.status_code == 422
+        assert body["code"] == 422
+        assert body["data"] is None
+        assert set(body) == {"code", "message", "data"}
+        for field_key in (MSG_VALIDATION_USERNAME, MSG_VALIDATION_PASSWORD):
+            if field_key in expected_fields:
+                assert t(field_key) in message
+            else:
+                assert t(field_key) not in message
+        for field_key, error_key, params in expected_errors:
+            assert t(error_key, **params) in message
+        assert username not in message
+        assert password not in message
+        if username == "bad.name":
+            assert r"^[a-zA-Z0-9_\-]+$" not in message
+    finally:
+        reset_current_locale(locale_token)
+
+
+@pytest.mark.parametrize("locale", ["zh", "en"])
+@pytest.mark.parametrize(
+    ("validator", "value", "message_key", "params"),
+    [
+        pytest.param(validate_password, "123", "string_too_short", {"min_length": 8}, id="short-password"),
+        pytest.param(validate_username, "ab", "string_too_short", {"min_length": 3}, id="short-username"),
+        pytest.param(validate_username, "u" * 51, "string_too_long", {"max_length": 50}, id="long-username"),
+        pytest.param(validate_username, "bad.name", ERR_USERNAME_FORMAT, {}, id="invalid-username"),
+    ],
+)
+def test_shared_validation_messages_are_concrete(
+    locale: str,
+    validator: Callable[..., str],
+    value: str,
+    message_key: str,
+    params: dict[str, int],
+) -> None:
+    locale_token = set_current_locale(locale)
+    try:
+        with pytest.raises(ValueError) as exc_info:
+            validator(value)
+
+        message = str(exc_info.value)
+        assert message == t(message_key, **params)
+        assert "{" not in message
+        assert "}" not in message
+    finally:
+        reset_current_locale(locale_token)
 
 
 @pytest.mark.parametrize("username", ["ab", "bad.name", "管理员"])
@@ -176,6 +308,77 @@ def test_setup_schema_accepts_chat_protocols(protocol: ModelProtocol) -> None:
     request = make_setup_request(protocol=protocol)
 
     assert request.channel.model_ids[0].protocol == protocol
+
+
+@pytest.mark.parametrize("protocol", [ModelProtocol.OPENAI, ModelProtocol.OPENAI_RESPONSES])
+@pytest.mark.parametrize(
+    ("context_window_k", "max_tokens", "include_max_tokens"),
+    [
+        pytest.param(1, 20480, True, id="default-max-tokens"),
+        pytest.param(1, 744, True, id="zero-input-budget"),
+        pytest.param(1, 745, True, id="negative-input-budget"),
+        pytest.param(1, None, False, id="max-tokens-omitted"),
+        pytest.param(1, None, True, id="max-tokens-null"),
+    ],
+)
+def test_setup_schema_rejects_chat_model_budget_overflow(
+    protocol: ModelProtocol,
+    context_window_k: int,
+    max_tokens: int | None,
+    include_max_tokens: bool,
+) -> None:
+    payload: dict[str, object] = {
+        "model_id": "chat-model",
+        "protocol": protocol,
+        "context_window_k": context_window_k,
+    }
+    if include_max_tokens:
+        payload["max_tokens"] = max_tokens
+
+    with pytest.raises(ValidationError) as exc_info:
+        SetupModelInput.model_validate(payload)
+
+    effective_max_tokens = max_tokens if max_tokens is not None else DEFAULT_CHAT_MAX_TOKENS
+    expected_message = t(
+        ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+        max_tokens=effective_max_tokens,
+        context_window_k=context_window_k,
+        context_window_tokens=context_window_k * CONTEXT_WINDOW_TOKENS_PER_K,
+        safety_margin_tokens=CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    )
+    assert expected_message in str(exc_info.value)
+
+
+@pytest.mark.parametrize("protocol", [ModelProtocol.OPENAI, ModelProtocol.OPENAI_RESPONSES])
+@pytest.mark.parametrize(
+    ("context_window_k", "max_tokens", "include_max_tokens"),
+    [
+        pytest.param(1, 743, True, id="one-token-input-budget"),
+        pytest.param(1, 0, True, id="zero-max-tokens"),
+        pytest.param(64, None, False, id="max-tokens-omitted"),
+        pytest.param(64, None, True, id="max-tokens-null"),
+        pytest.param(64, 20480, True, id="explicit-default-max-tokens"),
+    ],
+)
+def test_setup_schema_accepts_chat_model_budget_boundaries(
+    protocol: ModelProtocol,
+    context_window_k: int,
+    max_tokens: int | None,
+    include_max_tokens: bool,
+) -> None:
+    payload: dict[str, object] = {
+        "model_id": "chat-model",
+        "protocol": protocol,
+        "context_window_k": context_window_k,
+    }
+    if include_max_tokens:
+        payload["max_tokens"] = max_tokens
+
+    model = SetupModelInput.model_validate(payload)
+
+    assert model.protocol == protocol
+    assert model.context_window_k == context_window_k
+    assert model.max_tokens == max_tokens
 
 
 def test_setup_schema_accepts_independent_model_configurations() -> None:

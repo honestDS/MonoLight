@@ -140,5 +140,6 @@ export default {
   model_metadata_invalid_response: 'OpenRouter 返回了无效的模型信息',
   model_metadata_no_mappable_fields: 'OpenRouter 未返回可映射的参数',
   model_metadata_detect_success: '已从 OpenRouter 探测 {model} 的参数：{fields}',
+  model_metadata_max_tokens_adjusted: '探测到上下文窗口为 {context_window_k}K，原输出上限不适用，已将最大输出 Token 调整为 {max_tokens}。',
   model_metadata_detect_failed: '从 OpenRouter 探测参数失败'
 }

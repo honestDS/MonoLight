@@ -953,6 +953,12 @@ async function detectModelMetadata(entry) {
       model: typeof model.id === 'string' && model.id.trim() ? model.id : requestedModelId,
       fields: filledFields.map(field => t('channels.' + field)).join(', '),
     }))
+    if (filledFields.includes('max_tokens')) {
+      ElMessage.warning(t('channels.model_metadata_max_tokens_adjusted', {
+        context_window_k: entry.context_window_k,
+        max_tokens: entry.max_tokens,
+      }))
+    }
   } catch (error) {
     if (!isEntryActive(entry) || typeof entry.model_id !== 'string' || entry.model_id.trim() !== requestedModelId) return
     ElMessage.error(error.message || t('channels.model_metadata_detect_failed'))
