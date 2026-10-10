@@ -61,16 +61,16 @@
           <el-table-column :label="$t('memories.current_status')" width="130" align="center"><template #default="{ row }"><el-tag :type="recordStatusType(row)">{{ recordStatus(row) }}</el-tag></template></el-table-column>
           <el-table-column prop="version" :label="$t('memories.version')" width="76" align="center" />
           <el-table-column :label="$t('memories.updated_at')" width="170"><template #default="{ row }">{{ formatTime(row.updated_at) }}</template></el-table-column>
-          <el-table-column :label="$t('memories.actions')" width="280" fixed="right" header-align="center">
+          <el-table-column :label="$t('memories.actions')" min-width="190" fixed="right" header-align="center">
             <template #default="{ row }">
               <div class="memory-action-buttons">
                 <el-button size="small" type="info" @click="showDetails(row)">{{ $t('memories.view') }}</el-button>
-                <el-button size="small" type="warning" @click="togglePin(row)" :disabled="!canPin(row)">{{ row.pinned ? $t('memories.unpin') : $t('memories.pin') }}</el-button>
                 <el-button v-if="row.suppress_recall && !row.pending_mutation_job_id" size="small" type="warning" @click="resumeCurrent(row)">{{ $t('memories.resume_current') }}</el-button>
                 <el-dropdown trigger="click" popper-class="memory-more-dropdown" @command="handleMemoryMoreAction($event, row)">
                   <el-button size="small">{{ $t('memories.more') }}</el-button>
                   <template #dropdown>
                     <el-dropdown-menu>
+                      <el-dropdown-item command="toggle-pin" :disabled="!canPin(row)">{{ row.pinned ? $t('memories.unpin') : $t('memories.pin') }}</el-dropdown-item>
                       <el-dropdown-item command="history">{{ $t('memories.history') }}</el-dropdown-item>
                       <el-dropdown-item command="delete" class="danger-dropdown-item" :disabled="!canMutateRecord(row)">{{ $t('memories.delete') }}</el-dropdown-item>
                     </el-dropdown-menu>
@@ -443,7 +443,6 @@ const {
   editSelectedMemory,
   submitMemory,
   showDetails,
-  togglePin,
   handleMemoryMoreAction,
   canShowDeletedHistory,
   showDeletedHistory,
