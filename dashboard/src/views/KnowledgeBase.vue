@@ -59,7 +59,7 @@
                   <el-dropdown-item v-if="canManageKnowledgeBaseDocuments(row)" command="import_document">{{ $t('knowledgeBase.import_doc') }}</el-dropdown-item>
                   <el-dropdown-item command="embedding_status">{{ $t('knowledgeBase.embedding_status') }}</el-dropdown-item>
                   <el-dropdown-item command="edit">{{ $t('knowledgeBase.edit') }}</el-dropdown-item>
-                  <el-dropdown-item command="delete" divided class="danger-dropdown-item">{{ $t('knowledgeBase.delete') }}</el-dropdown-item>
+                  <el-dropdown-item command="delete" class="danger-dropdown-item">{{ $t('knowledgeBase.delete') }}</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>

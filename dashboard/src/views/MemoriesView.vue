@@ -4,116 +4,30 @@
       <div class="section-heading">
         <div class="section-heading-content">
           <h2>{{ $t('memories.title') }}</h2>
-          <p>{{ $t('memories.settings') }}</p>
-          <Transition name="memory-task-transition" mode="out-in">
-            <div v-if="currentMemoryTask" key="task-summary" class="memory-task-summary">
-              <div class="memory-task-summary-item">
-                <span>{{ $t('memories.current_task') }}</span>
-                <strong>{{ operationLabel(currentMemoryTask.operation) }}<span v-if="currentMemoryTask.id"> #{{ currentMemoryTask.id }}</span></strong>
-              </div>
-              <div class="memory-task-summary-item memory-task-progress">
-                <span>{{ $t('memories.progress') }}</span>
-                <div v-if="currentMemoryTask.total > 0 && currentMemoryTask.completed !== null" class="memory-task-progress-value">
-                  <el-progress :percentage="currentMemoryTask.percentage ?? 0" :show-text="false" />
-                  <span>{{ currentMemoryTask.completed }} / {{ currentMemoryTask.total }}</span>
-                </div>
-                <el-tag v-else size="small" type="warning">{{ statusText(currentMemoryTask.status) }}</el-tag>
-              </div>
-            </div>
-          </Transition>
+          <p>{{ $t('memories.page_description') }}</p>
         </div>
         <div class="heading-actions">
-          <el-select
-            v-if="isSuperuser"
-            v-model="ownerFilter"
-            class="filter-input"
-            filterable
-            :loading="ownersLoading"
-            :placeholder="$t('memories.owner_user')"
-            :aria-label="$t('memories.owner_user')"
-            @change="handleOwnerChange">
-            <el-option :label="$t('memories.all_users')" value="" />
-            <el-option v-for="owner in owners" :key="owner.uid" :label="owner.username" :value="owner.uid" />
-          </el-select>
-          <el-button size="small" @click="loadSettings()" :loading="settingsLoading">{{ $t('memories.refresh') }}</el-button>
-          <el-button type="success" size="small" @click="organize" :loading="actionLoading === 'organize'" :disabled="organizeBlocked">{{ $t('memories.organize_now') }}</el-button>
-          <el-button type="warning" size="small" @click="reindex" :loading="actionLoading === 'reindex'" :disabled="reindexBlocked">{{ $t('memories.reindex') }}</el-button>
-          <el-button
-            v-if="cleanupRetryId"
-            type="danger"
-            size="small"
-            @click="retryCleanup(cleanupRetryId)"
-            :loading="actionLoading === `cleanup-${cleanupRetryId}`">
-            {{ $t('memories.cleanup_retry') }}
-          </el-button>
-          <el-button size="small" @click="settingsExpanded = !settingsExpanded" :aria-expanded="settingsExpanded" :disabled="!runtimeOwnerUid">
-            {{ settingsExpanded ? $t('memories.collapse_settings') : $t('memories.expand_settings') }}
-          </el-button>
+          <el-button type="primary" @click="openRuntimeDialog('organize')" :disabled="!memoryScopeReady || Boolean(actionLoading)">{{ $t('memories.organize_now') }}</el-button>
+          <el-button @click="openRuntimeDialog('reindex')" :disabled="!memoryScopeReady || Boolean(actionLoading)">{{ $t('memories.reindex') }}</el-button>
+          <el-button @click="openRuntimeDialog('status')" :disabled="!memoryScopeReady || Boolean(actionLoading)">{{ $t('memories.view_status') }}</el-button>
         </div>
       </div>
-      <el-alert v-if="memoryScopeReady && isSuperuser && !runtimeOwnerUid" type="info" :closable="false" show-icon :title="$t('memories.select_owner_for_settings')" />
-
-      <el-collapse-transition>
-        <div v-show="settingsExpanded && runtimeOwnerUid" class="settings-content">
-          <el-alert v-if="!configured" type="info" :closable="false" show-icon :title="$t('memories.no_config')" />
-          <div class="settings-grid runtime-settings-grid" v-loading="settingsLoading">
-            <div class="config-block">
-              <strong>{{ $t('memories.active_config') }}</strong>
-              <div class="config-line"><span>{{ $t('memories.channel') }}</span><b>{{ channelName(nestedSetting('active', 'channel_id', 'active_embedding_channel_id')) }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.model') }}</span><b>{{ nestedSetting('active', 'model_id', 'active_embedding_model_id') }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.dimensions') }}</span><b>{{ nestedSetting('active', 'dimensions', 'active_embedding_dimensions') }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.collection') }}</span><b class="mono">{{ nestedSetting('active', 'collection', 'active_collection_name') }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.revision') }}</span><b>{{ nestedSetting('active', 'revision', 'active_embedding_revision') }}</b></div>
-            </div>
-            <div class="config-block">
-              <strong>{{ $t('memories.target_config') }}</strong>
-              <div class="config-line"><span>{{ $t('memories.channel') }}</span><b>{{ channelName(nestedSetting('target', 'channel_id', 'target_embedding_channel_id')) }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.model') }}</span><b>{{ nestedSetting('target', 'model_id', 'target_embedding_model_id') }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.dimensions') }}</span><b>{{ nestedSetting('target', 'dimensions', 'target_embedding_dimensions') }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.collection') }}</span><b class="mono">{{ nestedSetting('target', 'collection', 'target_collection_name') }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.migration_status') }}</span><StatusTag :status="settings.migration?.status || setting('migration_status')" :active-text="statusText(settings.migration?.status || setting('migration_status'))" :inactive-text="statusText(settings.migration?.status || setting('migration_status'))" :active-type="statusType(settings.migration?.status || setting('migration_status'))" :inactive-type="statusType(settings.migration?.status || setting('migration_status'))" /></div>
-            </div>
-            <div class="config-block progress-block">
-              <strong>{{ $t('memories.progress') }}</strong>
-              <el-progress :percentage="migrationPercentage" :status="(settings.migration?.status || setting('migration_status')) === 'failed' ? 'exception' : undefined" />
-              <div class="progress-counts">
-                <span>{{ $t('memories.total_count') }} {{ settings.migration?.total_count ?? setting('migration_total_count') ?? 0 }}</span>
-                <span>{{ $t('memories.success_count') }} {{ settings.migration?.success_count ?? setting('migration_success_count') ?? 0 }}</span>
-                <span>{{ $t('memories.failure_count') }} {{ settings.migration?.failure_count ?? setting('migration_failure_count') ?? 0 }}</span>
-              </div>
-              <div class="config-line"><span>{{ $t('memories.index_status') }}</span><StatusTag :status="settings.index?.status || setting('index_status')" :active-text="statusText(settings.index?.status || setting('index_status'))" :inactive-text="statusText(settings.index?.status || setting('index_status'))" :active-type="statusType(settings.index?.status || setting('index_status'))" :inactive-type="statusType(settings.index?.status || setting('index_status'))" /></div>
-              <div class="config-line"><span>{{ $t('memories.cleanup_status') }}</span><StatusTag :status="settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status')" :active-text="statusText(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :inactive-text="statusText(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :active-type="statusType(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :inactive-type="statusType(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" /></div>
-              <div class="config-line"><span>{{ $t('memories.capacity') }}</span><b>{{ settings.capacity?.active_record_count ?? setting('active_record_count') ?? 0 }} / {{ settings.capacity?.max_active_records ?? setting('max_active_records') ?? 0 }}</b></div>
-            </div>
-          </div>
-
-          <div class="settings-grid organization-settings">
-            <div class="config-block">
-              <strong>{{ $t('memories.capacity_settings') }}</strong>
-              <div class="config-line"><span>{{ $t('memories.active_record_count') }}</span><b>{{ settings.capacity?.active_record_count ?? setting('active_record_count') ?? 0 }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.organize_trigger_records') }}</span><b>{{ settings.capacity?.organize_trigger_records ?? 45 }} / {{ settings.capacity?.max_active_records ?? 50 }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.content_max_tokens') }}</span><b>{{ contentMaxTokens }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.capacity_status') }}</span><el-tag :type="capacityOverLimit ? 'danger' : 'success'">{{ statusText(settings.capacity?.status || 'normal') }}</el-tag></div>
-              <div class="config-line"><span>{{ $t('memories.over_limit') }}</span><b>{{ capacityOverLimit ? $t('memories.yes') : $t('memories.no') }}</b></div>
-            </div>
-            <div class="config-block">
-              <strong>{{ $t('memories.organization_jobs') }}</strong>
-              <div class="config-line"><span>{{ $t('memories.current_job') }}</span><b>{{ settings.organization?.current_job_id ?? '-' }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.recent_job') }}</span><b>{{ settings.organization?.recent_job_id ?? '-' }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.recent_job_status') }}</span><StatusTag :status="settings.organization?.recent_job?.status" :active-text="statusText(settings.organization?.recent_job?.status)" :inactive-text="statusText(settings.organization?.recent_job?.status)" :active-type="statusType(settings.organization?.recent_job?.status)" :inactive-type="statusType(settings.organization?.recent_job?.status)" /></div>
-              <div class="config-line"><span>{{ $t('memories.last_organized_at') }}</span><b>{{ formatTime(settings.organization?.last_run_at || settings.organization?.recent_job?.finished_at) }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.organization_error') }}</span><b class="text-wrap">{{ settings.organization?.error || settings.organization?.recent_job?.error || '-' }}</b></div>
-              <div v-if="settings.organization?.validation_error" class="config-line"><span>{{ $t('memories.organization_validation_error') }}</span><b class="text-wrap">{{ settings.organization.validation_error }}</b></div>
-              <div class="config-line"><span>{{ $t('memories.organize_blocking') }}</span><b class="text-wrap">{{ blockingText(settings.blocking?.organize) }}</b></div>
-            </div>
-          </div>
-
-          <el-alert v-if="settingsError" class="settings-error" type="warning" :closable="false" show-icon>
-            <template #title>{{ settingsError }}</template>
-          </el-alert>
-        </div>
-      </el-collapse-transition>
     </section>
+
+    <div v-if="isSuperuser" class="memory-owner-filter">
+      <span>{{ $t('memories.owner_filter') }}</span>
+      <el-select
+        v-model="ownerFilter"
+        class="filter-input"
+        filterable
+        :loading="ownersLoading"
+        :placeholder="$t('memories.owner_user')"
+        :aria-label="$t('memories.owner_filter')"
+        @change="handleOwnerChange">
+        <el-option :label="$t('memories.all_users')" value="" />
+        <el-option v-for="owner in owners" :key="owner.uid" :label="owner.username" :value="owner.uid" />
+      </el-select>
+    </div>
 
     <el-tabs v-model="activeTab" @tab-change="handleTabChange" class="memory-tabs">
       <el-tab-pane :label="$t('memories.memories')" name="memories">
@@ -158,7 +72,7 @@
                   <template #dropdown>
                     <el-dropdown-menu>
                       <el-dropdown-item command="history">{{ $t('memories.history') }}</el-dropdown-item>
-                      <el-dropdown-item command="delete" divided class="danger-dropdown-item" :disabled="!canMutateRecord(row)">{{ $t('memories.delete') }}</el-dropdown-item>
+                      <el-dropdown-item command="delete" class="danger-dropdown-item" :disabled="!canMutateRecord(row)">{{ $t('memories.delete') }}</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
@@ -237,6 +151,149 @@
       </el-tab-pane>
     </el-tabs>
 
+    <el-dialog
+      :model-value="runtimeDialogVisible"
+      @update:model-value="closeRuntimeDialog"
+      :title="runtimeDialogTitle"
+      :width="runtimeDialogAction === 'status' ? '1000px' : '560px'"
+      class="standard-dialog dialog-with-scroll-body memory-runtime-dialog"
+      align-center
+      :close-on-click-modal="!actionLoading"
+      :close-on-press-escape="!actionLoading"
+      :show-close="!actionLoading">
+      <el-form label-width="120px">
+        <el-form-item :label="$t('memories.owner_user')">
+          <el-select
+            v-if="isSuperuser"
+            :model-value="runtimeOwnerFilter"
+            filterable
+            clearable
+            :loading="ownersLoading"
+            :disabled="Boolean(actionLoading)"
+            :placeholder="$t('memories.select_owner')"
+            class="full-width-input"
+            :aria-label="$t('memories.owner_user')"
+            @change="handleRuntimeOwnerChange">
+            <el-option v-for="owner in owners" :key="owner.uid" :label="owner.username" :value="owner.uid" />
+          </el-select>
+          <span v-else>{{ ownerLabel(runtimeOwnerUid) }}</span>
+        </el-form-item>
+      </el-form>
+
+      <div class="memory-runtime-body" :aria-busy="settingsLoading">
+        <el-alert v-if="!runtimeOwnerUid" type="info" :closable="false" show-icon :title="$t('memories.select_owner_for_action')" />
+        <div v-if="settingsLoading && !settingsLoaded">
+          <el-skeleton :animated="false" :rows="6" />
+          <p class="help-text">{{ $t('memories.runtime_status_loading') }}</p>
+        </div>
+        <el-alert v-if="settingsLoadError" type="warning" :closable="false" show-icon>
+          <template #title>{{ settingsLoadError }}</template>
+        </el-alert>
+        <p v-if="runtimeDialogAction === 'organize' && runtimeOwnerUid" class="help-text">{{ $t('memories.organize_scope', { owner: ownerLabel(runtimeOwnerUid) }) }}</p>
+        <p v-if="runtimeDialogAction === 'reindex' && runtimeOwnerUid" class="help-text">{{ $t('memories.reindex_scope', { owner: ownerLabel(runtimeOwnerUid) }) }}</p>
+
+        <div v-if="settingsLoaded && currentMemoryTask" class="memory-task-summary">
+          <div class="memory-task-summary-item">
+            <span>{{ $t('memories.current_task') }}</span>
+            <strong>{{ operationLabel(currentMemoryTask.operation) }}<span v-if="currentMemoryTask.id"> #{{ currentMemoryTask.id }}</span></strong>
+          </div>
+          <div class="memory-task-summary-item memory-task-progress">
+            <span>{{ $t('memories.progress') }}</span>
+            <div v-if="currentMemoryTask.total > 0 && currentMemoryTask.completed !== null" class="memory-task-progress-value">
+              <el-progress :percentage="currentMemoryTask.percentage ?? 0" :show-text="false" />
+              <span>{{ currentMemoryTask.completed }} / {{ currentMemoryTask.total }}</span>
+            </div>
+            <el-tag v-else size="small" type="warning">{{ statusText(currentMemoryTask.status) }}</el-tag>
+          </div>
+        </div>
+
+        <el-descriptions v-if="settingsLoaded && ['organize', 'reindex'].includes(runtimeDialogAction)" :column="1" border>
+          <el-descriptions-item :label="$t('memories.active_record_count')">{{ activeRecordCount }}</el-descriptions-item>
+          <el-descriptions-item :label="$t('memories.index_status')"><StatusTag :status="settings.index?.status || setting('index_status')" :active-text="statusText(settings.index?.status || setting('index_status'))" :inactive-text="statusText(settings.index?.status || setting('index_status'))" :active-type="statusType(settings.index?.status || setting('index_status'))" :inactive-type="statusType(settings.index?.status || setting('index_status'))" /></el-descriptions-item>
+        </el-descriptions>
+        <el-alert v-if="runtimeBlockingMessage" type="warning" :closable="false" show-icon :title="runtimeBlockingMessage" />
+
+        <div v-if="settingsLoaded && runtimeDialogAction === 'status'" class="settings-content">
+          <el-alert v-if="!configured" type="info" :closable="false" show-icon :title="$t('memories.no_config')" />
+          <div class="settings-grid runtime-settings-grid" v-loading="settingsLoading">
+            <div class="config-block">
+              <strong>{{ $t('memories.active_config') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.channel') }}</span><b>{{ channelName(nestedSetting('active', 'channel_id', 'active_embedding_channel_id')) }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.model') }}</span><b>{{ nestedSetting('active', 'model_id', 'active_embedding_model_id') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.dimensions') }}</span><b>{{ nestedSetting('active', 'dimensions', 'active_embedding_dimensions') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.collection') }}</span><b class="mono">{{ nestedSetting('active', 'collection', 'active_collection_name') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.revision') }}</span><b>{{ nestedSetting('active', 'revision', 'active_embedding_revision') }}</b></div>
+            </div>
+            <div class="config-block">
+              <strong>{{ $t('memories.target_config') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.channel') }}</span><b>{{ channelName(nestedSetting('target', 'channel_id', 'target_embedding_channel_id')) }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.model') }}</span><b>{{ nestedSetting('target', 'model_id', 'target_embedding_model_id') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.dimensions') }}</span><b>{{ nestedSetting('target', 'dimensions', 'target_embedding_dimensions') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.collection') }}</span><b class="mono">{{ nestedSetting('target', 'collection', 'target_collection_name') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.migration_status') }}</span><StatusTag :status="settings.migration?.status || setting('migration_status')" :active-text="statusText(settings.migration?.status || setting('migration_status'))" :inactive-text="statusText(settings.migration?.status || setting('migration_status'))" :active-type="statusType(settings.migration?.status || setting('migration_status'))" :inactive-type="statusType(settings.migration?.status || setting('migration_status'))" /></div>
+            </div>
+            <div class="config-block progress-block">
+              <strong>{{ $t('memories.progress') }}</strong>
+              <el-progress :percentage="migrationPercentage" :status="(settings.migration?.status || setting('migration_status')) === 'failed' ? 'exception' : undefined" />
+              <div class="progress-counts">
+                <span>{{ $t('memories.total_count') }} {{ settings.migration?.total_count ?? setting('migration_total_count') ?? 0 }}</span>
+                <span>{{ $t('memories.success_count') }} {{ settings.migration?.success_count ?? setting('migration_success_count') ?? 0 }}</span>
+                <span>{{ $t('memories.failure_count') }} {{ settings.migration?.failure_count ?? setting('migration_failure_count') ?? 0 }}</span>
+              </div>
+              <div class="config-line"><span>{{ $t('memories.index_status') }}</span><StatusTag :status="settings.index?.status || setting('index_status')" :active-text="statusText(settings.index?.status || setting('index_status'))" :inactive-text="statusText(settings.index?.status || setting('index_status'))" :active-type="statusType(settings.index?.status || setting('index_status'))" :inactive-type="statusType(settings.index?.status || setting('index_status'))" /></div>
+              <div class="config-line"><span>{{ $t('memories.cleanup_status') }}</span><StatusTag :status="settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status')" :active-text="statusText(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :inactive-text="statusText(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :active-type="statusType(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :inactive-type="statusType(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" /></div>
+              <div class="config-line"><span>{{ $t('memories.capacity') }}</span><b>{{ settings.capacity?.active_record_count ?? setting('active_record_count') ?? 0 }} / {{ settings.capacity?.max_active_records ?? setting('max_active_records') ?? 0 }}</b></div>
+            </div>
+          </div>
+
+          <div class="settings-grid organization-settings">
+            <div class="config-block">
+              <strong>{{ $t('memories.capacity_settings') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.active_record_count') }}</span><b>{{ settings.capacity?.active_record_count ?? setting('active_record_count') ?? 0 }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.organize_trigger_records') }}</span><b>{{ settings.capacity?.organize_trigger_records ?? 45 }} / {{ settings.capacity?.max_active_records ?? 50 }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.content_max_tokens') }}</span><b>{{ contentMaxTokens }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.capacity_status') }}</span><el-tag :type="capacityOverLimit ? 'danger' : 'success'">{{ statusText(settings.capacity?.status || 'normal') }}</el-tag></div>
+              <div class="config-line"><span>{{ $t('memories.over_limit') }}</span><b>{{ capacityOverLimit ? $t('memories.yes') : $t('memories.no') }}</b></div>
+            </div>
+            <div class="config-block">
+              <strong>{{ $t('memories.organization_jobs') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.current_job') }}</span><b>{{ settings.organization?.current_job_id ?? '-' }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.recent_job') }}</span><b>{{ settings.organization?.recent_job_id ?? '-' }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.recent_job_status') }}</span><StatusTag :status="settings.organization?.recent_job?.status" :active-text="statusText(settings.organization?.recent_job?.status)" :inactive-text="statusText(settings.organization?.recent_job?.status)" :active-type="statusType(settings.organization?.recent_job?.status)" :inactive-type="statusType(settings.organization?.recent_job?.status)" /></div>
+              <div class="config-line"><span>{{ $t('memories.last_organized_at') }}</span><b>{{ formatTime(settings.organization?.last_run_at || settings.organization?.recent_job?.finished_at) }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.organization_error') }}</span><b class="text-wrap">{{ settings.organization?.error || settings.organization?.recent_job?.error || '-' }}</b></div>
+              <div v-if="settings.organization?.validation_error" class="config-line"><span>{{ $t('memories.organization_validation_error') }}</span><b class="text-wrap">{{ settings.organization.validation_error }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.organize_blocking') }}</span><b class="text-wrap">{{ blockingText(settings.blocking?.organize) }}</b></div>
+            </div>
+          </div>
+
+          <el-alert v-if="settingsError" class="settings-error" type="warning" :closable="false" show-icon>
+            <template #title>{{ settingsError }}</template>
+          </el-alert>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="loadSettings()" :loading="settingsLoading" :disabled="!runtimeOwnerUid || Boolean(actionLoading)">{{ $t('memories.refresh') }}</el-button>
+        <el-button
+          v-if="runtimeDialogAction === 'status' && settingsLoaded && cleanupRetryId"
+          type="danger"
+          @click="retryCleanup(cleanupRetryId)"
+          :loading="actionLoading === `cleanup-${cleanupRetryId}`"
+          :disabled="!settingsLoaded || settingsLoading || Boolean(actionLoading)">
+          {{ $t('memories.cleanup_retry') }}
+        </el-button>
+        <el-button @click="closeRuntimeDialog" :disabled="Boolean(actionLoading)">{{ runtimeDialogAction === 'status' ? $t('memories.close') : $t('memories.cancel') }}</el-button>
+        <el-button
+          v-if="runtimeDialogAction !== 'status'"
+          type="primary"
+          :loading="actionLoading === runtimeDialogAction"
+          :disabled="runtimeDialogAction === 'organize' ? organizeBlocked : reindexBlocked"
+          @click="submitRuntimeOperation(runtimeDialogAction)">
+          {{ $t(runtimeDialogAction === 'organize' ? 'memories.confirm_organize' : 'memories.confirm_reindex') }}
+        </el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="editorVisible" :title="editorMode === 'create' ? $t('memories.form_create_title') : $t('memories.form_edit_title')" width="720px" class="standard-dialog" align-center>
       <el-form :model="form" label-width="120px">
         <el-form-item :label="$t('memories.owner_user')">
@@ -301,8 +358,12 @@ const memoryTypes = MEMORY_TYPES
 const jobStatuses = MEMORY_JOB_STATUSES
 const jobOperations = MEMORY_JOB_OPERATIONS
 const activeTab = ref('memories')
-const settingsExpanded = ref(false)
 const settings = reactive({})
+const runtimeDialogVisible = ref(false)
+const runtimeDialogAction = ref('status')
+const runtimeOwnerFilter = ref('')
+const settingsLoaded = ref(false)
+const settingsLoadError = ref('')
 const isSuperuser = ref(false)
 const currentUid = ref(null)
 const currentUsername = ref('')
@@ -346,6 +407,7 @@ const pollTimer = ref(null)
 let pollingStopped = false
 const pollingTaskManager = createAbortableTaskManager()
 const settingsRequestTracker = createLatestRequestTracker()
+const runtimeActionRequestTracker = createLatestRequestTracker()
 const memoriesRequestTracker = createLatestRequestTracker()
 const jobsRequestTracker = createLatestRequestTracker()
 const migrationsRequestTracker = createLatestRequestTracker()
@@ -384,7 +446,16 @@ const ownerLabel = (uid) => {
   }
   return normalizedUid
 }
-const runtimeOwnerUid = computed(() => isSuperuser.value ? (ownerFilter.value || null) : currentUid.value)
+const runtimeOwnerUid = computed(() => {
+  const ownerUid = isSuperuser.value ? runtimeOwnerFilter.value : currentUid.value
+  if (typeof ownerUid === 'string') return ownerUid.trim() || null
+  return ownerUid ?? null
+})
+const runtimeDialogTitle = computed(() => {
+  if (runtimeDialogAction.value === 'organize') return t('memories.organize_now')
+  if (runtimeDialogAction.value === 'reindex') return t('memories.reindex')
+  return t('memories.view_status')
+})
 const numericSetting = (key, fallback) => {
   const value = Number(setting(key))
   return Number.isFinite(value) ? value : fallback
@@ -394,8 +465,8 @@ const contentMaxTokens = computed(() => settings.contentMaxTokens ?? Number(sett
 const activeRecordCount = computed(() => settings.activeRecordCount ?? Number(settings.capacity?.active_record_count ?? numericSetting('active_record_count', 0)))
 const maxActiveRecords = computed(() => settings.maxActiveRecords ?? Number(settings.capacity?.max_active_records ?? numericSetting('max_active_records', 50)))
 const capacityOverLimit = computed(() => ['over_limit', 'full'].includes(settings.capacity?.status) || activeRecordCount.value > maxActiveRecords.value)
-const organizeBlocked = computed(() => !runtimeOwnerUid.value || settingsLoading.value || !configured.value || Boolean(settings.blocking?.organize?.blocked))
-const reindexBlocked = computed(() => !runtimeOwnerUid.value || settingsLoading.value || !configured.value || Boolean(settings.blocking?.maintenance?.blocked))
+const organizeBlocked = computed(() => !runtimeDialogVisible.value || !memoryScopeReady.value || !settingsLoaded.value || settingsLoading.value || !runtimeOwnerUid.value || !configured.value || Boolean(actionLoading.value) || Boolean(settings.blocking?.organize?.blocked))
+const reindexBlocked = computed(() => !runtimeDialogVisible.value || !memoryScopeReady.value || !settingsLoaded.value || settingsLoading.value || !runtimeOwnerUid.value || !configured.value || Boolean(actionLoading.value) || Boolean(settings.blocking?.maintenance?.blocked))
 const cleanupRetryId = computed(() => {
   const status = settings.old_collection_cleanup?.status ?? settings.store?.old_collection_cleanup_status
   if (status !== 'failed') return null
@@ -444,6 +515,16 @@ const blockingReason = (reason) => {
   return known.includes(reason) ? t(`memories.blocking_${reason}`) : (reason || t('memories.not_blocked'))
 }
 const blockingText = (state) => state?.blocked ? t('memories.blocked_with_reason', { reason: blockingReason(state.reason), job: state.job_id || '-' }) : t('memories.not_blocked')
+const runtimeBlockingMessage = computed(() => {
+  if (!runtimeDialogVisible.value || !settingsLoaded.value || runtimeDialogAction.value === 'status') return ''
+  if (!configured.value) return t('memories.no_config')
+  const blocking = runtimeDialogAction.value === 'organize'
+    ? settings.blocking?.organize
+    : runtimeDialogAction.value === 'reindex'
+      ? settings.blocking?.maintenance
+      : null
+  return blocking?.blocked ? blockingText(blocking) : ''
+})
 const canMutateRecord = (row) => !row.pending_mutation_job_id && !row.deleted_at && row.is_active !== false
 const canPin = (row) => canMutateRecord(row)
 const jobError = (row) => row.error || row.result?.error || (row.context_error ? JSON.stringify(row.context_error) : '-')
@@ -472,31 +553,70 @@ const applySettings = (data) => {
   Object.assign(settings, normalizedData)
 }
 
+const resetRuntimeSettings = () => {
+  pollingTaskManager.cancel('settings')
+  settingsRequestTracker.invalidate()
+  Object.keys(settings).forEach(key => delete settings[key])
+  settingsLoaded.value = false
+  settingsLoading.value = false
+  settingsLoadError.value = ''
+}
+
 const loadSettings = async (silent = false) => {
+  if (!runtimeDialogVisible.value || !runtimeOwnerUid.value || pollingStopped || actionLoading.value) return
   const token = pollingTaskManager.begin('settings')
   if (!token) return
   const requestSeq = settingsRequestTracker.begin()
   const ownerUid = runtimeOwnerUid.value
-  if (!ownerUid) {
-    if (pollingTaskManager.isCurrent(token) && settingsRequestTracker.isCurrent(requestSeq)) {
-      Object.keys(settings).forEach(key => delete settings[key])
-      settingsLoading.value = false
-    }
-    pollingTaskManager.finish(token)
-    return
-  }
-  if (pollingTaskManager.isCurrent(token)) settingsLoading.value = !silent
+  if (pollingTaskManager.isCurrent(token)) settingsLoading.value = !silent || !settingsLoaded.value
   try {
     const data = unwrap(await memoryApi.settings({ signal: token.signal, params: { uid: ownerUid } }))
-    if (!pollingTaskManager.isCurrent(token) || !settingsRequestTracker.isCurrent(requestSeq)) return
+    if (!pollingTaskManager.isCurrent(token) || !settingsRequestTracker.isCurrent(requestSeq) || !runtimeDialogVisible.value || runtimeOwnerUid.value !== ownerUid || pollingStopped) return
     applySettings(data)
+    settingsLoaded.value = true
+    settingsLoadError.value = ''
   } catch (error) {
-    if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
-    if (settingsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
+    if (token.signal.aborted || !pollingTaskManager.isCurrent(token) || !settingsRequestTracker.isCurrent(requestSeq) || !runtimeDialogVisible.value || runtimeOwnerUid.value !== ownerUid || pollingStopped) return
+    Object.keys(settings).forEach(key => delete settings[key])
+    settingsLoaded.value = false
+    settingsLoadError.value = error?.message || t('memories.runtime_status_load_failed')
   } finally {
     if (pollingTaskManager.isCurrent(token) && settingsRequestTracker.isCurrent(requestSeq)) settingsLoading.value = false
     pollingTaskManager.finish(token)
   }
+}
+
+const openRuntimeDialog = (action) => {
+  if (!['organize', 'reindex', 'status'].includes(action) || pollingStopped || !memoryScopeReady.value || actionLoading.value || runtimeDialogVisible.value || editorVisible.value || detailsVisible.value || historyVisible.value || jobVisible.value || migrationVisible.value) return
+  detailsRequestTracker.invalidate()
+  jobDetailsRequestTracker.invalidate()
+  migrationDetailsRequestTracker.invalidate()
+  historyRequestTracker.invalidate()
+  resetRuntimeSettings()
+  runtimeDialogAction.value = action
+  runtimeOwnerFilter.value = isSuperuser.value
+    ? (typeof ownerFilter.value === 'string' ? ownerFilter.value.trim() : ownerFilter.value || '')
+    : (typeof currentUid.value === 'string' ? currentUid.value.trim() : currentUid.value || '')
+  runtimeDialogVisible.value = true
+  if (isSuperuser.value && !ownersLoaded.value && !ownersLoading.value) loadOwners()
+  loadSettings()
+}
+
+const closeRuntimeDialog = () => {
+  if (actionLoading.value) return
+  runtimeActionRequestTracker.invalidate()
+  runtimeDialogVisible.value = false
+  runtimeOwnerFilter.value = ''
+  resetRuntimeSettings()
+}
+
+const handleRuntimeOwnerChange = (uid) => {
+  if (!runtimeDialogVisible.value || actionLoading.value || pollingStopped) return
+  runtimeOwnerFilter.value = isSuperuser.value
+    ? (typeof uid === 'string' ? uid.trim() : uid || '')
+    : (typeof currentUid.value === 'string' ? currentUid.value.trim() : currentUid.value || '')
+  resetRuntimeSettings()
+  loadSettings()
 }
 
 const loadOwners = async () => {
@@ -619,17 +739,16 @@ const resetAndLoadJobs = () => { jobPage.value = 1; loadJobs() }
 const resetAndLoadMigrations = () => { migrationPage.value = 1; loadMigrations() }
 const handleTabChange = (tab) => { if (tab === 'jobs') loadJobs(); if (tab === 'migrations') loadMigrations() }
 const refreshAll = async () => {
-  const requests = [loadSettings(true), loadMemories(true)]
+  const requests = [loadMemories(true)]
+  if (runtimeDialogVisible.value) requests.push(loadSettings(true))
   if (activeTab.value === 'jobs') requests.push(loadJobs(true))
   if (activeTab.value === 'migrations') requests.push(loadMigrations(true))
   await Promise.all(requests)
 }
 const handleOwnerChange = () => {
-  pollingTaskManager.cancel('settings')
   pollingTaskManager.cancel('memories')
   pollingTaskManager.cancel('jobs')
   pollingTaskManager.cancel('migrations')
-  settingsRequestTracker.invalidate()
   memoriesRequestTracker.invalidate()
   jobsRequestTracker.invalidate()
   migrationsRequestTracker.invalidate()
@@ -648,7 +767,6 @@ const handleOwnerChange = () => {
   selectedMigration.value = null
   selectedHistoryMemory.value = null
   history.value = []
-  Object.keys(settings).forEach(key => delete settings[key])
   memories.value = []
   memoryTotal.value = 0
   jobs.value = []
@@ -658,7 +776,6 @@ const handleOwnerChange = () => {
   memoryPage.value = 1
   jobPage.value = 1
   migrationPage.value = 1
-  settingsLoading.value = false
   memoriesLoading.value = false
   jobsLoading.value = false
   migrationsLoading.value = false
@@ -679,12 +796,35 @@ const scheduleRefresh = () => {
   }, 5000)
 }
 
-const organize = async () => {
-  if (organizeBlocked.value || actionLoading.value) return
-  actionLoading.value = 'organize'
-  try { await memoryApi.organize(buildOrganizePayload(newDedupeKey()), { params: { uid: runtimeOwnerUid.value } }); ElMessage.info(t('memories.organize_submitted')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' }
+const submitRuntimeOperation = async (operation) => {
+  const blocked = operation === 'organize' ? organizeBlocked.value : operation === 'reindex' ? reindexBlocked.value : true
+  if (!['organize', 'reindex'].includes(operation) || pollingStopped || !runtimeDialogVisible.value || runtimeDialogAction.value !== operation || !memoryScopeReady.value || blocked) return
+  const ownerUid = runtimeOwnerUid.value
+  const owner = ownerLabel(ownerUid)
+  const dedupeKey = newDedupeKey()
+  pollingTaskManager.cancel('settings')
+  settingsRequestTracker.invalidate()
+  const requestSeq = runtimeActionRequestTracker.begin()
+  actionLoading.value = operation
+  let failed = false
+  try {
+    if (operation === 'organize') await memoryApi.organize(buildOrganizePayload(dedupeKey), { params: { uid: ownerUid } })
+    else await memoryApi.reindex({ dedupe_key: dedupeKey }, { params: { uid: ownerUid } })
+    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped || !runtimeDialogVisible.value || runtimeOwnerUid.value !== ownerUid || runtimeDialogAction.value !== operation) return
+    ElMessage.info(t('memories.runtime_operation_submitted', { owner, operation: operationLabel(operation) }))
+    actionLoading.value = ''
+    closeRuntimeDialog()
+    refreshAll()
+  } catch (error) {
+    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped || !runtimeDialogVisible.value || runtimeOwnerUid.value !== ownerUid || runtimeDialogAction.value !== operation) return
+    failed = true
+    ElMessage.error(error.message || t('memories.operation_failed'))
+  } finally {
+    if (!runtimeActionRequestTracker.isCurrent(requestSeq)) return
+    actionLoading.value = ''
+    if (failed && !pollingStopped && runtimeDialogVisible.value && runtimeOwnerUid.value === ownerUid && runtimeDialogAction.value === operation) loadSettings()
+  }
 }
-
 const resetForm = () => Object.assign(form, { id: null, version: 0, owner_uid: '', memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
 const openEditor = (row = null) => {
   editorRequestTracker.invalidate()
@@ -787,12 +927,30 @@ const showJob = async (row) => {
     if (jobDetailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
   }
 }
-const reindex = async () => { if (reindexBlocked.value || actionLoading.value) return; actionLoading.value = 'reindex'; try { await memoryApi.reindex({ dedupe_key: newDedupeKey() }, { params: { uid: runtimeOwnerUid.value } }); ElMessage.info(t('memories.accepted_processing')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' } }
 const canRetryMigration = (row) => ['failed', 'cancelled'].includes(row.status || row.migration_status)
 const canCancelMigration = (row) => ['preparing', 'building', 'catching_up', 'validating'].includes(row.status || row.migration_status)
 const retryMigration = async (row) => { try { await memoryApi.retryMigration(migrationId(row)); ElMessage.info(t('memories.migration_retry_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
 const cancelMigration = async (row) => { try { await memoryApi.cancelMigration(migrationId(row)); ElMessage.info(t('memories.migration_cancel_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
-const retryCleanup = async (id) => { actionLoading.value = `cleanup-${id}`; try { await memoryApi.retryCleanup(id); ElMessage.info(t('memories.retry_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' } }
+const retryCleanup = async (id) => {
+  if (!id || actionLoading.value || pollingStopped) return
+  pollingTaskManager.cancel('settings')
+  settingsRequestTracker.invalidate()
+  const requestSeq = runtimeActionRequestTracker.begin()
+  actionLoading.value = `cleanup-${id}`
+  try {
+    await memoryApi.retryCleanup(id)
+    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped) return
+    ElMessage.info(t('memories.retry_success'))
+  } catch (error) {
+    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped) return
+    ElMessage.error(error.message || t('memories.operation_failed'))
+  } finally {
+    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped) return
+    actionLoading.value = ''
+    loadSettings()
+    refreshAll()
+  }
+}
 const showMigration = async (row) => {
   const requestSeq = migrationDetailsRequestTracker.begin()
   try {
@@ -808,7 +966,6 @@ const showMigration = async (row) => {
 onMounted(async () => {
   await Promise.all([loadMemories(), loadChannels()])
   if (pollingStopped) return
-  await loadSettings()
   if (!pollingStopped) scheduleRefresh()
 })
 onBeforeUnmount(() => {
@@ -824,6 +981,7 @@ onBeforeUnmount(() => {
   jobDetailsRequestTracker.invalidate()
   migrationDetailsRequestTracker.invalidate()
   editorRequestTracker.invalidate()
+  runtimeActionRequestTracker.invalidate()
 })
 </script>
 

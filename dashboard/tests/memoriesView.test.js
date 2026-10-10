@@ -62,6 +62,12 @@ const pageResponse = (items = [], total = items.length, meta) => dataResponse({
 
 const translate = (key, params = {}) => {
   if (key === 'memories.owner_unknown') return 'owner_unknown'
+  if (key === 'memories.runtime_operation_submitted') {
+    return `runtime_operation_submitted:${params.owner ?? ''}:${params.operation ?? ''}`
+  }
+  if (key === 'memories.blocked_with_reason') {
+    return `memories.blocked_with_reason:${params.reason ?? ''}:${params.job ?? ''}`
+  }
   return String(key).replace(/\{(\w+)\}/g, (_match, name) => String(params[name] ?? ''))
 }
 
@@ -202,9 +208,16 @@ const createHarness = (t, options = {}) => {
   scope.run(() => {
     vm.runInContext(
       `${stripImports(memoriesViewScriptMatch[1])}
-globalThis.__module = {
+  globalThis.__module = {
   activeTab,
   settings,
+  runtimeDialogVisible,
+  runtimeDialogAction,
+  runtimeOwnerFilter,
+  runtimeDialogTitle,
+  settingsLoaded,
+  settingsLoadError,
+  runtimeBlockingMessage,
   isSuperuser,
   currentUid,
   currentUsername,
@@ -244,15 +257,22 @@ globalThis.__module = {
   runtimeOwnerUid,
   organizeBlocked,
   reindexBlocked,
+  cleanupRetryId,
   loadSettings,
   loadOwners,
   loadMemories,
   loadJobs,
   loadMigrations,
+  openRuntimeDialog,
+  closeRuntimeDialog,
+  handleRuntimeOwnerChange,
+  submitRuntimeOperation,
+  retryCleanup,
+  refreshAll,
   handleOwnerChange,
   ownerLabel,
-  organize,
-  reindex,
+  filters,
+  jobFilters,
   showDetails,
   showJob,
   showMigration,
@@ -317,6 +337,11 @@ test('derives ordinary-user scope from list metadata without cross-user uid requ
   assert.equal(harness.module.currentUsername.value, 'Alice')
   assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
   assert.equal(harness.module.ownerLabel('user-a'), 'Alice')
+  assert.equal(harness.calls('memoryApi.settings').length, 0)
+
+  harness.module.openRuntimeDialog('status')
+  await harness.flush()
+  assert.deepEqual(normalize(harness.calls('memoryApi.settings')[0].args[0].params), { uid: 'user-a' })
 
   harness.module.ownerFilter.value = 'user-b'
   assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
@@ -327,7 +352,6 @@ test('derives ordinary-user scope from list metadata without cross-user uid requ
   for (const name of ['memoryApi.list', 'memoryApi.jobs', 'memoryApi.migrations']) {
     for (const request of harness.calls(name)) assert.equal(request.args[0].uid, undefined)
   }
-  assert.deepEqual(normalize(harness.calls('memoryApi.settings')[0].args[0].params), { uid: 'user-a' })
 })
 
 test('loads all superuser owner labels across paginated user-list responses', async t => {
@@ -359,7 +383,7 @@ test('loads all superuser owner labels across paginated user-list responses', as
   assert.equal(harness.module.ownerLabel(''), 'owner_unknown')
 })
 
-test('uses the selected superuser owner for list, jobs, migrations, and settings', async t => {
+test('uses the selected superuser owner for list, jobs, and migrations while independently pre-filling the runtime dialog', async t => {
   const harness = createHarness(t, {
     superuser: true,
     apiOverrides: {
@@ -373,6 +397,7 @@ test('uses the selected superuser owner for list, jobs, migrations, and settings
   })
   await harness.mount()
   await harness.flush()
+  assert.equal(harness.calls('memoryApi.settings').length, 0)
   const requestCountBeforeSelection = harness.apiState.requests.length
 
   harness.module.ownerFilter.value = 'user-b'
@@ -380,48 +405,71 @@ test('uses the selected superuser owner for list, jobs, migrations, and settings
   await harness.flush()
   await harness.module.loadJobs()
   await harness.module.loadMigrations()
-  await harness.module.loadSettings()
 
   const selectedRequests = harness.apiState.requests.slice(requestCountBeforeSelection)
-  assert.ok(selectedRequests.some(request => request.name === 'memoryApi.list'))
-  assert.ok(selectedRequests.some(request => request.name === 'memoryApi.jobs'))
-  assert.ok(selectedRequests.some(request => request.name === 'memoryApi.migrations'))
-  assert.ok(selectedRequests.some(request => request.name === 'memoryApi.settings'))
   for (const name of ['memoryApi.list', 'memoryApi.jobs', 'memoryApi.migrations']) {
     const requests = harness.calls(name).filter(request => selectedRequests.includes(request))
     assert.ok(requests.length > 0)
     for (const request of requests) assert.equal(request.args[0].uid, 'user-b')
   }
-  const settingsRequests = harness.calls('memoryApi.settings').filter(request => selectedRequests.includes(request))
-  assert.ok(settingsRequests.length > 0)
-  for (const request of settingsRequests) assert.equal(request.args[0].params.uid, 'user-b')
-})
-
-test('blocks settings and mutating actions while a superuser views all users', async t => {
-  const harness = createHarness(t, { superuser: true })
-  await harness.mount()
-  await harness.flush()
-
-  assert.equal(harness.module.runtimeOwnerUid.value, null)
-  assert.equal(harness.module.organizeBlocked.value, true)
-  assert.equal(harness.module.reindexBlocked.value, true)
-
-  await harness.module.loadSettings()
-  await harness.module.organize()
-  await harness.module.reindex()
-
   assert.equal(harness.calls('memoryApi.settings').length, 0)
-  assert.equal(harness.calls('memoryApi.organize').length, 0)
-  assert.equal(harness.calls('memoryApi.reindex').length, 0)
+
+  harness.module.openRuntimeDialog('status')
+  await harness.flush()
+  assert.equal(harness.module.runtimeOwnerFilter.value, 'user-b')
+  assert.equal(harness.module.runtimeOwnerUid.value, 'user-b')
+  assert.equal(harness.calls('memoryApi.settings').length, 1)
+  assert.equal(harness.calls('memoryApi.settings')[0].args[0].params.uid, 'user-b')
 })
 
-test('clears scoped state synchronously and refreshes the active tab on owner switch', async t => {
+test('blocks runtime actions without an owner in the all-user scope', async t => {
   const harness = createHarness(t, { superuser: true })
   await harness.mount()
   await harness.flush()
+
+  for (const action of ['status', 'organize', 'reindex']) {
+    harness.module.openRuntimeDialog(action)
+    await harness.flush()
+
+    assert.equal(harness.module.runtimeDialogVisible.value, true)
+    assert.equal(harness.module.runtimeDialogAction.value, action)
+    assert.equal(harness.module.runtimeOwnerUid.value, null)
+    assert.equal(harness.module.organizeBlocked.value, true)
+    assert.equal(harness.module.reindexBlocked.value, true)
+
+    await harness.module.submitRuntimeOperation('organize')
+    await harness.module.submitRuntimeOperation('reindex')
+    assert.equal(harness.calls('memoryApi.settings').length, 0)
+    assert.equal(harness.calls('memoryApi.organize').length, 0)
+    assert.equal(harness.calls('memoryApi.reindex').length, 0)
+
+    harness.module.closeRuntimeDialog()
+    assert.equal(harness.module.runtimeDialogVisible.value, false)
+  }
+})
+
+test('keeps runtime state independent while switching the list owner', async t => {
+  const harness = createHarness(t, {
+    superuser: true,
+    apiOverrides: {
+      memoryApi: {
+        settings: () => dataResponse({
+          configured: true,
+          current_job: { id: 7, operation: 'organize', status: 'running' },
+        }),
+      },
+    },
+  })
+  await harness.mount()
+  await harness.flush()
+
+  harness.module.ownerFilter.value = 'user-a'
+  harness.module.openRuntimeDialog('status')
+  await harness.flush()
+  assert.equal(harness.module.runtimeOwnerFilter.value, 'user-a')
+  assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
 
   harness.module.activeTab.value = 'jobs'
-  harness.module.ownerFilter.value = 'user-b'
   Object.assign(harness.module.settings, {
     configured: true,
     current_job: { id: 7, operation: 'organize', status: 'running' },
@@ -446,10 +494,13 @@ test('clears scoped state synchronously and refreshes the active tab on owner sw
   harness.module.migrationVisible.value = true
   assert.equal(harness.module.currentMemoryTask.value.status, 'running')
 
+  harness.module.ownerFilter.value = 'user-b'
+  const settingsBeforeSwitch = normalize(harness.module.settings)
+  const currentTaskBeforeSwitch = normalize(harness.module.currentMemoryTask.value)
   const requestCountBeforeSwitch = harness.apiState.requests.length
   harness.module.handleOwnerChange()
 
-  assert.deepEqual(normalize(harness.module.settings), {})
+  assert.deepEqual(normalize(harness.module.settings), settingsBeforeSwitch)
   assert.deepEqual(normalize(harness.module.memories.value), [])
   assert.equal(harness.module.memoryTotal.value, 0)
   assert.equal(harness.module.memoryPage.value, 1)
@@ -468,17 +519,28 @@ test('clears scoped state synchronously and refreshes the active tab on owner sw
   assert.equal(harness.module.jobVisible.value, false)
   assert.equal(harness.module.selectedMigration.value, null)
   assert.equal(harness.module.migrationVisible.value, false)
-  assert.equal(harness.module.currentMemoryTask.value, null)
+  assert.deepEqual(normalize(harness.module.currentMemoryTask.value), currentTaskBeforeSwitch)
+  assert.equal(harness.module.runtimeOwnerFilter.value, 'user-a')
+  assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
 
+  await harness.flush()
   const refreshedRequests = harness.apiState.requests.slice(requestCountBeforeSwitch)
-  assert.ok(refreshedRequests.some(request => request.name === 'memoryApi.settings'))
-  assert.ok(refreshedRequests.some(request => request.name === 'memoryApi.list'))
-  assert.ok(refreshedRequests.some(request => request.name === 'memoryApi.jobs'))
-  assert.equal(refreshedRequests.some(request => request.name === 'memoryApi.migrations'), false)
-  for (const request of refreshedRequests) {
-    if (request.name === 'memoryApi.settings') assert.equal(request.args[0].params.uid, 'user-b')
-    if (['memoryApi.list', 'memoryApi.jobs'].includes(request.name)) assert.equal(request.args[0].uid, 'user-b')
-  }
+  const settingsRequests = refreshedRequests.filter(request => request.name === 'memoryApi.settings')
+  const listRequests = refreshedRequests.filter(request => request.name === 'memoryApi.list')
+  const jobRequests = refreshedRequests.filter(request => request.name === 'memoryApi.jobs')
+  const migrationRequests = refreshedRequests.filter(request => request.name === 'memoryApi.migrations')
+
+  assert.equal(settingsRequests.length, 1)
+  assert.equal(settingsRequests[0].args[0].params.uid, 'user-a')
+  assert.equal(listRequests.length, 1)
+  assert.equal(listRequests[0].args[0].uid, 'user-b')
+  assert.equal(jobRequests.length, 1)
+  assert.equal(jobRequests[0].args[0].uid, 'user-b')
+  assert.equal(migrationRequests.length, 0)
+  assert.deepEqual(normalize(harness.module.settings), settingsBeforeSwitch)
+  assert.deepEqual(normalize(harness.module.currentMemoryTask.value), currentTaskBeforeSwitch)
+  assert.equal(harness.module.runtimeOwnerFilter.value, 'user-a')
+  assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
 })
 
 const detailCases = [
@@ -1136,7 +1198,7 @@ test('allows one save request at a time and retries failures before refreshing o
   assert.equal(harness.module.editorVisible.value, false)
   assert.equal(harness.module.submitting.value, false)
   assert.ok(harness.calls('memoryApi.list').length > listCountBeforeSuccess)
-  assert.ok(harness.calls('memoryApi.settings').length > settingsCountBeforeSuccess)
+  assert.equal(harness.calls('memoryApi.settings').length, settingsCountBeforeSuccess)
 })
 
 test('ignores stale saves after owner switch or same-owner close and reopen', async t => {
@@ -1326,39 +1388,6 @@ const scopedOwner = marker => String(marker).startsWith('A') ? 'owner-a' : 'owne
 const scopedId = (marker, ownerAId, ownerBId) => String(marker).startsWith('A') ? ownerAId : ownerBId
 
 const scopedLoaderCases = [
-  {
-    name: 'settings',
-    method: 'settings',
-    requestName: 'memoryApi.settings',
-    loader: 'loadSettings',
-    activeTab: 'memories',
-    params: request => request.args[0].params,
-    signal: request => request.args[0].signal,
-    response: marker => dataResponse({
-      configured: true,
-      marker,
-      active_collection_name: `collection-${marker}`,
-    }),
-    assertState: (harness, marker) => {
-      assert.equal(harness.module.settings.marker, marker)
-      assert.equal(harness.module.settings.active_collection_name, `collection-${marker}`)
-    },
-    prepareState: harness => Object.assign(harness.module.settings, {
-      marker: 'before',
-      active_collection_name: 'collection-before',
-      current_job: { id: 77, operation: 'organize', status: 'running' },
-    }),
-    snapshot: harness => ({
-      settings: normalize(harness.module.settings),
-      loading: harness.module.settingsLoading.value,
-      currentTask: normalize(harness.module.currentMemoryTask.value),
-    }),
-    assertSnapshot: (harness, snapshot) => {
-      assert.deepEqual(normalize(harness.module.settings), snapshot.settings)
-      assert.equal(harness.module.settingsLoading.value, snapshot.loading)
-      assert.deepEqual(normalize(harness.module.currentMemoryTask.value), snapshot.currentTask)
-    },
-  },
   {
     name: 'memories',
     method: 'list',
@@ -1582,5 +1611,1330 @@ test('does not write delayed scoped reads after unmount', async t => {
     assert.equal(harness.module.runtimeOwnerUid.value, identity.runtimeOwnerUid, loaderCase.name)
     loaderCase.assertSnapshot(harness, snapshot)
     assert.equal(harness.messages.length, messagesBeforeResponse, loaderCase.name)
+  }
+})
+
+test('loads each admin runtime action for the selected owner without changing list state', async t => {
+  for (const action of ['organize', 'reindex', 'status']) {
+    const settingsByOwner = {
+      'user-a': {
+        configured: true,
+        capacity: { active_record_count: 11, max_active_records: 50 },
+        current_job: { id: 'job-a', operation: 'organize', status: 'running' },
+      },
+      'user-b': {
+        configured: true,
+        capacity: { active_record_count: 29, max_active_records: 60 },
+        current_job: { id: 'job-b', operation: 'reindex', status: 'running' },
+      },
+    }
+    const harness = createHarness(t, {
+      superuser: true,
+      apiOverrides: {
+        adminApi: {
+          userList: () => pageResponse([
+            { uid: 'user-a', username: 'Alice' },
+            { uid: 'user-b', username: 'Bob' },
+          ], 2),
+        },
+        memoryApi: {
+          settings: ({ params }) => dataResponse(settingsByOwner[params.uid]),
+        },
+      },
+    })
+    await harness.mount()
+    await harness.flush()
+
+    harness.module.ownerFilter.value = 'user-a'
+    harness.module.filters.keyword = 'keep-this-keyword'
+    harness.module.filters.memory_type = 'preference'
+    harness.module.jobFilters.status = 'running'
+    harness.module.jobFilters.operation = 'organize'
+    harness.module.jobFilters.memory_id = 'memory-7'
+    harness.module.memoryPage.value = 4
+    harness.module.memoryPageSize.value = 50
+    harness.module.memoryTotal.value = 12
+    harness.module.memories.value = [{ id: 'list-a', owner_uid: 'user-a' }]
+    harness.module.jobPage.value = 3
+    harness.module.jobPageSize.value = 50
+    harness.module.jobTotal.value = 8
+    harness.module.jobs.value = [{ id: 'job-list-a', owner_uid: 'user-a' }]
+    harness.module.migrationPage.value = 2
+    harness.module.migrationPageSize.value = 50
+    harness.module.migrationTotal.value = 5
+    harness.module.migrations.value = [{ id: 'migration-a', owner_uid: 'user-a' }]
+
+    harness.module.openRuntimeDialog(action)
+    await harness.flush()
+
+    assert.equal(harness.module.runtimeDialogVisible.value, true, action)
+    assert.equal(harness.module.runtimeOwnerFilter.value, 'user-a', action)
+    assert.equal(harness.module.runtimeOwnerUid.value, 'user-a', action)
+    assert.equal(harness.calls('memoryApi.settings').at(-1).args[0].params.uid, 'user-a', action)
+    assert.equal(harness.module.settings.capacity.active_record_count, 11, action)
+    assert.equal(harness.module.currentMemoryTask.value.id, 'job-a', action)
+    assert.equal(harness.module.ownerLabel(harness.module.runtimeOwnerUid.value), 'Alice', action)
+
+    const stateBeforeRuntimeSwitch = {
+      ownerFilter: harness.module.ownerFilter.value,
+      filters: normalize(harness.module.filters),
+      jobFilters: normalize(harness.module.jobFilters),
+      memoryPage: harness.module.memoryPage.value,
+      memoryPageSize: harness.module.memoryPageSize.value,
+      memoryTotal: harness.module.memoryTotal.value,
+      memories: normalize(harness.module.memories.value),
+      jobPage: harness.module.jobPage.value,
+      jobPageSize: harness.module.jobPageSize.value,
+      jobTotal: harness.module.jobTotal.value,
+      jobs: normalize(harness.module.jobs.value),
+      migrationPage: harness.module.migrationPage.value,
+      migrationPageSize: harness.module.migrationPageSize.value,
+      migrationTotal: harness.module.migrationTotal.value,
+      migrations: normalize(harness.module.migrations.value),
+    }
+    const listRequestCount = harness.calls('memoryApi.list').length
+    const jobsRequestCount = harness.calls('memoryApi.jobs').length
+    const migrationsRequestCount = harness.calls('memoryApi.migrations').length
+    const settingsRequestCount = harness.calls('memoryApi.settings').length
+
+    harness.module.handleRuntimeOwnerChange('user-b')
+
+    assert.equal(harness.module.runtimeOwnerFilter.value, 'user-b', action)
+    assert.equal(harness.module.runtimeOwnerUid.value, 'user-b', action)
+    assert.equal(harness.module.settingsLoaded.value, false, action)
+    assert.deepEqual(normalize(harness.module.settings), {}, action)
+    assert.equal(harness.module.currentMemoryTask.value, null, action)
+
+    await harness.flush()
+
+    assert.equal(harness.calls('memoryApi.settings').length, settingsRequestCount + 1, action)
+    assert.equal(harness.calls('memoryApi.settings').at(-1).args[0].params.uid, 'user-b', action)
+    assert.equal(harness.module.settings.capacity.active_record_count, 29, action)
+    assert.equal(harness.module.currentMemoryTask.value.id, 'job-b', action)
+    assert.equal(harness.module.ownerLabel(harness.module.runtimeOwnerUid.value), 'Bob', action)
+    assert.equal(harness.calls('memoryApi.list').length, listRequestCount, action)
+    assert.equal(harness.calls('memoryApi.jobs').length, jobsRequestCount, action)
+    assert.equal(harness.calls('memoryApi.migrations').length, migrationsRequestCount, action)
+    assert.deepEqual({
+      ownerFilter: harness.module.ownerFilter.value,
+      filters: normalize(harness.module.filters),
+      jobFilters: normalize(harness.module.jobFilters),
+      memoryPage: harness.module.memoryPage.value,
+      memoryPageSize: harness.module.memoryPageSize.value,
+      memoryTotal: harness.module.memoryTotal.value,
+      memories: normalize(harness.module.memories.value),
+      jobPage: harness.module.jobPage.value,
+      jobPageSize: harness.module.jobPageSize.value,
+      jobTotal: harness.module.jobTotal.value,
+      jobs: normalize(harness.module.jobs.value),
+      migrationPage: harness.module.migrationPage.value,
+      migrationPageSize: harness.module.migrationPageSize.value,
+      migrationTotal: harness.module.migrationTotal.value,
+      migrations: normalize(harness.module.migrations.value),
+    }, stateBeforeRuntimeSwitch, action)
+
+    harness.module.handleRuntimeOwnerChange('')
+    assert.equal(harness.module.runtimeOwnerFilter.value, '', action)
+    assert.equal(harness.module.runtimeOwnerUid.value, null, action)
+    assert.equal(harness.module.settingsLoaded.value, false, action)
+    assert.deepEqual(normalize(harness.module.settings), {}, action)
+    assert.equal(harness.module.currentMemoryTask.value, null, action)
+    assert.equal(harness.module.organizeBlocked.value, true, action)
+    assert.equal(harness.module.reindexBlocked.value, true, action)
+
+    await harness.flush()
+
+    assert.equal(harness.calls('memoryApi.settings').length, settingsRequestCount + 1, action)
+    assert.equal(harness.calls('memoryApi.organize').length, 0, action)
+    assert.equal(harness.calls('memoryApi.reindex').length, 0, action)
+  }
+})
+
+test('keeps ordinary-user runtime settings bound to the current user for every action', async t => {
+  for (const action of ['organize', 'reindex', 'status']) {
+    const requestedOwners = []
+    const harness = createHarness(t, {
+      currentUid: 'user-a',
+      currentUsername: 'Alice',
+      apiOverrides: {
+        memoryApi: {
+          settings: ({ params }) => {
+            requestedOwners.push(params.uid)
+            return dataResponse({
+              configured: true,
+              capacity: { active_record_count: 7, max_active_records: 40 },
+            })
+          },
+        },
+      },
+    })
+    await harness.mount()
+    await harness.flush()
+
+    assert.equal(harness.calls('adminApi.userList').length, 0, action)
+    harness.module.ownerFilter.value = 'user-b'
+    harness.module.openRuntimeDialog(action)
+    await harness.flush()
+    assert.equal(harness.module.runtimeOwnerUid.value, 'user-a', action)
+    assert.equal(harness.module.runtimeOwnerFilter.value, 'user-a', action)
+    assert.equal(harness.module.ownerLabel(harness.module.runtimeOwnerUid.value), 'Alice', action)
+
+    harness.module.runtimeOwnerFilter.value = 'user-b'
+    await harness.module.loadSettings()
+    harness.module.handleRuntimeOwnerChange('user-b')
+    await harness.flush()
+
+    assert.ok(requestedOwners.length >= 3, action)
+    assert.equal(requestedOwners.every(uid => uid === 'user-a'), true, action)
+    assert.equal(harness.module.runtimeOwnerFilter.value, 'user-a', action)
+    assert.equal(harness.module.runtimeOwnerUid.value, 'user-a', action)
+    assert.equal(harness.module.ownerLabel('user-a'), 'Alice', action)
+    assert.equal(harness.module.ownerLabel('user-b'), 'user-b', action)
+  }
+})
+
+test('does not open or query runtime status when entry is blocked or another dialog is open', async t => {
+  const blockedEntryCases = [
+    {
+      name: 'invalid action',
+      prepare: () => {},
+      action: 'unknown',
+    },
+    {
+      name: 'scope is not ready',
+      prepare: harness => { harness.module.memoryScopeReady.value = false },
+      action: 'status',
+    },
+    {
+      name: 'another action is loading',
+      prepare: harness => { harness.module.actionLoading.value = 'organize' },
+      action: 'status',
+    },
+  ]
+
+  for (const blockedCase of blockedEntryCases) {
+    const harness = createHarness(t)
+    await harness.mount()
+    blockedCase.prepare(harness)
+    harness.module.openRuntimeDialog(blockedCase.action)
+
+    assert.equal(harness.module.runtimeDialogVisible.value, false, blockedCase.name)
+    assert.equal(harness.calls('memoryApi.settings').length, 0, blockedCase.name)
+  }
+
+  const unmountedHarness = createHarness(t)
+  await unmountedHarness.mount()
+  unmountedHarness.unmount()
+  unmountedHarness.module.openRuntimeDialog('status')
+  assert.equal(unmountedHarness.module.runtimeDialogVisible.value, false)
+  assert.equal(unmountedHarness.calls('memoryApi.settings').length, 0)
+
+  for (const dialogKey of ['editorVisible', 'detailsVisible', 'historyVisible', 'jobVisible', 'migrationVisible']) {
+    const harness = createHarness(t)
+    await harness.mount()
+    harness.module[dialogKey].value = true
+    Object.assign(harness.module.form, {
+      id: 901,
+      version: 3,
+      owner_uid: 'user-a',
+      memory_key: 'draft-key',
+      memory_type: 'preference',
+      content: 'draft-content',
+      change_evidence: 'draft-evidence',
+      suppress_current: true,
+    })
+    const draftBeforeOpen = normalize(harness.module.form)
+
+    harness.module.openRuntimeDialog('status')
+
+    assert.equal(harness.module.runtimeDialogVisible.value, false, dialogKey)
+    assert.equal(harness.module[dialogKey].value, true, dialogKey)
+    assert.deepEqual(normalize(harness.module.form), draftBeforeOpen, dialogKey)
+    assert.equal(harness.calls('memoryApi.settings').length, 0, dialogKey)
+  }
+})
+
+test('invalidates pending memory, job, and migration details when runtime status opens first', async t => {
+  for (const detailCase of detailCases) {
+    for (const staleOutcome of ['success', 'failure']) {
+      const harness = createDetailHarness(t, detailCase)
+      await harness.mount()
+      const row = detailRow(detailCase, 'owner-a', `runtime-${staleOutcome}`)
+      const pending = harness.module[detailCase.show](row)
+      const request = harness.calls(detailCase.requestName)[0]
+
+      assert.equal(harness.module[detailCase.visible].value, false, detailCase.name)
+      harness.module.openRuntimeDialog('status')
+      await harness.flush()
+      const messagesBeforeStaleResponse = normalize(harness.messages)
+
+      if (staleOutcome === 'success') request.deferred.resolve(detailResponse(row, 'stale'))
+      else request.deferred.reject(new Error(`stale ${detailCase.name} response`))
+      await pending
+
+      assert.equal(harness.module.runtimeDialogVisible.value, true, detailCase.name)
+      assert.equal(harness.module[detailCase.selected].value, null, detailCase.name)
+      assert.equal(harness.module[detailCase.visible].value, false, detailCase.name)
+      assert.deepEqual(normalize(harness.messages), messagesBeforeStaleResponse, detailCase.name)
+    }
+  }
+})
+
+const runtimeSettingsData = (marker, activeRecordCount, maxActiveRecords = activeRecordCount + 40) => dataResponse({
+  configured: true,
+  capacity: { active_record_count: activeRecordCount, max_active_records: maxActiveRecords },
+  current_job: { id: `runtime-${marker}`, operation: 'create', status: 'running' },
+})
+
+const createRuntimeSettingsHarness = t => createHarness(t, {
+  superuser: true,
+  apiOverrides: {
+    memoryApi: {
+      settings: (...args) => args[args.length - 1].deferred.promise,
+    },
+  },
+})
+
+test('keeps the newest runtime settings after an administrator owner switch race', async t => {
+  for (const staleOutcome of ['success', 'failure']) {
+    const harness = createRuntimeSettingsHarness(t)
+    await harness.mount()
+    harness.module.ownerFilter.value = 'user-a'
+    harness.module.openRuntimeDialog('status')
+    const oldRequest = harness.calls('memoryApi.settings')[0]
+
+    harness.module.handleRuntimeOwnerChange('user-b')
+    const newRequest = harness.calls('memoryApi.settings')[1]
+    assert.equal(oldRequest.args[0].params.uid, 'user-a')
+    assert.equal(newRequest.args[0].params.uid, 'user-b')
+    assert.equal(oldRequest.args[0].signal.aborted, true)
+
+    newRequest.deferred.resolve(runtimeSettingsData('B', 29, 60))
+    await harness.flush()
+    const settingsAfterB = normalize(harness.module.settings)
+    const taskAfterB = normalize(harness.module.currentMemoryTask.value)
+    const messagesAfterB = normalize(harness.messages)
+    assert.equal(harness.module.settings.capacity.active_record_count, 29)
+    assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-B')
+    assert.equal(harness.module.settingsLoaded.value, true)
+    assert.equal(harness.module.settingsLoading.value, false)
+    assert.equal(harness.module.settingsLoadError.value, '')
+
+    if (staleOutcome === 'success') oldRequest.deferred.resolve(runtimeSettingsData('A-stale', 11, 50))
+    else oldRequest.deferred.reject(new Error('stale A settings response'))
+    await harness.flush()
+
+    assert.deepEqual(normalize(harness.module.settings), settingsAfterB)
+    assert.deepEqual(normalize(harness.module.currentMemoryTask.value), taskAfterB)
+    assert.equal(harness.module.settingsLoaded.value, true)
+    assert.equal(harness.module.settingsLoading.value, false)
+    assert.equal(harness.module.settingsLoadError.value, '')
+    assert.deepEqual(normalize(harness.messages), messagesAfterB)
+  }
+})
+
+test('keeps the final A runtime read authoritative across a rapid A to B to A cycle', async t => {
+  for (const firstAOutcome of ['success', 'failure']) {
+    for (const bOutcome of ['success', 'failure']) {
+      const harness = createRuntimeSettingsHarness(t)
+      await harness.mount()
+      harness.module.ownerFilter.value = 'user-a'
+      harness.module.openRuntimeDialog('status')
+      const firstARequest = harness.calls('memoryApi.settings')[0]
+
+      harness.module.handleRuntimeOwnerChange('user-b')
+      const bRequest = harness.calls('memoryApi.settings')[1]
+      harness.module.handleRuntimeOwnerChange('user-a')
+      const finalARequest = harness.calls('memoryApi.settings')[2]
+      assert.equal(firstARequest.args[0].signal.aborted, true)
+      assert.equal(bRequest.args[0].signal.aborted, true)
+      assert.equal(finalARequest.args[0].params.uid, 'user-a')
+
+      finalARequest.deferred.resolve(runtimeSettingsData('A-final', 37, 70))
+      await harness.flush()
+      const finalSnapshot = {
+        settings: normalize(harness.module.settings),
+        currentMemoryTask: normalize(harness.module.currentMemoryTask.value),
+        settingsLoaded: harness.module.settingsLoaded.value,
+        settingsLoading: harness.module.settingsLoading.value,
+        settingsLoadError: harness.module.settingsLoadError.value,
+        messages: normalize(harness.messages),
+      }
+      assert.equal(harness.module.settings.capacity.active_record_count, 37)
+      assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-A-final')
+      assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
+
+      if (firstAOutcome === 'success') firstARequest.deferred.resolve(runtimeSettingsData('A-first-stale', 11, 50))
+      else firstARequest.deferred.reject(new Error('stale first A settings response'))
+      await harness.flush()
+      if (bOutcome === 'success') bRequest.deferred.resolve(runtimeSettingsData('B-stale', 29, 60))
+      else bRequest.deferred.reject(new Error('stale B settings response'))
+      await harness.flush()
+
+      assert.deepEqual(normalize(harness.module.settings), finalSnapshot.settings)
+      assert.deepEqual(normalize(harness.module.currentMemoryTask.value), finalSnapshot.currentMemoryTask)
+      assert.equal(harness.module.settingsLoaded.value, finalSnapshot.settingsLoaded)
+      assert.equal(harness.module.settingsLoading.value, finalSnapshot.settingsLoading)
+      assert.equal(harness.module.settingsLoadError.value, finalSnapshot.settingsLoadError)
+      assert.deepEqual(normalize(harness.messages), finalSnapshot.messages)
+    }
+  }
+})
+
+test('cancels and clears runtime settings on close before reopening the same owner', async t => {
+  for (const staleOutcome of ['success', 'failure']) {
+    const harness = createRuntimeSettingsHarness(t)
+    await harness.mount()
+    harness.module.ownerFilter.value = 'user-a'
+    harness.module.openRuntimeDialog('status')
+    const oldRequest = harness.calls('memoryApi.settings')[0]
+
+    harness.module.closeRuntimeDialog()
+    assert.equal(oldRequest.args[0].signal.aborted, true)
+    assert.equal(harness.module.runtimeDialogVisible.value, false)
+    assert.deepEqual(normalize(harness.module.settings), {})
+    assert.equal(harness.module.settingsLoaded.value, false)
+    assert.equal(harness.module.settingsLoading.value, false)
+    assert.equal(harness.module.settingsLoadError.value, '')
+    for (const name of [
+      'memoryApi.cancelJob',
+      'memoryApi.cancelMigration',
+      'memoryApi.organize',
+      'memoryApi.reindex',
+      'memoryApi.retryJob',
+      'memoryApi.retryMigration',
+      'memoryApi.retryCleanup',
+      'memoryApi.updateSettings',
+      'memoryApi.create',
+      'memoryApi.update',
+      'memoryApi.delete',
+      'memoryApi.pin',
+      'memoryApi.unpin',
+      'memoryApi.resumeCurrent',
+    ]) assert.equal(harness.calls(name).length, 0, name)
+
+    harness.module.openRuntimeDialog('status')
+    const newRequest = harness.calls('memoryApi.settings')[1]
+    assert.equal(newRequest.args[0].params.uid, 'user-a')
+    if (staleOutcome === 'success') oldRequest.deferred.resolve(runtimeSettingsData('old-late', 7, 40))
+    else oldRequest.deferred.reject(new Error('old closed settings response'))
+    await harness.flush()
+    assert.deepEqual(normalize(harness.module.settings), {})
+    assert.equal(harness.module.settingsLoaded.value, false)
+    assert.equal(harness.module.settingsLoading.value, true)
+    assert.equal(harness.module.settingsLoadError.value, '')
+    assert.equal(harness.messages.length, 0)
+
+    newRequest.deferred.resolve(runtimeSettingsData('reopened', 43, 80))
+    await harness.flush()
+    assert.equal(harness.module.settings.capacity.active_record_count, 43)
+    assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-reopened')
+    assert.equal(harness.module.settingsLoaded.value, true)
+    assert.equal(harness.module.settingsLoading.value, false)
+    assert.equal(harness.module.settingsLoadError.value, '')
+    assert.equal(harness.messages.length, 0)
+  }
+})
+
+test('blocks runtime confirmation during an organize refresh failure and restores it after success', async t => {
+  const harness = createRuntimeSettingsHarness(t)
+  await harness.mount()
+  harness.module.ownerFilter.value = 'user-a'
+  harness.module.openRuntimeDialog('organize')
+  const initialRequest = harness.calls('memoryApi.settings')[0]
+  initialRequest.deferred.resolve(runtimeSettingsData('before-refresh', 13, 50))
+  await harness.flush()
+  assert.equal(harness.module.organizeBlocked.value, false)
+  assert.equal(harness.module.reindexBlocked.value, false)
+  assert.equal(harness.module.settings.capacity.active_record_count, 13)
+  assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-before-refresh')
+  const messagesBeforeFailure = normalize(harness.messages)
+
+  const failedPending = harness.module.loadSettings()
+  const failedRequest = harness.calls('memoryApi.settings')[1]
+  assert.equal(harness.module.settingsLoading.value, true)
+  assert.equal(harness.module.settingsLoaded.value, true)
+  assert.equal(harness.module.organizeBlocked.value, true)
+  assert.equal(harness.module.reindexBlocked.value, true)
+  failedRequest.deferred.reject(new Error('runtime refresh failed'))
+  await failedPending
+  await harness.flush()
+
+  assert.deepEqual(normalize(harness.module.settings), {})
+  assert.equal(harness.module.currentMemoryTask.value, null)
+  assert.equal(harness.module.settingsLoaded.value, false)
+  assert.equal(harness.module.settingsLoading.value, false)
+  assert.equal(harness.module.settingsLoadError.value, 'runtime refresh failed')
+  assert.equal(harness.module.organizeBlocked.value, true)
+  assert.equal(harness.module.reindexBlocked.value, true)
+  assert.deepEqual(normalize(harness.messages), messagesBeforeFailure)
+
+  const successfulPending = harness.module.loadSettings()
+  const successfulRequest = harness.calls('memoryApi.settings')[2]
+  successfulRequest.deferred.resolve(runtimeSettingsData('after-refresh', 31, 70))
+  await successfulPending
+  await harness.flush()
+  assert.equal(harness.module.settings.capacity.active_record_count, 31)
+  assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-after-refresh')
+  assert.equal(harness.module.settingsLoaded.value, true)
+  assert.equal(harness.module.settingsLoading.value, false)
+  assert.equal(harness.module.settingsLoadError.value, '')
+  assert.equal(harness.module.organizeBlocked.value, false)
+  assert.equal(harness.module.reindexBlocked.value, false)
+  assert.deepEqual(normalize(harness.messages), messagesBeforeFailure)
+})
+
+test('polls runtime settings only for the open owner and keeps silent reads out of loading state', async t => {
+  const harness = createRuntimeSettingsHarness(t)
+  await harness.mount()
+  const closedPollBeforeOpen = [...harness.timers.values()].at(-1)
+  const listCountBeforeClosedPoll = harness.calls('memoryApi.list').length
+  await closedPollBeforeOpen.callback()
+  await harness.flush()
+  assert.equal(harness.calls('memoryApi.settings').length, 0)
+  assert.ok(harness.calls('memoryApi.list').length > listCountBeforeClosedPoll)
+
+  harness.module.ownerFilter.value = 'user-a'
+  harness.module.openRuntimeDialog('status')
+  const openRequest = harness.calls('memoryApi.settings')[0]
+  openRequest.deferred.resolve(runtimeSettingsData('open', 17, 50))
+  await harness.flush()
+  assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
+  assert.equal(harness.module.settingsLoaded.value, true)
+  assert.equal(harness.module.settingsLoading.value, false)
+
+  const pollTimer = [...harness.timers.values()].at(-1)
+  const pollPending = pollTimer.callback()
+  await harness.flush()
+  const settingsRequestsDuringPoll = harness.calls('memoryApi.settings')
+  assert.equal(settingsRequestsDuringPoll.length, 2)
+  assert.deepEqual(settingsRequestsDuringPoll.map(request => request.args[0].params.uid), ['user-a', 'user-a'])
+  assert.equal(harness.module.settingsLoading.value, false)
+  assert.equal(harness.module.settingsLoaded.value, true)
+  assert.equal(harness.module.settings.capacity.active_record_count, 17)
+
+  settingsRequestsDuringPoll[1].deferred.resolve(runtimeSettingsData('polled', 23, 60))
+  await pollPending
+  await harness.flush()
+  assert.equal(harness.module.settings.capacity.active_record_count, 23)
+  assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-polled')
+  assert.equal(harness.module.settingsLoading.value, false)
+
+  harness.module.closeRuntimeDialog()
+  const settingsCountAfterClose = harness.calls('memoryApi.settings').length
+  const listCountBeforeClosedPollAfterOpen = harness.calls('memoryApi.list').length
+  const closedPollAfterOpen = [...harness.timers.values()].at(-1)
+  await closedPollAfterOpen.callback()
+  await harness.flush()
+  assert.equal(harness.calls('memoryApi.settings').length, settingsCountAfterClose)
+  assert.ok(harness.calls('memoryApi.list').length > listCountBeforeClosedPollAfterOpen)
+})
+
+test('preserves the runtime settings snapshot when a pending read settles after unmount', async t => {
+  for (const staleOutcome of ['success', 'failure']) {
+    const harness = createRuntimeSettingsHarness(t)
+    await harness.mount()
+    harness.module.ownerFilter.value = 'user-a'
+    harness.module.openRuntimeDialog('status')
+    const initialRequest = harness.calls('memoryApi.settings')[0]
+    initialRequest.deferred.resolve(runtimeSettingsData('before-unmount', 19, 55))
+    await harness.flush()
+    harness.module.settingsLoadError.value = 'keep-before-unmount'
+
+    const pending = harness.module.loadSettings()
+    const request = harness.calls('memoryApi.settings')[1]
+    const snapshot = {
+      settings: normalize(harness.module.settings),
+      currentMemoryTask: normalize(harness.module.currentMemoryTask.value),
+      runtimeDialogVisible: harness.module.runtimeDialogVisible.value,
+      runtimeOwnerFilter: harness.module.runtimeOwnerFilter.value,
+      runtimeOwnerUid: harness.module.runtimeOwnerUid.value,
+      settingsLoaded: harness.module.settingsLoaded.value,
+      settingsLoading: harness.module.settingsLoading.value,
+      settingsLoadError: harness.module.settingsLoadError.value,
+      messages: normalize(harness.messages),
+    }
+    assert.equal(snapshot.settingsLoading, true)
+    harness.unmount()
+    assert.equal(request.args[0].signal.aborted, true)
+
+    if (staleOutcome === 'success') request.deferred.resolve(runtimeSettingsData('late-unmount', 99, 120))
+    else request.deferred.reject(new Error('late unmount settings failure'))
+    await pending
+    await harness.flush()
+
+    assert.deepEqual(normalize(harness.module.settings), snapshot.settings)
+    assert.deepEqual(normalize(harness.module.currentMemoryTask.value), snapshot.currentMemoryTask)
+    assert.equal(harness.module.runtimeDialogVisible.value, snapshot.runtimeDialogVisible)
+    assert.equal(harness.module.runtimeOwnerFilter.value, snapshot.runtimeOwnerFilter)
+    assert.equal(harness.module.runtimeOwnerUid.value, snapshot.runtimeOwnerUid)
+    assert.equal(harness.module.settingsLoaded.value, snapshot.settingsLoaded)
+    assert.equal(harness.module.settingsLoading.value, snapshot.settingsLoading)
+    assert.equal(harness.module.settingsLoadError.value, snapshot.settingsLoadError)
+    assert.deepEqual(normalize(harness.messages), snapshot.messages)
+  }
+})
+
+const runtimeOperationReadyResponse = () => dataResponse({
+  configured: true,
+  blocking: {
+    organize: { blocked: false },
+    maintenance: { blocked: false },
+  },
+})
+
+const runtimeOperationBlockedResponse = operation => dataResponse({
+  configured: true,
+  blocking: {
+    [operation === 'organize' ? 'organize' : 'maintenance']: {
+      blocked: true,
+      reason: operation === 'organize' ? 'organization_active' : 'reindex_active',
+      job_id: `${operation}-blocking-job`,
+    },
+  },
+})
+
+const assertNoRuntimeOperationRequests = harness => {
+  assert.equal(harness.calls('memoryApi.organize').length, 0)
+  assert.equal(harness.calls('memoryApi.reindex').length, 0)
+}
+
+const attemptBlockedRuntimeOperation = async (harness, action) => {
+  await harness.module.submitRuntimeOperation(action)
+  await harness.module.submitRuntimeOperation(action === 'organize' ? 'reindex' : 'organize')
+  await harness.module.submitRuntimeOperation('unknown-operation')
+}
+
+test('submits organize and reindex with a frozen runtime owner and independent list scope', async t => {
+  const roleCases = [
+    {
+      name: 'administrator',
+      superuser: true,
+      currentUid: 'admin-user',
+      currentUsername: 'Administrator',
+      listUid: 'user-a',
+      runtimeUid: 'user-b',
+      expectedUid: 'user-b',
+      expectedUsername: 'Bob',
+    },
+    {
+      name: 'ordinary user',
+      superuser: false,
+      currentUid: 'user-a',
+      currentUsername: 'Alice',
+      listUid: 'foreign-list-user',
+      runtimeUid: 'foreign-runtime-user',
+      expectedUid: 'user-a',
+      expectedUsername: 'Alice',
+    },
+  ]
+
+  for (const operation of ['organize', 'reindex']) {
+    for (const roleCase of roleCases) {
+      const harness = createHarness(t, {
+        superuser: roleCase.superuser,
+        currentUid: roleCase.currentUid,
+        currentUsername: roleCase.currentUsername,
+        apiOverrides: {
+          ...(roleCase.superuser ? {
+            adminApi: {
+              userList: () => pageResponse([
+                { uid: 'user-a', username: 'Alice' },
+                { uid: 'user-b', username: 'Bob' },
+              ], 2),
+            },
+          } : {}),
+          memoryApi: {
+            settings: () => runtimeOperationReadyResponse(),
+            [operation]: (...args) => args[args.length - 1].deferred.promise,
+          },
+        },
+      })
+      await harness.mount()
+      await harness.flush()
+
+      harness.module.ownerFilter.value = roleCase.listUid
+      if (roleCase.superuser) {
+        harness.module.handleOwnerChange()
+        await harness.flush()
+      }
+      harness.module.openRuntimeDialog(operation)
+      await harness.flush()
+      assert.equal(harness.calls(`memoryApi.${operation}`).length, 0, roleCase.name)
+
+      harness.module.handleRuntimeOwnerChange(roleCase.runtimeUid)
+      await harness.flush()
+      assert.equal(harness.module.runtimeOwnerUid.value, roleCase.expectedUid, roleCase.name)
+      assert.equal(harness.calls(`memoryApi.${operation}`).length, 0, roleCase.name)
+
+      harness.module.filters.keyword = 'list-keyword'
+      harness.module.filters.memory_type = 'preference'
+      harness.module.jobFilters.status = 'running'
+      harness.module.jobFilters.operation = operation
+      harness.module.jobFilters.memory_id = 'list-memory-id'
+
+      const pending = harness.module.submitRuntimeOperation(operation)
+      const duplicatePending = harness.module.submitRuntimeOperation(operation)
+      const request = harness.calls(`memoryApi.${operation}`)[0]
+      assert.equal(harness.calls(`memoryApi.${operation}`).length, 1, roleCase.name)
+      assert.equal(harness.module.actionLoading.value, operation, roleCase.name)
+      assert.deepEqual(Object.keys(request.args[0]).sort(), ['dedupe_key'], roleCase.name)
+      assert.equal(typeof request.args[0].dedupe_key, 'string', roleCase.name)
+      assert.ok(request.args[0].dedupe_key.length > 0, roleCase.name)
+      for (const field of ['uid', 'owner_uid', 'keyword', 'memory_type', 'page', 'size']) {
+        assert.equal(Object.prototype.hasOwnProperty.call(request.args[0], field), false, `${roleCase.name}:${field}`)
+      }
+      assert.deepEqual(normalize(request.args[1]), { params: { uid: roleCase.expectedUid } }, roleCase.name)
+
+      harness.module.handleRuntimeOwnerChange(roleCase.superuser ? 'user-a' : 'foreign-runtime-user-2')
+      harness.module.closeRuntimeDialog()
+      harness.module.openRuntimeDialog(operation === 'organize' ? 'reindex' : 'organize')
+      assert.equal(harness.module.runtimeOwnerUid.value, roleCase.expectedUid, roleCase.name)
+      assert.equal(harness.module.runtimeDialogAction.value, operation, roleCase.name)
+      assert.equal(harness.module.runtimeDialogVisible.value, true, roleCase.name)
+
+      harness.module.ownerFilter.value = roleCase.superuser ? 'user-c' : 'foreign-list-user-2'
+      harness.module.handleOwnerChange()
+      harness.module.ownerFilter.value = roleCase.listUid
+      harness.module.handleOwnerChange()
+      await harness.flush()
+      assert.equal(harness.module.runtimeOwnerUid.value, roleCase.expectedUid, roleCase.name)
+      assert.equal(harness.calls(`memoryApi.${operation}`).length, 1, roleCase.name)
+
+      request.deferred.resolve(dataResponse({ accepted: true }))
+      await Promise.all([pending, duplicatePending])
+      await harness.flush()
+
+      assert.equal(harness.module.runtimeDialogVisible.value, false, roleCase.name)
+      assert.equal(harness.module.actionLoading.value, '', roleCase.name)
+      assert.equal(harness.confirmCalls.length, 0, roleCase.name)
+      const successMessages = harness.messages.filter(message => message.type === 'info')
+      assert.equal(successMessages.some(message => String(message.value).includes(roleCase.expectedUsername)), true, roleCase.name)
+      if (roleCase.superuser) {
+        assert.equal(successMessages.some(message => String(message.value).includes('Alice')), false, roleCase.name)
+        assert.equal(lastRequest(harness.calls('memoryApi.list')).args[0].uid, roleCase.listUid, roleCase.name)
+      } else {
+        assert.equal(lastRequest(harness.calls('memoryApi.list')).args[0].uid, undefined, roleCase.name)
+      }
+      assert.equal(harness.calls(`memoryApi.${operation}`).length, 1, roleCase.name)
+      assert.equal(harness.calls(`memoryApi.${operation === 'organize' ? 'reindex' : 'organize'}`).length, 0, roleCase.name)
+    }
+  }
+})
+
+test('blocks runtime operation submission for unavailable settings, owners, modes, and lifecycle states', async t => {
+  const readyGuardCases = [
+    {
+      name: 'closed dialog',
+      action: 'organize',
+      prepare: async harness => {
+        harness.module.openRuntimeDialog('organize')
+        await harness.flush()
+        harness.module.closeRuntimeDialog()
+      },
+    },
+    {
+      name: 'scope not ready',
+      action: 'organize',
+      prepare: async harness => {
+        harness.module.openRuntimeDialog('organize')
+        await harness.flush()
+        harness.module.memoryScopeReady.value = false
+      },
+    },
+    {
+      name: 'mode mismatch',
+      action: 'organize',
+      submitAction: 'reindex',
+      prepare: async harness => {
+        harness.module.openRuntimeDialog('organize')
+        await harness.flush()
+      },
+    },
+    {
+      name: 'unknown operation',
+      action: 'reindex',
+      submitAction: 'unknown-operation',
+      prepare: async harness => {
+        harness.module.openRuntimeDialog('reindex')
+        await harness.flush()
+      },
+    },
+    {
+      name: 'unmounted',
+      action: 'organize',
+      prepare: async harness => {
+        harness.module.openRuntimeDialog('organize')
+        await harness.flush()
+        harness.unmount()
+      },
+    },
+  ]
+
+  for (const blockedCase of readyGuardCases) {
+    const harness = createHarness(t)
+    await harness.mount()
+    await blockedCase.prepare(harness)
+    await harness.module.submitRuntimeOperation(blockedCase.submitAction ?? blockedCase.action)
+    assertNoRuntimeOperationRequests(harness)
+  }
+
+  const missingOwnerHarness = createHarness(t, { superuser: true })
+  await missingOwnerHarness.mount()
+  missingOwnerHarness.module.openRuntimeDialog('organize')
+  await missingOwnerHarness.flush()
+  assert.equal(missingOwnerHarness.module.runtimeOwnerUid.value, null)
+  assert.equal(missingOwnerHarness.calls('memoryApi.settings').length, 0)
+  await attemptBlockedRuntimeOperation(missingOwnerHarness, 'organize')
+  assertNoRuntimeOperationRequests(missingOwnerHarness)
+
+  const loadingHarness = createHarness(t, {
+    apiOverrides: {
+      memoryApi: {
+        settings: (...args) => args[args.length - 1].deferred.promise,
+      },
+    },
+  })
+  await loadingHarness.mount()
+  loadingHarness.module.openRuntimeDialog('organize')
+  await loadingHarness.flush()
+  assert.equal(loadingHarness.module.settingsLoading.value, true)
+  await attemptBlockedRuntimeOperation(loadingHarness, 'organize')
+  assertNoRuntimeOperationRequests(loadingHarness)
+  loadingHarness.calls('memoryApi.settings')[0].deferred.resolve(runtimeOperationReadyResponse())
+  await loadingHarness.flush()
+
+  const initialErrorHarness = createHarness(t, {
+    apiOverrides: {
+      memoryApi: {
+        settings: (...args) => args[args.length - 1].deferred.promise,
+      },
+    },
+  })
+  await initialErrorHarness.mount()
+  initialErrorHarness.module.openRuntimeDialog('organize')
+  const initialErrorRequest = initialErrorHarness.calls('memoryApi.settings')[0]
+  initialErrorRequest.deferred.reject(new Error('initial settings failed'))
+  await initialErrorHarness.flush()
+  assert.equal(initialErrorHarness.module.settingsLoaded.value, false)
+  assert.equal(initialErrorHarness.module.settingsLoadError.value, 'initial settings failed')
+  await attemptBlockedRuntimeOperation(initialErrorHarness, 'organize')
+  assertNoRuntimeOperationRequests(initialErrorHarness)
+
+  let currentReadCount = 0
+  const currentErrorHarness = createHarness(t, {
+    apiOverrides: {
+      memoryApi: {
+        settings: () => {
+          currentReadCount += 1
+          return currentReadCount === 1
+            ? runtimeOperationReadyResponse()
+            : Promise.reject(new Error('current settings read failed'))
+        },
+      },
+    },
+  })
+  await currentErrorHarness.mount()
+  currentErrorHarness.module.openRuntimeDialog('organize')
+  await currentErrorHarness.flush()
+  await currentErrorHarness.module.loadSettings()
+  await currentErrorHarness.flush()
+  assert.equal(currentErrorHarness.module.settingsLoaded.value, false)
+  assert.equal(currentErrorHarness.module.settingsLoadError.value, 'current settings read failed')
+  await attemptBlockedRuntimeOperation(currentErrorHarness, 'organize')
+  assertNoRuntimeOperationRequests(currentErrorHarness)
+
+  const recoveryCases = [
+    {
+      name: 'unconfigured organize',
+      operation: 'organize',
+      initial: () => dataResponse({ configured: false }),
+      assertMessage: message => assert.equal(message, 'memories.no_config'),
+    },
+    {
+      name: 'organize backend block',
+      operation: 'organize',
+      initial: () => runtimeOperationBlockedResponse('organize'),
+      assertMessage: message => {
+        assert.match(message, /memories\.blocked_with_reason/)
+        assert.match(message, /memories\.blocking_organization_active/)
+      },
+    },
+    {
+      name: 'reindex backend block',
+      operation: 'reindex',
+      initial: () => runtimeOperationBlockedResponse('reindex'),
+      assertMessage: message => {
+        assert.match(message, /memories\.blocked_with_reason/)
+        assert.match(message, /memories\.blocking_reindex_active/)
+      },
+    },
+  ]
+
+  for (const recoveryCase of recoveryCases) {
+    let state = 'blocked'
+    const harness = createHarness(t, {
+      apiOverrides: {
+        memoryApi: {
+          settings: () => state === 'blocked' ? recoveryCase.initial() : runtimeOperationReadyResponse(),
+          [recoveryCase.operation]: (...args) => args[args.length - 1].deferred.promise,
+        },
+      },
+    })
+    await harness.mount()
+    harness.module.openRuntimeDialog(recoveryCase.operation)
+    await harness.flush()
+    recoveryCase.assertMessage(harness.module.runtimeBlockingMessage.value)
+    await attemptBlockedRuntimeOperation(harness, recoveryCase.operation)
+    assertNoRuntimeOperationRequests(harness)
+
+    state = 'ready'
+    await harness.module.loadSettings()
+    await harness.flush()
+    assert.equal(harness.module.runtimeBlockingMessage.value, '', recoveryCase.name)
+    assert.equal(recoveryCase.operation === 'organize' ? harness.module.organizeBlocked.value : harness.module.reindexBlocked.value, false, recoveryCase.name)
+
+    const pending = harness.module.submitRuntimeOperation(recoveryCase.operation)
+    const request = harness.calls(`memoryApi.${recoveryCase.operation}`)[0]
+    assert.equal(typeof request.args[0].dedupe_key, 'string', recoveryCase.name)
+    assert.ok(request.args[0].dedupe_key.length > 0, recoveryCase.name)
+    request.deferred.resolve(dataResponse({ accepted: true }))
+    await pending
+    await harness.flush()
+    assert.equal(harness.module.runtimeDialogVisible.value, false, recoveryCase.name)
+  }
+})
+
+test('retains the runtime user after a failed operation and retries only after a conflict clears', async t => {
+  for (const operation of ['organize', 'reindex']) {
+    let settingsCallCount = 0
+    const harness = createHarness(t, {
+      superuser: true,
+      apiOverrides: {
+        adminApi: {
+          userList: () => pageResponse([
+            { uid: 'user-a', username: 'Alice' },
+            { uid: 'user-b', username: 'Bob' },
+          ], 2),
+        },
+        memoryApi: {
+          settings: () => {
+            settingsCallCount += 1
+            if (settingsCallCount <= 2) return runtimeOperationReadyResponse()
+            if (settingsCallCount === 3) return runtimeOperationBlockedResponse(operation)
+            return runtimeOperationReadyResponse()
+          },
+          [operation]: (...args) => args[args.length - 1].deferred.promise,
+        },
+      },
+    })
+    await harness.mount()
+    await harness.flush()
+    harness.module.ownerFilter.value = 'user-a'
+    harness.module.handleOwnerChange()
+    await harness.flush()
+    harness.module.filters.keyword = 'scope-keyword'
+    harness.module.filters.memory_type = 'preference'
+    harness.module.openRuntimeDialog(operation)
+    await harness.flush()
+    harness.module.handleRuntimeOwnerChange('user-b')
+    await harness.flush()
+    assert.equal(harness.module.runtimeOwnerUid.value, 'user-b')
+
+    const listCountBeforeFailure = harness.calls('memoryApi.list').length
+    const failedPending = harness.module.submitRuntimeOperation(operation)
+    const failedRequest = harness.calls(`memoryApi.${operation}`)[0]
+    const failedDedupeKey = failedRequest.args[0].dedupe_key
+    assert.deepEqual(normalize(failedRequest.args[1]), { params: { uid: 'user-b' } })
+    failedRequest.deferred.reject(new Error('runtime submit failed'))
+    await failedPending
+    await harness.flush()
+
+    assert.equal(harness.module.runtimeDialogVisible.value, true)
+    assert.equal(harness.module.runtimeOwnerUid.value, 'user-b')
+    assert.equal(harness.module.actionLoading.value, '')
+    assert.equal(harness.messages.at(-1).type, 'error')
+    assert.equal(harness.messages.at(-1).value, 'runtime submit failed')
+    assert.equal(harness.calls('memoryApi.settings').at(-1).args[0].params.uid, 'user-b')
+    assert.equal(harness.calls('memoryApi.list').length, listCountBeforeFailure)
+    assert.equal(operation === 'organize' ? harness.module.organizeBlocked.value : harness.module.reindexBlocked.value, true)
+
+    await harness.module.submitRuntimeOperation(operation)
+    assert.equal(harness.calls(`memoryApi.${operation}`).length, 1)
+
+    await harness.module.loadSettings()
+    await harness.flush()
+    assert.equal(harness.module.runtimeOwnerUid.value, 'user-b')
+    assert.equal(harness.module.settingsLoaded.value, true)
+    assert.equal(harness.module.settingsLoadError.value, '')
+    assert.equal(operation === 'organize' ? harness.module.organizeBlocked.value : harness.module.reindexBlocked.value, false)
+
+    const retryPending = harness.module.submitRuntimeOperation(operation)
+    const retryRequest = harness.calls(`memoryApi.${operation}`)[1]
+    assert.ok(retryRequest.args[0].dedupe_key.length > 0)
+    assert.notEqual(retryRequest.args[0].dedupe_key, failedDedupeKey)
+    assert.deepEqual(normalize(retryRequest.args[1]), { params: { uid: 'user-b' } })
+    retryRequest.deferred.resolve(dataResponse({ accepted: true }))
+    await retryPending
+    await harness.flush()
+
+    assert.equal(harness.module.runtimeDialogVisible.value, false)
+    assert.equal(harness.module.actionLoading.value, '')
+    assert.equal(harness.module.ownerFilter.value, 'user-a')
+    assert.equal(harness.calls('memoryApi.settings').length, 4)
+    assert.equal(lastRequest(harness.calls('memoryApi.list')).args[0].uid, 'user-a')
+    assert.equal(lastRequest(harness.calls('memoryApi.list')).args[0].keyword, 'scope-keyword')
+    assert.equal(lastRequest(harness.calls('memoryApi.list')).args[0].memory_type, 'preference')
+    assert.equal(harness.messages.at(-1).type, 'info')
+    assert.ok(String(harness.messages.at(-1).value).includes('Bob'))
+    assert.equal(harness.confirmCalls.length, 0)
+  }
+})
+
+test('preserves runtime state and avoids cancellation APIs when an operation settles after unmount', async t => {
+  for (const operation of ['organize', 'reindex']) {
+    for (const staleOutcome of ['success', 'failure']) {
+      const harness = createHarness(t, {
+        apiOverrides: {
+          memoryApi: {
+            settings: () => runtimeOperationReadyResponse(),
+            [operation]: (...args) => args[args.length - 1].deferred.promise,
+          },
+        },
+      })
+      await harness.mount()
+      harness.module.openRuntimeDialog(operation)
+      await harness.flush()
+      const pending = harness.module.submitRuntimeOperation(operation)
+      const request = harness.calls(`memoryApi.${operation}`)[0]
+      const snapshot = {
+        settings: normalize(harness.module.settings),
+        currentMemoryTask: normalize(harness.module.currentMemoryTask.value),
+        runtimeDialogVisible: harness.module.runtimeDialogVisible.value,
+        runtimeDialogAction: harness.module.runtimeDialogAction.value,
+        runtimeOwnerFilter: harness.module.runtimeOwnerFilter.value,
+        runtimeOwnerUid: harness.module.runtimeOwnerUid.value,
+        settingsLoaded: harness.module.settingsLoaded.value,
+        settingsLoading: harness.module.settingsLoading.value,
+        settingsLoadError: harness.module.settingsLoadError.value,
+        actionLoading: harness.module.actionLoading.value,
+        messages: normalize(harness.messages),
+      }
+      const listCount = harness.calls('memoryApi.list').length
+      const settingsCount = harness.calls('memoryApi.settings').length
+
+      harness.unmount()
+      if (staleOutcome === 'success') request.deferred.resolve(dataResponse({ accepted: true }))
+      else request.deferred.reject(new Error('late runtime operation failure'))
+      await pending
+      await harness.flush()
+
+      assert.deepEqual(normalize(harness.module.settings), snapshot.settings, `${operation}:${staleOutcome}`)
+      assert.deepEqual(normalize(harness.module.currentMemoryTask.value), snapshot.currentMemoryTask, `${operation}:${staleOutcome}`)
+      assert.equal(harness.module.runtimeDialogVisible.value, snapshot.runtimeDialogVisible, `${operation}:${staleOutcome}`)
+      assert.equal(harness.module.runtimeDialogAction.value, snapshot.runtimeDialogAction, `${operation}:${staleOutcome}`)
+      assert.equal(harness.module.runtimeOwnerFilter.value, snapshot.runtimeOwnerFilter, `${operation}:${staleOutcome}`)
+      assert.equal(harness.module.runtimeOwnerUid.value, snapshot.runtimeOwnerUid, `${operation}:${staleOutcome}`)
+      assert.equal(harness.module.settingsLoaded.value, snapshot.settingsLoaded, `${operation}:${staleOutcome}`)
+      assert.equal(harness.module.settingsLoading.value, snapshot.settingsLoading, `${operation}:${staleOutcome}`)
+      assert.equal(harness.module.settingsLoadError.value, snapshot.settingsLoadError, `${operation}:${staleOutcome}`)
+      assert.equal(harness.module.actionLoading.value, snapshot.actionLoading, `${operation}:${staleOutcome}`)
+      assert.deepEqual(normalize(harness.messages), snapshot.messages, `${operation}:${staleOutcome}`)
+      assert.equal(harness.calls('memoryApi.list').length, listCount, `${operation}:${staleOutcome}`)
+      assert.equal(harness.calls('memoryApi.settings').length, settingsCount, `${operation}:${staleOutcome}`)
+      assert.equal(harness.calls('memoryApi.cancelJob').length, 0, `${operation}:${staleOutcome}`)
+      assert.equal(harness.calls('memoryApi.cancelMigration').length, 0, `${operation}:${staleOutcome}`)
+    }
+  }
+})
+
+test('cancels a silent pending settings read before submitting and ignores its late result', async t => {
+  for (const staleOutcome of ['success', 'failure']) {
+    const harness = createHarness(t, {
+      apiOverrides: {
+        memoryApi: {
+          settings: (...args) => args[args.length - 1].deferred.promise,
+          organize: (...args) => args[args.length - 1].deferred.promise,
+        },
+      },
+    })
+    await harness.mount()
+    harness.module.openRuntimeDialog('organize')
+    const initialRequest = harness.calls('memoryApi.settings')[0]
+    initialRequest.deferred.resolve(runtimeOperationReadyResponse())
+    await harness.flush()
+    harness.module.settingsLoadError.value = 'keep-current-settings-error'
+
+    const silentPending = harness.module.loadSettings(true)
+    const silentRequest = harness.calls('memoryApi.settings')[1]
+    assert.equal(harness.module.settingsLoading.value, false)
+    assert.equal(silentRequest.args[0].signal.aborted, false)
+
+    const operationPending = harness.module.submitRuntimeOperation('organize')
+    const operationRequest = harness.calls('memoryApi.organize')[0]
+    assert.equal(silentRequest.args[0].signal.aborted, true)
+    assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
+    const snapshot = {
+      settings: normalize(harness.module.settings),
+      currentMemoryTask: normalize(harness.module.currentMemoryTask.value),
+      runtimeOwnerUid: harness.module.runtimeOwnerUid.value,
+      settingsLoaded: harness.module.settingsLoaded.value,
+      settingsLoading: harness.module.settingsLoading.value,
+      settingsLoadError: harness.module.settingsLoadError.value,
+      messages: normalize(harness.messages),
+    }
+
+    if (staleOutcome === 'success') silentRequest.deferred.resolve(dataResponse({ configured: false }))
+    else silentRequest.deferred.reject(new Error('late silent settings failure'))
+    await silentPending
+    await harness.flush()
+
+    assert.deepEqual(normalize(harness.module.settings), snapshot.settings, staleOutcome)
+    assert.deepEqual(normalize(harness.module.currentMemoryTask.value), snapshot.currentMemoryTask, staleOutcome)
+    assert.equal(harness.module.runtimeOwnerUid.value, snapshot.runtimeOwnerUid, staleOutcome)
+    assert.equal(harness.module.settingsLoaded.value, snapshot.settingsLoaded, staleOutcome)
+    assert.equal(harness.module.settingsLoading.value, snapshot.settingsLoading, staleOutcome)
+    assert.equal(harness.module.settingsLoadError.value, snapshot.settingsLoadError, staleOutcome)
+    assert.equal(harness.module.actionLoading.value, 'organize', staleOutcome)
+    assert.equal(harness.module.runtimeDialogVisible.value, true, staleOutcome)
+    assert.deepEqual(normalize(harness.messages), snapshot.messages, staleOutcome)
+
+    await harness.module.submitRuntimeOperation('organize')
+    assert.equal(harness.calls('memoryApi.organize').length, 1, staleOutcome)
+    operationRequest.deferred.resolve(dataResponse({ accepted: true }))
+    await operationPending
+    await harness.flush()
+  }
+})
+
+test('submits cleanup retry once while preserving runtime and list owner scopes', async t => {
+  let cleanupSettings = {
+    configured: true,
+    old_collection_cleanup: { status: 'failed', job_id: 801 },
+  }
+  const harness = createHarness(t, {
+    superuser: true,
+    apiOverrides: {
+      adminApi: {
+        userList: () => pageResponse([
+          { uid: 'user-a', username: 'Alice' },
+          { uid: 'user-b', username: 'Bob' },
+        ], 2),
+      },
+      memoryApi: {
+        settings: () => dataResponse(cleanupSettings),
+        retryCleanup: (...args) => args[args.length - 1].deferred.promise,
+      },
+    },
+  })
+  await harness.mount()
+  harness.module.ownerFilter.value = 'user-a'
+  harness.module.openRuntimeDialog('status')
+  await harness.flush()
+  harness.module.handleRuntimeOwnerChange('user-b')
+  await harness.flush()
+
+  const settingsCountBeforeRetry = harness.calls('memoryApi.settings').length
+  const retryPending = harness.module.retryCleanup(harness.module.cleanupRetryId.value)
+  harness.module.retryCleanup(harness.module.cleanupRetryId.value)
+  const retryRequests = harness.calls('memoryApi.retryCleanup')
+  assert.equal(retryRequests.length, 1)
+  assert.deepEqual(retryRequests[0].args, [801])
+  assert.equal(harness.module.actionLoading.value, 'cleanup-801')
+
+  harness.module.handleRuntimeOwnerChange('user-a')
+  harness.module.closeRuntimeDialog()
+  assert.equal(harness.module.runtimeDialogVisible.value, true)
+  assert.equal(harness.module.runtimeOwnerFilter.value, 'user-b')
+  assert.equal(harness.module.runtimeOwnerUid.value, 'user-b')
+
+  harness.module.ownerFilter.value = 'user-c'
+  harness.module.handleOwnerChange()
+  harness.module.ownerFilter.value = 'user-a'
+  harness.module.handleOwnerChange()
+  await harness.flush()
+  assert.equal(harness.module.runtimeOwnerFilter.value, 'user-b')
+  assert.equal(harness.module.runtimeOwnerUid.value, 'user-b')
+
+  cleanupSettings = {
+    configured: true,
+    old_collection_cleanup: { status: 'pending', job_id: 802 },
+  }
+  retryRequests[0].deferred.resolve(dataResponse({ accepted: true }))
+  await retryPending
+  await harness.flush()
+
+  assert.equal(harness.module.actionLoading.value, '')
+  assert.equal(harness.module.runtimeDialogVisible.value, true)
+  assert.equal(harness.module.runtimeDialogAction.value, 'status')
+  assert.equal(harness.module.cleanupRetryId.value, null)
+  const settingsAfterRetry = harness.calls('memoryApi.settings').slice(settingsCountBeforeRetry)
+  assert.ok(settingsAfterRetry.length > 0)
+  assert.equal(settingsAfterRetry.every(request => request.args[0].params.uid === 'user-b'), true)
+  assert.equal(harness.calls('memoryApi.list').at(-1).args[0].uid, 'user-a')
+  assert.equal(harness.messages.some(message => message.type === 'info' && message.value === 'memories.retry_success'), true)
+  assert.equal(harness.confirmCalls.length, 0)
+  assert.equal(harness.calls('memoryApi.cancelJob').length, 0)
+  assert.equal(harness.calls('memoryApi.cancelMigration').length, 0)
+})
+
+test('keeps cleanup retry available after a failed ordinary-user submission', async t => {
+  let settings = {
+    configured: true,
+    old_collection_cleanup: { status: 'failed', job_id: 901 },
+  }
+  const harness = createHarness(t, {
+    apiOverrides: {
+      memoryApi: {
+        settings: () => dataResponse(settings),
+        retryCleanup: (...args) => args[args.length - 1].deferred.promise,
+      },
+    },
+  })
+  await harness.mount()
+  harness.module.openRuntimeDialog('status')
+  await harness.flush()
+
+  const settingsCountBeforeRetry = harness.calls('memoryApi.settings').length
+  const failedPending = harness.module.retryCleanup(harness.module.cleanupRetryId.value)
+  const failedRequest = harness.calls('memoryApi.retryCleanup')[0]
+  failedRequest.deferred.reject(new Error('cleanup retry failed'))
+  await failedPending
+  await harness.flush()
+
+  assert.equal(harness.module.runtimeDialogVisible.value, true)
+  assert.equal(harness.module.runtimeOwnerUid.value, 'user-a')
+  assert.equal(harness.module.actionLoading.value, '')
+  assert.equal(harness.module.cleanupRetryId.value, 901)
+  assert.equal(harness.messages.at(-1).type, 'error')
+  assert.equal(harness.messages.at(-1).value, 'cleanup retry failed')
+  const settingsAfterFailure = harness.calls('memoryApi.settings').slice(settingsCountBeforeRetry)
+  assert.ok(settingsAfterFailure.length > 0)
+  assert.equal(settingsAfterFailure.every(request => request.args[0].params.uid === 'user-a'), true)
+
+  const retryPending = harness.module.retryCleanup(901)
+  const retryRequest = harness.calls('memoryApi.retryCleanup')[1]
+  assert.ok(retryRequest)
+  assert.equal(harness.module.actionLoading.value, 'cleanup-901')
+  settings = {
+    configured: true,
+    old_collection_cleanup: { status: 'pending', job_id: 902 },
+  }
+  retryRequest.deferred.resolve(dataResponse({ accepted: true }))
+  await retryPending
+  await harness.flush()
+
+  assert.equal(harness.module.cleanupRetryId.value, null)
+  assert.equal(harness.module.settings.old_collection_cleanup.status, 'pending')
+  assert.equal(harness.module.actionLoading.value, '')
+  assert.equal(harness.messages.at(-1).value, 'memories.retry_success')
+  assert.equal(harness.module.runtimeDialogVisible.value, true)
+})
+
+test('keeps the latest cleanup status after a stale silent settings response', async t => {
+  for (const staleOutcome of ['success', 'failure']) {
+    const harness = createHarness(t, {
+      apiOverrides: {
+        memoryApi: {
+          settings: (...args) => args[args.length - 1].deferred.promise,
+          retryCleanup: (...args) => args[args.length - 1].deferred.promise,
+        },
+      },
+    })
+    await harness.mount()
+    harness.module.openRuntimeDialog('status')
+    const initialRequest = harness.calls('memoryApi.settings')[0]
+    initialRequest.deferred.resolve(dataResponse({
+      configured: true,
+      old_collection_cleanup: { status: 'failed', job_id: 1001 },
+    }))
+    await harness.flush()
+
+    const oldPending = harness.module.loadSettings(true)
+    const oldRequest = harness.calls('memoryApi.settings')[1]
+    assert.equal(harness.module.settingsLoading.value, false)
+
+    const cleanupPending = harness.module.retryCleanup(harness.module.cleanupRetryId.value)
+    const cleanupRequest = harness.calls('memoryApi.retryCleanup')[0]
+    cleanupRequest.deferred.resolve(dataResponse({ accepted: true }))
+    await cleanupPending
+    await harness.flush()
+
+    const settingsRequests = harness.calls('memoryApi.settings')
+    assert.ok(settingsRequests.length > 2)
+    const newRequest = settingsRequests.at(-1)
+    assert.notEqual(newRequest, oldRequest)
+    assert.equal(newRequest.args[0].params.uid, 'user-a')
+    newRequest.deferred.resolve(dataResponse({
+      configured: true,
+      old_collection_cleanup: { status: 'pending', job_id: 1002 },
+    }))
+    await harness.flush()
+    const settingsAfterRetry = normalize(harness.module.settings)
+    const messagesAfterRetry = normalize(harness.messages)
+
+    if (staleOutcome === 'success') {
+      oldRequest.deferred.resolve(dataResponse({
+        configured: true,
+        old_collection_cleanup: { status: 'failed', job_id: 1001 },
+      }))
+    } else oldRequest.deferred.reject(new Error('stale cleanup status failure'))
+    await oldPending
+    await harness.flush()
+
+    assert.deepEqual(normalize(harness.module.settings), settingsAfterRetry, staleOutcome)
+    assert.equal(harness.module.settings.old_collection_cleanup.status, 'pending', staleOutcome)
+    assert.equal(harness.module.settings.old_collection_cleanup.job_id, 1002, staleOutcome)
+    assert.equal(harness.module.cleanupRetryId.value, null, staleOutcome)
+    assert.equal(harness.module.settingsLoaded.value, true, staleOutcome)
+    assert.equal(harness.module.settingsLoadError.value, '', staleOutcome)
+    assert.equal(harness.module.actionLoading.value, '', staleOutcome)
+    assert.equal(harness.module.runtimeDialogVisible.value, true, staleOutcome)
+    assert.deepEqual(normalize(harness.messages), messagesAfterRetry, staleOutcome)
+  }
+})
+
+test('ignores cleanup retry responses after unmount', async t => {
+  for (const outcome of ['success', 'failure']) {
+    const harness = createHarness(t, {
+      apiOverrides: {
+        memoryApi: {
+          settings: () => dataResponse({
+            configured: true,
+            old_collection_cleanup: { status: 'failed', job_id: 1101 },
+          }),
+          retryCleanup: (...args) => args[args.length - 1].deferred.promise,
+        },
+      },
+    })
+    await harness.mount()
+    harness.module.openRuntimeDialog('status')
+    await harness.flush()
+
+    const pending = harness.module.retryCleanup(harness.module.cleanupRetryId.value)
+    const request = harness.calls('memoryApi.retryCleanup')[0]
+    const snapshot = {
+      settings: normalize(harness.module.settings),
+      runtimeOwnerUid: harness.module.runtimeOwnerUid.value,
+      runtimeDialogVisible: harness.module.runtimeDialogVisible.value,
+      actionLoading: harness.module.actionLoading.value,
+      messages: normalize(harness.messages),
+      requestCount: harness.apiState.requests.length,
+    }
+
+    harness.unmount()
+    if (outcome === 'success') request.deferred.resolve(dataResponse({ accepted: true }))
+    else request.deferred.reject(new Error('late cleanup failure'))
+    await pending
+    await harness.flush()
+
+    assert.deepEqual(normalize(harness.module.settings), snapshot.settings, outcome)
+    assert.equal(harness.module.runtimeOwnerUid.value, snapshot.runtimeOwnerUid, outcome)
+    assert.equal(harness.module.runtimeDialogVisible.value, snapshot.runtimeDialogVisible, outcome)
+    assert.equal(harness.module.actionLoading.value, snapshot.actionLoading, outcome)
+    assert.deepEqual(normalize(harness.messages), snapshot.messages, outcome)
+    assert.equal(harness.apiState.requests.length, snapshot.requestCount, outcome)
+    assert.equal(harness.calls('memoryApi.cancelJob').length, 0, outcome)
+    assert.equal(harness.calls('memoryApi.cancelMigration').length, 0, outcome)
   }
 })
