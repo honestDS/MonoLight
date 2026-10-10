@@ -8,6 +8,11 @@ from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    ERR_MEMORY_JOB_NOT_FOUND,
+    ERR_MEMORY_MIGRATION_NOT_FOUND,
+    ERR_MEMORY_RECORD_NOT_FOUND,
+    ERR_ONLY_ADMIN_ALLOWED,
+    ERR_USER_NOT_FOUND,
     MEMORY_CONTENT_MAX_CHARS,
     MSG_MEMORY_CLEANUP_RETRY_SUBMITTED,
     MSG_MEMORY_CREATED,
@@ -32,6 +37,10 @@ from app.core.constants import (
     MSG_MEMORY_UNPINNED,
     MSG_MEMORY_UPDATED,
 )
+from app.core.crud.account.user import user_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import memory_record_crud, memory_revision_crud
+from app.core.exceptions import ForbiddenException, ResourceNotFoundException
 from app.core.memory import (
     cancel_embedding_migration,
     cancel_job,
@@ -53,6 +62,8 @@ from app.core.memory import (
     unpin_memory,
     update_memory_settings,
 )
+from app.core.memory.errors import MemoryNotFoundError
+from app.core.memory.normalization import _normalize_uid
 from app.core.security import get_current_user
 from app.models.memory import LongTermMemoryMutationOperation, LongTermMemoryMutationStatus, LongTermMemorySource, LongTermMemoryType
 from app.models.user import User
@@ -87,6 +98,61 @@ router = APIRouter(
 )
 
 
+async def _resolve_user_scope(
+    db: AsyncSession,
+    current_user: User,
+    uid: str | None,
+    *,
+    all_users: bool = False,
+) -> str | None:
+    is_superuser = bool(getattr(current_user, "is_superuser", False))
+    if uid is None:
+        return None if all_users and is_superuser else current_user.uid
+
+    normalized_uid = _normalize_uid(uid)
+    if not is_superuser and normalized_uid != current_user.uid:
+        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
+    if is_superuser and normalized_uid != current_user.uid and await user_crud.get_by_uid(db, normalized_uid) is None:
+        raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
+    return normalized_uid
+
+
+async def _resolve_memory_owner(
+    db: AsyncSession,
+    current_user: User,
+    memory_id: int,
+    *,
+    allow_history: bool = False,
+) -> str:
+    if not bool(getattr(current_user, "is_superuser", False)):
+        return current_user.uid
+
+    memory = await memory_record_crud.get_by_id(db, uid=None, memory_id=memory_id)
+    if memory is not None:
+        return memory.uid
+    if allow_history:
+        revision = await memory_revision_crud.get_by_memory_id(db, uid=None, memory_id=memory_id)
+        if revision is not None:
+            return revision.uid
+    raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
+
+
+async def _resolve_job_owner(
+    db: AsyncSession,
+    current_user: User,
+    job_id: int,
+    *,
+    error_key: str = ERR_MEMORY_JOB_NOT_FOUND,
+) -> str:
+    if not bool(getattr(current_user, "is_superuser", False)):
+        return current_user.uid
+
+    job = await memory_job_crud.get_by_id(db, uid=None, job_id=job_id)
+    if job is None:
+        raise MemoryNotFoundError(error_key)
+    return job.uid
+
+
 def _new_dedupe_key(prefix: str = "memory-api") -> str:
     return f"{prefix}:{uuid4().hex}"
 
@@ -95,7 +161,11 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, StrEnum):
         return value.value
     if hasattr(value, "model_dump"):
-        return {key: _json_value(item) for key, item in value.model_dump(exclude={"uid"}).items() if key != "uid"}
+        result = {key: _json_value(item) for key, item in value.model_dump(exclude={"uid"}).items() if key != "uid"}
+        owner_uid = getattr(value, "uid", None)
+        if isinstance(owner_uid, str):
+            result["owner_uid"] = owner_uid
+        return result
     if isinstance(value, dict):
         return {key: _json_value(item) for key, item in value.items() if key != "uid"}
     if isinstance(value, (list, tuple)):
@@ -130,6 +200,7 @@ def _submission_data(result: Any) -> dict[str, Any]:
 async def list_memories_api(
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
+    uid: str | None = Query(default=None, min_length=1, max_length=100),
     keyword: str | None = Query(default=None, max_length=MEMORY_CONTENT_MAX_CHARS),
     memory_type: LongTermMemoryType | None = Query(default=None),
     sort_by: MemorySortField = Query(default="updated_at"),
@@ -137,9 +208,10 @@ async def list_memories_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    scoped_uid = await _resolve_user_scope(db, current_user, uid, all_users=True)
     result = await list_memories(
         db,
-        uid=current_user.uid,
+        uid=scoped_uid,
         skip=(page - 1) * size,
         limit=size,
         keyword=keyword,
@@ -147,7 +219,13 @@ async def list_memories_api(
         sort_by=sort_by,
         sort_order=sort_order,
     )
-    return StandardResponse.success(data=_page_data(result), message=MSG_MEMORY_LIST_SUCCESS)
+    data = _page_data(result)
+    data.meta = {
+        "is_superuser": bool(getattr(current_user, "is_superuser", False)),
+        "current_uid": current_user.uid,
+        "current_username": getattr(current_user, "username", None),
+    }
+    return StandardResponse.success(data=data, message=MSG_MEMORY_LIST_SUCCESS)
 
 
 @router.get("/get", response_model=StandardResponse[MemoryRecordDetailResponse])
@@ -156,7 +234,7 @@ async def get_memory_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await get_memory(db, uid=current_user.uid, memory_id=memory_id)
+    result = await get_memory(db, uid=await _resolve_memory_owner(db, current_user, memory_id), memory_id=memory_id)
     return StandardResponse.success(data=result, message=MSG_MEMORY_DETAIL_SUCCESS)
 
 
@@ -167,12 +245,13 @@ async def get_memory_api(
 )
 async def create_memory_api(
     request: MemoryCreateRequest,
+    uid: str | None = Query(default=None, min_length=1, max_length=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     result = await memory_service.create(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_user_scope(db, current_user, uid),
         dedupe_key=request.dedupe_key or _new_dedupe_key(),
         content=request.content,
         memory_key=request.memory_key,
@@ -196,7 +275,7 @@ async def update_memory_api(
 ):
     result = await memory_service.update(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_memory_owner(db, current_user, request.memory_id),
         dedupe_key=request.dedupe_key or _new_dedupe_key(),
         memory_id=request.memory_id,
         expected_version=request.expected_version,
@@ -219,7 +298,7 @@ async def delete_memory_api(
 ):
     result = await memory_service.delete(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_memory_owner(db, current_user, request.memory_id),
         dedupe_key=request.dedupe_key or _new_dedupe_key(),
         memory_id=request.memory_id,
         expected_version=request.expected_version,
@@ -235,7 +314,7 @@ async def get_memory_job_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await get_job(db, uid=current_user.uid, job_id=job_id)
+    result = await get_job(db, uid=await _resolve_job_owner(db, current_user, job_id), job_id=job_id)
     return StandardResponse.success(data=result, message=MSG_MEMORY_JOB_DETAIL_SUCCESS)
 
 
@@ -243,6 +322,7 @@ async def get_memory_job_api(
 async def list_memory_jobs_api(
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
+    uid: str | None = Query(default=None, min_length=1, max_length=100),
     status: LongTermMemoryMutationStatus | None = Query(default=None),
     operation: LongTermMemoryMutationOperation | None = Query(default=None),
     memory_id: int | None = Query(default=None, ge=1),
@@ -251,7 +331,7 @@ async def list_memory_jobs_api(
 ):
     result = await list_jobs(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_user_scope(db, current_user, uid, all_users=True),
         skip=(page - 1) * size,
         limit=size,
         status=status,
@@ -267,7 +347,7 @@ async def retry_memory_job_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await retry_job(db, uid=current_user.uid, job_id=job_id)
+    result = await retry_job(db, uid=await _resolve_job_owner(db, current_user, job_id), job_id=job_id)
     return StandardResponse.success(data=result, message=MSG_MEMORY_JOB_RETRIED)
 
 
@@ -277,28 +357,30 @@ async def cancel_memory_job_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await cancel_job(db, uid=current_user.uid, job_id=job_id)
+    result = await cancel_job(db, uid=await _resolve_job_owner(db, current_user, job_id), job_id=job_id)
     return StandardResponse.success(data=result, message=MSG_MEMORY_JOB_CANCELLED)
 
 
 @router.get("/settings", response_model=StandardResponse[MemorySettingsResponse])
 async def get_memory_settings_api(
+    uid: str | None = Query(default=None, min_length=1, max_length=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await get_memory_settings(db, uid=current_user.uid)
+    result = await get_memory_settings(db, uid=await _resolve_user_scope(db, current_user, uid))
     return StandardResponse.success(data=result, message=MSG_MEMORY_SETTINGS_SUCCESS)
 
 
 @router.post("/settings", response_model=StandardResponse[MemorySettingsResponse])
 async def update_memory_settings_api(
     request: MemorySettingsUpdateRequest,
+    uid: str | None = Query(default=None, min_length=1, max_length=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     result = await update_memory_settings(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_user_scope(db, current_user, uid),
         auto_organize_enabled=request.auto_organize_enabled,
         organization_channel_id=request.organization_channel_id,
         organization_model_id=request.organization_model_id,
@@ -309,12 +391,13 @@ async def update_memory_settings_api(
 @router.post("/organize", response_model=StandardResponse[MemoryOrganizeResponse])
 async def organize_memories_api(
     request: MemoryOrganizeRequest | None = None,
+    uid: str | None = Query(default=None, min_length=1, max_length=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     result = await submit_memory_organization(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_user_scope(db, current_user, uid),
         dedupe_key=request.dedupe_key if request is not None else None,
     )
     return StandardResponse.success(data=result, message=MSG_MEMORY_ORGANIZE_SUBMITTED)
@@ -323,13 +406,14 @@ async def organize_memories_api(
 @router.post("/reindex", response_model=StandardResponse[MemorySubmissionResponse])
 async def reindex_memories_api(
     request: MemoryMaintenanceRequest | None = None,
+    uid: str | None = Query(default=None, min_length=1, max_length=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     request = request or MemoryMaintenanceRequest()
     result = await submit_memory_reindex(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_user_scope(db, current_user, uid),
         dedupe_key=request.dedupe_key or _new_dedupe_key("memory-reindex"),
         max_attempts=request.max_attempts,
     )
@@ -340,12 +424,13 @@ async def reindex_memories_api(
 async def list_memory_embedding_migrations_api(
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
+    uid: str | None = Query(default=None, min_length=1, max_length=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     result = await list_embedding_migrations(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_user_scope(db, current_user, uid, all_users=True),
         skip=(page - 1) * size,
         limit=size,
     )
@@ -358,7 +443,11 @@ async def get_memory_embedding_migration_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await get_embedding_migration(db, uid=current_user.uid, migration_id=job_id)
+    result = await get_embedding_migration(
+        db,
+        uid=await _resolve_job_owner(db, current_user, job_id, error_key=ERR_MEMORY_MIGRATION_NOT_FOUND),
+        migration_id=job_id,
+    )
     return StandardResponse.success(data=result, message=MSG_MEMORY_MIGRATION_DETAIL_SUCCESS)
 
 
@@ -368,7 +457,11 @@ async def retry_memory_embedding_migration_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await retry_embedding_migration(db, uid=current_user.uid, migration_id=job_id)
+    result = await retry_embedding_migration(
+        db,
+        uid=await _resolve_job_owner(db, current_user, job_id, error_key=ERR_MEMORY_MIGRATION_NOT_FOUND),
+        migration_id=job_id,
+    )
     return StandardResponse.success(data=result, message=MSG_MEMORY_MIGRATION_RETRIED)
 
 
@@ -378,7 +471,11 @@ async def cancel_memory_embedding_migration_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await cancel_embedding_migration(db, uid=current_user.uid, migration_id=job_id)
+    result = await cancel_embedding_migration(
+        db,
+        uid=await _resolve_job_owner(db, current_user, job_id, error_key=ERR_MEMORY_MIGRATION_NOT_FOUND),
+        migration_id=job_id,
+    )
     return StandardResponse.success(data=result, message=MSG_MEMORY_MIGRATION_CANCELLED)
 
 
@@ -392,7 +489,7 @@ async def retry_memory_collection_cleanup_api(
     request = request or MemoryMaintenanceRequest()
     result = await submit_memory_cleanup_retry(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_job_owner(db, current_user, job_id),
         job_id=job_id,
         dedupe_key=request.dedupe_key or _new_dedupe_key(f"memory-cleanup-retry-{job_id}"),
         max_attempts=request.max_attempts,
@@ -410,7 +507,7 @@ async def list_memory_history_api(
 ):
     result = await list_memory_history(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_memory_owner(db, current_user, memory_id, allow_history=True),
         memory_id=memory_id,
         skip=(page - 1) * size,
         limit=size,
@@ -428,7 +525,7 @@ async def resume_current_memory_api(
 ):
     result = await memory_service.resume_current(
         db,
-        uid=current_user.uid,
+        uid=await _resolve_memory_owner(db, current_user, memory_id),
         memory_id=memory_id,
         expected_version=request.expected_version,
     )
@@ -441,7 +538,7 @@ async def pin_memory_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await pin_memory(db, uid=current_user.uid, memory_id=memory_id)
+    result = await pin_memory(db, uid=await _resolve_memory_owner(db, current_user, memory_id), memory_id=memory_id)
     return StandardResponse.success(data=result, message=MSG_MEMORY_PINNED)
 
 
@@ -451,7 +548,7 @@ async def unpin_memory_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await unpin_memory(db, uid=current_user.uid, memory_id=memory_id)
+    result = await unpin_memory(db, uid=await _resolve_memory_owner(db, current_user, memory_id), memory_id=memory_id)
     return StandardResponse.success(data=result, message=MSG_MEMORY_UNPINNED)
 
 

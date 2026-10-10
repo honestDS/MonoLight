@@ -74,11 +74,13 @@ def _input_data(obj_in: Any) -> dict[str, Any]:
 
 def _memory_record_conditions(
     *,
-    uid: str,
+    uid: str | None,
     keyword: str | None = None,
     memory_type: LongTermMemoryType | str | None = None,
 ) -> list[Any]:
-    conditions: list[Any] = [LongTermMemoryRecord.uid == uid]
+    conditions: list[Any] = []
+    if uid is not None:
+        conditions.append(LongTermMemoryRecord.uid == uid)
     if keyword:
         keyword_pattern = f"%{keyword}%"
         conditions.append(

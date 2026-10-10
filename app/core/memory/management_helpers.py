@@ -64,7 +64,11 @@ def _json_value(value: Any) -> Any:
 def _model_view(model: Any) -> dict[str, Any]:
     if model is None:
         return {}
-    return _json_value(model.model_dump(exclude={"uid"}))
+    view = _json_value(model.model_dump(exclude={"uid"}))
+    uid = getattr(model, "uid", None)
+    if isinstance(uid, str):
+        view["owner_uid"] = uid
+    return view
 
 
 def _record_view(record: LongTermMemoryRecord | None) -> dict[str, Any] | None:
@@ -363,6 +367,7 @@ def _migration_view(
     item: dict[str, Any] = {
         "id": job.id,
         "job_id": job.id,
+        "owner_uid": job.uid,
         "revision": revision.revision if revision is not None else None,
         "status": _json_value(job.status),
         "job_status": _json_value(job.status),

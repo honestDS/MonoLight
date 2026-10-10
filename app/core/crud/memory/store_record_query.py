@@ -25,8 +25,11 @@ __all__ = [
 
 
 class CRUDLongTermMemoryRecordQuery:
-    async def get_by_id(self, db: AsyncSession, *, uid: str, memory_id: int) -> LongTermMemoryRecord | None:
-        result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.id == memory_id).execution_options(populate_existing=True))
+    async def get_by_id(self, db: AsyncSession, *, uid: str | None, memory_id: int) -> LongTermMemoryRecord | None:
+        conditions = [LongTermMemoryRecord.id == memory_id]
+        if uid is not None:
+            conditions.append(LongTermMemoryRecord.uid == uid)
+        result = await db.execute(select(LongTermMemoryRecord).where(*conditions).execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def exists_by_global_id(self, db: AsyncSession, *, memory_id: int) -> bool:
@@ -189,7 +192,7 @@ class CRUDLongTermMemoryRecordQuery:
         self,
         db: AsyncSession,
         *,
-        uid: str,
+        uid: str | None,
         skip: int = 0,
         limit: int = 100,
         keyword: str | None = None,
@@ -209,7 +212,7 @@ class CRUDLongTermMemoryRecordQuery:
         self,
         db: AsyncSession,
         *,
-        uid: str,
+        uid: str | None,
         keyword: str | None = None,
         memory_type: LongTermMemoryType | str | None = None,
     ) -> int:

@@ -127,7 +127,7 @@ export const profileApi = {
 export const memoryApi = {
   list: (params, config = {}) => request.get('/memories/list', { ...config, params }),
   get: (id) => request.get('/memories/get', { params: { memory_id: id } }),
-  create: (data) => request.post('/memories/create', data),
+  create: (data, config = {}) => request.post('/memories/create', data, config),
   update: (data) => request.post('/memories/update', data),
   delete: (data) => request.post('/memories/delete', data),
   jobs: (params, config = {}) => request.get('/memories/jobs', { ...config, params }),
@@ -137,14 +137,14 @@ export const memoryApi = {
   history: (id, params) => request.get(`/memories/${id}/history`, { params }),
   resumeCurrent: (id, data) => request.post(`/memories/${id}/resume-current`, data),
   settings: (config = {}) => request.get('/memories/settings', config),
-  reindex: (data) => request.post('/memories/reindex', data),
+  reindex: (data, config = {}) => request.post('/memories/reindex', data, config),
   migrations: (params, config = {}) => request.get('/memories/embedding-migrations', { ...config, params }),
   migration: (id) => request.get(`/memories/embedding-migrations/${id}`),
   retryMigration: (id) => request.post(`/memories/embedding-migrations/${id}/retry`),
   cancelMigration: (id) => request.post(`/memories/embedding-migrations/${id}/cancel`),
   retryCleanup: (id) => request.post(`/memories/collections/${id}/cleanup-retry`),
   updateSettings: (data) => request.post('/memories/settings', data),
-  organize: (data) => request.post('/memories/organize', data),
+  organize: (data, config = {}) => request.post('/memories/organize', data, config),
   pin: (id) => request.post(`/memories/${id}/pin`),
   unpin: (id) => request.post(`/memories/${id}/unpin`)
 }
