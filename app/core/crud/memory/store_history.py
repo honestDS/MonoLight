@@ -29,11 +29,13 @@ class CRUDLongTermMemoryRevision:
         self,
         db: AsyncSession,
         *,
-        uid: str,
+        uid: str | None,
         memory_id: int,
         version: int | None = None,
     ) -> LongTermMemoryRevision | None:
-        stmt = select(LongTermMemoryRevision).where(LongTermMemoryRevision.uid == uid, LongTermMemoryRevision.memory_id == memory_id)
+        stmt = select(LongTermMemoryRevision).where(LongTermMemoryRevision.memory_id == memory_id)
+        if uid is not None:
+            stmt = stmt.where(LongTermMemoryRevision.uid == uid)
         if version is not None:
             stmt = stmt.where(LongTermMemoryRevision.version == version)
         else:

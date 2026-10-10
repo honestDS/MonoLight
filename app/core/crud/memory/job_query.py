@@ -22,8 +22,11 @@ __all__ = [
 
 
 class CRUDLongTermMemoryMutationJobQuery:
-    async def get_by_id(self, db: AsyncSession, *, uid: str, job_id: int) -> LongTermMemoryMutationJob | None:
-        result = await db.execute(select(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.id == job_id).execution_options(populate_existing=True))
+    async def get_by_id(self, db: AsyncSession, *, uid: str | None, job_id: int) -> LongTermMemoryMutationJob | None:
+        statement = select(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.id == job_id)
+        if uid is not None:
+            statement = statement.where(LongTermMemoryMutationJob.uid == uid)
+        result = await db.execute(statement.execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def get_by_dedupe_key(self, db: AsyncSession, *, uid: str, dedupe_key: str) -> LongTermMemoryMutationJob | None:
@@ -45,14 +48,16 @@ class CRUDLongTermMemoryMutationJobQuery:
         self,
         db: AsyncSession,
         *,
-        uid: str,
+        uid: str | None,
         skip: int = 0,
         limit: int = 100,
         status: LongTermMemoryMutationStatus | str | None = None,
         operation: LongTermMemoryMutationOperation | str | None = None,
         memory_id: int | None = None,
     ) -> list[LongTermMemoryMutationJob]:
-        conditions: list[Any] = [LongTermMemoryMutationJob.uid == uid]
+        conditions: list[Any] = []
+        if uid is not None:
+            conditions.append(LongTermMemoryMutationJob.uid == uid)
         if status is not None:
             conditions.append(LongTermMemoryMutationJob.status == status)
         if operation is not None:
@@ -140,7 +145,7 @@ class CRUDLongTermMemoryMutationJobQuery:
         self,
         db: AsyncSession,
         *,
-        uid: str,
+        uid: str | None,
         skip: int = 0,
         limit: int = 100,
         status: LongTermMemoryMutationStatus | str | None = None,
@@ -161,12 +166,14 @@ class CRUDLongTermMemoryMutationJobQuery:
         self,
         db: AsyncSession,
         *,
-        uid: str,
+        uid: str | None,
         status: LongTermMemoryMutationStatus | str | None = None,
         operation: LongTermMemoryMutationOperation | str | None = None,
         memory_id: int | None = None,
     ) -> int:
-        conditions: list[Any] = [LongTermMemoryMutationJob.uid == uid]
+        conditions: list[Any] = []
+        if uid is not None:
+            conditions.append(LongTermMemoryMutationJob.uid == uid)
         if status is not None:
             conditions.append(LongTermMemoryMutationJob.status == status)
         if operation is not None:

@@ -69,7 +69,7 @@ from app.models.memory import (
 async def list_memories(
     db: AsyncSession,
     *,
-    uid: str,
+    uid: str | None,
     skip: int = 0,
     limit: int = 100,
     keyword: str | None = None,
@@ -77,7 +77,7 @@ async def list_memories(
     sort_by: str | None = None,
     sort_order: str = "desc",
 ) -> dict[str, Any]:
-    normalized_uid = _normalize_uid(uid)
+    normalized_uid = _normalize_uid(uid) if uid is not None else None
     normalized_skip, normalized_limit = _page(skip, limit)
     normalized_type = _optional_enum(memory_type, LongTermMemoryType, field="memory_type")
     items = await memory_record_crud.get_page(
@@ -209,14 +209,14 @@ async def list_memory_history(
 async def list_jobs(
     db: AsyncSession,
     *,
-    uid: str,
+    uid: str | None,
     skip: int = 0,
     limit: int = 100,
     status: LongTermMemoryMutationStatus | str | None = None,
     operation: LongTermMemoryMutationOperation | str | None = None,
     memory_id: int | None = None,
 ) -> dict[str, Any]:
-    normalized_uid = _normalize_uid(uid)
+    normalized_uid = _normalize_uid(uid) if uid is not None else None
     normalized_skip, normalized_limit = _page(skip, limit)
     normalized_status = _optional_enum(status, LongTermMemoryMutationStatus, field="status")
     normalized_operation = _optional_enum(operation, LongTermMemoryMutationOperation, field="operation")
@@ -419,11 +419,11 @@ async def cancel_job(db: AsyncSession, *, uid: str, job_id: int) -> dict[str, An
 async def list_embedding_migrations(
     db: AsyncSession,
     *,
-    uid: str,
+    uid: str | None,
     skip: int = 0,
     limit: int = 100,
 ) -> dict[str, Any]:
-    normalized_uid = _normalize_uid(uid)
+    normalized_uid = _normalize_uid(uid) if uid is not None else None
     normalized_skip, normalized_limit = _page(skip, limit)
     jobs = await memory_job_crud.get_page(
         db,
@@ -437,10 +437,10 @@ async def list_embedding_migrations(
         uid=normalized_uid,
         operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
     )
-    store = await memory_store_crud.get_snapshot_by_uid(db, uid=normalized_uid)
     items: list[dict[str, Any]] = []
     for job in jobs:
-        revision = await memory_embedding_revision_crud.get_by_job_id(db, uid=normalized_uid, job_id=job.id)
+        revision = await memory_embedding_revision_crud.get_by_job_id(db, uid=job.uid, job_id=job.id)
+        store = await memory_store_crud.get_snapshot_by_uid(db, uid=job.uid)
         items.append(_migration_view(job, revision, store))
     return {"items": items, "total": total, "skip": normalized_skip, "limit": normalized_limit}
 

@@ -23,6 +23,18 @@
           </Transition>
         </div>
         <div class="heading-actions">
+          <el-select
+            v-if="isSuperuser"
+            v-model="ownerFilter"
+            class="filter-input"
+            filterable
+            :loading="ownersLoading"
+            :placeholder="$t('memories.owner_user')"
+            :aria-label="$t('memories.owner_user')"
+            @change="handleOwnerChange">
+            <el-option :label="$t('memories.all_users')" value="" />
+            <el-option v-for="owner in owners" :key="owner.uid" :label="owner.username" :value="owner.uid" />
+          </el-select>
           <el-button size="small" @click="loadSettings()" :loading="settingsLoading">{{ $t('memories.refresh') }}</el-button>
           <el-button type="success" size="small" @click="organize" :loading="actionLoading === 'organize'" :disabled="organizeBlocked">{{ $t('memories.organize_now') }}</el-button>
           <el-button type="warning" size="small" @click="reindex" :loading="actionLoading === 'reindex'" :disabled="reindexBlocked">{{ $t('memories.reindex') }}</el-button>
@@ -34,14 +46,15 @@
             :loading="actionLoading === `cleanup-${cleanupRetryId}`">
             {{ $t('memories.cleanup_retry') }}
           </el-button>
-          <el-button size="small" @click="settingsExpanded = !settingsExpanded" :aria-expanded="settingsExpanded">
+          <el-button size="small" @click="settingsExpanded = !settingsExpanded" :aria-expanded="settingsExpanded" :disabled="!runtimeOwnerUid">
             {{ settingsExpanded ? $t('memories.collapse_settings') : $t('memories.expand_settings') }}
           </el-button>
         </div>
       </div>
+      <el-alert v-if="memoryScopeReady && isSuperuser && !runtimeOwnerUid" type="info" :closable="false" show-icon :title="$t('memories.select_owner_for_settings')" />
 
       <el-collapse-transition>
-        <div v-show="settingsExpanded" class="settings-content">
+        <div v-show="settingsExpanded && runtimeOwnerUid" class="settings-content">
           <el-alert v-if="!configured" type="info" :closable="false" show-icon :title="$t('memories.no_config')" />
           <div class="settings-grid runtime-settings-grid" v-loading="settingsLoading">
             <div class="config-block">
@@ -120,11 +133,12 @@
             <el-option :label="$t('memories.ascending')" value="asc" />
           </el-select>
           <el-button type="primary" @click="resetAndLoadMemories">{{ $t('common.confirm') }}</el-button>
-          <el-button @click="openEditor()">{{ $t('memories.create') }}</el-button>
+          <el-button @click="openEditor()" :disabled="!memoryScopeReady">{{ $t('memories.create') }}</el-button>
           <el-button @click="loadMemories">{{ $t('memories.refresh') }}</el-button>
         </div>
         <el-table :data="memories" v-loading="memoriesLoading" class="memory-table memory-data-table">
           <el-table-column prop="id" :label="$t('memories.memory_id')" width="88" align="center" />
+          <el-table-column :label="$t('memories.owner_user')" min-width="130" show-overflow-tooltip><template #default="{ row }">{{ ownerLabel(row.owner_uid) }}</template></el-table-column>
           <el-table-column :label="$t('memories.content_preview')" min-width="200"><template #default="{ row }"><div class="content-preview">{{ row.content || '-' }}</div></template></el-table-column>
           <el-table-column :label="$t('memories.type')" width="120" align="center"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column>
           <el-table-column prop="content_token_count" :label="$t('memories.token_count')" width="100" align="center" />
@@ -137,11 +151,17 @@
             <template #default="{ row }">
               <div class="memory-action-buttons">
                 <el-button size="small" type="info" @click="showDetails(row)">{{ $t('memories.view') }}</el-button>
-                <el-button size="small" type="primary" @click="openEditor(row)" :disabled="!canMutateRecord(row)">{{ $t('memories.edit') }}</el-button>
-                <el-button size="small" @click="showHistory(row)">{{ $t('memories.history') }}</el-button>
                 <el-button size="small" type="warning" @click="togglePin(row)" :disabled="!canPin(row)">{{ row.pinned ? $t('memories.unpin') : $t('memories.pin') }}</el-button>
                 <el-button v-if="row.suppress_recall && !row.pending_mutation_job_id" size="small" type="warning" @click="resumeCurrent(row)">{{ $t('memories.resume_current') }}</el-button>
-                <el-button size="small" type="danger" @click="deleteMemory(row)" :disabled="!canMutateRecord(row)">{{ $t('memories.delete') }}</el-button>
+                <el-dropdown trigger="click" popper-class="memory-more-dropdown" @command="handleMemoryMoreAction($event, row)">
+                  <el-button size="small">{{ $t('memories.more') }}</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="history">{{ $t('memories.history') }}</el-dropdown-item>
+                      <el-dropdown-item command="delete" divided class="danger-dropdown-item" :disabled="!canMutateRecord(row)">{{ $t('memories.delete') }}</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </div>
             </template>
           </el-table-column>
@@ -158,6 +178,7 @@
         </div>
         <el-table :data="jobs" v-loading="jobsLoading" row-key="id" :tree-props="{ children: 'childJobs' }" :default-expand-all="false" class="memory-data-table">
           <el-table-column prop="id" :label="$t('memories.job_id')" width="90" align="center" />
+          <el-table-column :label="$t('memories.owner_user')" min-width="130" show-overflow-tooltip><template #default="{ row }">{{ ownerLabel(row.owner_uid) }}</template></el-table-column>
           <el-table-column :label="$t('memories.operation')" width="190"><template #default="{ row }"><div class="job-tree"><el-tag v-if="row.jobLevel" size="small" type="info">{{ $t('memories.job_child') }}</el-tag><el-tag v-else-if="row.child_job_ids?.length" size="small" type="success">{{ $t('memories.job_parent') }}</el-tag><span>{{ operationLabel(row.operation) }}</span></div></template></el-table-column>
           <el-table-column prop="memory_id" :label="$t('memories.memory_id')" width="100" align="center" />
           <el-table-column :label="$t('memories.status')" width="120" align="center"><template #default="{ row }"><el-tag :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag></template></el-table-column>
@@ -186,6 +207,7 @@
           <el-table-column :label="$t('memories.migration_job')" width="110" align="center">
             <template #default="{ row }">{{ migrationId(row) }}</template>
           </el-table-column>
+          <el-table-column :label="$t('memories.owner_user')" min-width="130" show-overflow-tooltip><template #default="{ row }">{{ ownerLabel(row.owner_uid) }}</template></el-table-column>
           <el-table-column :label="$t('memories.status')" width="140" align="center">
             <template #default="{ row }">
               <el-tag :type="statusType(row.status || row.migration_status)">{{ statusText(row.status || row.migration_status) }}</el-tag>
@@ -217,6 +239,12 @@
 
     <el-dialog v-model="editorVisible" :title="editorMode === 'create' ? $t('memories.form_create_title') : $t('memories.form_edit_title')" width="720px" class="standard-dialog" align-center>
       <el-form :model="form" label-width="120px">
+        <el-form-item :label="$t('memories.owner_user')">
+          <el-select v-if="isSuperuser && editorMode === 'create'" v-model="form.owner_uid" filterable clearable :loading="ownersLoading" :placeholder="$t('memories.select_owner')" class="full-width-input">
+            <el-option v-for="owner in owners" :key="owner.uid" :label="owner.username" :value="owner.uid" />
+          </el-select>
+          <span v-else>{{ ownerLabel(form.owner_uid) }}</span>
+        </el-form-item>
         <el-form-item :label="$t('memories.memory_key')" required><el-input v-model="form.memory_key" :placeholder="$t('memories.memory_key_placeholder')" /></el-form-item>
         <el-form-item :label="$t('memories.type')" required><el-select v-model="form.memory_type" class="full-width-input"><el-option v-for="type in memoryTypes" :key="type" :label="typeLabel(type)" :value="type" /></el-select></el-form-item>
         <el-form-item :label="$t('memories.content')" required><el-input v-model="form.content" type="textarea" :rows="9" :placeholder="$t('memories.content_placeholder')" /></el-form-item>
@@ -228,19 +256,23 @@
     </el-dialog>
 
     <el-dialog v-model="detailsVisible" :title="$t('memories.details')" width="760px" class="standard-dialog" align-center>
-      <el-descriptions v-if="selectedMemory" :column="2" border><el-descriptions-item :label="$t('memories.memory_id')">{{ selectedMemory.id }}</el-descriptions-item><el-descriptions-item :label="$t('memories.version')">{{ selectedMemory.version }}</el-descriptions-item><el-descriptions-item :label="$t('memories.memory_key')">{{ selectedMemory.memory_key }}</el-descriptions-item><el-descriptions-item :label="$t('memories.type')">{{ typeLabel(selectedMemory.memory_type) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.source')">{{ sourceLabel(selectedMemory.source) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.token_count')">{{ selectedMemory.content_token_count ?? '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.pinned')">{{ selectedMemory.pinned ? $t('memories.pinned_yes') : $t('memories.pinned_no') }}</el-descriptions-item><el-descriptions-item :label="$t('memories.last_recalled_at')">{{ formatTime(selectedMemory.last_recalled_at) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.current_status')">{{ recordStatus(selectedMemory) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.content')" :span="2"><pre class="memory-content">{{ selectedMemory.content || '-' }}</pre></el-descriptions-item><el-descriptions-item :label="$t('memories.change_evidence')" :span="2"><pre class="memory-content">{{ selectedMemory.change_evidence || '-' }}</pre></el-descriptions-item></el-descriptions>
-      <template #footer><el-button @click="detailsVisible = false">{{ $t('memories.close') }}</el-button></template>
+      <el-descriptions v-if="selectedMemory" :column="2" border><el-descriptions-item :label="$t('memories.memory_id')">{{ selectedMemory.id }}</el-descriptions-item><el-descriptions-item :label="$t('memories.owner_user')">{{ ownerLabel(selectedMemory.owner_uid) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.version')">{{ selectedMemory.version }}</el-descriptions-item><el-descriptions-item :label="$t('memories.memory_key')">{{ selectedMemory.memory_key }}</el-descriptions-item><el-descriptions-item :label="$t('memories.type')">{{ typeLabel(selectedMemory.memory_type) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.source')">{{ sourceLabel(selectedMemory.source) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.token_count')">{{ selectedMemory.content_token_count ?? '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.pinned')">{{ selectedMemory.pinned ? $t('memories.pinned_yes') : $t('memories.pinned_no') }}</el-descriptions-item><el-descriptions-item :label="$t('memories.last_recalled_at')">{{ formatTime(selectedMemory.last_recalled_at) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.current_status')">{{ recordStatus(selectedMemory) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.content')" :span="2"><pre class="memory-content">{{ selectedMemory.content || '-' }}</pre></el-descriptions-item><el-descriptions-item :label="$t('memories.change_evidence')" :span="2"><pre class="memory-content">{{ selectedMemory.change_evidence || '-' }}</pre></el-descriptions-item></el-descriptions>
+      <template #footer>
+        <el-button @click="detailsVisible = false">{{ $t('memories.close') }}</el-button>
+        <el-button type="primary" @click="editSelectedMemory" :disabled="!selectedMemory || !canMutateRecord(selectedMemory)">{{ $t('memories.edit') }}</el-button>
+      </template>
     </el-dialog>
 
-    <el-dialog v-model="historyVisible" :title="$t('memories.history_title', { key: selectedMemory?.memory_key || '' })" width="900px" class="standard-dialog" align-center>
+    <el-dialog v-model="historyVisible" :title="$t('memories.history_title', { key: selectedHistoryMemory?.memory_key || '' })" width="900px" class="standard-dialog" align-center>
+      <p class="help-text">{{ $t('memories.owner_user') }}: {{ ownerLabel(selectedHistoryMemory?.owner_uid) }}</p>
       <el-alert type="info" :closable="false" show-icon :title="$t('memories.deleted_history_read_only')" />
       <el-table :data="history" v-loading="historyLoading"><el-table-column prop="version" :label="$t('memories.revision_version')" width="100" align="center" /><el-table-column prop="memory_type" :label="$t('memories.type')" width="120"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column><el-table-column prop="content_token_count" :label="$t('memories.token_count')" width="100" align="center" /><el-table-column prop="content" :label="$t('memories.content')" min-width="350" show-overflow-tooltip /><el-table-column prop="published_at" :label="$t('memories.published_at')" width="180"><template #default="{ row }">{{ formatTime(row.published_at || row.created_at) }}</template></el-table-column></el-table>
       <el-empty v-if="!historyLoading && !history.length" :description="$t('memories.no_history')" />
     </el-dialog>
 
-    <el-dialog v-model="jobVisible" :title="$t('memories.jobs')" width="820px" class="standard-dialog" align-center><el-descriptions v-if="selectedJob" :column="2" border><el-descriptions-item :label="$t('memories.job_id')">{{ selectedJob.id }}</el-descriptions-item><el-descriptions-item :label="$t('memories.operation')">{{ operationLabel(selectedJob.operation) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.status')">{{ statusText(selectedJob.status) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.memory_id')">{{ selectedJob.memory_id || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.parent_job_id')">{{ selectedJob.parent_job_id || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.children')">{{ selectedJob.child_job_ids?.join(', ') || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.snapshot_count')">{{ selectedJob.snapshot_count ?? '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.attempt')">{{ selectedJob.attempt_count }} / {{ selectedJob.max_attempts }}</el-descriptions-item><el-descriptions-item :label="$t('memories.organization_counts')" :span="2">{{ jobCountsText(selectedJob) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.token_budget')" :span="2">{{ tokenBudgetText(selectedJob.token_budget) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.context_error')" :span="2">{{ selectedJob.context_error ? JSON.stringify(selectedJob.context_error) : '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.error')" :span="2">{{ jobError(selectedJob) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.payload')" :span="2"><pre class="memory-content">{{ JSON.stringify(selectedJob.payload || {}, null, 2) }}</pre></el-descriptions-item><el-descriptions-item :label="$t('memories.result')" :span="2"><pre class="memory-content">{{ JSON.stringify(selectedJob.result || {}, null, 2) }}</pre></el-descriptions-item></el-descriptions><template #footer><el-button @click="jobVisible = false">{{ $t('memories.close') }}</el-button></template></el-dialog>
+    <el-dialog v-model="jobVisible" :title="$t('memories.jobs')" width="820px" class="standard-dialog" align-center><el-descriptions v-if="selectedJob" :column="2" border><el-descriptions-item :label="$t('memories.job_id')">{{ selectedJob.id }}</el-descriptions-item><el-descriptions-item :label="$t('memories.owner_user')">{{ ownerLabel(selectedJob.owner_uid) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.operation')">{{ operationLabel(selectedJob.operation) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.status')">{{ statusText(selectedJob.status) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.memory_id')">{{ selectedJob.memory_id || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.parent_job_id')">{{ selectedJob.parent_job_id || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.children')">{{ selectedJob.child_job_ids?.join(', ') || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.snapshot_count')">{{ selectedJob.snapshot_count ?? '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.attempt')">{{ selectedJob.attempt_count }} / {{ selectedJob.max_attempts }}</el-descriptions-item><el-descriptions-item :label="$t('memories.organization_counts')" :span="2">{{ jobCountsText(selectedJob) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.token_budget')" :span="2">{{ tokenBudgetText(selectedJob.token_budget) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.context_error')" :span="2">{{ selectedJob.context_error ? JSON.stringify(selectedJob.context_error) : '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.error')" :span="2">{{ jobError(selectedJob) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.payload')" :span="2"><pre class="memory-content">{{ JSON.stringify(selectedJob.payload || {}, null, 2) }}</pre></el-descriptions-item><el-descriptions-item :label="$t('memories.result')" :span="2"><pre class="memory-content">{{ JSON.stringify(selectedJob.result || {}, null, 2) }}</pre></el-descriptions-item></el-descriptions><template #footer><el-button @click="jobVisible = false">{{ $t('memories.close') }}</el-button></template></el-dialog>
 
-    <el-dialog v-model="migrationVisible" :title="$t('memories.migration_detail')" width="780px" class="standard-dialog" align-center><el-descriptions v-if="selectedMigration" :column="2" border><el-descriptions-item :label="$t('memories.migration_job')">{{ migrationId(selectedMigration) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.status')">{{ statusText(selectedMigration.status || selectedMigration.migration_status) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.target')" :span="2">{{ migrationTarget(selectedMigration) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.snapshot')">{{ migrationProgress(selectedMigration, 'migration_cursor') }} / {{ migrationProgress(selectedMigration, 'migration_snapshot_boundary') }}</el-descriptions-item><el-descriptions-item :label="$t('memories.delta')">{{ migrationProgress(selectedMigration, 'migration_delta_applied_watermark') }} / {{ migrationProgress(selectedMigration, 'migration_delta_high_watermark') }}</el-descriptions-item><el-descriptions-item :label="$t('memories.error')" :span="2">{{ selectedMigration.error || selectedMigration.migration_error || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.cleanup_status')">{{ statusText(selectedMigration.old_collection_cleanup_status) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.collection')">{{ selectedMigration.old_collection_name || '-' }}</el-descriptions-item></el-descriptions><template #footer><el-button @click="migrationVisible = false">{{ $t('memories.close') }}</el-button></template></el-dialog>
+    <el-dialog v-model="migrationVisible" :title="$t('memories.migration_detail')" width="780px" class="standard-dialog" align-center><el-descriptions v-if="selectedMigration" :column="2" border><el-descriptions-item :label="$t('memories.migration_job')">{{ migrationId(selectedMigration) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.owner_user')">{{ ownerLabel(selectedMigration.owner_uid) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.status')">{{ statusText(selectedMigration.status || selectedMigration.migration_status) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.target')" :span="2">{{ migrationTarget(selectedMigration) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.snapshot')">{{ migrationProgress(selectedMigration, 'migration_cursor') }} / {{ migrationProgress(selectedMigration, 'migration_snapshot_boundary') }}</el-descriptions-item><el-descriptions-item :label="$t('memories.delta')">{{ migrationProgress(selectedMigration, 'migration_delta_applied_watermark') }} / {{ migrationProgress(selectedMigration, 'migration_delta_high_watermark') }}</el-descriptions-item><el-descriptions-item :label="$t('memories.error')" :span="2">{{ selectedMigration.error || selectedMigration.migration_error || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.cleanup_status')">{{ statusText(selectedMigration.old_collection_cleanup_status) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.collection')">{{ selectedMigration.old_collection_name || '-' }}</el-descriptions-item></el-descriptions><template #footer><el-button @click="migrationVisible = false">{{ $t('memories.close') }}</el-button></template></el-dialog>
   </div>
 </template>
 
@@ -248,7 +280,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { channelApi, memoryApi } from '../api'
+import { adminApi, channelApi, memoryApi } from '../api'
 import { MEMORY_JOB_OPERATIONS, MEMORY_JOB_STATUSES, MEMORY_TYPES } from '../constants'
 import StatusTag from '../components/StatusTag.vue'
 import {
@@ -271,6 +303,14 @@ const jobOperations = MEMORY_JOB_OPERATIONS
 const activeTab = ref('memories')
 const settingsExpanded = ref(false)
 const settings = reactive({})
+const isSuperuser = ref(false)
+const currentUid = ref(null)
+const currentUsername = ref('')
+const owners = ref([])
+const ownersLoading = ref(false)
+const ownersLoaded = ref(false)
+const memoryScopeReady = ref(false)
+const ownerFilter = ref('')
 const settingsLoading = ref(false)
 const actionLoading = ref('')
 const channels = ref([])
@@ -295,6 +335,7 @@ const submitting = ref(false)
 const detailsVisible = ref(false)
 const selectedMemory = ref(null)
 const historyVisible = ref(false)
+const selectedHistoryMemory = ref(null)
 const historyLoading = ref(false)
 const history = ref([])
 const jobVisible = ref(false)
@@ -309,15 +350,19 @@ const memoriesRequestTracker = createLatestRequestTracker()
 const jobsRequestTracker = createLatestRequestTracker()
 const migrationsRequestTracker = createLatestRequestTracker()
 const historyRequestTracker = createLatestRequestTracker()
+const detailsRequestTracker = createLatestRequestTracker()
+const jobDetailsRequestTracker = createLatestRequestTracker()
+const migrationDetailsRequestTracker = createLatestRequestTracker()
+const editorRequestTracker = createLatestRequestTracker()
 const filters = reactive({ keyword: '', memory_type: '', sort_by: 'updated_at', sort_order: 'desc' })
 const jobFilters = reactive({ status: '', operation: '', memory_id: '' })
-const form = reactive({ id: null, version: 0, memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
+const form = reactive({ id: null, version: 0, owner_uid: '', memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
 
 const unwrap = (response) => response?.data?.data ?? response?.data ?? {}
 const pageData = (response) => {
   const data = unwrap(response)
-  if (Array.isArray(data)) return { items: data, total: data.length }
-  return { items: data.items || [], total: Number(data.total || 0) }
+  if (Array.isArray(data)) return { items: data, total: data.length, meta: null }
+  return { items: data.items || [], total: Number(data.total || 0), meta: data.meta ?? null }
 }
 const formatTime = (value) => value ? new Date(value).toLocaleString() : '-'
 const setting = (key) => settings.store?.[key] ?? settings[key] ?? '-'
@@ -327,6 +372,19 @@ const channelName = (channelId) => {
   const channel = channels.value.find(item => String(item.id) === String(channelId))
   return typeof channel?.name === 'string' && channel.name.trim() ? channel.name : '-'
 }
+const ownerLabel = (uid) => {
+  if (typeof uid !== 'string' || !uid.trim()) return t('memories.owner_unknown')
+  const normalizedUid = uid.trim()
+  const owner = owners.value.find(item => String(item.uid) === normalizedUid)
+  const ownerUsername = typeof owner?.username === 'string' ? owner.username.trim() : ''
+  if (ownerUsername) return ownerUsername
+  if (String(currentUid.value || '') === normalizedUid) {
+    const currentUsernameValue = typeof currentUsername.value === 'string' ? currentUsername.value.trim() : ''
+    if (currentUsernameValue) return currentUsernameValue
+  }
+  return normalizedUid
+}
+const runtimeOwnerUid = computed(() => isSuperuser.value ? (ownerFilter.value || null) : currentUid.value)
 const numericSetting = (key, fallback) => {
   const value = Number(setting(key))
   return Number.isFinite(value) ? value : fallback
@@ -336,8 +394,8 @@ const contentMaxTokens = computed(() => settings.contentMaxTokens ?? Number(sett
 const activeRecordCount = computed(() => settings.activeRecordCount ?? Number(settings.capacity?.active_record_count ?? numericSetting('active_record_count', 0)))
 const maxActiveRecords = computed(() => settings.maxActiveRecords ?? Number(settings.capacity?.max_active_records ?? numericSetting('max_active_records', 50)))
 const capacityOverLimit = computed(() => ['over_limit', 'full'].includes(settings.capacity?.status) || activeRecordCount.value > maxActiveRecords.value)
-const organizeBlocked = computed(() => Boolean(settings.blocking?.organize?.blocked))
-const reindexBlocked = computed(() => !configured.value || Boolean(settings.blocking?.maintenance?.blocked))
+const organizeBlocked = computed(() => !runtimeOwnerUid.value || settingsLoading.value || !configured.value || Boolean(settings.blocking?.organize?.blocked))
+const reindexBlocked = computed(() => !runtimeOwnerUid.value || settingsLoading.value || !configured.value || Boolean(settings.blocking?.maintenance?.blocked))
 const cleanupRetryId = computed(() => {
   const status = settings.old_collection_cleanup?.status ?? settings.store?.old_collection_cleanup_status
   if (status !== 'failed') return null
@@ -418,9 +476,18 @@ const loadSettings = async (silent = false) => {
   const token = pollingTaskManager.begin('settings')
   if (!token) return
   const requestSeq = settingsRequestTracker.begin()
+  const ownerUid = runtimeOwnerUid.value
+  if (!ownerUid) {
+    if (pollingTaskManager.isCurrent(token) && settingsRequestTracker.isCurrent(requestSeq)) {
+      Object.keys(settings).forEach(key => delete settings[key])
+      settingsLoading.value = false
+    }
+    pollingTaskManager.finish(token)
+    return
+  }
   if (pollingTaskManager.isCurrent(token)) settingsLoading.value = !silent
   try {
-    const data = unwrap(await memoryApi.settings({ signal: token.signal }))
+    const data = unwrap(await memoryApi.settings({ signal: token.signal, params: { uid: ownerUid } }))
     if (!pollingTaskManager.isCurrent(token) || !settingsRequestTracker.isCurrent(requestSeq)) return
     applySettings(data)
   } catch (error) {
@@ -428,6 +495,36 @@ const loadSettings = async (silent = false) => {
     if (settingsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
   } finally {
     if (pollingTaskManager.isCurrent(token) && settingsRequestTracker.isCurrent(requestSeq)) settingsLoading.value = false
+    pollingTaskManager.finish(token)
+  }
+}
+
+const loadOwners = async () => {
+  if (!isSuperuser.value || ownersLoading.value) return
+  const token = pollingTaskManager.begin('owners')
+  if (!token) return
+  if (pollingTaskManager.isCurrent(token)) ownersLoading.value = true
+  try {
+    const allOwners = []
+    let page = 1
+    let total = 0
+    while (true) {
+      if (!pollingTaskManager.isCurrent(token) || !isSuperuser.value) return
+      const data = pageData(await adminApi.userList({ page, size: 100 }))
+      if (!pollingTaskManager.isCurrent(token) || !isSuperuser.value) return
+      allOwners.push(...data.items)
+      total = data.total
+      if (!data.items.length || allOwners.length >= total || data.items.length < 100) break
+      page += 1
+    }
+    if (!pollingTaskManager.isCurrent(token) || !isSuperuser.value) return
+    owners.value = allOwners
+    ownersLoaded.value = true
+  } catch (error) {
+    if (token.signal.aborted || !pollingTaskManager.isCurrent(token) || !isSuperuser.value) return
+    ElMessage.error(error.message || t('memories.load_failed'))
+  } finally {
+    if (pollingTaskManager.isCurrent(token)) ownersLoading.value = false
     pollingTaskManager.finish(token)
   }
 }
@@ -454,8 +551,20 @@ const loadMemories = async (silent = false) => {
   const requestSeq = memoriesRequestTracker.begin()
   if (pollingTaskManager.isCurrent(token)) memoriesLoading.value = !silent
   try {
-    const data = pageData(await memoryApi.list({ page: memoryPage.value, size: memoryPageSize.value, keyword: filters.keyword || undefined, memory_type: filters.memory_type || undefined, sort_by: filters.sort_by, sort_order: filters.sort_order }, { signal: token.signal }))
+    const data = pageData(await memoryApi.list({ page: memoryPage.value, size: memoryPageSize.value, keyword: filters.keyword || undefined, memory_type: filters.memory_type || undefined, sort_by: filters.sort_by, sort_order: filters.sort_order, uid: isSuperuser.value ? ownerFilter.value || undefined : undefined }, { signal: token.signal }))
     if (!pollingTaskManager.isCurrent(token) || !memoriesRequestTracker.isCurrent(requestSeq)) return
+    const meta = data.meta || {}
+    isSuperuser.value = Boolean(meta.is_superuser)
+    currentUid.value = meta.current_uid ?? null
+    currentUsername.value = meta.current_username ?? ''
+    memoryScopeReady.value = true
+    if (isSuperuser.value) {
+      if (!ownersLoaded.value && !ownersLoading.value) loadOwners()
+    } else {
+      owners.value = []
+      ownerFilter.value = ''
+      ownersLoaded.value = false
+    }
     memories.value = data.items
     memoryTotal.value = data.total
   } catch (error) {
@@ -473,7 +582,7 @@ const loadJobs = async (silent = false) => {
   const requestSeq = jobsRequestTracker.begin()
   if (pollingTaskManager.isCurrent(token)) jobsLoading.value = !silent
   try {
-    const data = pageData(await memoryApi.jobs({ page: jobPage.value, size: jobPageSize.value, status: jobFilters.status || undefined, operation: jobFilters.operation || undefined, memory_id: jobFilters.memory_id || undefined }, { signal: token.signal }))
+    const data = pageData(await memoryApi.jobs({ page: jobPage.value, size: jobPageSize.value, status: jobFilters.status || undefined, operation: jobFilters.operation || undefined, memory_id: jobFilters.memory_id || undefined, uid: isSuperuser.value ? ownerFilter.value || undefined : undefined }, { signal: token.signal }))
     if (!pollingTaskManager.isCurrent(token) || !jobsRequestTracker.isCurrent(requestSeq)) return
     jobs.value = decorateMemoryJobs(data.items)
     jobTotal.value = data.total
@@ -492,7 +601,7 @@ const loadMigrations = async (silent = false) => {
   const requestSeq = migrationsRequestTracker.begin()
   if (pollingTaskManager.isCurrent(token)) migrationsLoading.value = !silent
   try {
-    const data = pageData(await memoryApi.migrations({ page: migrationPage.value, size: migrationPageSize.value }, { signal: token.signal }))
+    const data = pageData(await memoryApi.migrations({ page: migrationPage.value, size: migrationPageSize.value, uid: isSuperuser.value ? ownerFilter.value || undefined : undefined }, { signal: token.signal }))
     if (!pollingTaskManager.isCurrent(token) || !migrationsRequestTracker.isCurrent(requestSeq)) return
     migrations.value = data.items
     migrationTotal.value = data.total
@@ -515,6 +624,48 @@ const refreshAll = async () => {
   if (activeTab.value === 'migrations') requests.push(loadMigrations(true))
   await Promise.all(requests)
 }
+const handleOwnerChange = () => {
+  pollingTaskManager.cancel('settings')
+  pollingTaskManager.cancel('memories')
+  pollingTaskManager.cancel('jobs')
+  pollingTaskManager.cancel('migrations')
+  settingsRequestTracker.invalidate()
+  memoriesRequestTracker.invalidate()
+  jobsRequestTracker.invalidate()
+  migrationsRequestTracker.invalidate()
+  historyRequestTracker.invalidate()
+  detailsRequestTracker.invalidate()
+  jobDetailsRequestTracker.invalidate()
+  migrationDetailsRequestTracker.invalidate()
+  editorRequestTracker.invalidate()
+  editorVisible.value = false
+  detailsVisible.value = false
+  historyVisible.value = false
+  jobVisible.value = false
+  migrationVisible.value = false
+  selectedMemory.value = null
+  selectedJob.value = null
+  selectedMigration.value = null
+  selectedHistoryMemory.value = null
+  history.value = []
+  Object.keys(settings).forEach(key => delete settings[key])
+  memories.value = []
+  memoryTotal.value = 0
+  jobs.value = []
+  jobTotal.value = 0
+  migrations.value = []
+  migrationTotal.value = 0
+  memoryPage.value = 1
+  jobPage.value = 1
+  migrationPage.value = 1
+  settingsLoading.value = false
+  memoriesLoading.value = false
+  jobsLoading.value = false
+  migrationsLoading.value = false
+  historyLoading.value = false
+  submitting.value = false
+  refreshAll()
+}
 const scheduleRefresh = () => {
   if (pollingStopped) return
   pollTimer.value = window.setTimeout(async () => {
@@ -529,24 +680,62 @@ const scheduleRefresh = () => {
 }
 
 const organize = async () => {
+  if (organizeBlocked.value || actionLoading.value) return
   actionLoading.value = 'organize'
-  try { await memoryApi.organize(buildOrganizePayload(newDedupeKey())); ElMessage.info(t('memories.organize_submitted')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' }
+  try { await memoryApi.organize(buildOrganizePayload(newDedupeKey()), { params: { uid: runtimeOwnerUid.value } }); ElMessage.info(t('memories.organize_submitted')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' }
 }
 
-const resetForm = () => Object.assign(form, { id: null, version: 0, memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
-const openEditor = (row = null) => { editorMode.value = row ? 'edit' : 'create'; resetForm(); if (row) Object.assign(form, { id: row.id, version: row.version, memory_key: row.memory_key || '', memory_type: row.memory_type || 'fact', content: row.content || '', change_evidence: row.change_evidence || '', suppress_current: false }); editorVisible.value = true }
+const resetForm = () => Object.assign(form, { id: null, version: 0, owner_uid: '', memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
+const openEditor = (row = null) => {
+  editorRequestTracker.invalidate()
+  submitting.value = false
+  editorMode.value = row ? 'edit' : 'create'
+  resetForm()
+  if (row) {
+    Object.assign(form, { id: row.id, version: row.version, owner_uid: row.owner_uid, memory_key: row.memory_key || '', memory_type: row.memory_type || 'fact', content: row.content || '', change_evidence: row.change_evidence || '', suppress_current: false })
+  } else {
+    form.owner_uid = isSuperuser.value ? (ownerFilter.value || currentUid.value || '') : (currentUid.value || '')
+  }
+  editorVisible.value = true
+}
+const editSelectedMemory = () => {
+  const row = selectedMemory.value
+  if (!detailsVisible.value || !row || !canMutateRecord(row)) return
+  detailsRequestTracker.invalidate()
+  detailsVisible.value = false
+  openEditor(row)
+}
 const submitMemory = async () => {
+  if (submitting.value || !editorVisible.value || !memoryScopeReady.value || pollingStopped) return
+  if (editorMode.value === 'create' && isSuperuser.value && !form.owner_uid) return ElMessage.warning(t('memories.select_owner'))
   if (!form.memory_key.trim() || !form.content.trim()) return ElMessage.warning(t('memories.required'))
   if (contentTooLong.value) return ElMessage.warning(t('memories.token_limit_exceeded'))
+  const requestSeq = editorRequestTracker.begin()
   submitting.value = true
   try {
     const payload = { dedupe_key: newDedupeKey(), content: form.content, memory_key: form.memory_key, memory_type: form.memory_type, change_evidence: form.change_evidence || null }
-    if (editorMode.value === 'create') await memoryApi.create(payload)
+    if (editorMode.value === 'create') await memoryApi.create(payload, { params: { uid: isSuperuser.value ? form.owner_uid : currentUid.value } })
     else await memoryApi.update({ ...payload, memory_id: form.id, expected_version: form.version, suppress_current: form.suppress_current })
-    ElMessage.info(t('memories.accepted_processing')); editorVisible.value = false; refreshAll()
-  } catch (error) { ElMessage.error(error.message || t('memories.save_failed')) } finally { submitting.value = false }
+    if (editorRequestTracker.isCurrent(requestSeq) && editorVisible.value) {
+      ElMessage.info(t('memories.accepted_processing')); editorVisible.value = false; refreshAll()
+    }
+  } catch (error) {
+    if (editorRequestTracker.isCurrent(requestSeq) && editorVisible.value) ElMessage.error(error.message || t('memories.save_failed'))
+  } finally {
+    if (editorRequestTracker.isCurrent(requestSeq)) submitting.value = false
+  }
 }
-const showDetails = async (row) => { try { selectedMemory.value = unwrap(await memoryApi.get(row.id)) || row; detailsVisible.value = true } catch (error) { ElMessage.error(error.message || t('memories.load_failed')) } }
+const showDetails = async (row) => {
+  const requestSeq = detailsRequestTracker.begin()
+  try {
+    const selected = unwrap(await memoryApi.get(row.id)) || row
+    if (!detailsRequestTracker.isCurrent(requestSeq)) return
+    selectedMemory.value = selected
+    detailsVisible.value = true
+  } catch (error) {
+    if (detailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.load_failed'))
+  }
+}
 const deleteMemory = async (row) => {
   try {
     await ElMessageBox.confirm(t('memories.delete_confirm'), t('common.warning'), { type: 'warning', confirmButtonText: t('common.confirm'), cancelButtonText: t('common.cancel') })
@@ -556,7 +745,7 @@ const deleteMemory = async (row) => {
 const togglePin = async (row) => { try { if (row.pinned) await memoryApi.unpin(row.id); else await memoryApi.pin(row.id); ElMessage.info(t('memories.operation_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
 const loadHistory = async (memoryId, memory) => {
   const requestSeq = historyRequestTracker.begin()
-  selectedMemory.value = memory
+  selectedHistoryMemory.value = memory
   history.value = []
   historyVisible.value = true
   historyLoading.value = true
@@ -571,26 +760,55 @@ const loadHistory = async (memoryId, memory) => {
   }
 }
 const showHistory = (row) => loadHistory(row.id, row)
+const handleMemoryMoreAction = (command, row) => {
+  if (command === 'history') {
+    showHistory(row)
+    return
+  }
+  if (command === 'delete' && canMutateRecord(row)) deleteMemory(row)
+}
 const isRecordSnapshot = (value) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0
 const deletedRecordSnapshot = (row) => { const resultSnapshot = row?.result?.record_snapshot; if (isRecordSnapshot(resultSnapshot)) return resultSnapshot; const payloadSnapshot = row?.payload?.record_snapshot; return isRecordSnapshot(payloadSnapshot) ? payloadSnapshot : null }
 const canShowDeletedHistory = (row) => row.operation === 'delete_cleanup' && Boolean(row.memory_id && deletedRecordSnapshot(row))
-const showDeletedHistory = (row) => { const snapshot = deletedRecordSnapshot(row); if (!snapshot || !row.memory_id) return; loadHistory(row.memory_id, { ...snapshot, id: row.memory_id, memory_key: snapshot.memory_key || '', version: snapshot.version }) }
+const showDeletedHistory = (row) => { const snapshot = deletedRecordSnapshot(row); if (!snapshot || !row.memory_id) return; loadHistory(row.memory_id, { ...snapshot, id: row.memory_id, memory_key: snapshot.memory_key || '', version: snapshot.version, owner_uid: row.owner_uid }) }
 const resumeCurrent = async (row) => { try { await memoryApi.resumeCurrent(row.id, { expected_version: row.version }); ElMessage.info(t('memories.operation_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
 const canRetry = (row) => { if (row.operation === 'restore') return false; return row.operation === 'delete_cleanup' ? row.status === 'failed' : ['failed', 'cancelled'].includes(row.status) }
 const canCancel = (row) => !['succeeded', 'failed', 'cancelled'].includes(row.status) && row.operation !== 'delete_cleanup'
 const retryJob = async (row) => { try { await ElMessageBox.confirm(t('memories.retry_confirm'), t('common.warning'), { type: 'warning' }); await memoryApi.retryJob(row.id); ElMessage.info(t('memories.retry_success')); refreshAll() } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed')) } }
 const cancelJob = async (row) => { try { await ElMessageBox.confirm(t('memories.cancel_confirm'), t('common.warning'), { type: 'warning' }); await memoryApi.cancelJob(row.id); ElMessage.info(t('memories.cancel_success')); refreshAll() } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed')) } }
-const showJob = async (row) => { try { selectedJob.value = unwrap(await memoryApi.job(row.id)) || row; jobVisible.value = true } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
-const reindex = async () => { actionLoading.value = 'reindex'; try { await memoryApi.reindex({ dedupe_key: newDedupeKey() }); ElMessage.info(t('memories.accepted_processing')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' } }
+const showJob = async (row) => {
+  const requestSeq = jobDetailsRequestTracker.begin()
+  try {
+    const selected = unwrap(await memoryApi.job(row.id)) || row
+    if (!jobDetailsRequestTracker.isCurrent(requestSeq)) return
+    selectedJob.value = selected
+    jobVisible.value = true
+  } catch (error) {
+    if (jobDetailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
+  }
+}
+const reindex = async () => { if (reindexBlocked.value || actionLoading.value) return; actionLoading.value = 'reindex'; try { await memoryApi.reindex({ dedupe_key: newDedupeKey() }, { params: { uid: runtimeOwnerUid.value } }); ElMessage.info(t('memories.accepted_processing')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' } }
 const canRetryMigration = (row) => ['failed', 'cancelled'].includes(row.status || row.migration_status)
 const canCancelMigration = (row) => ['preparing', 'building', 'catching_up', 'validating'].includes(row.status || row.migration_status)
 const retryMigration = async (row) => { try { await memoryApi.retryMigration(migrationId(row)); ElMessage.info(t('memories.migration_retry_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
 const cancelMigration = async (row) => { try { await memoryApi.cancelMigration(migrationId(row)); ElMessage.info(t('memories.migration_cancel_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
 const retryCleanup = async (id) => { actionLoading.value = `cleanup-${id}`; try { await memoryApi.retryCleanup(id); ElMessage.info(t('memories.retry_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' } }
-const showMigration = async (row) => { try { selectedMigration.value = unwrap(await memoryApi.migration(migrationId(row))) || row; migrationVisible.value = true } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
+const showMigration = async (row) => {
+  const requestSeq = migrationDetailsRequestTracker.begin()
+  try {
+    const selected = unwrap(await memoryApi.migration(migrationId(row))) || row
+    if (!migrationDetailsRequestTracker.isCurrent(requestSeq)) return
+    selectedMigration.value = selected
+    migrationVisible.value = true
+  } catch (error) {
+    if (migrationDetailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
+  }
+}
 
 onMounted(async () => {
-  await Promise.all([loadSettings(), loadChannels(), loadMemories()])
+  await Promise.all([loadMemories(), loadChannels()])
+  if (pollingStopped) return
+  await loadSettings()
   if (!pollingStopped) scheduleRefresh()
 })
 onBeforeUnmount(() => {
@@ -602,6 +820,10 @@ onBeforeUnmount(() => {
   jobsRequestTracker.invalidate()
   migrationsRequestTracker.invalidate()
   historyRequestTracker.invalidate()
+  detailsRequestTracker.invalidate()
+  jobDetailsRequestTracker.invalidate()
+  migrationDetailsRequestTracker.invalidate()
+  editorRequestTracker.invalidate()
 })
 </script>
 

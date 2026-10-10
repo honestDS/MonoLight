@@ -71,6 +71,7 @@ class MemoryOrganizeRequest(_MemoryRequest):
 
 class MemoryRecordResponse(BaseModel):
     id: int
+    owner_uid: str
     memory_key: str | None = None
     memory_type: LongTermMemoryType
     content: str
@@ -103,6 +104,7 @@ class MemoryRecordResponse(BaseModel):
 
 class MemoryRevisionResponse(BaseModel):
     id: int
+    owner_uid: str
     memory_id: int
     version: int
     memory_key: str
@@ -125,6 +127,7 @@ class MemoryRevisionResponse(BaseModel):
 
 class MemoryJobResponse(BaseModel):
     id: int
+    owner_uid: str
     operation: LongTermMemoryMutationOperation
     dedupe_key: str
     active_mutation_key: str | None = None
