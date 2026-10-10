@@ -252,6 +252,10 @@ export function useMemoryRecords({
       showHistory(row)
       return
     }
+    if (command === 'toggle-pin' && canPin(row)) {
+      togglePin(row)
+      return
+    }
     if (command === 'delete' && canMutateRecord(row)) deleteMemory(row)
   }
   const isRecordSnapshot = value => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0

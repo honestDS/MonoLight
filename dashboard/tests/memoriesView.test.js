@@ -1232,6 +1232,51 @@ test('routes the history command to the selected row without deleting', async t 
   assert.equal(harness.module.history.value[0].content, 'history-content')
 })
 
+test('toggles pin state through the memory menu and refreshes the list', async t => {
+  const memorySnapshot = [{ id: 308, owner_uid: 'owner-a', memory_key: 'toggle-pin-row', pinned: false }]
+  const harness = createMenuHarness(t, {
+    apiOverrides: {
+      memoryApi: {
+        list: () => pageResponse(memorySnapshot.map(row => ({ ...row })), memorySnapshot.length),
+        pin: id => {
+          memorySnapshot.find(row => row.id === id).pinned = true
+          return dataResponse({})
+        },
+        unpin: id => {
+          memorySnapshot.find(row => row.id === id).pinned = false
+          return dataResponse({})
+        },
+      },
+    },
+  })
+  await harness.mount()
+  const firstRow = harness.module.memories.value[0]
+  const listCountAfterMount = harness.calls('memoryApi.list').length
+
+  harness.module.handleMemoryMoreAction('toggle-pin', firstRow)
+  await harness.flush()
+
+  assert.equal(harness.calls('memoryApi.pin').length, 1)
+  assert.equal(harness.calls('memoryApi.pin')[0].args[0], firstRow.id)
+  assert.equal(harness.calls('memoryApi.unpin').length, 0)
+  assert.equal(harness.module.memories.value[0].pinned, true)
+  assert.equal(harness.calls('memoryApi.list').length, listCountAfterMount + 1)
+
+  const refreshedRow = harness.module.memories.value[0]
+  harness.module.handleMemoryMoreAction('toggle-pin', refreshedRow)
+  await harness.flush()
+
+  assert.equal(harness.calls('memoryApi.pin').length, 1)
+  assert.equal(harness.calls('memoryApi.unpin').length, 1)
+  assert.equal(harness.calls('memoryApi.unpin')[0].args[0], refreshedRow.id)
+  assert.equal(harness.module.memories.value[0].pinned, false)
+  assert.equal(harness.calls('memoryApi.list').length, listCountAfterMount + 2)
+  assert.equal(harness.messages.filter(message => message.type === 'info').length, 2)
+  assert.equal(harness.calls('memoryApi.history').length, 0)
+  assert.equal(harness.calls('memoryApi.delete').length, 0)
+  assert.equal(harness.confirmCalls.length, 0)
+})
+
 test('waits for delete confirmation and sends the positive id, version, and dedupe key', async t => {
   const confirmation = createDeferred()
   const harness = createMenuHarness(t, { confirm: () => confirmation.promise })
@@ -1292,6 +1337,64 @@ test('blocks delete confirmation for non-mutable rows', async t => {
   }
 })
 
+test('ignores toggle-pin for non-mutable rows', async t => {
+  const rows = [
+    { id: 309, owner_uid: 'owner-a', pending_mutation_job_id: 901 },
+    { id: 310, owner_uid: 'owner-a', deleted_at: '2026-01-01T00:00:00Z' },
+    { id: 311, owner_uid: 'owner-a', is_active: false },
+  ]
+
+  for (const row of rows) {
+    for (const pinned of [false, true]) {
+      const harness = createMenuHarness(t)
+      await harness.mount()
+      const listCountBefore = harness.calls('memoryApi.list').length
+      const messagesBefore = harness.messages.length
+      const testRow = { ...row, pinned }
+
+      harness.module.handleMemoryMoreAction('toggle-pin', testRow)
+      harness.module.handleMemoryMoreAction('toggle-pin', testRow)
+      await harness.flush()
+
+      assert.equal(harness.calls('memoryApi.pin').length, 0)
+      assert.equal(harness.calls('memoryApi.unpin').length, 0)
+      assert.equal(harness.calls('memoryApi.list').length, listCountBefore)
+      assert.equal(harness.messages.length, messagesBefore)
+      assert.equal(harness.confirmCalls.length, 0)
+    }
+  }
+})
+
+test('reports toggle-pin failures without refreshing the list', async t => {
+  for (const pinned of [false, true]) {
+    const harness = createMenuHarness(t, {
+      apiOverrides: {
+        memoryApi: {
+          pin: () => Promise.reject(new Error('pin operation failed')),
+          unpin: () => Promise.reject(new Error('pin operation failed')),
+        },
+      },
+    })
+    await harness.mount()
+    const row = { id: pinned ? 313 : 312, owner_uid: 'owner-a', pinned }
+    const listCountBefore = harness.calls('memoryApi.list').length
+
+    harness.module.handleMemoryMoreAction('toggle-pin', row)
+    await harness.flush()
+
+    const expectedMethod = pinned ? 'memoryApi.unpin' : 'memoryApi.pin'
+    const otherMethod = pinned ? 'memoryApi.pin' : 'memoryApi.unpin'
+    assert.equal(harness.calls(expectedMethod).length, 1)
+    assert.equal(harness.calls(expectedMethod)[0].args[0], row.id)
+    assert.equal(harness.calls(otherMethod).length, 0)
+    assert.equal(harness.calls('memoryApi.list').length, listCountBefore)
+    assert.equal(harness.messages.filter(message => message.type === 'error').length, 1)
+    assert.equal(harness.messages[0].value, 'pin operation failed')
+    assert.equal(harness.messages.some(message => message.type === 'info'), false)
+    assert.equal(harness.confirmCalls.length, 0)
+  }
+})
+
 test('ignores unknown memory menu commands', async t => {
   const harness = createMenuHarness(t)
   await harness.mount()
@@ -1301,6 +1404,8 @@ test('ignores unknown memory menu commands', async t => {
   assert.equal(harness.confirmCalls.length, 0)
   assert.equal(harness.calls('memoryApi.history').length, 0)
   assert.equal(harness.calls('memoryApi.delete').length, 0)
+  assert.equal(harness.calls('memoryApi.pin').length, 0)
+  assert.equal(harness.calls('memoryApi.unpin').length, 0)
   assert.equal(harness.messages.length, 0)
 })
 
