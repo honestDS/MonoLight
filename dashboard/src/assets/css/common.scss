@@ -214,6 +214,9 @@
   border-radius: var(--radius-12) !important;
   background: rgba(var(--color-white-rgb), 0.98) !important;
   box-shadow: 0 14px 36px rgba(var(--color-slate-900-rgb), 0.12) !important;
+  min-width: 100px;
+  display: flex;
+  flex-direction: column;
 }
 
 .el-dropdown__popper .el-dropdown-menu {
@@ -227,6 +230,7 @@
 .el-dropdown__popper .el-dropdown-menu__item {
   min-height: 34px;
   padding: 0 12px;
+  justify-content: center;
   border-radius: var(--radius-8);
   color: var(--color-slate-600);
   font-size: 14px;
