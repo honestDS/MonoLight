@@ -180,12 +180,13 @@
         </el-form-item>
       </el-form>
 
-      <div class="memory-runtime-body" :aria-busy="settingsLoading">
+      <div
+        class="memory-runtime-body"
+        :aria-busy="settingsLoading"
+        :class="{ 'is-loading': settingsLoading && !settingsLoaded }"
+        v-loading="settingsLoading && !settingsLoaded"
+        :element-loading-text="$t('memories.runtime_status_loading')">
         <el-alert v-if="!runtimeOwnerUid" type="info" :closable="false" show-icon :title="$t('memories.select_owner_for_action')" />
-        <div v-if="settingsLoading && !settingsLoaded">
-          <el-skeleton :animated="false" :rows="6" />
-          <p class="help-text">{{ $t('memories.runtime_status_loading') }}</p>
-        </div>
         <el-alert v-if="settingsLoadError" type="warning" :closable="false" show-icon>
           <template #title>{{ settingsLoadError }}</template>
         </el-alert>
@@ -207,14 +208,14 @@
           </div>
         </div>
 
-        <el-descriptions v-if="settingsLoaded && ['organize', 'reindex'].includes(runtimeDialogAction)" :column="1" border>
+        <el-descriptions v-if="runtimeOwnerUid && !settingsLoadError && ['organize', 'reindex'].includes(runtimeDialogAction)" :column="1" border>
           <el-descriptions-item :label="$t('memories.active_record_count')">{{ activeRecordCount }}</el-descriptions-item>
           <el-descriptions-item :label="$t('memories.index_status')"><StatusTag :status="settings.index?.status || setting('index_status')" :active-text="statusText(settings.index?.status || setting('index_status'))" :inactive-text="statusText(settings.index?.status || setting('index_status'))" :active-type="statusType(settings.index?.status || setting('index_status'))" :inactive-type="statusType(settings.index?.status || setting('index_status'))" /></el-descriptions-item>
         </el-descriptions>
         <el-alert v-if="runtimeBlockingMessage" type="warning" :closable="false" show-icon :title="runtimeBlockingMessage" />
 
-        <div v-if="settingsLoaded && runtimeDialogAction === 'status'" class="settings-content">
-          <el-alert v-if="!configured" type="info" :closable="false" show-icon :title="$t('memories.no_config')" />
+        <div v-if="runtimeOwnerUid && !settingsLoadError && runtimeDialogAction === 'status'" class="settings-content">
+          <el-alert v-if="settingsLoaded && !configured" type="info" :closable="false" show-icon :title="$t('memories.no_config')" />
           <div class="settings-grid runtime-settings-grid" v-loading="settingsLoading">
             <div class="config-block">
               <strong>{{ $t('memories.active_config') }}</strong>
