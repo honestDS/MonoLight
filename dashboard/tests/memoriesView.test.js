@@ -18,9 +18,11 @@ import {
   MEMORY_TYPES,
 } from '../src/constants/index.js'
 
-const memoriesViewSource = readFileSync(new URL('../src/views/MemoriesView.vue', import.meta.url), 'utf8')
-const memoriesViewScriptMatch = memoriesViewSource.match(/<script\s+setup(?:\s[^>]*)?>([\s\S]*?)<\/script>/)
-if (!memoriesViewScriptMatch) throw new Error('MemoriesView.vue script setup was not found')
+const memoryComposableSources = [
+  readFileSync(new URL('../src/composables/memories/useMemoryRuntime.js', import.meta.url), 'utf8'),
+  readFileSync(new URL('../src/composables/memories/useMemoryRecords.js', import.meta.url), 'utf8'),
+  readFileSync(new URL('../src/composables/memories/useMemoriesView.js', import.meta.url), 'utf8'),
+]
 
 const stripImports = sourceText => {
   const keptLines = []
@@ -207,86 +209,10 @@ const createHarness = (t, options = {}) => {
   let module
   scope.run(() => {
     vm.runInContext(
-      `${stripImports(memoriesViewScriptMatch[1])}
-  globalThis.__module = {
-  activeTab,
-  settings,
-  runtimeDialogVisible,
-  runtimeDialogAction,
-  runtimeOwnerFilter,
-  runtimeDialogTitle,
-  settingsLoaded,
-  settingsLoadError,
-  runtimeBlockingMessage,
-  isSuperuser,
-  currentUid,
-  currentUsername,
-  owners,
-  ownersLoading,
-  ownersLoaded,
-  memoryScopeReady,
-  ownerFilter,
-  settingsLoading,
-  actionLoading,
-  memories,
-  memoriesLoading,
-  memoryPage,
-  memoryPageSize,
-  memoryTotal,
-  jobs,
-  jobsLoading,
-  jobPage,
-  jobPageSize,
-  jobTotal,
-  migrations,
-  migrationsLoading,
-  migrationPage,
-  migrationPageSize,
-  migrationTotal,
-  detailsVisible,
-  selectedMemory,
-  selectedHistoryMemory,
-  historyVisible,
-  historyLoading,
-  history,
-  jobVisible,
-  selectedJob,
-  migrationVisible,
-  selectedMigration,
-  currentMemoryTask,
-  runtimeOwnerUid,
-  organizeBlocked,
-  reindexBlocked,
-  cleanupRetryId,
-  loadSettings,
-  loadOwners,
-  loadMemories,
-  loadJobs,
-  loadMigrations,
-  openRuntimeDialog,
-  closeRuntimeDialog,
-  handleRuntimeOwnerChange,
-  submitRuntimeOperation,
-  retryCleanup,
-  refreshAll,
-  handleOwnerChange,
-  ownerLabel,
-  filters,
-  jobFilters,
-  showDetails,
-  showJob,
-  showMigration,
-  showHistory,
-  handleMemoryMoreAction,
-  form,
-  editorMode,
-  editorVisible,
-  submitting,
-  contentTooLong,
-  openEditor,
-  editSelectedMemory,
-  submitMemory
-}
+      `${memoryComposableSources
+        .map(source => stripImports(source).replace(/^(\s*)export\s+/gm, '$1'))
+        .join('\n')}
+  globalThis.__module = useMemoriesView()
 `,
       context,
       { filename: 'MemoriesView.vue?script-setup' },

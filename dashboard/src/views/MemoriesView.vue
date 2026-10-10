@@ -334,655 +334,130 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { useI18n } from 'vue-i18n'
-import { adminApi, channelApi, memoryApi } from '../api'
-import { MEMORY_JOB_OPERATIONS, MEMORY_JOB_STATUSES, MEMORY_TYPES } from '../constants'
 import StatusTag from '../components/StatusTag.vue'
-import {
-  buildOrganizePayload,
-  createLatestRequestTracker,
-  decorateMemoryJobs,
-  estimateMemoryTokens,
-  getCurrentMemoryTask,
-  isMemoryContentTooLong,
-  memoryOperationLabelKey,
-  memorySourceLabelKey,
-  normalizeMemorySettings
-} from '../utils/memoryManagement'
-import { createAbortableTaskManager } from '../utils/channelTestManager'
+import { useMemoriesView } from '../composables/memories/useMemoriesView.js'
 
-const { t } = useI18n()
-const memoryTypes = MEMORY_TYPES
-const jobStatuses = MEMORY_JOB_STATUSES
-const jobOperations = MEMORY_JOB_OPERATIONS
-const activeTab = ref('memories')
-const settings = reactive({})
-const runtimeDialogVisible = ref(false)
-const runtimeDialogAction = ref('status')
-const runtimeOwnerFilter = ref('')
-const settingsLoaded = ref(false)
-const settingsLoadError = ref('')
-const isSuperuser = ref(false)
-const currentUid = ref(null)
-const currentUsername = ref('')
-const owners = ref([])
-const ownersLoading = ref(false)
-const ownersLoaded = ref(false)
-const memoryScopeReady = ref(false)
-const ownerFilter = ref('')
-const settingsLoading = ref(false)
-const actionLoading = ref('')
-const channels = ref([])
-const memories = ref([])
-const memoriesLoading = ref(false)
-const memoryPage = ref(1)
-const memoryPageSize = ref(20)
-const memoryTotal = ref(0)
-const jobs = ref([])
-const jobsLoading = ref(false)
-const jobPage = ref(1)
-const jobPageSize = ref(20)
-const jobTotal = ref(0)
-const migrations = ref([])
-const migrationsLoading = ref(false)
-const migrationPage = ref(1)
-const migrationPageSize = ref(20)
-const migrationTotal = ref(0)
-const editorVisible = ref(false)
-const editorMode = ref('create')
-const submitting = ref(false)
-const detailsVisible = ref(false)
-const selectedMemory = ref(null)
-const historyVisible = ref(false)
-const selectedHistoryMemory = ref(null)
-const historyLoading = ref(false)
-const history = ref([])
-const jobVisible = ref(false)
-const selectedJob = ref(null)
-const migrationVisible = ref(false)
-const selectedMigration = ref(null)
-const pollTimer = ref(null)
-let pollingStopped = false
-const pollingTaskManager = createAbortableTaskManager()
-const settingsRequestTracker = createLatestRequestTracker()
-const runtimeActionRequestTracker = createLatestRequestTracker()
-const memoriesRequestTracker = createLatestRequestTracker()
-const jobsRequestTracker = createLatestRequestTracker()
-const migrationsRequestTracker = createLatestRequestTracker()
-const historyRequestTracker = createLatestRequestTracker()
-const detailsRequestTracker = createLatestRequestTracker()
-const jobDetailsRequestTracker = createLatestRequestTracker()
-const migrationDetailsRequestTracker = createLatestRequestTracker()
-const editorRequestTracker = createLatestRequestTracker()
-const filters = reactive({ keyword: '', memory_type: '', sort_by: 'updated_at', sort_order: 'desc' })
-const jobFilters = reactive({ status: '', operation: '', memory_id: '' })
-const form = reactive({ id: null, version: 0, owner_uid: '', memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
-
-const unwrap = (response) => response?.data?.data ?? response?.data ?? {}
-const pageData = (response) => {
-  const data = unwrap(response)
-  if (Array.isArray(data)) return { items: data, total: data.length, meta: null }
-  return { items: data.items || [], total: Number(data.total || 0), meta: data.meta ?? null }
-}
-const formatTime = (value) => value ? new Date(value).toLocaleString() : '-'
-const setting = (key) => settings.store?.[key] ?? settings[key] ?? '-'
-const nestedSetting = (section, key, legacyKey) => settings[section]?.[key] ?? setting(legacyKey)
-const channelName = (channelId) => {
-  if (channelId === null || channelId === undefined || channelId === '' || channelId === '-') return '-'
-  const channel = channels.value.find(item => String(item.id) === String(channelId))
-  return typeof channel?.name === 'string' && channel.name.trim() ? channel.name : '-'
-}
-const ownerLabel = (uid) => {
-  if (typeof uid !== 'string' || !uid.trim()) return t('memories.owner_unknown')
-  const normalizedUid = uid.trim()
-  const owner = owners.value.find(item => String(item.uid) === normalizedUid)
-  const ownerUsername = typeof owner?.username === 'string' ? owner.username.trim() : ''
-  if (ownerUsername) return ownerUsername
-  if (String(currentUid.value || '') === normalizedUid) {
-    const currentUsernameValue = typeof currentUsername.value === 'string' ? currentUsername.value.trim() : ''
-    if (currentUsernameValue) return currentUsernameValue
-  }
-  return normalizedUid
-}
-const runtimeOwnerUid = computed(() => {
-  const ownerUid = isSuperuser.value ? runtimeOwnerFilter.value : currentUid.value
-  if (typeof ownerUid === 'string') return ownerUid.trim() || null
-  return ownerUid ?? null
-})
-const runtimeDialogTitle = computed(() => {
-  if (runtimeDialogAction.value === 'organize') return t('memories.organize_now')
-  if (runtimeDialogAction.value === 'reindex') return t('memories.reindex')
-  return t('memories.view_status')
-})
-const numericSetting = (key, fallback) => {
-  const value = Number(setting(key))
-  return Number.isFinite(value) ? value : fallback
-}
-const configured = computed(() => settings.configured !== undefined ? Boolean(settings.configured) : Boolean(setting('active_embedding_channel_id') !== '-' && setting('active_embedding_model_id') !== '-' && setting('active_collection_name') !== '-'))
-const contentMaxTokens = computed(() => settings.contentMaxTokens ?? Number(settings.capacity?.content_max_tokens ?? numericSetting('content_max_tokens', 160)))
-const activeRecordCount = computed(() => settings.activeRecordCount ?? Number(settings.capacity?.active_record_count ?? numericSetting('active_record_count', 0)))
-const maxActiveRecords = computed(() => settings.maxActiveRecords ?? Number(settings.capacity?.max_active_records ?? numericSetting('max_active_records', 50)))
-const capacityOverLimit = computed(() => ['over_limit', 'full'].includes(settings.capacity?.status) || activeRecordCount.value > maxActiveRecords.value)
-const organizeBlocked = computed(() => !runtimeDialogVisible.value || !memoryScopeReady.value || !settingsLoaded.value || settingsLoading.value || !runtimeOwnerUid.value || !configured.value || Boolean(actionLoading.value) || Boolean(settings.blocking?.organize?.blocked))
-const reindexBlocked = computed(() => !runtimeDialogVisible.value || !memoryScopeReady.value || !settingsLoaded.value || settingsLoading.value || !runtimeOwnerUid.value || !configured.value || Boolean(actionLoading.value) || Boolean(settings.blocking?.maintenance?.blocked))
-const cleanupRetryId = computed(() => {
-  const status = settings.old_collection_cleanup?.status ?? settings.store?.old_collection_cleanup_status
-  if (status !== 'failed') return null
-  return settings.old_collection_cleanup?.job_id ?? settings.store?.old_collection_cleanup_job_id ?? null
-})
-const migrationPercentage = computed(() => {
-  const total = Number(settings.migration?.total_count ?? numericSetting('migration_total_count', 0))
-  return total ? Math.min(100, Math.round(Number(settings.migration?.success_count ?? numericSetting('migration_success_count', 0)) * 100 / total)) : 0
-})
-const contentTokenCount = computed(() => estimateMemoryTokens(form.content))
-const contentTooLong = computed(() => isMemoryContentTooLong(form.content, contentMaxTokens.value))
-const settingsError = computed(() => {
-  const candidates = [
-    settings.migration?.error,
-    settings.old_collection_cleanup?.error,
-    settings.store?.migration_error,
-    settings.store?.old_collection_cleanup_error,
-    settings.migration_error,
-    settings.old_collection_cleanup_error,
-  ]
-  return candidates.find(value => typeof value === 'string' && value.trim() && value.trim() !== '-') || ''
-})
-const currentMemoryTask = computed(() => getCurrentMemoryTask(settings))
-
-const typeLabel = (value) => t(`memories.type_${value}`, value || '-')
-const sourceLabel = (value) => {
-  const labelKey = memorySourceLabelKey(value)
-  return labelKey === `memories.source_${value}` ? t(labelKey) : labelKey
-}
-const statusText = (value) => value ? t(`memories.status_${value}`, value) : t('memories.not_available')
-const operationLabel = (value) => {
-  const labelKey = memoryOperationLabelKey(value)
-  return labelKey === `memories.operation_${value}` ? t(labelKey) : labelKey
-}
-const statusType = (value) => ['succeeded', 'ready', 'confirmed', 'none', 'normal'].includes(value) ? 'success' : ['failed', 'over_limit', 'full'].includes(value) ? 'danger' : ['cancelled'].includes(value) ? 'info' : 'warning'
-const recordStatus = (row) => row.deleted_at ? t('memories.deleted') : row.suppress_recall ? t('memories.suppressed') : row.pending_mutation_job_id ? t('memories.pending') : statusText(row.index_status || 'ready')
-const recordStatusType = (row) => row.deleted_at ? 'danger' : row.suppress_recall ? 'warning' : row.pending_mutation_job_id ? 'warning' : statusType(row.index_status || 'ready')
-const migrationId = (row) => row.job_id || row.migration_job_id || row.id || '-'
-const cleanupId = (row) => row.old_collection_cleanup_job_id || row.cleanup_job_id || row.cleanup?.job_id || null
-const migrationProgress = (row, key) => row[key] ?? row.progress?.[key.replace('migration_', '')] ?? 0
-const migrationTarget = (row) => `${row.target_embedding_model_id || row.target?.model_id || '-'} / ${row.target_embedding_dimensions || row.target?.dimensions || '-'}D`
-const progressText = (row) => `${migrationProgress(row, 'migration_success_count')} / ${migrationProgress(row, 'migration_total_count')}`
-const newDedupeKey = () => `dashboard-${Date.now()}-${Math.random().toString(36).slice(2)}`
-const blockingReason = (reason) => {
-  const known = ['active_store_not_configured', 'organization_active', 'reindex_active', 'embedding_migration_active', 'old_collection_cleanup_active', 'organization_model_not_configured', 'organization_model_invalid']
-  return known.includes(reason) ? t(`memories.blocking_${reason}`) : (reason || t('memories.not_blocked'))
-}
-const blockingText = (state) => state?.blocked ? t('memories.blocked_with_reason', { reason: blockingReason(state.reason), job: state.job_id || '-' }) : t('memories.not_blocked')
-const runtimeBlockingMessage = computed(() => {
-  if (!runtimeDialogVisible.value || !settingsLoaded.value || runtimeDialogAction.value === 'status') return ''
-  if (!configured.value) return t('memories.no_config')
-  const blocking = runtimeDialogAction.value === 'organize'
-    ? settings.blocking?.organize
-    : runtimeDialogAction.value === 'reindex'
-      ? settings.blocking?.maintenance
-      : null
-  return blocking?.blocked ? blockingText(blocking) : ''
-})
-const canMutateRecord = (row) => !row.pending_mutation_job_id && !row.deleted_at && row.is_active !== false
-const canPin = (row) => canMutateRecord(row)
-const jobError = (row) => row.error || row.result?.error || (row.context_error ? JSON.stringify(row.context_error) : '-')
-const jobCountsText = (row) => {
-  const counts = [
-    [t('memories.keep_count'), row.keep_count],
-    [t('memories.update_count'), row.update_count],
-    [t('memories.merge_count'), row.merge_count],
-    [t('memories.conflict_count'), row.conflict_count],
-    [t('memories.stale_count'), row.stale_count],
-    [t('memories.skipped_count'), row.skipped_count]
-  ].filter(([, value]) => value !== null && value !== undefined)
-  return counts.length ? counts.map(([label, value]) => `${label}: ${value}`).join(' / ') : '-'
-}
-const tokenBudgetText = (budget) => budget ? [
-  `${t('memories.context_window_tokens')}: ${budget.context_window_tokens ?? '-'}`,
-  `${t('memories.required_input_tokens')}: ${budget.required_input_tokens ?? '-'}`,
-  `${t('memories.available_input_tokens')}: ${budget.available_input_tokens ?? '-'}`,
-  `${t('memories.max_output_tokens')}: ${budget.max_output_tokens ?? budget.max_tokens ?? '-'}`,
-  `${t('memories.required_output_tokens')}: ${budget.required_output_tokens ?? '-'}`
-].join(' / ') : '-'
-
-const applySettings = (data) => {
-  const normalizedData = normalizeMemorySettings(data)
-  Object.keys(settings).forEach(key => delete settings[key])
-  Object.assign(settings, normalizedData)
-}
-
-const resetRuntimeSettings = () => {
-  pollingTaskManager.cancel('settings')
-  settingsRequestTracker.invalidate()
-  Object.keys(settings).forEach(key => delete settings[key])
-  settingsLoaded.value = false
-  settingsLoading.value = false
-  settingsLoadError.value = ''
-}
-
-const loadSettings = async (silent = false) => {
-  if (!runtimeDialogVisible.value || !runtimeOwnerUid.value || pollingStopped || actionLoading.value) return
-  const token = pollingTaskManager.begin('settings')
-  if (!token) return
-  const requestSeq = settingsRequestTracker.begin()
-  const ownerUid = runtimeOwnerUid.value
-  if (pollingTaskManager.isCurrent(token)) settingsLoading.value = !silent || !settingsLoaded.value
-  try {
-    const data = unwrap(await memoryApi.settings({ signal: token.signal, params: { uid: ownerUid } }))
-    if (!pollingTaskManager.isCurrent(token) || !settingsRequestTracker.isCurrent(requestSeq) || !runtimeDialogVisible.value || runtimeOwnerUid.value !== ownerUid || pollingStopped) return
-    applySettings(data)
-    settingsLoaded.value = true
-    settingsLoadError.value = ''
-  } catch (error) {
-    if (token.signal.aborted || !pollingTaskManager.isCurrent(token) || !settingsRequestTracker.isCurrent(requestSeq) || !runtimeDialogVisible.value || runtimeOwnerUid.value !== ownerUid || pollingStopped) return
-    Object.keys(settings).forEach(key => delete settings[key])
-    settingsLoaded.value = false
-    settingsLoadError.value = error?.message || t('memories.runtime_status_load_failed')
-  } finally {
-    if (pollingTaskManager.isCurrent(token) && settingsRequestTracker.isCurrent(requestSeq)) settingsLoading.value = false
-    pollingTaskManager.finish(token)
-  }
-}
-
-const openRuntimeDialog = (action) => {
-  if (!['organize', 'reindex', 'status'].includes(action) || pollingStopped || !memoryScopeReady.value || actionLoading.value || runtimeDialogVisible.value || editorVisible.value || detailsVisible.value || historyVisible.value || jobVisible.value || migrationVisible.value) return
-  detailsRequestTracker.invalidate()
-  jobDetailsRequestTracker.invalidate()
-  migrationDetailsRequestTracker.invalidate()
-  historyRequestTracker.invalidate()
-  resetRuntimeSettings()
-  runtimeDialogAction.value = action
-  runtimeOwnerFilter.value = isSuperuser.value
-    ? (typeof ownerFilter.value === 'string' ? ownerFilter.value.trim() : ownerFilter.value || '')
-    : (typeof currentUid.value === 'string' ? currentUid.value.trim() : currentUid.value || '')
-  runtimeDialogVisible.value = true
-  if (isSuperuser.value && !ownersLoaded.value && !ownersLoading.value) loadOwners()
-  loadSettings()
-}
-
-const closeRuntimeDialog = () => {
-  if (actionLoading.value) return
-  runtimeActionRequestTracker.invalidate()
-  runtimeDialogVisible.value = false
-  runtimeOwnerFilter.value = ''
-  resetRuntimeSettings()
-}
-
-const handleRuntimeOwnerChange = (uid) => {
-  if (!runtimeDialogVisible.value || actionLoading.value || pollingStopped) return
-  runtimeOwnerFilter.value = isSuperuser.value
-    ? (typeof uid === 'string' ? uid.trim() : uid || '')
-    : (typeof currentUid.value === 'string' ? currentUid.value.trim() : currentUid.value || '')
-  resetRuntimeSettings()
-  loadSettings()
-}
-
-const loadOwners = async () => {
-  if (!isSuperuser.value || ownersLoading.value) return
-  const token = pollingTaskManager.begin('owners')
-  if (!token) return
-  if (pollingTaskManager.isCurrent(token)) ownersLoading.value = true
-  try {
-    const allOwners = []
-    let page = 1
-    let total = 0
-    while (true) {
-      if (!pollingTaskManager.isCurrent(token) || !isSuperuser.value) return
-      const data = pageData(await adminApi.userList({ page, size: 100 }))
-      if (!pollingTaskManager.isCurrent(token) || !isSuperuser.value) return
-      allOwners.push(...data.items)
-      total = data.total
-      if (!data.items.length || allOwners.length >= total || data.items.length < 100) break
-      page += 1
-    }
-    if (!pollingTaskManager.isCurrent(token) || !isSuperuser.value) return
-    owners.value = allOwners
-    ownersLoaded.value = true
-  } catch (error) {
-    if (token.signal.aborted || !pollingTaskManager.isCurrent(token) || !isSuperuser.value) return
-    ElMessage.error(error.message || t('memories.load_failed'))
-  } finally {
-    if (pollingTaskManager.isCurrent(token)) ownersLoading.value = false
-    pollingTaskManager.finish(token)
-  }
-}
-
-const loadChannels = async () => {
-  try {
-    const allChannels = []
-    let page = 1
-    let total = 0
-    while (true) {
-      const data = pageData(await channelApi.list({ page, size: 100 }))
-      allChannels.push(...data.items)
-      total = data.total
-      if (!data.items.length || allChannels.length >= total || data.items.length < 100) break
-      page += 1
-    }
-    channels.value = allChannels
-  } catch (error) { ElMessage.error(error.message || t('memories.load_failed')) }
-}
-
-const loadMemories = async (silent = false) => {
-  const token = pollingTaskManager.begin('memories')
-  if (!token) return
-  const requestSeq = memoriesRequestTracker.begin()
-  if (pollingTaskManager.isCurrent(token)) memoriesLoading.value = !silent
-  try {
-    const data = pageData(await memoryApi.list({ page: memoryPage.value, size: memoryPageSize.value, keyword: filters.keyword || undefined, memory_type: filters.memory_type || undefined, sort_by: filters.sort_by, sort_order: filters.sort_order, uid: isSuperuser.value ? ownerFilter.value || undefined : undefined }, { signal: token.signal }))
-    if (!pollingTaskManager.isCurrent(token) || !memoriesRequestTracker.isCurrent(requestSeq)) return
-    const meta = data.meta || {}
-    isSuperuser.value = Boolean(meta.is_superuser)
-    currentUid.value = meta.current_uid ?? null
-    currentUsername.value = meta.current_username ?? ''
-    memoryScopeReady.value = true
-    if (isSuperuser.value) {
-      if (!ownersLoaded.value && !ownersLoading.value) loadOwners()
-    } else {
-      owners.value = []
-      ownerFilter.value = ''
-      ownersLoaded.value = false
-    }
-    memories.value = data.items
-    memoryTotal.value = data.total
-  } catch (error) {
-    if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
-    if (memoriesRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
-  } finally {
-    if (pollingTaskManager.isCurrent(token) && memoriesRequestTracker.isCurrent(requestSeq)) memoriesLoading.value = false
-    pollingTaskManager.finish(token)
-  }
-}
-
-const loadJobs = async (silent = false) => {
-  const token = pollingTaskManager.begin('jobs')
-  if (!token) return
-  const requestSeq = jobsRequestTracker.begin()
-  if (pollingTaskManager.isCurrent(token)) jobsLoading.value = !silent
-  try {
-    const data = pageData(await memoryApi.jobs({ page: jobPage.value, size: jobPageSize.value, status: jobFilters.status || undefined, operation: jobFilters.operation || undefined, memory_id: jobFilters.memory_id || undefined, uid: isSuperuser.value ? ownerFilter.value || undefined : undefined }, { signal: token.signal }))
-    if (!pollingTaskManager.isCurrent(token) || !jobsRequestTracker.isCurrent(requestSeq)) return
-    jobs.value = decorateMemoryJobs(data.items)
-    jobTotal.value = data.total
-  } catch (error) {
-    if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
-    if (jobsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.operation_failed'))
-  } finally {
-    if (pollingTaskManager.isCurrent(token) && jobsRequestTracker.isCurrent(requestSeq)) jobsLoading.value = false
-    pollingTaskManager.finish(token)
-  }
-}
-
-const loadMigrations = async (silent = false) => {
-  const token = pollingTaskManager.begin('migrations')
-  if (!token) return
-  const requestSeq = migrationsRequestTracker.begin()
-  if (pollingTaskManager.isCurrent(token)) migrationsLoading.value = !silent
-  try {
-    const data = pageData(await memoryApi.migrations({ page: migrationPage.value, size: migrationPageSize.value, uid: isSuperuser.value ? ownerFilter.value || undefined : undefined }, { signal: token.signal }))
-    if (!pollingTaskManager.isCurrent(token) || !migrationsRequestTracker.isCurrent(requestSeq)) return
-    migrations.value = data.items
-    migrationTotal.value = data.total
-  } catch (error) {
-    if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
-    if (migrationsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.operation_failed'))
-  } finally {
-    if (pollingTaskManager.isCurrent(token) && migrationsRequestTracker.isCurrent(requestSeq)) migrationsLoading.value = false
-    pollingTaskManager.finish(token)
-  }
-}
-
-const resetAndLoadMemories = () => { memoryPage.value = 1; loadMemories() }
-const resetAndLoadJobs = () => { jobPage.value = 1; loadJobs() }
-const resetAndLoadMigrations = () => { migrationPage.value = 1; loadMigrations() }
-const handleTabChange = (tab) => { if (tab === 'jobs') loadJobs(); if (tab === 'migrations') loadMigrations() }
-const refreshAll = async () => {
-  const requests = [loadMemories(true)]
-  if (runtimeDialogVisible.value) requests.push(loadSettings(true))
-  if (activeTab.value === 'jobs') requests.push(loadJobs(true))
-  if (activeTab.value === 'migrations') requests.push(loadMigrations(true))
-  await Promise.all(requests)
-}
-const handleOwnerChange = () => {
-  pollingTaskManager.cancel('memories')
-  pollingTaskManager.cancel('jobs')
-  pollingTaskManager.cancel('migrations')
-  memoriesRequestTracker.invalidate()
-  jobsRequestTracker.invalidate()
-  migrationsRequestTracker.invalidate()
-  historyRequestTracker.invalidate()
-  detailsRequestTracker.invalidate()
-  jobDetailsRequestTracker.invalidate()
-  migrationDetailsRequestTracker.invalidate()
-  editorRequestTracker.invalidate()
-  editorVisible.value = false
-  detailsVisible.value = false
-  historyVisible.value = false
-  jobVisible.value = false
-  migrationVisible.value = false
-  selectedMemory.value = null
-  selectedJob.value = null
-  selectedMigration.value = null
-  selectedHistoryMemory.value = null
-  history.value = []
-  memories.value = []
-  memoryTotal.value = 0
-  jobs.value = []
-  jobTotal.value = 0
-  migrations.value = []
-  migrationTotal.value = 0
-  memoryPage.value = 1
-  jobPage.value = 1
-  migrationPage.value = 1
-  memoriesLoading.value = false
-  jobsLoading.value = false
-  migrationsLoading.value = false
-  historyLoading.value = false
-  submitting.value = false
-  refreshAll()
-}
-const scheduleRefresh = () => {
-  if (pollingStopped) return
-  pollTimer.value = window.setTimeout(async () => {
-    pollTimer.value = null
-    if (pollingStopped) return
-    try {
-      await refreshAll()
-    } finally {
-      if (!pollingStopped) scheduleRefresh()
-    }
-  }, 5000)
-}
-
-const submitRuntimeOperation = async (operation) => {
-  const blocked = operation === 'organize' ? organizeBlocked.value : operation === 'reindex' ? reindexBlocked.value : true
-  if (!['organize', 'reindex'].includes(operation) || pollingStopped || !runtimeDialogVisible.value || runtimeDialogAction.value !== operation || !memoryScopeReady.value || blocked) return
-  const ownerUid = runtimeOwnerUid.value
-  const owner = ownerLabel(ownerUid)
-  const dedupeKey = newDedupeKey()
-  pollingTaskManager.cancel('settings')
-  settingsRequestTracker.invalidate()
-  const requestSeq = runtimeActionRequestTracker.begin()
-  actionLoading.value = operation
-  let failed = false
-  try {
-    if (operation === 'organize') await memoryApi.organize(buildOrganizePayload(dedupeKey), { params: { uid: ownerUid } })
-    else await memoryApi.reindex({ dedupe_key: dedupeKey }, { params: { uid: ownerUid } })
-    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped || !runtimeDialogVisible.value || runtimeOwnerUid.value !== ownerUid || runtimeDialogAction.value !== operation) return
-    ElMessage.info(t('memories.runtime_operation_submitted', { owner, operation: operationLabel(operation) }))
-    actionLoading.value = ''
-    closeRuntimeDialog()
-    refreshAll()
-  } catch (error) {
-    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped || !runtimeDialogVisible.value || runtimeOwnerUid.value !== ownerUid || runtimeDialogAction.value !== operation) return
-    failed = true
-    ElMessage.error(error.message || t('memories.operation_failed'))
-  } finally {
-    if (!runtimeActionRequestTracker.isCurrent(requestSeq)) return
-    actionLoading.value = ''
-    if (failed && !pollingStopped && runtimeDialogVisible.value && runtimeOwnerUid.value === ownerUid && runtimeDialogAction.value === operation) loadSettings()
-  }
-}
-const resetForm = () => Object.assign(form, { id: null, version: 0, owner_uid: '', memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
-const openEditor = (row = null) => {
-  editorRequestTracker.invalidate()
-  submitting.value = false
-  editorMode.value = row ? 'edit' : 'create'
-  resetForm()
-  if (row) {
-    Object.assign(form, { id: row.id, version: row.version, owner_uid: row.owner_uid, memory_key: row.memory_key || '', memory_type: row.memory_type || 'fact', content: row.content || '', change_evidence: row.change_evidence || '', suppress_current: false })
-  } else {
-    form.owner_uid = isSuperuser.value ? (ownerFilter.value || currentUid.value || '') : (currentUid.value || '')
-  }
-  editorVisible.value = true
-}
-const editSelectedMemory = () => {
-  const row = selectedMemory.value
-  if (!detailsVisible.value || !row || !canMutateRecord(row)) return
-  detailsRequestTracker.invalidate()
-  detailsVisible.value = false
-  openEditor(row)
-}
-const submitMemory = async () => {
-  if (submitting.value || !editorVisible.value || !memoryScopeReady.value || pollingStopped) return
-  if (editorMode.value === 'create' && isSuperuser.value && !form.owner_uid) return ElMessage.warning(t('memories.select_owner'))
-  if (!form.memory_key.trim() || !form.content.trim()) return ElMessage.warning(t('memories.required'))
-  if (contentTooLong.value) return ElMessage.warning(t('memories.token_limit_exceeded'))
-  const requestSeq = editorRequestTracker.begin()
-  submitting.value = true
-  try {
-    const payload = { dedupe_key: newDedupeKey(), content: form.content, memory_key: form.memory_key, memory_type: form.memory_type, change_evidence: form.change_evidence || null }
-    if (editorMode.value === 'create') await memoryApi.create(payload, { params: { uid: isSuperuser.value ? form.owner_uid : currentUid.value } })
-    else await memoryApi.update({ ...payload, memory_id: form.id, expected_version: form.version, suppress_current: form.suppress_current })
-    if (editorRequestTracker.isCurrent(requestSeq) && editorVisible.value) {
-      ElMessage.info(t('memories.accepted_processing')); editorVisible.value = false; refreshAll()
-    }
-  } catch (error) {
-    if (editorRequestTracker.isCurrent(requestSeq) && editorVisible.value) ElMessage.error(error.message || t('memories.save_failed'))
-  } finally {
-    if (editorRequestTracker.isCurrent(requestSeq)) submitting.value = false
-  }
-}
-const showDetails = async (row) => {
-  const requestSeq = detailsRequestTracker.begin()
-  try {
-    const selected = unwrap(await memoryApi.get(row.id)) || row
-    if (!detailsRequestTracker.isCurrent(requestSeq)) return
-    selectedMemory.value = selected
-    detailsVisible.value = true
-  } catch (error) {
-    if (detailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.load_failed'))
-  }
-}
-const deleteMemory = async (row) => {
-  try {
-    await ElMessageBox.confirm(t('memories.delete_confirm'), t('common.warning'), { type: 'warning', confirmButtonText: t('common.confirm'), cancelButtonText: t('common.cancel') })
-    await memoryApi.delete({ memory_id: row.id, expected_version: row.version, dedupe_key: newDedupeKey() }); ElMessage.info(t('memories.delete_success')); refreshAll()
-  } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed')) }
-}
-const togglePin = async (row) => { try { if (row.pinned) await memoryApi.unpin(row.id); else await memoryApi.pin(row.id); ElMessage.info(t('memories.operation_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
-const loadHistory = async (memoryId, memory) => {
-  const requestSeq = historyRequestTracker.begin()
-  selectedHistoryMemory.value = memory
-  history.value = []
-  historyVisible.value = true
-  historyLoading.value = true
-  try {
-    const data = pageData(await memoryApi.history(memoryId, { page: 1, size: 100 }))
-    if (!historyRequestTracker.isCurrent(requestSeq)) return
-    history.value = data.items
-  } catch (error) {
-    if (historyRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
-  } finally {
-    if (historyRequestTracker.isCurrent(requestSeq)) historyLoading.value = false
-  }
-}
-const showHistory = (row) => loadHistory(row.id, row)
-const handleMemoryMoreAction = (command, row) => {
-  if (command === 'history') {
-    showHistory(row)
-    return
-  }
-  if (command === 'delete' && canMutateRecord(row)) deleteMemory(row)
-}
-const isRecordSnapshot = (value) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0
-const deletedRecordSnapshot = (row) => { const resultSnapshot = row?.result?.record_snapshot; if (isRecordSnapshot(resultSnapshot)) return resultSnapshot; const payloadSnapshot = row?.payload?.record_snapshot; return isRecordSnapshot(payloadSnapshot) ? payloadSnapshot : null }
-const canShowDeletedHistory = (row) => row.operation === 'delete_cleanup' && Boolean(row.memory_id && deletedRecordSnapshot(row))
-const showDeletedHistory = (row) => { const snapshot = deletedRecordSnapshot(row); if (!snapshot || !row.memory_id) return; loadHistory(row.memory_id, { ...snapshot, id: row.memory_id, memory_key: snapshot.memory_key || '', version: snapshot.version, owner_uid: row.owner_uid }) }
-const resumeCurrent = async (row) => { try { await memoryApi.resumeCurrent(row.id, { expected_version: row.version }); ElMessage.info(t('memories.operation_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
-const canRetry = (row) => { if (row.operation === 'restore') return false; return row.operation === 'delete_cleanup' ? row.status === 'failed' : ['failed', 'cancelled'].includes(row.status) }
-const canCancel = (row) => !['succeeded', 'failed', 'cancelled'].includes(row.status) && row.operation !== 'delete_cleanup'
-const retryJob = async (row) => { try { await ElMessageBox.confirm(t('memories.retry_confirm'), t('common.warning'), { type: 'warning' }); await memoryApi.retryJob(row.id); ElMessage.info(t('memories.retry_success')); refreshAll() } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed')) } }
-const cancelJob = async (row) => { try { await ElMessageBox.confirm(t('memories.cancel_confirm'), t('common.warning'), { type: 'warning' }); await memoryApi.cancelJob(row.id); ElMessage.info(t('memories.cancel_success')); refreshAll() } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed')) } }
-const showJob = async (row) => {
-  const requestSeq = jobDetailsRequestTracker.begin()
-  try {
-    const selected = unwrap(await memoryApi.job(row.id)) || row
-    if (!jobDetailsRequestTracker.isCurrent(requestSeq)) return
-    selectedJob.value = selected
-    jobVisible.value = true
-  } catch (error) {
-    if (jobDetailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
-  }
-}
-const canRetryMigration = (row) => ['failed', 'cancelled'].includes(row.status || row.migration_status)
-const canCancelMigration = (row) => ['preparing', 'building', 'catching_up', 'validating'].includes(row.status || row.migration_status)
-const retryMigration = async (row) => { try { await memoryApi.retryMigration(migrationId(row)); ElMessage.info(t('memories.migration_retry_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
-const cancelMigration = async (row) => { try { await memoryApi.cancelMigration(migrationId(row)); ElMessage.info(t('memories.migration_cancel_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
-const retryCleanup = async (id) => {
-  if (!id || actionLoading.value || pollingStopped) return
-  pollingTaskManager.cancel('settings')
-  settingsRequestTracker.invalidate()
-  const requestSeq = runtimeActionRequestTracker.begin()
-  actionLoading.value = `cleanup-${id}`
-  try {
-    await memoryApi.retryCleanup(id)
-    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped) return
-    ElMessage.info(t('memories.retry_success'))
-  } catch (error) {
-    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped) return
-    ElMessage.error(error.message || t('memories.operation_failed'))
-  } finally {
-    if (!runtimeActionRequestTracker.isCurrent(requestSeq) || pollingStopped) return
-    actionLoading.value = ''
-    loadSettings()
-    refreshAll()
-  }
-}
-const showMigration = async (row) => {
-  const requestSeq = migrationDetailsRequestTracker.begin()
-  try {
-    const selected = unwrap(await memoryApi.migration(migrationId(row))) || row
-    if (!migrationDetailsRequestTracker.isCurrent(requestSeq)) return
-    selectedMigration.value = selected
-    migrationVisible.value = true
-  } catch (error) {
-    if (migrationDetailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
-  }
-}
-
-onMounted(async () => {
-  await Promise.all([loadMemories(), loadChannels()])
-  if (pollingStopped) return
-  if (!pollingStopped) scheduleRefresh()
-})
-onBeforeUnmount(() => {
-  pollingStopped = true
-  if (pollTimer.value) window.clearTimeout(pollTimer.value)
-  pollingTaskManager.invalidate()
-  settingsRequestTracker.invalidate()
-  memoriesRequestTracker.invalidate()
-  jobsRequestTracker.invalidate()
-  migrationsRequestTracker.invalidate()
-  historyRequestTracker.invalidate()
-  detailsRequestTracker.invalidate()
-  jobDetailsRequestTracker.invalidate()
-  migrationDetailsRequestTracker.invalidate()
-  editorRequestTracker.invalidate()
-  runtimeActionRequestTracker.invalidate()
-})
+const {
+  memoryTypes,
+  jobStatuses,
+  jobOperations,
+  activeTab,
+  isSuperuser,
+  owners,
+  ownersLoading,
+  memoryScopeReady,
+  ownerFilter,
+  memories,
+  memoriesLoading,
+  memoryPage,
+  memoryPageSize,
+  memoryTotal,
+  jobs,
+  jobsLoading,
+  jobPage,
+  jobPageSize,
+  jobTotal,
+  migrations,
+  migrationsLoading,
+  migrationPage,
+  migrationPageSize,
+  migrationTotal,
+  filters,
+  jobFilters,
+  formatTime,
+  channelName,
+  ownerLabel,
+  typeLabel,
+  sourceLabel,
+  statusText,
+  operationLabel,
+  statusType,
+  loadMemories,
+  loadJobs,
+  loadMigrations,
+  resetAndLoadMemories,
+  resetAndLoadJobs,
+  resetAndLoadMigrations,
+  handleTabChange,
+  handleOwnerChange,
+  settings,
+  runtimeDialogVisible,
+  runtimeDialogAction,
+  runtimeOwnerFilter,
+  settingsLoaded,
+  settingsLoadError,
+  settingsLoading,
+  actionLoading,
+  setting,
+  nestedSetting,
+  runtimeOwnerUid,
+  runtimeDialogTitle,
+  configured,
+  contentMaxTokens,
+  activeRecordCount,
+  capacityOverLimit,
+  organizeBlocked,
+  reindexBlocked,
+  cleanupRetryId,
+  migrationPercentage,
+  settingsError,
+  currentMemoryTask,
+  blockingText,
+  runtimeBlockingMessage,
+  loadSettings,
+  openRuntimeDialog,
+  closeRuntimeDialog,
+  handleRuntimeOwnerChange,
+  submitRuntimeOperation,
+  retryCleanup,
+  editorVisible,
+  editorMode,
+  submitting,
+  detailsVisible,
+  selectedMemory,
+  historyVisible,
+  selectedHistoryMemory,
+  historyLoading,
+  history,
+  jobVisible,
+  selectedJob,
+  migrationVisible,
+  selectedMigration,
+  form,
+  contentTokenCount,
+  contentTooLong,
+  recordStatus,
+  recordStatusType,
+  migrationId,
+  cleanupId,
+  migrationProgress,
+  migrationTarget,
+  progressText,
+  canMutateRecord,
+  canPin,
+  jobError,
+  jobCountsText,
+  tokenBudgetText,
+  openEditor,
+  editSelectedMemory,
+  submitMemory,
+  showDetails,
+  togglePin,
+  handleMemoryMoreAction,
+  canShowDeletedHistory,
+  showDeletedHistory,
+  resumeCurrent,
+  canRetry,
+  canCancel,
+  retryJob,
+  cancelJob,
+  showJob,
+  canRetryMigration,
+  canCancelMigration,
+  retryMigration,
+  cancelMigration,
+  showMigration
+} = useMemoriesView()
 </script>
 
 <style lang="scss">
