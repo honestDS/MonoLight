@@ -32,8 +32,9 @@
 .memory-content { max-height: 360px; margin: 0; overflow: auto; white-space: pre-wrap; word-break: break-word; font: inherit; line-height: 1.55; }
 .memory-action-buttons { width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }.memory-action-buttons .el-button { margin-left: 0; }.job-tree { display: flex; align-items: center; gap: 6px; }
 .memory-owner-filter { display: flex; align-items: center; gap: 12px; padding: 0 20px 16px; color: var(--color-text-regular); }
-.memory-runtime-dialog { max-width: calc(100vw - 32px); }
-.memory-runtime-body { display: flex; flex-direction: column; gap: 16px; min-height: 180px; }
+.memory-runtime-dialog { max-width: calc(100vw - 32px); align-self: center; }
+.memory-runtime-body { display: flex; flex-direction: column; gap: 16px; }
+.memory-runtime-body.is-loading > :not(.el-loading-mask) { visibility: hidden; }
 .memory-runtime-body .help-text { margin: 0; color: var(--color-text-regular); line-height: 1.5; }
 .memory-task-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; min-width: 0; margin-top: 8px; width: 100%; color: var(--color-text-secondary); font-size: 13px; white-space: normal; overflow: visible; }
 .memory-task-summary-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }.memory-task-summary-item strong { min-width: 0; color: var(--color-text-main); font-weight: 500; overflow: hidden; overflow-wrap: anywhere; text-overflow: ellipsis; white-space: normal; }.memory-task-progress { min-width: 0; flex: 1 1 240px; }.memory-task-progress-value { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; flex: 1; color: var(--color-text-main); }.memory-task-progress-value .el-progress { min-width: 40px; flex: 1 1 120px; }
