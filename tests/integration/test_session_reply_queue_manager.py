@@ -1592,3 +1592,114 @@ async def test_idempotent_submit_distinguishes_content_format(database_factory, 
             assert persisted.content_format == expected_content_format
             assert persisted.content == literal
             assert persisted.content.encode("utf-8") == literal.encode("utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["freeze", "absorb"])
+@pytest.mark.parametrize("base_actor", ["admin", "legacy-owner"])
+async def test_foreground_merge_stops_at_different_actor_boundary(
+    db_session: AsyncSession,
+    mode: str,
+    base_actor: str,
+):
+    manager = SessionReplyQueueManager()
+    base_actor_uid = "admin" if base_actor == "admin" else "user-1"
+    base_actor_username = "Admin Stable" if base_actor == "admin" else "Legacy Owner Stable"
+    different_actor_uid = "different-actor"
+    different_actor_username = "Different Actor Stable"
+
+    async def enqueue_message(content: str, actor_uid: str, actor_username: str):
+        return await manager._enqueue_foreground_message(
+            db_session,
+            uid="user-1",
+            session_id="session-1",
+            profile=SimpleNamespace(id=1),
+            message=content,
+            attachments=None,
+            source="http",
+            actor_uid=actor_uid,
+            actor_username=actor_username,
+        )
+
+    first_message, first_work = await enqueue_message("first", base_actor_uid, base_actor_username)
+    claimed_work = await session_reply_work_item_crud.claim_next(
+        db_session,
+        worker_id="worker-actor",
+        lease_seconds=300,
+    )
+    assert claimed_work is not None
+    assert claimed_work.id == first_work.id
+    first_work = claimed_work
+
+    if base_actor == "legacy-owner":
+        legacy_execution_state = dict(first_work.execution_state)
+        legacy_execution_state.pop("actor_uid", None)
+        legacy_execution_state.pop("actor_username", None)
+        first_work.execution_state = legacy_execution_state
+        db_session.add(first_work)
+        await db_session.commit()
+
+    actor_snapshot = {key: first_work.execution_state[key] for key in ("actor_uid", "actor_username") if key in first_work.execution_state}
+
+    if mode == "absorb":
+        _, _, initial_message_ids = await manager.freeze_foreground_input(
+            db_session,
+            work=first_work,
+            worker_id="worker-actor",
+        )
+        assert initial_message_ids == [first_message.id]
+
+    same_actor_message, same_actor_work = await enqueue_message("same actor", base_actor_uid, base_actor_username)
+    different_actor_message, different_actor_work = await enqueue_message(
+        "different actor",
+        different_actor_uid,
+        different_actor_username,
+    )
+    after_boundary_message, after_boundary_work = await enqueue_message("same actor after boundary", base_actor_uid, base_actor_username)
+
+    if mode == "freeze":
+        _, _, frozen_message_ids = await manager.freeze_foreground_input(
+            db_session,
+            work=first_work,
+            worker_id="worker-actor",
+        )
+        assert frozen_message_ids == [first_message.id, same_actor_message.id]
+    else:
+        batch = await manager.absorb_contiguous_foreground_messages(
+            db_session,
+            work_id=first_work.id,
+            worker_id="worker-actor",
+        )
+        assert batch is not None
+        assert batch.source_message_ids == (same_actor_message.id,)
+
+    await db_session.refresh(first_work)
+    await db_session.refresh(same_actor_work)
+    await db_session.refresh(different_actor_work)
+    await db_session.refresh(after_boundary_work)
+
+    assert first_work.input_message_ids == [first_message.id, same_actor_message.id]
+    assert {key: first_work.execution_state[key] for key in ("actor_uid", "actor_username") if key in first_work.execution_state} == actor_snapshot
+    assert same_actor_work.status == SessionReplyWorkStatus.MERGED
+    assert same_actor_work.merged_into_id == first_work.id
+    assert different_actor_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert different_actor_work.merged_into_id is None
+    assert after_boundary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert after_boundary_work.merged_into_id is None
+
+    message_rows = [
+        await db_session.get(Message, message_id)
+        for message_id in (
+            first_message.id,
+            same_actor_message.id,
+            different_actor_message.id,
+            after_boundary_message.id,
+        )
+    ]
+    assert all(message is not None for message in message_rows)
+    assert all(message.uid == "user-1" for message in message_rows if message is not None)
+    assert all(message.is_processed for message in message_rows[:2] if message is not None)
+    assert all(not message.is_processed for message in message_rows[2:] if message is not None)
+
+    work_items = [first_work, same_actor_work, different_actor_work, after_boundary_work]
+    assert all(work.uid == "user-1" for work in work_items)

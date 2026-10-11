@@ -1,9 +1,9 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.constants import ERR_LLM_EMPTY_RESPONSE, ERR_NO_VALID_CHANNEL, ERR_SESSION_NO_PERMISSION, ERR_SESSION_READ_ONLY
+from app.core.constants import ERR_LLM_EMPTY_RESPONSE, ERR_NO_VALID_CHANNEL, ERR_SESSION_NO_PERMISSION, ERR_SESSION_NOT_FOUND, ERR_SESSION_READ_ONLY
 from app.core.crud.session.session import session_crud
-from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException
+from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException, ResourceNotFoundException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.profile_selection import resolve_profile_for_session
@@ -15,10 +15,29 @@ from app.core.utils.llm_request_params import build_session_title_generation_par
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
+from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
+
+
+async def get_session_for_user(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+    is_admin: bool = False,
+    require_exists: bool = True,
+) -> ChatSession | None:
+    session = await session_crud.get_by_session_id(db, session_id)
+    if session is None:
+        if require_exists:
+            raise ResourceNotFoundException(message=ERR_SESSION_NOT_FOUND)
+        return None
+    if not is_admin and uid != session.uid:
+        raise ForbiddenException(message=ERR_SESSION_NO_PERMISSION)
+    return session
 
 
 async def ensure_web_session_writable(
@@ -26,14 +45,14 @@ async def ensure_web_session_writable(
     *,
     session_id: str,
     uid: str,
-) -> None:
-    session = await session_crud.get_by_session_id(db, session_id)
+    is_admin: bool = False,
+) -> ChatSession | None:
+    session = await get_session_for_user(db, session_id=session_id, uid=uid, is_admin=is_admin, require_exists=False)
     if session is None:
-        return
-    if session.uid != uid:
-        raise ForbiddenException(message=ERR_SESSION_NO_PERMISSION)
+        return None
     if not is_web_session_source(session.source):
         raise ForbiddenException(message=ERR_SESSION_READ_ONLY)
+    return session
 
 
 async def generate_session_title(

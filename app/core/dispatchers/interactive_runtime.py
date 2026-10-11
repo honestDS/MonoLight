@@ -88,13 +88,18 @@ async def dispatch_interactive(
     additional_system_prompt: str | None = None,
     dispatcher_mode: Literal["non_stream", "stream"] = "non_stream",
     request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    actor_uid: str | None = None,
+    actor_username: str | None = None,
     *,
     validate_initial_message_before_save: Callable[..., Awaitable[None]],
 ):
     try:
         dispatch_logger = logger if dispatcher_mode == "non_stream" else get_logger("app.core.dispatchers.stream")
-        user = await user_crud.get_by_uid(db, uid)
-        username = user.username if user else "Unknown"
+        if actor_username:
+            username = actor_username
+        else:
+            user = await user_crud.get_by_uid(db, actor_uid if actor_uid is not None else uid)
+            username = user.username if user else "Unknown"
         profile = await profile_crud.get_with_relations(db, persisted_profile_id) if persisted_profile_id is not None else await resolve_profile_for_session(db, uid=uid, session_id=session_id)
 
         if execution_resume_state is None:

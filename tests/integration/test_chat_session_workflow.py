@@ -875,8 +875,17 @@ async def test_ws_session_setting_to_http_updates_source_only_after_active_reply
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("uid", "is_superuser"),
+    [
+        pytest.param("user-1", False, id="owner"),
+        pytest.param("user-2", True, id="superuser"),
+    ],
+)
 async def test_external_session_lifecycle_persists_guidance_allows_profile_override_and_blocks_web_only_setting(
     chat_session_database: AsyncSession,
+    uid: str,
+    is_superuser: bool,
 ) -> None:
     primary_profile, alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
     external_session = ChatSession(
@@ -890,7 +899,7 @@ async def test_external_session_lifecycle_persists_guidance_allows_profile_overr
     chat_session_database.add(external_session)
     await chat_session_database.commit()
 
-    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    auth_state: dict[str, object] = {"uid": uid, "is_superuser": is_superuser}
     app = _build_app(chat_session_database, auth_state)
     expected_content = f"{GUIDANCE_MESSAGE_PREFIX}请先回答重点{GUIDANCE_MESSAGE_SUFFIX}"
 
@@ -910,6 +919,7 @@ async def test_external_session_lifecycle_persists_guidance_allows_profile_overr
         assert guidance_payload["code"] == 200
         assert guidance_payload["data"]["type"] == "guidance"
         assert guidance_payload["data"]["role"] == "system"
+        assert guidance_payload["data"]["uid"] == "user-1"
         assert guidance_payload["data"]["profile_id"] == primary_profile.id
         assert guidance_payload["data"]["is_processed"] is False
         assert guidance_payload["data"]["content"] == expected_content
@@ -928,8 +938,10 @@ async def test_external_session_lifecycle_persists_guidance_allows_profile_overr
         )
         assert len(stored_guidance) == 1
         assert stored_guidance[0].content == expected_content
+        assert stored_guidance[0].uid == "user-1"
         assert stored_guidance[0].role == MessageRole.SYSTEM
         assert stored_guidance[0].profile_id == primary_profile.id
+        assert external_session.uid == "user-1"
 
         override = await client.post(
             "/api/v1/chat/sessions/setting",
@@ -984,6 +996,86 @@ async def test_external_session_lifecycle_persists_guidance_allows_profile_overr
         assert clear_override.json()["code"] == 200
         await chat_session_database.refresh(external_session)
         assert external_session.profile_override_id is None
+
+
+@pytest.mark.asyncio
+async def test_external_session_guidance_rejects_other_user_and_allows_superuser(
+    chat_session_database: AsyncSession,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    external_session = ChatSession(
+        session_id="external-guidance-permission-session",
+        uid="user-1",
+        profile_id=None,
+        source="weixin-openclaw",
+        reply_target_source="weixin-openclaw",
+    )
+    owner_history = Message(
+        session_id=external_session.session_id,
+        uid="user-1",
+        profile_id=primary_profile.id,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="owner history",
+        is_processed=True,
+    )
+    chat_session_database.add(external_session)
+    await chat_session_database.flush()
+    chat_session_database.add(owner_history)
+    await chat_session_database.commit()
+
+    auth_state: dict[str, object] = {"uid": "user-2", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+    guidance_request = {
+        "session_id": external_session.session_id,
+        "content": "use the owner profile",
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        messages_before = list((await chat_session_database.execute(select(Message).where(Message.session_id == external_session.session_id))).scalars().all())
+        forbidden = await client.post(
+            "/api/v1/chat/sessions/guidance",
+            json=guidance_request,
+        )
+        assert forbidden.status_code == 200
+        assert forbidden.json()["code"] == 403
+
+        messages_after_forbidden = list((await chat_session_database.execute(select(Message).where(Message.session_id == external_session.session_id))).scalars().all())
+        assert len(messages_after_forbidden) == len(messages_before)
+
+        auth_state["is_superuser"] = True
+        guidance = await client.post(
+            "/api/v1/chat/sessions/guidance",
+            json=guidance_request,
+        )
+        assert guidance.status_code == 200
+        guidance_payload = guidance.json()
+        assert guidance_payload["code"] == 200
+        assert guidance_payload["data"]["uid"] == "user-1"
+        assert guidance_payload["data"]["profile_id"] == primary_profile.id
+
+        await chat_session_database.refresh(external_session)
+        assert external_session.uid == "user-1"
+        assert external_session.profile_id is None
+
+        stored_guidance = list(
+            (
+                await chat_session_database.execute(
+                    select(Message).where(
+                        Message.session_id == external_session.session_id,
+                        Message.type == MessageType.GUIDANCE,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(stored_guidance) == 1
+        assert stored_guidance[0].uid == "user-1"
+        assert stored_guidance[0].profile_id == primary_profile.id
 
 
 @pytest.mark.asyncio
@@ -1413,8 +1505,17 @@ async def test_session_history_supports_forward_id_cursor_for_incremental_recove
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("uid", "is_superuser"),
+    [
+        pytest.param("user-1", False, id="owner"),
+        pytest.param("user-2", True, id="admin"),
+    ],
+)
 async def test_background_task_pending_activity_is_not_limited_by_task_history_page(
     chat_session_database: AsyncSession,
+    uid: str,
+    is_superuser: bool,
 ) -> None:
     primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
     assert primary_profile.id is not None
@@ -1459,7 +1560,7 @@ async def test_background_task_pending_activity_is_not_limited_by_task_history_p
     await chat_session_database.commit()
     await chat_session_database.refresh(pending_task)
 
-    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    auth_state: dict[str, object] = {"uid": uid, "is_superuser": is_superuser}
     app = _build_app(chat_session_database, auth_state)
 
     async with httpx.AsyncClient(
@@ -1500,6 +1601,105 @@ async def test_background_task_pending_activity_is_not_limited_by_task_history_p
             params={"session_id": session.session_id},
         )
         assert completed.json()["data"] == {"has_pending_activity": False}
+
+
+@pytest.mark.asyncio
+async def test_background_task_pending_activity_enforces_session_scope(
+    chat_session_database: AsyncSession,
+) -> None:
+    primary_profile, _alternate_profile, other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    assert other_profile.id is not None
+    owner_session = ChatSession(
+        session_id="background-pending-owner-session",
+        uid="user-1",
+        profile_id=primary_profile.id,
+        source="http",
+        reply_target_source="http",
+    )
+    other_session = ChatSession(
+        session_id="background-pending-other-session",
+        uid="user-2",
+        profile_id=other_profile.id,
+        source="http",
+        reply_target_source="http",
+    )
+    task = BackgroundTask(
+        uid="user-1",
+        session_id=owner_session.session_id,
+        profile_id=primary_profile.id,
+        tool_call_id="background-pending-owner-task",
+        tool_name="test_tool",
+        status=BackgroundTaskStatus.RUNNING,
+        arguments={},
+        auto_reply=True,
+        reply_status=BackgroundTaskReplyStatus.PENDING,
+        created_at=get_local_time(),
+    )
+    chat_session_database.add_all([owner_session, other_session, task])
+    await chat_session_database.commit()
+    await chat_session_database.refresh(owner_session)
+    await chat_session_database.refresh(other_session)
+    await chat_session_database.refresh(task)
+    before_snapshots = {
+        "owner_session": owner_session.model_dump(),
+        "other_session": other_session.model_dump(),
+        "task": task.model_dump(),
+    }
+
+    auth_state: dict[str, object] = {"uid": "user-2", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        forbidden = await client.get(
+            "/api/v1/chat/background-tasks/pending-activity",
+            params={"session_id": owner_session.session_id},
+        )
+        assert forbidden.status_code == 403
+        assert forbidden.json()["code"] == 403
+        assert forbidden.json()["data"] is None
+
+        own = await client.get(
+            "/api/v1/chat/background-tasks/pending-activity",
+            params={"session_id": other_session.session_id},
+        )
+        assert own.status_code == 200
+        assert own.json()["data"] == {"has_pending_activity": False}
+
+        unknown = await client.get(
+            "/api/v1/chat/background-tasks/pending-activity",
+            params={"session_id": "background-pending-unknown-session"},
+        )
+        assert unknown.status_code == 200
+        assert unknown.json()["data"] == {"has_pending_activity": False}
+
+        auth_state["is_superuser"] = True
+
+        admin_owner = await client.get(
+            "/api/v1/chat/background-tasks/pending-activity",
+            params={"session_id": owner_session.session_id},
+        )
+        assert admin_owner.status_code == 200
+        assert admin_owner.json()["data"] == {"has_pending_activity": True}
+
+        admin_unknown = await client.get(
+            "/api/v1/chat/background-tasks/pending-activity",
+            params={"session_id": "background-pending-unknown-session"},
+        )
+        assert admin_unknown.status_code == 200
+        assert admin_unknown.json()["data"] == {"has_pending_activity": False}
+
+    await chat_session_database.refresh(owner_session)
+    await chat_session_database.refresh(other_session)
+    await chat_session_database.refresh(task)
+    assert {
+        "owner_session": owner_session.model_dump(),
+        "other_session": other_session.model_dump(),
+        "task": task.model_dump(),
+    } == before_snapshots
 
 
 @pytest.mark.asyncio
@@ -1752,3 +1952,319 @@ async def test_http_structured_voice_input_persists_message_parts_and_history_sh
     assert json.loads(stored_message.content) == submitted_parts
     history_message = MessageResponse.model_validate(stored_message)
     assert history_message.content == submitted_parts
+
+
+@pytest.mark.asyncio
+async def test_background_task_list_enforces_owner_scope_admin_scope_and_public_page_shape(
+    chat_session_database: AsyncSession,
+) -> None:
+    primary_profile, _alternate_profile, other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    assert other_profile.id is not None
+
+    owner_session = ChatSession(
+        session_id="background-list-owner-session",
+        uid="user-1",
+        profile_id=primary_profile.id,
+        source="http",
+        reply_target_source="http",
+    )
+    owner_secondary_session = ChatSession(
+        session_id="background-list-owner-secondary-session",
+        uid="user-1",
+        profile_id=primary_profile.id,
+        source="http",
+        reply_target_source="http",
+    )
+    other_session = ChatSession(
+        session_id="background-list-other-session",
+        uid="user-2",
+        profile_id=other_profile.id,
+        source="http",
+        reply_target_source="http",
+    )
+    chat_session_database.add_all([owner_session, owner_secondary_session, other_session])
+
+    base_time = get_local_time().replace(microsecond=0)
+    tasks = [
+        BackgroundTask(
+            uid="user-1",
+            session_id=owner_session.session_id,
+            profile_id=primary_profile.id,
+            tool_call_id="background-list-owner-old",
+            tool_name="test_tool",
+            status=BackgroundTaskStatus.SUCCEEDED,
+            arguments={"secret": "owner-old-arguments"},
+            result={"value": "owner-old"},
+            error=None,
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.SUCCEEDED,
+            locked_by="worker-owner-old",
+            lock_until=1001,
+            reply_locked_by="reply-owner-old",
+            reply_lock_until=2001,
+            attempt_count=1,
+            extra={"internal": "owner-old-extra"},
+            audit_record_id=3001,
+            audit_execution_record_id=4001,
+            created_at=base_time + timedelta(seconds=1),
+        ),
+        BackgroundTask(
+            uid="user-1",
+            session_id=owner_session.session_id,
+            profile_id=primary_profile.id,
+            tool_call_id="background-list-owner-new",
+            tool_name="test_tool",
+            status=BackgroundTaskStatus.FAILED,
+            arguments={"secret": "owner-new-arguments"},
+            result={"value": "owner-new"},
+            error="owner task failed",
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.FAILED,
+            locked_by="worker-owner-new",
+            lock_until=1002,
+            reply_locked_by="reply-owner-new",
+            reply_lock_until=2002,
+            attempt_count=2,
+            extra={"internal": "owner-new-extra"},
+            audit_record_id=3002,
+            audit_execution_record_id=4002,
+            created_at=base_time + timedelta(seconds=4),
+        ),
+        BackgroundTask(
+            uid="user-1",
+            session_id=owner_secondary_session.session_id,
+            profile_id=primary_profile.id,
+            tool_call_id="background-list-owner-secondary",
+            tool_name="test_tool",
+            status=BackgroundTaskStatus.RUNNING,
+            arguments={"secret": "owner-secondary-arguments"},
+            result=None,
+            error=None,
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.RUNNING,
+            locked_by="worker-owner-secondary",
+            lock_until=1003,
+            reply_locked_by="reply-owner-secondary",
+            reply_lock_until=2003,
+            attempt_count=3,
+            extra={"internal": "owner-secondary-extra"},
+            audit_record_id=3003,
+            audit_execution_record_id=4003,
+            created_at=base_time + timedelta(seconds=2),
+        ),
+        BackgroundTask(
+            uid="user-2",
+            session_id=other_session.session_id,
+            profile_id=other_profile.id,
+            tool_call_id="background-list-other-owner",
+            tool_name="test_tool",
+            status=BackgroundTaskStatus.CANCELLED,
+            arguments={"secret": "other-owner-arguments"},
+            result={"value": "other-owner"},
+            error="cancelled",
+            auto_reply=False,
+            reply_status=BackgroundTaskReplyStatus.NONE,
+            locked_by="worker-other-owner",
+            lock_until=1004,
+            reply_locked_by="reply-other-owner",
+            reply_lock_until=2004,
+            attempt_count=4,
+            extra={"internal": "other-owner-extra"},
+            audit_record_id=3004,
+            audit_execution_record_id=4004,
+            created_at=base_time + timedelta(seconds=3),
+        ),
+    ]
+    chat_session_database.add_all(tasks)
+    await chat_session_database.commit()
+    assert all(task.id is not None for task in tasks)
+
+    for task in tasks:
+        await chat_session_database.refresh(task)
+    before_snapshots = {task.id: task.model_dump() for task in tasks}
+    public_fields = {
+        "id",
+        "uid",
+        "session_id",
+        "profile_id",
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "result",
+        "error",
+        "auto_reply",
+        "reply_status",
+        "attempt_count",
+        "created_at",
+        "started_at",
+        "finished_at",
+    }
+    internal_fields = {
+        "arguments",
+        "extra",
+        "locked_by",
+        "lock_until",
+        "reply_locked_by",
+        "reply_lock_until",
+        "audit_record_id",
+        "audit_execution_record_id",
+    }
+
+    def assert_public_rows(rows: list[dict[str, object]], expected_tasks: list[BackgroundTask]) -> None:
+        assert [row["id"] for row in rows] == [task.id for task in expected_tasks]
+        for row, task in zip(rows, expected_tasks):
+            assert public_fields <= row.keys()
+            assert internal_fields.isdisjoint(row.keys())
+            assert row["uid"] == task.uid
+            assert row["session_id"] == task.session_id
+            assert row["result"] == task.result
+            assert row["status"] == task.status.value
+
+    auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
+    app = _build_app(chat_session_database, auth_state)
+    owner_tasks_desc = sorted(
+        (task for task in tasks if task.uid == "user-1"),
+        key=lambda task: task.created_at,
+        reverse=True,
+    )
+    all_tasks_desc = sorted(tasks, key=lambda task: task.created_at, reverse=True)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        owner_list = await client.get("/api/v1/chat/background-tasks")
+        assert owner_list.status_code == 200
+        assert_public_rows(owner_list.json()["data"], owner_tasks_desc)
+
+        owner_other_session = await client.get(
+            "/api/v1/chat/background-tasks",
+            params={"session_id": other_session.session_id},
+        )
+        assert owner_other_session.status_code == 200
+        assert owner_other_session.json()["data"] == []
+
+        auth_state["is_superuser"] = True
+
+        admin_page_one = await client.get(
+            "/api/v1/chat/background-tasks",
+            params={"page": 1, "size": 2},
+        )
+        assert admin_page_one.status_code == 200
+        assert_public_rows(admin_page_one.json()["data"], all_tasks_desc[:2])
+
+        admin_page_two = await client.get(
+            "/api/v1/chat/background-tasks",
+            params={"page": 2, "size": 2},
+        )
+        assert admin_page_two.status_code == 200
+        assert_public_rows(admin_page_two.json()["data"], all_tasks_desc[2:])
+
+        admin_session = await client.get(
+            "/api/v1/chat/background-tasks",
+            params={"session_id": other_session.session_id},
+        )
+        assert admin_session.status_code == 200
+        assert_public_rows(
+            admin_session.json()["data"],
+            [task for task in all_tasks_desc if task.session_id == other_session.session_id],
+        )
+
+    for task in tasks:
+        await chat_session_database.refresh(task)
+    assert {task.id: task.model_dump() for task in tasks} == before_snapshots
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("uid", "is_superuser", "can_read"),
+    [
+        pytest.param("user-1", False, True, id="owner"),
+        pytest.param("user-2", False, False, id="other-user"),
+        pytest.param("user-2", True, True, id="superuser"),
+    ],
+)
+async def test_background_task_detail_enforces_owner_scope_and_public_shape(
+    chat_session_database: AsyncSession,
+    uid: str,
+    is_superuser: bool,
+    can_read: bool,
+) -> None:
+    primary_profile, _alternate_profile, _other_profile = await _seed_profiles(chat_session_database)
+    assert primary_profile.id is not None
+    session = ChatSession(
+        session_id="background-detail-session",
+        uid="user-1",
+        profile_id=primary_profile.id,
+        source="http",
+        reply_target_source="http",
+    )
+    task = BackgroundTask(
+        uid="user-1",
+        session_id=session.session_id,
+        profile_id=primary_profile.id,
+        tool_call_id="background-detail-task",
+        tool_name="test_tool",
+        status=BackgroundTaskStatus.FAILED,
+        arguments={"secret": "task-arguments"},
+        result={"value": "task-result"},
+        error="task failed",
+        auto_reply=True,
+        reply_status=BackgroundTaskReplyStatus.FAILED,
+        locked_by="worker-detail",
+        lock_until=1001,
+        reply_locked_by="reply-detail",
+        reply_lock_until=2001,
+        attempt_count=2,
+        extra={"internal": "task-extra"},
+        audit_record_id=3001,
+        audit_execution_record_id=4001,
+        created_at=get_local_time().replace(microsecond=0),
+    )
+    chat_session_database.add_all([session, task])
+    await chat_session_database.commit()
+    await chat_session_database.refresh(task)
+    before_snapshot = task.model_dump()
+
+    auth_state: dict[str, object] = {"uid": uid, "is_superuser": is_superuser}
+    app = _build_app(chat_session_database, auth_state)
+    internal_fields = {
+        "arguments",
+        "extra",
+        "locked_by",
+        "lock_until",
+        "reply_locked_by",
+        "reply_lock_until",
+        "audit_record_id",
+        "audit_execution_record_id",
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        detail = await client.get(f"/api/v1/chat/background-tasks/{task.id}")
+        assert detail.status_code == 200
+        detail_payload = detail.json()
+        if can_read:
+            assert detail_payload["code"] == 200
+            detail_data = detail_payload["data"]
+            assert detail_data["uid"] == "user-1"
+            assert detail_data["session_id"] == session.session_id
+            assert detail_data["result"] == task.result
+            assert detail_data["error"] == task.error
+            assert detail_data["status"] == task.status.value
+            assert internal_fields.isdisjoint(detail_data)
+        else:
+            assert detail_payload["code"] == 404
+            assert detail_payload["data"] is None
+
+        missing = await client.get("/api/v1/chat/background-tasks/999999")
+        assert missing.status_code == 200
+        missing_payload = missing.json()
+        assert missing_payload["code"] == 404
+        assert missing_payload["data"] is None
+
+    await chat_session_database.refresh(task)
+    assert task.model_dump() == before_snapshot

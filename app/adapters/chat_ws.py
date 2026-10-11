@@ -41,6 +41,8 @@ class WebSocketChatAdapter(BaseChatAdapter):
         session_id: str,
         attachments: list[str] | None = None,
         request_id: str | None = None,
+        actor_uid: str | None = None,
+        actor_username: str | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
@@ -56,6 +58,8 @@ class WebSocketChatAdapter(BaseChatAdapter):
                 attachments=attachments,
                 source="ws",
                 request_id=request_id,
+                actor_uid=actor_uid,
+                actor_username=actor_username,
             )
             if request_id:
                 yield build_input_accepted_event(

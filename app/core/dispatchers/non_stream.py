@@ -40,6 +40,8 @@ class NonStreamDispatcherMixin:
         show_tool_calls: bool = True,
         additional_system_prompt: str | None = None,
         request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        actor_uid: str | None = None,
+        actor_username: str | None = None,
     ):
         return await dispatch_interactive(
             db=db,
@@ -64,6 +66,8 @@ class NonStreamDispatcherMixin:
             show_tool_calls=show_tool_calls,
             additional_system_prompt=additional_system_prompt,
             request_metadata_callback=request_metadata_callback,
+            actor_uid=actor_uid,
+            actor_username=actor_username,
             dispatcher_mode="non_stream",
             validate_initial_message_before_save=cls.validate_initial_message_before_save,
         )

@@ -259,6 +259,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             profile=profile,
         )
 
+    actor_username = execution_state.get("actor_username") or getattr(record, "decided_by", None) or record.operator_username
     cfg = await validate_profile_and_cfg(db, profile)
     session = await session_crud.get_by_session_id(db, work.session_id)
     confirmed_tool_context_window_k = _resolve_confirmed_tool_context_window_k(session)
@@ -295,7 +296,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             tool_calls=source_tool_calls,
             source_assistant_message_id=source_message.id,
             uid=work.uid,
-            operator_username=record.operator_username,
+            operator_username=actor_username,
             session_id=work.session_id,
             source=record.source,
             language=get_current_locale(),
@@ -494,7 +495,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     profile,
                     cfg,
                     messages,
-                    record.operator_username,
+                    actor_username,
                     work.session_id,
                     detail.turn_index,
                     work.uid,

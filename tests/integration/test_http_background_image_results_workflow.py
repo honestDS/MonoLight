@@ -320,6 +320,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(send_file_to_user_module, "_get_encryption_key", lambda: b"t" * 32)
+        monkeypatch.setattr(send_file_to_user_module, "FILE_TOKEN_DIR", tmp_path / "file_download_tokens")
         monkeypatch.setattr(executor_lifecycle_module, "send_session_event", noop_send_session_event)
 
         await executor_lifecycle_module.execute_session_reply_work(work_id, "image-worker")

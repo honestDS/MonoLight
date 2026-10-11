@@ -28,6 +28,7 @@ export default {
   session_group_today: 'Today',
   session_group_yesterday: 'Yesterday',
   session_group_earlier: 'Earlier',
+  session_group_user: "{username}'s sessions",
   refresh_sessions: 'Refresh session list',
   expand_sessions: 'Expand session list',
   collapse_sessions: 'Collapse session list',

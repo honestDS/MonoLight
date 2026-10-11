@@ -37,6 +37,7 @@ import * as sessionTransportMode from '../src/composables/chat/sessionTransportM
 import * as transportNotifications from '../src/composables/chat/transportNotifications.js'
 import * as llmRequestMetadata from '../src/composables/chat/llmRequestMetadata.js'
 import * as chatContentReveal from '../src/utils/chatContentReveal.js'
+import { groupChatSessions } from '../src/utils/chatPresentation.js'
 import * as historyPagination from '../src/composables/chat/historyPagination.js'
 import * as chatTransportRuntime from '../src/composables/chat/chatTransportRuntime.js'
 import { useChatState } from '../src/composables/chat/useChatState.js'
@@ -784,6 +785,7 @@ export const createHarness = async (t, options = {}) => {
     SESSION_MAX_TURNS_UPPER_BOUND,
     ...profileOptions,
     ...chatContentReveal,
+    groupChatSessions,
     ResizeObserver: class {
       observe() {}
       disconnect() {}

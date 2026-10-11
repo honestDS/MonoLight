@@ -251,6 +251,8 @@ async def _dispatch_interactive_work(
         "db": db,
         "message": message,
         "uid": work.uid,
+        "actor_uid": execution_state.get("actor_uid") or work.uid,
+        "actor_username": execution_state.get("actor_username"),
         "session_id": work.session_id,
         "attachments": attachments or None,
         "session_source": str(execution_state.get("message_source") or "queue"),

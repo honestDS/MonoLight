@@ -99,6 +99,16 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(select(func.count()).select_from(Message).where(Message.uid == uid, Message.session_id.in_(session_ids)))
         return int(result.scalar() or 0)
 
+    async def has_user_attachment(self, db: AsyncSession, *, uid: str, path: str) -> bool:
+        result = await db.stream_scalars(select(Message.attachments).where(Message.uid == uid, Message.attachments.is_not(None)))
+        try:
+            async for attachments in result:
+                if isinstance(attachments, list) and path in attachments:
+                    return True
+            return False
+        finally:
+            await result.close()
+
     async def create_guidance(
         self,
         db: AsyncSession,
