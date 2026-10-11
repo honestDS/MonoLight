@@ -149,10 +149,7 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
         return result.scalars().first()
 
     async def clear_default_by_uid(self, db: AsyncSession, uid: str | None) -> None:
-        profiles = await self.get_multi(db, uid=uid)
-        for profile in profiles:
-            profile.is_default = False
-            db.add(profile)
+        await db.execute(update(Profile).where(Profile.uid == uid).values(is_default=False))
 
     async def get_multi_by_prompt_id(self, db: AsyncSession, prompt_id: int) -> list[Profile]:
         result = await db.execute(select(Profile).where(Profile.prompt_id == prompt_id))

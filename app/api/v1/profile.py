@@ -296,15 +296,19 @@ async def set_default_profile(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    profile = await profile_crud.get(db, profile_id)
+    if not profile:
+        raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+    if not getattr(current_user, "is_superuser", False) and profile.uid != current_user.uid:
+        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
+
     profile = await profile_crud.lock_for_runtime_use(
         db,
         profile_id=profile_id,
-        uid=current_user.uid,
+        uid=profile.uid,
     )
     if not profile:
         raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
-    if profile.uid != current_user.uid:
-        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
 
     await validate_profile_for_assignment(db, profile)
 

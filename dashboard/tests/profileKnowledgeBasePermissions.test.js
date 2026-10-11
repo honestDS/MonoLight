@@ -74,6 +74,11 @@ const createHarness = async (t, options = {}) => {
     profileList: [],
     knowledgeBaseList: [],
     memorySettings: [],
+    channelList: [],
+    promptList: [],
+    adminUserList: [],
+    systemSettings: [],
+    systemSettingsUpdates: [],
     creates: [],
     updates: [],
   }
@@ -126,6 +131,43 @@ const createHarness = async (t, options = {}) => {
       ))
     },
   }
+  const defaultSystemSettings = {
+    log_locale: 'en',
+    temp_dir_max_size_mb: 2048,
+    audit_retention_days: 120,
+    audit_report_email: 'audit@example.com',
+    session_reply_max_concurrency: 8,
+  }
+  const channelApi = {
+    list: params => {
+      api.channelList.push(params)
+      return Promise.resolve(pageResponse([], 0, {}))
+    },
+  }
+  const promptApi = {
+    list: params => {
+      api.promptList.push(params)
+      return Promise.resolve(pageResponse([], 0, {}))
+    },
+  }
+  const adminApi = {
+    userList: params => {
+      api.adminUserList.push(params)
+      return Promise.resolve(pageResponse([], 0, {}))
+    },
+  }
+  const systemApi = {
+    settings: () => {
+      api.systemSettings.push({})
+      if (options.systemSettingsRequest) return options.systemSettingsRequest()
+      return Promise.resolve(dataResponse(defaultSystemSettings))
+    },
+    updateSettings: payload => {
+      api.systemSettingsUpdates.push({ ...payload })
+      if (options.systemSettingsUpdate) return options.systemSettingsUpdate(payload)
+      return Promise.resolve(dataResponse(payload))
+    },
+  }
 
   const ElMessage = (...args) => messages.push({ type: 'message', args })
   ElMessage.warning = (...args) => messages.push({ type: 'warning', args })
@@ -150,10 +192,10 @@ const createHarness = async (t, options = {}) => {
     watch,
     ...memoryManagement,
     ...profileOptions,
-    channelApi: {},
-    promptApi: {},
-    systemApi: {},
-    adminApi: {},
+    channelApi,
+    promptApi,
+    systemApi,
+    adminApi,
     console: { log() {}, warn() {}, error() {}, info() {} },
   })
 
@@ -172,6 +214,16 @@ const createHarness = async (t, options = {}) => {
     knowledgeBasesUnavailable,
     knowledgeBaseOptions,
     userPermissions,
+    canSetDefaultProfile,
+    showOwnerColumn,
+    currentUid,
+    loadSystemSettings,
+    saveSystemSettings,
+    showSystemSettingsDialog,
+    handleRefresh,
+    settingsDialogVisible,
+    settingsSubmitting,
+    systemSettings,
   }
 `,
       context,
@@ -183,6 +235,7 @@ const createHarness = async (t, options = {}) => {
     api,
     messages,
     mountedCallbacks,
+    permissionsStore,
     module: context.__module,
     dispose() {
       if (this.disposed) return
@@ -465,4 +518,214 @@ test('fetch failure keeps cached ids but omits bindings from the save payload', 
     assertOmitsKnowledgeBaseIds(payload)
     assert.deepEqual(harness.module.form.knowledge_base_ids, ['kb-preserved'], scenario.role)
   }
+})
+
+test('unknown and ordinary users never request or mutate global settings', async t => {
+  for (const scenario of [
+    { name: 'unknown', options: {} },
+    { name: 'ordinary', options: { superuser: false, currentUid: 'user-a' } },
+  ]) {
+    const harness = await createHarness(t, scenario.options)
+    const settingsBefore = normalize(harness.module.systemSettings)
+    const dialogBefore = harness.module.settingsDialogVisible.value
+    const submittingBefore = harness.module.settingsSubmitting.value
+
+    for (const callback of harness.mountedCallbacks) callback()
+    await flush()
+    harness.module.handleRefresh()
+    await flush()
+    assert.equal(await harness.module.loadSystemSettings(), false, scenario.name)
+    await harness.module.showSystemSettingsDialog()
+    await harness.module.saveSystemSettings()
+    await flush()
+
+    assert.equal(harness.api.systemSettings.length, 0, scenario.name)
+    assert.equal(harness.api.systemSettingsUpdates.length, 0, scenario.name)
+    assert.deepEqual(normalize(harness.module.systemSettings), settingsBefore, scenario.name)
+    assert.equal(harness.module.settingsDialogVisible.value, dialogBefore, scenario.name)
+    assert.equal(harness.module.settingsSubmitting.value, submittingBefore, scenario.name)
+    assert.deepEqual(harness.messages.filter(message => message.type === 'error'), [], scenario.name)
+  }
+})
+
+test('superuser can load, open, and save global settings', async t => {
+  const loadedSettings = {
+    log_locale: 'en',
+    temp_dir_max_size_mb: 4096,
+    audit_retention_days: 180,
+    audit_report_email: 'ops@example.com',
+    session_reply_max_concurrency: 12,
+  }
+  const harness = await createHarness(t, {
+    superuser: true,
+    systemSettingsRequest: () => Promise.resolve(dataResponse(loadedSettings)),
+    systemSettingsUpdate: payload => dataResponse({
+      ...payload,
+      audit_report_email: 'saved@example.com',
+    }),
+  })
+
+  assert.equal(await harness.module.loadSystemSettings(), true)
+  assert.equal(harness.api.systemSettings.length, 1)
+  assert.deepEqual(normalize(harness.module.systemSettings), loadedSettings)
+
+  await harness.module.showSystemSettingsDialog()
+  assert.equal(harness.api.systemSettings.length, 2)
+  assert.equal(harness.module.settingsDialogVisible.value, true)
+
+  harness.module.systemSettings.audit_retention_days = 365
+  const expectedPayload = normalize(harness.module.systemSettings)
+  await harness.module.saveSystemSettings()
+
+  assert.deepEqual(harness.api.systemSettingsUpdates, [expectedPayload])
+  assert.deepEqual(normalize(harness.module.systemSettings), {
+    ...expectedPayload,
+    audit_report_email: 'saved@example.com',
+  })
+  assert.equal(harness.module.settingsDialogVisible.value, false)
+  assert.equal(harness.module.settingsSubmitting.value, false)
+})
+
+test('failed global settings load does not open the dialog', async t => {
+  const harness = await createHarness(t, {
+    superuser: true,
+    systemSettingsRequest: () => Promise.reject(new Error('settings load failed')),
+  })
+  const settingsBefore = normalize(harness.module.systemSettings)
+
+  await harness.module.showSystemSettingsDialog()
+
+  assert.equal(harness.api.systemSettings.length, 1)
+  assert.equal(harness.module.settingsDialogVisible.value, false)
+  assert.deepEqual(normalize(harness.module.systemSettings), settingsBefore)
+  assert.equal(harness.module.settingsSubmitting.value, false)
+  assert.deepEqual(harness.messages.filter(message => message.type === 'error').map(message => message.args[0]), [
+    'settings load failed',
+  ])
+})
+
+test('clearing permissions ignores late global settings responses', async t => {
+  let resolveSettingsRequest
+  const settingsRequest = new Promise(resolve => {
+    resolveSettingsRequest = resolve
+  })
+  const loadHarness = await createHarness(t, {
+    superuser: true,
+    systemSettingsRequest: () => settingsRequest,
+  })
+  const settingsBeforeLoad = normalize(loadHarness.module.systemSettings)
+  const opening = loadHarness.module.showSystemSettingsDialog()
+  assert.equal(loadHarness.api.systemSettings.length, 1)
+
+  loadHarness.permissionsStore.clear()
+  resolveSettingsRequest(dataResponse({
+    log_locale: 'late',
+    temp_dir_max_size_mb: 8192,
+    audit_retention_days: 365,
+    audit_report_email: 'late@example.com',
+    session_reply_max_concurrency: 32,
+  }))
+  await opening
+  await flush()
+
+  assert.deepEqual(normalize(loadHarness.module.systemSettings), settingsBeforeLoad)
+  assert.equal(loadHarness.module.settingsDialogVisible.value, false)
+  assert.equal(loadHarness.module.settingsSubmitting.value, false)
+  assert.deepEqual(loadHarness.messages, [])
+
+  let resolveSettingsUpdate
+  const settingsUpdate = new Promise(resolve => {
+    resolveSettingsUpdate = resolve
+  })
+  const saveHarness = await createHarness(t, {
+    superuser: true,
+    systemSettingsUpdate: () => settingsUpdate,
+  })
+  await saveHarness.module.showSystemSettingsDialog()
+  saveHarness.module.systemSettings.log_locale = 'pending'
+  const settingsBeforeSave = normalize(saveHarness.module.systemSettings)
+  const saving = saveHarness.module.saveSystemSettings()
+  assert.equal(saveHarness.module.settingsSubmitting.value, true)
+
+  saveHarness.permissionsStore.clear()
+  resolveSettingsUpdate(dataResponse({
+    ...settingsBeforeSave,
+    log_locale: 'late-save',
+  }))
+  await saving
+  await flush()
+
+  assert.deepEqual(saveHarness.api.systemSettingsUpdates, [settingsBeforeSave])
+  assert.deepEqual(normalize(saveHarness.module.systemSettings), settingsBeforeSave)
+  assert.equal(saveHarness.module.settingsDialogVisible.value, true)
+  assert.equal(saveHarness.module.settingsSubmitting.value, false)
+  assert.deepEqual(saveHarness.messages, [])
+})
+
+test('unknown users cannot set any profile as default', async t => {
+  const harness = await createHarness(t)
+  harness.module.showOwnerColumn.value = true
+  harness.module.currentUid.value = 'user-a'
+
+  for (const row of [
+    { uid: 'user-a' },
+    { uid: 'user-b' },
+    { uid: null },
+    {},
+    undefined,
+    null,
+  ]) {
+    assert.equal(harness.module.canSetDefaultProfile(row), false)
+  }
+})
+
+test('ordinary users can set only their own profile as default', async t => {
+  const harness = await createHarness(t, {
+    superuser: false,
+    currentUid: 'user-a',
+  })
+
+  assert.equal(harness.module.canSetDefaultProfile({ uid: 'user-a' }), true)
+  assert.equal(harness.module.canSetDefaultProfile({ uid: 'user-b' }), false)
+  assert.equal(harness.module.canSetDefaultProfile({ uid: null }), false)
+  assert.equal(harness.module.canSetDefaultProfile({}), false)
+  assert.equal(harness.module.canSetDefaultProfile(), false)
+
+  harness.module.showOwnerColumn.value = true
+  harness.module.currentUid.value = 'user-b'
+  assert.equal(harness.module.canSetDefaultProfile({ uid: 'user-a' }), true)
+  assert.equal(harness.module.canSetDefaultProfile({ uid: 'user-b' }), false)
+})
+
+test('superusers can set profiles with any owner as default', async t => {
+  const harness = await createHarness(t, {
+    superuser: true,
+    currentUid: 'admin-user',
+  })
+
+  assert.equal(harness.module.canSetDefaultProfile({ uid: 'admin-user' }), true)
+  assert.equal(harness.module.canSetDefaultProfile({ uid: 'user-a' }), true)
+  assert.equal(harness.module.canSetDefaultProfile({ uid: null }), true)
+  assert.equal(harness.module.canSetDefaultProfile({}), true)
+  assert.equal(harness.module.canSetDefaultProfile(), false)
+})
+
+test('clearing permissions removes default-profile permission', async t => {
+  const ordinaryHarness = await createHarness(t, {
+    superuser: false,
+    currentUid: 'user-a',
+  })
+  const ownRow = { uid: 'user-a' }
+  assert.equal(ordinaryHarness.module.canSetDefaultProfile(ownRow), true)
+  ordinaryHarness.permissionsStore.clear()
+  assert.equal(ordinaryHarness.module.canSetDefaultProfile(ownRow), false)
+
+  const superuserHarness = await createHarness(t, {
+    superuser: true,
+    currentUid: 'admin-user',
+  })
+  const otherRow = { uid: 'user-b' }
+  assert.equal(superuserHarness.module.canSetDefaultProfile(otherRow), true)
+  superuserHarness.permissionsStore.clear()
+  assert.equal(superuserHarness.module.canSetDefaultProfile(otherRow), false)
 })

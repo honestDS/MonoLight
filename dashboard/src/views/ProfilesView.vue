@@ -15,7 +15,7 @@
       <template #actions>
         <el-button type="primary" size="default" @click="showDialog('create')">{{ $t('profiles.create_profile') }}</el-button>
         <el-button size="default" @click="handleRefresh">{{ $t('profiles.refresh') }}</el-button>
-        <el-button size="default" @click="showSystemSettingsDialog">{{ $t('profiles.global_settings') }}</el-button>
+        <el-button v-if="userPermissions.isSuperuser" size="default" @click="showSystemSettingsDialog">{{ $t('profiles.global_settings') }}</el-button>
       </template>
 
       <el-table-column :resizable="false" prop="name" :label="$t('profiles.profile_name')" min-width="120" sortable></el-table-column>
@@ -112,7 +112,7 @@
       @closed="closeMemoryEmbeddingDialog"
     />
 
-    <el-dialog :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="520px" class="standard-dialog" center align-center>
+    <el-dialog v-if="userPermissions.isSuperuser" :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="520px" class="standard-dialog" center align-center>
       <el-form :model="systemSettings" label-width="150px" size="default">
         <el-form-item :label="$t('profiles.log_locale')">
           <el-select v-model="systemSettings.log_locale" class="full-width-input">
@@ -400,7 +400,11 @@ const isCurrentMemoryEmbeddingRequest = (requestGeneration, profileId, targetKey
   && memoryEmbeddingTargetKey.value === targetKey
 )
 
-const canSetDefaultProfile = (row) => !showOwnerColumn.value || row.uid === currentUid.value
+const canSetDefaultProfile = (row) => Boolean(
+  row
+  && (userPermissions.isSuperuser
+    || (userPermissions.currentUser?.uid && row.uid === userPermissions.currentUser.uid))
+)
 
 const auditModelKey = computed({
   get() {
@@ -541,18 +545,24 @@ const fetchPrompts = async () => {
 }
 
 const loadSystemSettings = async () => {
+  if (!userPermissions.isSuperuser) return false
   try {
     const settingsRes = await systemApi.settings()
+    if (!userPermissions.isSuperuser) return false
     Object.assign(systemSettings, settingsRes.data.data || {})
+    return true
   } catch (err) {
     ElMessage.error(err.message || t('profiles.load_settings_failed'))
+    return false
   }
 }
 
 const saveSystemSettings = async () => {
+  if (!userPermissions.isSuperuser) return
   settingsSubmitting.value = true
   try {
     const res = await systemApi.updateSettings({ ...systemSettings })
+    if (!userPermissions.isSuperuser) return
     Object.assign(systemSettings, res.data.data || {})
     settingsDialogVisible.value = false
     ElMessage.success(t('profiles.system_settings_saved'))
@@ -564,8 +574,10 @@ const saveSystemSettings = async () => {
 }
 
 const showSystemSettingsDialog = async () => {
-  await loadSystemSettings()
-  settingsDialogVisible.value = true
+  if (!userPermissions.isSuperuser) return
+  if (await loadSystemSettings() && userPermissions.isSuperuser) {
+    settingsDialogVisible.value = true
+  }
 }
 
 const fetchChannels = async () => {
