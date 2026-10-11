@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, normalize_weixin_openclaw_config
@@ -23,6 +24,7 @@ from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
 from app.core.profile_validation import get_validated_profile_for_assignment
 from app.core.security import get_current_user
+from app.core.utils.database_integrity import is_unique_constraint_violation
 from app.models.message_platform import (
     MessagePlatform,
     MessagePlatformCreate,
@@ -83,6 +85,14 @@ def _normalize_uid(uid: str | None) -> str | None:
     return normalized or None
 
 
+def _is_platform_name_integrity_error(exc: IntegrityError) -> bool:
+    return is_unique_constraint_violation(
+        exc,
+        constraint_names=("uq_message_platform_uid_name",),
+        fallback_marker_groups=(("unique constraint failed: message_platform.uid, message_platform.name",),),
+    )
+
+
 def _ensure_uid_for_enabled(is_enabled: bool, uid: str | None) -> None:
     if is_enabled and not _normalize_uid(uid):
         raise ParameterException(ERR_MESSAGE_PLATFORM_UID_REQUIRED)
@@ -139,21 +149,27 @@ async def create_message_platform(
     submitted_uid = _normalize_uid(platform_in.uid)
     if not current_user.is_superuser and submitted_uid and submitted_uid != current_user.uid:
         raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
-    if await message_platform_crud.get_by_name(db, platform_in.name):
-        raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     payload = _normalize_create_payload(platform_in)
     if current_user.is_superuser:
         payload["uid"] = _normalize_uid(payload.get("uid") or getattr(current_user, "uid", None))
     else:
         payload["uid"] = _normalize_uid(current_user.uid)
     _ensure_uid_for_enabled(bool(payload.get("is_enabled")), payload.get("uid"))
+    if await message_platform_crud.get_by_name(db, payload["name"], uid=payload["uid"]):
+        raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     if payload.get("profile_id") is not None:
         await get_validated_profile_for_assignment(
             db,
             profile_id=payload["profile_id"],
             uid=payload["uid"],
         )
-    platform = await message_platform_crud.create(db, obj_in=payload)
+    try:
+        platform = await message_platform_crud.create(db, obj_in=payload)
+    except IntegrityError as exc:
+        await db.rollback()
+        if _is_platform_name_integrity_error(exc):
+            raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS) from exc
+        raise
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_CREATED)
 
 
@@ -165,10 +181,6 @@ async def update_message_platform(
     current_user=Depends(get_current_user),
 ):
     platform = await _get_accessible_platform(db, platform_id, current_user, for_update=True)
-    if platform_in.name and platform_in.name != platform.name:
-        same_name = await message_platform_crud.get_by_name(db, platform_in.name)
-        if same_name:
-            raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     data = _normalize_update_payload(platform.platform_type, platform_in)
     if "uid" in data:
         data["uid"] = _normalize_uid(data.get("uid"))
@@ -182,16 +194,27 @@ async def update_message_platform(
     next_is_enabled = bool(data["is_enabled"]) if "is_enabled" in data else platform.is_enabled
     next_uid = data["uid"] if "uid" in data else platform.uid
     next_profile_id = data["profile_id"] if "profile_id" in data else platform.profile_id
+    next_name = data["name"] if "name" in data else platform.name
     _ensure_uid_for_enabled(next_is_enabled, next_uid)
+    if next_name != platform.name or next_uid != platform.uid:
+        same_name = await message_platform_crud.get_by_name(db, next_name, uid=next_uid)
+        if same_name and same_name.id != platform.id:
+            raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     if ("uid" in data or "profile_id" in data) and next_profile_id is not None:
         await get_validated_profile_for_assignment(
             db,
             profile_id=next_profile_id,
             uid=next_uid,
         )
-    platform = await message_platform_crud.update(db, db_obj=platform, obj_in=data, commit=False)
-    response = StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_UPDATED)
-    await db.commit()
+    try:
+        platform = await message_platform_crud.update(db, db_obj=platform, obj_in=data, commit=False)
+        response = StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_UPDATED)
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if _is_platform_name_integrity_error(exc):
+            raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS) from exc
+        raise
     return response
 
 
