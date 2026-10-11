@@ -1,6 +1,8 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import { setupApi } from '../api'
+import { authApi, setupApi } from '../api'
+import { useUserPermissionsStore } from '../composables/useUserPermissions.js'
 import { BACKEND_UNAVAILABLE_PATH, createSetupGuard, setupStatusState } from './setupGuard.js'
+import { createUserManagementGuard } from './userManagementGuard.js'
 
 const routes = [
   { path: '/login', component: () => import('../views/LoginView.vue') },
@@ -12,7 +14,7 @@ const routes = [
   { path: '/scheduled-tasks', component: () => import('../views/ScheduledTasksView.vue') },
   { path: '/channels', component: () => import('../views/ChannelsView.vue') },
   { path: '/message-platforms', component: () => import('../views/MessagePlatformsView.vue') },
-  { path: '/users', component: () => import('../views/UsersView.vue') },
+  { path: '/users', component: () => import('../views/UsersView.vue'), meta: { requiresSuperuser: true } },
   { path: '/memories', component: () => import('../views/MemoriesView.vue') },
   { path: '/knowledge-base', component: () => import('../views/KnowledgeBase.vue') },
   { path: '/logs/realtime', component: () => import('../views/RealTimeLogs.vue') },
@@ -32,5 +34,10 @@ const setupGuard = createSetupGuard({
   state: setupStatusState
 })
 router.beforeEach(setupGuard)
+router.beforeEach(createUserManagementGuard({
+  currentUserRequest: () => authApi.me(),
+  getToken: () => localStorage.getItem('token'),
+  getPermissions: () => useUserPermissionsStore()
+}))
 
 export default router

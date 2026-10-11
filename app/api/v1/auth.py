@@ -17,9 +17,14 @@ from app.core.exceptions import (
 )
 from app.core.security import (
     create_access_token,
+    get_current_user,
     verify_password,
 )
 from app.core.validation import validate_password
+from app.models.user import (
+    User,
+    UserResponse,
+)
 from app.providers.database import get_db
 from app.schemas.auth import (
     LoginRequest,
@@ -49,3 +54,8 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
         data={"access_token": access_token, "token_type": "bearer"},
         message=MSG_LOGIN_SUCCESS,
     )
+
+
+@router.get("/me", response_model=StandardResponse[UserResponse])
+async def get_me(current_user: User = Depends(get_current_user)):
+    return StandardResponse.success(data=UserResponse.model_validate(current_user))

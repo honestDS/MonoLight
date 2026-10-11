@@ -39,8 +39,6 @@ from app.schemas.response import (
     StandardResponse,
 )
 
-router = APIRouter(prefix="/user", tags=["User Management"], dependencies=[Depends(get_current_user)])
-
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
@@ -48,11 +46,13 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
     return current_user
 
 
+router = APIRouter(prefix="/user", tags=["User Management"], dependencies=[Depends(check_admin_privilege)])
+
+
 @router.post("/add")
 async def add_new_user(
     user_in: UserCreate,
     db: AsyncSession = Depends(get_db),
-    admin: dict = Depends(check_admin_privilege),
 ):
     if await user_crud.get_by_username(db, user_in.username):
         raise ParameterException(ERR_USER_NAME_EXISTS)
@@ -77,7 +77,6 @@ async def list_all_users(
     page: int = 1,
     size: int = 10,
     db: AsyncSession = Depends(get_db),
-    admin: dict = Depends(check_admin_privilege),
 ):
     skip = (page - 1) * size
     users = await user_crud.get_multi(db, skip=skip, limit=size)
@@ -99,7 +98,6 @@ async def list_all_users(
 async def update_user(
     user_in: UserUpdate,
     db: AsyncSession = Depends(get_db),
-    admin: dict = Depends(check_admin_privilege),
 ):
     user = await user_crud.get_by_uid(db, user_in.uid)
     if not user:
@@ -129,7 +127,6 @@ async def update_user(
 async def delete_user(
     uid: str,
     db: AsyncSession = Depends(get_db),
-    admin: dict = Depends(check_admin_privilege),
 ):
     user = await user_crud.get_by_uid(db, uid)
     if not user:
