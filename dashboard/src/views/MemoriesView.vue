@@ -64,14 +64,14 @@
           <el-table-column :label="$t('memories.actions')" min-width="190" fixed="right" header-align="center">
             <template #default="{ row }">
               <div class="memory-action-buttons">
-                <el-button size="small" type="info" @click="showDetails(row)">{{ $t('memories.view') }}</el-button>
-                <el-button v-if="row.suppress_recall && !row.pending_mutation_job_id" size="small" type="warning" @click="resumeCurrent(row)">{{ $t('memories.resume_current') }}</el-button>
+                <el-button size="small" type="info" @click="showDetails(row)" :disabled="!canAccessMemoryData(row)">{{ $t('memories.view') }}</el-button>
+                <el-button v-if="canResume(row)" size="small" type="warning" @click="resumeCurrent(row)">{{ $t('memories.resume_current') }}</el-button>
                 <el-dropdown trigger="click" popper-class="memory-more-dropdown" @command="handleMemoryMoreAction($event, row)">
-                  <el-button size="small">{{ $t('memories.more') }}</el-button>
+                  <el-button size="small" :disabled="!canAccessMemoryData(row)">{{ $t('memories.more') }}</el-button>
                   <template #dropdown>
                     <el-dropdown-menu>
                       <el-dropdown-item command="toggle-pin" :disabled="!canPin(row)">{{ row.pinned ? $t('memories.unpin') : $t('memories.pin') }}</el-dropdown-item>
-                      <el-dropdown-item command="history">{{ $t('memories.history') }}</el-dropdown-item>
+                      <el-dropdown-item command="history" :disabled="!canAccessMemoryData(row)">{{ $t('memories.history') }}</el-dropdown-item>
                       <el-dropdown-item command="delete" class="danger-dropdown-item" :disabled="!canMutateRecord(row)">{{ $t('memories.delete') }}</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
@@ -107,7 +107,7 @@
                 <el-button v-if="canRetry(row)" size="small" type="warning" @click="retryJob(row)">{{ $t('memories.retry') }}</el-button>
                 <el-button v-if="canCancel(row)" size="small" type="danger" @click="cancelJob(row)">{{ $t('memories.cancel_job') }}</el-button>
                 <el-button v-if="canShowDeletedHistory(row)" size="small" @click="showDeletedHistory(row)">{{ $t('memories.history') }}</el-button>
-                <el-button size="small" type="info" @click="showJob(row)">{{ $t('memories.view') }}</el-button>
+                <el-button size="small" type="info" @click="showJob(row)" :disabled="!canAccessMemoryData(row)">{{ $t('memories.view') }}</el-button>
               </div>
             </template>
           </el-table-column>
@@ -139,10 +139,10 @@
           <el-table-column :label="$t('memories.actions')" width="350" fixed="right" header-align="center">
             <template #default="{ row }">
               <div class="memory-action-buttons">
-                <el-button size="small" type="info" @click="showMigration(row)">{{ $t('memories.view') }}</el-button>
+                <el-button size="small" type="info" @click="showMigration(row)" :disabled="!canAccessMemoryData(row)">{{ $t('memories.view') }}</el-button>
                 <el-button v-if="canRetryMigration(row)" size="small" type="warning" @click="retryMigration(row)">{{ $t('memories.migration_retry') }}</el-button>
                 <el-button v-if="canCancelMigration(row)" size="small" type="danger" @click="cancelMigration(row)">{{ $t('memories.migration_cancel') }}</el-button>
-                <el-button v-if="cleanupId(row)" size="small" type="danger" @click="retryCleanup(cleanupId(row))">{{ $t('memories.cleanup_retry') }}</el-button>
+                <el-button v-if="canRetryCleanup(cleanupId(row), row)" size="small" type="danger" @click="retryCleanup(cleanupId(row), row)">{{ $t('memories.cleanup_retry') }}</el-button>
               </div>
             </template>
           </el-table-column>
@@ -280,7 +280,7 @@
           type="danger"
           @click="retryCleanup(cleanupRetryId)"
           :loading="actionLoading === `cleanup-${cleanupRetryId}`"
-          :disabled="!settingsLoaded || settingsLoading || Boolean(actionLoading)">
+          :disabled="!settingsLoaded || settingsLoading || Boolean(actionLoading) || !canRetryCleanup(cleanupRetryId)">
           {{ $t('memories.cleanup_retry') }}
         </el-button>
         <el-button @click="closeRuntimeDialog" :disabled="Boolean(actionLoading)">{{ runtimeDialogAction === 'status' ? $t('memories.close') : $t('memories.cancel') }}</el-button>
@@ -310,7 +310,7 @@
         <el-form-item :label="$t('memories.change_evidence')"><el-input v-model="form.change_evidence" type="textarea" :rows="3" :placeholder="$t('memories.change_evidence_placeholder')" /></el-form-item>
         <el-form-item v-if="editorMode === 'edit'" :label="$t('memories.suppress_current')"><el-checkbox v-model="form.suppress_current">{{ $t('memories.suppress_current') }}</el-checkbox><div class="help-text">{{ $t('memories.suppress_hint') }}</div></el-form-item>
       </el-form>
-      <template #footer><el-button @click="editorVisible = false">{{ $t('memories.cancel') }}</el-button><el-button type="primary" :loading="submitting" :disabled="contentTooLong" @click="submitMemory">{{ $t('memories.save') }}</el-button></template>
+      <template #footer><el-button @click="editorVisible = false">{{ $t('memories.cancel') }}</el-button><el-button type="primary" :loading="submitting" :disabled="contentTooLong || !memoryScopeReady || (editorMode === 'edit' && !canAccessMemoryData(form))" @click="submitMemory">{{ $t('memories.save') }}</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="detailsVisible" :title="$t('memories.details')" width="760px" class="standard-dialog" align-center>
@@ -436,6 +436,9 @@ const {
   progressText,
   canMutateRecord,
   canPin,
+  canAccessMemoryData,
+  canResume,
+  canRetryCleanup,
   jobError,
   jobCountsText,
   tokenBudgetText,

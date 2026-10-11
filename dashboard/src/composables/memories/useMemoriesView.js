@@ -158,10 +158,19 @@ export function useMemoriesView() {
         uid: isSuperuser.value ? ownerFilter.value || undefined : undefined
       }, { signal: token.signal }))
       if (!pollingTaskManager.isCurrent(token) || !memoriesRequestTracker.isCurrent(requestSeq)) return
-      const meta = data.meta || {}
-      isSuperuser.value = Boolean(meta.is_superuser)
-      currentUid.value = meta.current_uid ?? null
-      currentUsername.value = meta.current_username ?? ''
+      const meta = data.meta
+      const currentMetaUid = typeof meta?.current_uid === 'string' ? meta.current_uid.trim() : ''
+      if (typeof meta?.is_superuser !== 'boolean' || !currentMetaUid) {
+        resetAuthorizationState()
+        return
+      }
+      const nextIsSuperuser = meta.is_superuser === true
+      if (memoryScopeReady.value && (isSuperuser.value !== nextIsSuperuser || currentUid.value !== currentMetaUid)) {
+        resetAuthorizationState()
+      }
+      isSuperuser.value = nextIsSuperuser
+      currentUid.value = currentMetaUid
+      currentUsername.value = typeof meta.current_username === 'string' ? meta.current_username : ''
       memoryScopeReady.value = true
       if (isSuperuser.value) {
         if (!ownersLoaded.value && !ownersLoading.value) loadOwners()
@@ -174,6 +183,11 @@ export function useMemoriesView() {
       memoryTotal.value = data.total
     } catch (error) {
       if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
+      if (memoriesRequestTracker.isCurrent(requestSeq) && (
+        [401, 403].includes(error?.response?.status) || [401, 403].includes(error?.response?.data?.code)
+      )) {
+        resetAuthorizationState()
+      }
       if (memoriesRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
     } finally {
       if (pollingTaskManager.isCurrent(token) && memoriesRequestTracker.isCurrent(requestSeq)) memoriesLoading.value = false
@@ -182,6 +196,7 @@ export function useMemoriesView() {
   }
 
   const loadJobs = async (silent = false) => {
+    if (!memoryScopeReady.value) return
     const token = pollingTaskManager.begin('jobs')
     if (!token) return
     const requestSeq = jobsRequestTracker.begin()
@@ -208,6 +223,7 @@ export function useMemoriesView() {
   }
 
   const loadMigrations = async (silent = false) => {
+    if (!memoryScopeReady.value) return
     const token = pollingTaskManager.begin('migrations')
     if (!token) return
     const requestSeq = migrationsRequestTracker.begin()
@@ -292,6 +308,7 @@ export function useMemoriesView() {
     unwrap,
     operationLabel,
     newDedupeKey,
+    canAccessMemoryData: row => records.canAccessMemoryData(row),
     canOpenRuntimeDialog: () => ![
       records.editorVisible,
       records.detailsVisible,
@@ -317,6 +334,35 @@ export function useMemoriesView() {
     statusType,
     newDedupeKey
   })
+
+  const resetAuthorizationState = () => {
+    pollingTaskManager.cancel('owners')
+    pollingTaskManager.cancel('jobs')
+    pollingTaskManager.cancel('migrations')
+    jobsRequestTracker.invalidate()
+    migrationsRequestTracker.invalidate()
+    resetOwnerState()
+    runtime.resetRuntimeState()
+    owners.value = []
+    ownersLoaded.value = false
+    ownersLoading.value = false
+    ownerFilter.value = ''
+    memories.value = []
+    memoryTotal.value = 0
+    memoryPage.value = 1
+    jobs.value = []
+    jobTotal.value = 0
+    jobPage.value = 1
+    migrations.value = []
+    migrationTotal.value = 0
+    migrationPage.value = 1
+    jobsLoading.value = false
+    migrationsLoading.value = false
+    memoryScopeReady.value = false
+    isSuperuser.value = false
+    currentUid.value = null
+    currentUsername.value = ''
+  }
 
   onMounted(async () => {
     await Promise.all([loadMemories(), loadChannels()])
