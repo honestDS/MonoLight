@@ -73,8 +73,14 @@ export function useMemoryRecords({
   const migrationProgress = (row, key) => row[key] ?? row.progress?.[key.replace('migration_', '')] ?? 0
   const migrationTarget = row => `${row.target_embedding_model_id || row.target?.model_id || '-'} / ${row.target_embedding_dimensions || row.target?.dimensions || '-'}D`
   const progressText = row => `${migrationProgress(row, 'migration_success_count')} / ${migrationProgress(row, 'migration_total_count')}`
-  const canMutateRecord = row => !row.pending_mutation_job_id && !row.deleted_at && row.is_active !== false
+  const canAccessMemoryData = row => {
+    if (!memoryScopeReady.value || isPollingStopped() || !row || typeof row !== 'object' || Array.isArray(row) || !Object.keys(row).length) return false
+    if (isSuperuser.value === true) return true
+    return typeof currentUid.value === 'string' && currentUid.value.length > 0 && row.owner_uid === currentUid.value
+  }
+  const canMutateRecord = row => canAccessMemoryData(row) && !row.pending_mutation_job_id && !row.deleted_at && row.is_active !== false
   const canPin = row => canMutateRecord(row)
+  const canResume = row => canMutateRecord(row) && Boolean(row.suppress_recall)
   const jobError = row => row.error || row.result?.error || (row.context_error ? JSON.stringify(row.context_error) : '-')
   const jobCountsText = row => {
     const counts = [
@@ -119,6 +125,7 @@ export function useMemoryRecords({
     history.value = []
     historyLoading.value = false
     submitting.value = false
+    resetForm()
   }
 
   const resetForm = () => Object.assign(form, {
@@ -132,11 +139,13 @@ export function useMemoryRecords({
     suppress_current: false
   })
   const openEditor = (row = null) => {
+    const editing = row !== null && row !== undefined
+    if (editing ? !canMutateRecord(row) : !memoryScopeReady.value || isPollingStopped()) return
     editorRequestTracker.invalidate()
     submitting.value = false
-    editorMode.value = row ? 'edit' : 'create'
+    editorMode.value = editing ? 'edit' : 'create'
     resetForm()
-    if (row) {
+    if (editing) {
       Object.assign(form, {
         id: row.id,
         version: row.version,
@@ -148,7 +157,7 @@ export function useMemoryRecords({
         suppress_current: false
       })
     } else {
-      form.owner_uid = isSuperuser.value ? (ownerFilter.value || currentUid.value || '') : (currentUid.value || '')
+      form.owner_uid = isSuperuser.value === true ? (ownerFilter.value || currentUid.value || '') : (currentUid.value || '')
     }
     editorVisible.value = true
   }
@@ -161,10 +170,17 @@ export function useMemoryRecords({
   }
   const submitMemory = async () => {
     if (submitting.value || !editorVisible.value || !memoryScopeReady.value || isPollingStopped()) return
-    if (editorMode.value === 'create' && isSuperuser.value && !form.owner_uid) return ElMessage.warning(t('memories.select_owner'))
+    if (editorMode.value === 'edit' && !canAccessMemoryData(form)) return
+    if (editorMode.value === 'create' && isSuperuser.value !== true && (typeof currentUid.value !== 'string' || currentUid.value.length === 0)) return
+    if (editorMode.value === 'create' && isSuperuser.value === true && !form.owner_uid) return ElMessage.warning(t('memories.select_owner'))
     if (!form.memory_key.trim() || !form.content.trim()) return ElMessage.warning(t('memories.required'))
     if (contentTooLong.value) return ElMessage.warning(t('memories.token_limit_exceeded'))
     const requestSeq = editorRequestTracker.begin()
+    const ownerUid = isSuperuser.value === true ? form.owner_uid : currentUid.value
+    const canSetEditorResult = () => {
+      if (!editorRequestTracker.isCurrent(requestSeq) || !editorVisible.value || !memoryScopeReady.value || isPollingStopped()) return false
+      return editorMode.value === 'edit' ? canAccessMemoryData(form) : canAccessMemoryData({ owner_uid: ownerUid })
+    }
     submitting.value = true
     try {
       const payload = {
@@ -175,7 +191,7 @@ export function useMemoryRecords({
         change_evidence: form.change_evidence || null
       }
       if (editorMode.value === 'create') {
-        await memoryApi.create(payload, { params: { uid: isSuperuser.value ? form.owner_uid : currentUid.value } })
+        await memoryApi.create(payload, { params: { uid: ownerUid } })
       } else {
         await memoryApi.update({
           ...payload,
@@ -184,53 +200,60 @@ export function useMemoryRecords({
           suppress_current: form.suppress_current
         })
       }
-      if (editorRequestTracker.isCurrent(requestSeq) && editorVisible.value) {
+      if (canSetEditorResult()) {
         ElMessage.info(t('memories.accepted_processing'))
         editorVisible.value = false
         refreshAll()
       }
     } catch (error) {
-      if (editorRequestTracker.isCurrent(requestSeq) && editorVisible.value) ElMessage.error(error.message || t('memories.save_failed'))
+      if (canSetEditorResult()) ElMessage.error(error.message || t('memories.save_failed'))
     } finally {
       if (editorRequestTracker.isCurrent(requestSeq)) submitting.value = false
     }
   }
   const showDetails = async row => {
+    if (!canAccessMemoryData(row)) return
     const requestSeq = detailsRequestTracker.begin()
     try {
       const selected = unwrap(await memoryApi.get(row.id)) || row
-      if (!detailsRequestTracker.isCurrent(requestSeq)) return
+      if (!detailsRequestTracker.isCurrent(requestSeq) || !canAccessMemoryData(row) || !canAccessMemoryData(selected)) return
       selectedMemory.value = selected
       detailsVisible.value = true
     } catch (error) {
-      if (detailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.load_failed'))
+      if (detailsRequestTracker.isCurrent(requestSeq) && canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.load_failed'))
     }
   }
   const deleteMemory = async row => {
+    if (!canMutateRecord(row)) return
     try {
       await ElMessageBox.confirm(t('memories.delete_confirm'), t('common.warning'), {
         type: 'warning',
         confirmButtonText: t('common.confirm'),
         cancelButtonText: t('common.cancel')
       })
+      if (!canMutateRecord(row)) return
       await memoryApi.delete({ memory_id: row.id, expected_version: row.version, dedupe_key: newDedupeKey() })
+      if (!canAccessMemoryData(row)) return
       ElMessage.info(t('memories.delete_success'))
       refreshAll()
     } catch (error) {
-      if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed'))
+      if (error !== 'cancel' && error !== 'close' && canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
   const togglePin = async row => {
+    if (!canPin(row)) return
     try {
       if (row.pinned) await memoryApi.unpin(row.id)
       else await memoryApi.pin(row.id)
+      if (!canAccessMemoryData(row)) return
       ElMessage.info(t('memories.operation_success'))
       refreshAll()
     } catch (error) {
-      ElMessage.error(error.message || t('memories.operation_failed'))
+      if (canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
-  const loadHistory = async (memoryId, memory) => {
+  const loadHistory = async (memoryId, memory, accessRow = memory) => {
+    if (!canAccessMemoryData(accessRow) || !canAccessMemoryData(memory)) return
     const requestSeq = historyRequestTracker.begin()
     selectedHistoryMemory.value = memory
     history.value = []
@@ -238,16 +261,20 @@ export function useMemoryRecords({
     historyLoading.value = true
     try {
       const data = pageData(await memoryApi.history(memoryId, { page: 1, size: 100 }))
-      if (!historyRequestTracker.isCurrent(requestSeq)) return
+      if (!historyRequestTracker.isCurrent(requestSeq) || !canAccessMemoryData(accessRow) || !canAccessMemoryData(memory)) return
       history.value = data.items
     } catch (error) {
-      if (historyRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
+      if (historyRequestTracker.isCurrent(requestSeq) && canAccessMemoryData(accessRow) && canAccessMemoryData(memory)) ElMessage.error(error.message || t('memories.operation_failed'))
     } finally {
-      if (historyRequestTracker.isCurrent(requestSeq)) historyLoading.value = false
+      if (historyRequestTracker.isCurrent(requestSeq) && canAccessMemoryData(accessRow) && canAccessMemoryData(memory)) historyLoading.value = false
     }
   }
-  const showHistory = row => loadHistory(row.id, row)
+  const showHistory = row => {
+    if (!canAccessMemoryData(row)) return
+    return loadHistory(row.id, row)
+  }
   const handleMemoryMoreAction = (command, row) => {
+    if (!canAccessMemoryData(row)) return
     if (command === 'history') {
       showHistory(row)
       return
@@ -265,92 +292,108 @@ export function useMemoryRecords({
     const payloadSnapshot = row?.payload?.record_snapshot
     return isRecordSnapshot(payloadSnapshot) ? payloadSnapshot : null
   }
-  const canShowDeletedHistory = row => row.operation === 'delete_cleanup' && Boolean(row.memory_id && deletedRecordSnapshot(row))
+  const canShowDeletedHistory = row => canAccessMemoryData(row) && row.operation === 'delete_cleanup' && Boolean(row.memory_id && deletedRecordSnapshot(row))
   const showDeletedHistory = row => {
+    if (!canShowDeletedHistory(row)) return
     const snapshot = deletedRecordSnapshot(row)
     if (!snapshot || !row.memory_id) return
-    loadHistory(row.memory_id, {
+    return loadHistory(row.memory_id, {
       ...snapshot,
       id: row.memory_id,
       memory_key: snapshot.memory_key || '',
       version: snapshot.version,
       owner_uid: row.owner_uid
-    })
+    }, row)
   }
   const resumeCurrent = async row => {
+    if (!canResume(row)) return
     try {
       await memoryApi.resumeCurrent(row.id, { expected_version: row.version })
+      if (!canAccessMemoryData(row)) return
       ElMessage.info(t('memories.operation_success'))
       refreshAll()
     } catch (error) {
-      ElMessage.error(error.message || t('memories.operation_failed'))
+      if (canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
   const canRetry = row => {
+    if (!canAccessMemoryData(row)) return false
     if (row.operation === 'restore') return false
     return row.operation === 'delete_cleanup' ? row.status === 'failed' : ['failed', 'cancelled'].includes(row.status)
   }
-  const canCancel = row => !['succeeded', 'failed', 'cancelled'].includes(row.status) && row.operation !== 'delete_cleanup'
+  const canCancel = row => canAccessMemoryData(row) && !['succeeded', 'failed', 'cancelled'].includes(row.status) && row.operation !== 'delete_cleanup'
   const retryJob = async row => {
+    if (!canRetry(row)) return
     try {
       await ElMessageBox.confirm(t('memories.retry_confirm'), t('common.warning'), { type: 'warning' })
+      if (!canRetry(row)) return
       await memoryApi.retryJob(row.id)
+      if (!canAccessMemoryData(row)) return
       ElMessage.info(t('memories.retry_success'))
       refreshAll()
     } catch (error) {
-      if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed'))
+      if (error !== 'cancel' && error !== 'close' && canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
   const cancelJob = async row => {
+    if (!canCancel(row)) return
     try {
       await ElMessageBox.confirm(t('memories.cancel_confirm'), t('common.warning'), { type: 'warning' })
+      if (!canCancel(row)) return
       await memoryApi.cancelJob(row.id)
+      if (!canAccessMemoryData(row)) return
       ElMessage.info(t('memories.cancel_success'))
       refreshAll()
     } catch (error) {
-      if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed'))
+      if (error !== 'cancel' && error !== 'close' && canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
   const showJob = async row => {
+    if (!canAccessMemoryData(row)) return
     const requestSeq = jobDetailsRequestTracker.begin()
     try {
       const selected = unwrap(await memoryApi.job(row.id)) || row
-      if (!jobDetailsRequestTracker.isCurrent(requestSeq)) return
+      if (!jobDetailsRequestTracker.isCurrent(requestSeq) || !canAccessMemoryData(row) || !canAccessMemoryData(selected)) return
       selectedJob.value = selected
       jobVisible.value = true
     } catch (error) {
-      if (jobDetailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
+      if (jobDetailsRequestTracker.isCurrent(requestSeq) && canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
-  const canRetryMigration = row => ['failed', 'cancelled'].includes(row.status || row.migration_status)
-  const canCancelMigration = row => ['preparing', 'building', 'catching_up', 'validating'].includes(row.status || row.migration_status)
+  const canRetryMigration = row => canAccessMemoryData(row) && ['failed', 'cancelled'].includes(row.status || row.migration_status)
+  const canCancelMigration = row => canAccessMemoryData(row) && ['preparing', 'building', 'catching_up', 'validating'].includes(row.status || row.migration_status)
   const retryMigration = async row => {
+    if (!canRetryMigration(row)) return
     try {
       await memoryApi.retryMigration(migrationId(row))
+      if (!canAccessMemoryData(row)) return
       ElMessage.info(t('memories.migration_retry_success'))
       refreshAll()
     } catch (error) {
-      ElMessage.error(error.message || t('memories.operation_failed'))
+      if (canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
   const cancelMigration = async row => {
+    if (!canCancelMigration(row)) return
     try {
       await memoryApi.cancelMigration(migrationId(row))
+      if (!canAccessMemoryData(row)) return
       ElMessage.info(t('memories.migration_cancel_success'))
       refreshAll()
     } catch (error) {
-      ElMessage.error(error.message || t('memories.operation_failed'))
+      if (canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
   const showMigration = async row => {
+    if (!canAccessMemoryData(row)) return
     const requestSeq = migrationDetailsRequestTracker.begin()
     try {
       const selected = unwrap(await memoryApi.migration(migrationId(row))) || row
-      if (!migrationDetailsRequestTracker.isCurrent(requestSeq)) return
+      if (!migrationDetailsRequestTracker.isCurrent(requestSeq) || !canAccessMemoryData(row) || !canAccessMemoryData(selected)) return
       selectedMigration.value = selected
       migrationVisible.value = true
     } catch (error) {
-      if (migrationDetailsRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
+      if (migrationDetailsRequestTracker.isCurrent(requestSeq) && canAccessMemoryData(row)) ElMessage.error(error.message || t('memories.operation_failed'))
     }
   }
 
@@ -378,8 +421,10 @@ export function useMemoryRecords({
     migrationProgress,
     migrationTarget,
     progressText,
+    canAccessMemoryData,
     canMutateRecord,
     canPin,
+    canResume,
     jobError,
     jobCountsText,
     tokenBudgetText,

@@ -18,6 +18,7 @@ export function useMemoryRuntime({
   ownersLoading,
   loadOwners,
   ownerLabel,
+  canAccessMemoryData,
   pollingTaskManager,
   isPollingStopped,
   refreshAll,
@@ -66,6 +67,15 @@ export function useMemoryRuntime({
     if (status !== 'failed') return null
     return settings.old_collection_cleanup?.job_id ?? settings.store?.old_collection_cleanup_job_id ?? null
   })
+  const canRetryCleanup = (id, row = null) => {
+    if (!id || !memoryScopeReady.value || isPollingStopped()) return false
+    if (row !== null) {
+      const rowJobId = row.old_collection_cleanup_job_id || row.cleanup_job_id || row.cleanup?.job_id
+      const rowStatus = row.old_collection_cleanup_status ?? row.cleanup?.status
+      return canAccessMemoryData(row) && id === rowJobId && rowStatus === 'failed'
+    }
+    return runtimeDialogVisible.value && settingsLoaded.value && !settingsLoading.value && Boolean(runtimeOwnerUid.value) && id === cleanupRetryId.value
+  }
   const migrationPercentage = computed(() => {
     const total = Number(settings.migration?.total_count ?? numericSetting('migration_total_count', 0))
     return total ? Math.min(100, Math.round(Number(settings.migration?.success_count ?? numericSetting('migration_success_count', 0)) * 100 / total)) : 0
@@ -198,18 +208,22 @@ export function useMemoryRuntime({
     }
   }
 
-  const retryCleanup = async (id) => {
-    if (!id || actionLoading.value || isPollingStopped()) return
+  const retryCleanup = async (id, row = null) => {
+    if (actionLoading.value || !canRetryCleanup(id, row)) return
+    const ownerUid = runtimeOwnerUid.value
     pollingTaskManager.cancel('settings')
     settingsRequestTracker.invalidate()
     const requestSeq = runtimeActionRequestTracker.begin()
     actionLoading.value = `cleanup-${id}`
+    const isRetryContextValid = () => row !== null
+      ? canAccessMemoryData(row)
+      : runtimeDialogVisible.value && runtimeOwnerUid.value === ownerUid
     try {
       await memoryApi.retryCleanup(id)
-      if (!runtimeActionRequestTracker.isCurrent(requestSeq) || isPollingStopped()) return
+      if (!runtimeActionRequestTracker.isCurrent(requestSeq) || isPollingStopped() || !isRetryContextValid()) return
       ElMessage.info(t('memories.retry_success'))
     } catch (error) {
-      if (!runtimeActionRequestTracker.isCurrent(requestSeq) || isPollingStopped()) return
+      if (!runtimeActionRequestTracker.isCurrent(requestSeq) || isPollingStopped() || !isRetryContextValid()) return
       ElMessage.error(error.message || t('memories.operation_failed'))
     } finally {
       if (!runtimeActionRequestTracker.isCurrent(requestSeq) || isPollingStopped()) return
@@ -222,6 +236,14 @@ export function useMemoryRuntime({
   const invalidateRequests = () => {
     settingsRequestTracker.invalidate()
     runtimeActionRequestTracker.invalidate()
+  }
+
+  const resetRuntimeState = () => {
+    invalidateRequests()
+    actionLoading.value = ''
+    runtimeDialogVisible.value = false
+    runtimeOwnerFilter.value = ''
+    resetRuntimeSettings()
   }
 
   return {
@@ -245,6 +267,7 @@ export function useMemoryRuntime({
     organizeBlocked,
     reindexBlocked,
     cleanupRetryId,
+    canRetryCleanup,
     migrationPercentage,
     settingsError,
     currentMemoryTask,
@@ -257,6 +280,7 @@ export function useMemoryRuntime({
     handleRuntimeOwnerChange,
     submitRuntimeOperation,
     retryCleanup,
-    invalidateRequests
+    invalidateRequests,
+    resetRuntimeState
   }
 }
