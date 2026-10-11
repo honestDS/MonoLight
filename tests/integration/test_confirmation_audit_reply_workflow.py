@@ -15,6 +15,8 @@ from sqlmodel import select
 
 import app.providers.database as database_provider
 from app.adapters.chat_web import web_chat_adapter
+from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
+from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.api.v1 import chat as chat_api
 from app.core.audit import confirmation_events as confirmation_events_module
 from app.core.audit import service as audit_service_module
@@ -618,6 +620,143 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
     assert session.llm_request_metadata["total_cached_tokens"] == 270
     assert session.llm_request_metadata["total_output_tokens"] == 207
     assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "high_risk", "expected_status", "expected_work_type"),
+    [
+        pytest.param(
+            "同意",
+            False,
+            AuditRecordStatus.EXECUTING,
+            SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            id="approve-normal",
+        ),
+        pytest.param(
+            "忽略",
+            True,
+            AuditRecordStatus.EXECUTING,
+            SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            id="ignore-high-risk",
+        ),
+        pytest.param(
+            "拒绝",
+            True,
+            AuditRecordStatus.REJECTED,
+            SessionReplyWorkType.FOREGROUND_REPLY,
+            id="reject-high-risk",
+        ),
+    ],
+)
+async def test_weixin_confirmation_decision_restores_username_when_actor_is_omitted(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    message: str,
+    high_risk: bool,
+    expected_status: AuditRecordStatus,
+    expected_work_type: SessionReplyWorkType,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        user = (await db.execute(select(User).where(User.uid == "owner"))).scalars().one()
+        user.username = "weixin_user"
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None
+        record.operator_username = "original_initiator"
+        record.source = "weixin-openclaw"
+        session = await db.get(ChatSession, "session-confirmation")
+        assert session is not None
+        session.source = "weixin-openclaw"
+        session.reply_target_source = "weixin-openclaw"
+        session.profile_override_id = 1
+        if high_risk:
+            details = list((await db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id == audit_record_id).order_by(AuditToolDetail.turn_index))).scalars().all())
+            assert details
+            for detail in details:
+                detail.score = 8
+        await db.commit()
+
+    async def validate_initial(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.ChatDispatcher.validate_initial_message_before_save", validate_initial)
+
+    async def send_session_event(_uid: str, _session_id: str, _event_payload: dict) -> None:
+        return None
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", send_session_event)
+
+    adapter = WeixinOpenClawAdapter(WeixinOpenClawConfig())
+    try:
+        async with confirmation_workflow_session_factory() as db:
+            result = await adapter.chat(
+                db,
+                message,
+                uid="owner",
+                session_id="session-confirmation",
+            )
+    finally:
+        await adapter.close()
+
+    assert result.text == ""
+    assert result.files == []
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        decision_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == "session-confirmation",
+                        Message.type == MessageType.AUDIT_DECISION,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        works = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == "session-confirmation",
+                        SessionReplyWorkItem.uid == "owner",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert record is not None
+    assert record.decided_by == "weixin_user"
+    assert record.operator_username == "original_initiator"
+    assert record.uid == "owner"
+    assert record.status == expected_status
+    assert record.decision is not None
+    assert record.decision.value == ("reject" if message == "拒绝" else "approve")
+    assert record.decision_raw_message == message
+    assert len(decision_messages) == 1
+    decision_message = decision_messages[0]
+    assert decision_message.id == record.decision_message_id
+    assert decision_message.uid == "owner"
+    assert decision_message.profile_id == 1
+    assert decision_message.content == message
+    assert len(works) == 1
+    work = works[0]
+    assert work.uid == "owner"
+    assert work.profile_id == 1
+    assert work.work_type == expected_work_type
+    assert work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert work.execution_state["actor_uid"] == "owner"
+    assert work.execution_state["actor_username"] == "weixin_user"
+    assert work.execution_state["message_source"] == "weixin-openclaw"
 
 
 @pytest.mark.asyncio
