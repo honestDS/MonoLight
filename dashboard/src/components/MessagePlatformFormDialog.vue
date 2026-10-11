@@ -18,7 +18,7 @@
         <el-switch v-model="localForm.is_enabled" />
       </el-form-item>
       <el-form-item :label="$t('messagePlatforms.uid')" :required="localForm.is_enabled">
-        <el-select v-model="localForm.uid" class="full-width-input" clearable filterable :loading="usersLoading">
+        <el-select v-model="localForm.uid" class="full-width-input" :disabled="!userPermissions.isSuperuser" :clearable="userPermissions.isSuperuser" :filterable="userPermissions.isSuperuser" :loading="usersLoading">
           <el-option v-for="user in users" :key="user.uid" :label="user.username" :value="user.uid" />
         </el-select>
       </el-form-item>
@@ -58,6 +58,7 @@
 <script setup>
 import { computed, watch } from 'vue'
 import { filterProfilesByUid, formatProfileOptionLabel } from '../utils/profileOptions'
+import { useUserPermissionsStore } from '../composables/useUserPermissions'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -74,6 +75,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:visible', 'submit'])
+
+const userPermissions = useUserPermissionsStore()
 
 const localForm = computed(() => props.form)
 

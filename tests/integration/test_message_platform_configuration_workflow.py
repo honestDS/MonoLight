@@ -5,14 +5,16 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+import app.core.crypto
 from app.api.v1.message_platforms import router
-from app.api.v1.users import check_admin_privilege
+from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.security import get_current_user
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
-from app.models.message_platform import MessagePlatform
+from app.models.message_platform import MessagePlatform, MessagePlatformCreate, MessagePlatformResponse, MessagePlatformStatus, MessagePlatformUpdate
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.providers.database import get_db
@@ -112,7 +114,7 @@ async def test_message_platform_profile_assignment_follows_final_owner_through_c
         return SimpleNamespace(**admin_state)
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[check_admin_privilege] = override_admin
+    app.dependency_overrides[get_current_user] = override_admin
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -169,3 +171,192 @@ async def test_message_platform_profile_assignment_follows_final_owner_through_c
         await message_platform_configuration_db.refresh(persisted)
         assert persisted.uid == "user-2"
         assert persisted.profile_id is None
+
+
+@pytest.mark.parametrize(
+    "input_kind",
+    ["model", "dict"],
+)
+@pytest.mark.asyncio
+async def test_message_platform_crud_create_encrypts_config_secrets(
+    message_platform_configuration_db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    input_kind: str,
+) -> None:
+    monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: b"0123456789abcdef0123456789abcdef")
+    create_payload = MessagePlatformCreate(
+        name="encrypted-config-platform",
+        config={
+            "token": "plain-token",
+            "bot_token": "plain-bot-token",
+            "base_url": "https://message-platform.invalid/v1",
+        },
+    )
+    obj_in = create_payload if input_kind == "model" else create_payload.model_dump()
+
+    created = await message_platform_crud.create(
+        message_platform_configuration_db,
+        obj_in=obj_in,
+    )
+    persisted_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == created.id))).scalar_one()
+
+    assert persisted_config["token"].startswith("enc:v1:")
+    assert persisted_config["token"] != "plain-token"
+    assert persisted_config["bot_token"].startswith("enc:v1:")
+    assert persisted_config["bot_token"] != "plain-bot-token"
+    assert persisted_config["base_url"] == "https://message-platform.invalid/v1"
+
+    await message_platform_configuration_db.refresh(created)
+    assert created.get_config_secret("token") == "plain-token"
+    assert created.get_config_secret("bot_token") == "plain-bot-token"
+    response = MessagePlatformResponse.model_validate(created)
+    assert response.config["token"] == "plain-token"
+    assert response.config["bot_token"] == "plain-bot-token"
+    assert response.config["base_url"] == "https://message-platform.invalid/v1"
+
+
+@pytest.mark.parametrize(
+    "input_kind",
+    ["model", "dict"],
+)
+@pytest.mark.asyncio
+async def test_message_platform_crud_update_encrypts_config_secrets_idempotently(
+    message_platform_configuration_db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    input_kind: str,
+) -> None:
+    monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: b"0123456789abcdef0123456789abcdef")
+    created = await message_platform_crud.create(
+        message_platform_configuration_db,
+        obj_in=MessagePlatformCreate(
+            name="encrypted-config-platform",
+            config={
+                "token": "plain-token",
+                "bot_token": "plain-bot-token",
+                "base_url": "https://message-platform.invalid/v1",
+            },
+        ),
+        commit=True,
+    )
+    update_payload = MessagePlatformUpdate(
+        config={
+            "token": "updated-token",
+            "bot_token": "updated-bot-token",
+            "base_url": "https://message-platform.invalid/v1",
+        },
+    )
+    update_input = update_payload if input_kind == "model" else update_payload.model_dump(exclude_unset=True)
+    updated = await message_platform_crud.update(
+        message_platform_configuration_db,
+        db_obj=created,
+        obj_in=update_input,
+        commit=True,
+    )
+    persisted_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == updated.id))).scalar_one()
+
+    assert persisted_config["token"].startswith("enc:v1:")
+    assert persisted_config["token"] != "updated-token"
+    assert persisted_config["bot_token"].startswith("enc:v1:")
+    assert persisted_config["bot_token"] != "updated-bot-token"
+    assert persisted_config["base_url"] == "https://message-platform.invalid/v1"
+    encrypted_config = dict(persisted_config)
+
+    await message_platform_configuration_db.refresh(updated)
+    assert updated.get_config_secret("token") == "updated-token"
+    assert updated.get_config_secret("bot_token") == "updated-bot-token"
+    response = MessagePlatformResponse.model_validate(updated)
+    assert response.config["token"] == "updated-token"
+    assert response.config["bot_token"] == "updated-bot-token"
+    assert response.config["base_url"] == "https://message-platform.invalid/v1"
+
+    await message_platform_crud.update(
+        message_platform_configuration_db,
+        db_obj=updated,
+        obj_in=MessagePlatformUpdate(name="encrypted-config-platform-renamed"),
+        commit=True,
+    )
+    unchanged_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == updated.id))).scalar_one()
+    assert unchanged_config == encrypted_config
+
+    await message_platform_configuration_db.refresh(updated)
+    assert updated.get_config_secret("token") == "updated-token"
+    assert updated.get_config_secret("bot_token") == "updated-bot-token"
+
+
+@pytest.mark.parametrize(
+    "update_kind",
+    ["metadata", "same-config", "runtime-state"],
+)
+@pytest.mark.asyncio
+async def test_message_platform_legacy_plaintext_config_reads_and_encrypts_on_update(
+    message_platform_configuration_db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    update_kind: str,
+) -> None:
+    monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: b"0123456789abcdef0123456789abcdef")
+    payload = MessagePlatformCreate(
+        name="legacy-config-platform",
+        uid="user-1",
+        config={
+            "token": "legacy-token",
+            "bot_token": "legacy-bot-token",
+            "base_url": "https://message-platform.invalid/v1",
+        },
+        state={"sync_buf": "legacy-sync"},
+    )
+    inserted = await message_platform_configuration_db.execute(
+        MessagePlatform.__table__.insert().values(
+            **payload.model_dump(),
+            status=MessagePlatformStatus.DISCONNECTED,
+        )
+    )
+    platform_id = inserted.inserted_primary_key[0]
+    await message_platform_configuration_db.commit()
+
+    loaded = await message_platform_crud.get(message_platform_configuration_db, id=platform_id)
+    assert loaded is not None
+    assert loaded.get_config_secret("token") == "legacy-token"
+    assert loaded.get_config_secret("bot_token") == "legacy-bot-token"
+    response = MessagePlatformResponse.model_validate(loaded)
+    assert response.config["token"] == "legacy-token"
+    assert response.config["bot_token"] == "legacy-bot-token"
+    assert response.config["base_url"] == "https://message-platform.invalid/v1"
+
+    plaintext_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == platform_id))).scalar_one()
+    assert plaintext_config == payload.config
+
+    if update_kind == "metadata":
+        await message_platform_crud.update(
+            message_platform_configuration_db,
+            db_obj=loaded,
+            obj_in=MessagePlatformUpdate(name="legacy-config-platform-renamed"),
+            commit=True,
+        )
+    elif update_kind == "same-config":
+        await message_platform_crud.update(
+            message_platform_configuration_db,
+            db_obj=loaded,
+            obj_in=MessagePlatformUpdate(config=payload.config),
+            commit=True,
+        )
+    else:
+        await message_platform_crud.update_runtime_state(
+            message_platform_configuration_db,
+            platform=loaded,
+            state={"sync_buf": "updated-sync"},
+        )
+
+    persisted_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == platform_id))).scalar_one()
+    assert persisted_config["token"].startswith("enc:v1:")
+    assert persisted_config["token"] != "legacy-token"
+    assert persisted_config["bot_token"].startswith("enc:v1:")
+    assert persisted_config["bot_token"] != "legacy-bot-token"
+    assert persisted_config["base_url"] == "https://message-platform.invalid/v1"
+
+    await message_platform_configuration_db.refresh(loaded)
+    assert loaded.get_config_secret("token") == "legacy-token"
+    assert loaded.get_config_secret("bot_token") == "legacy-bot-token"
+    response = MessagePlatformResponse.model_validate(loaded)
+    assert response.config["token"] == "legacy-token"
+    assert response.config["bot_token"] == "legacy-bot-token"
+    assert response.config["base_url"] == "https://message-platform.invalid/v1"
