@@ -84,7 +84,7 @@ def knowledge_base_app(db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
         yield db_session
 
     async def override_get_current_user() -> SimpleNamespace:
-        return SimpleNamespace(uid="user-a", is_superuser=False)
+        return SimpleNamespace(uid="user-a", is_superuser=True)
 
     async def fake_load_embedding_model(*_args, **_kwargs):
         return object(), {"model_id": "embed-v1", "embedding_dimensions": 768}
@@ -1372,3 +1372,149 @@ async def test_user_embedding_migration_lifecycle_reuses_active_job_preserves_te
     assert retried is not None
     assert retried.migration_job_id == second_job_id
     assert retried.target_embedding_model_id == "embed-v2"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_list_returns_profile_names_for_bindings_and_managed_profiles(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    chinese_profile = Profile(uid="user-a", name="中文配置", configs={})
+    english_profile = Profile(uid="user-a", name="English profile", configs={})
+    other_owner_profile = Profile(uid="user-b", name="中文配置", configs={})
+    db_session.add_all([chinese_profile, english_profile, other_owner_profile])
+    await db_session.flush()
+
+    user_bound = KnowledgeBase(
+        uid="user-a",
+        name="profile names bound",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="profile-names-bound",
+        knowledge_base_type=KnowledgeBaseType.USER,
+    )
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="profile names managed",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="profile-names-managed",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=chinese_profile.id,
+    )
+    user_unbound = KnowledgeBase(
+        uid="user-a",
+        name="profile names unbound",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="profile-names-unbound",
+        knowledge_base_type=KnowledgeBaseType.USER,
+    )
+    other_owner = KnowledgeBase(
+        uid="user-b",
+        name="profile names other owner",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="profile-names-other-owner",
+        knowledge_base_type=KnowledgeBaseType.USER,
+    )
+    db_session.add_all([user_bound, managed, user_unbound, other_owner])
+    await db_session.flush()
+
+    db_session.add_all(
+        [
+            KnowledgeBaseProfileBinding(
+                uid="user-a",
+                knowledge_base_id=user_bound.id,
+                profile_id=chinese_profile.id,
+            ),
+            KnowledgeBaseProfileBinding(
+                uid="user-a",
+                knowledge_base_id=user_bound.id,
+                profile_id=english_profile.id,
+            ),
+            KnowledgeBaseProfileBinding(
+                uid="user-b",
+                knowledge_base_id=other_owner.id,
+                profile_id=other_owner_profile.id,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    assert user_bound.id is not None
+    assert managed.id is not None
+    assert user_unbound.id is not None
+    assert other_owner.id is not None
+    assert chinese_profile.id is not None
+    assert english_profile.id is not None
+    assert other_owner_profile.id is not None
+    knowledge_base_ids = {
+        int(user_bound.id),
+        int(managed.id),
+        int(user_unbound.id),
+        int(other_owner.id),
+    }
+    profile_ids = {
+        "chinese": int(chinese_profile.id),
+        "english": int(english_profile.id),
+        "other_owner": int(other_owner_profile.id),
+    }
+
+    first_response = await api_client.get("/api/v1/knowledge-base/list")
+    assert first_response.status_code == 200
+    first_items = {item["id"]: item for item in first_response.json()["data"]["items"]}
+    assert set(first_items) == knowledge_base_ids
+
+    bound_item = first_items[int(user_bound.id)]
+    assert set(bound_item["profile_ids"]) == {profile_ids["chinese"], profile_ids["english"]}
+    assert set(bound_item["profile_names"]) == {"中文配置", "English profile"}
+    assert bound_item["uid"] == "user-a"
+    assert all("#" not in name for name in bound_item["profile_names"])
+
+    managed_item = first_items[int(managed.id)]
+    assert managed_item["profile_ids"] == []
+    assert managed_item["profile_names"] == ["中文配置"]
+    assert managed_item["uid"] == "user-a"
+    assert all("#" not in name for name in managed_item["profile_names"])
+
+    unbound_item = first_items[int(user_unbound.id)]
+    assert unbound_item["profile_ids"] == []
+    assert unbound_item["profile_names"] == []
+    assert unbound_item["uid"] == "user-a"
+
+    other_owner_item = first_items[int(other_owner.id)]
+    assert set(other_owner_item["profile_ids"]) == {profile_ids["other_owner"]}
+    assert other_owner_item["profile_names"] == ["中文配置"]
+    assert other_owner_item["uid"] == "user-b"
+    assert all("#" not in name for name in other_owner_item["profile_names"])
+
+    chinese_profile.name = "重命名配置"
+    await db_session.commit()
+
+    second_response = await api_client.get("/api/v1/knowledge-base/list")
+    assert second_response.status_code == 200
+    second_items = {item["id"]: item for item in second_response.json()["data"]["items"]}
+    assert set(second_items) == knowledge_base_ids
+
+    renamed_bound_item = second_items[int(user_bound.id)]
+    assert set(renamed_bound_item["profile_ids"]) == {profile_ids["chinese"], profile_ids["english"]}
+    assert set(renamed_bound_item["profile_names"]) == {"重命名配置", "English profile"}
+    assert renamed_bound_item["uid"] == bound_item["uid"] == "user-a"
+
+    renamed_managed_item = second_items[int(managed.id)]
+    assert renamed_managed_item["profile_ids"] == managed_item["profile_ids"] == []
+    assert renamed_managed_item["profile_names"] == ["重命名配置"]
+    assert renamed_managed_item["uid"] == managed_item["uid"] == "user-a"
+
+    assert second_items[int(user_unbound.id)]["profile_ids"] == unbound_item["profile_ids"] == []
+    assert second_items[int(user_unbound.id)]["profile_names"] == []
+    assert second_items[int(user_unbound.id)]["uid"] == unbound_item["uid"] == "user-a"
+    assert second_items[int(other_owner.id)]["profile_ids"] == other_owner_item["profile_ids"] == [profile_ids["other_owner"]]
+    assert second_items[int(other_owner.id)]["profile_names"] == ["中文配置"]
+    assert second_items[int(other_owner.id)]["uid"] == other_owner_item["uid"] == "user-b"

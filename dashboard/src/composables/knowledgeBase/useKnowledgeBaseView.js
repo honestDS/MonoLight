@@ -12,7 +12,7 @@ import {
 import {
   canManageKnowledgeBaseDocuments,
   canManageManagedKnowledge,
-  getKnowledgeBaseProfileIds,
+  getKnowledgeBaseProfileLabel,
   normalizeKnowledgeBase
 } from '../../utils/knowledgeBaseManagement.js'
 import { useDeleteConfirm } from '../useDeleteConfirm.js'
@@ -113,11 +113,6 @@ export function useKnowledgeBaseView() {
   const handleSizeChange = () => {
     currentPage.value = 1
     fetchData()
-  }
-
-  const getKnowledgeBaseProfileLabel = (row) => {
-    const profileIds = getKnowledgeBaseProfileIds(row)
-    return profileIds.length ? profileIds.map(id => `#${id}`).join(', ') : '-'
   }
 
   const getEmbeddingModelName = (row) => {

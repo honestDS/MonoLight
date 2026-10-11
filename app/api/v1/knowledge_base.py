@@ -21,6 +21,7 @@ from app.core.constants import (
     ERR_KB_VECTOR_WRITE_FAILED,
     ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED,
     ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND,
+    ERR_ONLY_ADMIN_ALLOWED,
     ERR_PROFILE_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
     MSG_GENERIC_SUCCESS,
@@ -49,7 +50,7 @@ from app.core.embedding.knowledge_base import (
     query_knowledge_base,
 )
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
-from app.core.exceptions import BaseBusinessException
+from app.core.exceptions import BaseBusinessException, ForbiddenException
 from app.core.i18n import t
 from app.core.knowledge.bindings import (
     get_user_knowledge_base_ids_for_profile,
@@ -116,7 +117,14 @@ from app.providers.vector import (
 )
 from app.schemas.response import StandardResponse
 
-router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"])
+
+async def check_admin_privilege(current_user=Depends(get_current_user)):
+    if not getattr(current_user, "is_superuser", False):
+        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
+    return current_user
+
+
+router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"], dependencies=[Depends(check_admin_privilege)])
 
 
 async def load_owned_knowledge_base(db: AsyncSession, kb_id: int, current_user: Any) -> KnowledgeBase:
@@ -209,6 +217,16 @@ async def build_knowledge_base_response(db: AsyncSession, kb: KnowledgeBase) -> 
     response = KnowledgeBaseResponse.model_validate(kb)
     if kb.id is not None:
         response.profile_ids = await get_knowledge_base_profile_ids(db, kb.id, kb.uid)
+    if kb.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED:
+        profile_ids_for_names = [kb.managed_profile_id] if kb.managed_profile_id is not None else []
+    elif kb.knowledge_base_type == KnowledgeBaseType.USER:
+        profile_ids_for_names = response.profile_ids
+    else:
+        profile_ids_for_names = []
+    if profile_ids_for_names:
+        profiles = await profile_crud.get_by_ids(db, set(profile_ids_for_names))
+        profile_names_by_id = {profile.id: profile.name for profile in profiles if profile.id is not None and profile.uid == kb.uid}
+        response.profile_names = [profile_names_by_id[profile_id] for profile_id in profile_ids_for_names if profile_id in profile_names_by_id]
     if response.migration_status in {KnowledgeBaseMigrationStatus.FAILED, KnowledgeBaseMigrationStatus.CANCELLED} and response.migration_job_id is not None and response.target_embedding_channel_id is None:
         job = await knowledge_job_crud.get_by_id(db, uid=kb.uid, job_id=response.migration_job_id)
         if job is not None and job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION and isinstance(job.payload, dict):

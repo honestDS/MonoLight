@@ -27,7 +27,7 @@ export default {
   knowledge_base_type: '知识库类型',
   type_user: '用户知识库',
   type_managed: 'LLM 托管知识库',
-  owner_profiles: '所属 Profile',
+  owner_profiles: '所属配置文件',
   active_embedding: '当前生效配置',
   target_embedding: '迁移目标',
   target_configuration: '当前目标配置',

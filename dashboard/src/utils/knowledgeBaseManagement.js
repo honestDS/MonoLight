@@ -25,6 +25,13 @@ export const getKnowledgeBaseProfileIds = (knowledgeBase) => {
   return normalized.profile_ids
 }
 
+export const getKnowledgeBaseProfileLabel = (knowledgeBase) => {
+  const names = Array.isArray(knowledgeBase?.profile_names)
+    ? knowledgeBase.profile_names.filter(name => typeof name === 'string' && name.trim())
+    : []
+  return names.length ? names.join(', ') : '-'
+}
+
 const submittedStatusByOperation = {
   create: 'created',
   update: 'updated',

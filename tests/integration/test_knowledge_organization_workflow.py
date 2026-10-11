@@ -69,7 +69,7 @@ def test_app(db_session: AsyncSession) -> FastAPI:
         yield db_session
 
     async def override_get_current_user() -> SimpleNamespace:
-        return SimpleNamespace(uid="user-a", is_superuser=False)
+        return SimpleNamespace(uid="user-a", is_superuser=True)
 
     app = FastAPI()
     register_handlers(app)

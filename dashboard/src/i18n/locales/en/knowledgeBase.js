@@ -27,7 +27,7 @@ export default {
   knowledge_base_type: 'Knowledge Base Type',
   type_user: 'User Knowledge Base',
   type_managed: 'LLM-managed Knowledge Base',
-  owner_profiles: 'Profiles',
+  owner_profiles: 'Configuration Files',
   active_embedding: 'Active Configuration',
   target_embedding: 'Migration Target',
   target_configuration: 'Current Target Configuration',

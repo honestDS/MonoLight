@@ -337,7 +337,7 @@ async def test_profile_create_and_update_sync_memory_organization_with_user_stor
     api_app: tuple[FastAPI, SimpleNamespace],
     db_session: AsyncSession,
 ) -> None:
-    app, _current_user = api_app
+    app, current_user = api_app
     channel = await _create_chat_channel(db_session, name="profile-organization-channel")
     await _create_active_store(db_session, uid="user-a")
     knowledge_base = KnowledgeBase(
@@ -376,6 +376,7 @@ async def test_profile_create_and_update_sync_memory_organization_with_user_stor
             is None
         )
 
+        current_user.is_superuser = True
         create_response = await client.post(
             "/api/v1/profiles/create",
             json={
@@ -389,6 +390,7 @@ async def test_profile_create_and_update_sync_memory_organization_with_user_stor
                 },
             },
         )
+        current_user.is_superuser = False
 
     create_payload = _assert_standard(create_response, 200)
     created_data = create_payload["data"]
@@ -461,6 +463,116 @@ async def test_profile_create_and_update_sync_memory_organization_with_user_stor
     assert store.auto_organize_enabled is False
     assert store.organization_channel_id is None
     assert store.organization_model_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("binding_case", ["empty", "own"])
+async def test_profile_knowledge_base_binding_requires_admin_and_preserves_rejected_state(
+    operation: str,
+    binding_case: str,
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, current_user = api_app
+    seed_profile = await profile_crud.create(
+        db_session,
+        obj_in={"uid": "user-a", "name": "profile-binding-seed", "configs": _profile_configs()},
+    )
+    knowledge_base = KnowledgeBase(
+        uid="user-a",
+        name="profile-binding-kb",
+        embedding_channel_id=1,
+        embedding_model_id="embed-v1",
+        collection_name="profile-binding-kb-collection",
+    )
+    db_session.add(knowledge_base)
+    await db_session.commit()
+    await db_session.refresh(knowledge_base)
+    assert knowledge_base.id is not None
+    knowledge_base_id = int(knowledge_base.id)
+    existing_binding = KnowledgeBaseProfileBinding(
+        knowledge_base_id=knowledge_base_id,
+        profile_id=int(seed_profile.id),
+        uid="user-a",
+    )
+    db_session.add(existing_binding)
+    await db_session.commit()
+
+    async def profile_snapshot() -> list[dict]:
+        profiles = (await db_session.execute(select(Profile).order_by(Profile.id))).scalars().all()
+        return [
+            {
+                "id": profile.id,
+                "uid": profile.uid,
+                "name": profile.name,
+                "prompt_id": profile.prompt_id,
+                "configs": ProfileConfig.model_validate(profile.configs or {}).model_dump(),
+                "is_default": profile.is_default,
+            }
+            for profile in profiles
+        ]
+
+    async def binding_snapshot() -> list[dict]:
+        bindings = (await db_session.execute(select(KnowledgeBaseProfileBinding).order_by(KnowledgeBaseProfileBinding.id))).scalars().all()
+        return [
+            {
+                "id": binding.id,
+                "knowledge_base_id": binding.knowledge_base_id,
+                "profile_id": binding.profile_id,
+                "uid": binding.uid,
+            }
+            for binding in bindings
+        ]
+
+    requested_ids = [] if binding_case == "empty" else [knowledge_base_id]
+    if operation == "create":
+        request_payload = {
+            "uid": "user-a",
+            "name": f"profile-binding-created-{binding_case}",
+            "configs": _profile_configs(_memory_config(top_k=7)),
+            "knowledge_base_ids": requested_ids,
+        }
+        request_path = "/api/v1/profiles/create"
+    else:
+        request_payload = {
+            "name": f"profile-binding-updated-{binding_case}",
+            "configs": _profile_configs(_memory_config(top_k=7)),
+            "knowledge_base_ids": requested_ids,
+        }
+        request_path = "/api/v1/profiles/update"
+
+    before_profiles = await profile_snapshot()
+    before_bindings = await binding_snapshot()
+    request_kwargs = {"json": request_payload}
+    if operation == "update":
+        request_kwargs["params"] = {"profile_id": int(seed_profile.id)}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        forbidden_response = await client.post(request_path, **request_kwargs)
+        forbidden_payload = _assert_standard(forbidden_response, 403)
+        assert forbidden_payload["data"] is None
+        assert await profile_snapshot() == before_profiles
+        assert await binding_snapshot() == before_bindings
+
+        current_user.uid = "admin-user"
+        current_user.is_superuser = True
+        admin_response = await client.post(request_path, **request_kwargs)
+
+    admin_payload = _assert_standard(admin_response, 200)
+    admin_data = admin_payload["data"]
+    target_profile_id = admin_data["id"] if operation == "create" else int(seed_profile.id)
+    assert admin_data["knowledge_base_ids"] == requested_ids
+
+    persisted_profile = await profile_crud.get(db_session, target_profile_id)
+    assert persisted_profile is not None
+    assert persisted_profile.uid == "user-a"
+    assert persisted_profile.name == request_payload["name"]
+    assert persisted_profile.configs == request_payload["configs"]
+
+    target_bindings = (await db_session.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == target_profile_id).order_by(KnowledgeBaseProfileBinding.id))).scalars().all()
+    assert [binding.knowledge_base_id for binding in target_bindings] == requested_ids
+    assert all(binding.uid == "user-a" for binding in target_bindings)
 
 
 @pytest.mark.asyncio
