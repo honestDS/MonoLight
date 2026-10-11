@@ -149,7 +149,7 @@
 import { h, ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { profileApi, channelApi, promptApi, systemApi, adminApi, knowledgeBaseApi } from '../api'
+import { profileApi, promptApi, systemApi, adminApi, knowledgeBaseApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import ProfileFormDialog from '../components/ProfileFormDialog.vue'
@@ -582,7 +582,7 @@ const showSystemSettingsDialog = async () => {
 
 const fetchChannels = async () => {
   try {
-    const res = await channelApi.list({ page: 1, size: 1000 })
+    const res = await profileApi.modelOptions({ page: 1, size: 1000 })
     channels.value = res.data.data.items || []
   } catch (err) {
     ElMessage.error(err.message || t('profiles.load_channels_failed'))

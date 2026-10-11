@@ -1,7 +1,7 @@
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { adminApi, channelApi, memoryApi } from '../../api/index.js'
+import { adminApi, memoryApi, profileApi } from '../../api/index.js'
 import { MEMORY_JOB_OPERATIONS, MEMORY_JOB_STATUSES, MEMORY_TYPES } from '../../constants/index.js'
 import {
   createLatestRequestTracker,
@@ -132,7 +132,7 @@ export function useMemoriesView() {
       let page = 1
       let total = 0
       while (true) {
-        const data = pageData(await channelApi.list({ page, size: 100 }))
+        const data = pageData(await profileApi.modelOptions({ page, size: 100 }))
         allChannels.push(...data.items)
         total = data.total
         if (!data.items.length || allChannels.length >= total || data.items.length < 100) break

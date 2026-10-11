@@ -30,6 +30,7 @@ from app.core.constants import (
     MSG_PROFILE_UPDATED,
 )
 from app.core.crud.account.user import user_crud
+from app.core.crud.channel.channel import channel_crud
 from app.core.crud.memory.store import memory_store_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.profile.prompt import prompt_crud
@@ -288,6 +289,37 @@ async def list_profiles(
         meta={"tool_options": get_profile_tool_options(), "show_owner": is_admin, "current_uid": current_user.uid},
     )
     return StandardResponse.success(data=page_data)
+
+
+@router.get("/model-options", response_model=StandardResponse)
+async def list_profile_model_options(
+    page: int = Query(1, ge=1),
+    size: int = Query(100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+):
+    skip = (page - 1) * size
+    channels = await channel_crud.get_multi(db, skip=skip, limit=size)
+    total = await channel_crud.count(db)
+    model_fields = (
+        "model_id",
+        "usage",
+        "protocol",
+        "is_enabled",
+        "context_window_k",
+        "max_tokens",
+        "reasoning_effort",
+        "reasoning_efforts",
+    )
+    items = [
+        {
+            "id": channel.id,
+            "name": channel.name,
+            "is_active": channel.is_active,
+            "model_ids": [{field: model[field] for field in model_fields if field in model} for model in channel.model_ids or []],
+        }
+        for channel in channels
+    ]
+    return StandardResponse.success(data=PageData(items=items, total=total, page=page, size=size))
 
 
 @router.post("/set-default")

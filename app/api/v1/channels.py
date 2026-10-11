@@ -275,7 +275,7 @@ def _has_channel_model_update_impact(
     return memory_impact.has_impact or any(profile_impacts.get(key, 0) for key in _CHANNEL_MODEL_UPDATE_PROFILE_IMPACT_KEYS)
 
 
-router = APIRouter(prefix="/channels", tags=["Channels"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/channels", tags=["Channels"], dependencies=[Depends(check_admin_privilege)])
 
 
 @router.post("/create", response_model=StandardResponse)

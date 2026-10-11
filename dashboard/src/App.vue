@@ -111,7 +111,7 @@
             <el-menu-item index="/profiles">
               <span>{{ $t('common.menu.profiles') }}</span>
             </el-menu-item>
-            <el-menu-item index="/channels">
+            <el-menu-item v-if="userPermissions.isSuperuser" index="/channels">
               <span>{{ $t('common.menu.channels') }}</span>
             </el-menu-item>
             <el-menu-item index="/message-platforms">
