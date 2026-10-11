@@ -15,6 +15,9 @@
       @size-change="handleSizeChange">
 
       <el-table-column :resizable="false" prop="name" :label="$t('scheduledTasks.name')" min-width="140" show-overflow-tooltip />
+      <el-table-column :resizable="false" prop="username" :label="$t('scheduledTasks.owner_username')" min-width="140" show-overflow-tooltip>
+        <template #default="scope">{{ scope.row.username || scope.row.uid || '-' }}</template>
+      </el-table-column>
       <el-table-column :resizable="false" prop="session_id" :label="$t('scheduledTasks.session_id')" min-width="180" show-overflow-tooltip />
       <el-table-column :resizable="false" prop="message" :label="$t('scheduledTasks.message')" min-width="240" show-overflow-tooltip />
       <el-table-column :resizable="false" prop="interval_seconds" :label="$t('scheduledTasks.interval_seconds')" width="130" align="center" />
@@ -52,10 +55,10 @@
         </el-form-item>
         <el-form-item :label="$t('scheduledTasks.session_id')">
           <el-select v-model="form.session_id" :placeholder="$t('scheduledTasks.select_session')" filterable class="full-width-input" popper-class="session-select-dropdown" :loading="sessionsLoading">
-            <el-option v-for="session in sessions" :key="session.session_id" class="session-select-option" :label="formatSessionLabel(session)" :value="session.session_id">
+            <el-option v-for="session in selectableSessions" :key="session.session_id" class="session-select-option" :label="formatSessionLabel(session)" :value="session.session_id">
               <div class="session-option">
                 <div class="session-option-title">{{ session.title || $t('chat.default_title') }}</div>
-                <div class="session-option-meta">{{ session.session_id }} · {{ formatTime(session.created_at) }}</div>
+                <div class="session-option-meta">{{ session.username || session.uid || '-' }} · {{ session.session_id }} · {{ formatTime(session.created_at) }}</div>
               </div>
             </el-option>
           </el-select>
@@ -82,7 +85,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { chatApi, scheduledTaskApi } from '../api'
@@ -100,6 +103,7 @@ const currentPage = ref(1)
 const pageSize = ref(20)
 const dialogVisible = ref(false)
 const dialogType = ref('create')
+const taskOwnerUid = ref(null)
 
 const form = reactive({
   id: null,
@@ -146,10 +150,16 @@ const loadSessions = async () => {
 
 const formatSessionLabel = (session) => {
   const title = session.title || t('chat.default_title')
-  return `${title} · ${session.session_id} · ${formatTime(session.created_at)}`
+  return `${title} · ${session.username || session.uid || '-'} · ${session.session_id} · ${formatTime(session.created_at)}`
 }
 
+const selectableSessions = computed(() => {
+  if (dialogType.value === 'create') return sessions.value
+  return sessions.value.filter(session => session.uid === taskOwnerUid.value)
+})
+
 const resetForm = () => {
+  taskOwnerUid.value = null
   form.id = null
   form.name = ''
   form.session_id = ''
@@ -162,6 +172,7 @@ const showDialog = (type, row = null) => {
   dialogType.value = type
   resetForm()
   if (type === 'edit' && row) {
+    taskOwnerUid.value = row.uid
     form.id = row.id
     form.name = row.name
     form.session_id = row.session_id

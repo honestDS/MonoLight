@@ -3,6 +3,7 @@ export default {
   edit_task: '编辑定时任务',
   refresh: '刷新列表',
   name: '名称',
+  owner_username: '所属用户',
   session_id: '会话 ID',
   message: '计划消息',
   interval_seconds: '间隔秒数',

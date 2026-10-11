@@ -51,4 +51,5 @@ class ScheduledTaskResponse(ScheduledTaskBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    username: str | None = None
     model_config = ConfigDict(from_attributes=True)
