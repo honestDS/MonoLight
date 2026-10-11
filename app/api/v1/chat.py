@@ -77,9 +77,10 @@ from app.core.session_reply_queue.manager import (
     session_reply_queue_manager,
 )
 from app.core.session_source import default_show_tool_calls_for_source
+from app.core.utils.file_access import validate_web_message_files
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
-from app.core.utils.session import ensure_web_session_writable, generate_session_title
+from app.core.utils.session import ensure_web_session_writable, generate_session_title, get_session_for_user
 from app.models.background_task import BackgroundTaskResponse
 from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.message import (
@@ -159,6 +160,7 @@ async def _create_new_web_session_with_profile_override(
 class _WebSocketChatState:
     stream_task: asyncio.Task | None = None
     current_session_id: str | None = None
+    current_owner_uid: str | None = None
     notifier_queue: asyncio.Queue[dict] = field(default_factory=asyncio.Queue)
 
 
@@ -187,6 +189,8 @@ async def _run_websocket_chat(
     session_id,
     attachments=None,
     request_id=None,
+    actor_uid: str | None = None,
+    actor_username: str | None = None,
 ):
     running_task = asyncio.current_task()
     try:
@@ -200,6 +204,8 @@ async def _run_websocket_chat(
                 db=db,
                 message=message_text,
                 uid=uid,
+                actor_uid=actor_uid,
+                actor_username=actor_username,
                 session_id=session_id,
                 attachments=attachments,
                 request_id=request_id,
@@ -333,13 +339,28 @@ async def chat_completions(
     if not request.request_id:
         raise ParameterException(ERR_CHAT_REQUEST_ID_REQUIRED)
 
+    session = await ensure_web_session_writable(
+        db,
+        session_id=request.session_id,
+        uid=uid,
+        is_admin=getattr(current_user, "is_superuser", False),
+    )
+    owner_uid = session.uid if session is not None else uid
+    await validate_web_message_files(
+        request.message,
+        request.attachments,
+        uid=owner_uid,
+        db=db,
+    )
     data = await web_chat_adapter.submit(
         db=db,
         message=request.message,
-        uid=uid,
+        uid=owner_uid,
         session_id=request.session_id,
         attachments=request.attachments,
         request_id=request.request_id,
+        actor_uid=uid,
+        actor_username=getattr(current_user, "username", None),
     )
     return StandardResponse.success(data=data)
 
@@ -351,16 +372,22 @@ async def get_reply_work_status(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
-    status = await session_reply_queue_manager.get_work_status(db, work_id, uid=uid)
+    is_admin = getattr(current_user, "is_superuser", False)
+    status = await session_reply_queue_manager.get_work_status(db, work_id, uid=uid, is_admin=is_admin)
     response = status.get("response")
     if isinstance(response, dict):
         session_id = status["session_id"]
-        plan = await session_todo_crud.get_by_session_id(db, uid=uid, session_id=session_id)
+        session = await get_session_for_user(db, session_id=session_id, uid=uid, is_admin=is_admin)
+        plan = await session_todo_crud.get_by_session_id(db, uid=session.uid, session_id=session_id)
         response["session_todo"] = {
             "revision": plan.revision if plan else 0,
             "todos": [dict(item) for item in plan.todos] if plan else [],
         }
-        if _response_has_background_tasks(response) or await background_task_crud.has_pending_user_activity(db, uid=uid, session_id=session_id):
+        if _response_has_background_tasks(response) or await background_task_crud.has_pending_user_activity(
+            db,
+            uid=session.uid,
+            session_id=session_id,
+        ):
             response["has_background_tasks"] = True
             response["background_task_poll_interval"] = 2
     return StandardResponse.success(data=status)
@@ -398,11 +425,12 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
     sessions = await message_crud.get_user_sessions(db, uid=uid, is_admin=is_admin)
-    session_ids = [row.session_id for row in sessions if row.uid == uid]
+    session_ids = [row.session_id for row in sessions]
     works = await session_reply_work_item_crud.list_recent_http_for_sessions(
         db,
         uid=uid,
         session_ids=session_ids,
+        is_admin=is_admin,
     )
     reply_works_by_session: dict[str, list[dict]] = {}
     for work in works:
@@ -501,15 +529,16 @@ async def stop_session(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
     session = await session_crud.get_by_session_id(db, session_id)
     if not session:
         return StandardResponse.error(code=404, message=ERR_SESSION_NOT_FOUND)
-    if session.uid != uid:
+    if not is_admin and session.uid != uid:
         return StandardResponse.error(code=403, message=ERR_SESSION_NO_PERMISSION)
     if (session.source or "http") not in {"http", "ws"}:
         return StandardResponse.error(code=403, message=ERR_SESSION_READ_ONLY)
 
-    count = await stop_interactive_reply(db, uid=uid, session_id=session_id)
+    count = await stop_interactive_reply(db, uid=session.uid, session_id=session_id)
     return StandardResponse.success(data={"session_id": session_id, "cancelled_count": count})
 
 
@@ -587,11 +616,12 @@ async def create_session_guidance(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
     session = await session_crud.get_by_session_id(db, request.session_id)
     if not session:
         return StandardResponse.error(message=ERR_SESSION_NOT_FOUND)
-    if session.uid != uid:
-        return StandardResponse.error(message=ERR_SESSION_NO_PERMISSION)
+    if not is_admin and session.uid != uid:
+        return StandardResponse.error(code=403, message=ERR_SESSION_NO_PERMISSION)
     source = session.source or "http"
     if source in {"http", "ws"}:
         return StandardResponse.error(code=403, message=ERR_SESSION_GUIDANCE_EXTERNAL_ONLY)
@@ -605,12 +635,12 @@ async def create_session_guidance(
         profile_id = await message_crud.get_latest_session_profile_id(
             db,
             session_id=session.session_id,
-            uid=uid,
+            uid=session.uid,
         )
     row = await message_crud.create_guidance(
         db,
         session_id=session.session_id,
-        uid=uid,
+        uid=session.uid,
         profile_id=profile_id if profile_id is not None else -1,
         content=f"{GUIDANCE_MESSAGE_PREFIX}{content}{GUIDANCE_MESSAGE_SUFFIX}",
     )
@@ -686,15 +716,17 @@ async def generate_title(
     uid = getattr(current_user, "uid", None)
 
     try:
-        await ensure_web_session_writable(
+        session = await ensure_web_session_writable(
             db,
             session_id=request.session_id,
             uid=uid,
+            is_admin=getattr(current_user, "is_superuser", False),
         )
     except BaseBusinessException as exc:
         return StandardResponse.error(code=exc.code, message=exc.message)
 
-    profile = await resolve_profile_for_session(db, uid=uid, session_id=request.session_id)
+    owner_uid = session.uid if session is not None else uid
+    profile = await resolve_profile_for_session(db, uid=owner_uid, session_id=request.session_id)
     if not profile:
         return StandardResponse.error(message=ERR_NO_VALID_CHANNEL)
 
@@ -720,7 +752,7 @@ async def generate_title(
         try:
             await db.commit()
             title = await generate_session_title(
-                uid=uid,
+                uid=owner_uid,
                 session_id=request.session_id,
                 first_message=request.first_message,
                 api_key=channel.get_decrypted_api_key(),
@@ -737,7 +769,7 @@ async def generate_title(
             # 仅 LLM 调用相关异常做降级；其他异常向上抛出，避免掩盖真实问题
             excluded_priorities.add(_rule.priority)
             logger.bind(
-                uid=uid,
+                uid=owner_uid,
                 session_id=request.session_id,
                 **channel_log_extra(channel, model_entry),
             ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=format_exception_message(e)))
@@ -756,8 +788,16 @@ async def list_background_tasks(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
     offset = (page - 1) * size
-    tasks = await background_task_crud.list_user_tasks(db, uid=uid, session_id=session_id, skip=offset, limit=size)
+    tasks = await background_task_crud.list_user_tasks(
+        db,
+        uid=uid,
+        session_id=session_id,
+        skip=offset,
+        limit=size,
+        is_admin=is_admin,
+    )
     data = [BackgroundTaskResponse.model_validate(task) for task in tasks]
     return StandardResponse.success(data=data, message=MSG_BACKGROUND_TASK_LIST_SUCCESS)
 
@@ -769,9 +809,17 @@ async def get_background_task_pending_activity(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
+    session = await get_session_for_user(
+        db,
+        session_id=session_id,
+        uid=uid,
+        is_admin=is_admin,
+        require_exists=False,
+    )
     has_pending_activity = await background_task_crud.has_pending_user_activity(
         db,
-        uid=uid,
+        uid=session.uid if session is not None else uid,
         session_id=session_id,
     )
     return StandardResponse.success(data={"has_pending_activity": has_pending_activity})
@@ -784,7 +832,11 @@ async def get_background_task(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
-    task = await background_task_crud.get_user_task(db, task_id=task_id, uid=uid)
+    is_admin = getattr(current_user, "is_superuser", False)
+    if is_admin:
+        task = await background_task_crud.get(db, task_id)
+    else:
+        task = await background_task_crud.get_user_task(db, task_id=task_id, uid=uid)
     if not task:
         return StandardResponse.error(code=404, message=ERR_BACKGROUND_TASK_NOT_FOUND)
     return StandardResponse.success(data=BackgroundTaskResponse.model_validate(task), message=MSG_BACKGROUND_TASK_DETAIL_SUCCESS)
@@ -800,13 +852,20 @@ async def get_session_history(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
-    session = await session_crud.get_by_session_id(db, session_id)
+    is_admin = getattr(current_user, "is_superuser", False)
+    session = await get_session_for_user(
+        db,
+        session_id=session_id,
+        uid=uid,
+        is_admin=is_admin,
+        require_exists=False,
+    )
     include_tool_messages = session.show_tool_calls if session else True
     offset = (page - 1) * size
     messages = await message_crud.get_history_paged(
         db,
         session_id=session_id,
-        uid=uid,
+        uid=session.uid if session else uid,
         limit=size,
         offset=offset,
         after_id=after_id,
@@ -835,6 +894,8 @@ async def chat_websocket(
     locale_token = set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
 
     uid = getattr(current_user, "uid", None)
+    actor_username = getattr(current_user, "username", None)
+    is_superuser = getattr(current_user, "is_superuser", False)
     log_locale_token = None
     async with AsyncSessionLocal() as db:
         settings = await system_setting_crud.get_runtime_settings(db)
@@ -878,10 +939,11 @@ async def chat_websocket(
 
                 try:
                     async with AsyncSessionLocal() as db:
-                        await ensure_web_session_writable(
+                        session = await ensure_web_session_writable(
                             db,
                             session_id=session_id,
                             uid=uid,
+                            is_admin=is_superuser,
                         )
                 except BaseBusinessException as exc:
                     await websocket.send_json(
@@ -893,18 +955,20 @@ async def chat_websocket(
                     )
                     continue
 
+                owner_uid = session.uid if session is not None else uid
                 old_session_id = state.current_session_id
                 if old_session_id and old_session_id != session_id:
-                    await session_notifier.unregister(uid, old_session_id, state.notifier_queue)
+                    await session_notifier.unregister(state.current_owner_uid, old_session_id, state.notifier_queue)
 
                 state.current_session_id = session_id
+                state.current_owner_uid = owner_uid
                 await _cancel_websocket_stream_task(state)
-                await session_notifier.register(uid, session_id, state.notifier_queue)
+                await session_notifier.register(owner_uid, session_id, state.notifier_queue)
                 state.stream_task = asyncio.create_task(
                     _run_websocket_resume(
                         websocket,
                         state,
-                        uid,
+                        owner_uid,
                         session_id,
                         history_message_id=data.get("history_message_id") if type(data.get("history_message_id")) is int and data["history_message_id"] >= 0 else 0,
                     )
@@ -930,6 +994,7 @@ async def chat_websocket(
 
             # 会话 ID 解析与切换逻辑
             old_session_id = state.current_session_id
+            created_new_session = False
             if not session_id:
                 # 如果收到空 session_id，决定是沿用当前会话还是开启新会话
                 if not state.stream_task or state.stream_task.done():
@@ -980,22 +1045,51 @@ async def chat_websocket(
                         )
                         continue
 
-                    state.current_session_id = new_session_id
-                    await websocket.send_json(
-                        {
-                            "type": "session_id",
-                            "session_id": state.current_session_id,
-                            "request_id": request_id,
-                        }
-                    )
+                    session_id = new_session_id
+                    created_new_session = True
+            if not session_id:
                 session_id = state.current_session_id
-            else:
-                state.current_session_id = session_id
 
-            if old_session_id and old_session_id != state.current_session_id:
-                await session_notifier.unregister(uid, old_session_id, state.notifier_queue)
+            try:
+                async with AsyncSessionLocal() as db:
+                    session = await ensure_web_session_writable(
+                        db,
+                        session_id=session_id,
+                        uid=uid,
+                        is_admin=is_superuser,
+                    )
+                    await validate_web_message_files(
+                        message,
+                        attachments,
+                        uid=session.uid if session is not None else uid,
+                        db=db,
+                    )
+            except BaseBusinessException as exc:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": t(exc.message, **exc.kwargs),
+                        "session_id": session_id,
+                        "request_id": request_id,
+                    }
+                )
+                continue
+
+            owner_uid = session.uid if session is not None else uid
+            if old_session_id and old_session_id != session_id:
+                await session_notifier.unregister(state.current_owner_uid, old_session_id, state.notifier_queue)
+            state.current_session_id = session_id
+            state.current_owner_uid = owner_uid
+            if created_new_session:
+                await websocket.send_json(
+                    {
+                        "type": "session_id",
+                        "session_id": session_id,
+                        "request_id": request_id,
+                    }
+                )
             if state.current_session_id:
-                await session_notifier.register(uid, state.current_session_id, state.notifier_queue)
+                await session_notifier.register(owner_uid, state.current_session_id, state.notifier_queue)
 
             # 判断是否发生了会话切换
             is_session_switched = old_session_id is not None and session_id != old_session_id
@@ -1007,7 +1101,19 @@ async def chat_websocket(
                     await _cancel_websocket_stream_task(state)
 
                     logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info(t("LOG_CHAT_WS_SESSION_SWITCHED"))
-                    state.stream_task = asyncio.create_task(_run_websocket_chat(websocket, state, uid, message, session_id, attachments, request_id))
+                    state.stream_task = asyncio.create_task(
+                        _run_websocket_chat(
+                            websocket,
+                            state,
+                            owner_uid,
+                            message,
+                            session_id,
+                            attachments,
+                            request_id,
+                            actor_uid=uid,
+                            actor_username=actor_username,
+                        )
+                    )
                 else:
                     # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
                     async with AsyncSessionLocal() as db:
@@ -1016,9 +1122,10 @@ async def chat_websocket(
                                 db,
                                 session_id=session_id,
                                 uid=uid,
+                                is_admin=is_superuser,
                             )
-                            profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id)
-                            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+                            profile = await resolve_profile_for_session(db, uid=owner_uid, session_id=session_id)
+                            await ChatDispatcher.validate_initial_message_before_save(db, message, owner_uid, session_id, profile, attachments)
                         except BaseBusinessException as exc:
                             await websocket.send_json(
                                 {
@@ -1031,7 +1138,9 @@ async def chat_websocket(
                             continue
                         _initial_message, work, submission_status, confirmation_update_events = await session_reply_queue_manager.submit_user_message(
                             db,
-                            uid=uid,
+                            uid=owner_uid,
+                            actor_uid=uid,
+                            actor_username=actor_username,
                             session_id=session_id,
                             profile=profile,
                             message=message,
@@ -1064,7 +1173,19 @@ async def chat_websocket(
                         logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_STREAM_MESSAGE_SUBMITTED", session_id=session_id))
             else:
                 # 3. 无流订阅：为当前会话启动结果订阅
-                state.stream_task = asyncio.create_task(_run_websocket_chat(websocket, state, uid, message, session_id, attachments, request_id))
+                state.stream_task = asyncio.create_task(
+                    _run_websocket_chat(
+                        websocket,
+                        state,
+                        owner_uid,
+                        message,
+                        session_id,
+                        attachments,
+                        request_id,
+                        actor_uid=uid,
+                        actor_username=actor_username,
+                    )
+                )
 
     except WebSocketDisconnect:
         # 连接关闭只结束传输层；持久化会话回复 work 不依赖 WebSocket 生命周期
@@ -1089,4 +1210,4 @@ async def chat_websocket(
         await _cancel_websocket_stream_task(state)
 
         if state.current_session_id:
-            await session_notifier.unregister(uid, state.current_session_id, state.notifier_queue)
+            await session_notifier.unregister(state.current_owner_uid, state.current_session_id, state.notifier_queue)

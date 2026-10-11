@@ -40,7 +40,11 @@ class SessionReplyFreeze:
 
         contiguous = await session_reply_work_item_crud.list_contiguous_foreground(db, work=work)
         bounded_contiguous: list[SessionReplyWorkItem] = []
+        actor_uid = (work.execution_state or {}).get("actor_uid") or work.uid
         for item in contiguous:
+            item_actor_uid = (item.execution_state or {}).get("actor_uid") or item.uid
+            if item_actor_uid != actor_uid:
+                break
             is_audit_decision = bool((item.execution_state or {}).get("audit_decision_response"))
             if is_audit_decision and item.id != work.id:
                 break
@@ -155,9 +159,13 @@ class SessionReplyFreeze:
 
         contiguous = await session_reply_work_item_crud.list_contiguous_foreground(db, work=work)
         additional_work: list[SessionReplyWorkItem] = []
+        actor_uid = (work.execution_state or {}).get("actor_uid") or work.uid
         for item in contiguous:
             if item.id == work.id:
                 continue
+            item_actor_uid = (item.execution_state or {}).get("actor_uid") or item.uid
+            if item_actor_uid != actor_uid:
+                break
             if bool((item.execution_state or {}).get("audit_decision_response")):
                 break
             if item.status != SessionReplyWorkStatus.READY_FOR_LLM or not item.source_id:

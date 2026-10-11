@@ -31,13 +31,20 @@ __all__ = [
 
 
 class SessionReplyResult:
-    async def get_work_status(self, db: AsyncSession, work_id: int, *, uid: str) -> dict:
+    async def get_work_status(
+        self,
+        db: AsyncSession,
+        work_id: int,
+        *,
+        uid: str,
+        is_admin: bool = False,
+    ) -> dict:
         original_work = await session_reply_work_item_crud.get(db, work_id)
-        if original_work is None or original_work.uid != uid:
+        if original_work is None or (not is_admin and original_work.uid != uid):
             raise ResourceNotFoundException(ERR_SESSION_REPLY_WORK_NOT_FOUND)
 
         work = await session_reply_work_item_crud.resolve_merged_target(db, work_id)
-        if work is None or work.uid != uid:
+        if work is None or work.uid != original_work.uid or work.session_id != original_work.session_id:
             raise ResourceNotFoundException(ERR_SESSION_REPLY_WORK_NOT_FOUND)
 
         response = None

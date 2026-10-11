@@ -44,6 +44,7 @@ export default {
   session_group_today: '今天',
   session_group_yesterday: '昨天',
   session_group_earlier: '以前',
+  session_group_user: '{username} 的会话',
   refresh_sessions: '刷新会话列表',
   expand_sessions: '展开会话列表',
   collapse_sessions: '收起会话列表',

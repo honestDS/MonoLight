@@ -1,8 +1,12 @@
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import mimetypes
+import os
+import secrets
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -22,10 +26,12 @@ from app.core.constants import (
     ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED,
     ERR_TOOL_OPERATION_DIRS_UNCONFIGURED,
     ERR_TOOL_PATH_OUTSIDE_ALLOWED_OPERATION_DIRS,
+    ERR_UNAUTHORIZED,
     MSG_FILE_COUNT_TRUNCATED,
 )
 from app.core.crypto import _get_encryption_key
 from app.core.i18n import t
+from app.core.paths import DATA_DIR
 from app.core.utils.operation_directories import (
     get_allowed_operation_dirs,
     is_path_within_allowed_operation_dirs,
@@ -37,7 +43,11 @@ from .base import BaseExecutor
 DEFAULT_MAX_FILE_COUNT = 10
 DEFAULT_MAX_SINGLE_FILE_SIZE_MB = 50
 DEFAULT_MAX_TOTAL_FILE_SIZE_MB = 100
-TOKEN_VERSION = "v1"
+TOKEN_VERSION = "v2"
+LEGACY_TOKEN_VERSION = "v1"
+FILE_TOKEN_DIR = DATA_DIR / "file_download_tokens"
+_TOKEN_DATA_KEYS = frozenset({"uid", "path", "id"})
+_TOKEN_RECORD_KEYS = frozenset({"data", "secret"})
 SENSITIVE_FILENAMES = {
     ".env",
     ".env.local",
@@ -56,33 +66,156 @@ def _sign_payload(payload: str) -> str:
     return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _encode_token(data: dict[str, Any]) -> str:
-    payload = base64.urlsafe_b64encode(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).decode("ascii")
-    signature = _sign_payload(payload)
-    return f"{TOKEN_VERSION}.{payload}.{signature}"
+def _token_payload_error() -> ValueError:
+    return ValueError(t(ERR_FILE_TOKEN_PAYLOAD_INVALID))
 
 
-def resolve_file_token(token: str) -> Path:
-    parts = token.split(".", 2)
-    if len(parts) != 3 or parts[0] != TOKEN_VERSION:
-        raise ValueError(t(ERR_FILE_TOKEN_INVALID))
+def _normalize_token_data(data: Any, *, require_id: bool) -> dict[str, str]:
+    if not isinstance(data, dict):
+        raise _token_payload_error()
+    if require_id and set(data) != _TOKEN_DATA_KEYS:
+        raise _token_payload_error()
 
-    _version, payload, signature = parts
-    expected_signature = _sign_payload(payload)
-    if not hmac.compare_digest(signature, expected_signature):
-        raise ValueError(t(ERR_FILE_TOKEN_SIGNATURE_INVALID))
+    uid = data.get("uid")
+    if not isinstance(uid, str) or not uid.strip():
+        raise _token_payload_error()
 
+    raw_path = data.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise _token_payload_error()
     try:
-        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
-    except Exception as exc:
-        raise ValueError(t(ERR_FILE_TOKEN_PAYLOAD_INVALID)) from exc
+        path = Path(raw_path)
+        if not path.is_absolute():
+            raise _token_payload_error()
+        path = path.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _token_payload_error() from exc
 
-    path = Path(data.get("path", "")).resolve()
     if _is_sensitive_path(path):
         raise ValueError(t(ERR_FILE_SENSITIVE_NOT_ALLOWED))
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(t(ERR_FILE_NOT_FOUND))
-    return path
+
+    normalized_data = {"uid": uid, "path": str(path)}
+    if require_id:
+        file_id = data.get("id")
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise _token_payload_error()
+        normalized_data["id"] = file_id
+    return normalized_data
+
+
+def _binding_key(data: dict[str, str]) -> str:
+    normalized_payload = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return uuid.uuid5(uuid.NAMESPACE_URL, normalized_payload).hex
+
+
+def _token_record_path(binding_key: str) -> Path:
+    if not isinstance(binding_key, str) or len(binding_key) != 32 or any(character not in "0123456789abcdef" for character in binding_key):
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID))
+
+    try:
+        token_dir_path = Path(FILE_TOKEN_DIR).resolve(strict=False)
+        record_path = token_dir_path / f"{binding_key}.json"
+        if record_path.is_symlink():
+            raise ValueError(t(ERR_FILE_TOKEN_INVALID))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID)) from exc
+    return record_path
+
+
+def _read_token_record(binding_key: str) -> tuple[dict[str, str], str]:
+    record_path = _token_record_path(binding_key)
+    try:
+        with record_path.open("r", encoding="utf-8") as record_file:
+            record = json.load(record_file)
+    except FileNotFoundError as exc:
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID)) from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise _token_payload_error() from exc
+
+    if not isinstance(record, dict) or set(record) != _TOKEN_RECORD_KEYS:
+        raise _token_payload_error()
+    stored_secret = record.get("secret")
+    if not isinstance(stored_secret, str) or not stored_secret.isascii() or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for character in stored_secret):
+        raise _token_payload_error()
+
+    data = _normalize_token_data(record.get("data"), require_id=True)
+    if _binding_key(data) != binding_key:
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID))
+    return data, stored_secret
+
+
+def _encode_token(data: dict[str, Any]) -> str:
+    normalized_data = _normalize_token_data(data, require_id=True)
+    binding_key = _binding_key(normalized_data)
+    record_path = _token_record_path(binding_key)
+    token_dir = Path(FILE_TOKEN_DIR)
+    token_dir.mkdir(parents=True, exist_ok=True)
+    secret = secrets.token_urlsafe(32)
+    temp_fd, temp_name = tempfile.mkstemp(prefix=f".{binding_key}.", suffix=".tmp", dir=str(token_dir))
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as record_file:
+            json.dump(
+                {"data": normalized_data, "secret": secret},
+                record_file,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            record_file.flush()
+            os.fsync(record_file.fileno())
+
+        try:
+            os.link(temp_path, record_path)
+        except FileExistsError:
+            _, stored_secret = _read_token_record(binding_key)
+            return f"{TOKEN_VERSION}.{binding_key}.{stored_secret}"
+        return f"{TOKEN_VERSION}.{binding_key}.{secret}"
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _check_token_owner(data: dict[str, str], uid: str | None, is_admin: bool) -> None:
+    if uid is not None and not is_admin and data["uid"] != uid:
+        raise ValueError(t(ERR_UNAUTHORIZED))
+
+
+def resolve_file_token(token: str, *, uid: str | None = None, is_admin: bool = False) -> Path:
+    if not isinstance(token, str):
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID))
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID))
+
+    version, payload, signature = parts
+    if version == LEGACY_TOKEN_VERSION:
+        if not signature.isascii():
+            raise ValueError(t(ERR_FILE_TOKEN_SIGNATURE_INVALID))
+        expected_signature = _sign_payload(payload)
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError(t(ERR_FILE_TOKEN_SIGNATURE_INVALID))
+
+        try:
+            data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+        except Exception as exc:
+            raise _token_payload_error() from exc
+        normalized_data = _normalize_token_data(data, require_id=False)
+        _check_token_owner(normalized_data, uid, is_admin)
+        return Path(normalized_data["path"])
+
+    if version != TOKEN_VERSION:
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID))
+
+    data, expected_secret = _read_token_record(payload)
+    if not signature.isascii() or not secrets.compare_digest(signature, expected_secret):
+        raise ValueError(t(ERR_FILE_TOKEN_SIGNATURE_INVALID))
+    _check_token_owner(data, uid, is_admin)
+    return Path(data["path"])
 
 
 def _is_sensitive_path(path: Path) -> bool:
@@ -207,7 +340,7 @@ class SendFileToUserExecutor(BaseExecutor):
 
                 mime_type = item.get("mime_type") or mimetypes.guess_type(resolved_path.name)[0] or "application/octet-stream"
                 display_name = item.get("display_name") or resolved_path.name
-                token = _encode_token({"path": str(resolved_path), "uid": self.uid, "id": uuid.uuid4().hex})
+                token = await asyncio.to_thread(_encode_token, {"path": str(resolved_path), "uid": self.uid, "id": uuid.uuid4().hex})
                 total_size += size
 
                 valid_files.append(

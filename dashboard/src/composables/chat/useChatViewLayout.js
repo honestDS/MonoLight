@@ -1,6 +1,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { groupChatSessions } from '../../utils/chatPresentation.js'
 
-export function useChatViewLayout({ chat, translate }) {
+export function useChatViewLayout({ chat, translate, currentUid = ref(null) }) {
   const t = translate
   const { sessions, currentSessionId } = chat
 
@@ -35,7 +36,7 @@ export function useChatViewLayout({ chat, translate }) {
     sessionsPanelOpen.value = false
   }
 
-  // 折叠的会话分组 key（today / yesterday / earlier）
+  // 按用户归属和日期划分的折叠会话分组 key
   const collapsedGroups = ref(new Set())
   const toggleGroup = (key) => {
     const next = new Set(collapsedGroups.value)
@@ -72,40 +73,11 @@ export function useChatViewLayout({ chat, translate }) {
     element.style.opacity = ''
   }
 
-  // 会话列表分组：今天 / 昨天 / 以前，按 last_active 降序
-  const groupedSessions = computed(() => {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const yesterday = new Date(today)
-    yesterday.setDate(yesterday.getDate() - 1)
-
-    const groups = {
-      today: [],
-      yesterday: [],
-      earlier: []
-    }
-
-    for (const session of sessions.value) {
-      if (!session.last_active) {
-        groups.earlier.push(session)
-        continue
-      }
-      const d = new Date(session.last_active)
-      if (d >= today) {
-        groups.today.push(session)
-      } else if (d >= yesterday) {
-        groups.yesterday.push(session)
-      } else {
-        groups.earlier.push(session)
-      }
-    }
-
-    return [
-      { key: 'today', label: t('chat.session_group_today'), sessions: groups.today },
-      { key: 'yesterday', label: t('chat.session_group_yesterday'), sessions: groups.yesterday },
-      { key: 'earlier', label: t('chat.session_group_earlier'), sessions: groups.earlier }
-    ].filter(g => g.sessions.length > 0)
-  })
+  // 会话列表按用户归属和日期分组，组内按 last_active 降序
+  const groupedSessions = computed(() => groupChatSessions(sessions.value, {
+    currentUid: currentUid.value,
+    translate: t
+  }))
 
   // 当前会话的创建/活跃时间，供 ChatMessageList 显示
   const currentSessionInfo = computed(() => {

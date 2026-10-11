@@ -57,12 +57,14 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkType,
 )
 from app.models.session_todo import SessionTodoPlan
+from app.models.user import User
 
 
 @pytest_asyncio.fixture
 async def db_session(database_factory) -> AsyncSession:
     tables = [
         Profile.__table__,
+        User.__table__,
         Message.__table__,
         AuditRecord.__table__,
         AuditToolDetail.__table__,
@@ -77,6 +79,7 @@ async def db_session(database_factory) -> AsyncSession:
     async with database_factory(tables=tables) as factory:
         async with factory() as session:
             session.add(Profile(id=1, uid="owner", name="test", configs={}))
+            session.add(User(uid="owner", username="owner"))
             await session.commit()
             yield session
 
@@ -85,6 +88,7 @@ async def db_session(database_factory) -> AsyncSession:
 async def concurrent_confirmation_session_factory(database_factory):
     tables = [
         Profile.__table__,
+        User.__table__,
         Message.__table__,
         AuditRecord.__table__,
         AuditToolDetail.__table__,
@@ -99,6 +103,7 @@ async def concurrent_confirmation_session_factory(database_factory):
     async with database_factory(tables=tables) as factory:
         async with factory() as setup_session:
             setup_session.add(Profile(id=1, uid="owner", name="test", configs={}))
+            setup_session.add(User(uid="owner", username="owner"))
             await setup_session.commit()
         yield factory
 

@@ -86,6 +86,8 @@ class WebChatAdapter(BaseChatAdapter):
         session_id: str,
         attachments: list[str] | None = None,
         request_id: str | None = None,
+        actor_uid: str | None = None,
+        actor_username: str | None = None,
     ) -> dict[str, Any]:
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
@@ -107,6 +109,8 @@ class WebChatAdapter(BaseChatAdapter):
             stream_requested=False,
             context_summary_events_requested=False,
             request_id=request_id,
+            actor_uid=actor_uid,
+            actor_username=actor_username,
             idempotent_http_request=True,
         )
         return {
@@ -125,6 +129,8 @@ class WebChatAdapter(BaseChatAdapter):
         session_id: str,
         attachments: list[str] | None = None,
         request_id: str | None = None,
+        actor_uid: str | None = None,
+        actor_username: str | None = None,
     ):
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
@@ -146,6 +152,8 @@ class WebChatAdapter(BaseChatAdapter):
                 attachments=attachments,
                 source="http",
                 request_id=request_id,
+                actor_uid=actor_uid,
+                actor_username=actor_username,
             )
             llm_response = await session_reply_queue_manager.wait_for_result(work.id)
             if isinstance(llm_response, dict):

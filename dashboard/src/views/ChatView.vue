@@ -72,13 +72,14 @@
                 <div
                   :class="['session-group-title', { 'is-collapsed': collapsedGroups.has(group.key) }]"
                   role="button"
+                  :aria-expanded="!collapsedGroups.has(group.key)"
                   tabindex="0"
                   @click="toggleGroup(group.key)"
                   @keydown.enter.prevent="toggleGroup(group.key)"
                   @keydown.space.prevent="toggleGroup(group.key)"
                 >
-                  <span class="session-group-title-text">{{ group.label }}</span>
-                  <el-icon class="session-group-chevron"><ArrowDown /></el-icon>
+                  <span class="session-group-title-text" :title="group.label">{{ group.label }}</span>
+                  <el-icon class="session-group-chevron" aria-hidden="true"><ArrowDown /></el-icon>
                 </div>
                 <Transition
                   @before-enter="handleSessionGroupBeforeEnter"
@@ -438,7 +439,7 @@ const currentUid = ref(null)
 const chat = useChatSession({ currentUid })
 const sessionTaskService = inject(SESSION_TASKS_KEY, null)
 
-const layout = useChatViewLayout({ chat, translate: t })
+const layout = useChatViewLayout({ chat, currentUid, translate: t })
 const settings = useChatViewSettings({
   chat,
   currentUid,

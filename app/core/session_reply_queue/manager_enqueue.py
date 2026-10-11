@@ -87,6 +87,8 @@ class SessionReplyEnqueue:
         has_quote: bool = False,
         request_id: str | None = None,
         additional_system_prompt: str | None = None,
+        actor_uid: str | None = None,
+        actor_username: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         if not hasattr(db, "execute"):
             return await self._enqueue_foreground_message(
@@ -101,6 +103,8 @@ class SessionReplyEnqueue:
                 context_summary_events_requested=context_summary_events_requested,
                 request_id=request_id,
                 additional_system_prompt=additional_system_prompt,
+                actor_uid=actor_uid,
+                actor_username=actor_username,
             )
         initial_message, work, _status, _confirmation_update_events = await self.submit_user_message(
             db,
@@ -115,6 +119,8 @@ class SessionReplyEnqueue:
             has_quote=has_quote,
             request_id=request_id,
             additional_system_prompt=additional_system_prompt,
+            actor_uid=actor_uid,
+            actor_username=actor_username,
         )
         return initial_message, work
 
@@ -135,6 +141,8 @@ class SessionReplyEnqueue:
         request_id: str | None = None,
         commit: bool = True,
         additional_system_prompt: str | None = None,
+        actor_uid: str | None = None,
+        actor_username: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         profile_id = profile.id if profile and profile.id else -1
         session = None
@@ -201,6 +209,8 @@ class SessionReplyEnqueue:
                 "language": get_current_locale(),
                 "message_source": source,
                 "audit_decision_response": audit_decision_response,
+                "actor_uid": uid if actor_uid is None else actor_uid,
+                "actor_username": actor_username,
             }
         state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
         state["request_ids"] = merge_work_request_ids(work, request_id=request_id)

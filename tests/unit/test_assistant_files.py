@@ -48,9 +48,10 @@ def _generated_dir(tmp_path, uid: str):
     return tmp_path / "temp" / f"temp_{uid}" / "generated_images"
 
 
-def _patch_token_signing(monkeypatch):
+def _patch_token_signing(monkeypatch, tmp_path):
     import app.core.tools.send_file_to_user as send_file_to_user_module
 
+    monkeypatch.setattr(send_file_to_user_module, "FILE_TOKEN_DIR", tmp_path / "file_download_tokens")
     monkeypatch.setattr(send_file_to_user_module, "_sign_payload", lambda _payload: "test-signature")
 
 
@@ -189,7 +190,7 @@ async def test_materialize_generated_images_writes_supported_formats_and_downloa
     mime_type,
     extension,
 ):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, raw = _encoded_image(image_format)
     message = InternalMessage(
         role=MessageRole.ASSISTANT,
@@ -229,7 +230,7 @@ async def test_materialize_generated_images_writes_supported_formats_and_downloa
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_deduplicates_repeated_ids_and_is_stable_across_calls(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, raw = _encoded_image("PNG")
     duplicate = _generated_image("same-id", encoded, "image/png")
     first_message = InternalMessage(role=MessageRole.ASSISTANT, generated_images=[duplicate, duplicate])
@@ -265,7 +266,7 @@ async def test_materialize_generated_images_deduplicates_repeated_ids_and_is_sta
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_keeps_same_bytes_for_different_ids(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, raw = _encoded_image("WEBP")
     message = InternalMessage(
         role=MessageRole.ASSISTANT,
@@ -292,7 +293,7 @@ async def test_materialize_generated_images_keeps_same_bytes_for_different_ids(m
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_shares_user_directory_across_sessions(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, raw = _encoded_image("PNG")
 
     first_message = InternalMessage(
@@ -333,7 +334,7 @@ async def test_materialize_generated_images_shares_user_directory_across_session
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_isolates_user_directories(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, raw = _encoded_image("PNG")
 
     first_message = InternalMessage(
@@ -370,7 +371,7 @@ async def test_materialize_generated_images_isolates_user_directories(monkeypatc
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_kind", ["base64", "non_image", "mime_mismatch", "gif"])
 async def test_materialize_generated_images_rejects_invalid_image_output(monkeypatch, tmp_path, invalid_kind):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     if invalid_kind == "base64":
         data = "not-valid-base64"
         mime_type = None
@@ -403,7 +404,7 @@ async def test_materialize_generated_images_rejects_invalid_image_output(monkeyp
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_rejects_single_file_limit_without_large_fixture(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, raw = _encoded_image("PNG")
     message = InternalMessage(
         role=MessageRole.ASSISTANT,
@@ -427,7 +428,7 @@ async def test_materialize_generated_images_rejects_single_file_limit_without_la
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_rejects_total_size_limit_without_large_fixture(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, raw = _encoded_image("PNG")
     images = [
         _generated_image("image-a", encoded, "image/png"),
@@ -452,7 +453,7 @@ async def test_materialize_generated_images_rejects_total_size_limit_without_lar
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_rejects_file_count_limit(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, _raw = _encoded_image("PNG")
     images = [
         _generated_image("image-a", encoded, "image/png"),
@@ -476,7 +477,7 @@ async def test_materialize_generated_images_rejects_file_count_limit(monkeypatch
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_blocks_jpeg_when_jpeg_extension_is_blocked(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, _raw = _encoded_image("JPEG")
     image = _generated_image("jpeg-image", encoded, "image/jpeg")
     message = InternalMessage(role=MessageRole.ASSISTANT, generated_images=[image])
@@ -498,7 +499,7 @@ async def test_materialize_generated_images_blocks_jpeg_when_jpeg_extension_is_b
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_uid", ["../escape", r"..\escape", "", ".", "..", "\x00", None])
 async def test_materialize_generated_images_rejects_invalid_uid(monkeypatch, tmp_path, invalid_uid):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, _raw = _encoded_image("PNG")
     message = InternalMessage(
         role=MessageRole.ASSISTANT,
@@ -521,7 +522,7 @@ async def test_materialize_generated_images_rejects_invalid_uid(monkeypatch, tmp
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_does_not_keep_valid_files_when_batch_contains_invalid_image(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, _raw = _encoded_image("PNG")
     images = [
         _generated_image("valid-image", encoded, "image/png"),
@@ -545,7 +546,7 @@ async def test_materialize_generated_images_does_not_keep_valid_files_when_batch
 
 @pytest.mark.asyncio
 async def test_materialize_generated_images_cleans_temporary_file_when_storage_fails(monkeypatch, tmp_path):
-    _patch_token_signing(monkeypatch)
+    _patch_token_signing(monkeypatch, tmp_path)
     encoded, _raw = _encoded_image("PNG")
     image = _generated_image("image-1", encoded, "image/png")
     message = InternalMessage(role=MessageRole.ASSISTANT, generated_images=[image])

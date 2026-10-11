@@ -23,6 +23,7 @@ from app.core.audit.integrity import build_tool_round_integrity_snapshot
 from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.security import get_current_user
+from app.core.session_notifier import SessionNotifier
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_audit as executor_audit_module
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
@@ -63,8 +64,10 @@ from app.models.session_reply_work_item import (
 )
 from app.models.session_todo import SessionTodoPlan
 from app.models.terminal_session import TerminalSession
+from app.models.user import User
 from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
+from tests.integration.test_chat_websocket_permissions import _Socket
 
 
 @pytest_asyncio.fixture
@@ -84,6 +87,7 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
             cursor.close()
 
     tables = [
+        User.__table__,
         PromptLibrary.__table__,
         Profile.__table__,
         ChatSession.__table__,
@@ -107,6 +111,9 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
     await clone_sqlite_schema(tmp_path / "confirmation-workflow.db", tables=tables)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
+        async with session_factory() as db:
+            db.add(User(uid="owner", username="owner"))
+            await db.commit()
         yield session_factory
     finally:
         await engine.dispose()
@@ -808,6 +815,369 @@ async def test_web_submit_duplicate_request_id_does_not_repeat_confirmation_deci
         assert work.execution_state["decision_message_id"] == message_row.id
     else:
         assert work.source_id == str(message_row.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "actor",
+    [
+        pytest.param(("admin", "admin_name", True), id="admin"),
+        pytest.param(("owner", "owner", False), id="owner"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("message", "risk_level", "high_risk", "expected_status", "expected_work_type"),
+    [
+        pytest.param(
+            "approve",
+            "normal",
+            False,
+            AuditRecordStatus.EXECUTING,
+            SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            id="approve-normal",
+        ),
+        pytest.param(
+            "ignore",
+            "high-risk",
+            True,
+            AuditRecordStatus.EXECUTING,
+            SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            id="ignore-high-risk",
+        ),
+        pytest.param(
+            "reject",
+            "high-risk",
+            True,
+            AuditRecordStatus.REJECTED,
+            SessionReplyWorkType.FOREGROUND_REPLY,
+            id="reject-high-risk",
+        ),
+    ],
+)
+async def test_http_confirmation_decision_uses_authenticated_actor_and_preserves_owner_provenance(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    actor: tuple[str, str, bool],
+    message: str,
+    risk_level: str,
+    high_risk: bool,
+    expected_status: AuditRecordStatus,
+    expected_work_type: SessionReplyWorkType,
+) -> None:
+    actor_uid, actor_username, actor_is_superuser = actor
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        db.add(User(uid="admin", username="admin_name", is_superuser=True))
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None
+        session = await db.get(ChatSession, "session-confirmation")
+        assert session is not None
+        session.profile_override_id = 1
+        record.operator_username = "original_initiator"
+        if high_risk:
+            details = list((await db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id == audit_record_id).order_by(AuditToolDetail.turn_index))).scalars().all())
+            assert details
+            for detail in details:
+                detail.score = 8
+        await db.commit()
+
+    async def validate_initial(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr("app.adapters.chat_web.ChatDispatcher.validate_initial_message_before_save", validate_initial)
+
+    async def capture_session_event(_uid: str, _session_id: str, _event_payload: dict) -> None:
+        return None
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", capture_session_event)
+
+    app = FastAPI()
+    app.include_router(chat_api.router, prefix="/api/v1")
+
+    current_actor = {
+        "uid": actor_uid,
+        "username": actor_username,
+        "is_superuser": actor_is_superuser,
+    }
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession]:
+        async with confirmation_workflow_session_factory() as db:
+            yield db
+
+    def override_current_user() -> SimpleNamespace:
+        return SimpleNamespace(**current_actor)
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = override_current_user
+
+    request_payload = {
+        "session_id": "session-confirmation",
+        "message": message,
+        "request_id": "http-confirmation-actor-provenance",
+        "actor_uid": "forged",
+        "actor_username": "forged",
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        first_response = await client.post("/api/v1/chat/completions", json=request_payload)
+        assert first_response.status_code == 200
+
+        async with confirmation_workflow_session_factory() as db:
+            first_record = await db.get(AuditRecord, audit_record_id)
+            first_decision_messages = list(
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.session_id == "session-confirmation",
+                            Message.type == MessageType.AUDIT_DECISION,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            first_works = list(
+                (
+                    await db.execute(
+                        select(SessionReplyWorkItem).where(
+                            SessionReplyWorkItem.session_id == "session-confirmation",
+                            SessionReplyWorkItem.uid == "owner",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert first_record is not None
+            assert len(first_decision_messages) == 1
+            assert len(first_works) == 1
+            first_audit_snapshot = (first_record.decided_by, first_record.decision_message_id)
+            first_work_snapshot = (first_works[0].id, dict(first_works[0].execution_state or {}))
+
+        if actor_uid == "admin":
+            current_actor.update(uid="owner", username="owner", is_superuser=False)
+        second_response = await client.post("/api/v1/chat/completions", json=request_payload)
+        assert second_response.status_code == 200
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        decision_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == "session-confirmation",
+                        Message.type == MessageType.AUDIT_DECISION,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        session = await db.get(ChatSession, "session-confirmation")
+        works = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == "session-confirmation",
+                        SessionReplyWorkItem.uid == "owner",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert record is not None
+    assert record.uid == "owner"
+    assert record.operator_username == "original_initiator"
+    assert record.decided_by == actor_username
+    assert record.decision is not None
+    assert record.decision.value == ("reject" if message == "reject" else "approve")
+    assert record.decision_raw_message == message
+    assert record.status == expected_status, risk_level
+    assert len(decision_messages) == 1
+    decision_message = decision_messages[0]
+    assert decision_message.uid == "owner"
+    assert decision_message.profile_id == 1
+    assert decision_message.content == message
+    assert record.decision_message_id == decision_message.id
+    assert session is not None
+    assert session.uid == "owner"
+    assert session.profile_id == 1
+    assert len(works) == 1
+    work = works[0]
+    assert work.uid == "owner"
+    assert work.profile_id == 1
+    assert work.work_type == expected_work_type
+    assert work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert work.execution_state["actor_uid"] == actor_uid
+    assert work.execution_state["actor_username"] == actor_username
+    assert (record.decided_by, record.decision_message_id) == first_audit_snapshot
+    assert (work.id, work.execution_state) == first_work_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_stream", [False, True], ids=["initial-stream", "active-stream"])
+@pytest.mark.parametrize(
+    ("message", "high_risk", "expected_status"),
+    [
+        pytest.param("approve", False, AuditRecordStatus.EXECUTING, id="approve-normal"),
+        pytest.param("ignore", True, AuditRecordStatus.EXECUTING, id="ignore-high-risk"),
+        pytest.param("reject", True, AuditRecordStatus.REJECTED, id="reject-high-risk"),
+    ],
+)
+async def test_websocket_confirmation_decision_uses_authenticated_actor_and_preserves_owner_provenance(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_stream: bool,
+    message: str,
+    high_risk: bool,
+    expected_status: AuditRecordStatus,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        db.add(User(uid="admin", username="admin_name", is_superuser=True))
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None
+        session = await db.get(ChatSession, "session-confirmation")
+        assert session is not None
+        session.profile_override_id = 1
+        record.operator_username = "owner"
+        if high_risk:
+            details = list((await db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id == audit_record_id).order_by(AuditToolDetail.turn_index))).scalars().all())
+            assert details
+            for detail in details:
+                detail.score = 8
+        await db.commit()
+
+    monkeypatch.setattr(chat_api, "AsyncSessionLocal", confirmation_workflow_session_factory)
+
+    async def runtime_settings(_db: AsyncSession) -> SimpleNamespace:
+        return SimpleNamespace(log_locale="zh")
+
+    monkeypatch.setattr(chat_api.system_setting_crud, "get_runtime_settings", runtime_settings)
+
+    async def validate_initial(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr("app.adapters.chat_web.ChatDispatcher.validate_initial_message_before_save", validate_initial)
+
+    async def send_session_event(_uid: str, _session_id: str, _event_payload: dict) -> None:
+        return None
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", send_session_event)
+    monkeypatch.setattr(chat_api, "session_notifier", SessionNotifier())
+
+    stream_blocked = asyncio.Event()
+    resume_started = asyncio.Event()
+
+    async def wait_for_stream(_work_id: int, **_kwargs):
+        await stream_blocked.wait()
+        if False:
+            yield {}
+
+    async def wait_for_session_stream(*_args, **_kwargs):
+        resume_started.set()
+        await stream_blocked.wait()
+        if False:
+            yield {}
+
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_stream", wait_for_stream)
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_session_stream", wait_for_session_stream)
+
+    socket = _Socket()
+    websocket_task = asyncio.create_task(
+        chat_api.chat_websocket(
+            socket,
+            SimpleNamespace(uid="admin", username="admin_name", is_superuser=True),
+        )
+    )
+    request_id = f"ws-confirmation-{message}-{'active' if active_stream else 'initial'}"
+    try:
+        await asyncio.wait_for(socket.accepted.wait(), timeout=5)
+        if active_stream:
+            await socket.feed({"type": "resume", "session_id": "session-confirmation"})
+            await asyncio.wait_for(resume_started.wait(), timeout=5)
+        await socket.feed(
+            {
+                "message": message,
+                "session_id": "session-confirmation",
+                "request_id": request_id,
+                "actor_uid": "forged",
+                "actor_username": "forged",
+            }
+        )
+        accepted = await socket.wait_for(lambda event: event.get("type") == "input_accepted" and event.get("request_id") == request_id)
+        assert accepted["submission_status"] == ("rejected" if message == "reject" else "approved")
+    finally:
+        await socket.disconnect()
+        await asyncio.wait_for(websocket_task, timeout=5)
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        decision_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == "session-confirmation",
+                        Message.type == MessageType.AUDIT_DECISION,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        work_items = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == "session-confirmation",
+                        SessionReplyWorkItem.uid == "owner",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        session = await db.get(ChatSession, "session-confirmation")
+
+    assert record is not None
+    assert record.uid == "owner"
+    assert record.operator_username == "owner"
+    assert record.decided_by == "admin_name"
+    assert record.decision is not None
+    assert record.decision.value == ("reject" if message == "reject" else "approve")
+    assert record.decision_raw_message == message
+    assert record.status == expected_status
+    assert len(decision_messages) == 1
+    decision_message = decision_messages[0]
+    assert decision_message.uid == "owner"
+    assert decision_message.profile_id == 1
+    assert decision_message.content == message
+    assert record.decision_message_id == decision_message.id
+    assert session is not None
+    assert session.uid == "owner"
+    assert session.profile_id == 1
+    assert session.profile_override_id == 1
+    assert len(work_items) == 1
+    work = work_items[0]
+    expected_work_type = SessionReplyWorkType.FOREGROUND_REPLY if message == "reject" else SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    assert work.uid == "owner"
+    assert work.profile_id == 1
+    assert work.work_type == expected_work_type
+    assert work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert work.execution_state["actor_uid"] == "admin"
+    assert work.execution_state["actor_username"] == "admin_name"
+    assert work.execution_state["message_source"] == "ws"
 
 
 @pytest.mark.asyncio

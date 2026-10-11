@@ -349,9 +349,18 @@ async def _seed_stop_case(session_factory: async_sessionmaker[AsyncSession]) -> 
 
 
 @pytest.mark.asyncio
-async def test_owner_stop_cancels_only_interactive_work_and_allows_new_claim(db_session) -> None:
+@pytest.mark.parametrize(
+    ("uid", "is_superuser"),
+    [("owner", False), ("other", True)],
+    ids=["owner", "superuser"],
+)
+async def test_owner_stop_cancels_only_interactive_work_and_allows_new_claim(
+    db_session,
+    uid: str,
+    is_superuser: bool,
+) -> None:
     seeded = await _seed_stop_case(db_session)
-    app = _build_app(db_session, {"uid": "owner", "is_superuser": False})
+    app = _build_app(db_session, {"uid": uid, "is_superuser": is_superuser})
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         stopped = await client.post(
@@ -375,8 +384,11 @@ async def test_owner_stop_cancels_only_interactive_work_and_allows_new_claim(db_
 
     async with db_session() as db:
         works = {work.id: work for work in (await db.execute(select(SessionReplyWorkItem).order_by(SessionReplyWorkItem.id))).scalars().all()}
+        owner_session = await db.get(ChatSession, seeded["owner_session_id"])
         history = await db.get(Message, seeded["history_id"])
+        messages = list((await db.execute(select(Message).where(Message.session_id == seeded["owner_session_id"]).order_by(Message.id))).scalars().all())
     assert all(works[work_id].status == SessionReplyWorkStatus.CANCELLED for work_id in seeded["interactive_ids"])
+    assert all(works[work_id].uid == "owner" for work_id in seeded["interactive_ids"])
     assert all(works[work_id].locked_by is None and works[work_id].lock_until is None for work_id in seeded["interactive_ids"])
     assert works[seeded["succeeded_id"]].status == SessionReplyWorkStatus.SUCCEEDED
     assert works[seeded["succeeded_id"]].result_message_id == seeded["history_id"]
@@ -386,8 +398,12 @@ async def test_owner_stop_cancels_only_interactive_work_and_allows_new_claim(db_
     assert works[seeded["background_id"]].locked_by == "background-worker"
     assert works[seeded["scheduled_id"]].status == SessionReplyWorkStatus.READY_FOR_LLM
     assert works[seeded["scheduled_id"]].locked_by == "scheduled-worker"
+    assert owner_session is not None
+    assert owner_session.uid == "owner"
     assert history is not None
+    assert history.uid == "owner"
     assert history.content == "historical reply"
+    assert all(message.uid == "owner" for message in messages)
 
     async with db_session() as db:
         profile = await db.get(Profile, 1)
@@ -472,11 +488,11 @@ async def _seed_invalid_stop_case(session_factory: async_sessionmaker[AsyncSessi
     [
         ("missing-session", "owner", False, 404),
         ("invalid-owner-session", "other", False, 403),
-        ("invalid-owner-session", "other", True, 403),
         ("invalid-external-session", "owner", False, 403),
+        ("invalid-external-session", "other", True, 403),
         ("", "owner", False, 422),
     ],
-    ids=["not-found", "other-user", "superuser-still-forbidden", "external-session", "empty-id"],
+    ids=["not-found", "other-user", "external-session", "superuser-external-session", "empty-id"],
 )
 async def test_stop_rejects_invalid_target_without_mutating_state(
     db_session,

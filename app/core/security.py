@@ -93,6 +93,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         detail=ERR_UNAUTHORIZED,
         headers={"WWW-Authenticate": "Bearer"},
     )
+    if token is None or token == "":
+        raise credentials_exception
     try:
         payload = jwt.decode(token, get_jwt_secret_key(), algorithms=[JWT_ALGORITHM])
         username: str = payload.get("sub")

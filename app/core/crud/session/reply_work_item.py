@@ -111,6 +111,7 @@ class CRUDSessionReplyWorkItem:
         db: AsyncSession,
         *,
         uid: str,
+        is_admin: bool = False,
         session_ids: list[str],
         limit_per_session: int = 30,
     ) -> list[SessionReplyWorkItem]:
@@ -118,7 +119,6 @@ class CRUDSessionReplyWorkItem:
             return []
 
         common_conditions = [
-            SessionReplyWorkItem.uid == uid,
             SessionReplyWorkItem.session_id.in_(session_ids),
             SessionReplyWorkItem.work_type.in_(
                 [
@@ -128,6 +128,8 @@ class CRUDSessionReplyWorkItem:
             ),
             SessionReplyWorkItem.execution_state["message_source"].as_string() == "http",
         ]
+        if not is_admin:
+            common_conditions.append(SessionReplyWorkItem.uid == uid)
         terminal_ranked = (
             select(
                 SessionReplyWorkItem.id.label("work_id"),

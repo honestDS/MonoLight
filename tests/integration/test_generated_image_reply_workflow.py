@@ -175,7 +175,12 @@ def _patch_runtime_database(monkeypatch: pytest.MonkeyPatch, factory: async_sess
     monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
     monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", factory)
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", factory)
+    monkeypatch.setattr(send_file_to_user_module, "FILE_TOKEN_DIR", Path(factory.kw["bind"].url.database).parent / "file_download_tokens")
     monkeypatch.setattr(send_file_to_user_module, "_get_encryption_key", lambda: b"g" * 32)
+
+
+async def _generated_image_owner() -> User:
+    return User(uid=UID, username="generated_image_user")
 
 
 async def _seed_conversation(factory: async_sessionmaker[AsyncSession], session_id: str) -> InternalMessage:
@@ -1274,6 +1279,7 @@ async def test_native_generated_image_reply_round_trips_through_dispatch_persist
 
     app = FastAPI()
     app.include_router(files_module.router, prefix="/api/v1")
+    app.dependency_overrides[get_current_user] = _generated_image_owner
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         download_response = await client.get(response_file["download_url"])
     assert download_response.status_code == 200
@@ -1788,6 +1794,7 @@ async def test_completed_background_image_tasks_do_not_regenerate_images_in_fina
 
     app = FastAPI()
     app.include_router(files_module.router, prefix="/api/v1")
+    app.dependency_overrides[get_current_user] = _generated_image_owner
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         for file_entry in sent_files:
             download_response = await client.get(file_entry["download_url"])
@@ -2005,6 +2012,7 @@ async def test_mixed_image_sources_share_per_user_temp_size_quota(
             timestamp = 1_000_000.0 + index
             os.utime(path, (timestamp, timestamp))
 
+        upload_uid = UID
         native_download_before = await client.get(native_file["download_url"])
         assert native_download_before.status_code == 200
         assert native_download_before.content == expected_bytes

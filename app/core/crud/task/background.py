@@ -87,8 +87,10 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def list_user_tasks(self, db: AsyncSession, *, uid: str, session_id: str | None = None, skip: int = 0, limit: int = 100) -> list[BackgroundTask]:
-        stmt = select(BackgroundTask).where(BackgroundTask.uid == uid).order_by(BackgroundTask.created_at.desc()).offset(skip).limit(limit)
+    async def list_user_tasks(self, db: AsyncSession, *, uid: str, is_admin: bool = False, session_id: str | None = None, skip: int = 0, limit: int = 100) -> list[BackgroundTask]:
+        stmt = select(BackgroundTask).order_by(BackgroundTask.created_at.desc()).offset(skip).limit(limit)
+        if not is_admin:
+            stmt = stmt.where(BackgroundTask.uid == uid)
         if session_id:
             stmt = stmt.where(BackgroundTask.session_id == session_id)
         result = await db.execute(stmt)

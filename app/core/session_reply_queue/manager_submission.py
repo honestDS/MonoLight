@@ -23,6 +23,7 @@ from app.core.constants import (
     ERR_CHAT_REQUEST_ID_CONFLICT,
     ERR_CHAT_REQUEST_WORK_UNAVAILABLE,
 )
+from app.core.crud.account.user import user_crud
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
@@ -74,7 +75,10 @@ class SessionReplySubmission:
         request_id: str | None = None,
         additional_system_prompt: str | None = None,
         idempotent_http_request: bool = False,
+        actor_uid: str | None = None,
+        actor_username: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem, str, list[dict[str, Any]]]:
+        actor_uid = uid if actor_uid is None else actor_uid
         profile_id = profile.id if profile and profile.id else -1
         content_format = MessageContentFormat.PARTS if isinstance(message, list) else MessageContentFormat.TEXT
         serialized_message = _serialize_message_content(message)
@@ -179,6 +183,8 @@ class SessionReplySubmission:
                 context_summary_events_requested=context_summary_events_requested,
                 request_id=request_id,
                 additional_system_prompt=cleaned_additional_system_prompt or None,
+                actor_uid=actor_uid,
+                actor_username=actor_username,
                 **({"persisted_message_row": idempotent_message_row} if idempotent_message_row is not None else {}),
             )
             submission_status = await self._resolve_submission_status(
@@ -199,6 +205,9 @@ class SessionReplySubmission:
             has_quote=has_quote,
             requires_high_risk_override=requires_high_risk_override,
         )
+        if decision is not None and not actor_username:
+            actor = await user_crud.get_by_uid(db, actor_uid)
+            actor_username = actor.username if actor is not None else "Unknown"
         if decision == ConfirmationDecision.REJECT:
             profile_id = profile.id if profile and profile.id else -1
             decision_raw_message = message if isinstance(message, str) else _serialize_message_content(message)
@@ -231,7 +240,7 @@ class SessionReplySubmission:
                 status=AuditRecordStatus.REJECTED,
                 decision_message_id=message_row.id,
                 decision_raw_message=decision_raw_message,
-                decided_by=current_confirmation.operator_username,
+                decided_by=actor_username,
                 **({"commit": False} if idempotent_http_request else {}),
             )
             await update_confirmation_tool_results_for_decision(
@@ -260,6 +269,8 @@ class SessionReplySubmission:
                 audit_decision_response=True,
                 request_id=request_id,
                 additional_system_prompt=cleaned_additional_system_prompt or None,
+                actor_uid=actor_uid,
+                actor_username=actor_username,
             )
             submission_status = await self._resolve_submission_status(
                 db,
@@ -325,6 +336,8 @@ class SessionReplySubmission:
                     request_id=request_id,
                     commit=False,
                     additional_system_prompt=cleaned_additional_system_prompt or None,
+                    actor_uid=actor_uid,
+                    actor_username=actor_username,
                 )
                 await db.commit()
             except Exception:
@@ -376,7 +389,7 @@ class SessionReplySubmission:
             session_id=session_id,
             decision_message_id=message_row.id,
             decision_raw_message=decision_raw_message,
-            decided_by=current_confirmation.operator_username,
+            decided_by=actor_username,
             commit=False,
         )
         if claimed_record is None or claim_token is None:
@@ -433,6 +446,8 @@ class SessionReplySubmission:
                 context_summary_events_requested=context_summary_events_requested,
                 request_id=request_id,
                 additional_system_prompt=cleaned_additional_system_prompt or None,
+                actor_uid=actor_uid,
+                actor_username=actor_username,
                 **({"persisted_message_row": message_row} if message_row is not None else {}),
             )
             submission_status = await self._resolve_submission_status(
@@ -485,6 +500,8 @@ class SessionReplySubmission:
             **(work.execution_state or {}),
             "audit_claim_token": claim_token,
             "decision_message_id": message_row.id,
+            "actor_uid": actor_uid,
+            "actor_username": actor_username,
             "stream_requested": source == "ws" if stream_requested is None else stream_requested,
             "context_summary_events_requested": source == "ws" if context_summary_events_requested is None else context_summary_events_requested,
             "show_tool_calls": show_tool_calls,

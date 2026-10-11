@@ -236,14 +236,19 @@
             <div v-for="(att, idx) in msg.attachments" :key="idx" class="message-attachment-item">
               <el-image
                 v-if="isImageFile(att)"
-                :src="fileApi.getDownloadUrl(att)"
+                :src="getFileObjectUrl(getAttachmentSourceUrl(att))"
                 :preview-src-list="getAttachmentImageUrls(msg)"
                 preview-teleported
                 :hide-on-click-modal="true"
                 class="msg-attachment-image"
                 @load="handleImageLoad"
               ></el-image>
-              <a v-else :href="fileApi.getDownloadUrl(att)" target="_blank" class="msg-attachment-file">
+              <a
+                v-else
+                :href="getFileObjectUrl(getAttachmentSourceUrl(att)) || '#'"
+                class="msg-attachment-file"
+                @click.prevent="handleFileDownload(getAttachmentSourceUrl(att), getFilename(att))"
+              >
                 <img src="@/assets/svg/document.svg" class="icon-document" />
                 <span class="file-name" :title="getFilename(att)">{{ getFilename(att) }}</span>
               </a>
@@ -322,14 +327,20 @@
             <div v-for="file in getMessageFiles(msg)" :key="file.id" class="message-attachment-item">
               <el-image
                 v-if="isPreviewImage(file)"
-                :src="getSentFileUrl(file)"
+                :src="getFileObjectUrl(getSentFileUrl(file))"
                 :preview-src-list="getSentFileImageUrls(msg)"
                 preview-teleported
                 :hide-on-click-modal="true"
                 class="msg-attachment-image"
                 @load="handleImageLoad"
               ></el-image>
-              <a v-else :href="getSentFileUrl(file)" target="_blank" rel="noopener noreferrer" class="msg-attachment-file">
+              <a
+                v-else
+                :href="getFileObjectUrl(getSentFileUrl(file)) || '#'"
+                rel="noopener noreferrer"
+                class="msg-attachment-file"
+                @click.prevent="handleFileDownload(getSentFileUrl(file), file.name)"
+              >
                 <img src="@/assets/svg/document.svg" class="icon-document" />
                 <span class="file-name" :title="file.name">{{ file.name }}</span>
                 <span class="sent-file-meta">{{ file.mime_type }} · {{ formatFileSize(file.size) }}</span>
@@ -375,7 +386,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
@@ -398,6 +409,7 @@ import {
   isToolResult
 } from '../utils'
 import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
+import { createFileDownloadCache } from '../utils/fileDownloads.js'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
 import { getMessageListScrollState, getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../utils/chatPresentation.js'
 import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
@@ -450,6 +462,15 @@ let transientUserScrollCandidate = false
 let transientUserScrollCandidateTimer = null
 let lastVirtualScrollOffset = null
 let messageListUnmounted = false
+const fileObjectUrls = ref(new Map())
+const fileDownloadCache = createFileDownloadCache({
+  fetchBlob: fileApi.fetchDownloadBlob,
+  createObjectUrl: URL.createObjectURL,
+  revokeObjectUrl: URL.revokeObjectURL
+})
+const pendingFileDownloads = new Set()
+const reportedImageErrors = new Set()
+let fileDownloadGeneration = 0
 const messagesLayoutReady = ref(false)
 const scrollState = ref(null)
 const scrollListeners = new Set()
@@ -852,10 +873,19 @@ const handleChangedIncomingMessages = async (changedMessages, replaceUnread = fa
   scheduleUnreadVisibilityCheck()
 }
 
+const clearFileDownloadState = () => {
+  fileDownloadGeneration += 1
+  fileDownloadCache.clear()
+  fileObjectUrls.value.clear()
+  pendingFileDownloads.clear()
+  reportedImageErrors.clear()
+}
+
 watch(() => props.currentSessionId, () => {
+  clearFileDownloadState()
   reasoningCollapseModel.value = []
   expandedUserMessages.value.clear()
-})
+}, { flush: 'sync' })
 
 watch(
   () => [props.currentSessionId, props.initialHistoryLoaded, messagesLayoutReady.value],
@@ -1219,9 +1249,110 @@ const getFilename = (path) => {
   return name.length > 9 && name[8] === '_' ? name.substring(9) : name
 }
 const isPreviewImage = file => file?.previewable && file?.mime_type?.startsWith('image/')
-const getAttachmentImageUrls = message => (message.attachments || []).filter(isImageFile).map(fileApi.getDownloadUrl)
+const getAttachmentSourceUrl = path => path ? fileApi.getDownloadUrl(path, props.currentSessionId) : ''
 const getSentFileUrl = file => fileApi.resolveDownloadUrl(file?.download_url)
-const getSentFileImageUrls = message => getMessageFiles(message).filter(isPreviewImage).map(getSentFileUrl)
+const getFileObjectUrl = sourceUrl => fileObjectUrls.value.get(sourceUrl) || ''
+const getAttachmentImageUrls = message => (message.attachments || [])
+  .filter(isImageFile)
+  .map(getAttachmentSourceUrl)
+  .map(getFileObjectUrl)
+  .filter(Boolean)
+const getSentFileImageUrls = message => getMessageFiles(message)
+  .filter(isPreviewImage)
+  .map(getSentFileUrl)
+  .map(getFileObjectUrl)
+  .filter(Boolean)
+const fileSourceUrls = computed(() => {
+  const urls = new Set()
+  props.messages.forEach(message => {
+    const attachments = message.attachments || []
+    attachments.forEach(path => urls.add(getAttachmentSourceUrl(path)))
+    getMessageFiles(message).forEach(file => urls.add(getSentFileUrl(file)))
+  })
+  return [...urls].filter(url => url && url !== '#')
+})
+const imageSourceUrls = computed(() => {
+  const urls = new Set()
+  props.messages.forEach(message => {
+    const attachments = message.attachments || []
+    attachments.filter(isImageFile).forEach(path => urls.add(getAttachmentSourceUrl(path)))
+    getMessageFiles(message).filter(isPreviewImage).forEach(file => urls.add(getSentFileUrl(file)))
+  })
+  return [...urls].filter(url => url && url !== '#')
+})
+const isActiveFileSource = (sourceUrl, generation) => (
+  !messageListUnmounted &&
+  generation === fileDownloadGeneration &&
+  fileSourceUrls.value.includes(sourceUrl)
+)
+const reportFileLoadError = (error, sourceUrl, generation, isImage = false) => {
+  if (!isActiveFileSource(sourceUrl, generation)) return
+  if (isImage && reportedImageErrors.has(sourceUrl)) return
+  if (isImage) reportedImageErrors.add(sourceUrl)
+  ElMessage.error(error?.message || t('common.network_request_failed'))
+}
+const loadFileObjectUrl = async (sourceUrl, generation = fileDownloadGeneration) => {
+  if (!isActiveFileSource(sourceUrl, generation)) return ''
+
+  const cachedUrl = fileDownloadCache.get(sourceUrl)
+  if (cachedUrl) {
+    fileObjectUrls.value.set(sourceUrl, cachedUrl)
+    return cachedUrl
+  }
+
+  const objectUrl = await fileDownloadCache.load(sourceUrl)
+  if (!objectUrl || !isActiveFileSource(sourceUrl, generation)) return ''
+  fileObjectUrls.value.set(sourceUrl, objectUrl)
+  return objectUrl
+}
+const preloadImage = async (sourceUrl, generation) => {
+  try {
+    await loadFileObjectUrl(sourceUrl, generation)
+  } catch (error) {
+    reportFileLoadError(error, sourceUrl, generation, true)
+  }
+}
+watch([fileSourceUrls, imageSourceUrls], ([sourceUrls, imageUrls]) => {
+  const retainedUrls = new Set(sourceUrls)
+  fileDownloadCache.prune(sourceUrls)
+  for (const sourceUrl of fileObjectUrls.value.keys()) {
+    if (!retainedUrls.has(sourceUrl)) fileObjectUrls.value.delete(sourceUrl)
+  }
+  for (const sourceUrl of reportedImageErrors) {
+    if (!retainedUrls.has(sourceUrl)) reportedImageErrors.delete(sourceUrl)
+  }
+
+  const generation = fileDownloadGeneration
+  new Set(imageUrls).forEach(sourceUrl => { void preloadImage(sourceUrl, generation) })
+}, { immediate: true, flush: 'sync' })
+const handleFileDownload = async (sourceUrl, filename) => {
+  if (!sourceUrl || sourceUrl === '#' || messageListUnmounted) return
+  const generation = fileDownloadGeneration
+  const downloadKey = `${generation}:${sourceUrl}`
+  if (pendingFileDownloads.has(downloadKey)) return
+  pendingFileDownloads.add(downloadKey)
+
+  try {
+    let objectUrl
+    try {
+      objectUrl = await loadFileObjectUrl(sourceUrl, generation)
+    } catch (error) {
+      reportFileLoadError(error, sourceUrl, generation)
+      return
+    }
+    if (!objectUrl || !isActiveFileSource(sourceUrl, generation)) return
+
+    const anchor = document.createElement('a')
+    anchor.href = objectUrl
+    anchor.download = filename || t('chat.unknown_file')
+    anchor.style.display = 'none'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  } finally {
+    pendingFileDownloads.delete(downloadKey)
+  }
+}
 const formatFileSize = (size) => {
   if (!Number.isFinite(size)) return '-'
   if (size < 1024) return `${size} B`
@@ -1239,6 +1370,11 @@ const handleImageLoad = () => {
 }
 onUnmounted(() => {
   messageListUnmounted = true
+  fileDownloadGeneration += 1
+  fileDownloadCache.dispose()
+  fileObjectUrls.value.clear()
+  pendingFileDownloads.clear()
+  reportedImageErrors.clear()
   window.clearInterval(auditCountdownTimer)
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
   if (messageListResizeObserver !== null) messageListResizeObserver.disconnect()

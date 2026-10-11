@@ -1,6 +1,7 @@
 import axios from 'axios'
 import i18n from '../i18n'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
+import { resolveAuthenticatedDownloadUrl } from '../utils/fileDownloads.js'
 import { resolveApiBaseUrl, resolveWebSocketBaseUrl } from '../utils/runtimeEndpoints.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
@@ -46,10 +47,17 @@ request.interceptors.response.use(
     }
     return res;
   },
-  err => {
+  async err => {
     if (err.response && err.response.status === 401) {
       localStorage.removeItem('token');
       if (window.location.hash !== '#/login') window.location.hash = '/login';
+    }
+    if (typeof Blob !== 'undefined' && err.response?.data instanceof Blob) {
+      try {
+        err.response.data = JSON.parse(await err.response.data.text())
+      } catch {
+        // 保留原始响应，让下方继续使用网络错误默认值。
+      }
     }
     // 统一错误提示格式：优先读取后端返回的 message 或 detail
     const errorMsg = err.response?.data?.message || err.response?.data?.detail || err.message || t('common.network_request_failed');
@@ -220,8 +228,21 @@ export const fileApi = {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
   },
-  getDownloadUrl: (path) => {
-    return `${API_BASE_URL}/download?path=${encodeURIComponent(path)}&lang=${encodeURIComponent(getCurrentLocale())}`
+  getDownloadUrl: (path, sessionId = null) => {
+    const sessionParam = sessionId === null || sessionId === undefined
+      ? ''
+      : `&session_id=${encodeURIComponent(sessionId)}`
+    return `${API_BASE_URL}/download?path=${encodeURIComponent(path)}&lang=${encodeURIComponent(getCurrentLocale())}${sessionParam}`
+  },
+  fetchDownloadBlob: async (url) => {
+    let verifiedUrl
+    try {
+      verifiedUrl = resolveAuthenticatedDownloadUrl(url, API_BASE_URL, window.location.origin)
+    } catch {
+      throw new Error(t('common.network_request_failed'))
+    }
+    const res = await request.get(verifiedUrl, { responseType: 'blob' })
+    return res.data
   },
   resolveDownloadUrl: (url) => {
     if (!url) return '#'
