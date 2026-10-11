@@ -66,15 +66,19 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         await db.refresh(scheduled_task)
         return scheduled_task
 
-    async def list_tasks(self, db: AsyncSession, *, skip: int = 0, limit: int = 100, status: ScheduledTaskStatus | None = None) -> list[ScheduledTask]:
+    async def list_tasks(self, db: AsyncSession, *, uid: str, is_admin: bool = False, skip: int = 0, limit: int = 100, status: ScheduledTaskStatus | None = None) -> list[ScheduledTask]:
         stmt = select(ScheduledTask).order_by(ScheduledTask.created_at.desc()).offset(skip).limit(limit)
+        if not is_admin:
+            stmt = stmt.where(ScheduledTask.uid == uid)
         if status is not None:
             stmt = stmt.where(ScheduledTask.status == status)
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def count_tasks(self, db: AsyncSession, *, status: ScheduledTaskStatus | None = None) -> int:
+    async def count_tasks(self, db: AsyncSession, *, uid: str, is_admin: bool = False, status: ScheduledTaskStatus | None = None) -> int:
         stmt = select(func.count()).select_from(ScheduledTask)
+        if not is_admin:
+            stmt = stmt.where(ScheduledTask.uid == uid)
         if status is not None:
             stmt = stmt.where(ScheduledTask.status == status)
         result = await db.execute(stmt)

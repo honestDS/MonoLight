@@ -3,6 +3,7 @@ export default {
   edit_task: 'Edit Scheduled Task',
   refresh: 'Refresh',
   name: 'Name',
+  owner_username: 'Owner',
   session_id: 'Session ID',
   message: 'Scheduled Message',
   interval_seconds: 'Interval Seconds',
