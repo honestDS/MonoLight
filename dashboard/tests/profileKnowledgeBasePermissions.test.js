@@ -74,6 +74,7 @@ const createHarness = async (t, options = {}) => {
     profileList: [],
     knowledgeBaseList: [],
     memorySettings: [],
+    modelOptions: [],
     channelList: [],
     promptList: [],
     adminUserList: [],
@@ -119,6 +120,11 @@ const createHarness = async (t, options = {}) => {
       api.memorySettings.push(params)
       return Promise.resolve(dataResponse({ configured: false }))
     },
+    modelOptions: params => {
+      api.modelOptions.push(params)
+      const items = options.modelOptionsItems ?? []
+      return Promise.resolve(pageResponse(items, items.length, {}))
+    },
   }
   const knowledgeBaseApi = {
     list: params => {
@@ -141,7 +147,7 @@ const createHarness = async (t, options = {}) => {
   const channelApi = {
     list: params => {
       api.channelList.push(params)
-      return Promise.resolve(pageResponse([], 0, {}))
+      return Promise.reject(new Error('403 channel management API forbidden'))
     },
   }
   const promptApi = {
@@ -207,6 +213,8 @@ const createHarness = async (t, options = {}) => {
     showDialog,
     submitForm,
     form,
+    channels,
+    auditModelKey,
     dialogType,
     knowledgeBases,
     knowledgeBasesReady,
@@ -544,6 +552,56 @@ test('unknown and ordinary users never request or mutate global settings', async
     assert.deepEqual(normalize(harness.module.systemSettings), settingsBefore, scenario.name)
     assert.equal(harness.module.settingsDialogVisible.value, dialogBefore, scenario.name)
     assert.equal(harness.module.settingsSubmitting.value, submittingBefore, scenario.name)
+    assert.deepEqual(harness.messages.filter(message => message.type === 'error'), [], scenario.name)
+  }
+})
+
+test('ordinary users and superusers load safe model options without the channel management API', async t => {
+  const modelOptionsItems = [
+    {
+      id: 11,
+      name: 'Safe channel',
+      is_active: true,
+      model_ids: [
+        { model_id: 'CHAT', usage: 'CHAT', is_enabled: true },
+        { model_id: 'EMBEDDING', usage: 'EMBEDDING', is_enabled: true },
+      ],
+    },
+  ]
+
+  for (const scenario of [
+    { name: 'ordinary', superuser: false, currentUid: 'user-a' },
+    { name: 'superuser', superuser: true, currentUid: 'admin-user' },
+  ]) {
+    const harness = await createHarness(t, {
+      ...scenario,
+      modelOptionsItems,
+    })
+
+    for (const callback of harness.mountedCallbacks) callback()
+    await flush()
+
+    assert.deepEqual(normalize(harness.api.modelOptions), [{ page: 1, size: 1000 }], scenario.name)
+    assert.equal(harness.api.channelList.length, 0, scenario.name)
+    assert.deepEqual(normalize(harness.module.channels.value), modelOptionsItems, scenario.name)
+    assert.deepEqual(harness.messages.filter(message => message.type === 'error'), [], scenario.name)
+
+    const chatModel = modelOptionsItems[0].model_ids.find(model => model.usage === 'CHAT')
+    harness.module.auditModelKey.value = `${modelOptionsItems[0].id}::${chatModel.model_id}`
+    assert.equal(harness.module.form.configs.security.audit_channel_id, modelOptionsItems[0].id, scenario.name)
+    assert.equal(harness.module.form.configs.security.audit_model_id, chatModel.model_id, scenario.name)
+
+    harness.module.handleRefresh()
+    await flush()
+
+    assert.deepEqual(normalize(harness.api.modelOptions), [
+      { page: 1, size: 1000 },
+      { page: 1, size: 1000 },
+    ], scenario.name)
+    assert.equal(harness.api.channelList.length, 0, scenario.name)
+    assert.deepEqual(normalize(harness.module.channels.value), modelOptionsItems, scenario.name)
+    assert.equal(harness.module.form.configs.security.audit_channel_id, modelOptionsItems[0].id, scenario.name)
+    assert.equal(harness.module.form.configs.security.audit_model_id, chatModel.model_id, scenario.name)
     assert.deepEqual(harness.messages.filter(message => message.type === 'error'), [], scenario.name)
   }
 })

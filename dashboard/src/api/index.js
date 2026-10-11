@@ -123,6 +123,7 @@ export const chatApi = {
 
 export const profileApi = {
   list: (params) => request.get('/profiles/list', { params }),
+  modelOptions: (params) => request.get('/profiles/model-options', { params }),
   create: (data) => request.post('/profiles/create', data),
   setDefault: (id) => request.post(`/profiles/set-default?profile_id=${id}`),
   update: (id, data) => request.post(`/profiles/update?profile_id=${id}`, data),

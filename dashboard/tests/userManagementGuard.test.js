@@ -154,6 +154,7 @@ const unauthorizedError = () => Object.assign(new Error('unauthorized'), {
 
 const managementRouteCases = [
   { path: '/users', view: '../views/UsersView.vue' },
+  { path: '/channels', view: '../views/ChannelsView.vue' },
 ]
 
 const authenticatedRouteCases = [
@@ -220,7 +221,7 @@ test('hydrates an ordinary role on an entry page and reuses it on normal navigat
   const harness = createHarness()
   harness.storage.token = 'ordinary-token'
 
-  const firstNavigation = harness.router.push('/channels')
+  const firstNavigation = harness.router.push('/knowledge-base')
   await harness.resolveNextSetup(false)
   await harness.resolveNextAuth({ is_superuser: false })
   await firstNavigation
@@ -239,7 +240,7 @@ for (const routeCase of managementRouteCases) {
     const harness = createHarness()
     harness.storage.token = 'role-changing-token'
 
-    const firstNavigation = harness.router.push('/channels')
+    const firstNavigation = harness.router.push('/knowledge-base')
     await harness.resolveNextSetup(false)
     await harness.resolveNextAuth({ is_superuser: true })
     await firstNavigation
@@ -283,12 +284,12 @@ for (const routeCase of managementRouteCases) {
       assert.equal(harness.permissions.isSuperuser, false)
       assert.equal(harness.loadedViews.includes(routeCase.view), false)
 
-      const channelsNavigation = harness.router.push('/channels')
+      const knowledgeBaseNavigation = harness.router.push('/knowledge-base')
       await harness.resolveNextSetup(false)
       await identityCase.settle(harness)
-      await channelsNavigation
+      await knowledgeBaseNavigation
 
-      assert.equal(harness.router.currentRoute.value.path, '/channels')
+      assert.equal(harness.router.currentRoute.value.path, '/knowledge-base')
       assert.equal(harness.permissions.isSuperuser, false)
     }
   })
@@ -325,7 +326,7 @@ test('clears permission state on login, setup, and backend-unavailable routes wi
   const harness = createHarness()
   harness.storage.token = 'super-token'
 
-  const entryNavigation = harness.router.push('/channels')
+  const entryNavigation = harness.router.push('/knowledge-base')
   await harness.resolveNextSetup(false)
   await harness.resolveNextAuth({ is_superuser: true })
   await entryNavigation
@@ -380,7 +381,7 @@ test('does not retain superuser state across logout or a token change', async ()
   const harness = createHarness()
   harness.storage.token = 'super-token'
 
-  const superNavigation = harness.router.push('/channels')
+  const superNavigation = harness.router.push('/knowledge-base')
   await harness.resolveNextSetup(false)
   await harness.resolveNextAuth({ is_superuser: true })
   await superNavigation
@@ -392,7 +393,7 @@ test('does not retain superuser state across logout or a token change', async ()
   await logoutNavigation
 
   harness.storage.token = 'ordinary-token'
-  const ordinaryNavigation = harness.router.push('/channels')
+  const ordinaryNavigation = harness.router.push('/knowledge-base')
   await harness.resolveNextSetup(false)
   await harness.resolveNextAuth({ is_superuser: false })
   await ordinaryNavigation

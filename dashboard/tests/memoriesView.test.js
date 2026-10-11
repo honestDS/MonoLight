@@ -102,6 +102,7 @@ const createHarness = (t, options = {}) => {
     if (name === 'memoryApi.jobs' || name === 'memoryApi.migrations') return pageResponse([])
     if (name === 'memoryApi.history') return pageResponse([])
     if (name === 'memoryApi.settings') return dataResponse({ configured: true })
+    if (name === 'profileApi.modelOptions') return pageResponse([])
     if (name === 'adminApi.userList' || name === 'channelApi.list') return pageResponse([])
     return dataResponse({})
   }
@@ -130,6 +131,7 @@ const createHarness = (t, options = {}) => {
 
   const adminApi = createApi('adminApi', ['userList'])
   const channelApi = createApi('channelApi', ['list'])
+  const profileApi = createApi('profileApi', ['modelOptions'])
   const memoryApi = createApi('memoryApi', [
     'list',
     'get',
@@ -192,6 +194,7 @@ const createHarness = (t, options = {}) => {
     ElMessageBox,
     adminApi,
     channelApi,
+    profileApi,
     memoryApi,
     ...memoryManagement,
     ...{
@@ -278,6 +281,63 @@ test('derives ordinary-user scope from list metadata without cross-user uid requ
   for (const name of ['memoryApi.list', 'memoryApi.jobs', 'memoryApi.migrations']) {
     for (const request of harness.calls(name)) assert.equal(request.args[0].uid, undefined)
   }
+})
+
+test('loads ordinary-user channel model names from paginated profile options without channel-list access', async t => {
+  const firstPage = Array.from({ length: 100 }, (_value, index) => ({
+    id: index + 1,
+    name: `Channel ${index}`,
+    is_active: true,
+    model_ids: [{
+      model_id: `model-${index}`,
+      usage: 'EMBEDDING',
+      protocol: 'OPENAI_EMBEDDING',
+      is_enabled: true,
+    }],
+  }))
+  const secondPage = [{
+    id: 101,
+    name: 'Channel 100',
+    is_active: true,
+    model_ids: [{
+      model_id: 'model-100',
+      usage: 'EMBEDDING',
+      protocol: 'OPENAI_EMBEDDING',
+      is_enabled: true,
+    }],
+  }]
+  const harness = createHarness(t, {
+    apiOverrides: {
+      profileApi: {
+        modelOptions: params => pageResponse(params.page === 1 ? firstPage : secondPage, 101),
+      },
+    },
+  })
+  await harness.mount()
+  await harness.flush()
+
+  assert.deepEqual(normalize(harness.calls('profileApi.modelOptions').map(request => request.args[0])), [
+    { page: 1, size: 100 },
+    { page: 2, size: 100 },
+  ])
+  assert.equal(harness.module.channels.value.length, 101)
+  assert.equal(harness.module.channelName(101), 'Channel 100')
+  assert.equal(harness.calls('channelApi.list').length, 0)
+  assert.equal(harness.messages.some(message => message.type === 'error'), false)
+
+  await harness.module.loadChannels()
+  await harness.flush()
+
+  assert.deepEqual(normalize(harness.calls('profileApi.modelOptions').map(request => request.args[0])), [
+    { page: 1, size: 100 },
+    { page: 2, size: 100 },
+    { page: 1, size: 100 },
+    { page: 2, size: 100 },
+  ])
+  assert.equal(harness.module.channels.value.length, 101)
+  assert.equal(new Set(harness.module.channels.value.map(channel => channel.id)).size, 101)
+  assert.equal(harness.calls('channelApi.list').length, 0)
+  assert.equal(harness.messages.some(message => message.type === 'error'), false)
 })
 
 test('loads all superuser owner labels across paginated user-list responses', async t => {
