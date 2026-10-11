@@ -99,7 +99,7 @@
             <el-icon><Clock /></el-icon>
             <template #title><span>{{ $t('common.menu.scheduled_tasks') }}</span></template>
           </el-menu-item>
-          <el-menu-item v-if="userPermissions.isSuperuser" index="/knowledge-base">
+          <el-menu-item index="/knowledge-base">
             <el-icon><Reading /></el-icon>
             <template #title><span>{{ $t('common.menu.knowledge_base') }}</span></template>
           </el-menu-item>

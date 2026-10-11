@@ -21,9 +21,9 @@ from app.core.constants import (
     ERR_KB_VECTOR_WRITE_FAILED,
     ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED,
     ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND,
-    ERR_ONLY_ADMIN_ALLOWED,
     ERR_PROFILE_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
+    ERR_USER_NOT_FOUND,
     MSG_GENERIC_SUCCESS,
     MSG_KB_CREATED,
     MSG_KB_DELETED,
@@ -33,6 +33,7 @@ from app.core.constants import (
     MSG_KB_UNNAMED_DOCUMENT,
     MSG_KB_UPDATED,
 )
+from app.core.crud.account.user import user_crud
 from app.core.crud.channel.channel import channel_crud
 from app.core.crud.knowledge.base import (
     knowledge_base_crud,
@@ -50,7 +51,7 @@ from app.core.embedding.knowledge_base import (
     query_knowledge_base,
 )
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
-from app.core.exceptions import BaseBusinessException, ForbiddenException
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.knowledge.bindings import (
     get_user_knowledge_base_ids_for_profile,
@@ -117,14 +118,7 @@ from app.providers.vector import (
 )
 from app.schemas.response import StandardResponse
 
-
-async def check_admin_privilege(current_user=Depends(get_current_user)):
-    if not getattr(current_user, "is_superuser", False):
-        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
-    return current_user
-
-
-router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"], dependencies=[Depends(check_admin_privilege)])
+router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"], dependencies=[Depends(get_current_user)])
 
 
 async def load_owned_knowledge_base(db: AsyncSession, kb_id: int, current_user: Any) -> KnowledgeBase:
@@ -213,8 +207,18 @@ async def get_knowledge_base_profile_ids(db: AsyncSession, kb_id: int, uid: str)
     )
 
 
-async def build_knowledge_base_response(db: AsyncSession, kb: KnowledgeBase) -> KnowledgeBaseResponse:
+async def build_knowledge_base_response(
+    db: AsyncSession,
+    kb: KnowledgeBase,
+    *,
+    usernames_by_uid: dict[str, str] | None = None,
+) -> KnowledgeBaseResponse:
     response = KnowledgeBaseResponse.model_validate(kb)
+    if usernames_by_uid is None:
+        owner = await user_crud.get_by_uid(db, kb.uid)
+        response.username = owner.username if owner is not None else None
+    else:
+        response.username = usernames_by_uid.get(kb.uid)
     if kb.id is not None:
         response.profile_ids = await get_knowledge_base_profile_ids(db, kb.id, kb.uid)
     if kb.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED:
@@ -326,6 +330,13 @@ async def create_knowledge_base(
 ):
     """创建知识库"""
 
+    requested_owner_uid = kb_in.uid if getattr(current_user, "is_superuser", False) else None
+    owner_uid = requested_owner_uid or current_user.uid
+    if requested_owner_uid is not None:
+        owner = await user_crud.get_by_uid(db, requested_owner_uid)
+        if owner is None:
+            raise HTTPException(status_code=404, detail=ERR_USER_NOT_FOUND)
+
     embedding_config, embedding_model = await load_embedding_model(db, kb_in.embedding_channel_id, kb_in.embedding_model_id)
     embedding_dimensions = embedding_model.get("embedding_dimensions")
     await db.commit()
@@ -345,6 +356,14 @@ async def create_knowledge_base(
         raise HTTPException(status_code=500, detail=t(ERR_KB_COLLECTION_CREATE_FAILED, message=str(e)))
 
     try:
+        if requested_owner_uid is not None:
+            owner = await user_crud.get_by_uid(
+                db,
+                requested_owner_uid,
+                lock_for_reference_write=True,
+            )
+            if owner is None:
+                raise HTTPException(status_code=404, detail=ERR_USER_NOT_FOUND)
         _channel, embedding_model = await load_embedding_model(
             db,
             kb_in.embedding_channel_id,
@@ -369,7 +388,7 @@ async def create_knowledge_base(
         db_kb = await knowledge_base_crud.create(
             db,
             obj_in={
-                "uid": current_user.uid,
+                "uid": owner_uid,
                 "name": kb_in.name,
                 "description": kb_in.description,
                 "embedding_channel_id": kb_in.embedding_channel_id,
@@ -423,10 +442,12 @@ async def list_knowledge_bases(
         skip=skip,
         limit=size,
     )
+    users = await user_crud.get_multi_by_uids(db, list({knowledge_base.uid for knowledge_base in kbs}))
+    usernames_by_uid = {user.uid: user.username for user in users}
 
     knowledge_base_items = []
     for knowledge_base in kbs:
-        knowledge_base_items.append(await build_knowledge_base_response(db, knowledge_base))
+        knowledge_base_items.append(await build_knowledge_base_response(db, knowledge_base, usernames_by_uid=usernames_by_uid))
 
     data = KnowledgeBaseListResponse(
         items=knowledge_base_items,

@@ -307,7 +307,7 @@
             </div>
           </el-tab-pane>
 
-          <el-tab-pane v-if="showOwnerColumn" :label="$t('profiles.knowledge_base_settings')" name="knowledge_base">
+          <el-tab-pane :label="$t('profiles.knowledge_base_settings')" name="knowledge_base">
             <div class="tab-pane-content">
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.knowledge_base_settings') }}</div>

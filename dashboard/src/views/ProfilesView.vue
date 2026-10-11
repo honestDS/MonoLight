@@ -578,7 +578,7 @@ const fetchChannels = async () => {
 }
 
 const fetchKnowledgeBases = async () => {
-  if (!userPermissions.isSuperuser) return
+  if (!userPermissions.currentUser) return
   knowledgeBasesLoading.value = true
   knowledgeBasesReady.value = false
   knowledgeBasesUnavailable.value = false
@@ -864,7 +864,7 @@ const showDialog = (type, row = null) => {
     memoryEmbeddingTargetKey.value = ''
   } else {
     form.id = null
-    form.uid = users.value[0]?.uid || null
+    form.uid = (userPermissions.isSuperuser ? users.value[0]?.uid : null) || userPermissions.currentUser?.uid || currentUid.value || null
     form.name = ''
     form.prompt_id = null
     form.knowledge_base_ids = []
@@ -964,7 +964,7 @@ const submitForm = async () => {
       memory_organization: buildOrganizationSettingsPayload(form.memory_organization),
       configs: buildConfigsForSave()
     }
-    if (userPermissions.isSuperuser && knowledgeBasesReady.value) {
+    if (userPermissions.currentUser && knowledgeBasesReady.value) {
       const knowledgeBaseIds = buildKnowledgeBaseBindingPayload(form.knowledge_base_ids, knowledgeBasesReady.value)
       if (knowledgeBaseIds !== undefined) {
         payload.knowledge_base_ids = knowledgeBaseIds

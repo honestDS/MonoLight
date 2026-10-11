@@ -716,6 +716,7 @@ class KnowledgeOrganizationFragment(SQLModel, table=True):
 
 
 class KnowledgeBaseCreate(SQLModel):
+    uid: StrictStr | None = Field(default=None, min_length=1, max_length=50, description="超管可指定的知识库所属用户ID；普通用户由登录身份确定")
     name: str = Field(..., min_length=1, max_length=100, description="知识库名称")
     description: str | None = Field(None, max_length=500, description="知识库描述")
     embedding_channel_id: int = Field(..., gt=0, description="向量化使用的渠道ID")
@@ -724,6 +725,7 @@ class KnowledgeBaseCreate(SQLModel):
 
 class KnowledgeBaseResponse(KnowledgeBaseCore):
     id: int
+    username: str | None = None
     profile_ids: list[int] = Field(default_factory=list)
     profile_names: list[str] = Field(default_factory=list)
     created_at: datetime | None = None

@@ -42,6 +42,7 @@ from app.models.knowledge_base import (
 )
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
+from app.models.user import User
 from app.providers.database import get_db
 
 
@@ -61,6 +62,7 @@ async def db_session() -> AsyncIterator[AsyncSession]:
                     PromptLibrary.__table__,
                     ModelChannel.__table__,
                     Profile.__table__,
+                    User.__table__,
                     KnowledgeBase.__table__,
                     KnowledgeBaseProfileBinding.__table__,
                     KnowledgeBaseDocument.__table__,
@@ -190,6 +192,7 @@ def assert_knowledge_base_fields(item: dict | KnowledgeBase, channel_id: int, co
         assert get(field) == 0
     if is_response:
         assert get("profile_ids") == []
+        assert get("username") is None
     return collection_name
 
 
@@ -1470,6 +1473,7 @@ async def test_knowledge_base_list_returns_profile_names_for_bindings_and_manage
     assert first_response.status_code == 200
     first_items = {item["id"]: item for item in first_response.json()["data"]["items"]}
     assert set(first_items) == knowledge_base_ids
+    assert all(item["username"] is None for item in first_items.values())
 
     bound_item = first_items[int(user_bound.id)]
     assert set(bound_item["profile_ids"]) == {profile_ids["chinese"], profile_ids["english"]}

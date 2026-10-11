@@ -154,6 +154,10 @@ const unauthorizedError = () => Object.assign(new Error('unauthorized'), {
 
 const managementRouteCases = [
   { path: '/users', view: '../views/UsersView.vue' },
+]
+
+const authenticatedRouteCases = [
+  ...managementRouteCases,
   { path: '/knowledge-base', view: '../views/KnowledgeBase.vue' },
 ]
 
@@ -189,6 +193,28 @@ for (const routeCase of managementRouteCases) {
     assert.equal(harness.loadedViews.includes(routeCase.view), true)
   })
 }
+
+test('allows ordinary and superuser direct knowledge-base navigation, including query refresh state', async () => {
+  for (const identity of [
+    { token: 'ordinary-token', user: { is_superuser: false } },
+    { token: 'super-token', user: { is_superuser: true } },
+  ]) {
+    const harness = createHarness()
+    harness.storage.token = identity.token
+
+    const navigation = harness.router.push({ path: '/knowledge-base', query: { refresh: '1' } })
+    await harness.resolveNextSetup(false)
+    await harness.resolveNextAuth(identity.user)
+    await navigation
+    await harness.router.isReady()
+
+    assert.equal(harness.router.currentRoute.value.path, '/knowledge-base')
+    assert.deepEqual(harness.router.currentRoute.value.query, { refresh: '1' })
+    assert.equal(harness.permissions.isSuperuser, identity.user.is_superuser)
+    assert.equal(harness.authRequests.requests.length, 1)
+    assert.equal(harness.loadedViews.includes('../views/KnowledgeBase.vue'), true)
+  }
+})
 
 test('hydrates an ordinary role on an entry page and reuses it on normal navigation', async () => {
   const harness = createHarness()
@@ -266,7 +292,9 @@ for (const routeCase of managementRouteCases) {
       assert.equal(harness.permissions.isSuperuser, false)
     }
   })
+}
 
+for (const routeCase of authenticatedRouteCases) {
   test(`sends missing or unauthorized ${routeCase.path} sessions to login and clears the token`, async () => {
     const missingToken = createHarness()
     const missingNavigation = missingToken.router.push(routeCase.path)
@@ -323,7 +351,7 @@ test('clears permission state on login, setup, and backend-unavailable routes wi
   assert.equal(harness.authRequests.requests.length, 1)
 })
 
-for (const routeCase of managementRouteCases) {
+for (const routeCase of authenticatedRouteCases) {
   test(`prioritizes incomplete or failed setup before ${routeCase.path} authentication and view loading`, async () => {
     const incomplete = createHarness()
     incomplete.storage.token = 'token'

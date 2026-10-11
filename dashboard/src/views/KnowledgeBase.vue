@@ -22,15 +22,24 @@
         :resizable="false"
         min-width="180px"
       />
+      <el-table-column
+        prop="username"
+        :label="$t('knowledgeBase.owner_username')"
+        min-width="180"
+        show-overflow-tooltip
+        :resizable="false"
+      >
+        <template #default="{ row }">{{ getKnowledgeBaseOwnerLabel(row) }}</template>
+      </el-table-column>
+      <el-table-column :resizable="false" :label="$t('knowledgeBase.owner_profiles')" min-width="130" show-overflow-tooltip>
+        <template #default="{ row }">{{ getKnowledgeBaseProfileLabel(row) }}</template>
+      </el-table-column>
       <el-table-column :resizable="false" :label="$t('knowledgeBase.knowledge_base_type')" align="center">
         <template #default="{ row }">
           <el-tag :type="canManageManagedKnowledge(row) ? 'warning' : 'info'">
             {{ canManageManagedKnowledge(row) ? $t('knowledgeBase.type_managed') : $t('knowledgeBase.type_user') }}
           </el-tag>
         </template>
-      </el-table-column>
-      <el-table-column :resizable="false" :label="$t('knowledgeBase.owner_profiles')" min-width="130" show-overflow-tooltip>
-        <template #default="{ row }">{{ getKnowledgeBaseProfileLabel(row) }}</template>
       </el-table-column>
       <el-table-column :resizable="false" prop="description" :label="$t('knowledgeBase.description')" min-width="220" show-overflow-tooltip />
       <el-table-column :resizable="false" :label="$t('knowledgeBase.active_embedding')" min-width="220" show-overflow-tooltip>
@@ -78,6 +87,36 @@
       align-center
     >
       <el-form :model="form" :rules="rules" ref="formRef" label-width="120px" size="default">
+        <el-form-item
+          v-if="!isEditing && isSuperuser"
+          prop="uid"
+          :label="$t('knowledgeBase.owner_username')"
+          :error="ownerUsersError || undefined"
+          for="knowledge-base-owner-select"
+        >
+          <el-select
+            id="knowledge-base-owner-select"
+            v-model="form.uid"
+            filterable
+            class="full-width-input"
+            :placeholder="$t('knowledgeBase.select_owner_user')"
+            :loading="ownerUsersLoading"
+            :disabled="ownerUsersLoading || submitting"
+          >
+            <el-option
+              v-for="user in ownerUsers"
+              :key="user.uid"
+              :label="user.username || $t('knowledgeBase.owner_unknown')"
+              :value="user.uid"
+            />
+          </el-select>
+          <el-button v-if="ownerUsersError" link type="primary" :disabled="submitting" @click="fetchOwnerUsers">
+            {{ $t('knowledgeBase.refresh') }}
+          </el-button>
+        </el-form-item>
+        <el-form-item v-else-if="isEditing" :label="$t('knowledgeBase.owner_username')">
+          <el-input :model-value="form.username || $t('knowledgeBase.owner_unknown')" readonly />
+        </el-form-item>
         <el-form-item :label="$t('knowledgeBase.name')" prop="name">
           <el-input v-model="form.name" :placeholder="$t('knowledgeBase.input_kb_name')" />
         </el-form-item>
@@ -108,7 +147,15 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false" size="default">{{ $t('knowledgeBase.cancel') }}</el-button>
-        <el-button type="primary" :loading="submitting" @click="submitForm" size="default">{{ $t('knowledgeBase.confirm') }}</el-button>
+        <el-button
+          type="primary"
+          :loading="submitting"
+          :disabled="!isEditing && isSuperuser && (ownerUsersLoading || !!ownerUsersError)"
+          @click="submitForm"
+          size="default"
+        >
+          {{ $t('knowledgeBase.confirm') }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -698,6 +745,7 @@ const {
   fetchData,
   handleSizeChange,
   canManageManagedKnowledge,
+  getKnowledgeBaseOwnerLabel,
   getKnowledgeBaseProfileLabel,
   getEmbeddingModelName,
   getTargetEmbeddingModelName,
@@ -711,7 +759,12 @@ const {
   handleKnowledgeBaseMoreAction,
   dialogVisible,
   isEditing,
+  isSuperuser,
   form,
+  ownerUsers,
+  ownerUsersLoading,
+  ownerUsersError,
+  fetchOwnerUsers,
   rules,
   formRef,
   embeddingModelOptions,

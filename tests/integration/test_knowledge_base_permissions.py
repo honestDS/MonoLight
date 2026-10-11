@@ -14,7 +14,7 @@ from sqlmodel import select
 
 import app.core.security as security
 from app.api.v1 import auth, knowledge_base
-from app.core.constants import ERR_ONLY_ADMIN_ALLOWED, ERR_UNAUTHORIZED
+from app.core.constants import ERR_SESSION_NO_PERMISSION, ERR_UNAUTHORIZED, ERR_USER_NOT_FOUND
 from app.core.dispatch_context import build_dispatch_context
 from app.core.i18n import t
 from app.core.knowledge.managed import build_managed_knowledge_snapshot
@@ -674,8 +674,12 @@ async def _submit_management_case(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", _management_cases(), ids=lambda case: case["id"])
-async def test_non_admin_owner_requests_are_forbidden_and_persistence_is_unchanged(
+@pytest.mark.parametrize(
+    "case",
+    (case for case in _management_cases() if case["scope"] == "peer"),
+    ids=lambda case: case["id"],
+)
+async def test_non_admin_cross_owner_management_requests_are_forbidden_and_persistence_is_unchanged(
     api_app: FastAPI,
     seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
     case: dict[str, str | None],
@@ -684,7 +688,7 @@ async def test_non_admin_owner_requests_are_forbidden_and_persistence_is_unchang
     before = await _state_snapshot(session_factory)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
         response = await _submit_management_case(client, case, resources)
-    _assert_error(response, 403, t(ERR_ONLY_ADMIN_ALLOWED))
+    _assert_error(response, 403, t(ERR_SESSION_NO_PERMISSION))
     assert await _state_snapshot(session_factory) == before
 
 
@@ -693,12 +697,27 @@ async def test_signed_token_cannot_forge_superuser_or_uid_claims(
     api_app: FastAPI,
     seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
 ) -> None:
-    session_factory, _resources = seeded_database
+    session_factory, resources = seeded_database
+    normal = resources["normal-user"]
+    peer = resources["peer-user"]
     token = _token("normal-user", is_superuser=True, uid="super-user")
     before = await _state_snapshot(session_factory)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
-        response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=token)
-    _assert_error(response, 403, t(ERR_ONLY_ADMIN_ALLOWED))
+        list_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=token)
+        listed = _assert_success(list_response)
+        assert listed["total"] == 2
+        assert all(item["uid"] == "normal-user" for item in listed["items"])
+        assert {item["id"] for item in listed["items"]} == {normal["user_kb_id"], normal["managed_kb_id"]}
+
+        update_response = await _request(
+            client,
+            "POST",
+            f"{KNOWLEDGE_BASE_PREFIX}/update",
+            token=token,
+            params={"kb_id": peer["user_kb_id"]},
+            json={"name": "forged metadata update", "description": "must be forbidden"},
+        )
+    _assert_error(update_response, 403, t(ERR_SESSION_NO_PERMISSION))
     assert await _state_snapshot(session_factory) == before
 
 
@@ -725,71 +744,89 @@ async def test_list_rejects_missing_invalid_expired_disabled_and_unknown_credent
 
 
 @pytest.mark.asyncio
-async def test_superuser_reads_cross_owner_resources_and_persists_metadata_update(
+@pytest.mark.parametrize("is_superuser", (False, True), ids=("normal-user", "super-admin"))
+async def test_users_read_allowed_resources_and_persist_metadata_update(
     api_app: FastAPI,
     seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
+    is_superuser: bool,
 ) -> None:
     session_factory, resources = seeded_database
-    admin_token = _token("super-admin")
-    peer = resources["peer-user"]
+    expected_usernames_by_uid = {
+        "super-user": "super-admin",
+        "normal-user": "normal-user",
+        "peer-user": "peer-user",
+    }
+    if is_superuser:
+        auth_token = _token("super-admin")
+        target_owner_uid = "peer-user"
+        listed_owner_uids = ("super-user", "normal-user", "peer-user")
+        expected_total = 6
+    else:
+        auth_token = _token("normal-user")
+        target_owner_uid = "normal-user"
+        listed_owner_uids = ("normal-user",)
+        expected_total = 2
+    target = resources[target_owner_uid]
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
-        listed_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=admin_token)
+        listed_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=auth_token)
         listed = _assert_success(listed_response)
         listed_pairs = {(item["uid"], item["knowledge_base_type"]) for item in listed["items"]}
-        assert listed_pairs == {(uid, kind) for uid in ("super-user", "normal-user", "peer-user") for kind in (KnowledgeBaseType.USER.value, KnowledgeBaseType.LLM_MANAGED.value)}
+        assert listed["total"] == expected_total
+        assert listed_pairs == {(uid, kind) for uid in listed_owner_uids for kind in (KnowledgeBaseType.USER.value, KnowledgeBaseType.LLM_MANAGED.value)}
+        assert {(item["uid"], item["username"]) for item in listed["items"]} == {(uid, expected_usernames_by_uid[uid]) for uid in listed_owner_uids}
 
         document_list_response = await _request(
             client,
             "GET",
             f"{KNOWLEDGE_BASE_PREFIX}/documents/list",
-            token=admin_token,
-            params={"kb_id": peer["user_kb_id"], "page": 1, "size": 20},
+            token=auth_token,
+            params={"kb_id": target["user_kb_id"], "page": 1, "size": 20},
         )
         document_list = _assert_success(document_list_response)
         assert document_list["total"] == 1
-        assert document_list["items"][0]["id"] == peer["document_id"]
+        assert document_list["items"][0]["id"] == target["document_id"]
 
         document_response = await _request(
             client,
             "GET",
             f"{KNOWLEDGE_BASE_PREFIX}/documents/get",
-            token=admin_token,
-            params={"kb_id": peer["user_kb_id"], "document_id": peer["document_id"]},
+            token=auth_token,
+            params={"kb_id": target["user_kb_id"], "document_id": target["document_id"]},
         )
         document = _assert_success(document_response)
-        assert document["id"] == peer["document_id"]
-        assert document["content"] == peer["document_content"]
+        assert document["id"] == target["document_id"]
+        assert document["content"] == target["document_content"]
 
         managed_list_response = await _request(
             client,
             "GET",
             f"{KNOWLEDGE_BASE_PREFIX}/managed-items/list",
-            token=admin_token,
-            params={"kb_id": peer["managed_kb_id"], "page": 1, "size": 20},
+            token=auth_token,
+            params={"kb_id": target["managed_kb_id"], "page": 1, "size": 20},
         )
         managed_list = _assert_success(managed_list_response)
         assert managed_list["total"] == 1
-        assert managed_list["items"][0]["id"] == peer["managed_item_id"]
+        assert managed_list["items"][0]["id"] == target["managed_item_id"]
 
         managed_response = await _request(
             client,
             "GET",
             f"{KNOWLEDGE_BASE_PREFIX}/managed-items/get",
-            token=admin_token,
-            params={"kb_id": peer["managed_kb_id"], "knowledge_id": peer["managed_item_id"]},
+            token=auth_token,
+            params={"kb_id": target["managed_kb_id"], "knowledge_id": target["managed_item_id"]},
         )
         managed = _assert_success(managed_response)
-        assert managed["id"] == peer["managed_item_id"]
-        assert managed["knowledge_base_id"] == peer["managed_kb_id"]
-        assert managed["content"] == peer["managed_content"]
+        assert managed["id"] == target["managed_item_id"]
+        assert managed["knowledge_base_id"] == target["managed_kb_id"]
+        assert managed["content"] == target["managed_content"]
 
         history_response = await _request(
             client,
             "GET",
             f"{KNOWLEDGE_BASE_PREFIX}/managed-items/history",
-            token=admin_token,
-            params={"kb_id": peer["managed_kb_id"], "knowledge_id": peer["managed_item_id"]},
+            token=auth_token,
+            params={"kb_id": target["managed_kb_id"], "knowledge_id": target["managed_item_id"]},
         )
         history = _assert_success(history_response)
         assert [(entry["version"], entry["operation"]) for entry in history] == [(1, "create")]
@@ -798,27 +835,78 @@ async def test_superuser_reads_cross_owner_resources_and_persists_metadata_updat
             client,
             "POST",
             f"{KNOWLEDGE_BASE_PREFIX}/update",
-            token=admin_token,
-            params={"kb_id": peer["user_kb_id"]},
+            token=auth_token,
+            params={"kb_id": target["user_kb_id"]},
             json={"name": "peer metadata updated", "description": "updated by superuser"},
         )
         updated = _assert_success(updated_response)
-        assert updated["uid"] == "peer-user"
+        assert updated["uid"] == target_owner_uid
+        assert updated["username"] == expected_usernames_by_uid[target_owner_uid]
         assert updated["name"] == "peer metadata updated"
         assert updated["description"] == "updated by superuser"
 
-    persisted = await _get_knowledge_base(session_factory, peer["user_kb_id"])
+    persisted = await _get_knowledge_base(session_factory, target["user_kb_id"])
     assert persisted is not None
-    assert persisted.id == peer["user_kb_id"]
-    assert persisted.uid == "peer-user"
+    assert persisted.id == target["user_kb_id"]
+    assert persisted.uid == target_owner_uid
     assert persisted.name == "peer metadata updated"
     assert persisted.description == "updated by superuser"
     assert persisted.knowledge_base_type == KnowledgeBaseType.USER
-    assert persisted.collection_name == "permission-peer-user-user-collection"
+    assert persisted.collection_name == f"permission-{target_owner_uid}-user-collection"
 
 
 @pytest.mark.asyncio
-async def test_same_real_user_is_forbidden_over_management_http_but_can_create_managed_knowledge_from_llm_tool(
+async def test_knowledge_base_owner_username_refreshes_after_real_user_rename(
+    api_app: FastAPI,
+    seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
+) -> None:
+    session_factory, resources = seeded_database
+    peer = resources["peer-user"]
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        initial_list_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=_token("super-admin"))
+        initial_list = _assert_success(initial_list_response)
+        initial_peer_items = [item for item in initial_list["items"] if item["uid"] == "peer-user"]
+        assert {item["id"] for item in initial_peer_items} == {peer["user_kb_id"], peer["managed_kb_id"]}
+        assert {(item["uid"], item["username"]) for item in initial_peer_items} == {("peer-user", "peer-user")}
+
+    async with session_factory() as session:
+        peer_user = (await session.execute(select(User).where(User.uid == "peer-user"))).scalar_one()
+        assert peer_user.username == "peer-user"
+        peer_user.username = "peer-renamed"
+        await session.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        renamed_list_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=_token("super-admin"))
+        renamed_list = _assert_success(renamed_list_response)
+        renamed_peer_items = [item for item in renamed_list["items"] if item["uid"] == "peer-user"]
+        assert {item["id"] for item in renamed_peer_items} == {peer["user_kb_id"], peer["managed_kb_id"]}
+        assert {(item["uid"], item["username"]) for item in renamed_peer_items} == {("peer-user", "peer-renamed")}
+
+        updated_response = await _request(
+            client,
+            "POST",
+            f"{KNOWLEDGE_BASE_PREFIX}/update",
+            token=_token("super-admin"),
+            params={"kb_id": peer["user_kb_id"]},
+            json={"name": "peer renamed metadata", "description": "updated after owner rename"},
+        )
+        updated = _assert_success(updated_response)
+        assert updated["uid"] == "peer-user"
+        assert updated["username"] == "peer-renamed"
+
+        normal_list_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=_token("normal-user"))
+        normal_list = _assert_success(normal_list_response)
+        assert normal_list["total"] == 2
+        assert {item["id"] for item in normal_list["items"]} == {
+            resources["normal-user"]["user_kb_id"],
+            resources["normal-user"]["managed_kb_id"],
+        }
+        assert {(item["uid"], item["username"]) for item in normal_list["items"]} == {("normal-user", "normal-user")}
+
+
+@pytest.mark.asyncio
+async def test_same_real_user_can_create_managed_knowledge_over_http_and_llm_tool(
     api_app: FastAPI,
     seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
 ) -> None:
@@ -857,21 +945,52 @@ async def test_same_real_user_is_forbidden_over_management_http_but_can_create_m
         await session.commit()
         await session.refresh(profile)
 
-    before_http = await _state_snapshot(session_factory)
+    http_content = "Management-created managed knowledge."
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
-        blocked_response = await client.post(
+        http_response = await client.post(
             f"{KNOWLEDGE_BASE_PREFIX}/managed-items/create",
             headers=headers,
             params={"kb_id": normal["managed_kb_id"]},
             json={
-                "knowledge_key": "conversation.allowed",
-                "content": "Conversation-created managed knowledge.",
+                "knowledge_key": "management.allowed",
+                "content": http_content,
                 "llm_maintainable": True,
-                "dedupe_key": "conversation-allowed-create",
+                "dedupe_key": "management-allowed-create",
             },
         )
-    _assert_error(blocked_response, 403, t(ERR_ONLY_ADMIN_ALLOWED))
-    assert await _state_snapshot(session_factory) == before_http
+    http_payload = _assert_success(http_response)
+    http_item_payload = http_payload["item"]
+    http_job_id = http_payload["job_id"]
+    assert http_payload["status"] == "created"
+    assert http_item_payload["id"] > 0
+    assert http_item_payload["knowledge_base_id"] == normal["managed_kb_id"]
+    assert http_item_payload["knowledge_key"] == "management.allowed"
+    assert http_item_payload["content"] == http_content
+    assert http_item_payload["source_type"] == ManagedKnowledgeSourceType.USER_API.value
+    assert http_item_payload["created_by"] == ManagedKnowledgeActorType.USER.value
+    assert http_item_payload["last_modified_by"] == ManagedKnowledgeActorType.USER.value
+    assert http_job_id > 0
+
+    async with session_factory() as session:
+        http_item = await session.get(ManagedKnowledgeItem, http_item_payload["id"])
+        http_job = await session.get(KnowledgeJob, http_job_id)
+        assert http_item is not None
+        assert http_item.uid == uid
+        assert http_item.knowledge_base_id == normal["managed_kb_id"]
+        assert http_item.knowledge_key == "management.allowed"
+        assert http_item.content == http_content
+        assert http_item.source_type == ManagedKnowledgeSourceType.USER_API
+        assert http_item.created_by == ManagedKnowledgeActorType.USER
+        assert http_item.last_modified_by == ManagedKnowledgeActorType.USER
+        assert http_item.source_job_id == http_job_id
+
+        assert http_job is not None
+        assert http_job.uid == uid
+        assert http_job.operation == KnowledgeJobOperation.MANAGED_CREATE
+        assert http_job.status == KnowledgeJobStatus.PENDING
+        assert http_job.knowledge_base_id == normal["managed_kb_id"]
+        assert http_job.knowledge_id == http_item.id
+        assert http_job.source_profile_id == normal["profile_id"]
 
     knowledge_content = "Conversation-created managed knowledge."
     async with session_factory() as session:
@@ -927,3 +1046,412 @@ async def test_same_real_user_is_forbidden_over_management_http_but_can_create_m
         assert stored_job.source_profile_id == normal["profile_id"]
         assert stored_job.source_session_id == "permission-conversation-session"
         assert stored_job.source_message_id == 707
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "owner_fields",
+    (
+        {},
+        {"uid": None},
+        {"uid": "peer-user", "username": "peer-user", "is_superuser": True},
+        {"uid": "missing-owner", "username": "super-admin", "is_superuser": True},
+    ),
+)
+async def test_normal_user_create_knowledge_base_uses_authenticated_owner_and_scope_lists(
+    api_app: FastAPI,
+    seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    owner_fields: dict[str, Any],
+) -> None:
+    session_factory, resources = seeded_database
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
+
+    async def skip_external_collection(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(knowledge_base, "async_create_collection", skip_external_collection)
+
+    peer_before = await _get_knowledge_base(session_factory, resources["peer-user"]["user_kb_id"])
+    assert peer_before is not None
+    peer_before_state = tuple(_freeze(getattr(peer_before, attribute.key)) for attribute in KnowledgeBase.__mapper__.column_attrs)
+
+    created_name = "normal-user-created"
+    created_description = "created by the authenticated normal user"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        login_response = await _request(
+            client,
+            "POST",
+            "/api/v1/auth/login",
+            json={"username": "normal-user", "password": TEST_PASSWORD},
+        )
+        login = _assert_success(login_response)
+        normal_token = login["access_token"]
+
+        create_response = await _request(
+            client,
+            "POST",
+            f"{KNOWLEDGE_BASE_PREFIX}/create",
+            token=normal_token,
+            json={
+                "name": created_name,
+                "description": created_description,
+                "embedding_channel_id": resources["channels"]["source_id"],
+                "embedding_model_id": "embed-v1",
+                **owner_fields,
+            },
+        )
+        created = _assert_success(create_response)
+        assert created["uid"] == "normal-user"
+        assert created["username"] == "normal-user"
+        assert created["knowledge_base_type"] == KnowledgeBaseType.USER.value
+        assert created["name"] == created_name
+        assert created["description"] == created_description
+        created_id = created["id"]
+
+        normal_list_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=normal_token)
+        normal_list = _assert_success(normal_list_response)
+        normal_items = normal_list["items"]
+        assert normal_list["total"] == 3
+        assert all(item["uid"] == "normal-user" for item in normal_items)
+        assert {item["id"] for item in normal_items} == {
+            resources["normal-user"]["user_kb_id"],
+            resources["normal-user"]["managed_kb_id"],
+            created_id,
+        }
+        assert any(item["id"] == created_id and item["name"] == created_name for item in normal_items)
+
+        super_login_response = await _request(
+            client,
+            "POST",
+            "/api/v1/auth/login",
+            json={"username": "super-admin", "password": TEST_PASSWORD},
+        )
+        super_login = _assert_success(super_login_response)
+        super_list_response = await _request(
+            client,
+            "GET",
+            f"{KNOWLEDGE_BASE_PREFIX}/list",
+            token=super_login["access_token"],
+        )
+        super_list = _assert_success(super_list_response)
+        seeded_ids = {resources[uid][knowledge_base_key] for uid in ("super-user", "normal-user", "peer-user") for knowledge_base_key in ("user_kb_id", "managed_kb_id")}
+        assert super_list["total"] == 7
+        assert {item["id"] for item in super_list["items"]} == seeded_ids | {created_id}
+        assert {item["uid"] for item in super_list["items"]} == {"super-user", "normal-user", "peer-user"}
+        assert any(item["id"] == created_id for item in super_list["items"])
+
+    new_knowledge_base = await _get_knowledge_base(session_factory, created_id)
+    assert new_knowledge_base is not None
+    assert new_knowledge_base.uid == "normal-user"
+    assert new_knowledge_base.knowledge_base_type == KnowledgeBaseType.USER
+    assert new_knowledge_base.name == created_name
+    assert new_knowledge_base.description == created_description
+
+    peer_after = await _get_knowledge_base(session_factory, resources["peer-user"]["user_kb_id"])
+    assert peer_after is not None
+    peer_after_state = tuple(_freeze(getattr(peer_after, attribute.key)) for attribute in KnowledgeBase.__mapper__.column_attrs)
+    assert peer_after_state == peer_before_state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("owner_fields", "expected_uid", "expected_username"),
+    (
+        ({}, "super-user", "super-admin"),
+        ({"uid": None}, "super-user", "super-admin"),
+        ({"uid": "super-user"}, "super-user", "super-admin"),
+        ({"uid": "peer-user"}, "peer-user", "peer-user"),
+        ({"uid": "disabled-user"}, "disabled-user", "disabled-user"),
+    ),
+    ids=("omitted-owner", "null-owner", "super-owner", "peer-owner", "disabled-owner"),
+)
+async def test_superuser_create_knowledge_base_resolves_owner_and_preserves_scope_lists(
+    api_app: FastAPI,
+    seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    owner_fields: dict[str, Any],
+    expected_uid: str,
+    expected_username: str,
+) -> None:
+    session_factory, resources = seeded_database
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
+
+    async def skip_external_collection(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(knowledge_base, "async_create_collection", skip_external_collection)
+
+    user_attributes = tuple(User.__mapper__.column_attrs)
+
+    async def user_snapshot() -> tuple[tuple[Any, ...], ...]:
+        async with session_factory() as session:
+            users = (await session.execute(select(User).order_by(User.uid))).scalars().all()
+            return tuple(tuple(_freeze(getattr(user, attribute.key)) for attribute in user_attributes) for user in users)
+
+    users_before = await user_snapshot()
+    created_name = "admin-created-owner"
+    created_description = "created by the superuser for owner resolution"
+    super_token = _token("super-admin")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        create_response = await _request(
+            client,
+            "POST",
+            f"{KNOWLEDGE_BASE_PREFIX}/create",
+            token=super_token,
+            json={
+                "name": created_name,
+                "description": created_description,
+                "embedding_channel_id": resources["channels"]["source_id"],
+                "embedding_model_id": "embed-v1",
+                **owner_fields,
+                "username": "forged-owner-name",
+            },
+        )
+        created = _assert_success(create_response)
+        assert created["uid"] == expected_uid
+        assert created["username"] == expected_username
+        assert created["username"] != "forged-owner-name"
+        assert created["knowledge_base_type"] == KnowledgeBaseType.USER.value
+        assert created["managed_profile_id"] is None
+        created_id = created["id"]
+
+        normal_list_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=_token("normal-user"))
+        normal_list = _assert_success(normal_list_response)
+        normal_ids = {resources["normal-user"]["user_kb_id"], resources["normal-user"]["managed_kb_id"]}
+        assert normal_list["total"] == 2
+        assert {item["id"] for item in normal_list["items"]} == normal_ids
+        assert created_id not in {item["id"] for item in normal_list["items"]}
+        assert all(item["uid"] == "normal-user" and item["username"] == "normal-user" for item in normal_list["items"])
+
+        peer_list_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=_token("peer-user"))
+        peer_list = _assert_success(peer_list_response)
+        peer_ids = {resources["peer-user"]["user_kb_id"], resources["peer-user"]["managed_kb_id"]}
+        if expected_uid == "peer-user":
+            peer_ids.add(created_id)
+        assert peer_list["total"] == len(peer_ids)
+        assert {item["id"] for item in peer_list["items"]} == peer_ids
+        assert (created_id in peer_ids) is (expected_uid == "peer-user")
+        assert all(item["uid"] == "peer-user" and item["username"] == "peer-user" for item in peer_list["items"])
+
+        super_list_response = await _request(client, "GET", f"{KNOWLEDGE_BASE_PREFIX}/list", token=super_token)
+        super_list = _assert_success(super_list_response)
+        seeded_ids = {resources[uid][knowledge_base_key] for uid in ("super-user", "normal-user", "peer-user") for knowledge_base_key in ("user_kb_id", "managed_kb_id")}
+        assert super_list["total"] == 7
+        assert {item["id"] for item in super_list["items"]} == seeded_ids | {created_id}
+        created_items = [item for item in super_list["items"] if item["id"] == created_id]
+        assert len(created_items) == 1
+        assert created_items[0]["uid"] == expected_uid
+        assert created_items[0]["username"] == expected_username
+        assert created_items[0]["username"] != "forged-owner-name"
+
+    new_knowledge_base = await _get_knowledge_base(session_factory, created_id)
+    assert new_knowledge_base is not None
+    assert new_knowledge_base.uid == expected_uid
+    assert new_knowledge_base.name == created_name
+    assert new_knowledge_base.knowledge_base_type == KnowledgeBaseType.USER
+    assert new_knowledge_base.managed_profile_id is None
+    assert await user_snapshot() == users_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("owner_uid", "expected_status"),
+    (
+        ("missing-owner", 404),
+        ("   ", 404),
+        ("", 422),
+        (True, 422),
+        (123, 422),
+        ([], 422),
+        ({}, 422),
+        ("x" * 51, 422),
+    ),
+    ids=(
+        "missing-owner",
+        "whitespace-owner",
+        "empty-owner",
+        "boolean-owner",
+        "integer-owner",
+        "list-owner",
+        "object-owner",
+        "overlong-owner",
+    ),
+)
+async def test_superuser_create_knowledge_base_rejects_invalid_owner_uid_without_side_effects(
+    api_app: FastAPI,
+    seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    owner_uid: Any,
+    expected_status: int,
+) -> None:
+    session_factory, resources = seeded_database
+    collection_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def record_external_collection(*args: object, **kwargs: object) -> None:
+        collection_calls.append((args, kwargs))
+
+    monkeypatch.setattr(knowledge_base, "async_create_collection", record_external_collection)
+    before = await _state_snapshot(session_factory)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        response = await _request(
+            client,
+            "POST",
+            f"{KNOWLEDGE_BASE_PREFIX}/create",
+            token=_token("super-admin"),
+            json={
+                "name": "invalid-owner-create",
+                "description": "invalid owner request",
+                "embedding_channel_id": resources["channels"]["source_id"],
+                "embedding_model_id": "embed-v1",
+                "uid": owner_uid,
+            },
+        )
+
+    if expected_status == 404:
+        _assert_error(response, 404, t(ERR_USER_NOT_FOUND))
+    else:
+        payload = response.json()
+        assert response.status_code == 422
+        assert payload["code"] == 422
+        assert payload["data"] is None
+        assert "uid" in payload["message"]
+
+    assert await _state_snapshot(session_factory) == before
+    assert collection_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "kind"),
+    (
+        ("ordinary", "user"),
+        ("ordinary", "managed"),
+        ("super-admin", "user"),
+        ("super-admin", "managed"),
+    ),
+    ids=("ordinary-user", "ordinary-managed", "super-admin-user", "super-admin-managed"),
+)
+async def test_delete_allowed_scope_removes_only_target_knowledge_base_and_queues_collections(
+    api_app: FastAPI,
+    seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
+    role: str,
+    kind: str,
+) -> None:
+    session_factory, resources = seeded_database
+    requester_uid = "normal-user" if role == "ordinary" else "super-admin"
+    owner_uid = "normal-user" if role == "ordinary" else "peer-user"
+    target = resources[owner_uid]
+    target_kb_id = target[f"{kind}_kb_id"]
+
+    def _rows_state(model: Any, rows: list[Any]) -> dict[Any, tuple[Any, ...]]:
+        primary_key = next(iter(model.__table__.primary_key.columns))
+        attributes = tuple(model.__mapper__.column_attrs)
+        return {getattr(row, primary_key.key): tuple(_freeze(getattr(row, attribute.key)) for attribute in attributes) for row in rows}
+
+    owned_model_specs = (
+        (KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.knowledge_base_id),
+        (KnowledgeBaseDocument, KnowledgeBaseDocument.knowledge_base_id),
+        (KnowledgeBaseCollectionOwner, KnowledgeBaseCollectionOwner.knowledge_base_id),
+        (ManagedKnowledgeItem, ManagedKnowledgeItem.knowledge_base_id),
+        (ManagedKnowledgeRevision, ManagedKnowledgeRevision.knowledge_base_id),
+        (KnowledgeJob, KnowledgeJob.knowledge_base_id),
+    )
+
+    async with session_factory() as session:
+        knowledge_bases = list((await session.execute(select(KnowledgeBase).order_by(KnowledgeBase.id))).scalars().all())
+        target_knowledge_base = next(knowledge_base for knowledge_base in knowledge_bases if knowledge_base.id == target_kb_id)
+        non_target_kb_ids = {knowledge_base.id for knowledge_base in knowledge_bases if knowledge_base.id != target_kb_id}
+        non_target_kb_states = _rows_state(KnowledgeBase, [knowledge_base for knowledge_base in knowledge_bases if knowledge_base.id in non_target_kb_ids])
+        target_collection_names = tuple(name for name in (target_knowledge_base.collection_name, target_knowledge_base.active_collection_name) if name)
+        non_target_owned_states = {}
+        for model, owner_column in owned_model_specs:
+            rows = list((await session.execute(select(model).where(owner_column.in_(non_target_kb_ids)))).scalars().all())
+            non_target_owned_states[model] = _rows_state(model, rows)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        response = await _request(
+            client,
+            "POST",
+            f"{KNOWLEDGE_BASE_PREFIX}/delete",
+            token=_token(requester_uid),
+            params={"kb_id": target_kb_id},
+        )
+    assert _assert_success(response) is True
+
+    async with session_factory() as session:
+        assert await session.get(KnowledgeBase, target_kb_id) is None
+
+        remaining_knowledge_bases = list((await session.execute(select(KnowledgeBase).order_by(KnowledgeBase.id))).scalars().all())
+        assert _rows_state(KnowledgeBase, remaining_knowledge_bases) == non_target_kb_states
+        for model, owner_column in owned_model_specs:
+            rows = list((await session.execute(select(model).where(owner_column.in_(non_target_kb_ids)))).scalars().all())
+            assert _rows_state(model, rows) == non_target_owned_states[model]
+
+        profile = await session.get(Profile, target["profile_id"])
+        assert profile is not None
+        assert profile.uid == owner_uid
+
+        if kind == "user":
+            assert await session.get(KnowledgeBaseDocument, target["document_id"]) is None
+        else:
+            assert await session.get(ManagedKnowledgeItem, target["managed_item_id"]) is None
+
+        owners = list((await session.execute(select(KnowledgeBaseCollectionOwner).where(KnowledgeBaseCollectionOwner.collection_name.in_(target_collection_names)))).scalars().all())
+        assert {owner.collection_name for owner in owners} == set(target_collection_names)
+        assert all(owner.knowledge_base_id is None for owner in owners)
+
+
+@pytest.mark.asyncio
+async def test_superuser_create_rejects_owner_deleted_before_knowledge_base_write_and_cleans_collection(
+    api_app: FastAPI,
+    seeded_database: tuple[async_sessionmaker[AsyncSession], dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory, resources = seeded_database
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
+
+    collections: set[str] = set()
+    deleted_owner_baseline: tuple[Any, ...] | None = None
+
+    async def create_collection(name: str) -> None:
+        nonlocal deleted_owner_baseline
+        collections.add(name)
+
+        async with session_factory() as session:
+            owner = (await session.execute(select(User).where(User.uid == "disabled-user"))).scalar_one()
+            await session.delete(owner)
+            await session.commit()
+        deleted_owner_baseline = await _state_snapshot(session_factory)
+
+    async def delete_collection(name: str) -> None:
+        collections.discard(name)
+
+    monkeypatch.setattr(knowledge_base, "async_create_collection", create_collection)
+    monkeypatch.setattr(knowledge_base, "async_delete_collection", delete_collection)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        response = await _request(
+            client,
+            "POST",
+            f"{KNOWLEDGE_BASE_PREFIX}/create",
+            token=_token("super-admin"),
+            json={
+                "name": "deleted-owner-race",
+                "description": "owner deleted after prevalidation",
+                "embedding_channel_id": resources["channels"]["source_id"],
+                "embedding_model_id": "embed-v1",
+                "uid": "disabled-user",
+            },
+        )
+
+    _assert_error(response, 404, t(ERR_USER_NOT_FOUND))
+    assert deleted_owner_baseline is not None
+    assert await _state_snapshot(session_factory) == deleted_owner_baseline
+    assert collections == set()
+
+    async with session_factory() as session:
+        missing_owner = (await session.execute(select(User).where(User.uid == "disabled-user"))).scalar_one_or_none()
+        assert missing_owner is None

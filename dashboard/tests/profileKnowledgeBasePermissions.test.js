@@ -73,6 +73,7 @@ const createHarness = async (t, options = {}) => {
   const api = {
     profileList: [],
     knowledgeBaseList: [],
+    memorySettings: [],
     creates: [],
     updates: [],
   }
@@ -108,6 +109,10 @@ const createHarness = async (t, options = {}) => {
     update: (id, payload) => {
       api.updates.push({ id, payload })
       return Promise.resolve(dataResponse({}))
+    },
+    memorySettings: params => {
+      api.memorySettings.push(params)
+      return Promise.resolve(dataResponse({ configured: false }))
     },
   }
   const knowledgeBaseApi = {
@@ -155,18 +160,19 @@ const createHarness = async (t, options = {}) => {
   scope.run(() => {
     vm.runInContext(
       `${profilesScript}
-globalThis.__module = {
-  fetchKnowledgeBases,
-  submitForm,
-  form,
-  dialogType,
-  knowledgeBases,
-  knowledgeBasesReady,
-  knowledgeBasesLoading,
-  knowledgeBasesUnavailable,
-  knowledgeBaseOptions,
-  userPermissions,
-}
+  globalThis.__module = {
+    fetchKnowledgeBases,
+    showDialog,
+    submitForm,
+    form,
+    dialogType,
+    knowledgeBases,
+    knowledgeBasesReady,
+    knowledgeBasesLoading,
+    knowledgeBasesUnavailable,
+    knowledgeBaseOptions,
+    userPermissions,
+  }
 `,
       context,
       { filename: 'ProfilesView.vue?script-setup' },
@@ -216,27 +222,41 @@ const assertOmitsKnowledgeBaseIds = payload => {
   assert.equal(Object.prototype.hasOwnProperty.call(payload, 'knowledge_base_ids'), false)
 }
 
-test('does not request knowledge bases for unknown or ordinary permissions', async t => {
-  for (const [label, superuser] of [['unknown', undefined], ['ordinary', false]]) {
-    const harness = await createHarness(t, { superuser })
+test('does not request knowledge bases when the current user is unknown', async t => {
+  const harness = await createHarness(t)
 
-    await harness.module.fetchKnowledgeBases()
-    await flush()
+  await harness.module.fetchKnowledgeBases()
+  await flush()
 
-    assert.equal(harness.api.knowledgeBaseList.length, 0, label)
-    assert.equal(harness.module.knowledgeBasesReady.value, false, label)
-    assert.deepEqual(normalize(harness.module.knowledgeBases.value), [], label)
-  }
+  assert.equal(harness.api.knowledgeBaseList.length, 0)
+  assert.equal(harness.module.knowledgeBasesReady.value, false)
+  assert.deepEqual(normalize(harness.module.knowledgeBases.value), [])
 })
 
-test('ordinary create and edit submissions omit bindings and preserve cached ids', async t => {
-  const cachedKnowledgeBases = [{
-    id: 'kb-existing',
-    uid: 'user-a',
-    name: 'Existing knowledge base',
-    description: '',
-    knowledge_base_type: 'user',
-  }]
+test('ordinary create and edit submissions fetch and preserve own bindings', async t => {
+  const knowledgeBases = [
+    {
+      id: 'kb-user-a',
+      uid: 'user-a',
+      name: 'Own user knowledge base',
+      description: 'Own description',
+      knowledge_base_type: 'user',
+    },
+    {
+      id: 'kb-user-b',
+      uid: 'user-b',
+      name: 'Other user knowledge base',
+      description: '',
+      knowledge_base_type: 'user',
+    },
+    {
+      id: 'kb-managed-a',
+      uid: 'user-a',
+      name: 'Managed knowledge base',
+      description: '',
+      knowledge_base_type: 'llm_managed',
+    },
+  ]
   const cases = [
     { type: 'create', id: null, name: 'ordinary create' },
     { type: 'edit', id: 41, name: 'ordinary edit' },
@@ -245,24 +265,38 @@ test('ordinary create and edit submissions omit bindings and preserve cached ids
   for (const scenario of cases) {
     const harness = await createHarness(t, {
       superuser: false,
-      knowledgeBases: cachedKnowledgeBases,
+      currentUid: 'user-a',
+      knowledgeBases,
     })
-    harness.module.knowledgeBases.value = cachedKnowledgeBases.map(item => ({ ...item }))
-    harness.module.knowledgeBasesReady.value = true
     prepareForm(harness.module, {
       ...scenario,
       ownerUid: 'user-a',
-      ids: ['kb-existing'],
+      ids: ['kb-user-a'],
     })
     await flush()
     assertFormScenario(harness.module, scenario, 'user-a')
 
     await harness.module.fetchKnowledgeBases()
+    await flush()
+    const optionsAfterFirstFetch = normalize(harness.module.knowledgeBaseOptions.value)
+    const idsAfterFirstFetch = normalize(harness.module.form.knowledge_base_ids)
     await harness.module.fetchKnowledgeBases()
     await flush()
 
-    assert.equal(harness.api.knowledgeBaseList.length, 0, scenario.type)
-    assert.deepEqual(harness.module.form.knowledge_base_ids, ['kb-existing'], scenario.type)
+    assert.deepEqual(normalize(harness.api.knowledgeBaseList), [
+      { page: 1, size: 1000 },
+      { page: 1, size: 1000 },
+    ], scenario.type)
+    assert.equal(harness.module.knowledgeBasesReady.value, true, scenario.type)
+    assert.equal(harness.module.knowledgeBasesUnavailable.value, false, scenario.type)
+    assert.deepEqual(optionsAfterFirstFetch, [{
+      value: 'kb-user-a',
+      label: 'Own user knowledge base',
+      description: 'Own description',
+    }], scenario.type)
+    assert.deepEqual(normalize(harness.module.knowledgeBaseOptions.value), optionsAfterFirstFetch, scenario.type)
+    assert.deepEqual(normalize(harness.module.form.knowledge_base_ids), idsAfterFirstFetch, scenario.type)
+    assert.deepEqual(idsAfterFirstFetch, ['kb-user-a'], scenario.type)
 
     await harness.module.submitForm()
     await flush()
@@ -273,9 +307,53 @@ test('ordinary create and edit submissions omit bindings and preserve cached ids
     assert.ok(payload, scenario.type)
     if (scenario.type === 'create') assert.equal(payload.uid, 'user-a')
     else assert.equal(harness.api.updates[0].id, scenario.id)
-    assertOmitsKnowledgeBaseIds(payload)
-    assert.deepEqual(harness.module.form.knowledge_base_ids, ['kb-existing'], scenario.type)
+    assert.deepEqual(payload.knowledge_base_ids, ['kb-user-a'], scenario.type)
+    assert.deepEqual(harness.module.form.knowledge_base_ids, ['kb-user-a'], scenario.type)
   }
+})
+
+test('ordinary create dialog uses the current user and own knowledge base options', async t => {
+  const harness = await createHarness(t, {
+    superuser: false,
+    currentUid: 'user-a',
+    knowledgeBases: [
+      {
+        id: 'kb-user-a',
+        uid: 'user-a',
+        name: 'Own user knowledge base',
+        description: 'Own description',
+        knowledge_base_type: 'user',
+      },
+      {
+        id: 'kb-user-b',
+        uid: 'user-b',
+        name: 'Other user knowledge base',
+        description: '',
+        knowledge_base_type: 'user',
+      },
+      {
+        id: 'kb-managed-a',
+        uid: 'user-a',
+        name: 'Managed knowledge base',
+        description: '',
+        knowledge_base_type: 'llm_managed',
+      },
+    ],
+  })
+
+  harness.module.showDialog('create')
+  await flush()
+  assert.equal(harness.module.form.uid, 'user-a')
+  assert.deepEqual(normalize(harness.api.memorySettings), [{ uid: 'user-a' }])
+
+  await harness.module.fetchKnowledgeBases()
+  await flush()
+
+  assert.deepEqual(normalize(harness.module.knowledgeBaseOptions.value), [{
+    value: 'kb-user-a',
+    label: 'Own user knowledge base',
+    description: 'Own description',
+  }])
 })
 
 test('superuser fetches owner knowledge bases and submits selected ids', async t => {
@@ -336,7 +414,7 @@ test('superuser fetches owner knowledge bases and submits selected ids', async t
   }
 })
 
-test('superuser fetch failure keeps ids but omits bindings from the save payload', async t => {
+test('fetch failure keeps cached ids but omits bindings from the save payload', async t => {
   const cachedKnowledgeBases = [{
     id: 'kb-preserved',
     uid: 'user-a',
@@ -345,13 +423,15 @@ test('superuser fetch failure keeps ids but omits bindings from the save payload
     knowledge_base_type: 'user',
   }]
   const cases = [
-    { type: 'create', id: null, name: 'failed create' },
-    { type: 'edit', id: 63, name: 'failed edit' },
+    { role: 'ordinary', superuser: false, type: 'create', id: null, name: 'ordinary failed create' },
+    { role: 'ordinary', superuser: false, type: 'edit', id: 63, name: 'ordinary failed edit' },
+    { role: 'superuser', superuser: true, type: 'create', id: null, name: 'superuser failed create' },
+    { role: 'superuser', superuser: true, type: 'edit', id: 63, name: 'superuser failed edit' },
   ]
 
   for (const scenario of cases) {
     const harness = await createHarness(t, {
-      superuser: true,
+      superuser: scenario.superuser,
       knowledgeBases: cachedKnowledgeBases,
       knowledgeBaseFailure: true,
     })
@@ -368,10 +448,10 @@ test('superuser fetch failure keeps ids but omits bindings from the save payload
     await harness.module.fetchKnowledgeBases()
     await flush()
 
-    assert.equal(harness.api.knowledgeBaseList.length, 1, scenario.type)
-    assert.equal(harness.module.knowledgeBasesReady.value, false, scenario.type)
-    assert.equal(harness.module.knowledgeBasesUnavailable.value, true, scenario.type)
-    assert.deepEqual(harness.module.form.knowledge_base_ids, ['kb-preserved'], scenario.type)
+    assert.equal(harness.api.knowledgeBaseList.length, 1, scenario.role)
+    assert.equal(harness.module.knowledgeBasesReady.value, false, scenario.role)
+    assert.equal(harness.module.knowledgeBasesUnavailable.value, true, scenario.role)
+    assert.deepEqual(harness.module.form.knowledge_base_ids, ['kb-preserved'], scenario.role)
 
     await harness.module.submitForm()
     await flush()
@@ -379,10 +459,10 @@ test('superuser fetch failure keeps ids but omits bindings from the save payload
     const payload = scenario.type === 'create'
       ? harness.api.creates[0]
       : harness.api.updates[0]?.payload
-    assert.ok(payload, scenario.type)
-    if (scenario.type === 'create') assert.equal(payload.uid, 'user-a')
-    else assert.equal(harness.api.updates[0].id, scenario.id)
+    assert.ok(payload, scenario.role)
+    if (scenario.type === 'create') assert.equal(payload.uid, 'user-a', scenario.role)
+    else assert.equal(harness.api.updates[0].id, scenario.id, scenario.role)
     assertOmitsKnowledgeBaseIds(payload)
-    assert.deepEqual(harness.module.form.knowledge_base_ids, ['kb-preserved'], scenario.type)
+    assert.deepEqual(harness.module.form.knowledge_base_ids, ['kb-preserved'], scenario.role)
   }
 })
