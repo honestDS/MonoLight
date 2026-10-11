@@ -79,8 +79,10 @@ import MessagePlatformFormDialog from '../components/MessagePlatformFormDialog.v
 import WeixinOcLoginDialog from '../components/weixin_oc/WeixinOcLoginDialog.vue'
 import { adminApi, messagePlatformApi, profileApi } from '../api'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
+import { useUserPermissionsStore } from '../composables/useUserPermissions'
 
 const { t } = useI18n()
+const userPermissions = useUserPermissionsStore()
 
 const loading = ref(false)
 const submitting = ref(false)
@@ -111,7 +113,7 @@ const defaultForm = () => ({
   language: 'zh',
   use_stream_dispatch: false,
   is_enabled: true,
-  uid: '',
+  uid: userPermissions.isSuperuser ? '' : userPermissions.currentUser?.uid || '',
   profile_id: null,
   config: {
     api_timeout_ms: 15000,
@@ -163,6 +165,11 @@ const fetchTypes = async () => {
 }
 
 const fetchUsers = async () => {
+  if (!userPermissions.isSuperuser) {
+    users.value = userPermissions.currentUser ? [userPermissions.currentUser] : []
+    return
+  }
+
   usersLoading.value = true
   try {
     const res = await adminApi.userList({ page: 1, size: 1000 })
@@ -213,7 +220,7 @@ const handleEdit = (row) => {
   form.language = row.language || 'zh'
   form.use_stream_dispatch = Boolean(row.use_stream_dispatch)
   form.is_enabled = row.is_enabled
-  form.uid = row.uid || ''
+  form.uid = userPermissions.isSuperuser ? row.uid || '' : userPermissions.currentUser?.uid || ''
   form.profile_id = row.profile_id ?? null
   form.config = { ...defaultForm().config, ...(row.config || {}) }
   dialogVisible.value = true
@@ -225,7 +232,7 @@ const buildPayload = () => ({
   language: form.language,
   use_stream_dispatch: form.use_stream_dispatch,
   is_enabled: form.is_enabled,
-  uid: form.uid || null,
+  ...(userPermissions.isSuperuser ? { uid: form.uid || null } : {}),
   profile_id: form.profile_id ?? null,
   config: {
     api_timeout_ms: form.config.api_timeout_ms || 15000,
@@ -239,7 +246,7 @@ const submitForm = async () => {
   if (!form.name || !form.platform_type) {
     return ElMessage.warning(t('messagePlatforms.fill_required'))
   }
-  if (form.is_enabled && !form.uid) {
+  if (userPermissions.isSuperuser && form.is_enabled && !form.uid) {
     return ElMessage.warning(t('messagePlatforms.uid_required'))
   }
   submitting.value = true

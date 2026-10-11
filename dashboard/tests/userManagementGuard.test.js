@@ -160,6 +160,7 @@ const managementRouteCases = [
 const authenticatedRouteCases = [
   ...managementRouteCases,
   { path: '/knowledge-base', view: '../views/KnowledgeBase.vue' },
+  { path: '/message-platforms', view: '../views/MessagePlatformsView.vue' },
 ]
 
 for (const routeCase of managementRouteCases) {
@@ -214,6 +215,28 @@ test('allows ordinary and superuser direct knowledge-base navigation, including 
     assert.equal(harness.permissions.isSuperuser, identity.user.is_superuser)
     assert.equal(harness.authRequests.requests.length, 1)
     assert.equal(harness.loadedViews.includes('../views/KnowledgeBase.vue'), true)
+  }
+})
+
+test('allows ordinary and superuser direct message-platforms navigation, including query refresh state', async () => {
+  for (const identity of [
+    { token: 'ordinary-token', user: { is_superuser: false } },
+    { token: 'super-token', user: { is_superuser: true } },
+  ]) {
+    const harness = createHarness()
+    harness.storage.token = identity.token
+
+    const navigation = harness.router.push({ path: '/message-platforms', query: { refresh: '1' } })
+    await harness.resolveNextSetup(false)
+    await harness.resolveNextAuth(identity.user)
+    await navigation
+    await harness.router.isReady()
+
+    assert.equal(harness.router.currentRoute.value.path, '/message-platforms')
+    assert.deepEqual(harness.router.currentRoute.value.query, { refresh: '1' })
+    assert.equal(harness.permissions.isSuperuser, identity.user.is_superuser)
+    assert.equal(harness.authRequests.requests.length, 1)
+    assert.equal(harness.loadedViews.includes('../views/MessagePlatformsView.vue'), true)
   }
 })
 

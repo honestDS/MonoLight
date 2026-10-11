@@ -53,16 +53,44 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         result = await db.execute(select(MessagePlatform).where(MessagePlatform.name == name))
         return result.scalars().first()
 
+    async def get_for_update(
+        self,
+        db: AsyncSession,
+        *,
+        platform_id: int,
+        uid: str | None = None,
+    ) -> MessagePlatform | None:
+        conditions = [MessagePlatform.id == platform_id]
+        if uid is not None:
+            conditions.append(MessagePlatform.uid == uid)
+        await db.execute(update(MessagePlatform).where(*conditions).values(updated_at=MessagePlatform.updated_at).execution_options(synchronize_session=False))
+        await db.flush()
+        result = await db.execute(select(MessagePlatform).where(*conditions).with_for_update().execution_options(populate_existing=True))
+        return result.scalars().first()
+
     async def has_profile_assignment(self, db: AsyncSession, profile_id: int) -> bool:
         result = await db.execute(select(MessagePlatform.id).where(MessagePlatform.profile_id == profile_id).limit(1))
         return result.scalar() is not None
 
-    async def list_platforms(self, db: AsyncSession, *, skip: int = 0, limit: int = 100) -> list[MessagePlatform]:
-        result = await db.execute(select(MessagePlatform).order_by(MessagePlatform.id.desc()).offset(skip).limit(limit))
+    async def list_platforms(
+        self,
+        db: AsyncSession,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        uid: str | None = None,
+    ) -> list[MessagePlatform]:
+        query = select(MessagePlatform)
+        if uid is not None:
+            query = query.where(MessagePlatform.uid == uid)
+        result = await db.execute(query.order_by(MessagePlatform.id.desc()).offset(skip).limit(limit))
         return result.scalars().all()
 
-    async def count_platforms(self, db: AsyncSession) -> int:
-        result = await db.execute(select(func.count()).select_from(MessagePlatform))
+    async def count_platforms(self, db: AsyncSession, *, uid: str | None = None) -> int:
+        query = select(func.count()).select_from(MessagePlatform)
+        if uid is not None:
+            query = query.where(MessagePlatform.uid == uid)
+        result = await db.execute(query)
         return result.scalar() or 0
 
     async def list_enabled(self, db: AsyncSession) -> list[MessagePlatform]:
@@ -124,6 +152,7 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         state: dict[str, Any] | None = None,
         account_id: str | None = None,
         last_error: str | None = None,
+        commit: bool = True,
     ) -> MessagePlatform:
         if status is not None:
             platform.status = status
@@ -140,8 +169,10 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         if last_error is not None:
             platform.last_error = last_error
         db.add(platform)
-        await db.commit()
+        await db.flush()
         await db.refresh(platform)
+        if commit:
+            await db.commit()
         return platform
 
 

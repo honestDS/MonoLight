@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 from pydantic import Field as PydanticField
 from sqlalchemy import Enum as SQLAlchemyEnum
-from sqlalchemy import event, inspect
+from sqlalchemy import event
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel
 
 from app.core.crypto import decrypt_api_key, encrypt_api_key
@@ -103,10 +103,7 @@ def _decrypted_config(config: dict[str, Any] | None) -> dict[str, Any]:
 @event.listens_for(MessagePlatform, "before_insert")
 @event.listens_for(MessagePlatform, "before_update")
 def encrypt_config_before_save(mapper, connection, target):
-    state = inspect(target)
-    history = state.get_history("config", passive=True)
-    if history.unchanged:
-        return
+    # 仅为兼容老旧数据允许历史明文存储；新增或更新记录时，凭据必须加密后存储。
     target.config = _encrypt_config(target.config)
 
 
