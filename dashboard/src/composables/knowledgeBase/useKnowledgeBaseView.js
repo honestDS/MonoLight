@@ -1,7 +1,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { knowledgeBaseApi } from '../../api/index.js'
+import { adminApi, knowledgeBaseApi } from '../../api/index.js'
 import { formatTime } from '../../utils/index.js'
 import {
   canStartKnowledgeBaseMigration,
@@ -16,12 +16,15 @@ import {
   normalizeKnowledgeBase
 } from '../../utils/knowledgeBaseManagement.js'
 import { useDeleteConfirm } from '../useDeleteConfirm.js'
+import { useUserPermissionsStore } from '../useUserPermissions.js'
 import { useKnowledgeBaseDocuments } from './useKnowledgeBaseDocuments.js'
 import { useManagedKnowledge } from './useManagedKnowledge.js'
 import { useKnowledgeOrganization } from './useKnowledgeOrganization.js'
 
 export function useKnowledgeBaseView() {
   const { t } = useI18n()
+  const userPermissions = useUserPermissionsStore()
+  const isSuperuser = computed(() => userPermissions.isSuperuser)
 
   const tableData = ref([])
   const loading = ref(false)
@@ -35,6 +38,10 @@ export function useKnowledgeBaseView() {
   const embeddingModels = ref([])
   const formRef = ref(null)
   const selectedKb = ref(null)
+  const ownerUsers = ref([])
+  const ownerUsersLoading = ref(false)
+  const ownerUsersError = ref(null)
+  let ownerUsersRequestVersion = 0
   const migrationDialogVisible = ref(false)
   const migrationTargetKey = ref('')
   const migrationSubmitting = ref(false)
@@ -50,12 +57,15 @@ export function useKnowledgeBaseView() {
   const form = reactive({
     name: '',
     description: '',
-    embedding_model_key: ''
+    embedding_model_key: '',
+    username: '',
+    uid: null
   })
 
   const rules = computed(() => ({
     name: [{ required: true, message: t('knowledgeBase.input_kb_name'), trigger: 'blur' }],
-    embedding_model_key: [{ required: !isEditing.value, message: t('knowledgeBase.select_embedding_model_err'), trigger: 'change' }]
+    embedding_model_key: [{ required: !isEditing.value, message: t('knowledgeBase.select_embedding_model_err'), trigger: 'change' }],
+    uid: [{ required: !isEditing.value && isSuperuser.value, message: t('knowledgeBase.owner_user_required'), trigger: 'change' }]
   }))
 
   const embeddingModelOptions = computed(() => embeddingModels.value.map(item => ({
@@ -141,6 +151,8 @@ export function useKnowledgeBaseView() {
     const key = status || 'none'
     return t(`knowledgeBase.cleanup_status_${key}`)
   }
+
+  const getKnowledgeBaseOwnerLabel = (row) => row?.username || t('knowledgeBase.owner_unknown')
 
   const stopMigrationPolling = () => {
     if (migrationPollTimer) {
@@ -255,11 +267,51 @@ export function useKnowledgeBaseView() {
     if (command === 'delete') handleDelete(row)
   }
 
+  const fetchOwnerUsers = async () => {
+    if (!isSuperuser.value || isEditing.value) return
+
+    const requestVersion = ++ownerUsersRequestVersion
+    const currentUserUid = userPermissions.currentUser?.uid || null
+    const isCurrent = () => (
+      requestVersion === ownerUsersRequestVersion &&
+      isSuperuser.value &&
+      !isEditing.value &&
+      (userPermissions.currentUser?.uid || null) === currentUserUid
+    )
+
+    ownerUsersLoading.value = true
+    ownerUsersError.value = null
+    const users = []
+    let page = 1
+
+    try {
+      while (isCurrent()) {
+        const res = await adminApi.userList({ page, size: 100 })
+        if (!isCurrent()) return
+        const { items = [], total = 0 } = res.data.data
+        users.push(...items)
+        if (items.length === 0 || users.length >= total) break
+        page += 1
+      }
+
+      if (!isCurrent()) return
+      ownerUsers.value = users
+      if (!users.some(item => item.uid === form.uid)) form.uid = null
+    } catch (error) {
+      if (isCurrent()) {
+        ownerUsersError.value = t('knowledgeBase.fetch_owner_users_failed', { message: error.message })
+      }
+    } finally {
+      if (isCurrent()) ownerUsersLoading.value = false
+    }
+  }
+
   const showDialog = () => {
     resetFormFields()
     isEditing.value = false
     editingId.value = null
     dialogVisible.value = true
+    return fetchOwnerUsers()
   }
 
   const showEditDialog = (row) => {
@@ -269,14 +321,24 @@ export function useKnowledgeBaseView() {
     form.name = row.name
     form.description = row.description || ''
     form.embedding_model_key = `${row.embedding_channel_id}::${row.embedding_model_id}`
+    form.username = row.username || ''
+    form.uid = row.uid || null
     dialogVisible.value = true
   }
 
   const resetFormFields = () => {
+    ownerUsersRequestVersion += 1
+    ownerUsersLoading.value = false
+    ownerUsersError.value = null
     if (formRef.value) formRef.value.resetFields()
     form.name = ''
     form.description = ''
     form.embedding_model_key = ''
+    form.username = userPermissions.currentUser?.username || ''
+    form.uid = isSuperuser.value ? userPermissions.currentUser?.uid || null : null
+    ownerUsers.value = isSuperuser.value && userPermissions.currentUser?.uid && userPermissions.currentUser?.username
+      ? [{ uid: userPermissions.currentUser.uid, username: userPermissions.currentUser.username }]
+      : []
   }
 
   const showQueryTestDialog = (row) => {
@@ -323,7 +385,9 @@ export function useKnowledgeBaseView() {
   }
 
   const submitForm = async () => {
+    if (submitting.value) return
     if (!formRef.value) return
+    if (!isEditing.value && isSuperuser.value && (ownerUsersLoading.value || ownerUsersError.value)) return
     await formRef.value.validate(async (valid) => {
       if (valid) {
         submitting.value = true
@@ -340,7 +404,8 @@ export function useKnowledgeBaseView() {
               name: form.name,
               description: form.description,
               embedding_channel_id: Number(embeddingChannelId),
-              embedding_model_id: embeddingModelId
+              embedding_model_id: embeddingModelId,
+              ...(isSuperuser.value ? { uid: form.uid } : {})
             })
             ElMessage.success(t('knowledgeBase.create_success'))
           }
@@ -358,9 +423,9 @@ export function useKnowledgeBaseView() {
   const { handleDelete: confirmDeleteKnowledgeBase } = useDeleteConfirm(knowledgeBaseApi.delete, fetchData)
 
   const handleDelete = (row) => {
-    confirmDeleteKnowledgeBase(row.id, row.name, {
+    return confirmDeleteKnowledgeBase(row.id, row.name, {
       title: t('knowledgeBase.prompt'),
-      message: t('knowledgeBase.delete_kb_confirm', { name: row.name }),
+      message: t('knowledgeBase.delete_kb_confirm', { name: row.name, username: getKnowledgeBaseOwnerLabel(row), id: row.id }),
       dangerouslyUseHTMLString: false,
       errorMessage: t('knowledgeBase.delete_kb_failed')
     })
@@ -371,6 +436,8 @@ export function useKnowledgeBaseView() {
   })
 
   onBeforeUnmount(() => {
+    ownerUsersRequestVersion += 1
+    ownerUsersLoading.value = false
     stopMigrationPolling()
     managedKnowledge.stopManagedKnowledgePolling()
     organization.stopOrganizationPolling()
@@ -389,6 +456,9 @@ export function useKnowledgeBaseView() {
     embeddingModels,
     formRef,
     selectedKb,
+    ownerUsers,
+    ownerUsersLoading,
+    ownerUsersError,
     form,
     rules,
     embeddingModelOptions,
@@ -396,6 +466,7 @@ export function useKnowledgeBaseView() {
     handleRefresh,
     handleSizeChange,
     getKnowledgeBaseProfileLabel,
+    getKnowledgeBaseOwnerLabel,
     getEmbeddingModelName,
     getTargetEmbeddingModelName,
     migrationDialogVisible,
@@ -412,6 +483,7 @@ export function useKnowledgeBaseView() {
     showDialog,
     showEditDialog,
     resetFormFields,
+    fetchOwnerUsers,
     queryTestDialogVisible,
     queryTesting,
     queryTested,
@@ -427,6 +499,7 @@ export function useKnowledgeBaseView() {
     formatScore,
     submitForm,
     handleDelete,
+    isSuperuser,
     formatTime,
     canStartKnowledgeBaseMigration,
     canManageKnowledgeBaseDocuments,
