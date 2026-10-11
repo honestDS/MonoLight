@@ -74,7 +74,8 @@ export const adminApi = {
 }
 
 export const authApi = {
-  login: (data) => request.post('/auth/login', data)
+  login: (data) => request.post('/auth/login', data),
+  me: () => request.get('/auth/me')
 }
 
 export const setupApi = {

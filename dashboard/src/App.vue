@@ -87,7 +87,7 @@
             <el-icon><ChatDotRound /></el-icon>
             <template #title><span>{{ $t('common.menu.chat') }}</span></template>
           </el-menu-item>
-          <el-menu-item index="/users">
+          <el-menu-item v-if="userPermissions.isSuperuser" index="/users">
             <el-icon><User /></el-icon>
             <template #title><span>{{ $t('common.menu.users') }}</span></template>
           </el-menu-item>
@@ -199,6 +199,7 @@
 <script>
 import { useResizeObserver } from './composables/useResizeObserver'
 import { useSessionTasks } from './composables/chat/useSessionTasks.js'
+import { useUserPermissionsStore } from './composables/useUserPermissions.js'
 import { routeNameMap } from './constants'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import SessionTaskCenter from './components/SessionTaskCenter.vue'
@@ -217,8 +218,10 @@ export default {
     SessionTaskCenter
   },
   setup() {
+    const userPermissions = useUserPermissionsStore()
     const service = useSessionTasks()
     return {
+      userPermissions,
       sessionTasks: service.tasks,
       sessionTaskError: service.error,
       sessionTasksLoading: service.loading,
@@ -262,6 +265,7 @@ export default {
       this.isCollapsedSubmenuOpen = false
     },
     logout() {
+      this.userPermissions.clear()
       localStorage.removeItem('token')
       this.$router.push('/login')
     }
