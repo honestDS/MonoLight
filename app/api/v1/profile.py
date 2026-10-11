@@ -177,6 +177,8 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    if profile_in.knowledge_base_ids is not None and not getattr(current_user, "is_superuser", False):
+        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
     if getattr(current_user, "is_superuser", False):
         profile_in.uid = profile_in.uid or current_user.uid
     elif profile_in.uid and profile_in.uid != current_user.uid:
@@ -321,6 +323,8 @@ async def update_profile(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    if profile_in.knowledge_base_ids is not None and not getattr(current_user, "is_superuser", False):
+        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
     db_profile = await profile_crud.get(db, profile_id)
     if not db_profile:
         raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)

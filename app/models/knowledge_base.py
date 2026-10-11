@@ -725,6 +725,7 @@ class KnowledgeBaseCreate(SQLModel):
 class KnowledgeBaseResponse(KnowledgeBaseCore):
     id: int
     profile_ids: list[int] = Field(default_factory=list)
+    profile_names: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

@@ -168,8 +168,10 @@ import {
   filterKnowledgeBaseIdsForOwner,
   filterUserKnowledgeBasesForOwner
 } from '../utils/profileOptions'
+import { useUserPermissionsStore } from '../composables/useUserPermissions.js'
 
 const { t } = useI18n()
+const userPermissions = useUserPermissionsStore()
 
 const profiles = ref([])
 const users = ref([])
@@ -576,6 +578,7 @@ const fetchChannels = async () => {
 }
 
 const fetchKnowledgeBases = async () => {
+  if (!userPermissions.isSuperuser) return
   knowledgeBasesLoading.value = true
   knowledgeBasesReady.value = false
   knowledgeBasesUnavailable.value = false
@@ -961,9 +964,11 @@ const submitForm = async () => {
       memory_organization: buildOrganizationSettingsPayload(form.memory_organization),
       configs: buildConfigsForSave()
     }
-    const knowledgeBaseIds = buildKnowledgeBaseBindingPayload(form.knowledge_base_ids, knowledgeBasesReady.value)
-    if (knowledgeBaseIds !== undefined) {
-      payload.knowledge_base_ids = knowledgeBaseIds
+    if (userPermissions.isSuperuser && knowledgeBasesReady.value) {
+      const knowledgeBaseIds = buildKnowledgeBaseBindingPayload(form.knowledge_base_ids, knowledgeBasesReady.value)
+      if (knowledgeBaseIds !== undefined) {
+        payload.knowledge_base_ids = knowledgeBaseIds
+      }
     }
 
     if (dialogType.value === 'create') {
