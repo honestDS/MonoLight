@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 from pydantic import Field as PydanticField
 from sqlalchemy import Enum as SQLAlchemyEnum
-from sqlalchemy import event
+from sqlalchemy import UniqueConstraint, event
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel
 
 from app.core.crypto import decrypt_api_key, encrypt_api_key
@@ -31,7 +31,7 @@ class MessagePlatformLanguage(StrEnum):
 
 
 class MessagePlatformBase(SQLModel):
-    name: str = Field(index=True, unique=True, nullable=False, min_length=1, max_length=100)
+    name: str = Field(index=True, nullable=False, min_length=1, max_length=100)
     platform_type: MessagePlatformType = Field(nullable=False, index=True)
     language: MessagePlatformLanguage = Field(
         default=MessagePlatformLanguage.ZH,
@@ -61,6 +61,7 @@ class MessagePlatformBase(SQLModel):
 
 class MessagePlatform(MessagePlatformBase, table=True):
     __tablename__ = "message_platform"
+    __table_args__ = (UniqueConstraint("uid", "name", name="uq_message_platform_uid_name"),)
 
     id: int | None = Field(default=None, primary_key=True, index=True)
     created_at: datetime | None = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True)))

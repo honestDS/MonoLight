@@ -49,8 +49,8 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
             await db.flush()
         return result.rowcount or 0
 
-    async def get_by_name(self, db: AsyncSession, name: str) -> MessagePlatform | None:
-        result = await db.execute(select(MessagePlatform).where(MessagePlatform.name == name))
+    async def get_by_name(self, db: AsyncSession, name: str, *, uid: str | None) -> MessagePlatform | None:
+        result = await db.execute(select(MessagePlatform).where(MessagePlatform.name == name, MessagePlatform.uid == uid))
         return result.scalars().first()
 
     async def get_for_update(

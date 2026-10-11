@@ -6,11 +6,14 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import app.core.crypto
 from app.api.v1.message_platforms import router
+from app.core.constants import ERR_MESSAGE_PLATFORM_NAME_EXISTS
 from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.i18n import t
 from app.core.security import get_current_user
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
@@ -95,6 +98,50 @@ async def _seed_profiles(db: AsyncSession) -> tuple[Profile, Profile]:
     await db.commit()
     assert profile_one.id is not None and profile_two.id is not None
     return profile_one, profile_two
+
+
+@pytest.mark.asyncio
+async def test_message_platform_name_uniqueness_is_persisted_per_owner(
+    message_platform_configuration_db: AsyncSession,
+) -> None:
+    created_platforms = [
+        await message_platform_crud.create(
+            message_platform_configuration_db,
+            obj_in=MessagePlatformCreate(name="owner-scoped-platform", uid=uid),
+            commit=True,
+        )
+        for uid in ("user-1", "user-2", None)
+    ]
+    assert all(platform.id is not None for platform in created_platforms)
+
+    for uid, platform in zip(("user-1", "user-2", None), created_platforms, strict=True):
+        found = await message_platform_crud.get_by_name(
+            message_platform_configuration_db,
+            name="owner-scoped-platform",
+            uid=uid,
+        )
+        assert found is not None
+        assert found.id == platform.id
+
+    assert (
+        await message_platform_crud.get_by_name(
+            message_platform_configuration_db,
+            name="owner-scoped-platform",
+            uid="unknown-user",
+        )
+        is None
+    )
+
+    with pytest.raises(IntegrityError):
+        await message_platform_crud.create(
+            message_platform_configuration_db,
+            obj_in=MessagePlatformCreate(name="owner-scoped-platform", uid="user-1"),
+            commit=True,
+        )
+    await message_platform_configuration_db.rollback()
+
+    persisted_platforms = (await message_platform_configuration_db.execute(select(MessagePlatform).where(MessagePlatform.name == "owner-scoped-platform").order_by(MessagePlatform.id))).scalars().all()
+    assert [(platform.id, platform.uid) for platform in persisted_platforms] == [(platform.id, uid) for platform, uid in zip(created_platforms, ("user-1", "user-2", None), strict=True)]
 
 
 @pytest.mark.asyncio
@@ -360,3 +407,117 @@ async def test_message_platform_legacy_plaintext_config_reads_and_encrypts_on_up
     assert response.config["token"] == "legacy-token"
     assert response.config["bot_token"] == "legacy-bot-token"
     assert response.config["base_url"] == "https://message-platform.invalid/v1"
+
+
+@pytest.mark.parametrize("operation", ("create", "rename", "transfer"))
+@pytest.mark.asyncio
+async def test_message_platform_name_conflict_rolls_back_and_keeps_session_usable(
+    message_platform_configuration_db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: b"0123456789abcdef0123456789abcdef")
+
+    await message_platform_crud.create(
+        message_platform_configuration_db,
+        obj_in=MessagePlatformCreate(
+            uid="user-1",
+            name="occupied",
+            config={"token": "occupied-user-one-token"},
+        ),
+        commit=True,
+    )
+    editable_user_one = await message_platform_crud.create(
+        message_platform_configuration_db,
+        obj_in=MessagePlatformCreate(
+            uid="user-1",
+            name="editable",
+            config={"token": "editable-user-one-token"},
+        ),
+        commit=True,
+    )
+    occupied_user_two = await message_platform_crud.create(
+        message_platform_configuration_db,
+        obj_in=MessagePlatformCreate(
+            uid="user-2",
+            name="occupied",
+            config={"token": "occupied-user-two-token"},
+        ),
+        commit=True,
+    )
+
+    initial_platforms = (await message_platform_configuration_db.execute(select(MessagePlatform).order_by(MessagePlatform.id))).scalars().all()
+    platform_ids = [int(platform.id) for platform in initial_platforms]
+    snapshot = [platform.model_dump() for platform in initial_platforms]
+    editable_user_one_id = int(editable_user_one.id)
+    occupied_user_two_id = int(occupied_user_two.id)
+
+    async def stale_get_by_name(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(message_platform_crud, "get_by_name", stale_get_by_name)
+
+    test_app = FastAPI()
+    register_handlers(test_app)
+    test_app.include_router(router, prefix="/api/v1")
+
+    async def override_get_db():
+        yield message_platform_configuration_db
+
+    async def override_current_user():
+        return SimpleNamespace(uid="user-1", is_superuser=True)
+
+    test_app.dependency_overrides[get_db] = override_get_db
+    test_app.dependency_overrides[get_current_user] = override_current_user
+
+    conflict_token = f"{operation}-conflict-token"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=test_app),
+        base_url="http://test",
+    ) as client:
+        if operation == "create":
+            failed = await client.post(
+                "/api/v1/message-platforms/create",
+                json={"uid": "user-1", "name": "occupied", "config": {"token": conflict_token}},
+            )
+        elif operation == "rename":
+            failed = await client.post(
+                "/api/v1/message-platforms/update",
+                params={"platform_id": editable_user_one_id},
+                json={"name": "occupied", "config": {"token": conflict_token}},
+            )
+        else:
+            failed = await client.post(
+                "/api/v1/message-platforms/update",
+                params={"platform_id": occupied_user_two_id},
+                json={"uid": "user-1", "config": {"token": conflict_token}},
+            )
+
+        failed_payload = failed.json()
+        assert failed.status_code == 400
+        assert failed_payload["code"] == 400
+        assert failed_payload["message"] == t(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
+        assert failed_payload["data"] is None
+        assert set(failed_payload) == {"code", "message", "data"}
+        assert conflict_token not in failed.text
+        assert message_platform_configuration_db.is_active
+
+        restored_platforms = (await message_platform_configuration_db.execute(select(MessagePlatform).order_by(MessagePlatform.id))).scalars().all()
+        assert [int(platform.id) for platform in restored_platforms] == platform_ids
+        assert [platform.model_dump() for platform in restored_platforms] == snapshot
+
+        recovered_name = f"recovered-{operation}"
+        recovered_token = f"{operation}-recovered-token"
+        recovered = await client.post(
+            "/api/v1/message-platforms/create",
+            json={"uid": "user-1", "name": recovered_name, "config": {"token": recovered_token}},
+        )
+        assert recovered.status_code == 200
+        recovered_payload = recovered.json()
+        assert recovered_payload["code"] == 200
+        assert recovered_payload["data"]["name"] == recovered_name
+
+        persisted_recovered = (await message_platform_configuration_db.execute(select(MessagePlatform).where(MessagePlatform.id == recovered_payload["data"]["id"]))).scalar_one()
+        assert persisted_recovered.uid == "user-1"
+        assert persisted_recovered.name == recovered_name
+        assert persisted_recovered.get_config_secret("token") == recovered_token

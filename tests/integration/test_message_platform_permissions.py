@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncGenerator
 from copy import deepcopy
 from datetime import timedelta
@@ -13,7 +14,7 @@ from sqlmodel import select
 import app.core.crypto as crypto_module
 import app.core.security as security
 from app.api.v1 import message_platforms
-from app.core.constants import ERR_MESSAGE_PLATFORM_NOT_FOUND, ERR_ONLY_ADMIN_ALLOWED, ERR_PROFILE_NOT_FOUND, ERR_UNAUTHORIZED
+from app.core.constants import ERR_MESSAGE_PLATFORM_NAME_EXISTS, ERR_MESSAGE_PLATFORM_NOT_FOUND, ERR_ONLY_ADMIN_ALLOWED, ERR_PROFILE_NOT_FOUND, ERR_UNAUTHORIZED
 from app.core.i18n import t
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
@@ -1362,3 +1363,331 @@ async def test_old_owner_cannot_write_platform_after_transfer_during_login_exter
     assert transferred_row[9] == other_profile_id
     assert await _platform_snapshot(session_factory) == transfer_snapshot
     assert calls == ["close"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", ("other", "admin"))
+async def test_distinct_users_can_create_same_message_platform_name(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str, int], list[str]],
+    actor: str,
+) -> None:
+    app, session_factory, platform_ids, calls = api_context
+    name = "ordinary-message-platform"
+    new_token = f"{actor}-same-name-platform-token"
+    request_payload: dict[str, Any] = {
+        "name": name,
+        "is_enabled": True,
+        "config": {"token": new_token},
+    }
+    if actor == "admin":
+        request_payload["uid"] = " other "
+
+    before = await _platform_snapshot(session_factory)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await client.post(
+            "/api/v1/message-platforms/create",
+            headers={"Authorization": f"Bearer {_token(actor)}"},
+            json=request_payload,
+        )
+        create_payload = create_response.json()
+        assert create_response.status_code == 200
+        assert create_payload["code"] == 200
+        created = create_payload["data"]
+        created_id = created["id"]
+        assert created["uid"] == "other"
+        assert created_id != platform_ids["ordinary"]
+        assert created["config"]["token"] == new_token
+
+        ordinary_get = await client.get(
+            "/api/v1/message-platforms/get",
+            params={"platform_id": created_id},
+            headers={"Authorization": f"Bearer {_token('ordinary')}"},
+        )
+        _assert_not_found(ordinary_get)
+        assert new_token not in ordinary_get.text
+
+    async with session_factory() as session:
+        same_name = (await session.execute(select(MessagePlatform).where(MessagePlatform.name == name).order_by(MessagePlatform.id))).scalars().all()
+        assert len(same_name) == 2
+        by_uid = {platform.uid: platform for platform in same_name}
+        assert set(by_uid) == {"ordinary", "other"}
+        assert by_uid["ordinary"].id == platform_ids["ordinary"]
+        assert by_uid["ordinary"].get_config_secret("token") == "ordinary-platform-token"
+        assert by_uid["other"].id == created_id
+        assert by_uid["other"].get_config_secret("token") == new_token
+
+    after = await _platform_snapshot(session_factory)
+    _assert_platforms_unchanged_except(before, after, created_id)
+    assert len(after) == len(before) + 1
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", ("ordinary", "admin"))
+async def test_same_user_cannot_create_duplicate_message_platform_name(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str, int], list[str]],
+    actor: str,
+) -> None:
+    app, session_factory, _platform_ids, calls = api_context
+    new_token = f"{actor}-duplicate-platform-token"
+    request_payload: dict[str, Any] = {
+        "name": "ordinary-message-platform",
+        "is_enabled": True,
+        "config": {"token": new_token},
+    }
+    if actor == "admin":
+        request_payload["uid"] = " ordinary "
+
+    before = await _platform_snapshot(session_factory)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/message-platforms/create",
+            headers={"Authorization": f"Bearer {_token(actor)}"},
+            json=request_payload,
+        )
+
+    payload = response.json()
+    assert response.status_code == 400
+    assert payload["code"] == 400
+    assert payload["message"] == t(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
+    assert payload["data"] is None
+    assert new_token not in response.text
+    assert "ordinary-platform-token" not in response.text
+    assert await _platform_snapshot(session_factory) == before
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name_case", "expected_status"),
+    (("cross-owner", 200), ("same-owner", 400), ("unchanged", 200)),
+)
+async def test_ordinary_user_update_name_checks_owner_scoped_uniqueness(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str, int], list[str]],
+    name_case: str,
+    expected_status: int,
+) -> None:
+    app, session_factory, platform_ids, calls = api_context
+    platform_id = platform_ids["ordinary"]
+    target_name = {
+        "cross-owner": "other-message-platform",
+        "same-owner": "ordinary-second-message-platform",
+        "unchanged": "ordinary-message-platform",
+    }[name_case]
+
+    async with session_factory() as session:
+        second_ordinary = _platform(
+            name="ordinary-second-message-platform",
+            uid="ordinary",
+            profile_id=None,
+            token="ordinary-second-platform-token",
+            qrcode="ordinary-second-platform-qrcode",
+            account_id="ordinary-second-platform-account",
+            last_error="ordinary-second-platform-error",
+        )
+        session.add(second_ordinary)
+        await session.commit()
+        assert second_ordinary.id is not None
+        assert second_ordinary.platform_type == MessagePlatformType.WEIXIN_OPENCLAW
+
+    before = await _platform_snapshot(session_factory)
+    token = _token("ordinary")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/message-platforms/update",
+            params={"platform_id": platform_id},
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": target_name, "language": "en"},
+        )
+
+    payload = response.json()
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        assert payload["code"] == 200
+        updated = payload["data"]
+        assert updated["name"] == target_name
+        assert updated["language"] == "en"
+        assert updated["uid"] == "ordinary"
+
+        async with session_factory() as session:
+            persisted = await session.get(MessagePlatform, platform_id)
+            assert persisted is not None
+            assert persisted.name == target_name
+            assert persisted.language.value == "en"
+            assert persisted.uid == "ordinary"
+
+        after = await _platform_snapshot(session_factory)
+        _assert_platforms_unchanged_except(before, after, platform_id)
+    else:
+        assert set(payload) == {"code", "message", "data"}
+        assert payload["code"] == 400
+        assert payload["message"] == t(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
+        assert payload["data"] is None
+        assert await _platform_snapshot(session_factory) == before
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ("owner-conflict", "renamed-conflict", "owner-free", "renamed-free"))
+async def test_superuser_transfer_checks_name_uniqueness_by_final_owner_and_name(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str, int], list[str]],
+    case: str,
+) -> None:
+    app, session_factory, platform_ids, calls = api_context
+    platform_id = platform_ids["ordinary"]
+    other_profile_id = await _get_owned_profile_id(session_factory, "other")
+    target_name = {
+        "owner-conflict": "ordinary-message-platform",
+        "renamed-conflict": "other-message-platform",
+        "owner-free": "ordinary-message-platform",
+        "renamed-free": "ordinary-local-platform",
+    }[case]
+
+    if case == "owner-conflict":
+        async with session_factory() as session:
+            session.add(
+                MessagePlatform(
+                    platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+                    uid="other",
+                    name="ordinary-message-platform",
+                )
+            )
+            await session.commit()
+    elif case == "renamed-free":
+        async with session_factory() as session:
+            session.add(
+                MessagePlatform(
+                    platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+                    uid="ordinary",
+                    name="ordinary-local-platform",
+                )
+            )
+            await session.commit()
+
+    request_payload: dict[str, Any] = {"uid": " other ", "profile_id": other_profile_id}
+    if case in ("renamed-conflict", "renamed-free"):
+        request_payload["name"] = target_name
+
+    before = await _platform_snapshot(session_factory)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/message-platforms/update",
+            params={"platform_id": platform_id},
+            headers={"Authorization": f"Bearer {_token('admin')}"},
+            json=request_payload,
+        )
+        payload = response.json()
+
+        if case in ("owner-conflict", "renamed-conflict"):
+            assert response.status_code == 400
+            assert set(payload) == {"code", "message", "data"}
+            assert payload["code"] == 400
+            assert payload["message"] == t(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
+            assert payload["data"] is None
+            assert await _platform_snapshot(session_factory) == before
+        else:
+            assert response.status_code == 200
+            assert payload["code"] == 200
+            updated = payload["data"]
+            assert updated["uid"] == "other"
+            assert updated["name"] == target_name
+            assert updated["profile_id"] == other_profile_id
+
+            async with session_factory() as session:
+                persisted = await session.get(MessagePlatform, platform_id)
+                assert persisted is not None
+                assert persisted.uid == "other"
+                assert persisted.name == target_name
+                assert persisted.profile_id == other_profile_id
+
+            after = await _platform_snapshot(session_factory)
+            _assert_platforms_unchanged_except(before, after, platform_id)
+
+            old_owner_get = await client.get(
+                "/api/v1/message-platforms/get",
+                params={"platform_id": platform_id},
+                headers={"Authorization": f"Bearer {_token('ordinary')}"},
+            )
+            _assert_not_found(old_owner_get)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_actor", ("ordinary", "other"))
+async def test_concurrent_users_create_same_message_platform_name(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str, int], list[str]],
+    second_actor: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, session_factory, _platform_ids, calls = api_context
+    name = "concurrent-name-platform"
+    request_tokens = ("concurrent-token-0", "concurrent-token-1")
+    actors = ("ordinary", second_actor)
+    barrier = asyncio.Barrier(2)
+    original = message_platforms.message_platform_crud.get_by_name
+
+    async def get_by_name_with_barrier(db, queried_name, *, uid):
+        result = await original(db, queried_name, uid=uid)
+        if queried_name == name:
+            await asyncio.wait_for(barrier.wait(), timeout=10)
+        return result
+
+    monkeypatch.setattr(message_platforms.message_platform_crud, "get_by_name", get_by_name_with_barrier)
+    before = await _platform_snapshot(session_factory)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        responses = await asyncio.wait_for(
+            asyncio.gather(
+                client.post(
+                    "/api/v1/message-platforms/create",
+                    headers={"Authorization": f"Bearer {_token(actors[0])}"},
+                    json={"name": name, "is_enabled": True, "config": {"token": request_tokens[0]}},
+                ),
+                client.post(
+                    "/api/v1/message-platforms/create",
+                    headers={"Authorization": f"Bearer {_token(actors[1])}"},
+                    json={"name": name, "is_enabled": True, "config": {"token": request_tokens[1]}},
+                ),
+            ),
+            timeout=30,
+        )
+
+    assert sorted(response.status_code for response in responses) == ([200, 400] if second_actor == "ordinary" else [200, 200])
+    successful = []
+    for index, response in enumerate(responses):
+        payload = response.json()
+        if response.status_code == 200:
+            assert payload["code"] == 200
+            created = payload["data"]
+            assert created["uid"] == actors[index]
+            assert created["name"] == name
+            assert created["config"]["token"] == request_tokens[index]
+            successful.append((index, created))
+        else:
+            assert response.status_code == 400
+            assert set(payload) == {"code", "message", "data"}
+            assert payload["code"] == 400
+            assert payload["message"] == t(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
+            assert payload["data"] is None
+            assert request_tokens[0] not in response.text
+            assert request_tokens[1] not in response.text
+
+    async with session_factory() as session:
+        same_name = (await session.execute(select(MessagePlatform).where(MessagePlatform.name == name).order_by(MessagePlatform.id))).scalars().all()
+        assert len(same_name) == len(successful)
+        persisted_by_id = {platform.id: platform for platform in same_name}
+        assert set(persisted_by_id) == {created["id"] for _, created in successful}
+        for index, created in successful:
+            persisted = persisted_by_id[created["id"]]
+            assert persisted.uid == actors[index]
+            assert persisted.name == name
+            assert persisted.get_config_secret("token") == request_tokens[index]
+
+    after = await _platform_snapshot(session_factory)
+    before_ids = {row[0] for row in before}
+    assert tuple(row for row in after if row[0] in before_ids) == before
+    assert len(after) == len(before) + len(successful)
+    persisted_tokens = {platform.get_config_secret("token") for platform in same_name}
+    assert persisted_tokens == {request_tokens[index] for index, _ in successful}
+    assert calls == []
