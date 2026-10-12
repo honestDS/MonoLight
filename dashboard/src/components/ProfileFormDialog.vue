@@ -17,7 +17,7 @@
                 </el-form-item>
                 <el-form-item :label="$t('profiles.associated_prompt')">
                   <el-select v-model="form.prompt_id" :placeholder="$t('profiles.optional_prompt')" clearable class="full-width-input">
-                    <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                    <el-option v-for="item in ownerPromptOptions" :key="item.id" :label="item.name" :value="item.id"></el-option>
                   </el-select>
                 </el-form-item>
                 <el-form-item>
@@ -589,10 +589,11 @@
 </template>
 
 <script setup>
+import { computed, watch } from 'vue'
 import ChannelEditor from './ChannelEditor.vue'
 import HelpTooltip from './HelpTooltip.vue'
 
-defineProps({
+const props = defineProps({
   activeTab: { type: String, required: true },
   allowedOperationDirInput: { type: String, required: true },
   auditModelKey: { type: String, default: null },
@@ -627,6 +628,17 @@ defineProps({
   submitting: { type: Boolean, required: true },
   toolOptions: { type: Array, required: true },
   users: { type: Array, required: true }
+})
+
+const ownerPromptOptions = computed(() => {
+  return props.form.uid ? props.prompts.filter(item => item.uid === props.form.uid) : []
+})
+
+watch(() => props.form.uid, (newUid, oldUid) => {
+  if (newUid === oldUid || props.dialogType !== 'create' || !props.dialogVisible || !props.form.prompt_id) return
+
+  const promptBelongsToOwner = Boolean(newUid) && props.prompts.some(item => item.uid === newUid && item.id === props.form.prompt_id)
+  if (!promptBelongsToOwner) props.form.prompt_id = null
 })
 
 defineEmits([

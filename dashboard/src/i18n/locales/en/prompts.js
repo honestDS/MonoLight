@@ -7,6 +7,9 @@ export default {
   delete: 'Delete',
   edit_prompt: 'Edit Prompt',
   prompt_name: 'Prompt Name',
+  owner_username: 'Owner',
+  owner_unassigned: 'Unassigned owner',
+  select_owner: 'Please select an owner',
   input_name: 'Please enter prompt name',
   content: 'Content',
   input_content: 'Please enter prompt content',
@@ -16,13 +19,16 @@ export default {
   fill_required: 'Please fill in name and content',
   save_success: 'Saved successfully',
   submit_failed: 'Submit failed',
+  load_users_failed: 'Failed to load users',
   refresh: 'Refresh',
   delete_confirm: 'Delete prompt "{name}"?',
   delete_success: 'Deleted successfully',
   delete_failed: 'Delete failed',
   reassign_prompt_title: 'Reassign References and Delete',
-  reassign_prompt_hint: 'This prompt is referenced by one or more profiles. Before deletion, reassign those references to another global prompt.',
+  reassign_prompt_hint: 'This prompt is referenced by one or more profiles. Before deletion, reassign those references to another prompt belonging to the same owner.',
   replacement_prompt: 'Replacement Prompt',
   confirm_reassign_delete: 'Reassign and Delete',
-  select_replacement_prompt: 'Please select a replacement prompt'
+  select_replacement_prompt: 'Please select a replacement prompt',
+  no_replacement_prompt: 'No replacement prompt belongs to the same owner. Create one before deleting this prompt.',
+  permission_denied: 'No permission to manage this prompt'
 }

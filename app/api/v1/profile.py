@@ -20,6 +20,7 @@ from app.core.constants import (
     ERR_PROFILE_NOT_FOUND,
     ERR_PROMPT_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
+    ERR_USER_NOT_FOUND,
     MSG_MEMORY_SETTINGS_SUCCESS,
     MSG_PROFILE_CREATED,
     MSG_PROFILE_DELETE_CONFIRMATION_REQUIRED,
@@ -192,6 +193,12 @@ async def create_profile(
         await memory_store_crud.get_snapshot_by_uid(db, uid=profile_in.uid),
     )
     try:
+        if not await user_crud.get_by_uid(
+            db,
+            profile_in.uid,
+            lock_for_reference_write=True,
+        ):
+            raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
         locked_channels = await lock_profile_channel_references(
             db,
             configs=profile_in.configs,
@@ -212,7 +219,7 @@ async def create_profile(
             raise ParameterException(ERR_PROFILE_NAME_EXISTS)
 
         if profile_in.prompt_id:
-            if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=profile_in.uid):
+            if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=profile_in.uid, lock_for_reference_write=True):
                 raise ParameterException(ERR_PROMPT_NOT_FOUND)
 
         knowledge_base_ids = profile_in.knowledge_base_ids
@@ -401,6 +408,10 @@ async def update_profile(
             memory_organization=profile_in.memory_organization,
             extra_channel_ids=old_channel_ids,
         )
+        if profile_in.prompt_id:
+            if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=db_profile.uid, lock_for_reference_write=True):
+                raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
+
         db_profile = await profile_crud.lock_for_runtime_use(
             db,
             profile_id=profile_id,
@@ -424,10 +435,6 @@ async def update_profile(
         if profile_in.name and profile_in.name != db_profile.name:
             if await profile_crud.get_by_name(db, profile_in.name, uid=db_profile.uid):
                 raise ParameterException(ERR_PROFILE_NAME_EXISTS)
-
-        if profile_in.prompt_id:
-            if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=db_profile.uid):
-                raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
 
         knowledge_base_ids = profile_in.knowledge_base_ids
         memory_organization = profile_in.memory_organization

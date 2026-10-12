@@ -10,6 +10,7 @@ export default {
   disable: 'Disable',
   edit: 'Edit',
   delete: 'Delete',
+  delete_confirm: 'Delete user “{name}”? Their profiles, prompts, sessions, messages, tasks, long-term memories, knowledge bases, message platforms, and related records will also be deleted. This cannot be undone.',
   edit_user: 'Edit User',
   input_username: 'Please enter username',
   password: 'Password',

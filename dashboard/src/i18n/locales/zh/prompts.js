@@ -1,5 +1,8 @@
 export default {
   create_prompt: '新建提示词',
+  owner_username: '所属用户',
+  owner_unassigned: '未分配用户',
+  select_owner: '请选择所属用户',
   name: '名称',
   content_preview: '内容预览',
   actions: '操作',
@@ -20,8 +23,11 @@ export default {
   delete_confirm: '确定删除提示词“{name}”吗？',
   delete_success: '删除成功',
   delete_failed: '删除失败',
+  load_users_failed: '加载用户列表失败',
+  no_replacement_prompt: '没有同一所属用户的可替换提示词，请先新建提示词后再删除',
+  permission_denied: '无权操作此提示词',
   reassign_prompt_title: '重置引用后删除',
-  reassign_prompt_hint: '该提示词已被一个或多个配置文件引用，删除前需要先把这些引用重置到其他全局提示词。',
+  reassign_prompt_hint: '该提示词已被一个或多个配置文件引用，删除前需要先把这些引用重置到同一所属用户的其他提示词。',
   replacement_prompt: '替换提示词',
   confirm_reassign_delete: '确认重置并删除',
   select_replacement_prompt: '请选择替换提示词'

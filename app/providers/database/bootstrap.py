@@ -47,12 +47,18 @@ def build_default_profile_configs() -> dict:
 
 
 async def ensure_default_profile_for_user(session: AsyncSession, uid: str | None) -> None:
-    if not uid or await profile_crud.get_by_uid(session, uid):
+    if not uid:
         return
 
-    prompt_obj = await prompt_crud.get_by_name(session, name="default")
+    user_obj = await user_crud.get_by_uid(session, uid, lock_for_reference_write=True)
+    if not user_obj or await profile_crud.get_by_uid(session, uid):
+        return
+
+    prompt_obj = await prompt_crud.get_by_name(session, name="default", uid=uid)
+    if prompt_obj:
+        prompt_obj = await prompt_crud.get_visible(session, prompt_obj.id, uid=uid, lock_for_reference_write=True)
     if not prompt_obj:
-        prompt_obj = await prompt_crud.create(session, obj_in={"name": "default", "content": "", "uid": None})
+        prompt_obj = await prompt_crud.create(session, obj_in={"name": "default", "content": "", "uid": uid}, commit=False)
 
     await profile_crud.create(
         session,
@@ -250,10 +256,6 @@ async def init_system_data(session: AsyncSession):
 
     # 2. 业务配置初始化
     await system_setting_crud.ensure_defaults(session)
-
-    prompt_obj = await prompt_crud.get_by_name(session, name="default")
-    if not prompt_obj:
-        prompt_obj = await prompt_crud.create(session, obj_in={"name": "default", "content": "", "uid": None})
 
     await ensure_default_profile_for_user(session, confirmed_admin_uid)
 

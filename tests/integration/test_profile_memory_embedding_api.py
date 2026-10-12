@@ -32,9 +32,11 @@ from app.models.profile import (
     Profile,
     ProfileConfig,
 )
+from app.models.user import User
 from app.providers.database import get_db
 
 API_TABLES = [
+    User.__table__,
     ModelChannel.__table__,
     Profile.__table__,
     KnowledgeBase.__table__,
@@ -138,6 +140,14 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
+            session.add_all(
+                [
+                    User(uid="user-a", username="user-a", is_superuser=False, is_active=True),
+                    User(uid="user-b", username="user-b", is_superuser=False, is_active=True),
+                    User(uid="admin-user", username="admin-user", is_superuser=True, is_active=True),
+                ]
+            )
+            await session.commit()
             yield session
     finally:
         await engine.dispose()

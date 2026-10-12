@@ -246,9 +246,7 @@ async def test_system_bootstrap_initializes_pending_setup_without_default_profil
     assert database["settings"][SETUP_ADMIN_UID_KEY] == ""
     for key, value in DEFAULT_SYSTEM_SETTINGS.items():
         assert database["settings"][key] == value
-    assert len(database["prompts"]) == 1
-    assert database["prompts"][0].name == "default"
-    assert database["prompts"][0].uid is None
+    assert database["prompts"] == []
     assert database["profiles"] == []
 
 

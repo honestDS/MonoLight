@@ -151,8 +151,17 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
     async def clear_default_by_uid(self, db: AsyncSession, uid: str | None) -> None:
         await db.execute(update(Profile).where(Profile.uid == uid).values(is_default=False))
 
-    async def get_multi_by_prompt_id(self, db: AsyncSession, prompt_id: int) -> list[Profile]:
-        result = await db.execute(select(Profile).where(Profile.prompt_id == prompt_id))
+    async def get_multi_by_prompt_id(
+        self,
+        db: AsyncSession,
+        prompt_id: int,
+        *,
+        lock_for_reference_write: bool = False,
+    ) -> list[Profile]:
+        query = select(Profile).where(Profile.prompt_id == prompt_id)
+        if lock_for_reference_write:
+            query = query.order_by(Profile.id.asc()).with_for_update().execution_options(populate_existing=True)
+        result = await db.execute(query)
         return list(result.scalars().all())
 
     async def reassign_prompt(self, db: AsyncSession, *, source_prompt_id: int, target_prompt_id: int) -> int:

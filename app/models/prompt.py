@@ -35,6 +35,7 @@ class PromptCreate(PromptBase):
 
 
 class PromptUpdate(SQLModel):
+    uid: str | None = Field(default=None, min_length=1, max_length=50)
     name: str | None = Field(None, min_length=1, max_length=100)
     content: str | None = Field(None, min_length=1)
 
@@ -42,4 +43,5 @@ class PromptUpdate(SQLModel):
 class PromptResponse(PromptBase):
     id: int
     created_at: datetime
+    username: str | None = None
     model_config = ConfigDict(from_attributes=True)
