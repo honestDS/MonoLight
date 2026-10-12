@@ -104,7 +104,11 @@ const loadUsers = async () => {
 }
 
 // 使用删除确认组合式函数
-const { handleDelete } = useDeleteConfirm(adminApi.userDelete, loadUsers)
+const { handleDelete: confirmDelete } = useDeleteConfirm(adminApi.userDelete, loadUsers)
+const handleDelete = (uid, name) => confirmDelete(uid, name, {
+  message: t('users.delete_confirm', { name }),
+  dangerouslyUseHTMLString: false
+})
 
 const handleRefresh = () => {
   currentPage.value = 1

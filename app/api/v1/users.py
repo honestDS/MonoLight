@@ -27,6 +27,7 @@ from app.core.security import (
     get_current_user,
     get_password_hash,
 )
+from app.core.user_deletion import delete_user_data
 from app.models.user import (
     UserCreate,
     UserResponse,
@@ -128,12 +129,17 @@ async def delete_user(
     uid: str,
     db: AsyncSession = Depends(get_db),
 ):
-    user = await user_crud.get_by_uid(db, uid)
-    if not user:
-        raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
+    try:
+        user = await user_crud.get_by_uid(db, uid, lock_for_reference_write=True)
+        if not user:
+            raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
 
-    if user.is_superuser:
-        raise ParameterException(ERR_USER_SUPER_DELETE_FORBIDDEN)
+        if user.is_superuser:
+            raise ParameterException(ERR_USER_SUPER_DELETE_FORBIDDEN)
 
-    await user_crud.remove(db, id=user.id)
-    return StandardResponse.success(message=MSG_USER_DELETED)
+        await delete_user_data(db, uid=uid)
+        await user_crud.remove(db, id=user.id)
+        return StandardResponse.success(data=None, message=MSG_USER_DELETED)
+    except Exception:
+        await db.rollback()
+        raise

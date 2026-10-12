@@ -19,12 +19,14 @@ from app.models.memory import (
 )
 from app.models.profile import Profile, ProfileConfig, ProfileCreate
 from app.models.prompt import PromptLibrary
+from app.models.user import User
 
 
 @pytest.mark.asyncio
 async def test_profile_creation_and_channel_deletion_serialize_on_channel_lock(database_factory, monkeypatch):
     tables = [
         ModelChannel.__table__,
+        User.__table__,
         PromptLibrary.__table__,
         Profile.__table__,
         KnowledgeBase.__table__,
@@ -41,6 +43,7 @@ async def test_profile_creation_and_channel_deletion_serialize_on_channel_lock(d
         try:
             model_id = "serializable-chat-model"
             async with session_factory() as setup_db:
+                setup_db.add(User(uid="profile-user", username="profile-user", is_superuser=False))
                 channel = ModelChannel(
                     name="serializable-channel",
                     api_key="enc:v1:test-key",

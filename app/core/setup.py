@@ -73,11 +73,11 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
             commit=False,
         )
 
-        prompt = await prompt_crud.get_by_name(db, name="default", uid=None)
+        prompt = await prompt_crud.get_by_name(db, name="default", uid=admin.uid)
         if prompt is None:
             prompt = await prompt_crud.create(
                 db,
-                obj_in={"name": "default", "content": "", "uid": None},
+                obj_in={"name": "default", "content": "", "uid": admin.uid},
                 commit=False,
             )
 

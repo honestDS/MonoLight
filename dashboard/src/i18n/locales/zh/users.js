@@ -10,6 +10,7 @@ export default {
   disable: '禁用',
   edit: '编辑',
   delete: '删除',
+  delete_confirm: '确定删除用户“{name}”吗？该用户的配置、提示词、会话、消息、任务、长期记忆、知识库、消息平台及相关记录将一并删除，且无法恢复。',
   edit_user: '编辑用户',
   input_username: '请输入用户名',
   password: '密码',
