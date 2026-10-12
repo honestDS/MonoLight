@@ -1,13 +1,30 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.account.user import user_crud
-from app.core.crud.knowledge.base import knowledge_base_collection_owner_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.knowledge.base import knowledge_base_collection_owner_crud, knowledge_base_crud
+from app.core.crud.memory.store import memory_embedding_revision_crud, memory_store_crud
+from app.core.crud.message_platform.outbox import message_platform_outbox_crud
+from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.profile.prompt import prompt_crud
+from app.core.crud.session.session import session_crud
+from app.core.crud.system.log import system_log_crud
+from app.core.crud.task.background import background_task_crud
+from app.core.crud.task.scheduled import scheduled_task_crud
+from app.core.crud.terminal.session import terminal_session_crud
 from app.core.session_cleanup import delete_session_data
 
 
-async def delete_user_data(db: AsyncSession, *, uid: str) -> None:
-    await user_crud.lock_owned_configuration(db, uid=uid)
-    session_ids, knowledge_bases, memory_stores, memory_revisions = await user_crud.get_deletion_state(db, uid=uid)
+async def delete_user_data(db: AsyncSession, *, uid: str) -> list[str]:
+    prompts = await prompt_crud.get_all_by_uid(db, uid=uid, lock_for_update=True)
+    profiles = await profile_crud.get_all_by_uid(db, uid=uid, lock_for_update=True)
+    memory_stores = await memory_store_crud.get_all_by_uid(db, uid=uid, lock_for_update=True)
+    knowledge_bases = await knowledge_base_crud.get_all_by_uid(db, uid=uid, lock_for_update=True)
+    memory_revisions = await memory_embedding_revision_crud.get_all_by_uid(db, uid=uid, lock_for_update=True)
+    sessions = await session_crud.get_all_by_uid(db, uid=uid, lock_for_update=True)
+    session_ids = [session.session_id for session in sessions]
+    profile_ids = {profile.id for profile in profiles if profile.id is not None}
+    prompt_ids = {prompt.id for prompt in prompts if prompt.id is not None}
 
     for knowledge_base in knowledge_bases:
         await knowledge_base_collection_owner_crud.enqueue(
@@ -21,7 +38,7 @@ async def delete_user_data(db: AsyncSession, *, uid: str) -> None:
             ),
             commit=False,
         )
-    await user_crud.delete_owned_knowledge_data(db, uid=uid)
+    await knowledge_base_crud.delete_by_uid(db, uid=uid)
 
     collection_names = sorted(
         {
@@ -51,7 +68,20 @@ async def delete_user_data(db: AsyncSession, *, uid: str) -> None:
             is_admin=False,
         )
 
-    await user_crud.unlink_configuration_references(db, uid=uid)
-    await user_crud.delete_owned_session_data(db, uid=uid)
-    await user_crud.delete_owned_memory_data(db, uid=uid)
-    await user_crud.delete_owned_configuration(db, uid=uid)
+    await session_crud.unlink_profile_references(db, profile_ids=profile_ids, excluded_uid=uid)
+    await scheduled_task_crud.unlink_profile_references(db, profile_ids=profile_ids, excluded_uid=uid)
+    await message_platform_crud.unlink_profile_references(db, profile_ids=profile_ids, excluded_uid=uid)
+    await profile_crud.unlink_prompt_references(db, prompt_ids=prompt_ids, excluded_uid=uid)
+
+    await background_task_crud.delete_by_uid(db, uid=uid)
+    await scheduled_task_crud.delete_by_uid(db, uid=uid)
+    await message_platform_crud.delete_by_uid(db, uid=uid)
+    await audit_crud.delete_by_uid(db, uid=uid)
+    await system_log_crud.delete_by_uid(db, uid=uid)
+    await message_platform_outbox_crud.delete_by_uid(db, uid=uid)
+    await terminal_session_crud.delete_by_uid(db, uid=uid)
+    await session_crud.delete_by_uid(db, uid=uid)
+    await memory_store_crud.delete_by_uid(db, uid=uid)
+    await profile_crud.delete_by_uid(db, uid=uid)
+    await prompt_crud.delete_by_uid(db, uid=uid)
+    return session_ids

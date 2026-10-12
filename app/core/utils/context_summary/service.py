@@ -466,21 +466,15 @@ async def _ensure_context_summary(
                 content=candidate_summary,
                 message_id=candidate_message_id,
             ).as_message()
-            fixed_system_messages = [
-                message for message in fixed_request_messages if message.role == MessageRole.SYSTEM
-            ]
-            fixed_non_system_messages = [
-                message for message in fixed_request_messages if message.role != MessageRole.SYSTEM
-            ]
+            fixed_system_messages = [message for message in fixed_request_messages if message.role == MessageRole.SYSTEM]
+            fixed_non_system_messages = [message for message in fixed_request_messages if message.role != MessageRole.SYSTEM]
             candidate_request_messages = [
                 *fixed_system_messages,
                 *([candidate_summary_message] if candidate_summary_message is not None else []),
                 *recent_messages,
                 *fixed_non_system_messages,
             ]
-            materialized_candidate_request_messages = materialize_user_environment_prompts(
-                candidate_request_messages
-            )
+            materialized_candidate_request_messages = materialize_user_environment_prompts(candidate_request_messages)
             required_tokens = estimate_request_context_tokens(
                 materialized_candidate_request_messages,
                 tools,
@@ -499,9 +493,7 @@ async def _ensure_context_summary(
                 "compression_goal_tokens": compression_goal_tokens,
                 "summary_tokens": (
                     estimate_tokens(
-                        message_token_text(
-                            materialized_candidate_request_messages[len(fixed_system_messages)]
-                        ),
+                        message_token_text(materialized_candidate_request_messages[len(fixed_system_messages)]),
                         model_id=model_id,
                         protocol=protocol,
                     )

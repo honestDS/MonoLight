@@ -80,6 +80,15 @@ class CRUDTerminalSession:
             await db.flush()
         return result.rowcount or 0
 
+    async def delete_by_uid(self, db: AsyncSession, *, uid: str) -> int:
+        session_ids_result = await db.execute(select(TerminalSession.terminal_session_id).where(TerminalSession.uid == uid))
+        terminal_session_ids = list(session_ids_result.scalars().all())
+        if terminal_session_ids:
+            await db.execute(delete(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id.in_(terminal_session_ids)).execution_options(synchronize_session=False))
+        result = await db.execute(delete(TerminalSession).where(TerminalSession.uid == uid).execution_options(synchronize_session=False))
+        await db.flush()
+        return result.rowcount or 0
+
     async def get_by_audit_execution_record_id(
         self,
         db: AsyncSession,

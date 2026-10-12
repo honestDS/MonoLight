@@ -1056,6 +1056,57 @@ test('blocks a superuser edit when the owner is cleared', async t => {
   )))
 })
 
+test('updates a superuser prompt that starts unassigned without selecting an owner', async t => {
+  const prompt = {
+    id: 1151,
+    name: 'original name',
+    content: 'original content',
+    uid: null,
+    username: null,
+  }
+  const updatedPrompt = {
+    ...prompt,
+    name: 'updated name',
+    content: 'updated content',
+  }
+  let listCall = 0
+  const harness = createHarness(t, {
+    listHandler: async () => {
+      listCall += 1
+      return response([listCall === 1 ? prompt : updatedPrompt], 1, { current_uid: 'admin' })
+    },
+    userListHandler: async () => response([], 0),
+  })
+  await harness.flush()
+  harness.permissions.currentUser = { uid: 'admin', username: 'Admin' }
+  harness.permissions.isSuperuser = true
+
+  harness.module.showDialog('edit', prompt)
+  await harness.flush()
+  assert.equal(harness.module.form.uid, null)
+  assert.equal(harness.module.ownerUsersLoading.value, false)
+  assert.equal(harness.module.ownerUsersError.value, '')
+
+  harness.module.form.name = updatedPrompt.name
+  harness.module.form.content = updatedPrompt.content
+  await harness.module.submitForm()
+  await harness.flush()
+
+  assert.equal(harness.apiState.updateRequests.length, 1)
+  assert.equal(harness.apiState.updateRequests[0].id, prompt.id)
+  assert.deepEqual(snapshot(harness.apiState.updateRequests[0].payload), {
+    name: updatedPrompt.name,
+    content: updatedPrompt.content,
+  })
+  assert.equal('uid' in harness.apiState.updateRequests[0].payload, false)
+  assert.equal(harness.module.dialogVisible.value, false)
+  assert.deepEqual(snapshot(harness.module.prompts.value), [updatedPrompt])
+  assert.deepEqual(snapshot(harness.apiState.listRequests.map(request => request.params)), [
+    { page: 1, size: 10 },
+    { page: 1, size: 10 },
+  ])
+})
+
 test('retains a superuser edit after a prompt-in-use conflict and retries with the same payload', async t => {
   const prompt = {
     id: 1201,

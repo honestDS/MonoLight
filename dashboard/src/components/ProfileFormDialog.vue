@@ -631,6 +631,10 @@ const props = defineProps({
 })
 
 const ownerPromptOptions = computed(() => {
+  if (props.form.uid === null && props.dialogType === 'edit') {
+    return props.prompts.filter(item => item.uid === null)
+  }
+
   return props.form.uid ? props.prompts.filter(item => item.uid === props.form.uid) : []
 })
 

@@ -3,7 +3,7 @@ from typing import (
     TypeVar,
 )
 
-from sqlalchemy import func
+from sqlalchemy import delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
     SQLModel,
@@ -26,6 +26,24 @@ class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType
     async def get_multi(self, db: AsyncSession, *, skip: int = 0, limit: int = 100) -> list[ModelType]:
         result = await db.execute(select(self.model).order_by(self.model.id.desc()).offset(skip).limit(limit))
         return result.scalars().all()
+
+    async def get_all_by_uid(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        lock_for_update: bool = False,
+    ) -> list[ModelType]:
+        statement = select(self.model).where(self.model.uid == uid).order_by(*self.model.__table__.primary_key.columns)
+        if lock_for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        result = await db.execute(statement)
+        return list(result.scalars().all())
+
+    async def delete_by_uid(self, db: AsyncSession, *, uid: str) -> int:
+        result = await db.execute(delete(self.model).where(self.model.uid == uid))
+        await db.flush()
+        return result.rowcount or 0
 
     async def count(self, db: AsyncSession) -> int:
         result = await db.execute(select(func.count()).select_from(self.model))

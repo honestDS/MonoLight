@@ -684,6 +684,67 @@ async def test_prompt_update_superuser_can_edit_each_owner_scope_without_other_m
 
 
 @pytest.mark.asyncio
+async def test_prompt_update_referenced_orphan_keeps_owner_for_admin_and_rejects_regular_user(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], PromptIds],
+) -> None:
+    app, session_factory, prompt_ids = api_context
+    prompt_id = prompt_ids[None][0]
+    (profile_id,) = await _seed_profiles(session_factory, ((None, prompt_id, "orphan-reference"),))
+    before_prompts = await _prompt_snapshot(session_factory)
+    before_profiles = await _profile_snapshot(session_factory)
+    original_row = next(row for row in before_prompts if row[0] == prompt_id)
+    original_content = original_row[3]
+    original_created_at = original_row[4]
+    updated_name = "orphan-updated"
+    updated_content = "orphan-updated-content"
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        admin_response = await _update_prompt(
+            client,
+            _token("super-admin"),
+            prompt_id,
+            {"name": updated_name, "content": updated_content},
+        )
+        admin_data = _assert_updated_prompt(
+            admin_response,
+            uid=None,
+            name=updated_name,
+            content=updated_content,
+        )
+        assert admin_data["id"] == prompt_id
+        assert admin_data["created_at"] == original_created_at.isoformat()
+        _assert_only_prompt_changed(
+            before_prompts,
+            await _prompt_snapshot(session_factory),
+            prompt_id,
+            uid=None,
+            name=updated_name,
+            content=updated_content,
+        )
+        after_admin_profiles = await _profile_snapshot(session_factory)
+        assert after_admin_profiles == before_profiles
+        assert next(row for row in after_admin_profiles if row[0] == profile_id)[3] == prompt_id
+
+        async with session_factory() as session:
+            profile = (await session.execute(select(Profile).where(Profile.id == profile_id))).scalars().one()
+            prompt_text = await build_system_prompt(session, profile)
+        assert updated_content in prompt_text
+        assert original_content not in prompt_text
+
+        before_regular_prompts = await _prompt_snapshot(session_factory)
+        before_regular_profiles = await _profile_snapshot(session_factory)
+        regular_response = await _update_prompt(
+            client,
+            _token("alice"),
+            prompt_id,
+            {"name": "regular-forbidden-edit", "content": "not persisted"},
+        )
+        _assert_standard(regular_response, 403, data_is_none=True)
+        assert await _prompt_snapshot(session_factory) == before_regular_prompts
+        assert await _profile_snapshot(session_factory) == before_regular_profiles
+
+
+@pytest.mark.asyncio
 async def test_prompt_update_name_scope_allows_cross_owner_name_but_rejects_same_owner_duplicate_and_missing_id(
     api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], PromptIds],
 ) -> None:
@@ -1196,7 +1257,7 @@ async def test_profile_create_superuser_uid_user_a_cannot_bind_foreign_prompt(
 
 
 @pytest.mark.asyncio
-async def test_build_system_prompt_keeps_owned_content_and_excludes_foreign_or_orphan_content(
+async def test_build_system_prompt_scopes_owned_and_orphan_content_by_profile_owner(
     api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], PromptIds],
 ) -> None:
     _app, session_factory, prompt_ids = api_context
@@ -1209,11 +1270,31 @@ async def test_build_system_prompt_keeps_owned_content_and_excludes_foreign_or_o
             ("user-a", own_prompt_id, "build-own-profile"),
             ("user-a", foreign_prompt_id, "build-foreign-profile"),
             ("user-a", orphan_prompt_id, "build-orphan-profile"),
+            (None, orphan_prompt_id, "build-unowned-profile"),
+            (None, own_prompt_id, "build-unowned-owned-profile"),
         ),
     )
 
     async with session_factory() as session:
-        profiles = (await session.execute(select(Profile).where(Profile.name.in_(("build-own-profile", "build-foreign-profile", "build-orphan-profile"))))).scalars().all()
+        profiles = (
+            (
+                await session.execute(
+                    select(Profile).where(
+                        Profile.name.in_(
+                            (
+                                "build-own-profile",
+                                "build-foreign-profile",
+                                "build-orphan-profile",
+                                "build-unowned-profile",
+                                "build-unowned-owned-profile",
+                            )
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
         prompt_texts = {profile.name: await build_system_prompt(session, profile) for profile in profiles}
 
     own_content = "content-alice-one"
@@ -1222,7 +1303,17 @@ async def test_build_system_prompt_keeps_owned_content_and_excludes_foreign_or_o
     assert own_content in prompt_texts["build-own-profile"]
     assert foreign_content not in prompt_texts["build-foreign-profile"]
     assert orphan_content not in prompt_texts["build-orphan-profile"]
-    for prompt_text in prompt_texts.values():
+    assert orphan_content in prompt_texts["build-unowned-profile"]
+    assert own_content not in prompt_texts["build-unowned-profile"]
+    assert foreign_content not in prompt_texts["build-unowned-profile"]
+    assert own_content not in prompt_texts["build-unowned-owned-profile"]
+    for profile_name in (
+        "build-own-profile",
+        "build-foreign-profile",
+        "build-orphan-profile",
+        "build-unowned-owned-profile",
+    ):
+        prompt_text = prompt_texts[profile_name]
         assert foreign_content not in prompt_text
         assert orphan_content not in prompt_text
 

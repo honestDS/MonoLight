@@ -48,9 +48,14 @@
             v-model="form.uid"
             class="full-width-input"
             filterable
-            :placeholder="$t('prompts.select_owner')"
+            :placeholder="dialogType === 'edit' && originalPromptUid === null ? $t('prompts.owner_unassigned') : $t('prompts.select_owner')"
             :loading="ownerUsersLoading"
             :disabled="ownerUsersLoading || submitting">
+            <el-option
+              v-if="dialogType === 'edit' && originalPromptUid === null"
+              :label="$t('prompts.owner_unassigned')"
+              :value="null"
+            />
             <el-option v-for="item in ownerUsers" :key="item.uid" :label="item.username || item.uid" :value="item.uid" />
           </el-select>
           <el-input v-else :model-value="getOwnerLabel(form)" readonly></el-input>
@@ -102,6 +107,7 @@ const deleteSubmitting = ref(false)
 const dialogVisible = ref(false)
 const reassignDialogVisible = ref(false)
 const dialogType = ref('create')
+const originalPromptUid = ref(null)
 const pendingDeletePrompt = ref(null)
 const replacementPromptId = ref(null)
 const replacementPromptOptions = ref([])
@@ -229,6 +235,7 @@ const showDialog = (type, row = null) => {
   }
   dialogType.value = type
   if (type === 'edit' && row) {
+    originalPromptUid.value = row.uid
     form.id = row.id
     form.name = row.name
     form.uid = row.uid
@@ -236,6 +243,7 @@ const showDialog = (type, row = null) => {
     form.content = row.content || ''
   } else {
     const uid = userPermissionsStore.currentUser?.uid || currentUid.value || null
+    originalPromptUid.value = uid
     form.id = null
     form.name = ''
     form.uid = uid
@@ -256,7 +264,8 @@ const submitForm = async () => {
   }
   if (userPermissionsStore.isSuperuser === true) {
     if (ownerUsersLoading.value || ownerUsersError.value) return
-    if (!form.uid) return ElMessage.warning(t('prompts.select_owner'))
+    const canKeepUnassigned = dialogType.value === 'edit' && originalPromptUid.value === null && form.uid === null
+    if (!canKeepUnassigned && !form.uid) return ElMessage.warning(t('prompts.select_owner'))
   }
   submitting.value = true
   try {
@@ -264,7 +273,7 @@ const submitForm = async () => {
       name: form.name,
       content: form.content
     }
-    if (userPermissionsStore.isSuperuser === true) payload.uid = form.uid
+    if (userPermissionsStore.isSuperuser === true && form.uid !== null) payload.uid = form.uid
     if (dialogType.value === 'create') {
       await promptApi.create(payload)
     } else {

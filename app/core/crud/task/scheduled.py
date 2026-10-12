@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -88,6 +88,13 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         stmt = select(ScheduledTask.id).where(ScheduledTask.profile_id == profile_id).limit(1)
         result = await db.execute(stmt)
         return result.scalar() is not None
+
+    async def unlink_profile_references(self, db: AsyncSession, *, profile_ids: set[int], excluded_uid: str) -> int:
+        if not profile_ids:
+            return 0
+        result = await db.execute(update(ScheduledTask).where(ScheduledTask.uid != excluded_uid, ScheduledTask.profile_id.in_(profile_ids)).values(profile_id=None))
+        await db.flush()
+        return result.rowcount or 0
 
     async def list_due(self, db: AsyncSession, *, limit: int = 100) -> list[ScheduledTask]:
         now = get_local_time()

@@ -8,6 +8,7 @@ from pydantic import (
     Field as PydanticField,
 )
 from sqlmodel import (
+    JSON,
     Column,
     DateTime,
     Field,
@@ -37,6 +38,16 @@ class User(UserBase, table=True):
     updated_at: datetime | None = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True), onupdate=get_local_time),
+    )
+
+
+class UserFileCleanup(SQLModel, table=True):
+    __tablename__ = "user_file_cleanup"
+
+    uid: str = Field(primary_key=True, max_length=50)
+    legacy_session_ids: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
     )
 
 

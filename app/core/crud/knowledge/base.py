@@ -13,11 +13,17 @@ from app.models.knowledge_base import (
     KnowledgeBaseCollectionOwner,
     KnowledgeBaseCreate,
     KnowledgeBaseDocument,
+    KnowledgeBaseEmbeddingDelta,
     KnowledgeBaseIndexStatus,
     KnowledgeBaseProfileBinding,
     KnowledgeBaseType,
     KnowledgeBaseUpdate,
+    KnowledgeJob,
+    KnowledgeOrganizationFragment,
+    KnowledgeOrganizationSnapshot,
+    KnowledgeOrganizationStage,
     ManagedKnowledgeItem,
+    ManagedKnowledgeRevision,
 )
 
 
@@ -174,6 +180,19 @@ class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBa
             await db.commit()
         else:
             await db.flush()
+
+    async def delete_by_uid(self, db: AsyncSession, *, uid: str) -> int:
+        knowledge_base_result = await db.execute(delete(KnowledgeBase).where(KnowledgeBase.uid == uid))
+        await db.execute(delete(KnowledgeOrganizationFragment).where(KnowledgeOrganizationFragment.uid == uid))
+        await db.execute(delete(KnowledgeOrganizationStage).where(KnowledgeOrganizationStage.uid == uid))
+        await db.execute(delete(KnowledgeJob).where(KnowledgeJob.uid == uid))
+        await db.execute(delete(ManagedKnowledgeRevision).where(ManagedKnowledgeRevision.uid == uid))
+        await db.execute(delete(ManagedKnowledgeItem).where(ManagedKnowledgeItem.uid == uid))
+        await db.execute(delete(KnowledgeBaseEmbeddingDelta).where(KnowledgeBaseEmbeddingDelta.uid == uid))
+        await db.execute(delete(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.uid == uid))
+        await db.execute(delete(KnowledgeOrganizationSnapshot).where(KnowledgeOrganizationSnapshot.uid == uid))
+        await db.flush()
+        return int(knowledge_base_result.rowcount or 0)
 
     async def mark_managed_initial_index_ready(
         self,
