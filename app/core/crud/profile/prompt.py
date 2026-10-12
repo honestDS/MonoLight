@@ -36,8 +36,6 @@ class CRUDPrompt(CRUDBase[PromptLibrary, PromptCreate, PromptUpdate]):
         *,
         lock_for_reference_write: bool = False,
     ) -> PromptLibrary | None:
-        if uid is None:
-            return None
         if lock_for_reference_write:
             prompt = await self.get(db, prompt_id, lock_for_reference_write=True)
             if prompt is None or prompt.uid != uid:

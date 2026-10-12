@@ -54,4 +54,5 @@ from app.models.system_setting import SystemSetting as SystemSetting
 from app.models.terminal_session import TerminalControlCommand as TerminalControlCommand
 from app.models.terminal_session import TerminalSession as TerminalSession
 from app.models.user import User as User
+from app.models.user import UserFileCleanup as UserFileCleanup
 from app.models.worker_lease import WorkerLease as WorkerLease

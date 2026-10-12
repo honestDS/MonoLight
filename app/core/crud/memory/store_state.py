@@ -1,17 +1,22 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_, update
+from sqlalchemy import delete, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.utils.time import get_local_time
 from app.models.memory import (
+    LongTermMemoryEmbeddingDelta,
+    LongTermMemoryEmbeddingRevision,
     LongTermMemoryEmbeddingSelectionToken,
     LongTermMemoryIndexStatus,
     LongTermMemoryMigrationStatus,
+    LongTermMemoryMutationJob,
     LongTermMemoryOldCollectionCleanupStatus,
+    LongTermMemoryRecord,
+    LongTermMemoryRevision,
     LongTermMemoryStore,
 )
 from app.providers.database.time import get_database_time
@@ -29,9 +34,33 @@ class CRUDLongTermMemoryStore:
         result = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
         return result.scalars().first()
 
+    async def delete_by_uid(self, db: AsyncSession, *, uid: str) -> int:
+        await db.execute(delete(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid))
+        await db.execute(delete(LongTermMemoryEmbeddingDelta).where(LongTermMemoryEmbeddingDelta.uid == uid))
+        await db.execute(delete(LongTermMemoryRevision).where(LongTermMemoryRevision.uid == uid))
+        await db.execute(delete(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid))
+        await db.execute(delete(LongTermMemoryEmbeddingSelectionToken).where(LongTermMemoryEmbeddingSelectionToken.uid == uid))
+        await db.execute(delete(LongTermMemoryEmbeddingRevision).where(LongTermMemoryEmbeddingRevision.uid == uid))
+        result = await db.execute(delete(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid))
+        await db.flush()
+        return result.rowcount or 0
+
     async def get_snapshot_by_uid(self, db: AsyncSession, *, uid: str) -> LongTermMemoryStore | None:
         result = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
         return result.scalars().first()
+
+    async def get_all_by_uid(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        lock_for_update: bool = False,
+    ) -> list[LongTermMemoryStore]:
+        statement = select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).order_by(LongTermMemoryStore.id.asc())
+        if lock_for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        result = await db.execute(statement)
+        return list(result.scalars().all())
 
     async def lock_for_mutation(
         self,

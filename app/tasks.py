@@ -16,6 +16,7 @@ from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import TEMP_DIR
+from app.core.user_file_cleanup import recover_user_file_cleanup
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -120,6 +121,8 @@ async def _get_active_temp_dir_max_size_mb() -> int | None:
 async def background_temp_cleaner(interval_seconds: int = 10):
     while True:
         try:
+            async with AsyncSessionLocal() as db:
+                await recover_user_file_cleanup(db)
             max_size_mb = await _get_active_temp_dir_max_size_mb()
             if max_size_mb is not None:
                 max_size_bytes = max_size_mb * 1024 * 1024

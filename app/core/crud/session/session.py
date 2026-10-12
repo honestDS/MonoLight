@@ -10,9 +10,12 @@ from app.core.session_source import default_show_tool_calls_for_source
 from app.core.utils.request_token_baseline import MAIN_DIALOGUE_REQUEST_PURPOSE
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message
 from app.models.session import ChatSession
+from app.models.session_event import SessionEvent
 from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
+from app.models.session_todo import SessionTodoPlan
 
 
 class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
@@ -116,9 +119,59 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         )
         return list(result.scalars().all())
 
+    async def unlink_profile_references(
+        self,
+        db: AsyncSession,
+        *,
+        profile_ids: set[int],
+        excluded_uid: str,
+    ) -> int:
+        if not profile_ids:
+            return 0
+
+        profile_result = await db.execute(
+            update(ChatSession)
+            .where(
+                ChatSession.uid != excluded_uid,
+                ChatSession.profile_id.in_(profile_ids),
+            )
+            .values(profile_id=None)
+        )
+        profile_override_result = await db.execute(
+            update(ChatSession)
+            .where(
+                ChatSession.uid != excluded_uid,
+                ChatSession.profile_override_id.in_(profile_ids),
+            )
+            .values(profile_override_id=None)
+        )
+        await db.flush()
+        return (profile_result.rowcount or 0) + (profile_override_result.rowcount or 0)
+
     async def get_by_session_id(self, db: AsyncSession, session_id: str) -> ChatSession | None:
         result = await db.execute(select(ChatSession).where(ChatSession.session_id == session_id))
         return result.scalars().first()
+
+    async def get_multi_by_session_ids(
+        self,
+        db: AsyncSession,
+        *,
+        session_ids: list[str],
+        case_insensitive: bool = False,
+        lock_for_update: bool = False,
+    ) -> list[ChatSession]:
+        if not session_ids:
+            return []
+
+        if case_insensitive:
+            session_id_filter = func.lower(ChatSession.session_id).in_({session_id.lower() for session_id in session_ids})
+        else:
+            session_id_filter = ChatSession.session_id.in_(session_ids)
+        stmt = select(ChatSession).where(session_id_filter)
+        if lock_for_update:
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
 
     async def get_by_session_id_for_update(self, db: AsyncSession, *, session_id: str, uid: str) -> ChatSession | None:
         result = await db.execute(
@@ -355,6 +408,17 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         else:
             await db.flush()
         return (result.rowcount or 0) == 1
+
+    async def delete_by_uid(self, db: AsyncSession, *, uid: str) -> int:
+        await db.execute(delete(ContextSummaryFragment).where(ContextSummaryFragment.uid == uid))
+        await db.execute(delete(ContextSummaryStage).where(ContextSummaryStage.uid == uid))
+        await db.execute(delete(Message).where(Message.uid == uid))
+        await db.execute(delete(SessionEvent).where(SessionEvent.uid == uid))
+        await db.execute(delete(SessionTodoPlan).where(SessionTodoPlan.uid == uid))
+        await db.execute(delete(SessionReplyWorkItem).where(SessionReplyWorkItem.uid == uid))
+        result = await db.execute(delete(ChatSession).where(ChatSession.uid == uid))
+        await db.flush()
+        return result.rowcount or 0
 
     async def delete_by_session(
         self,

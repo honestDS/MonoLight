@@ -14,6 +14,7 @@ from app.models.audit import (
     AuditRecord,
     AuditRecordStatus,
     AuditToolDetail,
+    AuditToolResultVersion,
 )
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 
@@ -302,6 +303,12 @@ class CRUDAuditRecovery:
             )
         )
         return list(result.scalars().all())
+
+    async def delete_by_uid(self, db: AsyncSession, *, uid: str) -> int:
+        await db.execute(delete(AuditToolResultVersion).where(AuditToolResultVersion.uid == uid))
+        result = await db.execute(delete(AuditRecord).where(AuditRecord.uid == uid))
+        await db.flush()
+        return result.rowcount or 0
 
     async def delete_records(self, db: AsyncSession, *, audit_record_ids: set[int]) -> int:
         if not audit_record_ids:

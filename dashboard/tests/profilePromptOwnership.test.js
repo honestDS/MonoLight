@@ -156,3 +156,42 @@ test('preserves bindings outside visible creation, including async edit prompt l
   assert.deepEqual(optionIds(asyncEdit), ['prompt-a'])
   assert.equal(asyncEdit.form.prompt_id, 'prompt-a')
 })
+
+test('shows only unowned prompts for an edit with a null uid, including async idempotent loading', async t => {
+  const edit = createHarness({
+    dialogType: 'edit',
+    uid: null,
+    promptId: 'prompt-null',
+    prompts: [],
+  })
+  t.after(() => edit.stop())
+
+  assert.deepEqual(optionIds(edit), [])
+  assert.equal(edit.form.prompt_id, 'prompt-null')
+
+  const loadedPrompts = [
+    { id: 'prompt-a', uid: 'user-a', name: 'Prompt A' },
+    { id: 'prompt-b', uid: 'user-b', name: 'Prompt B' },
+    { id: 'prompt-null', uid: null, name: 'Shared Prompt' },
+    { id: 'prompt-missing-uid', name: 'Missing Owner Prompt' },
+  ]
+  edit.props.prompts = loadedPrompts
+  await edit.flush()
+  assert.deepEqual(optionIds(edit), ['prompt-null'])
+  assert.equal(edit.form.prompt_id, 'prompt-null')
+
+  edit.props.prompts = [...loadedPrompts]
+  await edit.flush()
+  assert.deepEqual(optionIds(edit), ['prompt-null'])
+  assert.equal(edit.form.prompt_id, 'prompt-null')
+
+  edit.form.uid = 'user-b'
+  await edit.flush()
+  assert.deepEqual(optionIds(edit), ['prompt-b'])
+  assert.equal(edit.form.prompt_id, 'prompt-null')
+
+  edit.form.uid = null
+  await edit.flush()
+  assert.deepEqual(optionIds(edit), ['prompt-null'])
+  assert.equal(edit.form.prompt_id, 'prompt-null')
+})

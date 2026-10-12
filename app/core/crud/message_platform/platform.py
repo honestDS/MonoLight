@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import func, update
+from sqlalchemy import func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -47,6 +47,27 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
             await db.commit()
         else:
             await db.flush()
+        return result.rowcount or 0
+
+    async def unlink_profile_references(
+        self,
+        db: AsyncSession,
+        *,
+        profile_ids: set[int],
+        excluded_uid: str,
+    ) -> int:
+        if not profile_ids:
+            return 0
+        result = await db.execute(
+            update(MessagePlatform)
+            .where(
+                or_(MessagePlatform.uid != excluded_uid, MessagePlatform.uid.is_(None)),
+                MessagePlatform.profile_id.in_(profile_ids),
+            )
+            .values(profile_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        await db.flush()
         return result.rowcount or 0
 
     async def get_by_name(self, db: AsyncSession, name: str, *, uid: str | None) -> MessagePlatform | None:

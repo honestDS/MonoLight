@@ -1,4 +1,4 @@
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.base import CRUDBase
@@ -163,6 +163,26 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
             query = query.order_by(Profile.id.asc()).with_for_update().execution_options(populate_existing=True)
         result = await db.execute(query)
         return list(result.scalars().all())
+
+    async def unlink_prompt_references(
+        self,
+        db: AsyncSession,
+        *,
+        prompt_ids: set[int],
+        excluded_uid: str,
+    ) -> int:
+        if not prompt_ids:
+            return 0
+        result = await db.execute(
+            update(Profile)
+            .where(
+                or_(Profile.uid != excluded_uid, Profile.uid.is_(None)),
+                Profile.prompt_id.in_(prompt_ids),
+            )
+            .values(prompt_id=None)
+        )
+        await db.flush()
+        return result.rowcount or 0
 
     async def reassign_prompt(self, db: AsyncSession, *, source_prompt_id: int, target_prompt_id: int) -> int:
         profiles = await self.get_multi_by_prompt_id(db, source_prompt_id)

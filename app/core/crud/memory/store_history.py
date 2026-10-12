@@ -117,6 +117,19 @@ class CRUDLongTermMemoryEmbeddingRevision:
         result = await db.execute(select(LongTermMemoryEmbeddingRevision).where(LongTermMemoryEmbeddingRevision.uid == uid).order_by(LongTermMemoryEmbeddingRevision.revision.desc()).offset(skip).limit(limit))
         return list(result.scalars().all())
 
+    async def get_all_by_uid(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        lock_for_update: bool = False,
+    ) -> list[LongTermMemoryEmbeddingRevision]:
+        stmt = select(LongTermMemoryEmbeddingRevision).where(LongTermMemoryEmbeddingRevision.uid == uid).order_by(LongTermMemoryEmbeddingRevision.id.asc())
+        if lock_for_update:
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
     async def create(
         self,
         db: AsyncSession,
