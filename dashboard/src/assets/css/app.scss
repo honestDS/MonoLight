@@ -532,6 +532,7 @@ body {
 }
 .change-password-dialog.el-dialog {
   width: min(460px, calc(100vw - 32px));
+  align-self: center;
 }
 .el-main.app-main {
   padding: 0;
