@@ -4,6 +4,7 @@ from fastapi import (
     Query,
 )
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
@@ -12,6 +13,7 @@ from app.core.constants import (
     ERR_PROMPT_NAME_EXISTS,
     ERR_PROMPT_NOT_FOUND,
     ERR_PROMPT_OWNER_CHANGE_IN_USE,
+    ERR_PROMPT_OWNER_REQUIRED,
     ERR_PROMPT_REPLACEMENT_INVALID,
     ERR_SESSION_NO_PERMISSION,
     ERR_USER_NOT_FOUND,
@@ -28,6 +30,7 @@ from app.core.exceptions import (
     ResourceNotFoundException,
 )
 from app.core.security import get_current_user
+from app.core.utils.database_integrity import is_unique_constraint_violation
 from app.models.prompt import (
     PromptCreate,
     PromptResponse,
@@ -50,6 +53,14 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
         raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
     return current_user
+
+
+def _is_prompt_name_integrity_error(exc: IntegrityError) -> bool:
+    return is_unique_constraint_violation(
+        exc,
+        constraint_names=("uq_prompt_uid_name",),
+        fallback_marker_groups=(("unique constraint failed: prompt.uid, prompt.name",),),
+    )
 
 
 @router.get("/list", response_model=StandardResponse)
@@ -106,7 +117,13 @@ async def create_prompt(
     if await prompt_crud.get_by_name(db, data.name, uid=owner.uid):
         raise ParameterException(ERR_PROMPT_NAME_EXISTS)
 
-    db_prompt = await prompt_crud.create(db, obj_in=data)
+    try:
+        db_prompt = await prompt_crud.create(db, obj_in=data)
+    except IntegrityError as exc:
+        await db.rollback()
+        if _is_prompt_name_integrity_error(exc):
+            raise ParameterException(ERR_PROMPT_NAME_EXISTS) from exc
+        raise
     response = PromptResponse.model_validate(db_prompt)
     response.username = owner_username
     return StandardResponse.success(
@@ -140,14 +157,16 @@ async def update_prompt(
         owner_uid = db_prompt.uid
         if "uid" in data.model_fields_set:
             if data.uid is None:
-                raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
+                raise ParameterException(ERR_PROMPT_OWNER_REQUIRED)
             if not is_superuser and data.uid != db_prompt.uid:
                 raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
             owner_uid = data.uid
             if not owner:
                 raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
-        elif owner_uid is not None:
+        elif owner_uid:
             owner = await user_crud.get_by_uid(db, owner_uid)
+        else:
+            raise ParameterException(ERR_PROMPT_OWNER_REQUIRED)
 
         owner_changed = owner_uid != db_prompt.uid
         if owner_changed and await profile_crud.get_multi_by_prompt_id(db, prompt_id):
@@ -167,6 +186,11 @@ async def update_prompt(
             data=response,
             message=MSG_PROMPT_UPDATED,
         )
+    except IntegrityError as exc:
+        await db.rollback()
+        if _is_prompt_name_integrity_error(exc):
+            raise ParameterException(ERR_PROMPT_NAME_EXISTS) from exc
+        raise
     except Exception:
         await db.rollback()
         raise

@@ -19,9 +19,15 @@ import app.core.security as security
 from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router
 from app.api.v1.users import router as user_router
+from app.core.constants import (
+    ERR_DB_OPERATION_FAILED,
+    ERR_PROMPT_NAME_EXISTS,
+    ERR_PROMPT_OWNER_REQUIRED,
+)
 from app.core.crud.account.user import user_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.profile.prompt import prompt_crud
+from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt
 from app.handler import register_handlers
@@ -663,7 +669,6 @@ async def test_prompt_update_superuser_can_edit_each_owner_scope_without_other_m
         ("admin", prompt_ids["admin"][0], "admin-updated"),
         ("user-a", prompt_ids["user-a"][0], "alice-by-admin"),
         ("user-b", prompt_ids["user-b"][0], "bob-by-admin"),
-        (None, prompt_ids[None][0], "orphan-updated"),
         ("deleted-user", prompt_ids["deleted-user"][0], "legacy-updated"),
     )
 
@@ -683,65 +688,69 @@ async def test_prompt_update_superuser_can_edit_each_owner_scope_without_other_m
             _assert_only_prompt_changed(before, after, prompt_id, uid=uid, name=name, content=content)
 
 
+@pytest.mark.parametrize(
+    "owner_payload",
+    (
+        pytest.param({}, id="omitted"),
+        pytest.param({"uid": None}, id="null"),
+    ),
+)
 @pytest.mark.asyncio
-async def test_prompt_update_referenced_orphan_keeps_owner_for_admin_and_rejects_regular_user(
+async def test_prompt_update_referenced_orphan_requires_owner_for_admin_and_rejects_regular_user(
     api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], PromptIds],
+    owner_payload: dict[str, Any],
 ) -> None:
     app, session_factory, prompt_ids = api_context
     prompt_id = prompt_ids[None][0]
-    (profile_id,) = await _seed_profiles(session_factory, ((None, prompt_id, "orphan-reference"),))
+    await _seed_profiles(session_factory, ((None, prompt_id, "orphan-reference"),))
     before_prompts = await _prompt_snapshot(session_factory)
     before_profiles = await _profile_snapshot(session_factory)
-    original_row = next(row for row in before_prompts if row[0] == prompt_id)
-    original_content = original_row[3]
-    original_created_at = original_row[4]
-    updated_name = "orphan-updated"
-    updated_content = "orphan-updated-content"
+    body = {"name": "orphan-updated", "content": "orphan-updated-content", **owner_payload}
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        admin_response = await _update_prompt(
+        admin_response = await _update_prompt(client, _token("super-admin"), prompt_id, body)
+        admin_payload = _assert_standard(admin_response, 400, data_is_none=True)
+        assert admin_payload["message"] == t(ERR_PROMPT_OWNER_REQUIRED)
+        assert await _prompt_snapshot(session_factory) == before_prompts
+        assert await _profile_snapshot(session_factory) == before_profiles
+
+        regular_response = await _update_prompt(client, _token("alice"), prompt_id, body)
+        _assert_standard(regular_response, 403, data_is_none=True)
+        assert await _prompt_snapshot(session_factory) == before_prompts
+        assert await _profile_snapshot(session_factory) == before_profiles
+
+
+@pytest.mark.asyncio
+async def test_prompt_update_legacy_empty_owner_requires_owner(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], PromptIds],
+) -> None:
+    app, session_factory, _prompt_ids = api_context
+    async with session_factory() as session:
+        prompt = PromptLibrary(
+            uid="",
+            name="legacy-empty-owner",
+            content="legacy-empty-owner-content",
+        )
+        session.add(prompt)
+        await session.flush()
+        assert prompt.id is not None
+        prompt_id = int(prompt.id)
+        await session.commit()
+
+    before_prompts = await _prompt_snapshot(session_factory)
+    before_profiles = await _profile_snapshot(session_factory)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await _update_prompt(
             client,
             _token("super-admin"),
             prompt_id,
-            {"name": updated_name, "content": updated_content},
+            {"name": "legacy-empty-owner-updated", "content": "legacy-empty-owner-updated-content"},
         )
-        admin_data = _assert_updated_prompt(
-            admin_response,
-            uid=None,
-            name=updated_name,
-            content=updated_content,
-        )
-        assert admin_data["id"] == prompt_id
-        assert admin_data["created_at"] == original_created_at.isoformat()
-        _assert_only_prompt_changed(
-            before_prompts,
-            await _prompt_snapshot(session_factory),
-            prompt_id,
-            uid=None,
-            name=updated_name,
-            content=updated_content,
-        )
-        after_admin_profiles = await _profile_snapshot(session_factory)
-        assert after_admin_profiles == before_profiles
-        assert next(row for row in after_admin_profiles if row[0] == profile_id)[3] == prompt_id
 
-        async with session_factory() as session:
-            profile = (await session.execute(select(Profile).where(Profile.id == profile_id))).scalars().one()
-            prompt_text = await build_system_prompt(session, profile)
-        assert updated_content in prompt_text
-        assert original_content not in prompt_text
-
-        before_regular_prompts = await _prompt_snapshot(session_factory)
-        before_regular_profiles = await _profile_snapshot(session_factory)
-        regular_response = await _update_prompt(
-            client,
-            _token("alice"),
-            prompt_id,
-            {"name": "regular-forbidden-edit", "content": "not persisted"},
-        )
-        _assert_standard(regular_response, 403, data_is_none=True)
-        assert await _prompt_snapshot(session_factory) == before_regular_prompts
-        assert await _profile_snapshot(session_factory) == before_regular_profiles
+    payload = _assert_standard(response, 400, data_is_none=True)
+    assert payload["message"] == t(ERR_PROMPT_OWNER_REQUIRED)
+    assert await _prompt_snapshot(session_factory) == before_prompts
+    assert await _profile_snapshot(session_factory) == before_profiles
 
 
 @pytest.mark.asyncio
@@ -794,6 +803,81 @@ async def test_prompt_update_name_scope_allows_cross_owner_name_but_rejects_same
         )
         _assert_standard(missing_response, 404, data_is_none=True)
         assert await _prompt_snapshot(session_factory) == before_missing
+
+
+@pytest.mark.parametrize("operation", ("create", "rename", "transfer"))
+@pytest.mark.asyncio
+async def test_prompt_database_name_conflict_rolls_back(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], PromptIds],
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, session_factory, prompt_ids = api_context
+    before = await _prompt_snapshot(session_factory)
+
+    original_get_by_name = prompt_crud.get_by_name
+
+    async def get_by_name_without_conflict(*args: Any, **kwargs: Any) -> None:
+        await original_get_by_name(*args, **kwargs)
+        return None
+
+    monkeypatch.setattr(prompt_crud, "get_by_name", get_by_name_without_conflict)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        if operation == "create":
+            response = await _create_prompt(
+                client,
+                _token("alice"),
+                {"name": "alice-one", "content": "database-conflict-create"},
+            )
+        else:
+            prompt_id = prompt_ids["user-a"][0]
+            if operation == "rename":
+                token = _token("alice")
+                body = {"name": "alice-two", "content": "database-conflict-rename"}
+            else:
+                token = _token("super-admin")
+                body = {"uid": "user-b", "name": "bob-one", "content": "database-conflict-transfer"}
+            response = await _update_prompt(client, token, prompt_id, body)
+
+    payload = _assert_standard(response, 400, data_is_none=True)
+    assert payload["message"] == t(ERR_PROMPT_NAME_EXISTS)
+    assert await _prompt_snapshot(session_factory) == before
+
+
+@pytest.mark.parametrize("operation", ("create", "update"))
+@pytest.mark.asyncio
+async def test_prompt_unrelated_integrity_error_is_not_name_conflict(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], PromptIds],
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, session_factory, prompt_ids = api_context
+    prompt_id = prompt_ids["user-a"][0]
+    before = await _prompt_snapshot(session_factory)
+
+    if operation == "create":
+        original_create = prompt_crud.create
+
+        async def create_with_duplicate_id(*args: Any, **kwargs: Any) -> Any:
+            kwargs["update_dict"] = {"id": prompt_id}
+            return await original_create(*args, **kwargs)
+
+        monkeypatch.setattr(prompt_crud, "create", create_with_duplicate_id)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        if operation == "create":
+            response = await _create_prompt(
+                client,
+                _token("alice"),
+                {"name": "database-conflict-unrelated", "content": "valid-content"},
+            )
+        else:
+            response = await _update_prompt(client, _token("alice"), prompt_id, {"content": None})
+
+    payload = _assert_standard(response, 500, data_is_none=True)
+    assert payload["message"] == t(ERR_DB_OPERATION_FAILED)
+    assert await _prompt_snapshot(session_factory) == before
 
 
 @pytest.mark.asyncio
@@ -1456,7 +1540,7 @@ async def test_prompt_update_regular_user_cannot_change_own_prompt_owner_in_json
 @pytest.mark.parametrize(
     "requested_uid, expected_status",
     (
-        pytest.param(None, 404, id="null"),
+        pytest.param(None, 400, id="null"),
         pytest.param("deleted-user", 404, id="missing-user"),
         pytest.param("", 422, id="empty"),
         pytest.param("x" * 51, 422, id="too-long"),
@@ -1484,7 +1568,9 @@ async def test_prompt_update_superuser_rejects_invalid_owner_uid_without_prompt_
             },
         )
 
-    _assert_standard(response, expected_status, data_is_none=True)
+    payload = _assert_standard(response, expected_status, data_is_none=True)
+    if requested_uid is None:
+        assert payload["message"] == t(ERR_PROMPT_OWNER_REQUIRED)
     assert await _prompt_snapshot(session_factory) == before_prompts
     assert await _profile_snapshot(session_factory) == before_profiles
 
@@ -2207,5 +2293,277 @@ async def test_profile_update_to_replacement_serializes_with_prompt_delete(
         async with session_factory() as session:
             await session.execute(delete(Profile).where(Profile.uid == test_uid))
             await session.execute(delete(PromptLibrary).where(PromptLibrary.uid == test_uid))
+            await session.execute(delete(User).where(User.uid == test_uid))
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_prompt_concurrent_rename_keeps_owner_names_unique(
+    prompt_profile_lock_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = prompt_profile_lock_session_factory
+    test_uid = f"rename-lock-{uuid.uuid4().hex[:12]}"
+    prompt_a_id: int | None = None
+    prompt_b_id: int | None = None
+    request_tasks: list[asyncio.Task[httpx.Response]] = []
+    responses: list[httpx.Response] | None = None
+    name_queries_returned = asyncio.Event()
+    release_name_queries = asyncio.Event()
+    renamed_name = f"{test_uid}-renamed"
+    updated_contents: dict[int, str] = {}
+    original_rows: dict[int, tuple[str | None, str, str, datetime]] = {}
+
+    try:
+        async with session_factory() as session:
+            is_mysql = session.get_bind().dialect.name == "mysql"
+            test_user = User(
+                uid=test_uid,
+                username=f"{test_uid}-user",
+                is_active=True,
+                is_superuser=False,
+            )
+            prompt_a = PromptLibrary(
+                uid=test_uid,
+                name=f"{test_uid}-prompt-a",
+                content=f"{test_uid}-content-a",
+            )
+            prompt_b = PromptLibrary(
+                uid=test_uid,
+                name=f"{test_uid}-prompt-b",
+                content=f"{test_uid}-content-b",
+            )
+            session.add_all([test_user, prompt_a, prompt_b])
+            await session.flush()
+            assert prompt_a.id is not None
+            assert prompt_b.id is not None
+            prompt_a_id = int(prompt_a.id)
+            prompt_b_id = int(prompt_b.id)
+            updated_contents = {
+                prompt_a_id: f"{test_uid}-updated-content-a",
+                prompt_b_id: f"{test_uid}-updated-content-b",
+            }
+            await session.commit()
+            await session.refresh(prompt_a)
+            await session.refresh(prompt_b)
+            original_rows = {
+                prompt_a_id: (prompt_a.uid, prompt_a.name, prompt_a.content, prompt_a.created_at),
+                prompt_b_id: (prompt_b.uid, prompt_b.name, prompt_b.content, prompt_b.created_at),
+            }
+
+        app = FastAPI()
+        register_handlers(app)
+        app.include_router(router, prefix="/api/v1")
+
+        async def override_get_db() -> AsyncGenerator[AsyncSession]:
+            async with session_factory() as session:
+                try:
+                    yield session
+                finally:
+                    if session.in_transaction():
+                        await session.rollback()
+
+        async def override_current_user() -> User:
+            return test_user
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[security.get_current_user] = override_current_user
+
+        original_get_by_name = prompt_crud.get_by_name
+        name_query_count = 0
+
+        async def gated_get_by_name(
+            db: AsyncSession,
+            name: str,
+            uid: str | None = None,
+        ) -> PromptLibrary | None:
+            nonlocal name_query_count
+            result = await original_get_by_name(db, name, uid=uid)
+            if is_mysql and uid == test_uid and name == renamed_name:
+                name_query_count += 1
+                if name_query_count >= 2:
+                    name_queries_returned.set()
+                await asyncio.wait_for(release_name_queries.wait(), 10)
+            return result
+
+        monkeypatch.setattr(prompt_crud, "get_by_name", gated_get_by_name)
+
+        assert prompt_a_id is not None
+        assert prompt_b_id is not None
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            request_tasks = [
+                asyncio.create_task(
+                    client.post(
+                        "/api/v1/prompts/update",
+                        params={"prompt_id": prompt_a_id},
+                        json={"name": renamed_name, "content": updated_contents[prompt_a_id]},
+                    )
+                ),
+                asyncio.create_task(
+                    client.post(
+                        "/api/v1/prompts/update",
+                        params={"prompt_id": prompt_b_id},
+                        json={"name": renamed_name, "content": updated_contents[prompt_b_id]},
+                    )
+                ),
+            ]
+            if is_mysql:
+                await asyncio.wait_for(name_queries_returned.wait(), 10)
+                release_name_queries.set()
+            responses = list(await asyncio.wait_for(asyncio.gather(*request_tasks), 10))
+
+        assert responses is not None
+        assert sorted(response.status_code for response in responses) == [200, 400]
+        winner_response = next(response for response in responses if response.status_code == 200)
+        loser_response = next(response for response in responses if response.status_code == 400)
+        winner_payload = _assert_standard(winner_response, 200)
+        loser_payload = _assert_standard(loser_response, 400, data_is_none=True)
+        assert loser_payload["message"] == t(ERR_PROMPT_NAME_EXISTS)
+
+        async with session_factory() as session:
+            prompts = (await session.execute(select(PromptLibrary).where(PromptLibrary.uid == test_uid).order_by(PromptLibrary.id))).scalars().all()
+
+        assert {prompt.id for prompt in prompts} == {prompt_a_id, prompt_b_id}
+        assert sum(prompt.name == renamed_name for prompt in prompts) == 1
+        winner = next(prompt for prompt in prompts if prompt.name == renamed_name)
+        loser = next(prompt for prompt in prompts if prompt.id != winner.id)
+        assert winner.id in original_rows
+        assert loser.id in original_rows
+        winner_original = original_rows[winner.id]
+        loser_original = original_rows[loser.id]
+        assert winner.uid == winner_original[0]
+        assert winner.name == renamed_name
+        assert winner.content == updated_contents[winner.id]
+        assert winner.created_at == winner_original[3]
+        assert (loser.uid, loser.name, loser.content, loser.created_at) == loser_original
+
+        winner_data = winner_payload["data"]
+        assert winner_data["id"] == winner.id
+        assert winner_data["uid"] == test_uid
+        assert winner_data["name"] == renamed_name
+        assert winner_data["content"] == updated_contents[winner.id]
+    finally:
+        release_name_queries.set()
+        for task in request_tasks:
+            if not task.done():
+                task.cancel()
+        if request_tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*request_tasks, return_exceptions=True),
+                10,
+            )
+        async with session_factory() as session:
+            await session.execute(delete(PromptLibrary).where(PromptLibrary.uid == test_uid))
+            await session.execute(delete(User).where(User.uid == test_uid))
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_prompt_concurrent_ownerless_updates_require_owner(
+    prompt_profile_lock_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    session_factory = prompt_profile_lock_session_factory
+    test_uid = f"ownerless-update-{uuid.uuid4().hex[:12]}"
+    prompt_ids: tuple[int, ...] = ()
+    original_rows: dict[int, tuple[str | None, str, str, datetime]] = {}
+    request_tasks: list[asyncio.Task[httpx.Response]] = []
+
+    try:
+        async with session_factory() as session:
+            test_user = User(
+                uid=test_uid,
+                username=f"{test_uid}-user",
+                is_active=True,
+                is_superuser=True,
+            )
+            prompt_a = PromptLibrary(
+                uid=None,
+                name=f"{test_uid}-prompt-a",
+                content=f"{test_uid}-content-a",
+            )
+            prompt_b = PromptLibrary(
+                uid=None,
+                name=f"{test_uid}-prompt-b",
+                content=f"{test_uid}-content-b",
+            )
+            session.add_all([test_user, prompt_a, prompt_b])
+            await session.flush()
+            assert prompt_a.id is not None
+            assert prompt_b.id is not None
+            prompt_ids = (int(prompt_a.id), int(prompt_b.id))
+            await session.commit()
+            await session.refresh(prompt_a)
+            await session.refresh(prompt_b)
+            original_rows = {
+                int(prompt_a.id): (prompt_a.uid, prompt_a.name, prompt_a.content, prompt_a.created_at),
+                int(prompt_b.id): (prompt_b.uid, prompt_b.name, prompt_b.content, prompt_b.created_at),
+            }
+
+        app = FastAPI()
+        register_handlers(app)
+        app.include_router(router, prefix="/api/v1")
+
+        async def override_get_db() -> AsyncGenerator[AsyncSession]:
+            async with session_factory() as session:
+                try:
+                    yield session
+                finally:
+                    if session.in_transaction():
+                        await session.rollback()
+
+        async def override_current_user() -> User:
+            return test_user
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[security.get_current_user] = override_current_user
+
+        shared_name = f"{test_uid}-shared-name"
+        updated_contents = (
+            f"{test_uid}-updated-content-a",
+            f"{test_uid}-updated-content-b",
+        )
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            request_tasks = [
+                asyncio.create_task(
+                    client.post(
+                        "/api/v1/prompts/update",
+                        params={"prompt_id": prompt_ids[0]},
+                        json={"name": shared_name, "content": updated_contents[0]},
+                    )
+                ),
+                asyncio.create_task(
+                    client.post(
+                        "/api/v1/prompts/update",
+                        params={"prompt_id": prompt_ids[1]},
+                        json={"name": shared_name, "content": updated_contents[1]},
+                    )
+                ),
+            ]
+            responses = await asyncio.wait_for(asyncio.gather(*request_tasks), 10)
+
+        assert len(responses) == 2
+        for response in responses:
+            payload = _assert_standard(response, 400, data_is_none=True)
+            assert payload["message"] == t(ERR_PROMPT_OWNER_REQUIRED)
+
+        async with session_factory() as session:
+            persisted_prompts = (await session.execute(select(PromptLibrary).where(PromptLibrary.id.in_(prompt_ids)).order_by(PromptLibrary.id))).scalars().all()
+
+        assert len(persisted_prompts) == 2
+        after_rows: dict[int, tuple[str | None, str, str, datetime]] = {}
+        for prompt in persisted_prompts:
+            assert prompt.id is not None
+            after_rows[int(prompt.id)] = (prompt.uid, prompt.name, prompt.content, prompt.created_at)
+        assert after_rows == original_rows
+        assert all(prompt.name != shared_name for prompt in persisted_prompts)
+    finally:
+        for task in request_tasks:
+            if not task.done():
+                task.cancel()
+        if request_tasks:
+            await asyncio.gather(*request_tasks, return_exceptions=True)
+        async with session_factory() as session:
+            if prompt_ids:
+                await session.execute(delete(PromptLibrary).where(PromptLibrary.id.in_(prompt_ids)))
             await session.execute(delete(User).where(User.uid == test_uid))
             await session.commit()

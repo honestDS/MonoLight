@@ -7,11 +7,13 @@ from app.core.constants import (
     ERR_MEMORY_CAPACITY_FULL,
     ERR_MEMORY_CAPACITY_PENDING,
     ERR_MEMORY_MUTATION_PENDING,
+    ERR_MEMORY_NOT_CONFIGURED,
     ERR_MEMORY_OVER_LIMIT,
     MEMORY_MAX_ACTIVE_RECORDS,
 )
 from app.core.crud.memory.store import (
     memory_record_crud,
+    memory_store_crud,
 )
 from app.core.memory.capacity import load_memory_capacity_snapshot
 from app.core.memory.errors import MemoryConflictError
@@ -44,9 +46,9 @@ from .service_common import (
     _accepted,
     _enum_value,
     _finish,
-    _lock_active_store,
     _same_publication,
     _submit_job,
+    _validate_active_store,
     _validate_source_and_attempts,
 )
 
@@ -97,6 +99,9 @@ class LongTermMemoryCreate:
                 source_message_id=normalized_message_id,
             )
             active_key = build_memory_active_mutation_key(normalized_uid, memory_key=payload["memory_key"])
+            store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
+            if store is None:
+                raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
             existing_job = await memory_job_manager.get_job_by_dedupe_key(db, uid=normalized_uid, dedupe_key=normalized_dedupe_key)
             if existing_job is not None:
                 submission = await _accept_existing_job(
@@ -114,27 +119,7 @@ class LongTermMemoryCreate:
                 await _finish(db, commit=commit)
                 return _accepted(submission)
 
-            store = await _lock_active_store(db, normalized_uid)
-            existing_job = await memory_job_manager.get_job_by_dedupe_key(
-                db,
-                uid=normalized_uid,
-                dedupe_key=normalized_dedupe_key,
-            )
-            if existing_job is not None:
-                submission = await _accept_existing_job(
-                    db,
-                    existing_job,
-                    fallback_active_mutation_key=active_key,
-                    operation=LongTermMemoryMutationOperation.CREATE,
-                    payload=payload,
-                    source_session_id=normalized_session_id,
-                    source_profile_id=normalized_profile_id,
-                    source_message_id=normalized_message_id,
-                    max_attempts=attempts,
-                    use_existing_identity=False,
-                )
-                await _finish(db, commit=commit)
-                return _accepted(submission)
+            _validate_active_store(store)
             if (
                 await memory_job_manager.get_job_by_active_mutation_key(
                     db,

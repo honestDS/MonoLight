@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
@@ -1619,22 +1619,19 @@ async def test_superuser_transfer_checks_name_uniqueness_by_final_owner_and_name
 async def test_concurrent_users_create_same_message_platform_name(
     api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str, int], list[str]],
     second_actor: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, session_factory, _platform_ids, calls = api_context
     name = "concurrent-name-platform"
     request_tokens = ("concurrent-token-0", "concurrent-token-1")
     actors = ("ordinary", second_actor)
     barrier = asyncio.Barrier(2)
-    original = message_platforms.message_platform_crud.get_by_name
 
-    async def get_by_name_with_barrier(db, queried_name, *, uid):
-        result = await original(db, queried_name, uid=uid)
-        if queried_name == name:
-            await asyncio.wait_for(barrier.wait(), timeout=10)
-        return result
+    async def authenticate_with_barrier(token: str = Depends(security.oauth2_scheme)):
+        user = await security.get_current_user(token)
+        await asyncio.wait_for(barrier.wait(), timeout=10)
+        return user
 
-    monkeypatch.setattr(message_platforms.message_platform_crud, "get_by_name", get_by_name_with_barrier)
+    app.dependency_overrides[security.get_current_user] = authenticate_with_barrier
     before = await _platform_snapshot(session_factory)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         responses = await asyncio.wait_for(

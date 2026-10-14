@@ -356,14 +356,13 @@ async def create_knowledge_base(
         raise HTTPException(status_code=500, detail=t(ERR_KB_COLLECTION_CREATE_FAILED, message=str(e)))
 
     try:
-        if requested_owner_uid is not None:
-            owner = await user_crud.get_by_uid(
-                db,
-                requested_owner_uid,
-                lock_for_reference_write=True,
-            )
-            if owner is None:
-                raise HTTPException(status_code=404, detail=ERR_USER_NOT_FOUND)
+        owner = await user_crud.get_by_uid(
+            db,
+            owner_uid,
+            lock_for_reference_write=True,
+        )
+        if owner is None:
+            raise HTTPException(status_code=404, detail=ERR_USER_NOT_FOUND)
         _channel, embedding_model = await load_embedding_model(
             db,
             kb_in.embedding_channel_id,

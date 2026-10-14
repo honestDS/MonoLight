@@ -1056,7 +1056,7 @@ test('blocks a superuser edit when the owner is cleared', async t => {
   )))
 })
 
-test('updates a superuser prompt that starts unassigned without selecting an owner', async t => {
+test('requires a superuser to assign an owner before updating an unassigned prompt', async t => {
   const prompt = {
     id: 1151,
     name: 'original name',
@@ -1064,8 +1064,10 @@ test('updates a superuser prompt that starts unassigned without selecting an own
     uid: null,
     username: null,
   }
+  const owner = { uid: 'user-b', username: 'Bob' }
   const updatedPrompt = {
     ...prompt,
+    ...owner,
     name: 'updated name',
     content: 'updated content',
   }
@@ -1075,7 +1077,7 @@ test('updates a superuser prompt that starts unassigned without selecting an own
       listCall += 1
       return response([listCall === 1 ? prompt : updatedPrompt], 1, { current_uid: 'admin' })
     },
-    userListHandler: async () => response([], 0),
+    userListHandler: async () => response([owner], 1),
   })
   await harness.flush()
   harness.permissions.currentUser = { uid: 'admin', username: 'Admin' }
@@ -1090,6 +1092,15 @@ test('updates a superuser prompt that starts unassigned without selecting an own
   harness.module.form.name = updatedPrompt.name
   harness.module.form.content = updatedPrompt.content
   await harness.module.submitForm()
+
+  assert.equal(harness.apiState.updateRequests.length, 0)
+  assert.equal(harness.module.dialogVisible.value, true)
+  assert.ok(harness.messages.some(message => (
+    message.type === 'warning' && message.value === 'prompts.select_owner'
+  )))
+
+  harness.module.form.uid = owner.uid
+  await harness.module.submitForm()
   await harness.flush()
 
   assert.equal(harness.apiState.updateRequests.length, 1)
@@ -1097,8 +1108,8 @@ test('updates a superuser prompt that starts unassigned without selecting an own
   assert.deepEqual(snapshot(harness.apiState.updateRequests[0].payload), {
     name: updatedPrompt.name,
     content: updatedPrompt.content,
+    uid: updatedPrompt.uid,
   })
-  assert.equal('uid' in harness.apiState.updateRequests[0].payload, false)
   assert.equal(harness.module.dialogVisible.value, false)
   assert.deepEqual(snapshot(harness.module.prompts.value), [updatedPrompt])
   assert.deepEqual(snapshot(harness.apiState.listRequests.map(request => request.params)), [

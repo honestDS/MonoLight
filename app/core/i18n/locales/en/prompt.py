@@ -4,6 +4,7 @@ MESSAGES = {
     "MSG_PROMPT_DELETED": "Prompt template deleted",
     "ERR_PROMPT_NOT_FOUND": "Prompt template not found",
     "ERR_PROMPT_NAME_EXISTS": "Prompt template name already exists",
+    "ERR_PROMPT_OWNER_REQUIRED": "A prompt owner is required",
     "ERR_PROMPT_IN_USE": "Prompt template is used by profiles. Select another global prompt and confirm reassignment first",
     "ERR_PROMPT_OWNER_CHANGE_IN_USE": "This prompt is referenced by profiles. Select another prompt belonging to the same owner for those profiles before changing its owner.",
     "ERR_PROMPT_REPLACEMENT_INVALID": "Invalid replacement prompt. Select another existing global prompt",

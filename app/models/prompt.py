@@ -3,6 +3,9 @@ from datetime import (
 )
 
 from pydantic import ConfigDict
+from sqlalchemy import (
+    UniqueConstraint,
+)
 from sqlmodel import (
     Column,
     DateTime,
@@ -22,6 +25,7 @@ class PromptBase(SQLModel):
 
 class PromptLibrary(PromptBase, table=True):
     __tablename__ = "prompt"
+    __table_args__ = (UniqueConstraint("uid", "name", name="uq_prompt_uid_name"),)
     id: int | None = Field(default=None, primary_key=True, index=True)
     created_at: datetime = Field(
         default_factory=get_local_time,
