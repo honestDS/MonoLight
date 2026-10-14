@@ -75,6 +75,7 @@ export const adminApi = {
 
 export const authApi = {
   login: (data) => request.post('/auth/login', data),
+  changePassword: (data) => request.post('/auth/change-password', data),
   me: () => request.get('/auth/me')
 }
 
