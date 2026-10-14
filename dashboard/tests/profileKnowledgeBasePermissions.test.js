@@ -17,12 +17,18 @@ import { useUserPermissionsStore } from '../src/composables/useUserPermissions.j
 import * as memoryManagement from '../src/utils/memoryManagement.js'
 import * as profileOptions from '../src/utils/profileOptions.js'
 
-const profilesViewSource = readFileSync(
-  new URL('../src/views/ProfilesView.vue', import.meta.url),
+const profileMemorySource = readFileSync(
+  new URL('../src/composables/profiles/useProfileMemory.js', import.meta.url),
   'utf8',
 )
-const scriptMatch = profilesViewSource.match(/<script\s+setup>\r?\n([\s\S]*?)\r?\n<\/script>/)
-assert.ok(scriptMatch)
+const profileEditorSource = readFileSync(
+  new URL('../src/composables/profiles/useProfileEditor.js', import.meta.url),
+  'utf8',
+)
+const profilesViewSource = readFileSync(
+  new URL('../src/composables/profiles/useProfilesView.js', import.meta.url),
+  'utf8',
+)
 
 const stripImports = sourceText => {
   const keptLines = []
@@ -43,7 +49,10 @@ const stripImports = sourceText => {
   return keptLines.join('\n')
 }
 
-const profilesScript = stripImports(scriptMatch[1])
+const stripExports = sourceText => sourceText.replace(/^export /gm, '')
+const profilesScript = [profileMemorySource, profileEditorSource, profilesViewSource]
+  .map(sourceText => stripExports(stripImports(sourceText)))
+  .join('\n')
 const dataResponse = data => ({ data: { data } })
 const normalize = value => JSON.parse(JSON.stringify(value))
 const pageResponse = (items, total, meta) => dataResponse({ items, total, meta })
@@ -208,34 +217,10 @@ const createHarness = async (t, options = {}) => {
   scope.run(() => {
     vm.runInContext(
       `${profilesScript}
-  globalThis.__module = {
-    fetchKnowledgeBases,
-    showDialog,
-    submitForm,
-    form,
-    channels,
-    auditModelKey,
-    dialogType,
-    knowledgeBases,
-    knowledgeBasesReady,
-    knowledgeBasesLoading,
-    knowledgeBasesUnavailable,
-    knowledgeBaseOptions,
-    userPermissions,
-    canSetDefaultProfile,
-    showOwnerColumn,
-    currentUid,
-    loadSystemSettings,
-    saveSystemSettings,
-    showSystemSettingsDialog,
-    handleRefresh,
-    settingsDialogVisible,
-    settingsSubmitting,
-    systemSettings,
-  }
+  globalThis.__module = useProfilesView()
 `,
       context,
-      { filename: 'ProfilesView.vue?script-setup' },
+      { filename: 'useProfilesView.js' },
     )
   })
 

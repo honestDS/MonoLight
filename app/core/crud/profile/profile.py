@@ -121,7 +121,7 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
         return result.scalars().first()
 
     async def get_multi(self, db: AsyncSession, *, skip: int = 0, limit: int = 100, uid: str | None = None) -> list[Profile]:
-        stmt = select(Profile).where(Profile.uid == uid).offset(skip).limit(limit)
+        stmt = select(Profile).where(Profile.uid == uid).order_by(Profile.id.asc()).offset(skip).limit(limit)
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
