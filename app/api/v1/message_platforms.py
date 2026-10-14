@@ -13,6 +13,7 @@ from app.core.constants import (
     ERR_MESSAGE_PLATFORM_UID_REQUIRED,
     ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE,
     ERR_ONLY_ADMIN_ALLOWED,
+    ERR_USER_NOT_FOUND,
     MSG_MESSAGE_PLATFORM_CREATED,
     MSG_MESSAGE_PLATFORM_DELETED,
     MSG_MESSAGE_PLATFORM_LOGIN_STARTED,
@@ -20,6 +21,7 @@ from app.core.constants import (
     MSG_MESSAGE_PLATFORM_RECOVERED,
     MSG_MESSAGE_PLATFORM_UPDATED,
 )
+from app.core.crud.account.user import user_crud
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
 from app.core.profile_validation import get_validated_profile_for_assignment
@@ -155,6 +157,12 @@ async def create_message_platform(
     else:
         payload["uid"] = _normalize_uid(current_user.uid)
     _ensure_uid_for_enabled(bool(payload.get("is_enabled")), payload.get("uid"))
+    if payload["uid"] is not None and not await user_crud.get_by_uid(
+        db,
+        payload["uid"],
+        lock_for_reference_write=True,
+    ):
+        raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
     if await message_platform_crud.get_by_name(db, payload["name"], uid=payload["uid"]):
         raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     if payload.get("profile_id") is not None:

@@ -76,6 +76,8 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
+        session.add(User(uid="user-a", username="user-a", is_superuser=True))
+        await session.commit()
         yield session
     await engine.dispose()
 
@@ -192,7 +194,7 @@ def assert_knowledge_base_fields(item: dict | KnowledgeBase, channel_id: int, co
         assert get(field) == 0
     if is_response:
         assert get("profile_ids") == []
-        assert get("username") is None
+        assert get("username") == "user-a"
     return collection_name
 
 
@@ -1473,7 +1475,7 @@ async def test_knowledge_base_list_returns_profile_names_for_bindings_and_manage
     assert first_response.status_code == 200
     first_items = {item["id"]: item for item in first_response.json()["data"]["items"]}
     assert set(first_items) == knowledge_base_ids
-    assert all(item["username"] is None for item in first_items.values())
+    assert all(item["username"] == ("user-a" if item["uid"] == "user-a" else None) for item in first_items.values())
 
     bound_item = first_items[int(user_bound.id)]
     assert set(bound_item["profile_ids"]) == {profile_ids["chinese"], profile_ids["english"]}
