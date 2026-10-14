@@ -416,6 +416,7 @@ async def test_profile_list_is_scoped_to_regular_user_across_pages_and_forged_id
             for page in (1, 2)
         ]
         page_ids = []
+        ordered_page_ids = []
         for page, page_response in zip((1, 2), page_responses, strict=True):
             assert page_response.status_code == 200
             page_data = page_response.json()["data"]
@@ -425,9 +426,12 @@ async def test_profile_list_is_scoped_to_regular_user_across_pages_and_forged_id
             assert page_data["size"] == 1
             assert page_data["meta"]["show_owner"] is False
             assert page_data["meta"]["current_uid"] == "user-a"
-            page_ids.append({page_data["items"][0]["id"]})
+            item_id = page_data["items"][0]["id"]
+            page_ids.append({item_id})
+            ordered_page_ids.append(item_id)
         assert page_ids[0].isdisjoint(page_ids[1])
         assert page_ids[0] | page_ids[1] == own_ids
+        assert ordered_page_ids == sorted(own_ids)
 
         large_page_response = await client.get(
             "/api/v1/profiles/list",
