@@ -14,7 +14,7 @@ from sqlmodel import select
 import app.core.crypto as crypto_module
 import app.core.security as security
 from app.api.v1 import message_platforms
-from app.core.constants import ERR_MESSAGE_PLATFORM_NAME_EXISTS, ERR_MESSAGE_PLATFORM_NOT_FOUND, ERR_ONLY_ADMIN_ALLOWED, ERR_PROFILE_NOT_FOUND, ERR_UNAUTHORIZED
+from app.core.constants import ERR_MESSAGE_PLATFORM_NAME_EXISTS, ERR_MESSAGE_PLATFORM_NOT_FOUND, ERR_ONLY_ADMIN_ALLOWED, ERR_PROFILE_NOT_FOUND, ERR_UNAUTHORIZED, ERR_USER_NOT_FOUND
 from app.core.i18n import t
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
@@ -846,6 +846,36 @@ async def test_ordinary_user_cannot_update_message_platform_with_unowned_or_miss
     assert set(payload) == {"code", "message", "data"}
     assert payload["code"] == 404
     assert payload["message"] == t(ERR_PROFILE_NOT_FOUND)
+    assert payload["data"] is None
+    assert await _platform_snapshot(session_factory) == before
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_superuser_cannot_transfer_existing_message_platform_to_missing_uid(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str, int], list[str]],
+) -> None:
+    app, session_factory, platform_ids, calls = api_context
+    before = await _platform_snapshot(session_factory)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/message-platforms/update",
+            params={"platform_id": platform_ids["ordinary"]},
+            headers={"Authorization": f"Bearer {_token('admin')}"},
+            json={
+                "name": "missing-user-message-platform",
+                "uid": "missing-user",
+                "profile_id": None,
+                "is_enabled": False,
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 404
+    assert set(payload) == {"code", "message", "data"}
+    assert payload["code"] == 404
+    assert payload["message"] == t(ERR_USER_NOT_FOUND)
     assert payload["data"] is None
     assert await _platform_snapshot(session_factory) == before
     assert calls == []
