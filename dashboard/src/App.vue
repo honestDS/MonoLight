@@ -237,6 +237,7 @@
             type="error"
             :closable="false"
             show-icon
+            style="margin-bottom: 15px;"
             role="alert"
           />
           <el-form-item
