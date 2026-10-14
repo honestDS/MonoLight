@@ -259,14 +259,17 @@ async def create_profile(
 async def list_profiles(
     page: int = 1,
     size: int = 10,
+    owner_username: str | None = Query(default=None, max_length=50),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     skip = (page - 1) * size
     is_admin = getattr(current_user, "is_superuser", False)
     if is_admin:
-        profiles = await profile_crud.get_multi_all(db, skip=skip, limit=size)
-        total = await profile_crud.count_all(db)
+        owner_username = owner_username.strip() if owner_username is not None else None
+        owner_username = owner_username or None
+        profiles = await profile_crud.get_multi_all(db, skip=skip, limit=size, owner_username=owner_username)
+        total = await profile_crud.count_all(db, owner_username=owner_username)
     else:
         profiles = await profile_crud.get_multi(db, skip=skip, limit=size, uid=current_user.uid)
         total = await profile_crud.count(db, uid=current_user.uid)

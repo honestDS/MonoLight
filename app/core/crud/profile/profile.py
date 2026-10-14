@@ -8,6 +8,7 @@ from app.models.profile import (
     ProfileCreate,
     ProfileUpdate,
 )
+from app.models.user import User
 
 _PROFILE_NON_PERSISTED_FIELDS = {
     "knowledge_base_ids",
@@ -124,8 +125,18 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_multi_all(self, db: AsyncSession, *, skip: int = 0, limit: int = 100) -> list[Profile]:
-        stmt = select(Profile).offset(skip).limit(limit)
+    async def get_multi_all(
+        self,
+        db: AsyncSession,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        owner_username: str | None = None,
+    ) -> list[Profile]:
+        stmt = select(Profile)
+        if owner_username:
+            stmt = stmt.join(User, Profile.uid == User.uid).where(User.username.icontains(owner_username, autoescape=True))
+        stmt = stmt.order_by(Profile.id.asc()).offset(skip).limit(limit)
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
@@ -139,8 +150,11 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
         result = await db.execute(select(func.count()).select_from(Profile).where(Profile.uid == uid))
         return result.scalar()
 
-    async def count_all(self, db: AsyncSession) -> int:
-        result = await db.execute(select(func.count()).select_from(Profile))
+    async def count_all(self, db: AsyncSession, *, owner_username: str | None = None) -> int:
+        stmt = select(func.count()).select_from(Profile)
+        if owner_username:
+            stmt = stmt.join(User, Profile.uid == User.uid).where(User.username.icontains(owner_username, autoescape=True))
+        result = await db.execute(stmt)
         return result.scalar()
 
     async def get_default(self, db: AsyncSession, uid: str | None = None) -> Profile | None:
