@@ -16,7 +16,7 @@ from app.handler import register_handlers
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseCollectionOwner
 from app.models.memory import LongTermMemoryMutationJob, LongTermMemoryRecord, LongTermMemoryStore
-from app.models.message_platform import MessagePlatform
+from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.profile import Profile
 from app.models.scheduled_task import ScheduledTask
 from app.models.session import ChatSession
@@ -549,6 +549,96 @@ async def test_message_platform_creation_holds_user_lock_until_commit_concurrent
                 message_platform_result = await verification_session.execute(select(MessagePlatform).where(MessagePlatform.uid == "resource-owner"))
                 assert owner_result.scalar_one_or_none() is None
                 assert message_platform_result.scalar_one_or_none() is None
+        finally:
+            release.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                try:
+                    await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
+                except TimeoutError:
+                    pass
+
+
+@pytest.mark.asyncio
+async def test_message_platform_transfer_holds_target_user_lock_until_commit_concurrent_with_user_deletion(resource_app, monkeypatch):
+    app, session_factory, _ = resource_app
+    app.include_router(message_platforms.router, prefix="/api/v1")
+
+    async with session_factory() as seed_session:
+        platform = MessagePlatform(
+            name="transfer-target-platform",
+            platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+            uid="resource-admin",
+            profile_id=None,
+            is_enabled=False,
+        )
+        seed_session.add(platform)
+        await seed_session.commit()
+        await seed_session.refresh(platform)
+        platform_id = platform.id
+    assert platform_id is not None
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    target_lock_paused = False
+    original_get_by_uid = message_platforms.user_crud.get_by_uid
+
+    async def wait_for_target_user_lock(*args, **kwargs):
+        nonlocal target_lock_paused
+        user = await original_get_by_uid(*args, **kwargs)
+        uid = args[1] if len(args) > 1 else kwargs.get("uid")
+        if uid == "resource-owner" and kwargs.get("lock_for_reference_write", False) and not target_lock_paused:
+            target_lock_paused = True
+            entered.set()
+            await asyncio.wait_for(release.wait(), timeout=10)
+        return user
+
+    monkeypatch.setattr(message_platforms.user_crud, "get_by_uid", wait_for_target_user_lock)
+
+    admin_token = security.create_access_token({"sub": "resource-admin"})
+    tasks: list[asyncio.Task] = []
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        transfer_task = asyncio.create_task(
+            client.post(
+                "/api/v1/message-platforms/update",
+                params={"platform_id": platform_id},
+                json={"uid": "resource-owner", "profile_id": None, "is_enabled": False},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        )
+        tasks.append(transfer_task)
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+
+            delete_task = asyncio.create_task(
+                client.post(
+                    "/api/v1/admin/user/delete",
+                    params={"uid": "resource-owner"},
+                    headers={"Authorization": f"Bearer {admin_token}"},
+                )
+            )
+            tasks.append(delete_task)
+            await asyncio.wait({delete_task}, timeout=1)
+            assert not delete_task.done()
+
+            release.set()
+            transfer_response, delete_response = await asyncio.wait_for(asyncio.gather(transfer_task, delete_task), timeout=10)
+            assert transfer_response.status_code == 200
+            assert transfer_response.json()["code"] == 200
+            assert delete_response.status_code == 200
+            assert delete_response.json()["code"] == 200
+
+            async with session_factory() as verification_session:
+                owner_result = await verification_session.execute(select(User).where(User.uid == "resource-owner"))
+                platform_result = await verification_session.execute(select(MessagePlatform).where(MessagePlatform.id == platform_id))
+                assert owner_result.scalar_one_or_none() is None
+                assert platform_result.scalar_one_or_none() is None
         finally:
             release.set()
             for task in tasks:

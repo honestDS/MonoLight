@@ -188,6 +188,10 @@ async def update_message_platform(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    submitted_uid = _normalize_uid(platform_in.uid) if "uid" in platform_in.model_fields_set else None
+    if current_user.is_superuser and submitted_uid:
+        if not await user_crud.get_by_uid(db, submitted_uid, lock_for_reference_write=True):
+            raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
     platform = await _get_accessible_platform(db, platform_id, current_user, for_update=True)
     data = _normalize_update_payload(platform.platform_type, platform_in)
     if "uid" in data:
