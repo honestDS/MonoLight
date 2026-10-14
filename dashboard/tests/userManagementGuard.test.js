@@ -155,6 +155,8 @@ const unauthorizedError = () => Object.assign(new Error('unauthorized'), {
 const managementRouteCases = [
   { path: '/users', view: '../views/UsersView.vue' },
   { path: '/channels', view: '../views/ChannelsView.vue' },
+  { path: '/logs/realtime', view: '../views/RealTimeLogs.vue' },
+  { path: '/logs/history', view: '../views/HistoryLogs.vue' },
 ]
 
 const authenticatedRouteCases = [
