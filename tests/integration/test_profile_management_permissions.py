@@ -377,7 +377,13 @@ async def test_profile_list_is_scoped_to_regular_user_across_pages_and_forged_id
         response = await client.get(
             "/api/v1/profiles/list",
             headers=headers,
-            params={"page": 1, "size": 10, "uid": "user-b", "is_superuser": "true"},
+            params={
+                "page": 1,
+                "size": 10,
+                "uid": "user-b",
+                "is_superuser": "true",
+                "owner_username": "user-b",
+            },
         )
         assert response.status_code == 200
         payload = response.json()
@@ -399,7 +405,13 @@ async def test_profile_list_is_scoped_to_regular_user_across_pages_and_forged_id
             await client.get(
                 "/api/v1/profiles/list",
                 headers=headers,
-                params={"page": page, "size": 1, "uid": "user-b", "is_superuser": "true"},
+                params={
+                    "page": page,
+                    "size": 1,
+                    "uid": "user-b",
+                    "is_superuser": "true",
+                    "owner_username": "user-b",
+                },
             )
             for page in (1, 2)
         ]
@@ -420,7 +432,13 @@ async def test_profile_list_is_scoped_to_regular_user_across_pages_and_forged_id
         large_page_response = await client.get(
             "/api/v1/profiles/list",
             headers=headers,
-            params={"page": 1, "size": 100, "uid": "user-b", "is_superuser": "true"},
+            params={
+                "page": 1,
+                "size": 100,
+                "uid": "user-b",
+                "is_superuser": "true",
+                "owner_username": "user-b",
+            },
         )
     assert large_page_response.status_code == 200
     large_page_data = large_page_response.json()["data"]
@@ -461,6 +479,82 @@ async def test_profile_list_as_superuser_shows_all_profiles_and_real_owner_names
     for item in data["items"]:
         expected_username = item["uid"] if item["uid"] in {"admin", "user-a", "user-b"} else None
         assert item["username"] == expected_username
+
+
+@pytest.mark.asyncio
+async def test_profile_list_as_superuser_filters_by_owner_username(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, _session_factory, profile_ids = api_context
+    user_a_ids = {profile_ids["user-a"]["default"], profile_ids["user-a"]["target"]}
+    all_ids = {profile_id for owner_profiles in profile_ids.values() for profile_id in owner_profiles.values()}
+    headers = {"Authorization": f"Bearer {_token('admin')}"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        page_responses = [
+            await client.get(
+                "/api/v1/profiles/list",
+                headers=headers,
+                params={"page": page, "size": 1, "owner_username": "  SER-A  "},
+            )
+            for page in (1, 2)
+        ]
+        page_ids = []
+        ordered_page_ids = []
+        for page, page_response in zip((1, 2), page_responses, strict=True):
+            assert page_response.status_code == 200
+            payload = page_response.json()
+            assert set(payload) == {"code", "message", "data"}
+            assert payload["code"] == 200
+            data = payload["data"]
+            assert set(data) == {"items", "total", "page", "size", "meta"}
+            assert len(data["items"]) == 1
+            assert data["total"] == 2
+            assert data["page"] == page
+            assert data["size"] == 1
+            assert data["meta"]["show_owner"] is True
+            assert data["meta"]["current_uid"] == "admin"
+            item = data["items"][0]
+            assert item["uid"] == "user-a"
+            assert item["username"] == "user-a"
+            page_ids.append({item["id"]})
+            ordered_page_ids.append(item["id"])
+
+        assert page_ids[0].isdisjoint(page_ids[1])
+        assert page_ids[0] | page_ids[1] == user_a_ids
+        assert ordered_page_ids == sorted(user_a_ids)
+
+        blank_response = await client.get(
+            "/api/v1/profiles/list",
+            headers=headers,
+            params={"page": 1, "size": 100, "owner_username": "   "},
+        )
+        assert blank_response.status_code == 200
+        blank_data = blank_response.json()["data"]
+        assert len(blank_data["items"]) == 8
+        assert {item["id"] for item in blank_data["items"]} == all_ids
+        assert blank_data["total"] == 8
+
+        no_match_response = await client.get(
+            "/api/v1/profiles/list",
+            headers=headers,
+            params={"page": 1, "size": 1, "owner_username": "no-such-owner"},
+        )
+        assert no_match_response.status_code == 200
+        no_match_data = no_match_response.json()["data"]
+        assert no_match_data["items"] == []
+        assert no_match_data["total"] == 0
+
+        for wildcard in ("%", "_"):
+            wildcard_response = await client.get(
+                "/api/v1/profiles/list",
+                headers=headers,
+                params={"page": 1, "size": 1, "owner_username": wildcard},
+            )
+            assert wildcard_response.status_code == 200
+            wildcard_data = wildcard_response.json()["data"]
+            assert wildcard_data["items"] == []
+            assert wildcard_data["total"] == 0
 
 
 @pytest.mark.asyncio

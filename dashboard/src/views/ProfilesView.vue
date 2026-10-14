@@ -1,5 +1,23 @@
 <template>
   <div class="view-container">
+    <div v-if="userPermissions.isSuperuser" class="profile-filter-card">
+      <el-form :inline="true" :model="filters" @submit.prevent>
+        <el-form-item :label="$t('profiles.owner_username')">
+          <el-input
+            v-model="filters.ownerUsername"
+            :placeholder="$t('profiles.owner_search_placeholder')"
+            clearable
+            class="profile-owner-filter-input"
+            @keyup.enter="handleSearch"
+          />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="handleSearch">{{ $t('profiles.search') }}</el-button>
+          <el-button @click="resetFilters">{{ $t('profiles.reset') }}</el-button>
+        </el-form-item>
+      </el-form>
+    </div>
+
     <BaseDataTable
       :data="profiles"
       :loading="loading"
@@ -147,6 +165,7 @@
 
 <script setup>
 import { h, ref, reactive, computed, onMounted, watch } from 'vue'
+import '@/assets/css/ProfilesView.scss'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { profileApi, promptApi, systemApi, adminApi, knowledgeBaseApi } from '../api'
@@ -188,6 +207,9 @@ const loading = ref(false)
 const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(10)
+const filters = reactive({
+  ownerUsername: ''
+})
 const dialogVisible = ref(false)
 const settingsDialogVisible = ref(false)
 const dialogType = ref('create')
@@ -429,10 +451,14 @@ const auditModelKey = computed({
 const loadProfiles = async () => {
   loading.value = true
   try {
-    const res = await profileApi.list({
+    const params = {
       page: currentPage.value,
       size: pageSize.value
-    })
+    }
+    if (userPermissions.isSuperuser && filters.ownerUsername.trim()) {
+      params.owner_username = filters.ownerUsername.trim()
+    }
+    const res = await profileApi.list(params)
     profiles.value = res.data.data.items || []
     total.value = res.data.data.total || 0
     toolOptions.value = res.data.data.meta?.tool_options || []
@@ -626,6 +652,17 @@ const handleRefresh = () => {
 }
 
 const handleSizeChange = () => {
+  currentPage.value = 1
+  loadProfiles()
+}
+
+const handleSearch = () => {
+  currentPage.value = 1
+  loadProfiles()
+}
+
+const resetFilters = () => {
+  filters.ownerUsername = ''
   currentPage.value = 1
   loadProfiles()
 }
@@ -1007,7 +1044,3 @@ onMounted(() => {
   fetchUsers()
 })
 </script>
-
-<style lang="scss">
-@import "@/assets/css/ProfilesView.scss";
-</style>
