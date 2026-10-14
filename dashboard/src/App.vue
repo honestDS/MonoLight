@@ -176,7 +176,27 @@
               @refresh="refreshSessionTasks"
               @open="openTaskSession"
             />
-            <el-button type="text" @click="logout">{{ $t('common.logout') }}</el-button>
+            <el-dropdown
+              trigger="click"
+              placement="bottom-end"
+              @command="handleAccountCommand"
+            >
+              <button type="button" class="header-account-trigger">
+                <el-icon aria-hidden="true"><User /></el-icon>
+                <span>{{ $t('common.account.title') }}</span>
+                <el-icon aria-hidden="true"><ArrowDown /></el-icon>
+              </button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="change-password">
+                    {{ $t('common.account.change_password') }}
+                  </el-dropdown-item>
+                  <el-dropdown-item command="logout" divided class="danger-dropdown-item">
+                    {{ $t('common.logout') }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
 
         </el-header>
@@ -192,6 +212,85 @@
           </el-main>
         </el-container>
       </el-container>
+      <el-dialog
+        v-if="!isStandalonePage"
+        v-model="passwordDialogVisible"
+        :title="$t('common.account.change_password')"
+        class="standard-dialog change-password-dialog dialog-with-scroll-body"
+        align-center
+        :show-close="!passwordSubmitting"
+        :close-on-click-modal="!passwordSubmitting"
+        :close-on-press-escape="!passwordSubmitting"
+        @closed="resetPasswordForm"
+      >
+        <el-form
+          ref="passwordFormRef"
+          :model="passwordForm"
+          :rules="passwordRules"
+          label-position="top"
+          :disabled="passwordSubmitting"
+          @submit.prevent="submitPasswordChange"
+        >
+          <el-alert
+            v-if="passwordRequestError"
+            :title="passwordRequestError"
+            type="error"
+            :closable="false"
+            show-icon
+            role="alert"
+          />
+          <el-form-item
+            prop="current_password"
+            :label="$t('common.account.current_password')"
+            for="current-password"
+          >
+            <el-input
+              id="current-password"
+              v-model="passwordForm.current_password"
+              type="password"
+              show-password
+              autocomplete="current-password"
+            />
+          </el-form-item>
+          <el-form-item
+            prop="new_password"
+            :label="$t('common.account.new_password')"
+            for="new-password"
+          >
+            <el-input
+              id="new-password"
+              v-model="passwordForm.new_password"
+              type="password"
+              show-password
+              autocomplete="new-password"
+            />
+            <div class="help-text">{{ $t('common.account.password_hint') }}</div>
+          </el-form-item>
+          <el-form-item
+            prop="confirm_password"
+            :label="$t('common.account.confirm_password')"
+            for="confirm-password"
+          >
+            <el-input
+              id="confirm-password"
+              v-model="passwordForm.confirm_password"
+              type="password"
+              show-password
+              autocomplete="new-password"
+            />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <div class="dialog-footer">
+            <el-button :disabled="passwordSubmitting" @click="passwordDialogVisible = false">
+              {{ $t('common.cancel') }}
+            </el-button>
+            <el-button type="primary" :loading="passwordSubmitting" @click="submitPasswordChange">
+              {{ $t('common.confirm') }}
+            </el-button>
+          </div>
+        </template>
+      </el-dialog>
     </div>
   </el-config-provider>
 </template>
@@ -201,12 +300,15 @@ import { useResizeObserver } from './composables/useResizeObserver'
 import { useSessionTasks } from './composables/chat/useSessionTasks.js'
 import { useUserPermissionsStore } from './composables/useUserPermissions.js'
 import { routeNameMap } from './constants'
+import { authApi } from './api'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import SessionTaskCenter from './components/SessionTaskCenter.vue'
 import githubIcon from './assets/svg/github.svg'
 import logoImage from '../../logo.jpg'
+import { ElMessage } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import en from 'element-plus/es/locale/lang/en'
+import './assets/css/app.scss'
 
 // 初始化 ResizeObserver 防抖补丁
 useResizeObserver()
@@ -234,7 +336,15 @@ export default {
       githubIcon,
       logoImage,
       isSidebarCollapsed: false,
-      isCollapsedSubmenuOpen: false
+      isCollapsedSubmenuOpen: false,
+      passwordDialogVisible: false,
+      passwordSubmitting: false,
+      passwordRequestError: '',
+      passwordForm: {
+        current_password: '',
+        new_password: '',
+        confirm_password: ''
+      }
     }
   },
 
@@ -249,6 +359,85 @@ export default {
     },
     locale() {
       return this.$i18n.locale === 'zh' ? zhCn : en
+    },
+    passwordRules() {
+      return {
+        current_password: [
+          {
+            required: true,
+            message: this.$t('common.account.required'),
+            trigger: 'blur'
+          },
+          {
+            validator: (_rule, value, callback) => {
+              if (!value) {
+                callback()
+                return
+              }
+              if (new TextEncoder().encode(value).length > 72) {
+                callback(new Error(this.$t('common.account.password_bytes')))
+                return
+              }
+              callback()
+            },
+            trigger: 'blur'
+          }
+        ],
+        new_password: [
+          {
+            required: true,
+            message: this.$t('common.account.required'),
+            trigger: 'blur'
+          },
+          {
+            validator: (_rule, value, callback) => {
+              if (!value) {
+                callback()
+                return
+              }
+              if (new TextEncoder().encode(value).length > 72) {
+                callback(new Error(this.$t('common.account.password_bytes')))
+                return
+              }
+              if (Array.from(value).length < 8) {
+                callback(new Error(this.$t('common.account.password_length')))
+                return
+              }
+              callback()
+            },
+            trigger: 'blur'
+          }
+        ],
+        confirm_password: [
+          {
+            required: true,
+            message: this.$t('common.account.required'),
+            trigger: 'blur'
+          },
+          {
+            validator: (_rule, value, callback) => {
+              if (!value) {
+                callback()
+                return
+              }
+              if (value !== this.passwordForm.new_password) {
+                callback(new Error(this.$t('common.account.password_mismatch')))
+                return
+              }
+              callback()
+            },
+            trigger: ['blur', 'change']
+          }
+        ]
+      }
+    }
+  },
+  watch: {
+    isStandalonePage(value) {
+      if (value) {
+        this.passwordDialogVisible = false
+        this.resetPasswordForm()
+      }
     }
   },
   methods: {
@@ -264,6 +453,69 @@ export default {
     handleSidebarSubmenuClose() {
       this.isCollapsedSubmenuOpen = false
     },
+    handleAccountCommand(command) {
+      if (command === 'logout') {
+        this.logout()
+        return
+      }
+      if (command !== 'change-password') {
+        return
+      }
+      this.resetPasswordForm()
+      this.passwordDialogVisible = true
+      this.$nextTick(() => {
+        if (this.$refs.passwordFormRef) {
+          this.$refs.passwordFormRef.clearValidate()
+        }
+      })
+    },
+    resetPasswordForm() {
+      this.passwordForm.current_password = ''
+      this.passwordForm.new_password = ''
+      this.passwordForm.confirm_password = ''
+      this.passwordRequestError = ''
+      if (this.$refs.passwordFormRef) {
+        this.$refs.passwordFormRef.clearValidate()
+      }
+    },
+    async submitPasswordChange() {
+      if (this.passwordSubmitting) {
+        return
+      }
+      const initialToken = localStorage.getItem('token')
+      if (!initialToken) {
+        this.logout()
+        return
+      }
+      this.passwordSubmitting = true
+      this.passwordRequestError = ''
+      try {
+        const isValid = await this.$refs.passwordFormRef.validate().catch(() => false)
+        if (!isValid) {
+          return
+        }
+        if (localStorage.getItem('token') !== initialToken) {
+          return
+        }
+        await authApi.changePassword({
+          current_password: this.passwordForm.current_password,
+          new_password: this.passwordForm.new_password
+        })
+        if (localStorage.getItem('token') !== initialToken) {
+          return
+        }
+        this.passwordDialogVisible = false
+        this.resetPasswordForm()
+        ElMessage.success(this.$t('common.account.success'))
+        this.logout()
+      } catch (err) {
+        if (localStorage.getItem('token') === initialToken && this.passwordDialogVisible) {
+          this.passwordRequestError = (err && err.message) || this.$t('common.account.failed')
+        }
+      } finally {
+        this.passwordSubmitting = false
+      }
+    },
     logout() {
       this.userPermissions.clear()
       localStorage.removeItem('token')
@@ -272,7 +524,3 @@ export default {
   }
 }
 </script>
-
-<style lang="scss">
-@import "@/assets/css/app.scss";
-</style>

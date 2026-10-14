@@ -476,16 +476,29 @@ body {
   background: var(--color-white);
   border-color: rgba(var(--color-slate-500-rgb), 0.28);
 }
-.app-header .header-right > .el-button {
+.app-header .header-account-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   min-height: 38px;
   margin: 0;
-  padding: 0 12px !important;
-  color: var(--color-slate-500);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--color-slate-600);
+  background: var(--color-slate-50);
+  border: 1px solid rgba(var(--color-slate-400-rgb), 0.18);
   border-radius: var(--radius-10);
 }
-.app-header .header-right > .el-button:hover {
+.app-header .header-account-trigger:hover {
   color: var(--color-slate-900);
-  background: var(--color-slate-100);
+  background: var(--color-white);
+  border-color: rgba(var(--color-slate-500-rgb), 0.28);
+}
+.app-header .header-account-trigger:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 .app-header .github-link {
   border: 1px solid rgba(var(--color-slate-400-rgb), 0.18);
@@ -516,6 +529,9 @@ body {
   width: 20px;
   height: 20px;
   object-fit: contain;
+}
+.change-password-dialog.el-dialog {
+  width: min(460px, calc(100vw - 32px));
 }
 .el-main.app-main {
   padding: 0;
