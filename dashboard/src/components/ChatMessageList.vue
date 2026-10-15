@@ -386,33 +386,23 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
-import MarkdownIt from 'markdown-it'
-import hljs from 'highlight.js'
 import 'highlight.js/styles/github.css'
 import 'github-markdown-css/github-markdown.css'
 import VirtualizedCode from './VirtualizedCode.vue'
 import ThinkingBlock from './ThinkingBlock.vue'
 import CollapsibleMessageText from './CollapsibleMessageText.vue'
-import { fileApi } from '../api'
 import {
   formatTimestamp,
   getMessageTimestamp,
   getToolCallArguments,
-  getToolCallContent,
-  getToolCallName,
-  getToolCalls,
-  getToolResultContent,
-  getToolResultName,
-  isToolCall,
-  isToolResult
+  getToolResultContent
 } from '../utils'
-import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
-import { createFileDownloadCache } from '../utils/fileDownloads.js'
-import { truncateErrorMessage } from '../utils/errorMessage.js'
-import { getMessageListScrollState, getReasoningCollapseName, isFollowableLlmOutput, resolveChatActivityNotice } from '../utils/chatPresentation.js'
+import { getMessageListScrollState, getReasoningCollapseName, isFollowableLlmOutput } from '../utils/chatPresentation.js'
 import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
+import { useChatMessagePresentation } from '../composables/chat/useChatMessagePresentation.js'
+import { useChatAuditConfirmation } from '../composables/chat/useChatAuditConfirmation.js'
+import { useChatMessageFiles } from '../composables/chat/useChatMessageFiles.js'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -431,26 +421,51 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
+const {
+  formatTokenCount,
+  formatCacheHitRate,
+  formatSessionTooltip,
+  renderMarkdown,
+  renderTextWithLinks,
+  getDisplayKey,
+  displayMessages,
+  activityNotice,
+  getToolPairTitle,
+  getToolGroupStateClass,
+  getToolGroupStatus,
+  getMessageText,
+  getMessageFiles,
+  getReasoningContent,
+  getGuidanceText,
+  getBackgroundSystemTitle,
+  getBackgroundSystemText,
+  formatFileSize,
+  getMessageClass,
+  didLastDisplayChangePrepend
+} = useChatMessagePresentation({ props, t })
+const {
+  getAuditConfirmation,
+  isHighRiskAuditConfirmation,
+  getAuditStatusLabel,
+  getAuditExpiryLabel,
+  isAuditDecisionPending,
+  isAuditConfirmationExpired,
+  submitAuditDecision
+} = useChatAuditConfirmation({ props, emit, t })
+const {
+  isImageFile,
+  getFilename,
+  isPreviewImage,
+  getAttachmentSourceUrl,
+  getSentFileUrl,
+  getFileObjectUrl,
+  getAttachmentImageUrls,
+  getSentFileImageUrls,
+  handleFileDownload
+} = useChatMessageFiles({ props, t, getMessageFiles })
 const storedRequestMetadataCollapsed = getClientSetting('requestMetadataCollapsed', true)
 const requestMetadataCollapsed = ref(typeof storedRequestMetadataCollapsed === 'boolean' ? storedRequestMetadataCollapsed : true)
 watch(requestMetadataCollapsed, value => setClientSetting('requestMetadataCollapsed', value))
-const tokenNumberFormatter = new Intl.NumberFormat()
-const percentNumberFormatter = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 2 })
-const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
-const formatCacheHitRate = value => Number.isFinite(value) ? percentNumberFormatter.format(value) : '-'
-const formatSessionTooltip = (info) => {
-  if (!info) return ''
-  return [
-    `${t('chat.session_last_active')}: ${info.last_active || '-'}`,
-    `${t('chat.session_created_at')}: ${info.created_at || '-'}`
-  ].join('\n')
-}
-const pendingAuditDecisions = ref(new Set())
-const auditDecisionStatuses = ref(new Map())
-const auditCountdownNow = ref(Date.now())
-const auditCountdownTimer = window.setInterval(() => {
-  auditCountdownNow.value = Date.now()
-}, 1000)
 const virtualList = ref(null)
 const maintainScrollPosition = ref(false)
 let bottomScrollRequest = 0
@@ -462,15 +477,6 @@ let transientUserScrollCandidate = false
 let transientUserScrollCandidateTimer = null
 let lastVirtualScrollOffset = null
 let messageListUnmounted = false
-const fileObjectUrls = ref(new Map())
-const fileDownloadCache = createFileDownloadCache({
-  fetchBlob: fileApi.fetchDownloadBlob,
-  createObjectUrl: URL.createObjectURL,
-  revokeObjectUrl: URL.revokeObjectURL
-})
-const pendingFileDownloads = new Set()
-const reportedImageErrors = new Set()
-let fileDownloadGeneration = 0
 const messagesLayoutReady = ref(false)
 const scrollState = ref(null)
 const scrollListeners = new Set()
@@ -480,208 +486,6 @@ const collapseModel = computed({
   set: value => emit('update:activeCollapse', value)
 })
 const reasoningCollapseModel = ref([])
-
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  typographer: true,
-  highlight(str, lang) {
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        return `<pre class="hljs"><code>${hljs.highlight(str, { language: lang, ignoreIllegals: true }).value}</code></pre>`
-      } catch {}
-    }
-    return `<pre class="hljs"><code>${md.utils.escapeHtml(str)}</code></pre>`
-  }
-})
-md.linkify.set({ fuzzyLink: false })
-const defaultLinkOpenRender = md.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
-md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-  tokens[idx].attrSet('class', 'el-link el-link--primary is-underline message-link')
-  tokens[idx].attrSet('target', '_blank')
-  tokens[idx].attrSet('rel', 'noopener noreferrer')
-  return defaultLinkOpenRender(tokens, idx, options, env, self)
-}
-
-const renderMarkdown = text => md.render(text || '')
-const renderTextWithLinks = (text) => {
-  if (!text) return []
-  const matches = md.linkify.match(text)
-  if (!matches) return [{ type: 'text', text }]
-
-  const parts = []
-  let lastIndex = 0
-  matches.forEach((match) => {
-    if (match.index > lastIndex) parts.push({ type: 'text', text: text.slice(lastIndex, match.index) })
-    parts.push({ type: 'link', text: match.text, href: match.url })
-    lastIndex = match.lastIndex
-  })
-  if (lastIndex < text.length) parts.push({ type: 'text', text: text.slice(lastIndex) })
-  return parts
-}
-
-const getToolCallId = (toolCall, fallback) => toolCall?.id || toolCall?.function?.id || fallback
-const getToolResultCallId = (message) => {
-  try {
-    const content = typeof message?.content === 'string' ? JSON.parse(message.content) : message?.content
-    return content?.tool_call_id || message?.tool_call_id || null
-  } catch {
-    return message?.tool_call_id || null
-  }
-}
-
-const fallbackDisplayKeys = new WeakMap()
-let fallbackDisplayKeyIndex = 0
-const getMessageKey = (message, index) => String(message?.id ?? `${message?.role || 'message'}_${index}`)
-const getDisplayKey = (message) => {
-  if (!message || typeof message !== 'object') return String(message)
-  if (message._displayKey) return message._displayKey
-  if (message?.id !== undefined && message?.id !== null) return String(message.id)
-  if (!fallbackDisplayKeys.has(message)) fallbackDisplayKeys.set(message, `message_${fallbackDisplayKeyIndex++}`)
-  return fallbackDisplayKeys.get(message)
-}
-const analyzeMessage = (message) => ({
-  isToolCall: isToolCall(message),
-  isToolResult: isToolResult(message)
-})
-
-let cachedSources = []
-let cachedDisplayMessages = []
-let cachedOutputCounts = []
-let lastDisplayChangeWasPrepend = false
-
-const buildDisplayMessages = (messages) => {
-  const prependCount = messages.length - cachedSources.length
-  lastDisplayChangeWasPrepend = cachedSources.length > 0 && prependCount > 0 && cachedSources.every((message, index) => messages[index + prependCount] === message)
-
-  let firstChanged = 0
-  const sharedLength = Math.min(messages.length, cachedSources.length)
-  while (firstChanged < sharedLength && messages[firstChanged] === cachedSources[firstChanged]) firstChanged += 1
-  if (firstChanged === messages.length && firstChanged === cachedSources.length) return cachedDisplayMessages
-
-  let rebuildStart = firstChanged
-  const changedCurrent = messages[rebuildStart]
-  const changedPrevious = cachedSources[rebuildStart]
-  if ((changedCurrent && (isToolCall(changedCurrent) || isToolResult(changedCurrent))) || (changedPrevious && (isToolCall(changedPrevious) || isToolResult(changedPrevious)))) {
-    while (rebuildStart > 0) {
-      const previousMessage = messages[rebuildStart - 1]
-      if (!isToolCall(previousMessage) && !isToolResult(previousMessage)) break
-      rebuildStart -= 1
-    }
-  }
-
-  const prefixLength = rebuildStart > 0 ? cachedOutputCounts[rebuildStart - 1] : 0
-  const output = cachedDisplayMessages.slice(0, prefixLength)
-  const outputCounts = cachedOutputCounts.slice(0, rebuildStart)
-  let activeToolGroup = null
-
-  for (let index = rebuildStart; index < messages.length; index += 1) {
-    const message = messages[index]
-    const messageKey = getMessageKey(message, index)
-    const analysis = analyzeMessage(message)
-
-    if (analysis.isToolCall) {
-      const responseId = message.response_id || null
-      if (!activeToolGroup || !responseId || activeToolGroup.response_id !== responseId) {
-        activeToolGroup = {
-          id: `tool_group_${responseId || messageKey}`,
-          _displayKey: `tool_group_${responseId || messageKey}`,
-          type: 'tool_group',
-          role: 'assistant',
-          response_id: responseId,
-          request_id: message.request_id,
-          work_id: message.work_id,
-          turn: message.turn,
-          created_at: message.created_at,
-          content: '',
-          reasoning_content: message.reasoning_content || '',
-          pairs: [],
-          latestEvent: null
-        }
-        output.push(activeToolGroup)
-      }
-
-      const toolContent = getToolCallContent(message).trim()
-      if (toolContent) activeToolGroup.content = activeToolGroup.content ? `${activeToolGroup.content}\n${toolContent}` : toolContent
-      if (!activeToolGroup.reasoning_content && message.reasoning_content) activeToolGroup.reasoning_content = message.reasoning_content
-      getToolCalls(message).forEach((toolCall, toolIndex) => {
-        const toolCallId = getToolCallId(toolCall, `${messageKey}_${toolIndex}`)
-        let pair = activeToolGroup.pairs.find(item => item.id === toolCallId)
-        if (!pair) {
-          pair = { id: toolCallId, toolCall, resultMessage: null }
-          activeToolGroup.pairs.push(pair)
-        } else {
-          pair.toolCall = toolCall
-        }
-        activeToolGroup.latestEvent = { type: 'call', pair }
-      })
-      outputCounts[index] = output.length
-      continue
-    }
-
-    if (analysis.isToolResult) {
-      const toolCallId = getToolResultCallId(message)
-      let targetGroup = activeToolGroup
-      let pair = targetGroup?.pairs.find(item => item.id === toolCallId)
-      if (!pair) {
-        targetGroup = [...output].reverse().find(item => item.type === 'tool_group' && item.pairs.some(toolPair => toolPair.id === toolCallId))
-        pair = targetGroup?.pairs.find(item => item.id === toolCallId)
-      }
-      if (!targetGroup) {
-        targetGroup = {
-          id: `tool_group_${message.response_id || messageKey}`,
-          _displayKey: `tool_group_${message.response_id || messageKey}`,
-          type: 'tool_group',
-          role: 'assistant',
-          response_id: message.response_id || null,
-          request_id: message.request_id,
-          created_at: message.created_at,
-          content: '',
-          pairs: [],
-          latestEvent: null
-        }
-        output.push(targetGroup)
-      }
-      if (!pair) {
-        pair = { id: toolCallId || messageKey, toolCall: null, resultMessage: null }
-        targetGroup.pairs.push(pair)
-      }
-      pair.resultMessage = message
-      targetGroup.latestEvent = { type: 'result', pair }
-      activeToolGroup = targetGroup
-      outputCounts[index] = output.length
-      continue
-    }
-
-    activeToolGroup = null
-    output.push(message)
-    outputCounts[index] = output.length
-  }
-
-  cachedSources = [...messages]
-  cachedDisplayMessages = output
-  cachedOutputCounts = outputCounts
-  return output
-}
-
-const displayMessages = computed(() => buildDisplayMessages(props.messages).filter(message => (
-  message.role !== 'thinking' && (props.currentSessionShowReasoning || message.role !== 'reasoning')
-)))
-const hasActiveThinking = computed(() => props.messages.some(message => message?.role === 'thinking'))
-const activityNotice = computed(() => {
-  const type = resolveChatActivityNotice({
-    contextSummarizing: props.contextSummarizing,
-    thinking: hasActiveThinking.value,
-    historyLoading: props.historyLoading
-  })
-  if (!type) return null
-  const textKeys = {
-    context_summary: 'chat.context_summarizing',
-    thinking: 'chat.thinking_in_progress',
-    history_loading: 'chat.loading_history'
-  }
-  return { type, text: t(textKeys[type]) }
-})
 const unreadMessageKeys = ref([])
 const latestLlmMessageVisible = ref(true)
 const followsOutput = ref(true)
@@ -873,16 +677,7 @@ const handleChangedIncomingMessages = async (changedMessages, replaceUnread = fa
   scheduleUnreadVisibilityCheck()
 }
 
-const clearFileDownloadState = () => {
-  fileDownloadGeneration += 1
-  fileDownloadCache.clear()
-  fileObjectUrls.value.clear()
-  pendingFileDownloads.clear()
-  reportedImageErrors.clear()
-}
-
 watch(() => props.currentSessionId, () => {
-  clearFileDownloadState()
   reasoningCollapseModel.value = []
   expandedUserMessages.value.clear()
 }, { flush: 'sync' })
@@ -916,7 +711,7 @@ watch(
 
 watch(displayMessages, async (messages) => {
   if (!unreadTrackingReady) return
-  if (lastDisplayChangeWasPrepend) {
+  if (didLastDisplayChangePrepend()) {
     resetIncomingMessageSnapshots(messages)
     return
   }
@@ -1084,12 +879,6 @@ const scrollToBottom = async (behavior = 'auto', restoreFollow = true) => {
   }
 }
 
-const getToolPairName = pair => pair.toolCall ? getToolCallName(pair.toolCall) : getToolResultName(pair.resultMessage)
-const getToolPairTitle = pair => t('chat.tool', { name: getToolPairName(pair) })
-const isToolGroupReturned = group => Boolean(group?.pairs?.length) && group.pairs.every(pair => pair.resultMessage)
-const getToolGroupStateClass = group => isToolGroupReturned(group) ? 'is-result' : 'is-call'
-const getToolGroupStatus = group => t(isToolGroupReturned(group) ? 'chat.tool_status_returned' : 'chat.tool_status_calling')
-
 const setCodeRef = (id, element) => {
   if (element) codeRefs.set(id, element)
   else codeRefs.delete(id)
@@ -1103,263 +892,6 @@ watch(collapseModel, (newValue, oldValue) => {
   })
 }, { deep: true })
 
-const parseAssistantFilesContent = (content) => {
-  try {
-    const parsed = typeof content === 'string' ? JSON.parse(content) : content
-    return parsed?.type === 'assistant_files' ? parsed : null
-  } catch {
-    return null
-  }
-}
-const getMessageText = (message) => {
-  const parsed = parseAssistantFilesContent(message.content)
-  const text = parsed ? parsed.text || '' : message.content
-  return message.role === 'err' ? truncateErrorMessage(text) : text
-}
-const getMessageFiles = (message) => message.files || parseAssistantFilesContent(message.content)?.files || []
-const getReasoningContent = message => typeof message?.reasoning_content === 'string' ? message.reasoning_content : ''
-const GUIDANCE_START_MARKER = '[系统提示信息]'
-const GUIDANCE_END_MARKER = '[系统提示信息结束]'
-const getGuidanceText = (content) => {
-  if (typeof content !== 'string') return ''
-  if (!content.startsWith(GUIDANCE_START_MARKER) || !content.endsWith(GUIDANCE_END_MARKER)) return content
-  return content.slice(GUIDANCE_START_MARKER.length, -GUIDANCE_END_MARKER.length).trim()
-}
-const parseAuditConfirmation = (content) => {
-  try {
-    const parsed = typeof content === 'string' ? JSON.parse(content) : content
-    return parsed?.type === 'audit_confirmation' ? parsed : null
-  } catch {
-    return null
-  }
-}
-const hasAuditRecordId = value => value !== null && value !== undefined && String(value).trim() !== ''
-const hasSameAuditRecordId = (left, right) => hasAuditRecordId(left) && hasAuditRecordId(right) && String(left) === String(right)
-const findLatestAuditConfirmation = (auditRecordId) => {
-  if (!hasAuditRecordId(auditRecordId)) return null
-
-  for (let index = props.messages.length - 1; index >= 0; index -= 1) {
-    const message = props.messages[index]
-    if (message?.type !== 'audit_confirmation') continue
-
-    const confirmation = parseAuditConfirmation(message.content)
-    if (hasSameAuditRecordId(confirmation?.audit_record_id, auditRecordId)) return { message, confirmation }
-  }
-  return null
-}
-const getAuditConfirmation = (message) => {
-  const payload = parseAuditConfirmation(message?.content) || {}
-  const localStatus = auditDecisionStatuses.value.get(payload.audit_record_id)
-  const terminalStatuses = new Set(['rejected', 'cancelled', 'expired', 'succeeded', 'failed', 'execution_unknown'])
-  if (terminalStatuses.has(payload.status)) return payload
-  if (localStatus) return { ...payload, status: localStatus }
-  return payload
-}
-const isHighRiskAuditConfirmation = message => getAuditConfirmation(message).confirmation_mode === 'high_risk_override'
-const getAuditRemainingSeconds = (message) => {
-  const expiresAt = Date.parse(getAuditConfirmation(message).expires_at || '')
-  if (!Number.isFinite(expiresAt)) return null
-  return Math.max(0, Math.ceil((expiresAt - auditCountdownNow.value) / 1000))
-}
-const formatAuditCountdown = (remainingSeconds) => {
-  const days = Math.floor(remainingSeconds / 86400)
-  const hours = Math.floor((remainingSeconds % 86400) / 3600)
-  const minutes = Math.floor((remainingSeconds % 3600) / 60)
-  const seconds = remainingSeconds % 60
-  if (days > 0) return t('chat.audit_countdown_days', { days, hours, minutes, seconds })
-  if (hours > 0) return t('chat.audit_countdown_hours', { hours, minutes, seconds })
-  if (minutes > 0) return t('chat.audit_countdown_minutes', { minutes, seconds })
-  return t('chat.audit_countdown_seconds', { seconds })
-}
-const isAuditConfirmationExpired = message => getAuditRemainingSeconds(message) === 0
-const getAuditExpiryLabel = (message) => {
-  const confirmation = getAuditConfirmation(message)
-  const status = confirmation.status || 'pending'
-  if (status === 'expired') return t('chat.audit_status_expired')
-  if (status !== 'pending') return ''
-  const remainingSeconds = getAuditRemainingSeconds(message)
-  if (remainingSeconds === null) return '-'
-  if (remainingSeconds === 0) return t('chat.audit_status_expired')
-  return t('chat.audit_expires_in', { time: formatAuditCountdown(remainingSeconds) })
-}
-const isAuditDecisionPending = message => pendingAuditDecisions.value.has(getAuditConfirmation(message).audit_record_id)
-const getAuditStatusLabel = message => {
-  const status = getAuditConfirmation(message).status || 'pending'
-  return t(`chat.audit_status_${status === 'pending' && isAuditConfirmationExpired(message) ? 'expired' : status}`)
-}
-const submitAuditDecision = async (message, decision) => {
-  const auditRecordId = getAuditConfirmation(message).audit_record_id
-  if (!auditRecordId || pendingAuditDecisions.value.has(auditRecordId)) return
-
-  if (decision === 'ignore') {
-    pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value, auditRecordId])
-    try {
-      await ElMessageBox.confirm(
-        t('chat.audit_high_risk_warning'),
-        t('chat.audit_high_risk_warning_title'),
-        {
-          type: 'error',
-          confirmButtonText: t('chat.audit_ignore_and_allow'),
-          cancelButtonText: t('common.cancel')
-        }
-      )
-    } catch {
-      pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value].filter(id => id !== auditRecordId))
-      return
-    }
-
-    const latestAuditConfirmation = findLatestAuditConfirmation(auditRecordId)
-    const now = Date.now()
-    if (
-      props.currentSessionReadOnly ||
-      !latestAuditConfirmation ||
-      !hasSameAuditRecordId(latestAuditConfirmation.confirmation.audit_record_id, auditRecordId) ||
-      !isAuditConfirmationActionable(latestAuditConfirmation.confirmation, now)
-    ) {
-      pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value].filter(id => id !== auditRecordId))
-      return
-    }
-  }
-
-  pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value, auditRecordId])
-  auditDecisionStatuses.value = new Map([
-    ...auditDecisionStatuses.value,
-    [auditRecordId, ['approve', 'ignore'].includes(decision) ? 'executing' : 'rejected']
-  ])
-  emit('audit-decision', { auditRecordId, decision })
-}
-const parseBackgroundSystemContent = (content) => {
-  try {
-    const parsed = typeof content === 'string' ? JSON.parse(content) : content
-    return parsed?.type === 'background_tool_result' ? parsed : null
-  } catch {
-    return null
-  }
-}
-const getBackgroundSystemTitle = (message) => t('chat.background_task_result', { name: parseBackgroundSystemContent(message.content)?.task?.tool_name || t('common.unknown_tool') })
-const getBackgroundSystemText = (message) => {
-  const parsed = parseBackgroundSystemContent(message.content)
-  return parsed?.task?.summary || parsed?.task?.error || parsed?.task?.content || parsed?.instruction || ''
-}
-
-const isImageFile = (path) => ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes((path || '').split('.').pop().toLowerCase())
-const getFilename = (path) => {
-  if (!path) return t('chat.unknown_file')
-  const name = path.split(/[/\\]/).pop()
-  return name.length > 9 && name[8] === '_' ? name.substring(9) : name
-}
-const isPreviewImage = file => file?.previewable && file?.mime_type?.startsWith('image/')
-const getAttachmentSourceUrl = path => path ? fileApi.getDownloadUrl(path, props.currentSessionId) : ''
-const getSentFileUrl = file => fileApi.resolveDownloadUrl(file?.download_url)
-const getFileObjectUrl = sourceUrl => fileObjectUrls.value.get(sourceUrl) || ''
-const getAttachmentImageUrls = message => (message.attachments || [])
-  .filter(isImageFile)
-  .map(getAttachmentSourceUrl)
-  .map(getFileObjectUrl)
-  .filter(Boolean)
-const getSentFileImageUrls = message => getMessageFiles(message)
-  .filter(isPreviewImage)
-  .map(getSentFileUrl)
-  .map(getFileObjectUrl)
-  .filter(Boolean)
-const fileSourceUrls = computed(() => {
-  const urls = new Set()
-  props.messages.forEach(message => {
-    const attachments = message.attachments || []
-    attachments.forEach(path => urls.add(getAttachmentSourceUrl(path)))
-    getMessageFiles(message).forEach(file => urls.add(getSentFileUrl(file)))
-  })
-  return [...urls].filter(url => url && url !== '#')
-})
-const imageSourceUrls = computed(() => {
-  const urls = new Set()
-  props.messages.forEach(message => {
-    const attachments = message.attachments || []
-    attachments.filter(isImageFile).forEach(path => urls.add(getAttachmentSourceUrl(path)))
-    getMessageFiles(message).filter(isPreviewImage).forEach(file => urls.add(getSentFileUrl(file)))
-  })
-  return [...urls].filter(url => url && url !== '#')
-})
-const isActiveFileSource = (sourceUrl, generation) => (
-  !messageListUnmounted &&
-  generation === fileDownloadGeneration &&
-  fileSourceUrls.value.includes(sourceUrl)
-)
-const reportFileLoadError = (error, sourceUrl, generation, isImage = false) => {
-  if (!isActiveFileSource(sourceUrl, generation)) return
-  if (isImage && reportedImageErrors.has(sourceUrl)) return
-  if (isImage) reportedImageErrors.add(sourceUrl)
-  ElMessage.error(error?.message || t('common.network_request_failed'))
-}
-const loadFileObjectUrl = async (sourceUrl, generation = fileDownloadGeneration) => {
-  if (!isActiveFileSource(sourceUrl, generation)) return ''
-
-  const cachedUrl = fileDownloadCache.get(sourceUrl)
-  if (cachedUrl) {
-    fileObjectUrls.value.set(sourceUrl, cachedUrl)
-    return cachedUrl
-  }
-
-  const objectUrl = await fileDownloadCache.load(sourceUrl)
-  if (!objectUrl || !isActiveFileSource(sourceUrl, generation)) return ''
-  fileObjectUrls.value.set(sourceUrl, objectUrl)
-  return objectUrl
-}
-const preloadImage = async (sourceUrl, generation) => {
-  try {
-    await loadFileObjectUrl(sourceUrl, generation)
-  } catch (error) {
-    reportFileLoadError(error, sourceUrl, generation, true)
-  }
-}
-watch([fileSourceUrls, imageSourceUrls], ([sourceUrls, imageUrls]) => {
-  const retainedUrls = new Set(sourceUrls)
-  fileDownloadCache.prune(sourceUrls)
-  for (const sourceUrl of fileObjectUrls.value.keys()) {
-    if (!retainedUrls.has(sourceUrl)) fileObjectUrls.value.delete(sourceUrl)
-  }
-  for (const sourceUrl of reportedImageErrors) {
-    if (!retainedUrls.has(sourceUrl)) reportedImageErrors.delete(sourceUrl)
-  }
-
-  const generation = fileDownloadGeneration
-  new Set(imageUrls).forEach(sourceUrl => { void preloadImage(sourceUrl, generation) })
-}, { immediate: true, flush: 'sync' })
-const handleFileDownload = async (sourceUrl, filename) => {
-  if (!sourceUrl || sourceUrl === '#' || messageListUnmounted) return
-  const generation = fileDownloadGeneration
-  const downloadKey = `${generation}:${sourceUrl}`
-  if (pendingFileDownloads.has(downloadKey)) return
-  pendingFileDownloads.add(downloadKey)
-
-  try {
-    let objectUrl
-    try {
-      objectUrl = await loadFileObjectUrl(sourceUrl, generation)
-    } catch (error) {
-      reportFileLoadError(error, sourceUrl, generation)
-      return
-    }
-    if (!objectUrl || !isActiveFileSource(sourceUrl, generation)) return
-
-    const anchor = document.createElement('a')
-    anchor.href = objectUrl
-    anchor.download = filename || t('chat.unknown_file')
-    anchor.style.display = 'none'
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-  } finally {
-    pendingFileDownloads.delete(downloadKey)
-  }
-}
-const formatFileSize = (size) => {
-  if (!Number.isFinite(size)) return '-'
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / 1024 / 1024).toFixed(1)} MB`
-}
-const getMessageClass = role => ({ user: 'user', background_system: 'background-system', err: 'error' })[role] || 'ai'
 const handleNewMessageClick = async () => {
   await scrollToBottom('smooth')
   updateMessageListBottomState()
@@ -1370,12 +902,6 @@ const handleImageLoad = () => {
 }
 onUnmounted(() => {
   messageListUnmounted = true
-  fileDownloadGeneration += 1
-  fileDownloadCache.dispose()
-  fileObjectUrls.value.clear()
-  pendingFileDownloads.clear()
-  reportedImageErrors.clear()
-  window.clearInterval(auditCountdownTimer)
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
   if (messageListResizeObserver !== null) messageListResizeObserver.disconnect()
   window.removeEventListener('focus', handleWindowFocus)
