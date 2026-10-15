@@ -114,3 +114,206 @@
     margin-top: 6px;
   }
 }
+
+.organization-dialog {
+  .el-dialog__header {
+    padding: 22px 28px 16px;
+    text-align: left;
+  }
+
+  .el-dialog__title {
+    color: var(--color-slate-900);
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .el-dialog__body {
+    padding: 0 28px 28px;
+  }
+
+  .organization-toolbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 24px;
+  }
+
+  .organization-intro {
+    flex: 1;
+    min-width: 0;
+    margin: 2px 0 0;
+    color: var(--color-text-regular);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .organization-toolbar .el-button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .organization-latest {
+    padding: 20px 22px;
+    background: var(--color-slate-50);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-8);
+  }
+
+  .organization-latest__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+  }
+
+  .organization-latest__heading {
+    min-width: 0;
+  }
+
+  .organization-latest h3 {
+    margin: 0;
+    color: var(--color-slate-900);
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .organization-latest__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin-top: 7px;
+    color: var(--color-text-regular);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+
+  .organization-latest__actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .organization-progress-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--color-border-light);
+  }
+
+  .organization-progress-item {
+    min-width: 0;
+  }
+
+  .organization-progress-label {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    color: var(--color-text-regular);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .organization-progress-label span:last-child {
+    flex: 0 0 auto;
+    color: var(--color-slate-800);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .organization-latest__counts {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid var(--color-border-light);
+    color: var(--color-text-regular);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .organization-latest__counts span:last-child {
+    color: var(--color-slate-800);
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .organization-job-error,
+  .organization-history__error {
+    margin-top: 14px;
+    padding: 10px 12px;
+    color: var(--color-slate-800);
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    background: var(--color-danger-soft);
+    border: 1px solid var(--color-danger);
+    border-radius: var(--radius-6);
+  }
+
+  .organization-history {
+    margin-top: 28px;
+    border-top: 1px solid var(--color-border-light);
+  }
+
+  .organization-history__summary {
+    display: list-item;
+    box-sizing: border-box;
+    min-height: 44px;
+    padding: 12px 0;
+    color: var(--color-slate-900);
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 20px;
+    cursor: pointer;
+  }
+
+  .organization-history__summary:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  .organization-history[open] .organization-job-table {
+    margin-top: 12px;
+  }
+
+  .organization-history__result {
+    min-width: 0;
+    line-height: 1.5;
+  }
+
+  .organization-history__error {
+    margin-top: 6px;
+  }
+
+  .organization-history-details {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 20px;
+    padding: 14px 18px;
+    color: var(--color-text-regular);
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    background: var(--color-slate-50);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-6);
+  }
+
+  .organization-history .el-table__expand-icon:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: var(--radius-4);
+  }
+}

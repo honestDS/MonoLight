@@ -65,7 +65,8 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
     },
     organizationJobs: (selectedId, params) => {
       organizationJobs.push({ selectedId, params })
-      return Promise.resolve(dataResponse({ items: [], total: 0 }))
+      return options.organizationJobs?.({ selectedId, params })
+        ?? Promise.resolve(dataResponse({ items: [], total: 0 }))
     },
     retryOrganizationJob: (selectedId, jobId) => {
       retries.push({ selectedId, jobId })
@@ -274,4 +275,111 @@ test('rechecks can_retry after the confirmation resolves', async t => {
   assert.deepEqual(normalize(harness.api.retries), [])
   assert.deepEqual(harness.refreshed, [])
   assert.equal(harness.module.organizationActionJobId.value, null)
+})
+
+test('uses live organization jobs instead of a cached knowledge-base error', async t => {
+  const selectedKb = {
+    id: 'managed-kb',
+    knowledge_base_type: 'llm_managed',
+    organization_error: 'stale cached organization error'
+  }
+  let jobs = [{
+    id: 'organization-live',
+    knowledge_base_id: selectedKb.id,
+    status: 'running',
+    error: null
+  }]
+  const harness = await createKnowledgeOrganizationHarness(t, {
+    selectedKb,
+    organizationJobs: () => dataResponse({ items: jobs, total: jobs.length })
+  })
+
+  await harness.module.showOrganizationDialog()
+  assert.equal(harness.module.organizationDialogVisible.value, true)
+  assert.equal(harness.module.latestOrganizationJob.value.status, 'running')
+  assert.equal(harness.module.latestOrganizationJob.value.error, null)
+
+  const failedJob = {
+    ...jobs[0],
+    status: 'failed',
+    error: 'organization failed with the original server error',
+    can_retry: true
+  }
+  jobs = [failedJob]
+  await harness.module.fetchOrganizationJobs()
+  assert.equal(harness.module.latestOrganizationJob.value.status, 'failed')
+  assert.equal(harness.module.latestOrganizationJob.value.error, 'organization failed with the original server error')
+
+  const successJob = {
+    id: 'organization-success',
+    knowledge_base_id: selectedKb.id,
+    status: 'succeeded',
+    error: null,
+    can_retry: false
+  }
+  jobs = [successJob, failedJob]
+  await harness.module.fetchOrganizationJobs()
+  assert.equal(harness.module.latestOrganizationJob.value.id, 'organization-success')
+  assert.equal(harness.module.latestOrganizationJob.value.status, 'succeeded')
+  assert.equal(harness.module.latestOrganizationJob.value.error, null)
+
+  const cancelledJob = {
+    id: 'organization-cancelled',
+    knowledge_base_id: selectedKb.id,
+    status: 'cancelled',
+    error: null,
+    can_retry: true
+  }
+  jobs = [cancelledJob, successJob, failedJob]
+  await harness.module.fetchOrganizationJobs()
+  assert.equal(harness.module.latestOrganizationJob.value.id, 'organization-cancelled')
+  assert.equal(harness.module.latestOrganizationJob.value.status, 'cancelled')
+  assert.equal(harness.module.latestOrganizationJob.value.error, null)
+
+  await harness.module.fetchOrganizationJobs()
+  assert.equal(harness.module.organizationJobs.value.length, 3)
+  assert.equal(harness.module.latestOrganizationJob.value.id, 'organization-cancelled')
+  assert.equal(harness.module.organizationJobs.value[2].id, 'organization-live')
+  assert.equal(harness.module.organizationJobs.value[2].error, 'organization failed with the original server error')
+  assert.equal(selectedKb.organization_error, 'stale cached organization error')
+})
+
+test('keeps the organization dialog visible and shows the new job after retry', async t => {
+  const selectedKb = { id: 'managed-kb', knowledge_base_type: 'llm_managed' }
+  const failedJob = {
+    id: 'organization-failed',
+    knowledge_base_id: selectedKb.id,
+    status: 'failed',
+    error: 'organization failed before retry',
+    can_retry: true
+  }
+  const pendingJob = {
+    id: 'organization-retry',
+    knowledge_base_id: selectedKb.id,
+    status: 'pending',
+    error: null,
+    can_retry: false
+  }
+  let jobs = [failedJob]
+  const harness = await createKnowledgeOrganizationHarness(t, {
+    selectedKb,
+    organizationJobs: () => dataResponse({ items: jobs, total: jobs.length })
+  })
+
+  await harness.module.showOrganizationDialog()
+  assert.equal(harness.module.organizationDialogVisible.value, true)
+  assert.equal(harness.module.latestOrganizationJob.value.id, failedJob.id)
+  assert.equal(harness.module.latestOrganizationJob.value.error, failedJob.error)
+
+  jobs = [pendingJob, failedJob]
+  await harness.module.handleRetryOrganizationJob(failedJob)
+
+  assert.deepEqual(normalize(harness.api.retries), [{ selectedId: selectedKb.id, jobId: failedJob.id }])
+  assert.equal(harness.module.organizationDialogVisible.value, true)
+  assert.equal(harness.module.latestOrganizationJob.value.id, pendingJob.id)
+  assert.equal(harness.module.latestOrganizationJob.value.status, 'pending')
+  assert.equal(harness.module.latestOrganizationJob.value.error, null)
+  assert.equal(harness.module.organizationJobs.value[1].id, failedJob.id)
+  assert.equal(harness.module.organizationJobs.value[1].status, 'failed')
+  assert.equal(harness.module.organizationJobs.value[1].error, failedJob.error)
 })
