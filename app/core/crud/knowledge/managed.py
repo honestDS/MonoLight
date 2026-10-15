@@ -36,12 +36,6 @@ class ManagedKnowledgeRecallState:
     deleted_at: datetime | None
 
 
-@dataclass(frozen=True, slots=True)
-class ManagedKnowledgeOrganizationCandidate:
-    item: ManagedKnowledgeItem
-    revision: ManagedKnowledgeRevision
-
-
 async def _finish(db: AsyncSession, *, commit: bool) -> None:
     if commit:
         await db.commit()
@@ -56,32 +50,6 @@ def organization_lock_token_for_job(job_id: int) -> str:
 
 
 class CRUDManagedKnowledgeItem:
-    async def list_organization_candidates(
-        self,
-        db: AsyncSession,
-        *,
-        uid: str,
-        knowledge_base_id: int,
-    ) -> list[ManagedKnowledgeOrganizationCandidate]:
-        result = await db.execute(
-            select(ManagedKnowledgeItem, ManagedKnowledgeRevision)
-            .join(
-                ManagedKnowledgeRevision,
-                (ManagedKnowledgeRevision.uid == ManagedKnowledgeItem.uid) & (ManagedKnowledgeRevision.knowledge_base_id == ManagedKnowledgeItem.knowledge_base_id) & (ManagedKnowledgeRevision.knowledge_id == ManagedKnowledgeItem.id) & (ManagedKnowledgeRevision.version == ManagedKnowledgeItem.version),
-            )
-            .where(
-                ManagedKnowledgeItem.uid == uid,
-                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
-                ManagedKnowledgeItem.deleted_at.is_(None),
-                ManagedKnowledgeItem.llm_maintainable.is_(True),
-                ManagedKnowledgeItem.is_recallable.is_(True),
-                ManagedKnowledgeItem.pending_job_id.is_(None),
-                ManagedKnowledgeItem.indexed_version == ManagedKnowledgeItem.version,
-            )
-            .order_by(ManagedKnowledgeItem.id)
-        )
-        return [ManagedKnowledgeOrganizationCandidate(item=item, revision=revision) for item, revision in result.all()]
-
     async def count_organization_candidates(
         self,
         db: AsyncSession,

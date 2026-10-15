@@ -10,7 +10,6 @@ import { createAbortableTaskManager, createLatestRequestTracker } from '../../ut
 export function useKnowledgeOrganization ({
   t,
   selectedKb,
-  managedKnowledgeSelectedIds,
   fetchManagedKnowledgeItems,
   scheduleManagedKnowledgePolling
 }) {
@@ -267,18 +266,13 @@ export function useKnowledgeOrganization ({
     if (organizationDialogVisible.value) scheduleOrganizationPolling(session)
   }
 
-  const submitKnowledgeOrganization = async (selectedOnly) => {
+  const submitKnowledgeOrganization = async () => {
     if (!selectedKb.value || !canManageManagedKnowledge(selectedKb.value) || organizationSubmitting.value) return
-    const knowledgeIds = [...managedKnowledgeSelectedIds.value]
-    if (selectedOnly && !knowledgeIds.length) {
-      ElMessage.warning(t('knowledgeBase.organization_select_at_least_one'))
-      return
-    }
 
     const selectedId = selectedKb.value.id
     organizationSubmitting.value = true
     try {
-      await knowledgeBaseApi.organize(selectedId, selectedOnly ? { knowledge_ids: knowledgeIds } : {})
+      await knowledgeBaseApi.organize(selectedId, {})
       if (selectedKb.value?.id === selectedId) selectedKb.value.organization_error = null
       ElMessage.success(t('knowledgeBase.organization_submitted'))
       await refreshOrganizationData()

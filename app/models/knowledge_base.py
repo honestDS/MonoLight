@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import ConfigDict, StrictInt, StrictStr, model_validator
+from pydantic import ConfigDict, StrictStr, model_validator
 from sqlalchemy import DDL, CheckConstraint, ForeignKeyConstraint, Integer, Text, event
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlmodel import (
@@ -764,8 +764,9 @@ class KnowledgeBaseEmbeddingMigrationRequest(SQLModel):
 
 
 class KnowledgeOrganizationRequest(SQLModel):
-    knowledge_ids: list[StrictInt] | None = Field(default=None, min_length=1, description="可选的托管知识条目范围")
     dedupe_key: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class ManagedKnowledgeCreateRequest(SQLModel):

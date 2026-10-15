@@ -116,8 +116,7 @@ async def _prepare_knowledge_organization_snapshot(
         if not isinstance(payload, dict):
             raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID))
 
-        knowledge_ids = payload.get("knowledge_ids")
-        if knowledge_ids is not None and (not isinstance(knowledge_ids, list) or any(isinstance(knowledge_id, bool) or not isinstance(knowledge_id, int) or knowledge_id < 1 for knowledge_id in knowledge_ids)):
+        if payload.get("knowledge_ids") is not None:
             raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID))
 
         snapshot_nonce = payload.get("snapshot_nonce")
@@ -129,7 +128,6 @@ async def _prepare_knowledge_organization_snapshot(
             uid=uid,
             knowledge_base_id=knowledge_base_id,
             organization_job_id=organization_job_id,
-            knowledge_ids=knowledge_ids,
             snapshot_nonce=snapshot_nonce,
         )
         knowledge_base = await knowledge_base_crud.get(db, knowledge_base_id)
@@ -496,36 +494,6 @@ async def execute_knowledge_organization(
         raise
 
 
-def _normalize_organization_scope_ids(value: Iterable[int] | None) -> list[int] | None:
-    if value is None:
-        return None
-    normalized: set[int] = set()
-    for knowledge_id in value:
-        if isinstance(knowledge_id, bool) or not isinstance(knowledge_id, int) or knowledge_id < 1:
-            raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID))
-        normalized.add(knowledge_id)
-    if not normalized:
-        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID))
-    return sorted(normalized)
-
-
-def _organization_job_payload(
-    *,
-    knowledge_base_id: int,
-    knowledge_ids: list[int] | None,
-    source: str,
-    snapshot_nonce: str,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "knowledge_base_id": knowledge_base_id,
-        "source": source,
-        "snapshot_nonce": snapshot_nonce,
-    }
-    if knowledge_ids is not None:
-        payload["knowledge_ids"] = knowledge_ids
-    return payload
-
-
 def _published_organization_mutation_count(children: Iterable[KnowledgeJob]) -> int:
     child_items = list(children)
     children_by_id = {child.id: child for child in child_items if child.id is not None}
@@ -620,12 +588,10 @@ async def submit_knowledge_organization(
     *,
     uid: str,
     knowledge_base_id: int,
-    knowledge_ids: Iterable[int] | None = None,
     source: str = "manual",
     dedupe_key: str | None = None,
     commit: bool = True,
 ) -> KnowledgeJob:
-    normalized_ids = _normalize_organization_scope_ids(knowledge_ids)
     if source not in {"manual", "auto"}:
         raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID))
     knowledge_base = await knowledge_base_crud.lock_owned_by_id(
@@ -643,29 +609,13 @@ async def submit_knowledge_organization(
             retryable=False,
         )
 
-    if normalized_ids is not None:
-        candidates = await managed_knowledge_item_crud.list_organization_candidates(
-            db,
-            uid=uid,
-            knowledge_base_id=knowledge_base_id,
-        )
-        candidate_ids = {candidate.item.id for candidate in candidates if candidate.item.id is not None}
-        if not set(normalized_ids).issubset(candidate_ids):
-            raise KnowledgeOrganizationExecutionError(
-                message=ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID,
-                code=409,
-                status="organization_scope_invalid",
-                retryable=False,
-            )
-
     normalized_dedupe_key = dedupe_key.strip() if isinstance(dedupe_key, str) and dedupe_key.strip() else None
     snapshot_nonce = hashlib.sha256(normalized_dedupe_key.encode("utf-8")).hexdigest() if normalized_dedupe_key is not None else uuid4().hex
-    payload = _organization_job_payload(
-        knowledge_base_id=knowledge_base_id,
-        knowledge_ids=normalized_ids,
-        source=source,
-        snapshot_nonce=snapshot_nonce,
-    )
+    payload = {
+        "knowledge_base_id": knowledge_base_id,
+        "source": source,
+        "snapshot_nonce": snapshot_nonce,
+    }
     request_hash = hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
     final_dedupe_key = normalized_dedupe_key or f"knowledge-organization:{knowledge_base_id}:{payload['snapshot_nonce']}"
     existing_by_dedupe = await knowledge_job_crud.get_by_dedupe_key(
@@ -907,6 +857,7 @@ async def retry_knowledge_organization(
             KnowledgeJobStatus.FAILED,
             KnowledgeJobStatus.CANCELLED,
         }
+        or (isinstance(old_job.payload, dict) and old_job.payload.get("knowledge_ids") is not None)
     ):
         raise KnowledgeOrganizationExecutionError(
             message=ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT,
@@ -914,14 +865,11 @@ async def retry_knowledge_organization(
             status="organization_retry_invalid",
             retryable=False,
         )
-    payload = old_job.payload if isinstance(old_job.payload, dict) else {}
-    old_scope = payload.get("knowledge_ids")
     source = "auto" if old_job.operation == KnowledgeJobOperation.AUTO_ORGANIZE else "manual"
     retried = await submit_knowledge_organization(
         db,
         uid=uid,
         knowledge_base_id=old_job.knowledge_base_id,
-        knowledge_ids=old_scope,
         source=source,
         dedupe_key=f"knowledge-organization-retry:{job_id}:{uuid4().hex}",
         commit=False,

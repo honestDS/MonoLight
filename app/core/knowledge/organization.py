@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from time import monotonic
 from typing import Any
 
@@ -84,24 +84,6 @@ def _non_negative_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
-
-
-def _normalize_knowledge_ids(value: Iterable[int] | None) -> tuple[int, ...] | None:
-    if value is None:
-        return None
-    if isinstance(value, (str, bytes, bytearray)):
-        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
-    try:
-        values = tuple(value)
-    except TypeError as exc:
-        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID)) from exc
-    normalized: set[int] = set()
-    for knowledge_id in values:
-        positive_id = _positive_int(knowledge_id)
-        if positive_id is None:
-            raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
-        normalized.add(positive_id)
-    return tuple(sorted(normalized))
 
 
 def _normalize_snapshot_nonce(value: str | None) -> str | None:
@@ -232,12 +214,7 @@ async def _iter_candidate_revisions(
     knowledge_base_id: int,
     boundary_revision_id: int,
     page_size: int,
-    knowledge_ids: Iterable[int] | None = None,
 ) -> AsyncIterator[tuple[ManagedKnowledgeRevision, ManagedKnowledgeItem]]:
-    normalized_knowledge_ids = _normalize_knowledge_ids(knowledge_ids)
-    knowledge_id_filter = None if normalized_knowledge_ids is None else frozenset(normalized_knowledge_ids)
-    if knowledge_id_filter is not None and not knowledge_id_filter:
-        return
     after_knowledge_id = 0
     while True:
         page = await managed_knowledge_revision_crud.list_latest_at_boundary_page(
@@ -252,19 +229,14 @@ async def _iter_candidate_revisions(
             return
         for revision in page:
             after_knowledge_id = max(after_knowledge_id, revision.knowledge_id)
-        candidate_page = page if knowledge_id_filter is None else tuple(revision for revision in page if revision.knowledge_id in knowledge_id_filter)
-        if not candidate_page:
-            if len(page) < page_size:
-                return
-            continue
         current_items = await managed_knowledge_item_crud.get_by_ids(
             db,
             uid=uid,
             knowledge_base_id=knowledge_base_id,
-            knowledge_ids=[revision.knowledge_id for revision in candidate_page],
+            knowledge_ids=[revision.knowledge_id for revision in page],
         )
         current_by_id = {item.id: item for item in current_items if item.id is not None}
-        for revision in candidate_page:
+        for revision in page:
             item = current_by_id.get(revision.knowledge_id)
             if _revision_is_organization_candidate(revision, item):
                 yield revision, item
@@ -279,10 +251,8 @@ def _snapshot_digest_prefix(
     boundary_revision_id: int,
     active_embedding_revision: int,
     index_revision: int,
-    knowledge_ids: tuple[int, ...] | None = None,
     snapshot_nonce: str | None = None,
 ) -> bytes:
-    normalized_knowledge_ids = _normalize_knowledge_ids(knowledge_ids)
     normalized_snapshot_nonce = _normalize_snapshot_nonce(snapshot_nonce)
     payload: dict[str, Any] = {
         "active_embedding_revision": active_embedding_revision,
@@ -292,8 +262,6 @@ def _snapshot_digest_prefix(
         "scope": "knowledge_organization_snapshot_v2",
         "uid": uid,
     }
-    if normalized_knowledge_ids is not None:
-        payload["knowledge_ids"] = list(normalized_knowledge_ids)
     if normalized_snapshot_nonce is not None:
         payload["snapshot_nonce"] = normalized_snapshot_nonce
     return canonical_json_dumps(payload).encode("utf-8")
@@ -309,10 +277,8 @@ async def _calculate_snapshot_identity(
     index_revision: int,
     page_size: int,
     lease_heartbeat: Callable[[bool], Awaitable[None]] | None = None,
-    knowledge_ids: Iterable[int] | None = None,
     snapshot_nonce: str | None = None,
 ) -> tuple[str, int]:
-    normalized_knowledge_ids = _normalize_knowledge_ids(knowledge_ids)
     normalized_snapshot_nonce = _normalize_snapshot_nonce(snapshot_nonce)
     digest = hashlib.sha256()
     digest.update(
@@ -322,7 +288,6 @@ async def _calculate_snapshot_identity(
             boundary_revision_id=boundary_revision_id,
             active_embedding_revision=active_embedding_revision,
             index_revision=index_revision,
-            knowledge_ids=normalized_knowledge_ids,
             snapshot_nonce=normalized_snapshot_nonce,
         )
     )
@@ -333,7 +298,6 @@ async def _calculate_snapshot_identity(
         knowledge_base_id=knowledge_base_id,
         boundary_revision_id=boundary_revision_id,
         page_size=page_size,
-        knowledge_ids=normalized_knowledge_ids,
     ):
         if lease_heartbeat is not None:
             await lease_heartbeat(False)
@@ -352,11 +316,9 @@ async def _ensure_snapshot_items(
     page_size: int,
     organization_job_id: int | None = None,
     lease_heartbeat: Callable[[bool], Awaitable[None]] | None = None,
-    knowledge_ids: Iterable[int] | None = None,
 ) -> None:
     if snapshot.id is None:
         raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
-    normalized_knowledge_ids = _normalize_knowledge_ids(knowledge_ids)
     sequence = 0
     async for revision, item in _iter_candidate_revisions(
         db,
@@ -364,7 +326,6 @@ async def _ensure_snapshot_items(
         knowledge_base_id=snapshot.knowledge_base_id,
         boundary_revision_id=snapshot.boundary_revision_id,
         page_size=page_size,
-        knowledge_ids=normalized_knowledge_ids,
     ):
         if lease_heartbeat is not None:
             await lease_heartbeat(False)
@@ -420,10 +381,8 @@ async def create_knowledge_organization_snapshot(
     uid: str,
     knowledge_base_id: int,
     organization_job_id: int | None = None,
-    knowledge_ids: Iterable[int] | None = None,
     snapshot_nonce: str | None = None,
 ) -> KnowledgeOrganizationSnapshot:
-    normalized_knowledge_ids = _normalize_knowledge_ids(knowledge_ids)
     normalized_snapshot_nonce = _normalize_snapshot_nonce(snapshot_nonce)
     organization_job: KnowledgeJob | None = None
     if organization_job_id is not None:
@@ -461,7 +420,6 @@ async def create_knowledge_organization_snapshot(
         index_revision=knowledge_base.index_revision,
         page_size=KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
         lease_heartbeat=lease_heartbeat,
-        knowledge_ids=normalized_knowledge_ids,
         snapshot_nonce=normalized_snapshot_nonce,
     )
     snapshot = KnowledgeOrganizationSnapshot(
@@ -482,7 +440,6 @@ async def create_knowledge_organization_snapshot(
             page_size=KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
             organization_job_id=organization_job_id,
             lease_heartbeat=lease_heartbeat,
-            knowledge_ids=normalized_knowledge_ids,
         )
         await db.commit()
         return persisted

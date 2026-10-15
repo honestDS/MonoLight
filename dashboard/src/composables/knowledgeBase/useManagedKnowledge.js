@@ -16,8 +16,6 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
   const managedKnowledgePage = ref(1)
   const managedKnowledgePageSize = ref(10)
   const managedKnowledgeQuery = ref('')
-  const managedKnowledgeTableRef = ref(null)
-  const managedKnowledgeSelectedIds = ref([])
   const managedKnowledgeEditDialogVisible = ref(false)
   const managedKnowledgeEditingId = ref(null)
   const managedKnowledgeFormRef = ref(null)
@@ -50,25 +48,6 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
     managedKnowledgeForm.llm_maintainable = false
   }
 
-  const clearManagedKnowledgeSelection = () => {
-    managedKnowledgeSelectedIds.value = []
-    managedKnowledgeTableRef.value?.clearSelection()
-  }
-
-  const isManagedKnowledgeOrganizable = (item) => Boolean(
-    item?.llm_maintainable === true
-    && item?.is_recallable === true
-    && !item?.pending_job_id
-    && item?.indexed_version === item?.version
-  )
-
-  const handleManagedKnowledgeSelectionChange = (selection) => {
-    managedKnowledgeSelectedIds.value = selection
-      .filter(isManagedKnowledgeOrganizable)
-      .map(item => item.id)
-      .filter(id => id !== null && id !== undefined)
-  }
-
   const managedKnowledgeListTaskKey = 'managed-knowledge-list'
 
   const fetchManagedKnowledgeItems = async (notifyError = true, replaceCurrent = false) => {
@@ -76,7 +55,6 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
     const selectedId = selectedKb.value.id
     if (replaceCurrent) {
       managedKnowledgeTaskManager.cancel(managedKnowledgeListTaskKey)
-      clearManagedKnowledgeSelection()
     }
     const token = managedKnowledgeTaskManager.begin(managedKnowledgeListTaskKey)
     if (!token) return
@@ -95,8 +73,6 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
       ) return
       managedKnowledgeItems.value = res.data.data.items || []
       managedKnowledgeTotal.value = res.data.data.total || 0
-      const pageIds = new Set(managedKnowledgeItems.value.map(item => item.id))
-      managedKnowledgeSelectedIds.value = managedKnowledgeSelectedIds.value.filter(id => pageIds.has(id))
     } catch (error) {
       if (token.signal.aborted || !managedKnowledgeTaskManager.isCurrent(token)) return
       if (notifyError && managedKnowledgeRequestTracker.isCurrent(requestSeq)) {
@@ -142,7 +118,6 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
     managedKnowledgeQuery.value = ''
     managedKnowledgeItems.value = []
     managedKnowledgeTotal.value = 0
-    clearManagedKnowledgeSelection()
     managedKnowledgeDialogVisible.value = true
     await fetchManagedKnowledgeItems(true, true)
     scheduleManagedKnowledgePolling()
@@ -150,20 +125,17 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
 
   const handleManagedKnowledgeSearch = async () => {
     managedKnowledgePage.value = 1
-    clearManagedKnowledgeSelection()
     await fetchManagedKnowledgeItems(true, true)
     scheduleManagedKnowledgePolling()
   }
 
   const handleManagedKnowledgeSizeChange = async () => {
     managedKnowledgePage.value = 1
-    clearManagedKnowledgeSelection()
     await fetchManagedKnowledgeItems(true, true)
     scheduleManagedKnowledgePolling()
   }
 
   const handleManagedKnowledgePageChange = async () => {
-    clearManagedKnowledgeSelection()
     await fetchManagedKnowledgeItems(true, true)
     scheduleManagedKnowledgePolling()
   }
@@ -350,8 +322,6 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
     managedKnowledgePage,
     managedKnowledgePageSize,
     managedKnowledgeQuery,
-    managedKnowledgeTableRef,
-    managedKnowledgeSelectedIds,
     managedKnowledgeEditDialogVisible,
     managedKnowledgeEditingId,
     managedKnowledgeFormRef,
@@ -362,8 +332,6 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
     managedKnowledgeHistoryKey,
     managedKnowledgeForm,
     managedKnowledgeRules,
-    isManagedKnowledgeOrganizable,
-    handleManagedKnowledgeSelectionChange,
     fetchManagedKnowledgeItems,
     scheduleManagedKnowledgePolling,
     stopManagedKnowledgePolling,

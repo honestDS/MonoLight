@@ -493,7 +493,6 @@ async def submit_knowledge_base_organization(
         db,
         uid=knowledge_base.uid,
         knowledge_base_id=kb_id,
-        knowledge_ids=organization_in.knowledge_ids if organization_in is not None else None,
         dedupe_key=organization_in.dedupe_key if organization_in is not None else None,
     )
     return StandardResponse.success(

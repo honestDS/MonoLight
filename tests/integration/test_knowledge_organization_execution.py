@@ -633,6 +633,51 @@ async def test_snapshot_keeps_frozen_revision_after_current_item_changes(session
 
 
 @pytest.mark.asyncio
+async def test_snapshot_preparation_rejects_legacy_partial_scope_without_expanding(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        first, _first_revision = await _add_item(
+            db,
+            knowledge_base_id=knowledge_base.id,
+            key="legacy-scope-first",
+            content="first knowledge",
+        )
+        second, _second_revision = await _add_item(
+            db,
+            knowledge_base_id=knowledge_base.id,
+            key="legacy-scope-second",
+            content="second knowledge",
+        )
+        job = await _create_running_organization_job(db, knowledge_base_id=knowledge_base.id, job_id_suffix="legacy-scope")
+        job.payload = {**job.payload, "knowledge_ids": [first.id]}
+        await db.commit()
+
+        knowledge_base_id = knowledge_base.id
+        job_id = job.id
+        knowledge_ids = (first.id, second.id)
+
+    with pytest.raises(ValueError):
+        await organization_run._prepare_knowledge_organization_snapshot(
+            session_factory,
+            uid="user-1",
+            knowledge_base_id=knowledge_base_id,
+            organization_job_id=job_id,
+        )
+
+    async with session_factory() as db:
+        snapshots = list((await db.execute(select(KnowledgeOrganizationSnapshot))).scalars())
+        snapshot_items = list((await db.execute(select(KnowledgeOrganizationSnapshotItem))).scalars())
+        items = list((await db.execute(select(ManagedKnowledgeItem).where(ManagedKnowledgeItem.id.in_(knowledge_ids)).order_by(ManagedKnowledgeItem.id))).scalars())
+        current_job = await db.get(KnowledgeJob, job_id)
+
+    assert snapshots == []
+    assert snapshot_items == []
+    assert [item.organization_lock_token for item in items] == [None, None]
+    assert current_job is not None
+    assert current_job.payload == {"source": "test", "knowledge_ids": [knowledge_ids[0]]}
+
+
+@pytest.mark.asyncio
 async def test_snapshot_uses_current_index_vector_ids_without_mutating_content_revision(session_factory):
     async with session_factory() as db:
         knowledge_base = await _create_managed_container(db)

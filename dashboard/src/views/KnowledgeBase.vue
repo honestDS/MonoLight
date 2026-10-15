@@ -387,19 +387,13 @@
         <el-button type="primary" @click="handleManagedKnowledgeSearch">{{ $t('knowledgeBase.search') }}</el-button>
         <el-button type="success" @click="showManagedKnowledgeCreateDialog">{{ $t('knowledgeBase.managed_add') }}</el-button>
         <el-button type="warning" @click="showOrganizationDialog">{{ $t('knowledgeBase.organization') }}</el-button>
-        <span v-if="managedKnowledgeSelectedIds.length" class="help-text">
-          {{ $t('knowledgeBase.organization_selected_count', { count: managedKnowledgeSelectedIds.length }) }}
-        </span>
       </div>
       <el-table
-        ref="managedKnowledgeTableRef"
         :data="managedKnowledgeItems"
         :loading="managedKnowledgeLoading"
         row-key="id"
         class="managed-knowledge-table"
-        @selection-change="handleManagedKnowledgeSelectionChange"
       >
-        <el-table-column type="selection" width="55" :reserve-selection="true" :selectable="isManagedKnowledgeOrganizable" />
         <el-table-column prop="knowledge_key" :label="$t('knowledgeBase.managed_key')" min-width="180" show-overflow-tooltip />
         <el-table-column prop="content_preview" :label="$t('knowledgeBase.managed_content_preview')" min-width="280" show-overflow-tooltip />
         <el-table-column prop="version" :label="$t('knowledgeBase.managed_version')" width="80" align="center" />
@@ -489,24 +483,13 @@
       />
 
       <div class="managed-knowledge-toolbar">
-        <span class="help-text">{{ $t('knowledgeBase.organization_select_hint') }}</span>
-        <div>
-          <el-button
-            type="primary"
-            :loading="organizationSubmitting"
-            @click="submitKnowledgeOrganization(false)"
-          >
-            {{ $t('knowledgeBase.organization_start_full') }}
-          </el-button>
-          <el-button
-            type="success"
-            :loading="organizationSubmitting"
-            :disabled="!managedKnowledgeSelectedIds.length"
-            @click="submitKnowledgeOrganization(true)"
-          >
-            {{ $t('knowledgeBase.organization_start_selected') }}
-          </el-button>
-        </div>
+        <el-button
+          type="primary"
+          :loading="organizationSubmitting"
+          @click="submitKnowledgeOrganization"
+        >
+          {{ $t('knowledgeBase.organization_start') }}
+        </el-button>
       </div>
 
       <el-descriptions
@@ -807,12 +790,8 @@ const {
   handleManagedKnowledgeSearch,
   showManagedKnowledgeCreateDialog,
   showOrganizationDialog,
-  managedKnowledgeSelectedIds,
-  managedKnowledgeTableRef,
   managedKnowledgeItems,
   managedKnowledgeLoading,
-  handleManagedKnowledgeSelectionChange,
-  isManagedKnowledgeOrganizable,
   getManagedSourceLabel,
   formatManagedSourceReference,
   getManagedActorLabel,
