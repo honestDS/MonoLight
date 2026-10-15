@@ -440,6 +440,11 @@
   transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+.send-reply-icon {
+  margin-left: -2px;
+  margin-top: 2px;
+}
+
 .read-only-notice-icon {
   flex: 0 0 14px;
   margin-top: 3px;

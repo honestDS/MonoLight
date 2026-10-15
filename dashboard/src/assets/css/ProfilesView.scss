@@ -90,6 +90,7 @@
 
 .profile-dialog {
   min-width: min(900px, calc(100vw - 32px));
+  height: calc(100vh - 64px);
 
   .memory-embedding-action {
     width: 100%;
@@ -169,6 +170,9 @@
     min-height: 0;
     overflow-y: auto;
     padding-right: 4px;
+    box-sizing: border-box;
+    margin-top: 0;
+    padding-top: 20px;
   }
 
   .mb-15 {

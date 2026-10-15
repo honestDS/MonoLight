@@ -227,7 +227,7 @@
           {{ getMigrationStatusLabel(selectedKb?.migration_status) }}
         </el-form-item>
         <el-form-item :label="$t('knowledgeBase.migration_progress')">
-          <div style="width: 100%">
+          <div class="migration-progress-content">
             <el-progress :percentage="migrationProgress" />
             <div class="help-text mt-5">
               {{ $t('knowledgeBase.migration_counts', {

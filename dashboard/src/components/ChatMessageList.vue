@@ -116,7 +116,7 @@
             class="content markdown-body tool-call-message"
             v-html="renderMarkdown(msg.content)"
           ></div>
-          <div v-else-if="msg.content.trim()" class="content tool-call-message" style="white-space: pre-wrap;">
+          <div v-else-if="msg.content.trim()" class="content tool-call-message">
             <template v-for="(part, idx) in renderTextWithLinks(msg.content)" :key="idx">
               <el-link
                 v-if="part.type === 'link'"
@@ -266,7 +266,7 @@
               <div v-html="renderMarkdown(getMessageText(msg))"></div>
             </CollapsibleMessageText>
           </div>
-          <div v-else-if="typeof getMessageText(msg) === 'string' && getMessageText(msg).trim() && !currentSessionEnableMarkdown" class="content" style="white-space: pre-wrap;">
+          <div v-else-if="typeof getMessageText(msg) === 'string' && getMessageText(msg).trim() && !currentSessionEnableMarkdown" class="content">
             <div v-if="msg.status === 'queued'" class="queued-indicator">
               <img src="@/assets/svg/wait.svg" class="is-loading" />
             </div><CollapsibleMessageText

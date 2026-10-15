@@ -237,7 +237,7 @@
             type="error"
             :closable="false"
             show-icon
-            style="margin-bottom: 15px;"
+            class="change-password-error"
             role="alert"
           />
           <el-form-item
@@ -297,6 +297,10 @@
 </template>
 
 <script>
+import { ElMessage } from 'element-plus'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import en from 'element-plus/es/locale/lang/en'
+
 import { useResizeObserver } from './composables/useResizeObserver'
 import { useSessionTasks } from './composables/chat/useSessionTasks.js'
 import { useUserPermissionsStore } from './composables/useUserPermissions.js'
@@ -306,9 +310,6 @@ import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import SessionTaskCenter from './components/SessionTaskCenter.vue'
 import githubIcon from './assets/svg/github.svg'
 import logoImage from '../../logo.jpg'
-import { ElMessage } from 'element-plus'
-import zhCn from 'element-plus/es/locale/lang/zh-cn'
-import en from 'element-plus/es/locale/lang/en'
 import './assets/css/app.scss'
 
 // 初始化 ResizeObserver 防抖补丁
