@@ -2313,19 +2313,12 @@ async def test_auto_organization_counts_candidates_without_loading_full_list(ses
         await _seed_items(db, knowledge_base_id=knowledge_base.id, count=5)
 
     count_calls: list[tuple[bool, object | None]] = []
-    list_calls = 0
     original_count = organization_run.managed_knowledge_item_crud.count_organization_candidates
-
-    async def fail_list(*_args, **_kwargs):
-        nonlocal list_calls
-        list_calls += 1
-        raise AssertionError("automatic organization must not load the full candidate list")
 
     async def recording_count(*args, **kwargs):
         count_calls.append(("updated_after" in kwargs, kwargs.get("updated_after")))
         return await original_count(*args, **kwargs)
 
-    monkeypatch.setattr(organization_run.managed_knowledge_item_crud, "list_organization_candidates", fail_list)
     monkeypatch.setattr(organization_run.managed_knowledge_item_crud, "count_organization_candidates", recording_count)
 
     async with session_factory() as db:
@@ -2338,7 +2331,6 @@ async def test_auto_organization_counts_candidates_without_loading_full_list(ses
     assert job is not None
     assert job.operation == KnowledgeJobOperation.AUTO_ORGANIZE
     assert count_calls == [(False, None), (True, organization_last_run_at)]
-    assert list_calls == 0
 
 
 @pytest.mark.asyncio

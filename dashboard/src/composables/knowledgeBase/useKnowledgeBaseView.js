@@ -92,7 +92,6 @@ export function useKnowledgeBaseView() {
   const organization = useKnowledgeOrganization({
     t,
     selectedKb,
-    managedKnowledgeSelectedIds: managedKnowledge.managedKnowledgeSelectedIds,
     fetchManagedKnowledgeItems: managedKnowledge.fetchManagedKnowledgeItems,
     scheduleManagedKnowledgePolling: managedKnowledge.scheduleManagedKnowledgePolling
   })

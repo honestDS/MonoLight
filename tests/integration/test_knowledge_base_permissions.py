@@ -276,7 +276,6 @@ async def _seed_database(session: AsyncSession, password_hash: str) -> dict[str,
                 "knowledge_base_id": managed_knowledge_base.id,
                 "source": "manual",
                 "snapshot_nonce": f"{uid}-snapshot",
-                "knowledge_ids": [managed_item.id],
             },
             error="seeded organization failure",
         )
@@ -634,7 +633,6 @@ async def _submit_management_case(
             token=token,
             params={"kb_id": target["managed_kb_id"]},
             json={
-                "knowledge_ids": [target["managed_item_id"]],
                 "dedupe_key": f"permission-organization-{scope}",
             },
         )

@@ -260,6 +260,75 @@ async def test_knowledge_organization_lifecycle_submit_observe_finish_and_retry_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scope",
+    [[1], [], None],
+    ids=["legacy-scope", "legacy-empty-scope", "legacy-null-scope"],
+)
+async def test_organization_rejects_legacy_knowledge_ids_without_creating_records(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    scope: list[int] | None,
+) -> None:
+    knowledge_base = await _create_managed_knowledge_base(db_session, suffix="legacy-scope")
+    response = await api_client.post(
+        "/api/v1/knowledge-base/organization",
+        params={"kb_id": knowledge_base.id},
+        json={"knowledge_ids": scope, "dedupe_key": "legacy-scope"},
+    )
+
+    _assert_standard(response, 422)
+
+    jobs = await db_session.execute(select(KnowledgeJob).where(KnowledgeJob.knowledge_base_id == knowledge_base.id))
+    assert jobs.scalars().all() == []
+    snapshots = await db_session.execute(select(KnowledgeOrganizationSnapshot))
+    assert snapshots.scalars().all() == []
+    snapshot_items = await db_session.execute(select(KnowledgeOrganizationSnapshotItem))
+    assert snapshot_items.scalars().all() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_status",
+    [KnowledgeJobStatus.FAILED, KnowledgeJobStatus.CANCELLED],
+    ids=["failed", "cancelled"],
+)
+async def test_organization_retry_rejects_legacy_scoped_job_without_creating_records(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    terminal_status: KnowledgeJobStatus,
+) -> None:
+    knowledge_base = await _create_managed_knowledge_base(db_session, suffix=f"retry-legacy-{terminal_status.value}")
+    create_response = await api_client.post(
+        "/api/v1/knowledge-base/organization",
+        params={"kb_id": knowledge_base.id},
+    )
+    old_id = _assert_standard(create_response, 200)["data"]["id"]
+
+    old_job = await db_session.get(KnowledgeJob, old_id)
+    assert old_job is not None
+    legacy_payload = {**old_job.payload, "knowledge_ids": [1]}
+    old_job.payload = legacy_payload
+    old_job.status = terminal_status
+    old_job.active_change_key = None
+    await db_session.commit()
+
+    retry_response = await api_client.post(
+        f"/api/v1/knowledge-base/organization/{old_id}/retry",
+        params={"kb_id": knowledge_base.id},
+    )
+    retry = _assert_standard(retry_response, 409)
+    assert retry["data"]["status"] == "organization_retry_invalid"
+
+    result = await db_session.execute(select(KnowledgeJob).where(KnowledgeJob.knowledge_base_id == knowledge_base.id).order_by(KnowledgeJob.id))
+    jobs = list(result.scalars().all())
+    assert len(jobs) == 1
+    assert jobs[0].id == old_id
+    assert jobs[0].status == terminal_status
+    assert jobs[0].payload == legacy_payload
+
+
+@pytest.mark.asyncio
 async def test_organization_job_isolation_blocks_cross_knowledge_base_cancellation(
     api_client: AsyncClient,
     db_session: AsyncSession,
