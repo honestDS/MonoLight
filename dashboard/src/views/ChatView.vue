@@ -396,7 +396,7 @@
                     circle
                   >
                     <span v-if="isReplyRunning" class="stop-reply-icon" aria-hidden="true"></span>
-                    <el-icon v-else style="margin-left: -2px;margin-top: 2px;" aria-hidden="true"><Position /></el-icon>
+                    <el-icon v-else class="send-reply-icon" aria-hidden="true"><Position /></el-icon>
                   </el-button>
                 </div>
               </div>

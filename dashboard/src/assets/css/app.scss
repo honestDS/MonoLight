@@ -534,6 +534,9 @@ body {
   width: min(460px, calc(100vw - 32px));
   align-self: center;
 }
+.change-password-dialog .change-password-error {
+  margin-bottom: 15px;
+}
 .el-main.app-main {
   padding: 0;
   overflow-y: auto; 
