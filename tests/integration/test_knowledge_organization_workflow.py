@@ -167,10 +167,16 @@ async def _create_managed_knowledge_base(db: AsyncSession, *, suffix: str) -> Kn
     [KnowledgeJobStatus.CANCELLED, KnowledgeJobStatus.FAILED],
     ids=["cancelled", "failed"],
 )
+@pytest.mark.parametrize(
+    "full_payload_shape",
+    ["missing", "null"],
+    ids=["payload-missing", "payload-null"],
+)
 async def test_knowledge_organization_lifecycle_submit_observe_finish_and_retry_with_new_snapshot(
     api_client: AsyncClient,
     db_session: AsyncSession,
     terminal_status: KnowledgeJobStatus,
+    full_payload_shape: str,
 ) -> None:
     knowledge_base = await _create_managed_knowledge_base(
         db_session,
@@ -187,6 +193,7 @@ async def test_knowledge_organization_lifecycle_submit_observe_finish_and_retry_
     assert created["status"] == KnowledgeJobStatus.PENDING.value
     assert created["knowledge_base_id"] == knowledge_base.id
     assert created["snapshot_id"] is None
+    assert created["can_retry"] is False
     assert created["organization_progress"] == _zero_progress()
 
     list_response = await api_client.get(
@@ -197,6 +204,7 @@ async def test_knowledge_organization_lifecycle_submit_observe_finish_and_retry_
     assert set(listed) == {"items", "total", "skip", "limit"}
     assert listed["total"] == 1
     assert listed["items"][0]["id"] == old_id
+    assert listed["items"][0]["can_retry"] is False
     assert listed["items"][0]["organization_progress"] == _zero_progress()
 
     detail_response = await api_client.get(
@@ -206,6 +214,7 @@ async def test_knowledge_organization_lifecycle_submit_observe_finish_and_retry_
     detail = _assert_standard(detail_response, 200)["data"]
     assert detail["id"] == old_id
     assert detail["knowledge_base_id"] == knowledge_base.id
+    assert detail["can_retry"] is False
     assert detail["organization_progress"] == _zero_progress()
 
     if terminal_status == KnowledgeJobStatus.CANCELLED:
@@ -229,10 +238,27 @@ async def test_knowledge_organization_lifecycle_submit_observe_finish_and_retry_
     old_job = await db_session.get(KnowledgeJob, old_id)
     assert old_job is not None
     assert old_job.status == terminal_status
+    if full_payload_shape == "null":
+        old_job.payload = {**old_job.payload, "knowledge_ids": None}
+        await db_session.commit()
     old_snapshot_nonce = old_job.payload["snapshot_nonce"]
     if terminal_status == KnowledgeJobStatus.CANCELLED:
         assert old_job.cancel_requested_at is not None
         assert old_job.active_change_key is None
+
+    terminal_list_response = await api_client.get(
+        "/api/v1/knowledge-base/organization/jobs",
+        params={"kb_id": knowledge_base.id},
+    )
+    terminal_listed = _assert_standard(terminal_list_response, 200)["data"]
+    assert terminal_listed["items"][0]["can_retry"] is True
+
+    terminal_detail_response = await api_client.get(
+        f"/api/v1/knowledge-base/organization/{old_id}",
+        params={"kb_id": knowledge_base.id},
+    )
+    terminal_detail = _assert_standard(terminal_detail_response, 200)["data"]
+    assert terminal_detail["can_retry"] is True
 
     retry_response = await api_client.post(
         f"/api/v1/knowledge-base/organization/{old_id}/retry",
@@ -247,6 +273,7 @@ async def test_knowledge_organization_lifecycle_submit_observe_finish_and_retry_
     assert new_job["status"] == KnowledgeJobStatus.PENDING.value
     assert new_job["knowledge_base_id"] == knowledge_base.id
     assert new_job["snapshot_id"] is None
+    assert new_job["can_retry"] is False
     assert new_job["organization_progress"] == _zero_progress()
     assert new_job["payload"]["snapshot_nonce"] != old_snapshot_nonce
 
@@ -293,10 +320,16 @@ async def test_organization_rejects_legacy_knowledge_ids_without_creating_record
     [KnowledgeJobStatus.FAILED, KnowledgeJobStatus.CANCELLED],
     ids=["failed", "cancelled"],
 )
+@pytest.mark.parametrize(
+    "legacy_scope",
+    [[1], []],
+    ids=["legacy-scope", "legacy-empty-scope"],
+)
 async def test_organization_retry_rejects_legacy_scoped_job_without_creating_records(
     api_client: AsyncClient,
     db_session: AsyncSession,
     terminal_status: KnowledgeJobStatus,
+    legacy_scope: list[int],
 ) -> None:
     knowledge_base = await _create_managed_knowledge_base(db_session, suffix=f"retry-legacy-{terminal_status.value}")
     create_response = await api_client.post(
@@ -307,11 +340,27 @@ async def test_organization_retry_rejects_legacy_scoped_job_without_creating_rec
 
     old_job = await db_session.get(KnowledgeJob, old_id)
     assert old_job is not None
-    legacy_payload = {**old_job.payload, "knowledge_ids": [1]}
+    legacy_payload = {**old_job.payload, "knowledge_ids": legacy_scope}
     old_job.payload = legacy_payload
     old_job.status = terminal_status
     old_job.active_change_key = None
     await db_session.commit()
+
+    list_response = await api_client.get(
+        "/api/v1/knowledge-base/organization/jobs",
+        params={"kb_id": knowledge_base.id},
+    )
+    listed = _assert_standard(list_response, 200)["data"]
+    assert listed["items"][0]["id"] == old_id
+    assert listed["items"][0]["can_retry"] is False
+
+    detail_response = await api_client.get(
+        f"/api/v1/knowledge-base/organization/{old_id}",
+        params={"kb_id": knowledge_base.id},
+    )
+    detail = _assert_standard(detail_response, 200)["data"]
+    assert detail["id"] == old_id
+    assert detail["can_retry"] is False
 
     retry_response = await api_client.post(
         f"/api/v1/knowledge-base/organization/{old_id}/retry",

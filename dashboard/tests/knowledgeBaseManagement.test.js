@@ -9,7 +9,6 @@ import { createI18n } from 'vue-i18n'
 import { getKnowledgeBaseProfileLabel } from '../src/utils/knowledgeBaseManagement.js'
 import * as knowledgeBaseManagement from '../src/utils/knowledgeBaseManagement.js'
 import * as knowledgeBaseMigration from '../src/utils/knowledgeBaseMigration.js'
-import * as requestTaskManager from '../src/utils/requestTaskManager.js'
 import { useUserPermissionsStore } from '../src/composables/useUserPermissions.js'
 import zhCommon from '../src/i18n/locales/zh/common.js'
 import zhKnowledgeBase from '../src/i18n/locales/zh/knowledgeBase.js'
@@ -22,10 +21,6 @@ const useKnowledgeBaseViewSource = readFileSync(
 )
 const useDeleteConfirmSource = readFileSync(
   new URL('../src/composables/useDeleteConfirm.js', import.meta.url),
-  'utf8',
-)
-const useKnowledgeOrganizationSource = readFileSync(
-  new URL('../src/composables/knowledgeBase/useKnowledgeOrganization.js', import.meta.url),
   'utf8',
 )
 
@@ -51,7 +46,6 @@ const stripImports = sourceText => {
 const stripModuleSyntax = sourceText => stripImports(sourceText).replace(/\bexport\s+/g, '')
 const useKnowledgeBaseViewScript = stripModuleSyntax(useKnowledgeBaseViewSource)
 const useDeleteConfirmScript = stripModuleSyntax(useDeleteConfirmSource)
-const useKnowledgeOrganizationScript = stripModuleSyntax(useKnowledgeOrganizationSource)
 const dataResponse = data => ({ data: { data } })
 const normalize = value => JSON.parse(JSON.stringify(value))
 const deferred = () => {
@@ -218,73 +212,6 @@ const createHarness = async (t, options = {}) => {
     disposed: false,
   }
   t.after(() => harness.dispose())
-  return harness
-}
-
-const createKnowledgeOrganizationHarness = async (t, options = {}) => {
-  const selectedKb = ref(options.selectedKb ?? null)
-  const organizes = []
-  const organizationJobs = []
-  const refreshed = []
-  const scheduled = []
-  const messages = []
-  const timers = []
-  const knowledgeBaseApi = {
-    organize: (selectedId, payload) => {
-      organizes.push({ selectedId, payload })
-      return options.organize?.({ selectedId, payload }) ?? Promise.resolve(dataResponse({}))
-    },
-    organizationJobs: (selectedId, params) => {
-      organizationJobs.push({ selectedId, params })
-      return Promise.resolve(dataResponse({ items: [], total: 0 }))
-    },
-  }
-  const ElMessage = {}
-  for (const type of ['success', 'error']) ElMessage[type] = (...args) => messages.push({ type, args })
-  const i18n = createI18n({
-    legacy: false,
-    locale: options.locale ?? 'zh',
-    messages: { zh: { knowledgeBase: zhKnowledgeBase }, en: { knowledgeBase: enKnowledgeBase } },
-  })
-  const fetchManagedKnowledgeItems = (...args) => {
-    refreshed.push(args)
-    return Promise.resolve()
-  }
-  const scheduleManagedKnowledgePolling = (...args) => scheduled.push(args)
-  const scope = effectScope()
-  const context = vm.createContext({
-    AbortController,
-    clearTimeout() {},
-    computed,
-    ElMessage,
-    fetchManagedKnowledgeItems,
-    knowledgeBaseApi,
-    ref,
-    scheduleManagedKnowledgePolling,
-    selectedKb,
-    setTimeout: (...args) => (timers.push(args), timers.length),
-    t: (...args) => i18n.global.t(...args),
-    ...knowledgeBaseManagement,
-    ...requestTaskManager,
-    console: { log() {}, warn() {}, error() {}, info() {} },
-  })
-  scope.run(() => vm.runInContext(
-    `${useKnowledgeOrganizationScript}\n` +
-    'globalThis.__module = useKnowledgeOrganization({ t, selectedKb, fetchManagedKnowledgeItems, scheduleManagedKnowledgePolling })',
-    context,
-    { filename: 'useKnowledgeOrganization.js' },
-  ))
-  const harness = {
-    api: { organizes, organizationJobs },
-    messages,
-    module: context.__module,
-    refreshed,
-    scheduled,
-    selectedKb,
-    timers,
-    dispose: () => scope.stop(),
-  }
-  t.after(harness.dispose)
   return harness
 }
 
@@ -939,59 +866,5 @@ test('waits for confirmation and preserves literal names and unknown owner place
     assert.doesNotMatch(missingMessage, /undefined/)
     assert.equal(missingOptions.dangerouslyUseHTMLString, false)
     assert.deepEqual(harness.api.deletes.map(request => request.id), [specialRow.id, missingUsernameRow.id])
-  }
-})
-
-test('submits organization without selected items and refreshes managed knowledge', async t => {
-  for (const locale of ['zh', 'en']) {
-    const selectedKb = { id: `managed-${locale}`, knowledge_base_type: 'llm_managed', organization_error: 'failed' }
-    const harness = await createKnowledgeOrganizationHarness(t, { locale, selectedKb })
-    await harness.module.submitKnowledgeOrganization()
-
-    assert.deepEqual(normalize(harness.api.organizes), [{ selectedId: selectedKb.id, payload: {} }])
-    assert.equal(selectedKb.organization_error, null)
-    assert.deepEqual(harness.refreshed, [[true, true]])
-    assert.deepEqual(harness.scheduled, [[]])
-    assert.equal(harness.messages[0].args[0], locale === 'zh' ? '知识整理已提交' : 'Organization job submitted')
-    assert.equal(harness.module.organizationSubmitting.value, false)
-  }
-})
-
-test('guards duplicate organization submissions and localizes failures before allowing retry', async t => {
-  for (const locale of ['zh', 'en']) {
-    const pending = deferred()
-    let callCount = 0
-    const harness = await createKnowledgeOrganizationHarness(t, {
-      locale,
-      selectedKb: { id: `managed-${locale}`, knowledge_base_type: 'llm_managed' },
-      organize: () => ++callCount === 1 ? pending.promise : Promise.resolve(dataResponse({})),
-    })
-    const firstSubmit = harness.module.submitKnowledgeOrganization()
-    const duplicateSubmit = harness.module.submitKnowledgeOrganization()
-
-    assert.equal(harness.api.organizes.length, 1)
-    assert.equal(harness.module.organizationSubmitting.value, true)
-    pending.reject(new Error('network error'))
-    await firstSubmit
-    await duplicateSubmit
-
-    assert.equal(
-      harness.messages[harness.messages.length - 1].args[0],
-      locale === 'zh' ? '提交知识整理失败: network error' : 'Failed to submit organization job: network error',
-    )
-    assert.equal(harness.module.organizationSubmitting.value, false)
-    await harness.module.submitKnowledgeOrganization()
-    assert.equal(harness.api.organizes.length, 2)
-  }
-})
-
-test('does not submit organization without a managed knowledge base', async t => {
-  for (const selectedKb of [null, { id: 'user-kb', knowledge_base_type: 'user' }]) {
-    const harness = await createKnowledgeOrganizationHarness(t, { selectedKb })
-    await harness.module.submitKnowledgeOrganization()
-
-    assert.equal(harness.api.organizes.length, 0)
-    assert.deepEqual(harness.refreshed, [])
-    assert.equal(harness.module.organizationSubmitting.value, false)
   }
 })

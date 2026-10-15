@@ -520,6 +520,23 @@ def _published_organization_mutation_count(children: Iterable[KnowledgeJob]) -> 
     return succeeded
 
 
+def _can_retry_knowledge_organization_job(job: KnowledgeJob | None) -> bool:
+    return (
+        job is not None
+        and job.operation
+        in {
+            KnowledgeJobOperation.AUTO_ORGANIZE,
+            KnowledgeJobOperation.MANUAL_ORGANIZE,
+        }
+        and job.status
+        in {
+            KnowledgeJobStatus.FAILED,
+            KnowledgeJobStatus.CANCELLED,
+        }
+        and (not isinstance(job.payload, dict) or job.payload.get("knowledge_ids") is None)
+    )
+
+
 async def _organization_job_view(
     db: AsyncSession,
     job: KnowledgeJob,
@@ -559,6 +576,7 @@ async def _organization_job_view(
         "job_id": job.id,
         "operation": operation,
         "status": status,
+        "can_retry": _can_retry_knowledge_organization_job(job),
         "knowledge_base_id": job.knowledge_base_id,
         "parent_job_id": job.parent_job_id,
         "payload": payload,
@@ -845,20 +863,7 @@ async def retry_knowledge_organization(
     commit: bool = True,
 ) -> dict[str, Any]:
     old_job = await knowledge_job_crud.get_by_id(db, uid=uid, job_id=job_id)
-    if (
-        old_job is None
-        or old_job.operation
-        not in {
-            KnowledgeJobOperation.AUTO_ORGANIZE,
-            KnowledgeJobOperation.MANUAL_ORGANIZE,
-        }
-        or old_job.status
-        not in {
-            KnowledgeJobStatus.FAILED,
-            KnowledgeJobStatus.CANCELLED,
-        }
-        or (isinstance(old_job.payload, dict) and old_job.payload.get("knowledge_ids") is not None)
-    ):
+    if not _can_retry_knowledge_organization_job(old_job):
         raise KnowledgeOrganizationExecutionError(
             message=ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT,
             code=409,
