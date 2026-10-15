@@ -16,6 +16,7 @@ import { createChannelTestManager } from '../src/utils/channelTestManager.js'
 import { isValidHttpProxy, normalizeHttpProxy } from '../src/utils/channelHttpProxy.js'
 import { truncateErrorMessage } from '../src/utils/errorMessage.js'
 import * as setupForm from '../src/utils/setupForm.js'
+import { useSetupChannelConfiguration } from '../src/composables/setup/useSetupChannelConfiguration.js'
 import {
   HOME_PATH,
   LOGIN_PATH,
@@ -169,6 +170,7 @@ const createHarness = t => {
     promptApi,
     setupApi,
     defaultModelEntry,
+    useSetupChannelConfiguration,
     truncateErrorMessage,
     createChannelTestManager,
     normalizeHttpProxy,
