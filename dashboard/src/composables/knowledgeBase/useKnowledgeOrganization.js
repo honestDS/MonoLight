@@ -154,7 +154,7 @@ export function useKnowledgeOrganization ({
 
   const canRetryOrganizationJob = (job) => Boolean(
     isOrganizationJobForSelectedKnowledgeBase(job)
-    && ['failed', 'cancelled'].includes(job?.status)
+    && job?.can_retry === true
   )
 
   const fetchOrganizationJobs = async (notifyError = true, session = organizationPollingSession) => {
