@@ -168,6 +168,7 @@ class CRUDSessionReplyWorkItem:
         session_id: str,
         history_message_id: int,
         after_sequence_no: int,
+        interactive_only: bool = False,
     ) -> SessionReplyWorkItem | None:
         unseen_turn = exists(
             select(SessionReplyStreamEvent.id).where(
@@ -176,22 +177,33 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyStreamEvent.event["message_id"].as_integer() > history_message_id,
             )
         )
-        result = await db.execute(
-            select(SessionReplyWorkItem)
-            .where(
-                SessionReplyWorkItem.uid == uid,
-                SessionReplyWorkItem.session_id == session_id,
-                SessionReplyWorkItem.sequence_no > after_sequence_no,
-                SessionReplyWorkItem.status != SessionReplyWorkStatus.MERGED,
-                or_(
-                    SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
-                    SessionReplyWorkItem.result_message_id > history_message_id,
-                    unseen_turn,
-                ),
+        conditions = [
+            SessionReplyWorkItem.uid == uid,
+            SessionReplyWorkItem.session_id == session_id,
+            SessionReplyWorkItem.sequence_no > after_sequence_no,
+            SessionReplyWorkItem.status != SessionReplyWorkStatus.MERGED,
+        ]
+        visibility_conditions = [
+            SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+            SessionReplyWorkItem.result_message_id > history_message_id,
+            unseen_turn,
+        ]
+        if interactive_only:
+            conditions.append(
+                SessionReplyWorkItem.work_type.in_(
+                    [
+                        SessionReplyWorkType.FOREGROUND_REPLY,
+                        SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                    ]
+                )
             )
-            .order_by(SessionReplyWorkItem.sequence_no, SessionReplyWorkItem.id)
-            .limit(1)
-        )
+            visibility_conditions.append(
+                and_(
+                    SessionReplyWorkItem.status == SessionReplyWorkStatus.CANCELLED,
+                    SessionReplyWorkItem.result_message_id.is_(None),
+                )
+            )
+        result = await db.execute(select(SessionReplyWorkItem).where(*conditions, or_(*visibility_conditions)).order_by(SessionReplyWorkItem.sequence_no, SessionReplyWorkItem.id).limit(1))
         return result.scalars().first()
 
     async def allocate_sequence_no(self, db: AsyncSession, session_id: str) -> int:

@@ -1241,16 +1241,14 @@ async def test_websocket_adapter_approval_reaches_confirmed_execution_work(db_se
 @pytest.mark.asyncio
 async def test_websocket_route_active_task_appends_approval_through_unified_submission(db_session, entry_dependencies, monkeypatch):
     record = await add_pending_confirmation(db_session)
-    first_started = asyncio.Event()
+    subscription_started = asyncio.Event()
     session_id = "session-1"
 
-    async def held_chat(*_args, **_kwargs):
-        first_started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            return
-        yield {"type": "done", "session_id": session_id}
+    async def held_session_stream(*_args, **_kwargs):
+        subscription_started.set()
+        await asyncio.Event().wait()
+        if False:
+            yield {"type": "done", "session_id": session_id}
 
     class SessionContext:
         async def __aenter__(self):
@@ -1272,10 +1270,10 @@ async def test_websocket_route_active_task_appends_approval_through_unified_subm
         async def receive_json(self):
             if self.receive_count == 0:
                 self.receive_count += 1
-                return {"session_id": session_id, "message": "等待中的首条消息"}
+                return {"type": "resume", "session_id": session_id, "history_message_id": 0}
             if self.receive_count == 1:
                 self.receive_count += 1
-                await first_started.wait()
+                await subscription_started.wait()
                 return {"session_id": session_id, "message": "同意", "request_id": "approval-request"}
             raise WebSocketDisconnect(code=1000)
 
@@ -1289,10 +1287,10 @@ async def test_websocket_route_active_task_appends_approval_through_unified_subm
     monkeypatch.setattr(chat_api.session_notifier, "register", _noop_async)
     monkeypatch.setattr(chat_api.session_notifier, "unregister", _noop_async)
     monkeypatch.setattr(chat_api, "resolve_profile_for_session", _active_profile)
-    monkeypatch.setattr(chat_api.ws_chat_adapter, "chat", held_chat)
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_session_stream", held_session_stream)
 
     websocket = FakeWebSocket()
-    await chat_api.chat_websocket(websocket, SimpleNamespace(uid="owner"))
+    await asyncio.wait_for(chat_api.chat_websocket(websocket, SimpleNamespace(uid="owner")), timeout=5)
 
     await refresh_record(db_session, record)
     works = await list_work(db_session)

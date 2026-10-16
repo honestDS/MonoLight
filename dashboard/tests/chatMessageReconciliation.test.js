@@ -575,6 +575,95 @@ const selectRealSession = async (harness, sessionId) => {
   await harness.flush()
 }
 
+test('reconciles a terminal proactive reply that precedes resumed turn_end after session switch', async t => {
+  let terminalHistoryAvailable = false
+  const harness = await createHarness(t, {
+    sessions: [
+      createSession(SESSION_A, {
+        source: 'ws',
+        is_loading: true,
+        is_reply_running: true
+      }),
+      createSession(SESSION_B, { source: 'ws' })
+    ],
+    initialRoute: { path: '/', query: { session_id: SESSION_B } },
+    sessionsHistory: ({ sessionId }) => {
+      if (sessionId !== SESSION_A) return []
+      return terminalHistoryAvailable
+        ? createPersistedHistory()
+        : [persistedMessage({ id: 41, role: 'user', content: '你好' })]
+    }
+  })
+  await harness.flush()
+
+  await selectRealSession(harness, SESSION_A)
+  assert.ok(harness.wsManager.sent.some(message => (
+    message.type === 'resume' && message.session_id === SESSION_A
+  )))
+
+  const requestId = 'request-switch-terminal-race'
+  const responseId = 'response-switch-terminal-race'
+  await receiveEvent(harness, {
+    type: 'agent_loop_start',
+    session_id: SESSION_A,
+    request_id: requestId,
+    request_ids: [requestId],
+    work_id: WORK_ID,
+    response_id: responseId,
+    turn: 1,
+    event_sequence_no: 1
+  })
+  await receiveEvent(harness, {
+    type: 'reasoning',
+    session_id: SESSION_A,
+    request_id: requestId,
+    work_id: WORK_ID,
+    response_id: responseId,
+    turn: 1,
+    content: FINAL_REASONING,
+    event_sequence_no: 2
+  })
+  await receiveEvent(harness, {
+    type: 'content',
+    session_id: SESSION_A,
+    request_id: requestId,
+    work_id: WORK_ID,
+    response_id: responseId,
+    turn: 1,
+    content: FINAL_CONTENT,
+    event_sequence_no: 3
+  })
+
+  terminalHistoryAvailable = true
+  await receiveEvent(harness, {
+    type: 'proactive_reply',
+    session_id: SESSION_A,
+    request_ids: [requestId],
+    work_id: WORK_ID,
+    event_sequence_no: 187,
+    message_id: 50,
+    content: FINAL_CONTENT,
+    source: 'foreground'
+  })
+  await harness.flush()
+
+  await receiveEvent(harness, {
+    type: 'turn_end',
+    session_id: SESSION_A,
+    request_id: requestId,
+    work_id: WORK_ID,
+    response_id: responseId,
+    turn: 1,
+    content: FINAL_CONTENT,
+    reasoning_content: FINAL_REASONING,
+    message_id: 50,
+    finish_reason: 'stop',
+    event_sequence_no: 4
+  })
+
+  assertSingleReconciledReply(harness.chat.messages.value)
+})
+
 test('replays an A stream after a real B switch without letting old event identities drop text', async t => {
   const harness = await createHarness(t, {
     sessions: [

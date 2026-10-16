@@ -1,11 +1,6 @@
 import { nextTick } from 'vue'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions.js'
-import { truncateErrorMessage } from '../../utils/errorMessage.js'
-import { shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
-import {
-  getAuditConfirmationRecordId,
-  parseAuditConfirmationResponse
-} from './chatMessageHelpers.js'
+import { getHistoryMessageCursor } from './streamResume.js'
 
 export function useChatWebSocketSend({
   chatState,
@@ -24,25 +19,16 @@ export function useChatWebSocketSend({
   trackSubmission,
   markNewSessionTodoKnownEmpty,
   selectNewSession,
-  createLifecycleCallbacks,
+  createStreamCallbacks,
   contextSummaryTracker,
   contextSummaryWorkKeys,
   contextSummaryRequestKeys,
   workLifecycleTracker,
-  messageProcessor,
-  processAiResponse,
-  updateLlmRequestMetadata,
-  mergeLatestSessionHistory,
-  applyAuditConfirmationStatus,
-  applyAuditToolResultsUpdate,
-  getCompletedWorkId,
-  shouldProcessCompletedWork,
   finishRequestLifecycle,
   setTransportMode,
   transportNotifier,
   httpSend,
   api,
-  notify,
   translate
 }) {
   const wsSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
@@ -100,118 +86,18 @@ export function useChatWebSocketSend({
       && requestSessionId === sessionManager.currentSessionId.value
     )
 
-    // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
+    const historyMessageId = getHistoryMessageCursor(
+      chatState.messages.value.filter(message => {
+        const dbId = message?.db_id
+        return dbId !== null && dbId !== undefined && dbId !== ''
+      })
+    )
+
     const callbacks = {
-      ...createLifecycleCallbacks(isCurrentRequestSession),
-      onContextSummaryStart: (data) => {
-        if (
-          isCurrentRequestSession()
-          && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)
-          && !workLifecycleTracker.isWorkTerminal(data.work_id)
-        ) {
-          contextSummaryTracker.startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
-        }
-      },
-      onContextSummaryEnd: (data) => {
-        if (isCurrentRequestSession() && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
-          contextSummaryTracker.endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
-        }
-      },
-      onReasoning: (text, turn, responseId, requestIdParam, workId, eventId) => {
-        if (!isCurrentRequestSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        messageProcessor.processStreamReasoning(chatState.messages, text, turn, responseId, requestIdParam, workId, eventId)
-      },
-      onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam, workId, eventId) => {
-        if (!isCurrentRequestSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        messageProcessor.processStreamContent(chatState.messages, text, turn, null, finishReason, responseId, requestIdParam, workId, eventId)
-      },
-      onToolStart: (toolCall, thinkingIdParam, responseId, requestIdParam, workId) => {
-        if (!isCurrentRequestSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        if (!currentSessionShowToolCalls.value) return
-        messageProcessor.processStreamToolStart(chatState.messages, toolCall, null, responseId, requestIdParam, workId)
-      },
-      onToolEnd: (toolEnd, responseId, requestIdParam, workId) => {
-        if (!isCurrentRequestSession()) return
-        if (workLifecycleTracker.isWorkTerminal(workId)) return
-        if (!currentSessionShowToolCalls.value) return
-        messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam, workId)
-      },
-      onError: (errorMessage, thinkingIdParam, requestIdParam, errorData = {}) => {
-        contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
-        if (!isCurrentRequestSession()) return
-        const inserted = messageProcessor.processStreamError(
-          chatState.messages,
-          errorMessage,
-          null,
-          requestIdParam || requestId,
-          errorData.work_id,
-          errorData.event_id,
-          errorData.message_id
-        )
-        if (inserted) {
-          notify.error(errorMessage || translate('chat.stream_error'))
-        }
-      },
-      onProactiveReply: (data) => {
-        if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-        if (
-          data.llm_request_metadata
-          && (data.llm_request_metadata.request_purpose || !data.source || data.source === 'foreground')
-        ) {
-          updateLlmRequestMetadata({
-            ...data.llm_request_metadata,
-            session_id: data.session_id || sessionManager.currentSessionId.value
-          }, isCurrentRequestSession)
-        }
-        if (
-          Array.isArray(data?.request_ids) &&
-          data.request_ids.some(id => String(id) === String(requestId))
-        ) {
-          if (shouldApplyOwnProactiveReply(workLifecycleTracker, data, requestId)) {
-            processAiResponse(data, null, requestId)
-          }
-          return
-        }
-        const workId = data.work_id
-        if (
-          workId !== undefined &&
-          workId !== null &&
-          workId !== '' &&
-          chatState.messages.value.some(message =>
-            message.work_id !== undefined &&
-            message.work_id !== null &&
-            message.work_id !== '' &&
-            String(message.work_id) === String(workId)
-          )
-        ) return
-        void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
-          console.error('Proactive reply history merge failed:', err)
-        })
-      },
-      onProactiveReplyError: (data) => {
-        if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-        const errorMessage = truncateErrorMessage(data.content || data.message || 'Background proactive reply failed')
-        const inserted = messageProcessor.processStreamError(
-          chatState.messages,
-          errorMessage,
-          null,
-          null,
-          data.work_id,
-          data.event_id,
-          data.message_id
-        )
-        if (inserted) {
-          notify.error(errorMessage)
-        }
-        void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
-          console.error('Proactive reply error history merge failed:', err)
-        })
-      },
-      onAuditConfirmationStatus: applyAuditConfirmationStatus,
-      onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
+      ...createStreamCallbacks({
+        isCurrentSession: isCurrentRequestSession,
+        requestId
+      }),
       onSessionId: (newSessionId) => {
         if (requestSessionId !== sessionManager.currentSessionId.value) return
         requestSessionId = newSessionId
@@ -237,57 +123,6 @@ export function useChatWebSocketSend({
         
         // 2. 收到 ID 后立即调用标题生成
         sessionManager.updateSessionTitle(newSessionId, text)
-      },
-      onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
-        if (eventType !== 'turn_end') {
-          contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
-        }
-        if (!isCurrentRequestSession()) return
-        if (data.session_id && data.session_id !== requestSessionId) return
-
-        if (eventType === 'turn_end') {
-          if (workLifecycleTracker.isWorkTerminal(getCompletedWorkId(data))) return
-          messageProcessor.processStreamTurnEnd(chatState.messages, data, requestIdParam ?? requestId)
-          return // turn_end 时不需要执行 done 的历史比对和占位符清理
-        }
-
-        if (!shouldProcessCompletedWork(data)) return
-
-        const completedResponse = data.response || data
-        const auditConfirmation = parseAuditConfirmationResponse(completedResponse)
-        if (auditConfirmation) {
-          const auditRecordId = String(auditConfirmation.audit_record_id || '')
-          const existingIndex = chatState.messages.value.findIndex(message => getAuditConfirmationRecordId(message) === auditRecordId)
-          if (existingIndex === -1) {
-            processAiResponse(completedResponse, null, requestIdParam)
-          } else {
-            const existingMessage = chatState.messages.value[existingIndex]
-            chatState.messages.value[existingIndex] = {
-              ...existingMessage,
-              type: 'audit_confirmation',
-              content: JSON.stringify(auditConfirmation),
-              request_id: existingMessage.request_id || requestIdParam
-            }
-          }
-          chatState.loading.value = false
-          return
-        }
-
-        // 已确认工具执行通过独立 done 返回完整正文，不会再发送 content 增量事件。
-        const finalResponse = {
-          ...completedResponse,
-          ...(completedResponse?.work_id == null && data.work_id != null ? { work_id: data.work_id } : {}),
-          ...(completedResponse?.response_id == null && data.response_id != null ? { response_id: data.response_id } : {}),
-          ...(completedResponse?.message_id == null && data.message_id != null ? { message_id: data.message_id } : {}),
-          ...(completedResponse?.files == null && data.files != null ? { files: data.files } : {})
-        }
-        processAiResponse(finalResponse, null, requestIdParam ?? requestId)
-
-      },
-      setLoading: (val) => {
-        if (!isCurrentRequestSession()) return
-        if (!val && chatState.messages.value.some(message => message.role === 'thinking')) return
-        chatState.loading.value = val
       }
     }
     
@@ -324,6 +159,7 @@ export function useChatWebSocketSend({
             showReasoning,
             goalMode,
             maxTurns,
+            historyMessageId,
             callbacks
           })
           if (!sent) {

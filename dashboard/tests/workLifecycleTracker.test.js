@@ -5,7 +5,6 @@ import {
   finishWorkLifecycle,
   markInputQueued,
   markInputsDequeued,
-  shouldApplyOwnProactiveReply,
   startAgentLoop,
   stopAgentLoop
 } from '../src/composables/chat/workLifecycleTracker.js'
@@ -389,62 +388,127 @@ test('records only the first accepted terminal event for each work', () => {
   assert.equal(tracker.isAcceptedTerminalEvent(firstTerminalEvent), false)
 })
 
-test('applies an own proactive reply only when it is the accepted terminal event', () => {
+test('global proactive sequence does not compare against work-local stream sequence', () => {
   const tracker = createWorkLifecycleTracker()
+  let messages = [userMessage('request-a')]
+
+  messages = tracker.startAgentLoop(messages, {
+    work_id: 'work-a',
+    response_id: 'response-a',
+    turn: 1,
+    event_sequence_no: 39
+  })
+  assert.equal(messages.some(message => message.role === 'thinking'), true)
+
   const proactiveReply = {
+    type: 'proactive_reply',
+    source: 'foreground',
     work_id: 'work-a',
     request_ids: ['request-a'],
     event_sequence_no: 1
   }
-  const done = {
-    work_id: 'work-a',
-    request_ids: ['request-a'],
-    event_sequence_no: 2
-  }
-  const lateProactiveReply = {
-    work_id: 'work-a',
-    request_ids: ['request-a'],
-    event_sequence_no: 3
-  }
-
-  let messages = [userMessage('request-a')]
   messages = tracker.finishWorkLifecycle(messages, proactiveReply)
 
-  assert.equal(shouldApplyOwnProactiveReply(tracker, proactiveReply, 'request-a'), true)
-
-  messages = tracker.finishWorkLifecycle(messages, done)
-  assert.equal(shouldApplyOwnProactiveReply(tracker, done, 'request-a'), false)
-  assert.equal(shouldApplyOwnProactiveReply(tracker, lateProactiveReply, 'request-a'), false)
+  assert.equal(tracker.isWorkTerminal('work-a'), true)
+  assert.equal(tracker.isAcceptedTerminalEvent(proactiveReply), true)
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
 })
 
-test('does not apply an own proactive reply after done wins the terminal event', () => {
+for (const [caseName, terminalEvent, expected] of [
+  ['without a terminal event', null, true],
+  ['done', { type: 'done' }, true],
+  ['proactive_reply', { type: 'proactive_reply' }, true],
+  ['error', { type: 'error' }, false],
+  ['proactive_reply_error', { type: 'proactive_reply_error' }, false],
+  ['cancelled', { type: 'cancelled' }, false],
+  ['legacy error choice', { choices: [{ message: { role: 'err' } }] }, false]
+]) {
+  test(`shouldProcessTurnEnd handles ${caseName}`, () => {
+    const tracker = createWorkLifecycleTracker()
+    let messages = tracker.startAgentLoop([userMessage('request-a')], {
+      work_id: 'work-a',
+      response_id: 'response-a',
+      event_sequence_no: 1
+    })
+
+    assert.equal(tracker.shouldProcessTurnEnd('work-a'), true)
+
+    if (!terminalEvent) {
+      assert.equal(messages.some(message => message.role === 'thinking'), true)
+      return
+    }
+
+    const firstTerminalEvent = {
+      work_id: 'work-a',
+      request_ids: ['request-a'],
+      event_sequence_no: 2,
+      ...terminalEvent
+    }
+    messages = tracker.finishWorkLifecycle(messages, firstTerminalEvent)
+
+    const competingDone = {
+      work_id: 'work-a',
+      request_ids: ['request-a'],
+      type: 'done',
+      event_sequence_no: 3
+    }
+    messages = tracker.finishWorkLifecycle(messages, competingDone)
+
+    assert.equal(tracker.shouldProcessTurnEnd('work-a'), expected)
+    assert.equal(tracker.isAcceptedTerminalEvent(firstTerminalEvent), true)
+    assert.equal(tracker.isAcceptedTerminalEvent(competingDone), false)
+    assert.equal(messages.some(message => message.role === 'thinking'), false)
+
+    const afterTerminalStart = tracker.startAgentLoop(messages, {
+      work_id: 'work-a',
+      response_id: 'response-late',
+      event_sequence_no: 4
+    })
+    assert.equal(afterTerminalStart.some(message => message.role === 'thinking'), false)
+  })
+}
+
+test('resetWorkLifecycle admits a new turn-end round', () => {
   const tracker = createWorkLifecycleTracker()
-  const done = {
+  let messages = tracker.startAgentLoop([userMessage('request-a')], {
     work_id: 'work-a',
-    request_ids: ['request-a'],
+    response_id: 'response-a',
     event_sequence_no: 1
-  }
-  const lateProactiveReply = {
+  })
+  const firstTerminalEvent = {
     work_id: 'work-a',
     request_ids: ['request-a'],
+    type: 'error',
     event_sequence_no: 2
   }
 
-  tracker.finishWorkLifecycle([userMessage('request-a')], done)
+  messages = tracker.finishWorkLifecycle(messages, firstTerminalEvent)
+  assert.equal(tracker.shouldProcessTurnEnd('work-a'), false)
+  assert.equal(tracker.isAcceptedTerminalEvent(firstTerminalEvent), true)
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
 
-  assert.equal(shouldApplyOwnProactiveReply(tracker, lateProactiveReply, 'request-a'), false)
-})
+  messages = tracker.resetWorkLifecycle(messages)
+  assert.equal(tracker.shouldProcessTurnEnd('work-a'), true)
+  assert.equal(tracker.isAcceptedTerminalEvent(firstTerminalEvent), false)
 
-test('requires the current request id but accepts own proactive replies without work ids', () => {
-  const tracker = createWorkLifecycleTracker()
-
-  assert.equal(shouldApplyOwnProactiveReply(tracker, {
+  messages = tracker.startAgentLoop(messages, {
     work_id: 'work-a',
-    request_ids: ['other-request']
-  }, 'request-a'), false)
-  assert.equal(shouldApplyOwnProactiveReply(tracker, {
-    request_ids: ['request-a']
-  }, 'request-a'), true)
+    response_id: 'response-b',
+    event_sequence_no: 1
+  })
+  assert.equal(messages.some(message => message.role === 'thinking'), true)
+
+  const secondTerminalEvent = {
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    type: 'done',
+    event_sequence_no: 2
+  }
+  messages = tracker.finishWorkLifecycle(messages, secondTerminalEvent)
+
+  assert.equal(tracker.shouldProcessTurnEnd('work-a'), true)
+  assert.equal(tracker.isAcceptedTerminalEvent(secondTerminalEvent), true)
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
 })
 
 test('cleans up a migrated thinking marker by request id without a work id', () => {

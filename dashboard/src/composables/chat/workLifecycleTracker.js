@@ -31,16 +31,6 @@ const hasRequestIdIntersection = (leftRequestIds, rightRequestIds) => (
   Array.from(leftRequestIds).some(requestId => rightRequestIds.has(requestId))
 )
 
-export const shouldApplyOwnProactiveReply = (tracker, event, requestId) => {
-  const normalizedRequestId = normalizeIdentity(requestId)
-  if (!normalizedRequestId || !getRequestIds(event).has(normalizedRequestId)) return false
-
-  const workId = normalizeIdentity(event?.work_id)
-  if (!workId) return true
-
-  return !tracker.isWorkTerminal(workId) || tracker.isAcceptedTerminalEvent(event)
-}
-
 const isThinkingForWork = (message, workId) =>
   message?.role === 'thinking' && sameIdentity(message.work_id, workId)
 
@@ -245,10 +235,12 @@ const getEventSequenceNo = event => (
 )
 
 const createWorkState = () => ({
-  eventSequenceNo: null,
+  workEventSequenceNo: null,
+  sessionNotificationSequenceNo: null,
   outputResponseIds: new Set(),
   startedResponseIds: new Set(),
-  terminal: false
+  terminal: false,
+  terminalType: null
 })
 
 export function createWorkLifecycleTracker() {
@@ -267,8 +259,11 @@ export function createWorkLifecycleTracker() {
   const acceptsWorkEvent = (state, event) => {
     const eventSequenceNo = getEventSequenceNo(event)
     if (eventSequenceNo !== null) {
-      if (state.eventSequenceNo !== null && eventSequenceNo <= state.eventSequenceNo) return false
-      state.eventSequenceNo = eventSequenceNo
+      const sequenceField = (
+        event?.type === 'proactive_reply' || event?.type === 'proactive_reply_error'
+      ) ? 'sessionNotificationSequenceNo' : 'workEventSequenceNo'
+      if (state[sequenceField] !== null && eventSequenceNo <= state[sequenceField]) return false
+      state[sequenceField] = eventSequenceNo
     }
     return true
   }
@@ -335,6 +330,9 @@ export function createWorkLifecycleTracker() {
       if (state) {
         if (state.terminal || !acceptsWorkEvent(state, event)) return messages
         state.terminal = true
+        state.terminalType = event?.type ?? (
+          event?.choices?.[0]?.message?.role === 'err' ? 'error' : null
+        )
         if (event && typeof event === 'object') acceptedTerminalEvents.add(event)
       }
 
@@ -351,6 +349,13 @@ export function createWorkLifecycleTracker() {
 
     isAcceptedTerminalEvent(event) {
       return Boolean(event && typeof event === 'object' && acceptedTerminalEvents.has(event))
+    },
+
+    shouldProcessTurnEnd(workId) {
+      const state = workStates.get(normalizeIdentity(workId))
+      return !state?.terminal
+        || state.terminalType === 'done'
+        || state.terminalType === 'proactive_reply'
     },
 
     resetWorkLifecycle(messages) {

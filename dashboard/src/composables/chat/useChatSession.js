@@ -149,7 +149,9 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     currentSessionShowToolCalls,
     messageProcessor,
     mergeLatestSessionHistory: history.mergeLatestSessionHistory,
-    api: chatApi
+    api: chatApi,
+    notify: ElMessage,
+    translate: t
   })
   const {
     currentTodoPlan,
@@ -162,13 +164,10 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     isContextSummarizing,
     llmRequestMetadata,
     processAiResponse,
-    createLifecycleCallbacks,
+    createStreamCallbacks,
     finishRequestLifecycle,
-    getCompletedWorkId,
     shouldProcessCompletedWork,
     refreshSessionLoadingState,
-    applyAuditConfirmationStatus,
-    applyAuditToolResultsUpdate,
     applyNonStreamSessionEvents,
     updateLlmRequestMetadata
   } = events
@@ -329,21 +328,8 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     chatState,
     sessionManager,
     transport,
-    currentSessionShowToolCalls,
     isSessionScopeActive: () => sessionScopeActive,
-    createLifecycleCallbacks,
-    contextSummaryTracker,
-    contextSummaryWorkKeys,
-    contextSummaryRequestKeys,
-    workLifecycleTracker,
-    messageProcessor,
-    mergeLatestSessionHistory: history.mergeLatestSessionHistory,
-    refreshSessionLoadingState,
-    applyAuditConfirmationStatus,
-    applyAuditToolResultsUpdate,
-    getCompletedWorkId,
-    notify: ElMessage,
-    translate: t
+    createStreamCallbacks
   })
   resumeSelectedSessionStream = streamResume.resumeSelectedSessionStream
 
@@ -383,18 +369,10 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
   })
   const { wsSend } = useChatWebSocketSend({
     ...sendOptions,
-    createLifecycleCallbacks,
+    createStreamCallbacks,
     contextSummaryTracker,
     contextSummaryWorkKeys,
     contextSummaryRequestKeys,
-    messageProcessor,
-    processAiResponse,
-    updateLlmRequestMetadata,
-    mergeLatestSessionHistory: history.mergeLatestSessionHistory,
-    applyAuditConfirmationStatus,
-    applyAuditToolResultsUpdate,
-    getCompletedWorkId,
-    shouldProcessCompletedWork,
     finishRequestLifecycle,
     setTransportMode,
     transportNotifier,

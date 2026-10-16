@@ -395,26 +395,21 @@ export function createChatTransport({ wsManager, api, getToken, reportError, tra
       return
     }
 
-    if (type === 'proactive_reply') {
+    if (type === 'proactive_reply' || type === 'proactive_reply_error') {
+      if (data.source === 'foreground' || data.source === 'confirmed_tool_execution') return
       if (onWorkFinished) onWorkFinished(data)
-      if (onProactiveReply) {
-        onProactiveReply(data)
-      } else if (onComplete) {
-        onComplete(data, null, requestId, 'proactive_reply')
-      }
-      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
-      if (scrollToBottom) {
-        scrollToBottom()
-      }
-      return
-    }
-
-    if (type === 'proactive_reply_error') {
-      if (onWorkFinished) onWorkFinished(data)
-      if (onProactiveReplyError) {
-        onProactiveReplyError(data)
-      } else if (onError) {
-        onError(resolveErrorMessage(data, 'Background proactive reply failed'), null, requestId, data)
+      if (type === 'proactive_reply') {
+        if (onProactiveReply) {
+          onProactiveReply(data)
+        } else if (onComplete) {
+          onComplete(data, null, requestId, 'proactive_reply')
+        }
+      } else {
+        if (onProactiveReplyError) {
+          onProactiveReplyError(data)
+        } else if (onError) {
+          onError(resolveErrorMessage(data, 'Background proactive reply failed'), null, requestId, data)
+        }
       }
       getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (scrollToBottom) {
@@ -509,7 +504,7 @@ export function createChatTransport({ wsManager, api, getToken, reportError, tra
     ...options
   })
 
-  const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, goalMode, maxTurns, callbacks = {} }) => {
+  const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, showReasoning, goalMode, maxTurns, historyMessageId = 0, callbacks = {} }) => {
     if (transportMode.value !== 'ws') return false
     const operationGeneration = transportGeneration
     const token = getToken()
@@ -556,6 +551,7 @@ export function createChatTransport({ wsManager, api, getToken, reportError, tra
       type: 'chat',
       message,
       session_id: sessionId || null,
+      history_message_id: historyMessageId,
       attachments: attachments || null,
       request_id: requestId
     }

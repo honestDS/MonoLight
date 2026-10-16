@@ -2,6 +2,10 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { createContextSummaryTracker } from './contextSummaryTracker.js'
 import { createWorkLifecycleTracker } from './workLifecycleTracker.js'
 import {
+  getAuditConfirmationRecordId,
+  parseAuditConfirmationResponse
+} from './chatMessageHelpers.js'
+import {
   applyAuditConfirmationStatusToMessages,
   applyAuditToolResultsUpdateToMessages
 } from './auditConfirmationState.js'
@@ -16,6 +20,7 @@ import {
   normalizeTodoPlan,
   readTodoPlanFromTransport
 } from '../../utils/todoPresentation.js'
+import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { filterResponseHistoryToolOutput } from '../../utils/toolOutputVisibility'
 
 export function useChatSessionEvents({
@@ -25,7 +30,9 @@ export function useChatSessionEvents({
   currentSessionShowToolCalls,
   messageProcessor,
   mergeLatestSessionHistory,
-  api
+  api,
+  notify,
+  translate
 }) {
   const currentTodoPlan = ref(null)
   const skipTodoInitialLoadSessionIds = new Set()
@@ -201,6 +208,251 @@ export function useChatSessionEvents({
       || workLifecycleTracker.isAcceptedTerminalEvent(data)
   }
 
+  const createStreamCallbacks = ({
+    isCurrentSession,
+    requestId = null,
+    deferLoadingUntilResumeComplete = false
+  }) => {
+    const resolveRequestId = (eventRequestId, data) => (
+      eventRequestId ?? data?.request_id ?? requestId
+    )
+
+    const isCurrentStreamEvent = (event) => (
+      isCurrentSession()
+      && (!event?.session_id || event.session_id === sessionManager.currentSessionId.value)
+    )
+
+    const syncHistory = (event = null) => {
+      if (!isCurrentStreamEvent(event)) return
+      const sessionId = event?.session_id || sessionManager.currentSessionId.value
+      if (!sessionId) return
+      void mergeLatestSessionHistory(sessionId).catch(err => {
+        console.error('WebSocket stream history merge failed:', err)
+      })
+    }
+
+    const setLoading = (value) => {
+      if (!isCurrentSession()) return
+      if (!value && chatState.messages.value.some(message => message.role === 'thinking')) return
+      chatState.loading.value = value
+    }
+
+    const callbacks = {
+      ...createLifecycleCallbacks(isCurrentSession),
+      deferLoadingUntilResumeComplete,
+      onContextSummaryStart: data => {
+        if (
+          !isCurrentStreamEvent(data)
+          || contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)
+          || workLifecycleTracker.isWorkTerminal(data.work_id)
+        ) return
+        contextSummaryTracker.startContextSummaryWork(
+          contextSummaryWorkKeys.value,
+          contextSummaryRequestKeys,
+          data,
+          resolveRequestId(data.request_id, data)
+        )
+      },
+      onContextSummaryEnd: data => {
+        if (
+          !isCurrentStreamEvent(data)
+          || contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)
+        ) return
+        contextSummaryTracker.endContextSummaryWork(
+          contextSummaryWorkKeys.value,
+          contextSummaryRequestKeys,
+          data,
+          resolveRequestId(data.request_id, data)
+        )
+      },
+      onReasoning: (text, turn, responseId, requestIdParam, workId, eventId) => {
+        if (!isCurrentSession() || workLifecycleTracker.isWorkTerminal(workId)) return
+        messageProcessor.processStreamReasoning(
+          chatState.messages,
+          text,
+          turn,
+          responseId,
+          resolveRequestId(requestIdParam),
+          workId,
+          eventId
+        )
+      },
+      onContent: (text, turn, _thinkingId, finishReason, responseId, requestIdParam, workId, eventId) => {
+        if (!isCurrentSession() || workLifecycleTracker.isWorkTerminal(workId)) return
+        messageProcessor.processStreamContent(
+          chatState.messages,
+          text,
+          turn,
+          null,
+          finishReason,
+          responseId,
+          resolveRequestId(requestIdParam),
+          workId,
+          eventId
+        )
+      },
+      onToolStart: (toolCall, _thinkingId, responseId, requestIdParam, workId) => {
+        if (
+          !isCurrentSession()
+          || workLifecycleTracker.isWorkTerminal(workId)
+          || !currentSessionShowToolCalls.value
+        ) return
+        messageProcessor.processStreamToolStart(
+          chatState.messages,
+          toolCall,
+          null,
+          responseId,
+          resolveRequestId(requestIdParam),
+          workId
+        )
+      },
+      onToolEnd: (toolEnd, responseId, requestIdParam, workId) => {
+        if (
+          !isCurrentSession()
+          || workLifecycleTracker.isWorkTerminal(workId)
+          || !currentSessionShowToolCalls.value
+        ) return
+        messageProcessor.processStreamToolEnd(
+          chatState.messages,
+          toolEnd,
+          responseId,
+          resolveRequestId(requestIdParam),
+          workId
+        )
+      },
+      onComplete: (data, _thinkingId, requestIdParam, eventType) => {
+        const resolvedRequestId = resolveRequestId(requestIdParam, data)
+        if (eventType !== 'turn_end') {
+          contextSummaryTracker.clearContextSummaryRequest(
+            contextSummaryWorkKeys.value,
+            contextSummaryRequestKeys,
+            resolvedRequestId
+          )
+        }
+        if (!isCurrentStreamEvent(data)) return
+
+        if (eventType === 'turn_end') {
+          if (!workLifecycleTracker.shouldProcessTurnEnd(data?.work_id)) return
+          messageProcessor.processStreamTurnEnd(chatState.messages, data, resolvedRequestId)
+          if (data?.work_id && data?.response_id) {
+            applyLifecycleEvent(workLifecycleTracker.stopAgentLoop, data, isCurrentSession)
+          }
+          return
+        }
+
+        const completedResponse = data?.response || data
+        const completedMetadata = data?.llm_request_metadata || completedResponse?.llm_request_metadata
+        if (completedMetadata) {
+          updateLlmRequestMetadata({
+            ...completedMetadata,
+            session_id: completedMetadata.session_id
+              || data?.session_id
+              || sessionManager.currentSessionId.value
+          }, isCurrentSession)
+        }
+        if (!shouldProcessCompletedWork(data)) return
+
+        const finalResponse = {
+          ...completedResponse,
+          ...(completedResponse?.work_id == null && data?.work_id != null ? { work_id: data.work_id } : {}),
+          ...(completedResponse?.response_id == null && data?.response_id != null ? { response_id: data.response_id } : {}),
+          ...(completedResponse?.message_id == null && data?.message_id != null ? { message_id: data.message_id } : {}),
+          ...(completedResponse?.files == null && data?.files != null ? { files: data.files } : {})
+        }
+        const auditConfirmation = parseAuditConfirmationResponse(finalResponse)
+        if (auditConfirmation) {
+          const auditRecordId = String(auditConfirmation.audit_record_id || '')
+          const existingIndex = chatState.messages.value.findIndex(
+            message => getAuditConfirmationRecordId(message) === auditRecordId
+          )
+          if (existingIndex === -1) {
+            processAiResponse(finalResponse, null, resolvedRequestId)
+          } else {
+            const existingMessage = chatState.messages.value[existingIndex]
+            chatState.messages.value[existingIndex] = {
+              ...existingMessage,
+              type: 'audit_confirmation',
+              content: JSON.stringify(auditConfirmation),
+              request_id: existingMessage.request_id || resolvedRequestId
+            }
+          }
+          if (!deferLoadingUntilResumeComplete) setLoading(false)
+          return
+        }
+
+        processAiResponse(finalResponse, null, resolvedRequestId)
+      },
+      onError: (errorMessage, _thinkingId, requestIdParam, errorData = {}) => {
+        const resolvedRequestId = resolveRequestId(requestIdParam, errorData)
+        contextSummaryTracker.clearContextSummaryRequest(
+          contextSummaryWorkKeys.value,
+          contextSummaryRequestKeys,
+          resolvedRequestId
+        )
+        if (!isCurrentStreamEvent(errorData)) return
+
+        const shouldProcess = shouldProcessCompletedWork(errorData)
+        if (shouldProcess) {
+          const resolvedErrorMessage = errorMessage || translate('chat.stream_error')
+          const inserted = messageProcessor.processStreamError(
+            chatState.messages,
+            resolvedErrorMessage,
+            null,
+            resolvedRequestId,
+            errorData.work_id,
+            errorData.event_id,
+            errorData.message_id
+          )
+          if (inserted) notify.error(resolvedErrorMessage)
+        }
+        syncHistory(errorData)
+      },
+      onProactiveReply: data => {
+        if (!isCurrentStreamEvent(data)) return
+        if (
+          data.llm_request_metadata
+          && (data.llm_request_metadata.request_purpose || !data.source || data.source === 'foreground')
+        ) {
+          updateLlmRequestMetadata({
+            ...data.llm_request_metadata,
+            session_id: data.session_id || sessionManager.currentSessionId.value
+          }, isCurrentSession)
+        }
+        syncHistory(data)
+      },
+      onProactiveReplyError: data => {
+        if (!isCurrentStreamEvent(data)) return
+
+        if (shouldProcessCompletedWork(data)) {
+          const errorMessage = truncateErrorMessage(
+            data?.content || data?.message || 'Background proactive reply failed'
+          )
+          const inserted = messageProcessor.processStreamError(
+            chatState.messages,
+            errorMessage,
+            null,
+            data?.request_id ?? null,
+            data?.work_id,
+            data?.event_id,
+            data?.message_id
+          )
+          if (inserted) notify.error(errorMessage)
+        }
+        syncHistory(data)
+      },
+      onResumeComplete: data => {
+        if (!isCurrentStreamEvent(data)) return
+        refreshSessionLoadingState()
+        syncHistory(data)
+      },
+      onAuditConfirmationStatus: applyAuditConfirmationStatus,
+      onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
+      setLoading
+    }
+
+    return callbacks
+  }
+
   const applyAuditConfirmationStatus = (data) => {
     if (contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
@@ -262,9 +514,8 @@ export function useChatSessionEvents({
     isContextSummarizing,
     llmRequestMetadata,
     processAiResponse,
-    createLifecycleCallbacks,
+    createStreamCallbacks,
     finishRequestLifecycle,
-    getCompletedWorkId,
     shouldProcessCompletedWork,
     refreshSessionLoadingState,
     applyAuditConfirmationStatus,

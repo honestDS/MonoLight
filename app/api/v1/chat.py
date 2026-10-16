@@ -15,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Valida
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import _response_has_background_tasks, web_chat_adapter
-from app.adapters.chat_ws import ws_chat_adapter
 from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.channel_router import select_channel
 from app.core.constants import (
@@ -159,6 +158,9 @@ async def _create_new_web_session_with_profile_override(
 @dataclass
 class _WebSocketChatState:
     stream_task: asyncio.Task | None = None
+    stream_wakeup: asyncio.Event = field(default_factory=asyncio.Event)
+    history_message_id: int = 0
+    after_work_sequence_no: int = 0
     current_session_id: str | None = None
     current_owner_uid: str | None = None
     notifier_queue: asyncio.Queue[dict] = field(default_factory=asyncio.Queue)
@@ -181,122 +183,98 @@ async def _cancel_websocket_stream_task(state: _WebSocketChatState) -> None:
     await asyncio.gather(stream_task, return_exceptions=True)
 
 
-async def _run_websocket_chat(
+async def _run_websocket_resume(
     websocket: WebSocket,
     state: _WebSocketChatState,
-    uid: str | None,
-    message_text,
-    session_id,
-    attachments=None,
-    request_id=None,
-    actor_uid: str | None = None,
-    actor_username: str | None = None,
-):
+    uid: str,
+    session_id: str,
+) -> None:
+    """保持当前会话的前台结果订阅，空闲时只等待本连接的唤醒事件。"""
     running_task = asyncio.current_task()
+    resume_failed = False
     try:
-        async with AsyncSessionLocal() as db:
-            await ensure_web_session_writable(
-                db,
-                session_id=session_id,
+        while session_id == state.current_session_id:
+            await state.stream_wakeup.wait()
+            state.stream_wakeup.clear()
+            if session_id != state.current_session_id:
+                break
+
+            async for response in session_reply_queue_manager.wait_for_session_stream(
                 uid=uid,
-            )
-            async for response in ws_chat_adapter.chat(
-                db=db,
-                message=message_text,
-                uid=uid,
-                actor_uid=actor_uid,
-                actor_username=actor_username,
                 session_id=session_id,
-                attachments=attachments,
-                request_id=request_id,
+                history_message_id=state.history_message_id,
+                after_work_sequence_no=state.after_work_sequence_no,
+                interactive_only=True,
             ):
                 if session_id != state.current_session_id:
                     continue
                 if not _event_matches_session(response, session_id):
                     continue
                 await websocket.send_json(response)
-    except BaseBusinessException as exc:
-        if session_id == state.current_session_id:
-            await websocket.send_json(
-                {
-                    "type": "error",
-                    "message": t(exc.message, **exc.kwargs),
-                    "session_id": session_id,
-                    "request_id": request_id,
-                }
-            )
-    except RuntimeError as e:
-        # WebSocket 已关闭时忽略传输层发送错误；其他运行时错误仍记录。
-        if not ("websocket.send" in str(e) and "websocket.close" in str(e)):
-            logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_RUNTIME_ERROR", error=str(e)))
-    except Exception:
-        logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
-        if session_id == state.current_session_id:
-            try:
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "message": t(ERR_INTERNAL_SERVER_ERROR),
-                        "session_id": session_id,
-                        "request_id": request_id,
-                    }
-                )
-            except Exception:
-                pass
-    finally:
-        if state.stream_task is running_task:
-            state.stream_task = None
+                if response.get("type") in {"done", "error", "cancelled"}:
+                    work_sequence_no = response.get("work_sequence_no")
+                    if type(work_sequence_no) is int and work_sequence_no >= 0 and session_id == state.current_session_id and state.stream_task is running_task:
+                        state.after_work_sequence_no = work_sequence_no
 
-
-async def _run_websocket_resume(
-    websocket: WebSocket,
-    state: _WebSocketChatState,
-    uid: str,
-    session_id: str,
-    history_message_id: int = 0,
-) -> None:
-    running_task = asyncio.current_task()
-    try:
-        async for response in session_reply_queue_manager.wait_for_session_stream(
-            uid=uid,
-            session_id=session_id,
-            history_message_id=history_message_id,
-        ):
             if session_id != state.current_session_id:
-                continue
-            if not _event_matches_session(response, session_id):
-                continue
-            await websocket.send_json(response)
-
-    except RuntimeError as exc:
-        if not ("websocket.send" in str(exc) and "websocket.close" in str(exc)):
-            logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_RUNTIME_ERROR", error=str(exc)))
-    except Exception:
-        logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
-        if session_id == state.current_session_id:
-            try:
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "message": t(ERR_INTERNAL_SERVER_ERROR),
-                        "session_id": session_id,
-                    }
-                )
-            except Exception:
-                pass
-    finally:
-        if state.stream_task is running_task:
-            state.stream_task = None
-        if session_id == state.current_session_id:
-            try:
+                break
+            if not state.stream_wakeup.is_set():
                 await websocket.send_json(
                     {
                         "type": "resume_complete",
                         "session_id": session_id,
                     }
                 )
+
+    except RuntimeError as exc:
+        resume_failed = True
+        if not ("websocket.send" in str(exc) and "websocket.close" in str(exc)):
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_RUNTIME_ERROR", error=str(exc)))
+    except Exception:
+        resume_failed = True
+        logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
+        if session_id == state.current_session_id:
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": t(ERR_INTERNAL_SERVER_ERROR),
+                        "session_id": session_id,
+                    }
+                )
             except Exception:
                 pass
+    finally:
+        if state.stream_task is running_task:
+            state.stream_task = None
+            if resume_failed and session_id == state.current_session_id:
+                if state.stream_wakeup.is_set() and not running_task.cancelling():
+                    _wake_websocket_stream(websocket, state)
+                else:
+                    try:
+                        await websocket.send_json(
+                            {
+                                "type": "resume_complete",
+                                "session_id": session_id,
+                            }
+                        )
+                    except Exception:
+                        pass
+
+
+def _wake_websocket_stream(websocket: WebSocket, state: _WebSocketChatState) -> None:
+    state.stream_wakeup.set()
+    if state.current_session_id is None or state.current_owner_uid is None:
+        return
+    if state.stream_task is None or state.stream_task.done():
+        state.stream_task = asyncio.create_task(
+            _run_websocket_resume(
+                websocket,
+                state,
+                state.current_owner_uid,
+                state.current_session_id,
+            )
+        )
 
 
 @router.post("/completions")
@@ -903,28 +881,39 @@ async def chat_websocket(
 
     # 用于追踪当前是否有正在运行的调度任务
     state = _WebSocketChatState()
+    receive_task: asyncio.Task | None = None
+    notify_task: asyncio.Task | None = None
 
     try:
+        receive_task = asyncio.create_task(websocket.receive_json())
+        notify_task = asyncio.create_task(state.notifier_queue.get())
         while True:
-            receive_task = asyncio.create_task(websocket.receive_json())
-            notify_task = asyncio.create_task(state.notifier_queue.get())
-            done, pending = await asyncio.wait({receive_task, notify_task}, return_when=asyncio.FIRST_COMPLETED)
-            for pending_task in pending:
-                pending_task.cancel()
+            done, _pending = await asyncio.wait({receive_task, notify_task}, return_when=asyncio.FIRST_COMPLETED)
 
             if notify_task in done:
                 event = notify_task.result()
+                notify_task = asyncio.create_task(state.notifier_queue.get())
                 if _event_matches_session(event, state.current_session_id, require_session_id=True):
+                    should_forward = True
                     if event.get("type") == "audit_tool_results_update":
                         async with AsyncSessionLocal() as db:
                             session = await session_crud.get_by_session_id(db, state.current_session_id)
                         if session and not session.show_tool_calls:
-                            continue
-                    await websocket.send_json(event)
-                continue
+                            should_forward = False
+                    if should_forward:
+                        if event.get("type") in {"proactive_reply", "proactive_reply_error"} and event.get("source") in {
+                            "foreground",
+                            "confirmed_tool_execution",
+                        }:
+                            _wake_websocket_stream(websocket, state)
+                        else:
+                            await websocket.send_json(event)
+                if receive_task not in done:
+                    continue
 
             # 接收 JSON 消息
             data = receive_task.result()
+            receive_task = asyncio.create_task(websocket.receive_json())
             if data.get("type") == "resume":
                 session_id = data.get("session_id")
                 if not session_id:
@@ -936,6 +925,10 @@ async def chat_websocket(
                         }
                     )
                     continue
+
+                history_message_id = data.get("history_message_id")
+                if type(history_message_id) is not int or history_message_id < 0:
+                    history_message_id = 0
 
                 try:
                     async with AsyncSessionLocal() as db:
@@ -957,22 +950,18 @@ async def chat_websocket(
 
                 owner_uid = session.uid if session is not None else uid
                 old_session_id = state.current_session_id
-                if old_session_id and old_session_id != session_id:
-                    await session_notifier.unregister(state.current_owner_uid, old_session_id, state.notifier_queue)
+                old_owner_uid = state.current_owner_uid
+                await _cancel_websocket_stream_task(state)
+                if old_session_id and old_owner_uid:
+                    await session_notifier.unregister(old_owner_uid, old_session_id, state.notifier_queue)
 
                 state.current_session_id = session_id
                 state.current_owner_uid = owner_uid
-                await _cancel_websocket_stream_task(state)
+                state.history_message_id = history_message_id
+                state.after_work_sequence_no = 0
+                state.stream_wakeup.clear()
                 await session_notifier.register(owner_uid, session_id, state.notifier_queue)
-                state.stream_task = asyncio.create_task(
-                    _run_websocket_resume(
-                        websocket,
-                        state,
-                        owner_uid,
-                        session_id,
-                        history_message_id=data.get("history_message_id") if type(data.get("history_message_id")) is int and data["history_message_id"] >= 0 else 0,
-                    )
-                )
+                _wake_websocket_stream(websocket, state)
                 continue
 
             message = data.get("message")
@@ -980,6 +969,9 @@ async def chat_websocket(
             attachments = data.get("attachments")
             request_id = data.get("request_id")
             profile_override_id = data.get("profile_override_id")
+            history_message_id = data.get("history_message_id")
+            if type(history_message_id) is not int or history_message_id < 0:
+                history_message_id = 0
 
             if not message and not attachments:
                 await websocket.send_json(
@@ -996,8 +988,18 @@ async def chat_websocket(
             old_session_id = state.current_session_id
             created_new_session = False
             if not session_id:
-                # 如果收到空 session_id，决定是沿用当前会话还是开启新会话
-                if not state.stream_task or state.stream_task.done():
+                reuse_current_session = False
+                current_owner_uid = state.current_owner_uid or uid
+                if old_session_id and current_owner_uid:
+                    async with AsyncSessionLocal() as db:
+                        reuse_current_session = await session_reply_work_item_crud.has_active_interactive_work(
+                            db,
+                            uid=current_owner_uid,
+                            session_id=old_session_id,
+                        )
+                if reuse_current_session:
+                    session_id = old_session_id
+                else:
                     try:
                         profile_setting = NewSessionProfileSetting.model_validate(
                             {
@@ -1047,8 +1049,6 @@ async def chat_websocket(
 
                     session_id = new_session_id
                     created_new_session = True
-            if not session_id:
-                session_id = state.current_session_id
 
             try:
                 async with AsyncSessionLocal() as db:
@@ -1076,8 +1076,17 @@ async def chat_websocket(
                 continue
 
             owner_uid = session.uid if session is not None else uid
-            if old_session_id and old_session_id != session_id:
-                await session_notifier.unregister(state.current_owner_uid, old_session_id, state.notifier_queue)
+            is_session_switched = old_session_id != session_id
+            if is_session_switched:
+                old_owner_uid = state.current_owner_uid
+                await _cancel_websocket_stream_task(state)
+                if old_session_id and old_owner_uid:
+                    await session_notifier.unregister(old_owner_uid, old_session_id, state.notifier_queue)
+                state.history_message_id = history_message_id
+                state.after_work_sequence_no = 0
+                state.stream_wakeup.clear()
+                if old_session_id is not None:
+                    logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info(t("LOG_CHAT_WS_SESSION_SWITCHED"))
             state.current_session_id = session_id
             state.current_owner_uid = owner_uid
             if created_new_session:
@@ -1088,104 +1097,65 @@ async def chat_websocket(
                         "request_id": request_id,
                     }
                 )
-            if state.current_session_id:
-                await session_notifier.register(owner_uid, state.current_session_id, state.notifier_queue)
+            await session_notifier.register(owner_uid, session_id, state.notifier_queue)
 
-            # 判断是否发生了会话切换
-            is_session_switched = old_session_id is not None and session_id != old_session_id
-
-            # 如果当前连接已有流订阅在运行
-            if state.stream_task and not state.stream_task.done():
-                if is_session_switched:
-                    # 1. 切换会话场景：停止旧会话流订阅；旧会话 work 由 SessionReplyConsumer 独立继续执行
-                    await _cancel_websocket_stream_task(state)
-
-                    logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info(t("LOG_CHAT_WS_SESSION_SWITCHED"))
-                    state.stream_task = asyncio.create_task(
-                        _run_websocket_chat(
-                            websocket,
-                            state,
-                            owner_uid,
-                            message,
-                            session_id,
-                            attachments,
-                            request_id,
-                            actor_uid=uid,
-                            actor_username=actor_username,
-                        )
+            try:
+                async with AsyncSessionLocal() as db:
+                    await ensure_web_session_writable(
+                        db,
+                        session_id=session_id,
+                        uid=uid,
+                        is_admin=is_superuser,
                     )
-                else:
-                    # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
-                    async with AsyncSessionLocal() as db:
-                        try:
-                            await ensure_web_session_writable(
-                                db,
-                                session_id=session_id,
-                                uid=uid,
-                                is_admin=is_superuser,
-                            )
-                            profile = await resolve_profile_for_session(db, uid=owner_uid, session_id=session_id)
-                            await ChatDispatcher.validate_initial_message_before_save(db, message, owner_uid, session_id, profile, attachments)
-                        except BaseBusinessException as exc:
-                            await websocket.send_json(
-                                {
-                                    "type": "error",
-                                    "message": t(exc.message, **exc.kwargs),
-                                    "session_id": session_id,
-                                    "request_id": request_id,
-                                }
-                            )
-                            continue
-                        _initial_message, work, submission_status, confirmation_update_events = await session_reply_queue_manager.submit_user_message(
-                            db,
-                            uid=owner_uid,
-                            actor_uid=uid,
-                            actor_username=actor_username,
-                            session_id=session_id,
-                            profile=profile,
-                            message=message,
-                            attachments=attachments,
-                            source="ws",
-                            request_id=request_id,
-                        )
-                        if request_id:
-                            await websocket.send_json(
-                                build_input_accepted_event(
-                                    session_id,
-                                    request_id,
-                                    work.id,
-                                    submission_status,
-                                )
-                            )
-                        for event in confirmation_update_events:
-                            if request_id and isinstance(event, dict) and "request_id" not in event:
-                                event = {**event, "request_id": request_id}
-                            await websocket.send_json(event)
-                        if request_id and is_submission_queued(submission_status):
-                            await websocket.send_json(
-                                build_input_queued_event(
-                                    session_id,
-                                    request_id,
-                                    work.id,
-                                    submission_status,
-                                )
-                            )
-                        logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_STREAM_MESSAGE_SUBMITTED", session_id=session_id))
-            else:
-                # 3. 无流订阅：为当前会话启动结果订阅
-                state.stream_task = asyncio.create_task(
-                    _run_websocket_chat(
-                        websocket,
-                        state,
-                        owner_uid,
-                        message,
-                        session_id,
-                        attachments,
-                        request_id,
+                    profile = await resolve_profile_for_session(db, uid=owner_uid, session_id=session_id)
+                    await ChatDispatcher.validate_initial_message_before_save(db, message, owner_uid, session_id, profile, attachments)
+                    _initial_message, work, submission_status, confirmation_update_events = await session_reply_queue_manager.submit_user_message(
+                        db,
+                        uid=owner_uid,
                         actor_uid=uid,
                         actor_username=actor_username,
+                        session_id=session_id,
+                        profile=profile,
+                        message=message,
+                        attachments=attachments,
+                        source="ws",
+                        request_id=request_id,
+                    )
+            except BaseBusinessException as exc:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": t(exc.message, **exc.kwargs),
+                        "session_id": session_id,
+                        "request_id": request_id,
+                    }
+                )
+                continue
+
+            if request_id:
+                await websocket.send_json(
+                    build_input_accepted_event(
+                        session_id,
+                        request_id,
+                        work.id,
+                        submission_status,
                     )
                 )
+            for event in confirmation_update_events:
+                if request_id and isinstance(event, dict) and "request_id" not in event:
+                    event = {**event, "request_id": request_id}
+                await websocket.send_json(event)
+            if request_id and is_submission_queued(submission_status):
+                await websocket.send_json(
+                    build_input_queued_event(
+                        session_id,
+                        request_id,
+                        work.id,
+                        submission_status,
+                    )
+                )
+            _wake_websocket_stream(websocket, state)
+            logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_STREAM_MESSAGE_SUBMITTED", session_id=session_id))
 
     except WebSocketDisconnect:
         # 连接关闭只结束传输层；持久化会话回复 work 不依赖 WebSocket 生命周期
@@ -1202,6 +1172,12 @@ async def chat_websocket(
         except RuntimeError:
             pass
     finally:
+        for task in (receive_task, notify_task):
+            if task is not None and not task.done():
+                task.cancel()
+        receive_tasks = [task for task in (receive_task, notify_task) if task is not None]
+        if receive_tasks:
+            await asyncio.gather(*receive_tasks, return_exceptions=True)
         if log_locale_token is not None:
             reset_system_log_locale(log_locale_token)
         reset_current_locale(locale_token)
