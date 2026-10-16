@@ -30,9 +30,11 @@ from app.core.exceptions import LLMException, ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger
 from app.core.prompts import (
+    BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT,
     BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT,
     BACKGROUND_PROACTIVE_TEXT_ONLY_FALLBACK_PROMPT,
     BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
+    BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
     BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT,
     TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
 )
@@ -84,6 +86,29 @@ from app.providers.database import AsyncSessionLocal
 logger = get_logger(__name__)
 
 
+def _materialize_reply_request_messages(messages: list[InternalMessage], *, tools_available: bool) -> list[InternalMessage]:
+    guidance_prompts: list[str] = []
+    for message in reversed(messages):
+        if message.role != MessageRole.USER:
+            continue
+        if isinstance(message.guidance_prompt, str):
+            guidance_prompt = message.guidance_prompt.strip()
+            if guidance_prompt:
+                guidance_prompts.append(guidance_prompt)
+        break
+
+    guidance_prompts.append(BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT)
+    if not tools_available:
+        guidance_prompts.append(BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT)
+
+    guidance_message = InternalMessage(
+        role=MessageRole.USER,
+        content=None,
+        guidance_prompt="\n\n".join(guidance_prompts),
+    )
+    return materialize_user_environment_prompts([*messages, guidance_message])
+
+
 class BackgroundDispatcherMixin:
     @staticmethod
     async def _build_text_only_correction_request(
@@ -96,7 +121,7 @@ class BackgroundDispatcherMixin:
         uid: str,
         session_id: str,
     ) -> list[InternalMessage]:
-        request_messages = materialize_user_environment_prompts(messages)
+        request_messages = _materialize_reply_request_messages(messages, tools_available=False)
         return ContextManager.prepare_messages_for_model_request(
             messages=request_messages,
             context_window_k=retry_chat_params["context_window_k"],
@@ -236,7 +261,7 @@ class BackgroundDispatcherMixin:
                         message.guidance_prompt = cleaned_guidance_prompt
                         break
             return ContextManager.prepare_messages_for_model_request(
-                messages=materialize_user_environment_prompts(messages),
+                messages=_materialize_reply_request_messages(messages, tools_available=bool(tools)),
                 context_window_k=chat_params["context_window_k"],
                 max_tokens=chat_params["max_tokens"],
             )
@@ -330,7 +355,7 @@ class BackgroundDispatcherMixin:
 
                 async def build_correction_request(retry_chat_params, _chat_channel_obj, _model_entry):
                     return ContextManager.prepare_messages_for_model_request(
-                        messages=materialize_user_environment_prompts(correction_context_messages),
+                        messages=_materialize_reply_request_messages(correction_context_messages, tools_available=bool(tools)),
                         context_window_k=retry_chat_params["context_window_k"],
                         max_tokens=retry_chat_params["max_tokens"],
                     )
@@ -370,7 +395,7 @@ class BackgroundDispatcherMixin:
 
                     async def build_text_only_request(retry_chat_params, _chat_channel_obj, _model_entry):
                         return ContextManager.prepare_messages_for_model_request(
-                            messages=materialize_user_environment_prompts(text_only_context_messages),
+                            messages=_materialize_reply_request_messages(text_only_context_messages, tools_available=False),
                             context_window_k=retry_chat_params["context_window_k"],
                             max_tokens=retry_chat_params["max_tokens"],
                         )
@@ -599,7 +624,7 @@ class BackgroundDispatcherMixin:
                     ]
                 else:
                     tool_result_round_budget_tokens = calculate_tool_result_round_budget_tokens(
-                        messages=materialize_user_environment_prompts(messages),
+                        messages=_materialize_reply_request_messages(messages, tools_available=False),
                         context_window_k=chat_params["context_window_k"],
                         max_tokens=chat_params["max_tokens"],
                         tools=tools,
@@ -711,7 +736,8 @@ class BackgroundDispatcherMixin:
                     model_id=model_entry["model_id"],
                     protocol=resolve_model_protocol(model_entry),
                 )
-            request_messages = materialize_user_environment_prompts(messages)
+            # 避免长上下文诱发工具调用模仿，指导仅加入本次请求副本，不持久化。
+            request_messages = _materialize_reply_request_messages(messages, tools_available=False)
             return ContextManager.prepare_messages_for_model_request(
                 messages=request_messages,
                 context_window_k=final_chat_params["context_window_k"],
