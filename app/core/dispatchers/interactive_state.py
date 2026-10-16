@@ -19,7 +19,7 @@ from app.core.i18n import t
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.request_token_baseline import merge_session_cache_token_totals
-from app.models.message import InternalMessage
+from app.models.message import InternalMessage, MessageType
 
 from .interactive_helpers import (
     _AdditionalUserMessagesContext,
@@ -110,6 +110,7 @@ def build_interactive_dispatch_state(
     additional_user_messages_context: _AdditionalUserMessagesContext,
     execution_resume_state: dict[str, Any] | None = None,
     execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    initial_message_type: MessageType = MessageType.TEXT,
 ) -> InteractiveDispatchState:
     turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
     files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
@@ -121,7 +122,7 @@ def build_interactive_dispatch_state(
         total_input_tokens=(execution_resume_state.get("session_total_input_tokens", 0) if execution_resume_state is not None else 0),
         total_cached_tokens=(execution_resume_state.get("session_total_cached_tokens", 0) if execution_resume_state is not None else 0),
     )
-    initial_memory_recall_boundary = max(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
+    initial_message_boundary = max(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
     resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None
     resumed_memory_recall_status = execution_resume_state.get("memory_recall_status") if execution_resume_state else None
     resumed_execution_phase = execution_resume_state.get("execution_phase", GOAL_EXECUTION_PHASE_RUNNING) if execution_resume_state else GOAL_EXECUTION_PHASE_RUNNING
@@ -133,6 +134,10 @@ def build_interactive_dispatch_state(
         raise ValueError(t(ERR_MEMORY_RECALL_STATUS_INVALID))
     if resumed_memory_recall_status is not None and resumed_memory_recall_boundary is None:
         raise ValueError(t(ERR_MEMORY_RECALL_STATUS_BOUNDARY_REQUIRED))
+    if initial_message_type == MessageType.AUDIT_DECISION:
+        initial_memory_recall_boundary = resumed_memory_recall_boundary if resumed_memory_recall_boundary != initial_message_boundary else None
+    else:
+        initial_memory_recall_boundary = initial_message_boundary
     checkpoint_state = _ExecutionCheckpointState(
         callback=execution_checkpoint_callback,
         turn_messages=turn_messages,

@@ -11,7 +11,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage
+from app.models.message import InternalMessage, MessageType
 
 __all__ = [
     "StreamDispatcherMixin",
@@ -129,6 +129,7 @@ class StreamDispatcherMixin:
         raise_errors: bool = False,
         actor_uid: str | None = None,
         actor_username: str | None = None,
+        initial_message_type: MessageType = MessageType.TEXT,
     ) -> AsyncGenerator[dict[str, Any]]:
         event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=100)
         response_state: dict[str, str | None] = {"latest_response_id": None}
@@ -145,6 +146,7 @@ class StreamDispatcherMixin:
             "uid": uid,
             "actor_uid": actor_uid,
             "actor_username": actor_username,
+            "initial_message_type": initial_message_type,
             "session_id": session_id,
             "attachments": attachments,
             "active_tasks": active_tasks,

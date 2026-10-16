@@ -16,7 +16,7 @@ from app.core.tools import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.dispatcher import provider_state
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
 
 
 class _Session:
@@ -246,7 +246,7 @@ def _install_dispatcher_stubs(
     monkeypatch.setattr(interactive_helpers_module, "ensure_user_runtime_instructions", ensure_runtime_snapshot)
 
 
-async def _dispatch_non_stream(*, checkpoint_callback=None, additional_fetcher=None, resume_state=None):
+async def _dispatch_non_stream(*, checkpoint_callback=None, additional_fetcher=None, resume_state=None, initial_message_type=MessageType.TEXT):
     return await _Dispatcher.dispatch(
         db=_Session(),
         message="original",
@@ -258,6 +258,7 @@ async def _dispatch_non_stream(*, checkpoint_callback=None, additional_fetcher=N
         additional_user_messages_fetcher=additional_fetcher,
         execution_checkpoint_callback=checkpoint_callback,
         execution_resume_state=resume_state,
+        initial_message_type=initial_message_type,
     )
 
 
@@ -523,10 +524,12 @@ async def test_stream_dispatch_runs_memory_recall_precheck_in_stream_mode(monkey
 
 
 @pytest.mark.asyncio
-async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_source_message_id(monkeypatch):
+@pytest.mark.parametrize("initial_message_type", [MessageType.TEXT, MessageType.AUDIT_DECISION])
+async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_source_message_id(monkeypatch, initial_message_type):
     cfg = _build_cfg(SimpleNamespace(enabled=True), max_turns=2)
     request_log = []
     event_log = []
+    precheck_boundaries = []
     source_message_ids = []
     mutation_call = InternalToolCall(
         id="mutation-1",
@@ -540,6 +543,7 @@ async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_sourc
     )
 
     async def precheck(context):
+        precheck_boundaries.append(context.current_user_boundary_message_id)
         return build_result(context, "completed")
 
     async def process_tool(tool_call, *args, **kwargs):
@@ -563,8 +567,9 @@ async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_sourc
         process_tool=process_tool,
     )
 
-    response = await _dispatch_non_stream(additional_fetcher=lambda: _empty_batch())
+    response = await _dispatch_non_stream(additional_fetcher=lambda: _empty_batch(), initial_message_type=initial_message_type)
 
+    assert precheck_boundaries == ([10] if initial_message_type == MessageType.TEXT else [])
     assert source_message_ids == [10]
     assert response["choices"][0]["message"]["content"] == "mutation complete"
 
@@ -731,3 +736,238 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
     assert any(message.role == MessageRole.USER and summary_notice in (message.content or "") for message in request_log[-1]["messages"])
     assert [tool_call.id for tool_call in execution_calls] == [first_call.id, second_call.id]
     assert response["choices"][0]["message"]["content"] == "final summary"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_requested", [False, True])
+@pytest.mark.parametrize(
+    ("message_content", "initial_message_type", "expected_boundaries"),
+    [
+        ("同意", MessageType.TEXT, [10]),
+        ("同意", MessageType.AUDIT_DECISION, []),
+        ("忽略", MessageType.AUDIT_DECISION, []),
+        ("拒绝", MessageType.AUDIT_DECISION, []),
+    ],
+)
+async def test_initial_message_type_controls_forced_memory_recall(
+    monkeypatch,
+    stream_requested,
+    message_content,
+    initial_message_type,
+    expected_boundaries,
+):
+    cfg = _build_cfg(SimpleNamespace(enabled=True), max_turns=2)
+    request_log = []
+    event_log = []
+    precheck_boundaries = []
+
+    async def precheck(context):
+        precheck_boundaries.append(context.current_user_boundary_message_id)
+        return build_result(context, "completed")
+
+    _install_dispatcher_stubs(
+        monkeypatch,
+        cfg,
+        [InternalMessage(role=MessageRole.ASSISTANT, content="final answer")],
+        request_log,
+        event_log,
+        precheck,
+        expose_memory_tool=True,
+    )
+
+    dispatch_kwargs = {
+        "db": _Session(),
+        "message": message_content,
+        "uid": "user-1",
+        "session_id": "session-1",
+        "persisted_initial_message": InternalMessage(id=10, role=MessageRole.USER, content=message_content),
+        "frozen_user_message_ids": [10],
+        "persisted_profile_id": 1,
+        "additional_user_messages_fetcher": _empty_batch,
+        "initial_message_type": initial_message_type,
+    }
+
+    if stream_requested:
+        events = [event async for event in _StreamDispatcher.dispatch_stream(**dispatch_kwargs)]
+        final_output = next(event["content"] for event in events if event.get("type") == "content")
+    else:
+        response = await _Dispatcher.dispatch(**dispatch_kwargs)
+        final_output = response["choices"][0]["message"]["content"]
+
+    assert precheck_boundaries == expected_boundaries
+    assert final_output == "final answer"
+    assert request_log
+    assert all(item["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA] for item in request_log)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resume_boundary", "resume_status", "expected_precheck_boundaries"),
+    [
+        (None, None, []),
+        (10, "pending", []),
+        (10, "completed", []),
+        (20, "pending", [20]),
+        (20, "completed", []),
+        (20, "failed", []),
+    ],
+)
+async def test_audit_decision_resume_recall_boundary_ignores_initial_message(
+    monkeypatch,
+    resume_boundary,
+    resume_status,
+    expected_precheck_boundaries,
+):
+    cfg = _build_cfg(SimpleNamespace(enabled=True), max_turns=2)
+    checkpoints = []
+    request_log = []
+    event_log = []
+    precheck_boundaries = []
+    resume_messages = [InternalMessage(id=10, role=MessageRole.USER, content="同意")]
+    if resume_boundary == 20:
+        resume_messages.append(InternalMessage(id=20, role=MessageRole.USER, content="follow-up"))
+        if resume_status == "completed":
+            resume_messages.extend(_recall_messages(20))
+
+    resume_state = {
+        "messages": [message.model_dump(mode="json") for message in resume_messages],
+        "turn_messages": [],
+        "files_to_user": [],
+        "current_turn": 0,
+    }
+    if resume_boundary is not None:
+        resume_state.update(
+            {
+                "memory_recall_boundary_message_id": resume_boundary,
+                "memory_recall_status": resume_status,
+            }
+        )
+
+    async def precheck(context):
+        boundary = context.current_user_boundary_message_id
+        precheck_boundaries.append(boundary)
+        if boundary is not None:
+            assistant_message, tool_message = _recall_messages(boundary)
+            context.messages.extend([assistant_message, tool_message])
+            context.turn_messages.extend([assistant_message, tool_message])
+        return build_result(context, "completed")
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(dict(checkpoint))
+
+    _install_dispatcher_stubs(
+        monkeypatch,
+        cfg,
+        [InternalMessage(role=MessageRole.ASSISTANT, content="resumed answer")],
+        request_log,
+        event_log,
+        precheck,
+        expose_memory_tool=True,
+    )
+
+    response = await _Dispatcher.dispatch(
+        db=_Session(),
+        message="同意",
+        uid="user-1",
+        session_id="session-1",
+        persisted_initial_message=InternalMessage(id=10, role=MessageRole.USER, content="同意"),
+        frozen_user_message_ids=[10],
+        persisted_profile_id=1,
+        additional_user_messages_fetcher=_empty_batch,
+        initial_message_type=MessageType.AUDIT_DECISION,
+        execution_checkpoint_callback=save_checkpoint,
+        execution_resume_state=resume_state,
+    )
+
+    assert precheck_boundaries == expected_precheck_boundaries
+    assert len(request_log) == 1
+    formal_messages = request_log[0]["messages"]
+    assert not any((message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id == "recall-10") or (message.role == MessageRole.TOOL and message.tool_call_id == "recall-10") for message in formal_messages)
+    assert all(checkpoint.get("memory_recall_boundary_message_id") != 10 for checkpoint in checkpoints)
+    assert response["choices"][0]["message"]["content"] == "resumed answer"
+
+    if resume_boundary == 20 and resume_status == "completed":
+        assert any(message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id == "recall-20" for message in formal_messages)
+        assert any(message.role == MessageRole.TOOL and message.tool_call_id == "recall-20" for message in formal_messages)
+    elif resume_boundary == 20 and resume_status == "pending":
+        assert [(checkpoint["memory_recall_boundary_message_id"], checkpoint["memory_recall_status"]) for checkpoint in checkpoints] == [(20, "pending"), (20, "completed")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_requested", [False, True])
+async def test_audit_decision_skips_initial_recall_but_recalls_follow_up(monkeypatch, stream_requested):
+    cfg = _build_cfg(SimpleNamespace(enabled=True), max_turns=2)
+    checkpoints = []
+    request_log = []
+    event_log = []
+    precheck_boundaries = []
+    follow_up = UserInputBatch(
+        messages=(InternalMessage(id=20, role=MessageRole.USER, content="follow-up"),),
+        source_message_ids=(20,),
+    )
+    fetch_values = iter([None, follow_up, None, None])
+
+    async def fetch_additional():
+        return next(fetch_values)
+
+    async def precheck(context):
+        boundary = context.current_user_boundary_message_id
+        precheck_boundaries.append(boundary)
+        assistant_message, tool_message = _recall_messages(boundary)
+        context.messages.extend([assistant_message, tool_message])
+        context.turn_messages.extend([assistant_message, tool_message])
+        return build_result(context, "completed")
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(dict(checkpoint))
+
+    _install_dispatcher_stubs(
+        monkeypatch,
+        cfg,
+        [
+            InternalMessage(role=MessageRole.ASSISTANT, content="first answer"),
+            InternalMessage(role=MessageRole.ASSISTANT, content="second answer"),
+        ],
+        request_log,
+        event_log,
+        precheck,
+        expose_memory_tool=True,
+    )
+
+    dispatch_kwargs = {
+        "db": _Session(),
+        "message": "同意",
+        "uid": "user-1",
+        "session_id": "session-1",
+        "persisted_initial_message": InternalMessage(id=10, role=MessageRole.USER, content="同意"),
+        "frozen_user_message_ids": [10],
+        "persisted_profile_id": 1,
+        "additional_user_messages_fetcher": fetch_additional,
+        "initial_message_type": MessageType.AUDIT_DECISION,
+        "execution_checkpoint_callback": save_checkpoint,
+    }
+
+    if stream_requested:
+        events = [event async for event in _StreamDispatcher.dispatch_stream(**dispatch_kwargs)]
+        done_response = next(event["response"] for event in events if event.get("type") == "done")
+        final_output = done_response["choices"][0]["message"]["content"]
+    else:
+        response = await _Dispatcher.dispatch(**dispatch_kwargs)
+        final_output = response["choices"][0]["message"]["content"]
+
+    assert precheck_boundaries == [20]
+    assert len(request_log) == 2
+    first_messages = request_log[0]["messages"]
+    assert not any((message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id in {"recall-10", "recall-20"}) or (message.role == MessageRole.TOOL and message.tool_call_id in {"recall-10", "recall-20"}) for message in first_messages)
+    second_messages = request_log[1]["messages"]
+    assert any(message.id == 20 and message.role == MessageRole.USER and message.content == "follow-up" for message in second_messages)
+    assert any(message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id == "recall-20" for message in second_messages)
+    assert any(message.role == MessageRole.TOOL and message.tool_call_id == "recall-20" for message in second_messages)
+    assert all(item["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA] for item in request_log)
+    assert final_output == "second answer"
+    assert all(checkpoint.get("memory_recall_boundary_message_id") != 10 for checkpoint in checkpoints)
+    memory_recall_statuses = [(checkpoint["memory_recall_boundary_message_id"], checkpoint["memory_recall_status"]) for checkpoint in checkpoints if checkpoint.get("memory_recall_boundary_message_id") == 20]
+    assert memory_recall_statuses
+    assert {status for _, status in memory_recall_statuses} <= {"pending", "completed"}
+    assert memory_recall_statuses[0][1] == "pending"
+    assert memory_recall_statuses[-1][1] == "completed"

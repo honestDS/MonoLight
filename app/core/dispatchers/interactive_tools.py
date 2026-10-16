@@ -585,7 +585,7 @@ async def handle_interactive_tool_round(
         model_id=state.model_entry["model_id"],
         protocol=resolve_model_protocol(state.model_entry),
         context_summary_boundary_message_id=state.checkpoint_state.upper_message_id,
-        source_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
+        source_message_id=state.checkpoint_state.memory_recall_boundary_message_id or (state.initial_msg.id if state.memory_enabled else None),
         session_reply_work_claim=getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY),
     )
     tasks = [asyncio.create_task(_execute_isolated_tool_call(parallel_tool_context, tc)) for tc in executable_tool_calls]

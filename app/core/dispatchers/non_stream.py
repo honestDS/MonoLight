@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dispatchers.interactive import dispatch_interactive
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage
+from app.models.message import InternalMessage, MessageType
 
 __all__ = [
     "NonStreamDispatcherMixin",
@@ -42,6 +42,7 @@ class NonStreamDispatcherMixin:
         request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         actor_uid: str | None = None,
         actor_username: str | None = None,
+        initial_message_type: MessageType = MessageType.TEXT,
     ):
         return await dispatch_interactive(
             db=db,
@@ -68,6 +69,7 @@ class NonStreamDispatcherMixin:
             request_metadata_callback=request_metadata_callback,
             actor_uid=actor_uid,
             actor_username=actor_username,
+            initial_message_type=initial_message_type,
             dispatcher_mode="non_stream",
             validate_initial_message_before_save=cls.validate_initial_message_before_save,
         )

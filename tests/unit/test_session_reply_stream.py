@@ -19,7 +19,7 @@ from app.core.session_reply_queue.manager_common import build_foreground_message
 from app.core.utils.dispatcher.helpers import dump_output_history
 from app.core.utils.dispatcher.save_message import _to_storable_content
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkStatus
+from app.models.session_reply_work_item import SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.llm import client as llm_client_module
 from app.providers.llm.client import LLMClient
 
@@ -1385,6 +1385,7 @@ async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
 async def test_execute_foreground_persists_each_tool_event_with_original_response_id(monkeypatch):
     work = SimpleNamespace(
         id=7,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
         sequence_no=1,
         uid="user-1",
         session_id="session-1",
@@ -1659,6 +1660,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
 async def test_execute_foreground_stream_reraises_llm_exception(monkeypatch):
     work = SimpleNamespace(
         id=9,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
         sequence_no=1,
         uid="user-1",
         session_id="session-1",
@@ -1718,6 +1720,7 @@ async def test_execute_foreground_stream_reraises_llm_exception(monkeypatch):
 async def test_execute_foreground_persists_non_stream_llm_request_metadata(monkeypatch):
     work = SimpleNamespace(
         id=8,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
         sequence_no=2,
         uid="user-1",
         session_id="session-1",
