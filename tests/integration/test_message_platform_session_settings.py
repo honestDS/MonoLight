@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
@@ -1400,6 +1401,7 @@ async def test_platform_setting_save_updates_only_its_sessions(database_factory,
             "platform-session-a": data["platform_id"],
             "platform-session-b": data["platform_id"],
             "unbound-session": None,
+            SESSION_ID: None,
             "other-platform-session": second_platform_id,
         }
         expected_sessions = {session_id: (UID, "weixin-openclaw", platform_id) for session_id, platform_id in expected_platforms.items()}
@@ -1419,7 +1421,7 @@ async def test_platform_setting_save_updates_only_its_sessions(database_factory,
                         profile_id=data["primary_profile_id"],
                         source=source,
                         message_platform_id=platform_id,
-                        message_platform_user_id=EXTERNAL_USER,
+                        message_platform_user_id=None if session_id == SESSION_ID else EXTERNAL_USER,
                         max_turns=3,
                         enable_markdown=True,
                         goal_mode=True,
@@ -1470,7 +1472,7 @@ async def test_platform_setting_save_updates_only_its_sessions(database_factory,
             request_payload = {"profile_id": new_value}
         else:
             request_payload = {"config": {"session_settings": {setting_name: new_value}}}
-        target_session_ids = {"platform-session-a", "platform-session-b"}
+        target_session_ids = {"platform-session-a", "platform-session-b", "unbound-session", SESSION_ID}
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             for _ in range(2):
@@ -1494,4 +1496,277 @@ async def test_platform_setting_save_updates_only_its_sessions(database_factory,
                         assert session.uid == uid
                         assert session.source == source
                         assert session.message_platform_id == platform_id
-                        assert session.message_platform_user_id == EXTERNAL_USER
+                        assert session.message_platform_user_id == (None if session_id == SESSION_ID else EXTERNAL_USER)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resolution",
+    [
+        "disabled_target",
+        "disconnected_target",
+        "ambiguous_disabled_peer",
+        "no_matching_tokens",
+        "matched_other_platform",
+        "single_platform_fallback",
+        "missing_external_user",
+    ],
+)
+async def test_platform_setting_save_updates_only_uniquely_attributable_legacy_session(
+    database_factory,
+    resolution: str,
+) -> None:
+    async with database_factory(wal=True, foreign_keys=True) as factory:
+        data = await _seed_platform_data(
+            factory,
+            stream_llm_request=True,
+            session_settings=_session_settings(enable_markdown=True),
+        )
+        second_platform_id = None
+        if resolution not in {"single_platform_fallback", "missing_external_user"}:
+            second_platform_id = await _seed_second_platform(
+                factory,
+                profile_id=data["primary_profile_id"],
+                stream_llm_request=False,
+                context_token=("second-context-token" if resolution in {"ambiguous_disabled_peer", "matched_other_platform"} else None),
+            )
+
+        session_id = "opaque-legacy-session" if resolution == "missing_external_user" else SESSION_ID
+        async with factory() as db:
+            primary_platform = await db.get(MessagePlatform, data["platform_id"])
+            assert primary_platform is not None
+            if resolution == "disabled_target":
+                primary_platform.is_enabled = False
+            elif resolution == "disconnected_target":
+                primary_platform.status = MessagePlatformStatus.DISCONNECTED
+                primary_config = dict(primary_platform.config or {})
+                primary_config.pop("token", None)
+                primary_platform.config = primary_config
+            elif resolution == "no_matching_tokens":
+                primary_platform.state = {"context_tokens": {}}
+            elif resolution in {"matched_other_platform", "single_platform_fallback"}:
+                primary_platform.state = {"context_tokens": {}}
+
+            if resolution in {"ambiguous_disabled_peer", "no_matching_tokens", "matched_other_platform"}:
+                assert second_platform_id is not None
+                second_platform = await db.get(MessagePlatform, second_platform_id)
+                assert second_platform is not None
+                if resolution == "ambiguous_disabled_peer":
+                    second_platform.is_enabled = False
+                elif resolution == "no_matching_tokens":
+                    second_platform.state = {"context_tokens": {}}
+
+            db.add(
+                ChatSession(
+                    session_id=session_id,
+                    uid=UID,
+                    source="weixin-openclaw",
+                    message_platform_id=None,
+                    message_platform_user_id=None,
+                    max_turns=3,
+                    enable_markdown=True,
+                    stream_llm_request=True,
+                )
+            )
+            await db.commit()
+
+        app = FastAPI()
+        app.include_router(message_platforms_api.router, prefix="/api/v1")
+        register_handlers(app)
+
+        async def override_get_db():
+            async with factory() as db:
+                yield db
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(uid=UID, is_superuser=False)
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/message-platforms/update",
+                params={"platform_id": data["platform_id"]},
+                json={"config": {"session_settings": {"max_turns": 11}}},
+            )
+            assert response.status_code == 200
+            assert response.json()["code"] == 200
+
+        async with factory() as db:
+            platform = await db.get(MessagePlatform, data["platform_id"])
+            session = await db.get(ChatSession, session_id)
+            assert platform is not None
+            assert session is not None
+            assert platform.config["session_settings"]["max_turns"] == 11
+            assert session.max_turns == (11 if resolution in {"disabled_target", "disconnected_target", "single_platform_fallback"} else 3)
+            assert session.enable_markdown is True
+            assert session.stream_llm_request is True
+            assert session.source == "weixin-openclaw"
+            assert session.uid == UID
+            assert session.message_platform_id is None
+            assert session.message_platform_user_id is None
+            if resolution == "disabled_target":
+                assert platform.is_enabled is False
+                assert platform.status == MessagePlatformStatus.CONNECTED
+            elif resolution == "disconnected_target":
+                assert platform.is_enabled is True
+                assert platform.status == MessagePlatformStatus.DISCONNECTED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_count", [1, 40])
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_session_list_resolves_platform_stream_mode_with_bounded_queries(
+    database_factory,
+    session_count: int,
+    is_admin: bool,
+) -> None:
+    async with database_factory(wal=True, foreign_keys=True) as factory:
+        data = await _seed_platform_data(
+            factory,
+            stream_llm_request=True,
+            session_settings=_session_settings(enable_markdown=True),
+        )
+        other_uid = "other-session-list-owner"
+        other_session_id = "other-owner-legacy-session"
+        expected_streams: dict[str, bool] = {}
+
+        async with factory() as db:
+            db.add(User(uid=other_uid, username="session-list-other-owner"))
+            db.add(
+                MessagePlatform(
+                    name="message-platform-session-other-owner",
+                    platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+                    is_enabled=True,
+                    status=MessagePlatformStatus.CONNECTED,
+                    uid=other_uid,
+                    profile_id=data["primary_profile_id"],
+                    config={"token": "other-session-list-token", "stream_llm_request": False},
+                    state={"context_tokens": {EXTERNAL_USER: "other-context-token"}},
+                )
+            )
+
+            sessions = []
+            for index in range(session_count):
+                bound_session_id = f"opaque-bound-session-{index}"
+                legacy_session_id = f"opaque-legacy-session-{index}"
+                sessions.extend(
+                    [
+                        ChatSession(
+                            session_id=bound_session_id,
+                            uid=UID,
+                            profile_id=data["primary_profile_id"],
+                            source="weixin-openclaw",
+                            message_platform_id=data["platform_id"],
+                            message_platform_user_id=EXTERNAL_USER,
+                            stream_llm_request=None,
+                        ),
+                        ChatSession(
+                            session_id=legacy_session_id,
+                            uid=UID,
+                            profile_id=data["primary_profile_id"],
+                            source="weixin-openclaw",
+                            message_platform_id=None,
+                            message_platform_user_id=EXTERNAL_USER,
+                            stream_llm_request=None,
+                        ),
+                    ]
+                )
+                expected_streams[bound_session_id] = True
+                expected_streams[legacy_session_id] = True
+
+            sessions.extend(
+                [
+                    ChatSession(
+                        session_id=SESSION_ID,
+                        uid=UID,
+                        profile_id=data["primary_profile_id"],
+                        source="weixin-openclaw",
+                        message_platform_id=None,
+                        message_platform_user_id=None,
+                        stream_llm_request=None,
+                    ),
+                    ChatSession(
+                        session_id="opaque-explicit-false-session",
+                        uid=UID,
+                        profile_id=data["primary_profile_id"],
+                        source="weixin-openclaw",
+                        message_platform_id=data["platform_id"],
+                        message_platform_user_id=EXTERNAL_USER,
+                        stream_llm_request=False,
+                    ),
+                    ChatSession(
+                        session_id="http-null-stream-session",
+                        uid=UID,
+                        profile_id=data["primary_profile_id"],
+                        source="http",
+                        stream_llm_request=None,
+                    ),
+                    ChatSession(
+                        session_id="ws-null-stream-session",
+                        uid=UID,
+                        profile_id=data["primary_profile_id"],
+                        source="ws",
+                        stream_llm_request=None,
+                    ),
+                    ChatSession(
+                        session_id=other_session_id,
+                        uid=other_uid,
+                        profile_id=data["primary_profile_id"],
+                        source="weixin-openclaw",
+                        message_platform_id=None,
+                        message_platform_user_id=EXTERNAL_USER,
+                        stream_llm_request=None,
+                    ),
+                ]
+            )
+            db.add_all(sessions)
+            await db.commit()
+
+        expected_streams.update(
+            {
+                SESSION_ID: True,
+                "opaque-explicit-false-session": False,
+                "http-null-stream-session": False,
+                "ws-null-stream-session": True,
+            }
+        )
+        if is_admin:
+            expected_streams[other_session_id] = False
+
+        app = FastAPI()
+        app.include_router(chat_api.router, prefix="/api/v1")
+        register_handlers(app)
+
+        async def override_get_db():
+            async with factory() as db:
+                yield db
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(uid=UID, is_superuser=is_admin)
+
+        statements: list[str] = []
+
+        def record_select(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            if statement.lstrip().lower().startswith("select"):
+                statements.append(statement)
+
+        engine = factory.kw["bind"].sync_engine
+        event.listen(engine, "before_cursor_execute", record_select)
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/v1/chat/sessions/list")
+        finally:
+            event.remove(engine, "before_cursor_execute", record_select)
+
+        assert response.status_code == 200
+        assert response.json()["code"] == 200
+        listed_by_id = {item["session_id"]: item for item in response.json()["data"]}
+        assert {session_id: item["stream_llm_request"] for session_id, item in listed_by_id.items()} == expected_streams
+        assert sum("from message_platform" in statement.lower() for statement in statements) == 1
+        assert sum("from chat_session" in statement.lower() for statement in statements) == 1
