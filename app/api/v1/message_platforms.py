@@ -25,13 +25,13 @@ from app.core.crud.account.user import user_crud
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.session import session_crud
 from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
+from app.core.i18n.locale import get_available_locales
 from app.core.profile_validation import get_validated_profile_for_assignment
 from app.core.security import get_current_user
 from app.core.utils.database_integrity import is_unique_constraint_violation
 from app.models.message_platform import (
     MessagePlatform,
     MessagePlatformCreate,
-    MessagePlatformLanguage,
     MessagePlatformResponse,
     MessagePlatformStatus,
     MessagePlatformType,
@@ -118,7 +118,7 @@ async def get_message_platform_types():
     return StandardResponse.success(
         data={
             "platform_types": [item.value for item in MessagePlatformType],
-            "languages": [item.value for item in MessagePlatformLanguage],
+            "languages": list(get_available_locales(default_first=True)),
             "statuses": [item.value for item in MessagePlatformStatus],
         }
     )

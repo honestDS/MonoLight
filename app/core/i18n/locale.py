@@ -1,17 +1,21 @@
 from pathlib import Path
+from typing import Literal
 
 DEFAULT_LOCALE = "zh"
 
 
-def get_available_locales() -> tuple[str, ...]:
+def get_available_locales(*, default_first: bool = False) -> tuple[str, ...]:
     locales_dir = Path(__file__).parent / "locales"
     locales = sorted(path.name for path in locales_dir.iterdir() if path.is_dir() and not path.name.startswith("__"))
     if DEFAULT_LOCALE not in locales:
         locales.insert(0, DEFAULT_LOCALE)
+    if default_first:
+        locales = [DEFAULT_LOCALE, *(locale for locale in locales if locale != DEFAULT_LOCALE)]
     return tuple(locales)
 
 
 SUPPORTED_LOCALES = get_available_locales()
+type SupportedLocale = Literal[*SUPPORTED_LOCALES]
 
 
 def normalize_locale(raw: str | None) -> str:

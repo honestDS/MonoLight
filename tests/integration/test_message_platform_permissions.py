@@ -20,7 +20,6 @@ from app.handler import register_handlers
 from app.models.channel import ModelChannel
 from app.models.message_platform import (
     MessagePlatform,
-    MessagePlatformLanguage,
     MessagePlatformStatus,
     MessagePlatformType,
 )
@@ -105,7 +104,7 @@ def _platform(
     return MessagePlatform(
         name=name,
         platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
-        language=MessagePlatformLanguage.ZH,
+        language="zh",
         is_enabled=True,
         status=MessagePlatformStatus.WAITING_LOGIN,
         account_id=account_id,
@@ -468,6 +467,33 @@ def _assert_platforms_unchanged_except(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("create", "update"))
+@pytest.mark.parametrize("language", ("fr", "", "EN", "en-US", 123))
+async def test_message_platform_create_and_update_reject_invalid_languages(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str, int], list[str]],
+    operation: str,
+    language: Any,
+) -> None:
+    app, session_factory, platform_ids, calls = api_context
+    request = _request_for(operation, platform_ids["ordinary"])
+    request["json"]["language"] = language
+    before = await _platform_snapshot(session_factory)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await _request(client, request, _token("ordinary"))
+
+    payload = response.json()
+    assert response.status_code == 422
+    assert payload["code"] == 422
+    assert "message" in payload and "data" in payload
+    message = payload["message"].lower()
+    assert "language" in message
+    assert "zh" in message and "en" in message
+    assert await _platform_snapshot(session_factory) == before
+    assert calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", MESSAGE_PLATFORM_OPERATIONS)
 @pytest.mark.parametrize("target", DENIED_TARGETS)
 async def test_ordinary_user_cannot_access_other_unbound_or_missing_message_platforms(
@@ -790,7 +816,7 @@ async def test_ordinary_user_can_update_owned_message_platform_and_clear_profile
             assert persisted.uid == "ordinary"
             assert persisted.profile_id == profile_id
             assert persisted.name == name
-            assert persisted.language.value == "en"
+            assert persisted.language == "en"
             assert persisted.use_stream_dispatch is True
             assert persisted.is_enabled is is_enabled
             assert persisted.get_config_secret("token") == token_value
@@ -980,7 +1006,7 @@ async def test_authorized_user_can_complete_message_platform_lifecycle(
             assert persisted.uid == target
             assert persisted.profile_id == profile_id
             assert persisted.name == updated_name
-            assert persisted.language.value == "en"
+            assert persisted.language == "en"
             assert persisted.use_stream_dispatch is True
             assert persisted.is_enabled is False
             assert persisted.get_config_secret("token") == original_token
@@ -1543,7 +1569,7 @@ async def test_ordinary_user_update_name_checks_owner_scoped_uniqueness(
             persisted = await session.get(MessagePlatform, platform_id)
             assert persisted is not None
             assert persisted.name == target_name
-            assert persisted.language.value == "en"
+            assert persisted.language == "en"
             assert persisted.uid == "ordinary"
 
         after = await _platform_snapshot(session_factory)
