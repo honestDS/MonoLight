@@ -47,7 +47,6 @@ from app.core.constants import (
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel.channel import channel_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
-from app.core.exceptions import LLMRequestRejectedException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
@@ -80,7 +79,6 @@ class AuditRoundResult:
     status: AuditRecordStatus
     tool_results: tuple[InternalMessage, ...]
     confirmation_payload: dict[str, Any] | None = None
-    request_error: LLMRequestRejectedException | None = None
 
     @property
     def may_execute(self) -> bool:
@@ -585,8 +583,6 @@ async def _summarize_pending(
                 )
                 read_results.append(read_result)
                 messages.append(build_read_tool_message(tool_call.id, read_result))
-    except LLMRequestRejectedException:
-        raise
     except Exception as exc:
         return fallback_summary, {"fallback": True, "error": str(exc)}
     return fallback_summary, {"fallback": True}
@@ -671,7 +667,6 @@ async def audit_tool_round(
         }
         failure_type = None
         error_reason = None
-        request_error: LLMRequestRejectedException | None = None
         request_context: dict[str, Any] = {"messages": []}
         response_context: dict[str, Any] = {}
         file_reads: list[dict[str, Any]] = []
@@ -779,11 +774,7 @@ async def audit_tool_round(
         except Exception as exc:
             status = AuditRecordStatus.AUDIT_FAILED
             failure_type = AuditFailureType.AUDIT_SERVICE_FAILED
-            if isinstance(exc, LLMRequestRejectedException):
-                request_error = exc
-                error_reason = exc.render_message()
-            else:
-                error_reason = str(exc)
+            error_reason = str(exc)
             parsed_results = [{"tool_call_id": item.id, "score": None, "reason": error_reason} for item in tool_calls]
             conclusions = [AuditToolConclusion.AUDIT_FAILED for _ in tool_calls]
             response_context = {"error": error_reason}
@@ -793,24 +784,13 @@ async def audit_tool_round(
         summary_context = None
         expires_at = None
         if status == AuditRecordStatus.PENDING:
-            try:
-                intent_summary, summary_context = await _summarize_pending(
-                    db,
-                    cfg,
-                    _tool_payload(audited_tool_calls),
-                    server_confirmation_reasons,
-                    working_directory=workdir,
-                )
-            except LLMRequestRejectedException as exc:
-                request_error = exc
-                status = AuditRecordStatus.AUDIT_FAILED
-                failure_type = AuditFailureType.AUDIT_SERVICE_FAILED
-                error_reason = exc.render_message()
-                parsed_results = [{**item, "reason": error_reason} for item in parsed_results]
-                conclusions = [AuditToolConclusion.AUDIT_FAILED for _ in tool_calls]
-                summary_context = {"fallback": True, "error": error_reason}
-                intent_summary = None
-        if status == AuditRecordStatus.PENDING:
+            intent_summary, summary_context = await _summarize_pending(
+                db,
+                cfg,
+                _tool_payload(audited_tool_calls),
+                server_confirmation_reasons,
+                working_directory=workdir,
+            )
             expires_at = get_local_time() + timedelta(seconds=cfg.security.audit_confirmation_timeout_seconds)
 
         details = []
@@ -859,7 +839,6 @@ async def audit_tool_round(
         if not persisted:
             status = AuditRecordStatus.AUDIT_FAILED
             error_reason = "audit persistence failed"
-            request_error = None
             parsed_results = [{**item, "reason": error_reason} for item in parsed_results]
 
         tool_scores = {str(item.get("tool_call_id")): item.get("score") for item in parsed_results if isinstance(item, dict) and item.get("tool_call_id")}
@@ -908,7 +887,7 @@ async def audit_tool_round(
                     expires_in_seconds=timeout_seconds,
                 ),
             }
-        return AuditRoundResult(audit_record_id=audit_record_id, status=status, tool_results=tool_results, confirmation_payload=confirmation_payload, request_error=request_error)
+        return AuditRoundResult(audit_record_id=audit_record_id, status=status, tool_results=tool_results, confirmation_payload=confirmation_payload)
     except asyncio.CancelledError:
         await db.rollback()
         await audit_crud.cancel_unexecuted(

@@ -1,3 +1,4 @@
+import json
 from email.parser import BytesParser
 from email.policy import default
 
@@ -6,9 +7,11 @@ import pytest
 from app.core.constants import (
     ERR_LLM_API_RESPONSE_ERROR,
     ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
+    ERR_LLM_REQUEST_TOO_LARGE,
     ERR_LLM_UNSUPPORTED_PROTOCOL,
 )
 from app.core.exceptions import LLMException, LLMRequestRejectedException
+from app.core.utils import llm_request_policy
 from app.providers.embedding.client import EmbeddingClient
 from app.providers.image_generation.client import ImageGenerationClient
 from app.providers.rerank.client import RerankClient
@@ -62,6 +65,21 @@ class _CollectingWriter:
         self.chunks.append(bytes(chunk))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_llm_request_max_bytes(monkeypatch) -> None:
+    async def load_llm_request_max_bytes() -> int:
+        return 32 * 1024 * 1024
+
+    monkeypatch.setattr(llm_request_policy, "load_llm_request_max_bytes", load_llm_request_max_bytes)
+
+
+def _patch_llm_request_max_bytes(monkeypatch, max_size_bytes: int) -> None:
+    async def load_llm_request_max_bytes() -> int:
+        return max_size_bytes
+
+    monkeypatch.setattr(llm_request_policy, "load_llm_request_max_bytes", load_llm_request_max_bytes)
+
+
 def _patch_fake_image_http(monkeypatch, *, status: int = 200, response_text: str = '{"data": []}'):
     sessions: list[_FakeClientSession] = []
     connector_calls: list[dict] = []
@@ -81,12 +99,15 @@ def _patch_fake_image_http(monkeypatch, *, status: int = 200, response_text: str
     return sessions, connector_calls
 
 
-async def _parse_form_data(form) -> tuple[str, object]:
-    payload = form()
+async def _collect_payload_bytes(payload) -> bytes:
     writer = _CollectingWriter()
     await payload.write(writer)
+    return b"".join(writer.chunks)
+
+
+async def _parse_form_data(payload) -> tuple[str, object]:
     content_type = payload.headers["Content-Type"]
-    message = BytesParser(policy=default).parsebytes(f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii") + b"".join(writer.chunks))
+    message = BytesParser(policy=default).parsebytes(f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii") + await _collect_payload_bytes(payload))
     return content_type, message
 
 
@@ -197,7 +218,7 @@ async def test_openai_image_references_select_json_or_multipart_transport(
     assert headers["x-channel-header"] == "image-channel"
 
     if expected_file_field is None:
-        assert post_call["kwargs"]["json"] == {
+        expected_payload = {
             "model": "gpt-image-1",
             "prompt": "draw a blue bird",
             "n": 2,
@@ -205,7 +226,11 @@ async def test_openai_image_references_select_json_or_multipart_transport(
             "quality": "high",
             "response_format": "b64_json",
         }
-        assert "data" not in post_call["kwargs"]
+        request_data = post_call["kwargs"]["data"]
+        assert isinstance(request_data, bytes)
+        assert "json" not in post_call["kwargs"]
+        assert request_data == json.dumps(expected_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        assert json.loads(request_data) == expected_payload
         assert headers["Content-Type"] == "application/json"
         return
 
@@ -243,6 +268,159 @@ async def test_openai_image_references_select_json_or_multipart_transport(
         assert part.get_filename() == filename
         assert part.get_content_type() == mime_type
         assert part.get_payload(decode=True) == data
+
+
+@pytest.mark.parametrize(
+    "reference_images",
+    [
+        [],
+        [("参考图一.png", b"first-reference", "image/png")],
+        [
+            ("参考图一.png", b"first-reference", "image/png"),
+            ("参考图二.webp", b"second-reference\x00", "image/webp"),
+        ],
+    ],
+    ids=["json", "multipart-one-reference", "multipart-many-references"],
+)
+@pytest.mark.parametrize("limit_delta", [-1, 0, 1], ids=["below", "equal", "above"])
+@pytest.mark.asyncio
+async def test_openai_image_request_size_boundaries(
+    monkeypatch,
+    reference_images: list[tuple[str, bytes, str]],
+    limit_delta: int,
+) -> None:
+    sessions, connector_calls = _patch_fake_image_http(monkeypatch)
+    prompt = '画一只"蓝色"鸟\\路径\n第二行'
+    extra_body = {"extra_text": '普通字段"引号"\\路径\n换行'}
+    request_kwargs = {
+        "api_key": "image-api-key",
+        "base_url": "https://example.invalid/v1",
+        "model_id": "gpt-image-1",
+        "protocol": "openai_image",
+        "prompt": prompt,
+        "size": "768x768",
+        "n": 2,
+        "quality": "high",
+        "response_format": "b64_json",
+        "extra_body": extra_body,
+        "reference_images": reference_images,
+    }
+
+    await ImageGenerationClient.generate_image(**request_kwargs)
+    first_request_data = sessions[0].post_calls[0]["kwargs"]["data"]
+    if reference_images:
+        first_wire_data = await _collect_payload_bytes(first_request_data)
+        assert prompt.encode("utf-8") in first_wire_data
+        assert extra_body["extra_text"].encode("utf-8") in first_wire_data
+        assert all(data in first_wire_data for _, data, _ in reference_images)
+        request_size_bytes = len(first_wire_data)
+        assert request_size_bytes > sum(len(data) for _, data, _ in reference_images)
+    else:
+        expected_payload = {
+            "model": "gpt-image-1",
+            "prompt": prompt,
+            "n": 2,
+            "size": "768x768",
+            "quality": "high",
+            "response_format": "b64_json",
+            "extra_text": extra_body["extra_text"],
+        }
+        assert isinstance(first_request_data, bytes)
+        assert json.loads(first_request_data) == expected_payload
+        assert first_request_data == json.dumps(expected_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        request_size_bytes = len(first_request_data)
+
+    limit = request_size_bytes + limit_delta
+    _patch_llm_request_max_bytes(monkeypatch, limit)
+    sessions_before = len(sessions)
+    connectors_before = len(connector_calls)
+    posts_before = sum(len(session.post_calls) for session in sessions)
+
+    if limit_delta < 0:
+        with pytest.raises(LLMRequestRejectedException) as exc_info:
+            await ImageGenerationClient.generate_image(**request_kwargs)
+
+        rejection = exc_info.value
+        assert rejection.message == ERR_LLM_REQUEST_TOO_LARGE
+        assert rejection.source == "local"
+        assert rejection.code == 400
+        assert rejection.reason == "request_too_large"
+        assert rejection.allow_channel_fallback is False
+        assert rejection.data["request_size_bytes"] == request_size_bytes
+        assert rejection.data["max_size_bytes"] == limit
+        assert rejection.kwargs["request_size_bytes"] == request_size_bytes
+        assert rejection.kwargs["max_size_bytes"] == limit
+        assert len(sessions) == sessions_before
+        assert len(connector_calls) == connectors_before
+        assert sum(len(session.post_calls) for session in sessions) == posts_before
+        return
+
+    result = await ImageGenerationClient.generate_image(**request_kwargs)
+    assert result == {"data": []}
+    assert len(sessions) == sessions_before + 1
+    assert len(connector_calls) == connectors_before + 1
+    assert sum(len(session.post_calls) for session in sessions) == posts_before + 1
+    sent_data = sessions[-1].post_calls[-1]["kwargs"]["data"]
+    if reference_images:
+        sent_size_bytes = len(await _collect_payload_bytes(sent_data))
+    else:
+        assert isinstance(sent_data, bytes)
+        sent_size_bytes = len(sent_data)
+    assert sent_size_bytes <= limit
+
+
+@pytest.mark.parametrize(
+    ("prompt", "extra_body", "reference_images"),
+    [
+        ("x" * 1100, None, []),
+        ("short prompt", {"extra_text": "x" * 1100}, []),
+        ("short prompt", None, [("大图.png", b"x" * 1100, "image/png")]),
+        (
+            "short prompt",
+            None,
+            [
+                ("第一张.png", b"a" * 600, "image/png"),
+                ("第二张.png", b"b" * 600, "image/png"),
+            ],
+        ),
+        ("short prompt", {"extra_text": "x" * 1100}, [("短图.png", b"x", "image/png")]),
+    ],
+    ids=["long-json-prompt", "long-json-extra-body", "large-reference", "many-references", "long-multipart-text"],
+)
+@pytest.mark.asyncio
+async def test_openai_image_request_size_limit_rejects_before_http(
+    monkeypatch,
+    prompt: str,
+    extra_body: dict[str, str] | None,
+    reference_images: list[tuple[str, bytes, str]],
+) -> None:
+    max_size_bytes = 1024
+    _patch_llm_request_max_bytes(monkeypatch, max_size_bytes)
+    sessions, connector_calls = _patch_fake_image_http(monkeypatch)
+
+    with pytest.raises(LLMRequestRejectedException) as exc_info:
+        await ImageGenerationClient.generate_image(
+            api_key="image-api-key",
+            base_url="https://example.invalid/v1",
+            model_id="gpt-image-1",
+            protocol="openai_image",
+            prompt=prompt,
+            extra_body=extra_body,
+            reference_images=reference_images,
+        )
+
+    rejection = exc_info.value
+    assert rejection.message == ERR_LLM_REQUEST_TOO_LARGE
+    assert rejection.source == "local"
+    assert rejection.code == 400
+    assert rejection.reason == "request_too_large"
+    assert rejection.allow_channel_fallback is False
+    assert rejection.data["request_size_bytes"] > max_size_bytes
+    assert rejection.data["max_size_bytes"] == max_size_bytes
+    assert rejection.kwargs["request_size_bytes"] == rejection.data["request_size_bytes"]
+    assert rejection.kwargs["max_size_bytes"] == max_size_bytes
+    assert sessions == []
+    assert connector_calls == []
 
 
 @pytest.mark.parametrize(

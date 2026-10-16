@@ -709,9 +709,6 @@ class BackgroundDispatcherMixin:
             tool_results=stored_tool_responses,
         )
 
-        if audit_round is not None and audit_round.request_error is not None:
-            raise audit_round.request_error
-
         if audit_round is not None and audit_round.confirmation_payload is not None:
             confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
             await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)

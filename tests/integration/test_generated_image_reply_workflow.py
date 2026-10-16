@@ -31,6 +31,7 @@ import app.core.dispatchers.background as background_dispatcher_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
+import app.core.utils.llm_request_policy as llm_request_policy_module
 import app.tasks as tasks_module
 import app.transformers.openai.image_generation as image_generation_transformer_module
 from app.api.v1 import files as files_module
@@ -175,6 +176,7 @@ def _patch_runtime_database(monkeypatch: pytest.MonkeyPatch, factory: async_sess
     monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
     monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", factory)
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", factory)
+    monkeypatch.setattr(llm_request_policy_module, "AsyncSessionLocal", factory)
     monkeypatch.setattr(send_file_to_user_module, "FILE_TOKEN_DIR", Path(factory.kw["bind"].url.database).parent / "file_download_tokens")
     monkeypatch.setattr(send_file_to_user_module, "_get_encryption_key", lambda: b"g" * 32)
 
@@ -1489,9 +1491,8 @@ async def test_generate_image_background_workflow_supports_openai_images_and_ref
         request = image_http_calls[1]
         assert request["url"] == f"https://llm.invalid/v1/images/{'edits' if with_reference else 'generations'}"
         if with_reference:
-            form = request["kwargs"].get("data")
-            assert form is not None
-            multipart = form()
+            multipart = request["kwargs"].get("data")
+            assert multipart is not None
             content_type = multipart.headers["Content-Type"]
             body = await _serialize_multipart_form(multipart)
             message = BytesParser(policy=policy.default).parsebytes(f"MIME-Version: 1.0\r\nContent-Type: {content_type}\r\n\r\n".encode() + body)
@@ -1522,7 +1523,11 @@ async def test_generate_image_background_workflow_supports_openai_images_and_ref
             assert file_data == reference_bytes
             assert "mask" not in fields
         else:
-            payload = request["kwargs"].get("json")
+            request_data = request["kwargs"]["data"]
+            assert isinstance(request_data, bytes)
+            payload = json.loads(request_data)
+            assert "json" not in request["kwargs"]
+            assert request_data == json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             assert payload == {
                 "model": image_model_id,
                 "prompt": prompt,

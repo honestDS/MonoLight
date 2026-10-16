@@ -22,6 +22,7 @@ import app.core.utils.dispatcher.helpers as dispatcher_helpers_module
 import app.core.utils.llm_request_policy as llm_request_policy_module
 import app.providers.database as database_provider
 import app.transformers.openai.base as openai_base_module
+import app.transformers.openai.image_generation as image_generation_module
 from app.api.v1.chat import router
 from app.core.exceptions import LLMRequestRejectedException
 from app.core.security import get_current_user
@@ -43,6 +44,7 @@ from app.models.session_reply_work_item import (
 from app.models.system_setting import SystemSetting
 from app.models.user import User
 from app.providers.database import get_db
+from app.providers.image_generation.client import ImageGenerationClient
 from app.providers.llm.client import LLMClient
 
 UID = "llm-rejection-user"
@@ -187,9 +189,52 @@ class _FakeClientSession:
         return self._http.next_response(stream=stream)
 
 
+class _CountingWriter:
+    def __init__(self) -> None:
+        self.size = 0
+
+    async def write(self, data: bytes) -> None:
+        self.size += len(data)
+
+
+class _FakeImageClientSession:
+    def __init__(self, http: "_FakeImageHttp") -> None:
+        self._http = http
+
+    async def __aenter__(self) -> "_FakeImageClientSession":
+        return self
+
+    async def __aexit__(self, _exc_type, _exc_value, _traceback) -> bool:
+        return False
+
+    def post(self, url: str, **kwargs: Any) -> _FakeAiohttpResponse:
+        self._http.post_calls.append({"url": url, "kwargs": kwargs})
+        return _FakeAiohttpResponse(status=200, text='{"data": []}')
+
+
+class _FakeImageHttp:
+    def __init__(self) -> None:
+        self.session_calls: list[dict[str, Any]] = []
+        self.connector_calls: list[dict[str, Any]] = []
+        self.post_calls: list[dict[str, Any]] = []
+
+    def tcp_connector(self, *args: Any, **kwargs: Any) -> object:
+        self.connector_calls.append({"args": args, "kwargs": kwargs})
+        return object()
+
+    def client_session(self, *args: Any, **kwargs: Any) -> _FakeImageClientSession:
+        self.session_calls.append({"args": args, "kwargs": kwargs})
+        return _FakeImageClientSession(self)
+
+
 def _install_fake_http(monkeypatch: pytest.MonkeyPatch, http: _FakeHttp) -> None:
     monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", http.client_session)
     monkeypatch.setattr(openai_base_module.aiohttp, "TCPConnector", lambda **_kwargs: object())
+
+
+def _install_fake_image_http(monkeypatch: pytest.MonkeyPatch, http: _FakeImageHttp) -> None:
+    monkeypatch.setattr(image_generation_module.aiohttp, "ClientSession", http.client_session)
+    monkeypatch.setattr(image_generation_module.aiohttp, "TCPConnector", http.tcp_connector)
 
 
 def _profile_config() -> dict[str, Any]:
@@ -599,6 +644,82 @@ async def test_llm_request_size_limit_is_loaded_for_each_real_request(
         parsed_payload = json.loads(sent_data)
         assert json.dumps(parsed_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") == sent_data
         assert 1024 * 1024 < len(sent_data) < 2 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_kind", "expected_endpoint"),
+    [("json", "generations"), ("single_image", "edits"), ("multi_image", "edits")],
+    ids=["json", "single-image", "multi-image"],
+)
+async def test_image_request_size_limit_is_loaded_for_each_real_request(
+    database_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    request_kind: str,
+    expected_endpoint: str,
+) -> None:
+    async with database_factory(foreign_keys=True, wal=True) as factory:
+        async with factory() as db:
+            db.add(SystemSetting(key="llm_request_max_size_mb", value="1"))
+            await db.commit()
+        monkeypatch.setattr(llm_request_policy_module, "AsyncSessionLocal", factory)
+
+        prompt = LARGE_TEXT if request_kind == "json" else "edit this image"
+        reference_images: list[tuple[str, bytes, str]] | None = None
+        if request_kind == "single_image":
+            reference_images = [("reference.png", b"x" * 1_100_000, "image/png")]
+        elif request_kind == "multi_image":
+            reference_images = [
+                ("first.png", b"x" * 600_000, "image/png"),
+                ("second.png", b"y" * 600_000, "image/png"),
+            ]
+
+        request_kwargs = {
+            "api_key": "test-api-key",
+            "base_url": "https://image.invalid",
+            "model_id": MODEL_ID,
+            "protocol": "openai_image",
+            "prompt": prompt,
+            "reference_images": reference_images,
+        }
+        http = _FakeImageHttp()
+        _install_fake_image_http(monkeypatch, http)
+
+        with pytest.raises(LLMRequestRejectedException) as rejection:
+            await ImageGenerationClient.generate_image(**request_kwargs)
+        assert rejection.value.source == "local"
+        assert rejection.value.allow_channel_fallback is False
+        assert http.session_calls == []
+        assert http.connector_calls == []
+        assert http.post_calls == []
+
+        await _set_request_limit(factory, 2)
+        response = await ImageGenerationClient.generate_image(**request_kwargs)
+        assert response == {"data": []}
+        assert len(http.session_calls) == 1
+        assert len(http.connector_calls) == 1
+        assert len(http.post_calls) == 1
+
+        post_call = http.post_calls[0]
+        assert post_call["url"] == f"https://image.invalid/images/{expected_endpoint}"
+        assert post_call["kwargs"]["headers"]["Authorization"] == "Bearer test-api-key"
+        if request_kind == "json":
+            assert post_call["kwargs"]["headers"]["Content-Type"] == "application/json"
+        else:
+            assert "Content-Type" not in post_call["kwargs"]["headers"]
+
+        data = post_call["kwargs"]["data"]
+        if request_kind == "json":
+            assert isinstance(data, bytes)
+            body_size = len(data)
+        else:
+            assert not isinstance(data, bytes)
+            assert data.size is not None
+            writer = _CountingWriter()
+            await data.write(writer)
+            body_size = writer.size
+            assert data.size == body_size
+        assert 1024 * 1024 < body_size < 2 * 1024 * 1024
 
 
 @pytest.mark.asyncio

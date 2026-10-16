@@ -11,8 +11,8 @@ from app.core.constants import (
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils import llm_request_policy
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
-from app.core.utils.llm_request_policy import build_upstream_rejection
 from app.core.utils.model_request_headers import build_model_request_headers
 
 from ..base import BaseImageGenerationTransformer
@@ -71,28 +71,33 @@ class OpenAIImageGenerationTransformer(BaseImageGenerationTransformer):
         url = f"{self._normalize_image_base_url(base_url)}/images/{'edits' if is_edit else 'generations'}"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
+            if is_edit:
+                headers = {key: value for key, value in headers.items() if key.lower() != "content-type"}
+                form = aiohttp.FormData()
+                file_field = "image" if len(reference_images) == 1 else "image[]"
+                for key, value in payload.items():
+                    if key not in {"image", "image[]"}:
+                        form.add_field(key, str(value))
+                for filename, data, mime_type in reference_images:
+                    form.add_field(file_field, data, filename=filename, content_type=mime_type)
+                request_data = form()
+                # FormData's payload size includes fields, file headers, files, and boundaries.
+                max_size_bytes = await llm_request_policy.load_llm_request_max_bytes()
+                llm_request_policy.validate_llm_request_size(request_data.size, max_size_bytes=max_size_bytes)
+            else:
+                request_data = await llm_request_policy.prepare_llm_json_request(payload)
+
             proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=client_timeout,
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                if is_edit:
-                    headers = {key: value for key, value in headers.items() if key.lower() != "content-type"}
-                    form = aiohttp.FormData()
-                    file_field = "image" if len(reference_images) == 1 else "image[]"
-                    for key, value in payload.items():
-                        if key not in {"image", "image[]"}:
-                            form.add_field(key, str(value))
-                    for filename, data, mime_type in reference_images:
-                        form.add_field(file_field, data, filename=filename, content_type=mime_type)
-                    request_kwargs = {"headers": headers, "data": form, **proxy_kwargs}
-                else:
-                    request_kwargs = {"headers": headers, "json": payload, **proxy_kwargs}
+                request_kwargs = {"headers": headers, "data": request_data, **proxy_kwargs}
 
                 async with session.post(url, **request_kwargs) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        rejection = build_upstream_rejection(status=resp.status, detail=txt)
+                        rejection = llm_request_policy.build_upstream_rejection(status=resp.status, detail=txt)
                         if rejection is not None:
                             raise rejection
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)

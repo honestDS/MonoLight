@@ -18,10 +18,7 @@ async def load_llm_request_max_bytes() -> int:
     return max_size_mb * _MIB
 
 
-def serialize_llm_json_request(payload: dict[str, Any], *, max_size_bytes: int) -> bytes:
-    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    encoded = serialized.encode("utf-8")
-    request_size_bytes = len(encoded)
+def validate_llm_request_size(request_size_bytes: int, *, max_size_bytes: int) -> None:
     if request_size_bytes > max_size_bytes:
         raise LLMRequestRejectedException(
             message=ERR_LLM_REQUEST_TOO_LARGE,
@@ -35,6 +32,13 @@ def serialize_llm_json_request(payload: dict[str, Any], *, max_size_bytes: int) 
             request_size_mib=f"{request_size_bytes / _MIB:.2f}",
             max_size_mib=f"{max_size_bytes / _MIB:.2f}",
         )
+
+
+def serialize_llm_json_request(payload: dict[str, Any], *, max_size_bytes: int) -> bytes:
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    encoded = serialized.encode("utf-8")
+    request_size_bytes = len(encoded)
+    validate_llm_request_size(request_size_bytes, max_size_bytes=max_size_bytes)
     return encoded
 
 
