@@ -195,6 +195,20 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
     async def get_platform(db, platform_id):
         return SimpleNamespace(uid="owner", config={})
 
+    async def get_session(db, session_id):
+        return None
+
+    async def upsert_profile(db, *, session_id, uid, profile_id, source, stream_requested=False):
+        return SimpleNamespace(
+            session_id=session_id,
+            uid=uid,
+            profile_id=profile_id,
+            source=source,
+        )
+
+    async def bind_message_platform(*args, **kwargs):
+        return True
+
     async def validate_initial_message_before_save(*args, **kwargs):
         captured["preflight_args"] = args
         captured["preflight_kwargs"] = kwargs
@@ -204,6 +218,9 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
 
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.resolve_profile_for_session", resolve_profile)
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.message_platform_crud.get", get_platform)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.session_crud.get_by_session_id", get_session)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.session_crud.upsert_profile", upsert_profile)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.session_crud.bind_message_platform", bind_message_platform)
     monkeypatch.setattr(
         "app.adapters.weixin_openclaw.adapter.ChatDispatcher.validate_initial_message_before_save",
         validate_initial_message_before_save,

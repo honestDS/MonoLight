@@ -29,6 +29,8 @@ async def resolve_profile_for_session(
         profile = await _get_owned_profile(db, uid=uid, profile_id=getattr(session, "profile_override_id", None))
         if profile is not None:
             return profile
+        if message_platform_id is None:
+            message_platform_id = getattr(session, "message_platform_id", None)
 
     if message_platform_id is not None:
         platform = await message_platform_crud.get(db, message_platform_id)

@@ -11,6 +11,7 @@ from app.core.channel_router import select_channel
 from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
+    ERR_MESSAGE_PLATFORM_NOT_FOUND,
     ERR_SESSION_REPLY_LEASE_LOST,
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
@@ -158,7 +159,10 @@ async def dispatch_interactive(
             state.max_turns = session.max_turns
             if session.source not in {"http", "ws"}:
                 platform = await message_platform_crud.get_platform_for_session(db, uid=uid, session_id=session_id, source=session.source)
-                if platform is not None:
+                if platform is None:
+                    if session.source == "weixin-openclaw":
+                        raise BaseBusinessException(message=ERR_MESSAGE_PLATFORM_NOT_FOUND)
+                else:
                     platform_config = platform.config or {}
                     state.stream_llm_request = platform_config.get("stream_llm_request", False)
 

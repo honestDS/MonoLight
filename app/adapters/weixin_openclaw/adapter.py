@@ -32,9 +32,12 @@ from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, Weixi
 from app.core.audit.confirmation import message_has_quote
 from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
+    ERR_MESSAGE_PLATFORM_NOT_FOUND,
     ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID,
     ERR_SESSION_ID_REQUIRED,
+    ERR_SESSION_NO_PERMISSION,
     ERR_WEIXIN_OPENCLAW_GET_UPDATES_FAILED,
+    ERR_WEIXIN_OPENCLAW_SESSION_UNINITIALIZED,
 )
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.session import session_crud
@@ -48,7 +51,7 @@ from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.session import generate_session_title_for_selected_profile
 from app.models.message import InternalMessage, MessageRole
-from app.models.message_platform import MessagePlatformSessionSettings
+from app.models.message_platform import MessagePlatformSessionSettings, MessagePlatformStatus, MessagePlatformType
 
 logger = get_logger(__name__)
 
@@ -129,13 +132,20 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             "user_id": user_id,
         }
 
-    async def send_session_event(self, uid: str, session_id: str, event: dict[str, Any]) -> bool:
+    async def send_session_event(
+        self,
+        uid: str,
+        session_id: str,
+        event: dict[str, Any],
+        *,
+        message_platform_user_id: str | None = None,
+    ) -> bool:
         event_type = str(event.get("type") or "").strip()
         if event_type not in {"proactive_reply", "proactive_reply_error"}:
             logger.bind(uid=uid, session_id=session_id, event_type=event_type).debug(t("LOG_WEIXIN_OPENCLAW_SESSION_EVENT_IGNORED"))
             return True
 
-        user_id = parse_session_user_id(session_id)
+        user_id = (message_platform_user_id if message_platform_user_id is not None else parse_session_user_id(session_id)).strip()
         if not user_id:
             logger.bind(uid=uid, session_id=session_id, event_type=event_type).warning(t("LOG_WEIXIN_OPENCLAW_SESSION_EVENT_USER_MISSING"))
             return False
@@ -176,10 +186,33 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         has_quote: bool = False,
         message_platform_id: int | None = None,
         stream_requested: bool = False,
+        message_platform_user_id: str | None = None,
     ) -> WeixinOpenClawChatResult:
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
         try:
+            platform = None
+            session = None
+            platform_user_id = ""
+            if message_platform_id is not None:
+                platform = await message_platform_crud.get(db, message_platform_id)
+                if platform is None or platform.uid != uid:
+                    raise BaseBusinessException(message=ERR_MESSAGE_PLATFORM_NOT_FOUND)
+
+                session = await session_crud.get_by_session_id(db, session_id)
+                if session is not None and (session.uid != uid or session.source != "weixin-openclaw"):
+                    raise BaseBusinessException(message=ERR_SESSION_NO_PERMISSION)
+
+                platform_user_id = (message_platform_user_id or "").strip() or (session.message_platform_user_id.strip() if session is not None and session.message_platform_user_id else "") or parse_session_user_id(session_id)
+                if not platform_user_id:
+                    raise BaseBusinessException(message=ERR_WEIXIN_OPENCLAW_SESSION_UNINITIALIZED)
+
+                if session is not None:
+                    existing_platform_id = session.message_platform_id
+                    existing_platform_user_id = session.message_platform_user_id
+                    if not ((existing_platform_id is None and existing_platform_user_id is None) or (existing_platform_id == message_platform_id and existing_platform_user_id == platform_user_id)):
+                        raise BaseBusinessException(message=ERR_SESSION_NO_PERMISSION)
+
             profile = await resolve_profile_for_session(
                 db,
                 uid=uid,
@@ -197,21 +230,29 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             )
             profile_id = getattr(profile, "id", None)
             if message_platform_id is not None and isinstance(profile_id, int) and not isinstance(profile_id, bool) and profile_id > 0:
-                platform = await message_platform_crud.get(db, message_platform_id)
                 platform_config = getattr(platform, "config", None)
-                if platform is not None and platform.uid == uid and isinstance(platform_config, dict) and "session_settings" in platform_config:
+                settings: dict[str, Any] = {}
+                if isinstance(platform_config, dict) and "session_settings" in platform_config:
                     settings = MessagePlatformSessionSettings.model_validate(platform_config["session_settings"]).model_dump(exclude_unset=True)
-                    if settings:
-                        session = await session_crud.upsert_profile(
-                            db,
-                            session_id=session_id,
-                            uid=uid,
-                            profile_id=profile_id,
-                            source="weixin-openclaw",
-                            stream_requested=stream_requested,
-                        )
-                        if session is not None and session.uid == uid and session.source == "weixin-openclaw":
-                            await session_crud.update(db, db_obj=session, obj_in=settings, commit=False)
+                session = await session_crud.upsert_profile(
+                    db,
+                    session_id=session_id,
+                    uid=uid,
+                    profile_id=profile_id,
+                    source="weixin-openclaw",
+                    stream_requested=stream_requested,
+                )
+                if not await session_crud.bind_message_platform(
+                    db,
+                    session_id=session_id,
+                    uid=uid,
+                    message_platform_id=message_platform_id,
+                    message_platform_user_id=platform_user_id,
+                    source="weixin-openclaw",
+                ):
+                    raise BaseBusinessException(message=ERR_SESSION_NO_PERMISSION)
+                if settings and session is not None and session.uid == uid and session.source == "weixin-openclaw":
+                    await session_crud.update(db, db_obj=session, obj_in=settings, commit=False)
             await session_reply_queue_manager.submit_user_message(
                 db,
                 uid=uid,
@@ -226,8 +267,10 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             )
             return WeixinOpenClawChatResult()
         except BaseBusinessException as exc:
+            await db.rollback()
             return WeixinOpenClawChatResult(text=t(exc.message, default=exc.message, **exc.kwargs))
         except Exception as exc:
+            await db.rollback()
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_WEIXIN_OPENCLAW_UNEXPECTED_ERROR", error=str(exc)), exc_info=True)
             return WeixinOpenClawChatResult(text=t(ERR_LLM_UNEXPECTED_ERROR))
 
@@ -337,18 +380,48 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 logger.bind(uid=resolved_uid, session_id=message.session_id).warning(t("LOG_WEIXIN_OPENCLAW_RUNTIME_INVALID_BEFORE_DISPATCH"))
                 return False
 
+            if message_platform_id is not None:
+                platform = await message_platform_crud.get_for_update(db, platform_id=message_platform_id, uid=resolved_uid)
+                if platform is None or not platform.is_enabled or platform.status != MessagePlatformStatus.CONNECTED or platform.platform_type != MessagePlatformType.WEIXIN_OPENCLAW:
+                    raise BaseBusinessException(message=ERR_MESSAGE_PLATFORM_NOT_FOUND)
+
+                latest_session = await session_crud.get_latest_for_message_platform(
+                    db,
+                    uid=resolved_uid,
+                    message_platform_id=message_platform_id,
+                    message_platform_user_id=message.user_id,
+                    source="weixin-openclaw",
+                )
+                selected_session_id = latest_session.session_id if latest_session is not None else None
+                if selected_session_id is None:
+                    legacy_session_id = build_session_id(message.user_id)
+                    legacy_session = await session_crud.get_by_session_id(db, legacy_session_id)
+                    if legacy_session is not None and legacy_session.uid == resolved_uid and legacy_session.source == "weixin-openclaw" and (legacy_session.message_platform_user_id is None or legacy_session.message_platform_user_id == message.user_id):
+                        legacy_platform = await message_platform_crud.get_platform_for_session(
+                            db,
+                            uid=resolved_uid,
+                            session_id=legacy_session_id,
+                            source="weixin-openclaw",
+                        )
+                        if legacy_platform is not None and legacy_platform.id == message_platform_id:
+                            selected_session_id = legacy_session_id
+                message.session_id = selected_session_id or f"weixin-openclaw:{uuid.uuid4().hex}"
+
             dispatch_text = message.text
-            result = await self.chat(
-                db=db,
-                message=dispatch_text,
-                uid=resolved_uid,
-                session_id=message.session_id,
-                attachments=message.attachments or None,
-                active_tasks=active_tasks,
-                has_quote=message_has_quote(getattr(message, "raw", None)),
-                message_platform_id=message_platform_id,
-                stream_requested=stream_requested,
-            )
+            chat_kwargs: dict[str, Any] = {
+                "db": db,
+                "message": dispatch_text,
+                "uid": resolved_uid,
+                "session_id": message.session_id,
+                "attachments": message.attachments or None,
+                "active_tasks": active_tasks,
+                "has_quote": message_has_quote(getattr(message, "raw", None)),
+                "message_platform_id": message_platform_id,
+                "stream_requested": stream_requested,
+            }
+            if message_platform_id is not None:
+                chat_kwargs["message_platform_user_id"] = message.user_id
+            result = await self.chat(**chat_kwargs)
             if result.text or result.files:
                 sent = False
                 if result.text:

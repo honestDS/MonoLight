@@ -12,6 +12,7 @@ from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message
+from app.models.message_platform import MessagePlatform
 from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
 from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
@@ -151,6 +152,69 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
     async def get_by_session_id(self, db: AsyncSession, session_id: str) -> ChatSession | None:
         result = await db.execute(select(ChatSession).where(ChatSession.session_id == session_id))
         return result.scalars().first()
+
+    async def get_latest_for_message_platform(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        message_platform_id: int,
+        message_platform_user_id: str,
+        source: str,
+    ) -> ChatSession | None:
+        result = await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.uid == uid,
+                ChatSession.message_platform_id == message_platform_id,
+                ChatSession.message_platform_user_id == message_platform_user_id,
+                ChatSession.source == source,
+            )
+            .order_by(ChatSession.created_at.desc(), ChatSession.session_id.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
+    async def bind_message_platform(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        message_platform_id: int,
+        message_platform_user_id: str,
+        source: str,
+    ) -> bool:
+        platform_exists = select(MessagePlatform.id).where(
+            MessagePlatform.id == message_platform_id,
+            MessagePlatform.uid == uid,
+        )
+        result = await db.execute(
+            update(ChatSession)
+            .where(
+                ChatSession.session_id == session_id,
+                ChatSession.uid == uid,
+                ChatSession.source == source,
+                or_(
+                    and_(
+                        ChatSession.message_platform_id.is_(None),
+                        ChatSession.message_platform_user_id.is_(None),
+                    ),
+                    and_(
+                        ChatSession.message_platform_id == message_platform_id,
+                        ChatSession.message_platform_user_id == message_platform_user_id,
+                    ),
+                ),
+                exists(platform_exists),
+            )
+            .values(
+                message_platform_id=message_platform_id,
+                message_platform_user_id=message_platform_user_id,
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        await db.flush()
+        return (result.rowcount or 0) == 1
 
     async def get_multi_by_session_ids(
         self,

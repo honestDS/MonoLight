@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON
+from sqlalchemy import JSON, Index
 from sqlmodel import Column, DateTime, Field, SQLModel, UniqueConstraint
 
 from app.core.constants import (
@@ -19,7 +19,16 @@ class ChatSession(SQLModel, table=True):
     """
 
     __tablename__ = "chat_session"
-    __table_args__ = (UniqueConstraint("session_id", "uid", name="uq_chat_session_session_uid"),)
+    __table_args__ = (
+        UniqueConstraint("session_id", "uid", name="uq_chat_session_session_uid"),
+        Index(
+            "ix_chat_session_platform_user",
+            "uid",
+            "message_platform_id",
+            "message_platform_user_id",
+            "created_at",
+        ),
+    )
 
     session_id: str = Field(primary_key=True, max_length=100, index=True)
     uid: str = Field(index=True, max_length=100)
@@ -32,6 +41,15 @@ class ChatSession(SQLModel, table=True):
         ondelete="RESTRICT",
     )
     source: str = Field(default="http", max_length=50, index=True)
+    message_platform_id: int | None = Field(
+        default=None,
+        description="消息平台实例标识，用于会话来源追溯",
+    )
+    message_platform_user_id: str | None = Field(
+        default=None,
+        max_length=255,
+        description="平台侧接收用户标识，用于会话来源追溯",
+    )
     reply_target_source: str = Field(
         default="http",
         max_length=50,
