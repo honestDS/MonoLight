@@ -45,7 +45,7 @@ from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 from .interactive_helpers import (
@@ -90,6 +90,7 @@ async def dispatch_interactive(
     request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     actor_uid: str | None = None,
     actor_username: str | None = None,
+    initial_message_type: MessageType = MessageType.TEXT,
     *,
     validate_initial_message_before_save: Callable[..., Awaitable[None]],
 ):
@@ -147,6 +148,7 @@ async def dispatch_interactive(
             additional_user_messages_context=additional_user_messages_context,
             execution_resume_state=execution_resume_state,
             execution_checkpoint_callback=execution_checkpoint_callback,
+            initial_message_type=initial_message_type,
         )
         session = await session_crud.get_by_session_id(db, session_id)
         if session is not None:
@@ -154,7 +156,7 @@ async def dispatch_interactive(
             state.goal_mode = session.goal_mode
             state.max_turns = session.max_turns
 
-        initial_memory_recall_boundary = max(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
+        initial_memory_recall_boundary = state.checkpoint_state.memory_recall_boundary_message_id
         resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None
         resumed_memory_recall_status = execution_resume_state.get("memory_recall_status") if execution_resume_state else None
 

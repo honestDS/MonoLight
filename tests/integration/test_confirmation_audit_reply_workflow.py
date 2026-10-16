@@ -13,6 +13,10 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
+import app.core.dispatcher as dispatcher_module
+import app.core.dispatchers.interactive_generation as interactive_generation_module
+import app.core.dispatchers.interactive_runtime as interactive_runtime_module
+import app.core.dispatchers.memory.request as memory_request_module
 import app.providers.database as database_provider
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
@@ -24,6 +28,7 @@ from app.core.audit.confirmation_persistence import persist_pending_confirmation
 from app.core.audit.integrity import build_tool_round_integrity_snapshot
 from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.prompts import LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
 from app.core.security import get_current_user
 from app.core.session_notifier import SessionNotifier
 from app.core.session_reply_queue import consumer as consumer_module
@@ -35,7 +40,8 @@ from app.core.session_reply_queue import executor_metadata as executor_metadata_
 from app.core.session_reply_queue import manager_result as manager_result_module
 from app.core.session_reply_queue import manager_submission as manager_submission_module
 from app.core.session_reply_queue.manager import session_reply_queue_manager
-from app.core.tools import TOOL_EXECUTOR_MAP
+from app.core.tools import MANAGE_TODO_TOOL_NAME, TOOL_EXECUTOR_MAP
+from app.core.utils.dispatcher import channel_call as channel_call_module
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.request_token_baseline import build_provider_request_usage_metadata
 from app.core.utils.time import get_local_time
@@ -51,7 +57,7 @@ from app.models.audit import (
 )
 from app.models.background_task import BackgroundTask
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseDocument, KnowledgeBaseProfileBinding
-from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
@@ -68,6 +74,7 @@ from app.models.session_todo import SessionTodoPlan
 from app.models.terminal_session import TerminalSession
 from app.models.user import User
 from app.providers.database import get_db
+from app.providers.llm.client import LLMClient
 from tests.database_support import clone_sqlite_schema
 from tests.integration.test_chat_websocket_permissions import _Socket
 
@@ -2010,3 +2017,284 @@ async def test_stopped_foreground_work_blocks_audit_before_preparation(
     assert work is not None and work.status == SessionReplyWorkStatus.CANCELLED
     assert work.locked_by is None and work.lock_until is None
     assert delivered_events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_requested", [False, True], ids=["non-stream", "stream"])
+@pytest.mark.parametrize("decision", ["同意", "忽略", "拒绝"], ids=["approve", "ignore", "reject"])
+async def test_confirmation_audit_decision_continues_without_forced_memory_recall(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stream_requested: bool,
+    decision: str,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        session = await db.get(ChatSession, "session-confirmation")
+        assert profile is not None
+        assert session is not None
+        profile.configs = _profile_config()
+        profile.configs["memory"].update({"enabled": True, "precheck_enabled": True})
+        session.max_turns = 3
+        if decision == "忽略":
+            details = list((await db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id == audit_record_id).order_by(AuditToolDetail.turn_index))).scalars().all())
+            assert details
+            for detail in details:
+                detail.score = 8
+        await db.commit()
+
+    for module in (executor_lifecycle_module, executor_interactive_module, executor_metadata_module):
+        monkeypatch.setattr(module, "AsyncSessionLocal", confirmation_workflow_session_factory)
+    monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", confirmation_workflow_session_factory)
+
+    fake_channel = SimpleNamespace(
+        id=1,
+        base_url="https://chat.invalid",
+        get_decrypted_api_key=lambda: "test-key",
+        http_proxy=None,
+    )
+    fake_model_entry = {
+        "model_id": "chat-model",
+        "usage": "CHAT",
+        "protocol": "OPENAI",
+        "is_enabled": True,
+        "context_window_k": 32,
+        "max_tokens": 256,
+    }
+    fake_channel_rule = SimpleNamespace(channel_id=1, model_id="chat-model", priority=1, weight=1)
+
+    async def fake_select_channel(_db, _channel_cfg, expected_usage: str, **_kwargs):
+        assert expected_usage == "CHAT"
+        return fake_channel, dict(fake_model_entry), fake_channel_rule
+
+    for module in (
+        dispatcher_module,
+        interactive_runtime_module,
+        interactive_generation_module,
+        memory_request_module,
+        channel_call_module,
+    ):
+        monkeypatch.setattr(module, "select_channel", fake_select_channel)
+
+    commands: list[str] = []
+
+    class FakeShellExecutor:
+        requires_audit = True
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def execute(self, **arguments) -> str:
+            command = arguments["command"]
+            commands.append(command)
+            return json.dumps(
+                {
+                    "status": "success",
+                    "command": command,
+                    "stdout": f"{command}\n",
+                    "stderr": "",
+                    "exit_code": 0,
+                },
+                ensure_ascii=False,
+            )
+
+    monkeypatch.setitem(TOOL_EXECUTOR_MAP, "execute_shell", FakeShellExecutor)
+
+    confirmation_events: list[dict] = []
+    executor_lifecycle_events: list[dict] = []
+    executor_interactive_events: list[dict] = []
+
+    async def capture_confirmation_event(_uid: str, _session_id: str, event_payload: dict) -> None:
+        confirmation_events.append(event_payload)
+
+    async def capture_lifecycle_event(_uid: str, _session_id: str, event_payload: dict) -> None:
+        executor_lifecycle_events.append(event_payload)
+
+    async def capture_interactive_event(_uid: str, _session_id: str, event_payload: dict) -> None:
+        executor_interactive_events.append(event_payload)
+
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", capture_confirmation_event)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_lifecycle_event)
+    monkeypatch.setattr(executor_interactive_module, "send_session_stream_event", capture_interactive_event)
+
+    captured_requests: list[dict[str, object]] = []
+    forced_recall_requests: list[list[InternalMessage]] = []
+    normal_turn = 0
+
+    def build_fake_llm_response(messages: list[InternalMessage], tools) -> InternalResponse:
+        nonlocal normal_turn
+        request_messages = [message.model_copy(deep=True) for message in messages]
+        captured_requests.append({"messages": request_messages, "tools": tools})
+        first_system_content = next(
+            (message.content for message in request_messages if message.role == MessageRole.SYSTEM),
+            None,
+        )
+        if first_system_content == LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT:
+            forced_recall_requests.append(request_messages)
+            return InternalResponse(
+                message=InternalMessage(role=MessageRole.ASSISTANT, content="unexpected forced recall"),
+                model="chat-model",
+                usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                finish_reason="stop",
+            )
+
+        if decision == "拒绝":
+            return InternalResponse(
+                message=InternalMessage(role=MessageRole.ASSISTANT, content="rejected reply"),
+                model="chat-model",
+                usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                finish_reason="stop",
+            )
+
+        if normal_turn == 0:
+            assert tools
+            assert any(item.get("function", {}).get("name") == MANAGE_TODO_TOOL_NAME for item in tools)
+            normal_turn = 1
+            return InternalResponse(
+                message=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id="todo-call",
+                            name=MANAGE_TODO_TOOL_NAME,
+                            arguments={"operation": "read"},
+                        )
+                    ],
+                ),
+                model="chat-model",
+                usage={"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
+                finish_reason="tool_calls",
+            )
+
+        normal_turn += 1
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="continued reply"),
+            model="chat-model",
+            usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            finish_reason="stop",
+        )
+
+    async def fake_generate(**kwargs) -> InternalResponse:
+        return build_fake_llm_response(kwargs["messages"], kwargs.get("tools"))
+
+    async def fake_generate_with_stream_callback(**kwargs) -> InternalResponse:
+        response = build_fake_llm_response(kwargs["messages"], kwargs.get("tools"))
+        if response.message.content:
+            await kwargs["on_content"](response.message.content)
+        return response
+
+    monkeypatch.setattr(LLMClient, "generate", fake_generate)
+    monkeypatch.setattr(LLMClient, "generate_with_stream_callback", fake_generate_with_stream_callback)
+
+    source = "ws" if stream_requested else "http"
+    worker_id = f"confirmation-audit-reply-{source}-{decision}"
+    async with confirmation_workflow_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        _message, submitted_work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile=profile,
+            message=decision,
+            attachments=None,
+            source=source,
+            stream_requested=stream_requested,
+            actor_username="owner",
+        )
+        assert submitted_work.id is not None
+        assert submission_status in {"approved", "rejected"}
+        submitted_work_id = submitted_work.id
+
+    async with confirmation_workflow_session_factory() as db:
+        claimed_work = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id=worker_id,
+            lease_seconds=300,
+        )
+    assert claimed_work is not None
+    assert claimed_work.id == submitted_work_id
+    await executor_lifecycle_module.execute_session_reply_work(claimed_work.id, worker_id)
+
+    async with confirmation_workflow_session_factory() as db:
+        record = await db.get(AuditRecord, audit_record_id)
+        work = await db.get(SessionReplyWorkItem, submitted_work_id)
+        decision_messages = list(
+            (
+                await db.execute(
+                    select(Message)
+                    .where(
+                        Message.session_id == "session-confirmation",
+                        Message.type == MessageType.AUDIT_DECISION,
+                    )
+                    .order_by(Message.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        messages = list((await db.execute(select(Message).where(Message.session_id == "session-confirmation").order_by(Message.id))).scalars().all())
+        executions = list((await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == audit_record_id).order_by(AuditExecutionRecord.id))).scalars().all())
+
+    assert record is not None
+    assert work is not None
+    assert work.status == SessionReplyWorkStatus.SUCCEEDED
+    assert work.work_type == (SessionReplyWorkType.FOREGROUND_REPLY if decision == "拒绝" else SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION)
+    assert len(decision_messages) == 1
+    decision_message = decision_messages[0]
+    assert decision_message.type == MessageType.AUDIT_DECISION
+    assert decision_message.content == decision
+    assert record.decision_message_id == decision_message.id
+    assert record.decision_raw_message == decision
+    expected_decision = {"同意": "approve", "忽略": "approve", "拒绝": "reject"}[decision]
+    expected_record_status = AuditRecordStatus.REJECTED if decision == "拒绝" else AuditRecordStatus.SUCCEEDED
+    assert record.decision is not None and record.decision.value == expected_decision
+    assert record.status == expected_record_status
+    assert forced_recall_requests == []
+    assert not [message for message in messages if (message.dedupe_key or "").startswith("memory-recall-")]
+
+    checkpoint = (work.execution_state or {}).get("dispatcher_checkpoint") or {}
+    assert checkpoint.get("memory_recall_boundary_message_id") != decision_message.id
+    final_message = next(message for message in messages if message.id == work.result_message_id)
+    assert final_message.role == MessageRole.ASSISTANT
+    assert final_message.type == MessageType.TEXT
+    assert final_message.content == ("rejected reply" if decision == "拒绝" else "continued reply")
+
+    if decision == "拒绝":
+        assert commands == []
+        assert executions == []
+        assert not any(json.loads(InternalMessage.model_validate_json(message.content or "{}").content or "{}").get("operation") == "read" for message in messages if message.type == MessageType.TOOL_RESULT)
+        assert captured_requests[0]["tools"] is None
+        assert len(captured_requests) == 1
+    else:
+        assert commands == ["echo confirmed-1", "echo confirmed-2"]
+        assert [execution.status for execution in executions] == [
+            AuditExecutionStatus.SUCCEEDED,
+            AuditExecutionStatus.SUCCEEDED,
+        ]
+        todo_results = []
+        for message in messages:
+            if message.type != MessageType.TOOL_RESULT:
+                continue
+            internal = InternalMessage.model_validate_json(message.content or "{}")
+            if internal.tool_call_id != "todo-call":
+                continue
+            todo_results.append(json.loads(internal.content or "{}"))
+        assert todo_results
+        assert todo_results[0] == {
+            "status": "success",
+            "operation": "read",
+            "revision": 0,
+            "todos": [],
+        }
+        assert len(captured_requests) == 2
+
+    assert executor_lifecycle_events
+    if stream_requested and decision != "拒绝":
+        assert executor_interactive_events
