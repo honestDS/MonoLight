@@ -316,7 +316,7 @@
                           <el-radio-group
                             :model-value="isWsModeComputed ? 'stream' : 'non_stream'"
                             :aria-label="$t('chat.more_options_response_mode')"
-                            :disabled="isCurrentSessionReadOnly || modeSettingSubmitting || transportModeChangeBlocked"
+                            :disabled="modeSettingSubmitting || transportModeChangeBlocked"
                             size="small"
                             @update:model-value="val => handleModeChange(val === 'stream')"
                           >
@@ -334,7 +334,7 @@
                           <el-radio-group
                             :model-value="currentSessionEnableMarkdown ? 'md' : 'plain'"
                             :aria-label="$t('chat.more_options_message_format')"
-                            :disabled="isCurrentSessionReadOnly"
+                            :disabled="markdownSettingSubmitting"
                             size="small"
                             @update:model-value="val => toggleMarkdown(val === 'md')"
                           >
@@ -524,6 +524,7 @@ const {
   toolOutputSettingSubmitting,
   agentSettingSubmitting,
   reasoningSettingSubmitting,
+  markdownSettingSubmitting,
   currentSessionEnableMarkdown,
   toggleMarkdown,
   isWsModeComputed,

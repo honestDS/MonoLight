@@ -54,6 +54,7 @@ const createHarness = async (t, options = {}) => {
     is_superuser: options.superuser === true,
   }
   const messages = []
+  const confirmCalls = []
   const mountedCallbacks = []
   const unmountedCallbacks = []
   const timerCalls = []
@@ -124,6 +125,12 @@ const createHarness = async (t, options = {}) => {
   ElMessage.error = (...args) => messages.push({ type: 'error', args })
   ElMessage.success = (...args) => messages.push({ type: 'success', args })
   ElMessage.info = (...args) => messages.push({ type: 'info', args })
+  const ElMessageBox = {
+    confirm: (...args) => {
+      confirmCalls.push(args)
+      return options.confirmSave ? options.confirmSave(...args) : Promise.resolve()
+    },
+  }
 
   const scope = effectScope()
   const context = vm.createContext({
@@ -132,6 +139,7 @@ const createHarness = async (t, options = {}) => {
     console: { log() {}, warn() {}, error() {}, info() {} },
     createMessagePlatformForm,
     ElMessage,
+    ElMessageBox,
     loadMessagePlatformForm,
     onMounted: callback => mountedCallbacks.push(callback),
     onUnmounted: callback => unmountedCallbacks.push(callback),
@@ -168,6 +176,7 @@ globalThis.__module = {
   isEdit,
   currentId,
   dialogVisible,
+  submitting,
   userPermissions,
 }
 `,
@@ -179,6 +188,7 @@ globalThis.__module = {
   const harness = {
     api,
     messages,
+    confirmCalls,
     mountedCallbacks,
     unmountedCallbacks,
     timerCalls,
@@ -484,4 +494,79 @@ test('clearing permissions removes admin user loading and uid from payloads', as
   await flush()
   assert.equal(harness.api.platformCreates.length, 1)
   assert.equal(hasOwn(harness.api.platformCreates[0], 'uid'), false)
+})
+
+test('platform edit waits for confirmation and cancel or close can be retried', async t => {
+  const pendingConfirmations = []
+  const harness = await createHarness(t, {
+    confirmSave: () => new Promise((resolve, reject) => {
+      pendingConfirmations.push({ resolve, reject })
+    }),
+  })
+
+  harness.module.openCreateDialog()
+  harness.module.form.name = 'new platform'
+  harness.module.form.platform_type = 'WEIXIN_OPENCLAW'
+  await harness.module.submitForm()
+  await flush()
+
+  assert.equal(harness.api.platformCreates.length, 1)
+  assert.equal(harness.confirmCalls.length, 0)
+
+  const row = {
+    id: 41,
+    name: 'edited platform',
+    platform_type: 'WEIXIN_OPENCLAW',
+  }
+  harness.module.handleEdit(row)
+  const update = harness.module.submitForm()
+
+  assert.equal(harness.confirmCalls.length, 1)
+  assert.equal(harness.module.submitting.value, true)
+  assert.equal(harness.api.platformUpdates.length, 0)
+
+  await harness.module.submitForm()
+  assert.equal(harness.confirmCalls.length, 1)
+  assert.equal(harness.api.platformUpdates.length, 0)
+
+  pendingConfirmations[0].resolve()
+  await update
+  await flush()
+
+  assert.equal(harness.api.platformUpdates.length, 1)
+  assert.equal(harness.api.platformUpdates[0].id, 41)
+  assert.equal(harness.module.dialogVisible.value, false)
+  assert.equal(harness.module.submitting.value, false)
+
+  for (const result of ['cancel', 'close']) {
+    harness.module.handleEdit(row)
+    const formBefore = normalize(harness.module.form)
+    const updatesBefore = harness.api.platformUpdates.length
+    const successesBefore = harness.messages.filter(message => message.type === 'success').length
+    const errorsBefore = harness.messages.filter(message => message.type === 'error').length
+    const confirmCallsBefore = harness.confirmCalls.length
+    const canceledSubmit = harness.module.submitForm()
+
+    assert.equal(harness.confirmCalls.length, confirmCallsBefore + 1)
+    assert.equal(harness.module.submitting.value, true)
+    pendingConfirmations.at(-1).reject(result)
+    await canceledSubmit
+    await flush()
+
+    assert.equal(harness.api.platformUpdates.length, updatesBefore)
+    assert.equal(harness.messages.filter(message => message.type === 'success').length, successesBefore)
+    assert.equal(harness.messages.filter(message => message.type === 'error').length, errorsBefore)
+    assert.equal(harness.module.dialogVisible.value, true)
+    assert.deepEqual(normalize(harness.module.form), formBefore)
+    assert.equal(harness.module.submitting.value, false)
+
+    const retrySubmit = harness.module.submitForm()
+    assert.equal(harness.confirmCalls.length, confirmCallsBefore + 2)
+    pendingConfirmations.at(-1).resolve()
+    await retrySubmit
+    await flush()
+
+    assert.equal(harness.api.platformUpdates.length, updatesBefore + 1)
+    assert.equal(harness.module.dialogVisible.value, false)
+  }
 })

@@ -206,6 +206,9 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
             source=source,
         )
 
+    async def update_session(db, *, db_obj, obj_in, commit=True):
+        return db_obj
+
     async def bind_message_platform(*args, **kwargs):
         return True
 
@@ -220,6 +223,7 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.message_platform_crud.get", get_platform)
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.session_crud.get_by_session_id", get_session)
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.session_crud.upsert_profile", upsert_profile)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.session_crud.update", update_session)
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.session_crud.bind_message_platform", bind_message_platform)
     monkeypatch.setattr(
         "app.adapters.weixin_openclaw.adapter.ChatDispatcher.validate_initial_message_before_save",

@@ -216,6 +216,30 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         await db.flush()
         return (result.rowcount or 0) == 1
 
+    async def update_settings_for_message_platform(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        message_platform_id: int,
+        settings: dict[str, Any],
+    ) -> int:
+        if not settings:
+            return 0
+
+        result = await db.execute(
+            update(ChatSession)
+            .where(
+                ChatSession.uid == uid,
+                ChatSession.message_platform_id == message_platform_id,
+                ChatSession.source.notin_(("http", "ws")),
+            )
+            .values(**settings)
+            .execution_options(synchronize_session="fetch")
+        )
+        await db.flush()
+        return result.rowcount or 0
+
     async def get_multi_by_session_ids(
         self,
         db: AsyncSession,

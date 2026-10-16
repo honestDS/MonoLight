@@ -35,6 +35,7 @@ export function useChatViewSettings({ chat, currentUid, api, profileApi, notify,
   const toolOutputSettingSubmitting = ref(false)
   const agentSettingSubmitting = ref(false)
   const reasoningSettingSubmitting = ref(false)
+  const markdownSettingSubmitting = ref(false)
 
   const currentSessionEnableMarkdown = computed({
     get() {
@@ -55,26 +56,37 @@ export function useChatViewSettings({ chat, currentUid, api, profileApi, notify,
   })
 
   const toggleMarkdown = async (val) => {
-    if (isCurrentSessionReadOnly.value) {
-      notify.warning(t('chat.external_session_read_only'))
+    if (markdownSettingSubmitting.value) return
+
+    const sessionId = currentSessionId.value
+    const previousValue = currentSessionEnableMarkdown.value
+
+    if (!sessionId) {
+      currentSessionEnableMarkdown.value = val
       return
     }
 
     currentSessionEnableMarkdown.value = val
-
-    if (!currentSessionId.value) {
-      return
-    }
-
+    markdownSettingSubmitting.value = true
     try {
-      await api.updateSessionSetting(currentSessionId.value, { enable_markdown: val })
+      await api.updateSessionSetting(sessionId, { enable_markdown: val })
+      const session = sessions.value.find(item => item.session_id === sessionId)
+      if (session) session.enable_markdown = val
     } catch (error) {
       notify.error(error.message || t('chat.setting_failed'))
-      currentSessionEnableMarkdown.value = !val
+      const session = sessions.value.find(item => item.session_id === sessionId)
+      if (session) session.enable_markdown = previousValue
+    } finally {
+      markdownSettingSubmitting.value = false
     }
   }
 
-  const isWsModeComputed = computed(() => transportMode.value === 'ws')
+  const isWsModeComputed = computed(() => {
+    if (isCurrentSessionReadOnly.value) {
+      return Boolean(currentSession.value?.stream_llm_request)
+    }
+    return transportMode.value === 'ws'
+  })
 
   const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(
     currentSession.value,
@@ -184,13 +196,26 @@ export function useChatViewSettings({ chat, currentUid, api, profileApi, notify,
 
   const handleModeChange = async (val) => {
     if (modeSettingSubmitting.value) return
-
-    if (isCurrentSessionReadOnly.value) {
-      notify.warning(t('chat.external_session_read_only'))
-      return
-    }
     if (transportModeChangeBlocked.value) {
       notify.warning(t('chat.transport_change_blocked'))
+      return
+    }
+
+    if (isCurrentSessionReadOnly.value) {
+      const sessionId = currentSessionId.value
+      const enabled = Boolean(val)
+      if (!sessionId || Boolean(currentSession.value?.stream_llm_request) === enabled) return
+
+      modeSettingSubmitting.value = true
+      try {
+        await api.updateSessionSetting(sessionId, { stream_llm_request: enabled })
+        const session = sessions.value.find(item => item.session_id === sessionId)
+        if (session) session.stream_llm_request = enabled
+      } catch (error) {
+        notify.error(error.message || t('chat.setting_failed'))
+      } finally {
+        modeSettingSubmitting.value = false
+      }
       return
     }
 
@@ -211,6 +236,7 @@ export function useChatViewSettings({ chat, currentUid, api, profileApi, notify,
     toolOutputSettingSubmitting,
     agentSettingSubmitting,
     reasoningSettingSubmitting,
+    markdownSettingSubmitting,
     currentSessionEnableMarkdown,
     toggleMarkdown,
     isWsModeComputed,

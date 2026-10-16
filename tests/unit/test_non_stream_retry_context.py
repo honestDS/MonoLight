@@ -64,6 +64,7 @@ def _patch_session_crud(monkeypatch):
             context_summary_revision=0,
             context_content_revision=0,
             llm_request_metadata=None,
+            stream_llm_request=None,
         )
 
     async def fake_get_provider_states(*args, **kwargs):
@@ -1419,6 +1420,7 @@ async def _run_audited_interactive_dispatch(
             context_summary_revision=0,
             context_content_revision=0,
             llm_request_metadata=None,
+            stream_llm_request=None,
         )
 
     db = _DatabaseLikeSession() if use_execution_round_if_complete else _Session()

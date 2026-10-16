@@ -404,22 +404,14 @@ test('loading and active submission flags block tool and agent setting updates',
   assert.deepEqual(fixture.updateRequests, [])
 })
 
-test('mode changes warn for read-only or blocked sessions and format known sources', async () => {
-  const fixture = createFixture({ readOnly: true })
+test('web mode changes respect transport blocks and format known sources', async () => {
+  const fixture = createFixture()
   const settings = createSettings(fixture)
 
+  fixture.chat.transportModeChangeBlocked.value = true
   await settings.handleModeChange(true)
   assert.deepEqual(fixture.modeCalls, [])
-  assert.deepEqual(fixture.notices.warning, ['external session is read-only'])
-
-  fixture.isCurrentSessionReadOnly.value = false
-  fixture.chat.transportModeChangeBlocked.value = true
-  await settings.handleModeChange(false)
-  assert.deepEqual(fixture.modeCalls, [])
-  assert.deepEqual(fixture.notices.warning, [
-    'external session is read-only',
-    'transport change blocked'
-  ])
+  assert.deepEqual(fixture.notices.warning, ['transport change blocked'])
 
   fixture.chat.transportModeChangeBlocked.value = false
   await settings.handleModeChange(true)
@@ -430,4 +422,166 @@ test('mode changes warn for read-only or blocked sessions and format known sourc
   assert.equal(settings.formatSessionSource('http'), 'HTTP')
   assert.equal(settings.formatSessionSource('ws'), 'WebSocket')
   assert.equal(settings.formatSessionSource('external'), 'external')
+})
+
+test('external session mode changes persist stream_llm_request without changing its source', async () => {
+  const session = makeSession('A', {
+    source: 'weixin-openclaw',
+    stream_llm_request: false
+  })
+  const fixture = createFixture({
+    sessions: [session],
+    sessionId: 'A',
+    readOnly: true,
+    transportMode: 'ws'
+  })
+  const settings = createSettings(fixture)
+
+  assert.equal(settings.isWsModeComputed.value, false)
+  await settings.handleModeChange(false)
+  assert.deepEqual(fixture.updateRequests, [])
+
+  await settings.handleModeChange(true)
+  assert.deepEqual(fixture.updateRequests, [
+    { sessionId: 'A', payload: { stream_llm_request: true } }
+  ])
+  assert.equal(session.stream_llm_request, true)
+  assert.equal(session.source, 'weixin-openclaw')
+  assert.deepEqual(fixture.modeCalls, [])
+  assert.equal(settings.isWsModeComputed.value, true)
+
+  await settings.handleModeChange(false)
+  await settings.handleModeChange(false)
+  assert.deepEqual(fixture.updateRequests, [
+    { sessionId: 'A', payload: { stream_llm_request: true } },
+    { sessionId: 'A', payload: { stream_llm_request: false } }
+  ])
+  assert.equal(session.stream_llm_request, false)
+  assert.equal(session.source, 'weixin-openclaw')
+  assert.deepEqual(fixture.modeCalls, [])
+  assert.equal(fixture.transportMode.value, 'ws')
+})
+
+test('external mode save errors leave the session setting unchanged', async () => {
+  const session = makeSession('A', {
+    source: 'weixin-openclaw',
+    stream_llm_request: false
+  })
+  const fixture = createFixture({
+    sessions: [session],
+    sessionId: 'A',
+    readOnly: true,
+    updateSessionSetting: async () => {
+      throw new Error('external mode save failed')
+    }
+  })
+  const settings = createSettings(fixture)
+
+  await settings.handleModeChange(true)
+
+  assert.deepEqual(fixture.updateRequests, [
+    { sessionId: 'A', payload: { stream_llm_request: true } }
+  ])
+  assert.equal(session.stream_llm_request, false)
+  assert.equal(session.source, 'weixin-openclaw')
+  assert.deepEqual(fixture.notices.error, ['external mode save failed'])
+  assert.equal(fixture.chat.modeSettingSubmitting.value, false)
+  assert.deepEqual(fixture.modeCalls, [])
+})
+
+test('pending external mode save ignores duplicates and stays bound to session A', async () => {
+  const sessionA = makeSession('A', {
+    source: 'weixin-openclaw',
+    stream_llm_request: false
+  })
+  const sessionB = makeSession('B', {
+    source: 'weixin-openclaw',
+    stream_llm_request: false
+  })
+  const firstSave = createDeferred()
+  const fixture = createFixture({
+    sessions: [sessionA, sessionB],
+    sessionId: 'A',
+    readOnly: true,
+    updateSessionSetting: async () => firstSave.promise
+  })
+  const settings = createSettings(fixture)
+
+  const pending = settings.handleModeChange(true)
+  assert.equal(fixture.chat.modeSettingSubmitting.value, true)
+
+  await settings.handleModeChange(true)
+  fixture.currentSessionId.value = 'B'
+  await settings.handleModeChange(false)
+  assert.deepEqual(fixture.updateRequests, [
+    { sessionId: 'A', payload: { stream_llm_request: true } }
+  ])
+  assert.equal(sessionA.stream_llm_request, false)
+  assert.equal(sessionB.stream_llm_request, false)
+
+  firstSave.resolve()
+  await pending
+
+  assert.equal(sessionA.stream_llm_request, true)
+  assert.equal(sessionB.stream_llm_request, false)
+  assert.equal(sessionA.source, 'weixin-openclaw')
+  assert.equal(sessionB.source, 'weixin-openclaw')
+  assert.equal(fixture.chat.modeSettingSubmitting.value, false)
+  assert.deepEqual(fixture.modeCalls, [])
+})
+
+test('external read-only session markdown settings persist without changing the source', async () => {
+  const session = makeSession('A', { source: 'weixin-openclaw' })
+  const fixture = createFixture({
+    sessions: [session],
+    sessionId: 'A',
+    readOnly: true
+  })
+  const settings = createSettings(fixture)
+
+  await settings.toggleMarkdown(false)
+
+  assert.deepEqual(fixture.updateRequests, [
+    { sessionId: 'A', payload: { enable_markdown: false } }
+  ])
+  assert.equal(session.enable_markdown, false)
+  assert.equal(session.source, 'weixin-openclaw')
+  assert.equal(settings.markdownSettingSubmitting.value, false)
+})
+
+test('pending external markdown save ignores duplicates and rolls back only session A', async () => {
+  const sessionA = makeSession('A', { source: 'weixin-openclaw' })
+  const sessionB = makeSession('B', {
+    source: 'weixin-openclaw',
+    enable_markdown: false
+  })
+  const firstSave = createDeferred()
+  const fixture = createFixture({
+    sessions: [sessionA, sessionB],
+    sessionId: 'A',
+    readOnly: true,
+    updateSessionSetting: async () => firstSave.promise
+  })
+  const settings = createSettings(fixture)
+
+  const pending = settings.toggleMarkdown(false)
+  assert.equal(settings.markdownSettingSubmitting.value, true)
+
+  fixture.currentSessionId.value = 'B'
+  await settings.toggleMarkdown(true)
+  assert.deepEqual(fixture.updateRequests, [
+    { sessionId: 'A', payload: { enable_markdown: false } }
+  ])
+  assert.equal(sessionA.enable_markdown, false)
+  assert.equal(sessionB.enable_markdown, false)
+
+  firstSave.reject(new Error('external markdown save failed'))
+  await pending
+
+  assert.equal(sessionA.enable_markdown, true)
+  assert.equal(sessionB.enable_markdown, false)
+  assert.equal(sessionA.source, 'weixin-openclaw')
+  assert.equal(sessionB.source, 'weixin-openclaw')
+  assert.equal(settings.markdownSettingSubmitting.value, false)
+  assert.deepEqual(fixture.notices.error, ['external markdown save failed'])
 })

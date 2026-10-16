@@ -46,6 +46,7 @@ from app.core.constants import (
     MSG_TITLE_GENERATED,
     SESSION_MAX_TURNS_UPPER_BOUND,
 )
+from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
@@ -425,6 +426,18 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
 
     data = []
     for row in sessions:
+        stream_llm_request = row.stream_llm_request
+        if stream_llm_request is None:
+            if row.source not in {"http", "ws"}:
+                platform = await message_platform_crud.get_platform_for_session(
+                    db,
+                    uid=row.uid,
+                    session_id=row.session_id,
+                    source=row.source,
+                )
+                stream_llm_request = bool((platform.config or {}).get("stream_llm_request", False)) if platform else False
+            else:
+                stream_llm_request = row.source == "ws"
         data.append(
             {
                 "session_id": row.session_id,
@@ -436,6 +449,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "username": row.username,
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
+                "stream_llm_request": stream_llm_request,
                 "show_tool_calls": row.show_tool_calls,
                 "show_reasoning": row.show_reasoning,
                 "goal_mode": row.goal_mode,
@@ -529,6 +543,7 @@ class SessionSettingRequest(BaseModel):
     show_tool_calls: bool | None = None
     show_reasoning: bool | None = None
     goal_mode: StrictBool = Field(default=None)
+    stream_llm_request: StrictBool = Field(default=None)
     max_turns: StrictInt = Field(default=None, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
     profile_override_id: int | None = Field(default=None, gt=0)
 
@@ -643,18 +658,24 @@ async def update_session_setting(
 
     if not is_admin and session.uid != uid:
         return StandardResponse.error(message=ERR_SESSION_NO_PERMISSION)
-    if (request.enable_markdown is not None or request.transport_mode is not None) and session.source not in {"http", "ws"}:
+    if request.transport_mode is not None and session.source not in {"http", "ws"}:
         return StandardResponse.error(code=403, message=ERR_SESSION_READ_ONLY)
 
+    transport_changed = False
     if request.transport_mode is not None:
         current_transport_mode = session.source or "http"
-        if request.transport_mode != current_transport_mode and await session_reply_work_item_crud.has_active_interactive_work(
+        transport_changed = request.transport_mode != current_transport_mode
+        if transport_changed and await session_reply_work_item_crud.has_active_interactive_work(
             db,
             uid=session.uid,
             session_id=session.session_id,
         ):
             return StandardResponse.error(code=409, message=ERR_SESSION_TRANSPORT_CHANGE_ACTIVE)
         session.source = request.transport_mode
+    if request.stream_llm_request is not None:
+        session.stream_llm_request = request.stream_llm_request
+    elif transport_changed:
+        session.stream_llm_request = None
     if request.enable_markdown is not None:
         session.enable_markdown = request.enable_markdown
     if request.show_tool_calls is not None:

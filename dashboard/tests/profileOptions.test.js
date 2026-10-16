@@ -64,8 +64,13 @@ test('prefers an explicit profile override over an external session profile', ()
   )
 })
 
-test('uses the external session profile id without an explicit override', () => {
-  assert.equal(resolveSessionProfileDisplayId({ source: 'telegram', profile_id: 2 }, null), 2)
+test('ignores an external session profile id without an explicit override', () => {
+  assert.equal(resolveSessionProfileDisplayId({ source: 'telegram', profile_id: 2 }, null), null)
+  assert.equal(resolveSessionProfileDisplayId({ source: 'weixin-openclaw', profile_id: 2 }, null), null)
+  assert.equal(
+    resolveSessionProfileDisplayId({ source: 'telegram', profile_override_id: null, profile_id: 2 }, null),
+    null
+  )
 })
 
 test('ignores a web session profile id without an explicit override', () => {

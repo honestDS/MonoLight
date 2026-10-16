@@ -20,6 +20,7 @@ from app.models.channel import ModelChannel
 from app.models.message_platform import MessagePlatform, MessagePlatformCreate, MessagePlatformResponse, MessagePlatformStatus, MessagePlatformUpdate
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
+from app.models.session import ChatSession
 from app.models.user import User
 from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
@@ -41,7 +42,7 @@ async def message_platform_configuration_db(tmp_path) -> AsyncGenerator[AsyncSes
         finally:
             cursor.close()
 
-    await clone_sqlite_schema(tmp_path / "message-platform-configuration.db", tables=[ModelChannel.__table__, PromptLibrary.__table__, Profile.__table__, MessagePlatform.__table__, User.__table__])
+    await clone_sqlite_schema(tmp_path / "message-platform-configuration.db", tables=[ModelChannel.__table__, ChatSession.__table__, PromptLibrary.__table__, Profile.__table__, MessagePlatform.__table__, User.__table__])
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

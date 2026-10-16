@@ -58,6 +58,10 @@ class ChatSession(SQLModel, table=True):
     )
     title: str | None = Field(default=None, max_length=255)
     enable_markdown: bool = Field(default=False)
+    stream_llm_request: bool | None = Field(
+        default=None,
+        description="会话模型请求是否流式；空值兼容历史外部会话的平台配置",
+    )
     goal_mode: bool = Field(default=DEFAULT_SESSION_GOAL_MODE)
     max_turns: int = Field(default=DEFAULT_SESSION_MAX_TURNS, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
     show_tool_calls: bool = Field(default=True)

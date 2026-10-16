@@ -23,6 +23,7 @@ from app.core.constants import (
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.crud.session.session import session_crud
 from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
 from app.core.profile_validation import get_validated_profile_for_assignment
 from app.core.security import get_current_user
@@ -228,8 +229,26 @@ async def update_message_platform(
             profile_id=next_profile_id,
             uid=next_uid,
         )
+    submitted_data = platform_in.model_dump(exclude_unset=True)
+    settings = {}
+    submitted_config = submitted_data.get("config")
+    if isinstance(submitted_config, dict):
+        submitted_session_settings = submitted_config.get("session_settings")
+        if isinstance(submitted_session_settings, dict):
+            settings.update(submitted_session_settings)
+        if "stream_llm_request" in submitted_config:
+            settings["stream_llm_request"] = submitted_config["stream_llm_request"]
+    if "profile_id" in submitted_data:
+        settings["profile_override_id"] = next_profile_id
     try:
         platform = await message_platform_crud.update(db, db_obj=platform, obj_in=data, commit=False)
+        if next_uid and settings:
+            await session_crud.update_settings_for_message_platform(
+                db,
+                uid=next_uid,
+                message_platform_id=platform_id,
+                settings=settings,
+            )
         response = StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_UPDATED)
         await db.commit()
     except IntegrityError as exc:
