@@ -50,6 +50,7 @@ MonoLight is more than a chat interface or a thin wrapper around one-off tool ca
 | Item | Minimum Requirement | Recommended Configuration |
 | --- | --- | --- |
 | Server configuration | 2 CPU cores / 2 GB RAM | 2 CPU cores / 8 GB RAM |
+| Python version | Python 3.13 or later | — |
 
 ### Model Configuration
 
