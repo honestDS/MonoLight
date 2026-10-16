@@ -70,10 +70,17 @@ class SessionReplyResult:
             "error": error,
         }
 
-    async def wait_for_session_stream(self, *, uid: str, session_id: str, history_message_id: int = 0):
+    async def wait_for_session_stream(
+        self,
+        *,
+        uid: str,
+        session_id: str,
+        history_message_id: int = 0,
+        after_work_sequence_no: int = 0,
+        interactive_only: bool = False,
+    ):
         from app.providers.database import AsyncSessionLocal
 
-        after_work_sequence_no = 0
         while True:
             async with AsyncSessionLocal() as db:
                 work = await session_reply_work_item_crud.get_next_for_session_resume(
@@ -82,6 +89,7 @@ class SessionReplyResult:
                     session_id=session_id,
                     history_message_id=history_message_id,
                     after_sequence_no=after_work_sequence_no,
+                    interactive_only=interactive_only,
                 )
                 resume_after_sequence_no = (
                     await session_reply_stream_event_crud.get_latest_resume_boundary_sequence(
@@ -102,7 +110,11 @@ class SessionReplyResult:
                 resume_mode=True,
                 history_message_id=history_message_id,
             ):
-                yield event
+                response_event = dict(event)
+                response_event["work_sequence_no"] = work.sequence_no
+                if "request_ids" not in response_event:
+                    response_event["request_ids"] = get_work_request_ids(work)
+                yield response_event
 
     async def wait_for_result(self, work_id: int) -> dict[str, Any]:
         from app.providers.database import AsyncSessionLocal

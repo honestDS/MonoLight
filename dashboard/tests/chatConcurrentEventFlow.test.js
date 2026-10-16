@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { createHistoryMergeTracker } from '../src/composables/chat/historyMergeTracker.js'
-import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from '../src/composables/chat/workLifecycleTracker.js'
+import { createWorkLifecycleTracker } from '../src/composables/chat/workLifecycleTracker.js'
 import { mergeAssistantResponseIntoList } from '../src/utils/assistantResponseIdentity.js'
 
 const userMessage = requestId => ({
@@ -37,9 +37,6 @@ const createEventDriver = () => {
         && !lifecycle.isAcceptedTerminalEvent(terminalEvent)
       ) return
       messages = mergeAssistantResponseIntoList(messages, message)
-    },
-    shouldApplyOwnProactiveReply(event, requestId) {
-      return shouldApplyOwnProactiveReply(lifecycle, event, requestId)
     },
     shouldProcessCompletedWork(event) {
       return !lifecycle.isWorkTerminal(event.work_id)
@@ -209,9 +206,7 @@ test('proactive and done terminal order preserves the first confirmation card bo
     for (const eventType of eventTypes) {
       const event = terminalEvents[eventType]
       driver.lifecycle('finishWorkLifecycle', event)
-      const shouldApply = eventType === 'proactive'
-        ? driver.shouldApplyOwnProactiveReply(event, 'request-a')
-        : driver.shouldProcessCompletedWork(event)
+      const shouldApply = driver.shouldProcessCompletedWork(event)
       if (!shouldApply) continue
 
       confirmationCardBody = event.confirmationCardBody
