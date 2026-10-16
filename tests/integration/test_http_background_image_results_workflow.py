@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, select
 
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatcher as dispatcher_module
@@ -17,6 +17,10 @@ import app.core.session_reply_queue.executor_metadata as executor_metadata_modul
 import app.core.tools.send_file_to_user as send_file_to_user_module
 from app.api.v1.chat import router
 from app.core.background_tasks.manager import BackgroundTaskManager
+from app.core.prompts import (
+    BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT,
+    BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
+)
 from app.core.security import get_current_user
 from app.core.utils.background_task_result import build_background_task_success_result
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
@@ -28,7 +32,7 @@ from app.models.background_task import (
     BackgroundTaskStatus,
 )
 from app.models.channel import ModelChannel
-from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
@@ -39,8 +43,7 @@ from app.models.session_reply_work_item import (
 )
 from app.models.user import User
 from app.providers.database import get_db
-from app.providers.llm.client import LLMClient
-from app.transformers.openai import OpenAIResponsesTransformer
+from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 UID = "http-image-user"
 SESSION_ID = "http-image-session"
@@ -165,10 +168,12 @@ async def test_http_reply_work_status_exposes_hidden_background_image_activity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
 async def test_completed_background_image_message_is_returned_by_http_history(
     database_factory,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
 ) -> None:
     image_path = tmp_path / "completed-background-image.png"
     image = Image.new("RGB", (2, 2), color=(32, 128, 224))
@@ -189,7 +194,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                     {
                         "model_id": MODEL_ID,
                         "usage": "CHAT",
-                        "protocol": "OPENAI",
+                        "protocol": protocol,
                         "context_window_k": 32,
                         "max_tokens": 512,
                     }
@@ -280,50 +285,202 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert work_id is not None
             assert task_id is not None
 
-        async def fake_generate(**kwargs):
-            messages = kwargs["messages"]
-            has_send_file_result = any(message.role == MessageRole.TOOL and message.tool_call_id == "send-file-call" for message in messages)
-            if not has_send_file_result:
-                background_result_message = next(message for message in messages if message.role == MessageRole.TOOL and message.tool_call_id == "generate-image-call")
-                background_result = json.loads(background_result_message.content or "{}")
+        provider_payloads = []
+
+        def provider_items(payload: dict) -> list[dict]:
+            return payload["messages"] if protocol == "OPENAI" else payload["input"]
+
+        def find_guidance(items: list[dict]) -> tuple[int, dict]:
+            user_items = [(index, item) for index, item in enumerate(items) if item.get("role") == MessageRole.USER.value and isinstance(item.get("content"), str)]
+            assert user_items
+            guidance_items = []
+            for index, item in user_items:
+                assert item["content"].strip()
+                content = json.loads(item["content"])
+                if isinstance(content, dict) and content.get("user_message") is None:
+                    guidance_items.append((index, content))
+            assert len(guidance_items) == 1
+            guidance_index, guidance = guidance_items[0]
+            assert guidance_index == user_items[-1][0] == len(items) - 1
+            return guidance_index, guidance
+
+        def find_tool_output(items: list[dict], call_id: str) -> dict:
+            if protocol == "OPENAI":
+                tool_item = next(item for item in items if item.get("role") == MessageRole.TOOL.value and item.get("tool_call_id") == call_id)
+                content = tool_item["content"]
+            else:
+                tool_item = next(item for item in items if item.get("type") == "function_call_output" and item.get("call_id") == call_id)
+                content = tool_item["output"]
+            assert isinstance(content, str)
+            return json.loads(content)
+
+        def find_send_file_call(items: list[dict]) -> dict:
+            if protocol == "OPENAI":
+                return next(tool_call for item in items if item.get("role") == MessageRole.ASSISTANT.value for tool_call in item.get("tool_calls") or [] if tool_call.get("function", {}).get("name") == "send_file_to_user")
+            return next(item for item in items if item.get("type") == "function_call" and item.get("name") == "send_file_to_user")
+
+        def tool_names(payload: dict) -> list[str]:
+            tools = payload.get("tools") or []
+            if protocol == "OPENAI":
+                return [tool["function"]["name"] for tool in tools]
+            return [tool["name"] for tool in tools]
+
+        async def fake_post_json(_transformer, **kwargs):
+            payload = kwargs["payload"]
+            provider_payloads.append(payload)
+            items = provider_items(payload)
+            system_indexes = [index for index, item in enumerate(items) if item.get("role") == MessageRole.SYSTEM.value]
+            assert system_indexes == [0]
+            _guidance_index, guidance = find_guidance(items)
+            has_tools = bool(payload.get("tools"))
+            expected_guidance = BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT
+            if not has_tools:
+                expected_guidance = f"{expected_guidance}\n\n{BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT}"
+            assert guidance == {
+                "user_message": None,
+                "platform_guidance": expected_guidance,
+            }
+
+            if len(provider_payloads) == 1:
+                assert has_tools
+                assert tool_names(payload) == ["send_file_to_user"]
+                background_result = find_tool_output(items, "generate-image-call")
                 assert background_result["status"] == "succeeded"
                 assert background_result["tool_name"] == "generate_image"
                 result_path = background_result["content"]["path"]
-                message = InternalMessage(
-                    role=MessageRole.ASSISTANT,
-                    tool_calls=[
-                        InternalToolCall(
-                            id="send-file-call",
-                            name="send_file_to_user",
-                            arguments={"files": [{"path": result_path}]},
-                        )
+                assert result_path == str(image_path)
+                arguments = json.dumps({"files": [{"path": result_path}]}, ensure_ascii=False)
+                if protocol == "OPENAI":
+                    return {
+                        "id": "chatcmpl-background-image",
+                        "object": "chat.completion",
+                        "model": MODEL_ID,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "send-file-call",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "send_file_to_user",
+                                                "arguments": arguments,
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    }
+                return {
+                    "id": "resp-background-image",
+                    "object": "response",
+                    "model": MODEL_ID,
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "send-file-call",
+                            "call_id": "send-file-call",
+                            "name": "send_file_to_user",
+                            "arguments": arguments,
+                            "status": "completed",
+                        }
                     ],
-                )
-            else:
-                message = InternalMessage(
-                    role=MessageRole.ASSISTANT,
-                    content="后台图片已发送",
-                )
-            return InternalResponse(
-                message=message,
-                model=kwargs["model_id"],
-                usage={},
-            )
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                }
 
-        async def noop_send_session_event(*_args, **_kwargs):
-            return None
+            assert len(provider_payloads) == 2
+            assert not has_tools
+            assert "tools" not in payload
+            assert payload["tool_choice"] == "none"
+            send_file_call = find_send_file_call(items)
+            if protocol == "OPENAI":
+                send_file_call_id = send_file_call["id"]
+                send_file_arguments = json.loads(send_file_call["function"]["arguments"])
+            else:
+                send_file_call_id = send_file_call["call_id"]
+                send_file_arguments = json.loads(send_file_call["arguments"])
+            assert send_file_arguments == {"files": [{"path": str(image_path)}]}
+            send_file_result = find_tool_output(items, send_file_call_id)
+            assert send_file_result["type"] == "files_to_user"
+            assert send_file_result["status"] == "success"
+            assert len(send_file_result["files"]) == 1
+            if protocol == "OPENAI":
+                return {
+                    "id": "chatcmpl-background-image-final",
+                    "object": "chat.completion",
+                    "model": MODEL_ID,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "后台图片已发送"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+            return {
+                "id": "resp-background-image-final",
+                "object": "response",
+                "model": MODEL_ID,
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "后台图片已发送"}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+
+        events = []
+
+        async def capture_send_session_event(uid: str, session_id: str, event: dict) -> None:
+            events.append((uid, session_id, event))
 
         monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
-        monkeypatch.setattr(LLMClient, "generate", fake_generate)
+        transformer_cls = OpenAIChatCompletionsTransformer if protocol == "OPENAI" else OpenAIResponsesTransformer
+        monkeypatch.setattr(transformer_cls, "_post_json", fake_post_json)
         monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(send_file_to_user_module, "_get_encryption_key", lambda: b"t" * 32)
         monkeypatch.setattr(send_file_to_user_module, "FILE_TOKEN_DIR", tmp_path / "file_download_tokens")
-        monkeypatch.setattr(executor_lifecycle_module, "send_session_event", noop_send_session_event)
+        monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_send_session_event)
 
         await executor_lifecycle_module.execute_session_reply_work(work_id, "image-worker")
+
+        assert len(provider_payloads) == 2
+        first_items = provider_items(provider_payloads[0])
+        second_items = provider_items(provider_payloads[1])
+        first_system = next(item for item in first_items if item.get("role") == MessageRole.SYSTEM.value)
+        second_system = next(item for item in second_items if item.get("role") == MessageRole.SYSTEM.value)
+        assert first_system["content"] == second_system["content"]
+        first_prefix = first_items[:-1]
+        second_prefix = second_items[:-1]
+        assert second_prefix[: len(first_prefix)] == first_prefix
+
+        assert len(events) == 1
+        event_uid, event_session_id, event = events[0]
+        assert (event_uid, event_session_id) == (UID, SESSION_ID)
+        assert event["type"] == "proactive_reply"
+        assert event["content"] == "后台图片已发送"
+        assert len(event["files"]) == 1
+        assert event["files"][0]["mime_type"] == "image/png"
+        assert event["files"][0]["size"] == image_size
+        assert send_file_to_user_module.resolve_file_token(event["files"][0]["id"]) == image_path.resolve()
+        event_dump = json.dumps(event, ensure_ascii=False)
+        assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in event_dump
+        assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in event_dump
+        assert not any(item.get("role") == MessageRole.USER.value for item in event.get("history", []))
 
         async with factory() as db:
             persisted_work = await db.get(SessionReplyWorkItem, work_id)
@@ -333,6 +490,17 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert persisted_work.status == SessionReplyWorkStatus.SUCCEEDED
             assert persisted_work.result_message_id is not None
             assert persisted_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+            assert persisted_task.extra["submission_context"] == []
+            persisted_messages = (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all()
+            assert not any(message.role == MessageRole.USER for message in persisted_messages)
+            assert all(message.guidance_prompt is None for message in persisted_messages)
+            persisted_response = (persisted_work.execution_state or {}).get("response")
+            assert isinstance(persisted_response, dict)
+            assert persisted_response["content"] == "后台图片已发送"
+            persisted_response_dump = json.dumps(persisted_response, ensure_ascii=False)
+            assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in persisted_response_dump
+            assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in persisted_response_dump
+            assert not any(item.get("role") == MessageRole.USER.value for item in persisted_response.get("history", []))
             result_message_id = persisted_work.result_message_id
 
         async def request_history() -> list[dict]:
@@ -347,10 +515,18 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                         "/api/v1/chat/sessions/history",
                         params={"session_id": SESSION_ID},
                     )
+                    reply_work = await client.get(f"/api/v1/chat/reply-works/{work_id}")
 
             assert pending_activity.status_code == 200
             assert pending_activity.json()["data"] == {"has_pending_activity": False}
             assert history.status_code == 200
+            assert reply_work.status_code == 200
+            reply_work_data = reply_work.json()["data"]
+            assert reply_work_data["response"]["content"] == "后台图片已发送"
+            reply_work_dump = json.dumps(reply_work_data, ensure_ascii=False)
+            assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in reply_work_dump
+            assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in reply_work_dump
+            assert not any(item.get("role") == MessageRole.USER.value for item in reply_work_data["response"].get("history", []))
             return history.json()["data"]
 
         def find_assistant_file_items(history_items: list[dict]) -> list[tuple[dict, dict]]:
@@ -369,6 +545,10 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             return matches
 
         history_items = await request_history()
+        history_dump = json.dumps(history_items, ensure_ascii=False)
+        assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in history_dump
+        assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in history_dump
+        assert not any(item.get("role") == MessageRole.USER.value for item in history_items)
         assistant_file_items = find_assistant_file_items(history_items)
         assert len(assistant_file_items) == 1
         history_item, assistant_files = assistant_file_items[0]
@@ -384,6 +564,8 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         repeated_matches = find_assistant_file_items(await request_history())
         assert len(repeated_matches) == 1
         assert repeated_matches[0][0]["id"] == history_item["id"]
+        assert len(provider_payloads) == 2
+        assert len(events) == 1
 
 
 @pytest.mark.asyncio
@@ -639,7 +821,24 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
         async def fake_post_json(_transformer, **kwargs):
             payload = kwargs["payload"]
             provider_payloads.append(payload)
+            assert "tools" not in payload
+            assert payload["tool_choice"] == "none"
             input_items = payload["input"]
+            assert input_items
+            assert input_items[-1].get("role") == "user"
+            final_user_content = input_items[-1].get("content")
+            assert isinstance(final_user_content, str) and final_user_content.strip()
+            final_user_payload = json.loads(final_user_content)
+            assert final_user_payload["user_message"] is None
+            platform_guidance = final_user_payload["platform_guidance"]
+            expected_platform_guidance = f"{BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT}\n\n{BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT}"
+            assert platform_guidance == expected_platform_guidance
+            assert platform_guidance.count(BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT) == 1
+            assert platform_guidance.count(BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT) == 1
+            for item in input_items[:-1]:
+                if item.get("role") != "user" or not isinstance(item.get("content"), str):
+                    continue
+                assert "platform_guidance" not in json.loads(item["content"])
             pending_call_ids = set()
             function_calls = []
             function_call_outputs = []
