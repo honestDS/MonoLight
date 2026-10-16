@@ -59,6 +59,7 @@ def _patch_session_crud(monkeypatch):
     async def get_session_by_id(*args, **kwargs):
         return SimpleNamespace(
             goal_mode=False,
+            source="http",
             max_turns=5,
             context_summary_revision=0,
             context_content_revision=0,
@@ -151,6 +152,7 @@ def _context_length_generation_state(*, stream_event_callback=None):
         chat_channel_obj=_Channel(),
         channel_rule=SimpleNamespace(priority=1),
         latest_llm_request_metadata=None,
+        stream_llm_request=None,
         current_turn=1,
         stream_event_callback=stream_event_callback,
         request_metadata_callback=None,
@@ -1412,6 +1414,7 @@ async def _run_audited_interactive_dispatch(
     async def get_session_by_id(*args, **kwargs):
         return SimpleNamespace(
             goal_mode=False,
+            source="http",
             max_turns=5,
             context_summary_revision=0,
             context_content_revision=0,

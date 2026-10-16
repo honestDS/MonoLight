@@ -5,6 +5,7 @@ import vm from 'node:vm'
 import { createPinia, setActivePinia } from 'pinia'
 import { effectScope, nextTick, reactive, ref } from 'vue'
 import { useUserPermissionsStore } from '../src/composables/useUserPermissions.js'
+import { createMessagePlatformForm, loadMessagePlatformForm, buildMessagePlatformPayload, isValidMessagePlatformMaxTurns } from '../src/utils/messagePlatformForm.js'
 
 const messagePlatformsViewSource = readFileSync(
   new URL('../src/views/MessagePlatformsView.vue', import.meta.url),
@@ -129,12 +130,16 @@ const createHarness = async (t, options = {}) => {
     adminApi,
     clearInterval: timerId => clearedTimers.push(timerId),
     console: { log() {}, warn() {}, error() {}, info() {} },
+    createMessagePlatformForm,
     ElMessage,
+    loadMessagePlatformForm,
     onMounted: callback => mountedCallbacks.push(callback),
     onUnmounted: callback => unmountedCallbacks.push(callback),
     QRCode: { toDataURL: async () => 'stub-qrcode-data' },
     reactive,
     ref,
+    buildMessagePlatformPayload,
+    isValidMessagePlatformMaxTurns,
     messagePlatformApi,
     profileApi,
     setInterval: (...args) => {
@@ -229,12 +234,12 @@ test('ordinary create and update preserve business fields while omitting uid', a
   harness.module.form.is_enabled = true
   harness.module.form.uid = 'other-user'
   harness.module.form.profile_id = 17
-  harness.module.form.config = {
+  Object.assign(harness.module.form.config, {
     api_timeout_ms: 22000,
     long_poll_timeout_ms: 44000,
     poll_interval_ms: 1500,
     merge_single_poll_messages: false,
-  }
+  })
 
   const ordinaryCreatePayload = harness.module.buildPayload()
   assert.equal(hasOwn(ordinaryCreatePayload, 'uid'), false)
@@ -253,6 +258,14 @@ test('ordinary create and update preserve business fields while omitting uid', a
       long_poll_timeout_ms: 44000,
       poll_interval_ms: 1500,
       merge_single_poll_messages: false,
+      stream_llm_request: false,
+      session_settings: {
+        enable_markdown: false,
+        goal_mode: true,
+        max_turns: 5,
+        show_tool_calls: true,
+        show_reasoning: true,
+      },
     },
   }])
   assert.equal(hasOwn(harness.api.platformCreates[0], 'uid'), false)
@@ -288,6 +301,14 @@ test('ordinary create and update preserve business fields while omitting uid', a
     long_poll_timeout_ms: 45000,
     poll_interval_ms: 1600,
     merge_single_poll_messages: false,
+    stream_llm_request: false,
+    session_settings: {
+      enable_markdown: false,
+      goal_mode: true,
+      max_turns: 5,
+      show_tool_calls: true,
+      show_reasoning: true,
+    },
   })
 
   harness.module.form.uid = null
@@ -311,6 +332,14 @@ test('ordinary create and update preserve business fields while omitting uid', a
         long_poll_timeout_ms: 45000,
         poll_interval_ms: 1600,
         merge_single_poll_messages: false,
+        stream_llm_request: false,
+        session_settings: {
+          enable_markdown: false,
+          goal_mode: true,
+          max_turns: 5,
+          show_tool_calls: true,
+          show_reasoning: true,
+        },
       },
     },
   }])
@@ -362,6 +391,14 @@ test('superusers load admin users, submit selected owners, and require uid for e
       long_poll_timeout_ms: 30000,
       poll_interval_ms: 1000,
       merge_single_poll_messages: true,
+      stream_llm_request: false,
+      session_settings: {
+        enable_markdown: false,
+        goal_mode: true,
+        max_turns: 5,
+        show_tool_calls: true,
+        show_reasoning: true,
+      },
     },
   }])
 
@@ -410,6 +447,14 @@ test('superusers load admin users, submit selected owners, and require uid for e
         long_poll_timeout_ms: 30000,
         poll_interval_ms: 1700,
         merge_single_poll_messages: true,
+        stream_llm_request: false,
+        session_settings: {
+          enable_markdown: false,
+          goal_mode: true,
+          max_turns: 5,
+          show_tool_calls: true,
+          show_reasoning: true,
+        },
       },
     },
   }])

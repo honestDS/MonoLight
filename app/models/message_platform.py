@@ -2,12 +2,13 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, field_validator
 from pydantic import Field as PydanticField
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy import UniqueConstraint, event
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel
 
+from app.core.constants import DEFAULT_SESSION_GOAL_MODE, DEFAULT_SESSION_MAX_TURNS, SESSION_MAX_TURNS_UPPER_BOUND
 from app.core.crypto import decrypt_api_key, encrypt_api_key
 from app.core.utils.time import get_local_time
 
@@ -28,6 +29,23 @@ class MessagePlatformStatus(StrEnum):
 class MessagePlatformLanguage(StrEnum):
     ZH = "zh"
     EN = "en"
+
+
+class MessagePlatformSessionSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enable_markdown: StrictBool = False
+    goal_mode: StrictBool = DEFAULT_SESSION_GOAL_MODE
+    max_turns: StrictInt = PydanticField(default=DEFAULT_SESSION_MAX_TURNS, ge=1, le=SESSION_MAX_TURNS_UPPER_BOUND)
+    show_tool_calls: StrictBool = True
+    show_reasoning: StrictBool = True
+
+
+class MessagePlatformConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    session_settings: MessagePlatformSessionSettings = PydanticField(default_factory=MessagePlatformSessionSettings)
+    stream_llm_request: StrictBool = False
 
 
 class MessagePlatformBase(SQLModel):
@@ -101,6 +119,12 @@ def _decrypted_config(config: dict[str, Any] | None) -> dict[str, Any]:
     return decrypted
 
 
+def _validate_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    if config is None:
+        return None
+    return MessagePlatformConfig.model_validate(config).model_dump(exclude_unset=True)
+
+
 @event.listens_for(MessagePlatform, "before_insert")
 @event.listens_for(MessagePlatform, "before_update")
 def encrypt_config_before_save(mapper, connection, target):
@@ -120,6 +144,11 @@ class MessagePlatformCreate(SQLModel):
     config: dict[str, Any] = PydanticField(default_factory=dict)
     state: dict[str, Any] = PydanticField(default_factory=dict)
 
+    @field_validator("config", mode="before")
+    @classmethod
+    def validate_config(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_config(value)
+
 
 class MessagePlatformUpdate(SQLModel):
     name: str | None = PydanticField(None, min_length=1, max_length=100)
@@ -131,6 +160,11 @@ class MessagePlatformUpdate(SQLModel):
     account_id: str | None = None
     config: dict[str, Any] | None = None
     state: dict[str, Any] | None = None
+
+    @field_validator("config", mode="before")
+    @classmethod
+    def validate_config(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _validate_config(value)
 
 
 class MessagePlatformResponse(BaseModel):

@@ -74,11 +74,23 @@ def _normalize_create_payload(payload: MessagePlatformCreate) -> dict:
     return data
 
 
-def _normalize_update_payload(platform_type: MessagePlatformType, payload: MessagePlatformUpdate) -> dict:
+def _normalize_update_payload(platform: MessagePlatform, payload: MessagePlatformUpdate) -> dict:
     data = payload.model_dump(exclude_unset=True)
     data.pop("state", None)
-    if "config" in data and data["config"] is not None and platform_type == MessagePlatformType.WEIXIN_OPENCLAW:
-        data["config"] = normalize_weixin_openclaw_config(data["config"])
+    if "config" in data and data["config"] is not None:
+        current_config = dict(platform.config or {})
+        submitted_config = data["config"]
+        if "session_settings" in submitted_config:
+            submitted_config = {
+                **submitted_config,
+                "session_settings": {
+                    **dict(current_config.get("session_settings") or {}),
+                    **submitted_config["session_settings"],
+                },
+            }
+        data["config"] = {**current_config, **submitted_config}
+        if platform.platform_type == MessagePlatformType.WEIXIN_OPENCLAW:
+            data["config"] = normalize_weixin_openclaw_config(data["config"])
     return data
 
 
@@ -193,13 +205,11 @@ async def update_message_platform(
         if not await user_crud.get_by_uid(db, submitted_uid, lock_for_reference_write=True):
             raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
     platform = await _get_accessible_platform(db, platform_id, current_user, for_update=True)
-    data = _normalize_update_payload(platform.platform_type, platform_in)
+    data = _normalize_update_payload(platform, platform_in)
     if "uid" in data:
         data["uid"] = _normalize_uid(data.get("uid"))
         if not current_user.is_superuser and data["uid"] != platform.uid:
             raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
-    if "config" in data:
-        data["config"] = {**dict(platform.config or {}), **data["config"]}
     if data.get("config", {}).get("token"):
         data["status"] = MessagePlatformStatus.CONNECTED
         data["last_error"] = ""

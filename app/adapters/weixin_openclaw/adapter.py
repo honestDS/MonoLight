@@ -36,6 +36,8 @@ from app.core.constants import (
     ERR_SESSION_ID_REQUIRED,
     ERR_WEIXIN_OPENCLAW_GET_UPDATES_FAILED,
 )
+from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.crud.session.session import session_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
@@ -46,6 +48,7 @@ from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.session import generate_session_title_for_selected_profile
 from app.models.message import InternalMessage, MessageRole
+from app.models.message_platform import MessagePlatformSessionSettings
 
 logger = get_logger(__name__)
 
@@ -192,6 +195,23 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 attachments,
                 additional_system_prompt=build_weixin_openclaw_concise_output_system_prompt(),
             )
+            profile_id = getattr(profile, "id", None)
+            if message_platform_id is not None and isinstance(profile_id, int) and not isinstance(profile_id, bool) and profile_id > 0:
+                platform = await message_platform_crud.get(db, message_platform_id)
+                platform_config = getattr(platform, "config", None)
+                if platform is not None and platform.uid == uid and isinstance(platform_config, dict) and "session_settings" in platform_config:
+                    settings = MessagePlatformSessionSettings.model_validate(platform_config["session_settings"]).model_dump(exclude_unset=True)
+                    if settings:
+                        session = await session_crud.upsert_profile(
+                            db,
+                            session_id=session_id,
+                            uid=uid,
+                            profile_id=profile_id,
+                            source="weixin-openclaw",
+                            stream_requested=stream_requested,
+                        )
+                        if session is not None and session.uid == uid and session.source == "weixin-openclaw":
+                            await session_crud.update(db, db_obj=session, obj_in=settings, commit=False)
             await session_reply_queue_manager.submit_user_message(
                 db,
                 uid=uid,

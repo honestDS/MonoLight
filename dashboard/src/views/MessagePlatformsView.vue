@@ -80,6 +80,12 @@ import WeixinOcLoginDialog from '../components/weixin_oc/WeixinOcLoginDialog.vue
 import { adminApi, messagePlatformApi, profileApi } from '../api'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import { useUserPermissionsStore } from '../composables/useUserPermissions'
+import {
+  buildMessagePlatformPayload,
+  createMessagePlatformForm,
+  isValidMessagePlatformMaxTurns,
+  loadMessagePlatformForm
+} from '../utils/messagePlatformForm'
 
 const { t } = useI18n()
 const userPermissions = useUserPermissionsStore()
@@ -107,21 +113,9 @@ const loginPlatformId = ref(null)
 const qrcodeImageUrl = ref('')
 let loginTimer = null
 
-const defaultForm = () => ({
-  name: '',
-  platform_type: 'WEIXIN_OPENCLAW',
-  language: 'zh',
-  use_stream_dispatch: false,
-  is_enabled: true,
-  uid: userPermissions.isSuperuser ? '' : userPermissions.currentUser?.uid || '',
-  profile_id: null,
-  config: {
-    api_timeout_ms: 15000,
-    long_poll_timeout_ms: 30000,
-    poll_interval_ms: 1000,
-    merge_single_poll_messages: true
-  },
-  state: {}
+const defaultForm = () => createMessagePlatformForm({
+  uid: userPermissions.currentUser?.uid || '',
+  isSuperuser: userPermissions.isSuperuser
 })
 
 const form = reactive(defaultForm())
@@ -215,32 +209,14 @@ const handleEdit = (row) => {
   isEdit.value = true
   currentId.value = row.id
   resetForm()
-  form.name = row.name
-  form.platform_type = row.platform_type
-  form.language = row.language || 'zh'
-  form.use_stream_dispatch = Boolean(row.use_stream_dispatch)
-  form.is_enabled = row.is_enabled
-  form.uid = userPermissions.isSuperuser ? row.uid || '' : userPermissions.currentUser?.uid || ''
-  form.profile_id = row.profile_id ?? null
-  form.config = { ...defaultForm().config, ...(row.config || {}) }
+  Object.assign(form, loadMessagePlatformForm(row, {
+    uid: userPermissions.currentUser?.uid || '',
+    isSuperuser: userPermissions.isSuperuser
+  }))
   dialogVisible.value = true
 }
 
-const buildPayload = () => ({
-  name: form.name.trim(),
-  platform_type: form.platform_type,
-  language: form.language,
-  use_stream_dispatch: form.use_stream_dispatch,
-  is_enabled: form.is_enabled,
-  ...(userPermissions.isSuperuser ? { uid: form.uid || null } : {}),
-  profile_id: form.profile_id ?? null,
-  config: {
-    api_timeout_ms: form.config.api_timeout_ms || 15000,
-    long_poll_timeout_ms: form.config.long_poll_timeout_ms || 30000,
-    poll_interval_ms: form.config.poll_interval_ms ?? 1000,
-    merge_single_poll_messages: form.config.merge_single_poll_messages ?? true
-  }
-})
+const buildPayload = () => buildMessagePlatformPayload(form, { includeUid: userPermissions.isSuperuser })
 
 const submitForm = async () => {
   if (!form.name || !form.platform_type) {
@@ -248,6 +224,9 @@ const submitForm = async () => {
   }
   if (userPermissions.isSuperuser && form.is_enabled && !form.uid) {
     return ElMessage.warning(t('messagePlatforms.uid_required'))
+  }
+  if (!isValidMessagePlatformMaxTurns(form.config?.session_settings?.max_turns)) {
+    return ElMessage.warning(t('chat.max_turns_invalid'))
   }
   submitting.value = true
   try {
