@@ -48,7 +48,8 @@ async def test_session_override_profile_takes_priority_over_platform_and_default
 
 
 @pytest.mark.asyncio
-async def test_platform_profile_is_used_when_session_has_no_override(monkeypatch):
+@pytest.mark.parametrize("message_platform_id", [7, None])
+async def test_platform_profile_is_used_when_session_has_no_override(monkeypatch, message_platform_id):
     db = SimpleNamespace()
     calls = []
     platform_profile = SimpleNamespace(id=22, uid="user-1")
@@ -56,7 +57,7 @@ async def test_platform_profile_is_used_when_session_has_no_override(monkeypatch
     async def get_session(db_arg, session_id):
         assert db_arg is db
         calls.append(("session", session_id))
-        return SimpleNamespace(uid="user-1", profile_override_id=None)
+        return SimpleNamespace(uid="user-1", profile_override_id=None, message_platform_id=7)
 
     async def get_platform(db_arg, platform_id):
         assert db_arg is db
@@ -82,7 +83,7 @@ async def test_platform_profile_is_used_when_session_has_no_override(monkeypatch
         db,
         uid="user-1",
         session_id="session-1",
-        message_platform_id=7,
+        message_platform_id=message_platform_id,
     )
 
     assert profile is platform_profile

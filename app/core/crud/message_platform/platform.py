@@ -138,30 +138,50 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         if source != "weixin-openclaw":
             return None
 
-        user_id = _parse_weixin_openclaw_session_user_id(session_id)
         session_result = await db.execute(select(ChatSession).where(ChatSession.session_id == session_id, ChatSession.uid == uid))
         session = session_result.scalars().first()
-        if session is not None and session.source != source:
+        if session is None or session.source != source:
+            return None
+
+        if session.message_platform_id is not None:
+            result = await db.execute(
+                select(MessagePlatform).where(
+                    MessagePlatform.id == session.message_platform_id,
+                    MessagePlatform.uid == uid,
+                    MessagePlatform.platform_type == MessagePlatformType.WEIXIN_OPENCLAW,
+                    MessagePlatform.is_enabled.is_(True),
+                    MessagePlatform.status == MessagePlatformStatus.CONNECTED,
+                )
+            )
+            return result.scalars().first()
+
+        user_id = (session.message_platform_user_id or "").strip() or _parse_weixin_openclaw_session_user_id(session_id)
+        if not user_id:
             return None
 
         result = await db.execute(
-            select(MessagePlatform)
-            .where(
-                MessagePlatform.is_enabled.is_(True),
-                MessagePlatform.platform_type == MessagePlatformType.WEIXIN_OPENCLAW,
-                MessagePlatform.status == MessagePlatformStatus.CONNECTED,
+            select(MessagePlatform).where(
                 MessagePlatform.uid == uid,
+                MessagePlatform.platform_type == MessagePlatformType.WEIXIN_OPENCLAW,
             )
-            .order_by(MessagePlatform.id.asc())
         )
         platforms = result.scalars().all()
-        if not user_id:
-            return platforms[0] if len(platforms) == 1 else None
+        matching_platforms = []
         for platform in platforms:
             context_tokens = (platform.state or {}).get("context_tokens")
             if isinstance(context_tokens, dict) and str(context_tokens.get(user_id) or "").strip():
-                return platform
-        return platforms[0] if len(platforms) == 1 else None
+                matching_platforms.append(platform)
+
+        if len(matching_platforms) == 1:
+            selected_platform = matching_platforms[0]
+        elif not matching_platforms and len(platforms) == 1:
+            selected_platform = platforms[0]
+        else:
+            return None
+
+        if not selected_platform.is_enabled or selected_platform.status != MessagePlatformStatus.CONNECTED:
+            return None
+        return selected_platform
 
     async def update_runtime_state(
         self,

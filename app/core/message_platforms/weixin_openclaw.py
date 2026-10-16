@@ -4,9 +4,10 @@ from typing import Any
 
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
 from app.adapters.weixin_openclaw.constants import INBOUND_COLLECTION_MAX_WAIT_SECONDS, INBOUND_COLLECTION_QUIET_PERIOD_SECONDS
-from app.adapters.weixin_openclaw.message import merge_message_pair
+from app.adapters.weixin_openclaw.message import merge_message_pair, parse_session_user_id
 from app.core.audit.confirmation import is_confirmation_candidate, message_has_quote
 from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.crud.session.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.base import MessagePlatformHandler
@@ -218,11 +219,21 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
             if not self.is_pollable(platform):
                 yield None
                 return
+            session = await session_crud.get_by_session_id(db, session_id)
+            if session is None or session.uid != uid or session.source != source:
+                yield None
+                return
+            user_id = (session.message_platform_user_id or "").strip()
+            if not user_id and session.message_platform_id is None:
+                user_id = parse_session_user_id(session_id)
+            if not user_id:
+                yield None
+                return
             assert platform is not None
             adapter = self._build_adapter(platform)
             self._restore_context_tokens(adapter, platform)
         try:
-            yield adapter
+            yield adapter, user_id
         finally:
             await adapter.close()
 
@@ -252,10 +263,11 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
     async def send_session_event(self, uid: str, session_id: str, source: str, event: dict[str, Any]) -> bool:
         if source not in self.sources:
             return False
-        async with self._build_session_adapter(uid, session_id, source) as adapter:
-            if adapter is None:
+        async with self._build_session_adapter(uid, session_id, source) as session_adapter:
+            if session_adapter is None:
                 return False
-            return await adapter.send_session_event(uid, session_id, event)
+            adapter, user_id = session_adapter
+            return await adapter.send_session_event(uid, session_id, event, message_platform_user_id=user_id)
 
 
 weixin_openclaw_platform_handler = WeixinOpenClawPlatformHandler()
