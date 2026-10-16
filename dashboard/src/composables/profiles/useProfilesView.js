@@ -44,6 +44,7 @@ export function useProfilesView() {
   const systemSettings = reactive({
     log_locale: 'zh',
     temp_dir_max_size_mb: 1024,
+    llm_request_max_size_mb: 32,
     audit_retention_days: 90,
     audit_report_email: '',
     session_reply_max_concurrency: 4

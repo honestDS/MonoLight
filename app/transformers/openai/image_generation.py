@@ -12,6 +12,7 @@ from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
+from app.core.utils.llm_request_policy import build_upstream_rejection
 from app.core.utils.model_request_headers import build_model_request_headers
 
 from ..base import BaseImageGenerationTransformer
@@ -91,6 +92,9 @@ class OpenAIImageGenerationTransformer(BaseImageGenerationTransformer):
                 async with session.post(url, **request_kwargs) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
+                        rejection = build_upstream_rejection(status=resp.status, detail=txt)
+                        if rejection is not None:
+                            raise rejection
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     result = json.loads(txt)
                     if not isinstance(result, dict):

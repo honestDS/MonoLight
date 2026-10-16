@@ -17,7 +17,14 @@ from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import KNOWLEDGE_ORGANIZATION_SUMMARY_MAX_TOKENS, MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
 from app.core.crud.knowledge.embedding_transition import knowledge_base_migration_crud
 from app.core.crud.knowledge.job import knowledge_job_crud
-from app.core.exceptions import BaseBusinessException, LLMException, ParameterException, ResourceNotFoundException, ServerException
+from app.core.exceptions import (
+    BaseBusinessException,
+    LLMException,
+    LLMRequestRejectedException,
+    ParameterException,
+    ResourceNotFoundException,
+    ServerException,
+)
 from app.core.knowledge import (
     managed as managed_module,
 )
@@ -56,6 +63,7 @@ from app.core.knowledge.organization_runtime import (
 )
 from app.core.knowledge.organization_types import KnowledgeOrganizationPlan
 from app.core.prompts import KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT, KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT
+from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
@@ -2549,3 +2557,121 @@ async def test_new_execution_retries_failed_long_item_analysis(session_factory):
         stages = list((await db.execute(select(KnowledgeOrganizationStage))).scalars())
         assert all(stage.status == KnowledgeOrganizationStageStatus.INVALIDATED for stage in stages if stage.stage_key in old_keys)
         assert any(stage.status == KnowledgeOrganizationStageStatus.COMPLETED and stage.model_snapshot["purpose"].startswith("analysis:") for stage in stages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejection_kind", ["local", "upstream413"], ids=["local", "upstream-413"])
+@pytest.mark.parametrize("stage_kind", ["plan", "analysis"], ids=["plan", "analysis"])
+async def test_knowledge_organization_request_rejection_is_terminal_without_retry(
+    session_factory,
+    rejection_kind: str,
+    stage_kind: str,
+):
+    private_response = "<html>private organization response</html>"
+    if stage_kind == "analysis":
+        content = " ".join(f"fact-{index}" for index in range(500))
+        # Keep the scope budget at 180 while leaving the analysis payload room.
+        model = replace(
+            _model(input_budget_tokens=180),
+            context_window_tokens=10000,
+            system_prompt_tokens=10000 - 768 - 256 - 180,
+        )
+    else:
+        content = "stable organization content"
+        model = _model(input_budget_tokens=4000)
+
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, revision = await _add_item(
+            db,
+            knowledge_base_id=knowledge_base.id,
+            key=f"rejection-{stage_kind}",
+            content=content,
+        )
+        assert knowledge_base.id is not None
+        assert item.id is not None
+        assert revision.id is not None
+        knowledge_base_id = knowledge_base.id
+        knowledge_id = item.id
+        revision_id = revision.id
+        before_item = (item.content, item.version, item.content_hash)
+
+    calls = 0
+
+    async def reject_request(payload):
+        nonlocal calls
+        calls += 1
+        if rejection_kind == "local":
+            serialize_llm_json_request(payload, max_size_bytes=0)
+            raise AssertionError("serialize_llm_json_request should have rejected the request")
+
+        rejection = build_upstream_rejection(status=413, detail=private_response)
+        assert rejection is not None
+        raise rejection
+
+    async def rejecting_model_caller(_model_config, *, scope):
+        await reject_request({"scope": [scope_item.content for scope_item in scope]})
+
+    async def rejecting_analysis_caller(_model_config, *, content):
+        await reject_request({"content": content})
+
+    with pytest.raises(LLMRequestRejectedException) as exc_info:
+        await execute_knowledge_organization(
+            session_factory,
+            uid="user-1",
+            knowledge_base_id=knowledge_base_id,
+            model_candidates=(model,),
+            model_caller=rejecting_model_caller if stage_kind == "plan" else lambda _model_config, *, scope: _keep_plan_for_scope(scope),
+            analysis_caller=rejecting_analysis_caller,
+            semantic_neighbor_loader=lambda _scope, _collection: {},
+        )
+
+    rejection = exc_info.value
+    assert type(rejection) is LLMRequestRejectedException
+    assert not isinstance(rejection, executor_module.KnowledgeOrganizationModelFailedError)
+    assert calls == 1
+    assert rejection.source == ("local" if rejection_kind == "local" else "upstream")
+    assert rejection.reason == "request_too_large"
+    if rejection_kind == "upstream413":
+        assert rejection.upstream_status == 413
+    friendly_error = rejection.render_message()
+    assert friendly_error
+    assert type(rejection).__name__ not in friendly_error
+    assert executor_module.KnowledgeOrganizationModelFailedError.__name__ not in friendly_error
+    assert private_response not in friendly_error
+
+    async with session_factory() as db:
+        stages = list((await db.execute(select(KnowledgeOrganizationStage).order_by(KnowledgeOrganizationStage.id))).scalars().all())
+        jobs = list((await db.execute(select(KnowledgeJob).order_by(KnowledgeJob.id))).scalars().all())
+        current_item = await db.get(ManagedKnowledgeItem, knowledge_id)
+        revisions = list((await db.execute(select(ManagedKnowledgeRevision).where(ManagedKnowledgeRevision.knowledge_id == knowledge_id).order_by(ManagedKnowledgeRevision.id))).scalars().all())
+        current_knowledge_base = await db.get(KnowledgeBase, knowledge_base_id)
+
+    assert stages
+    assert all(stage.status == KnowledgeOrganizationStageStatus.INVALIDATED for stage in stages)
+    assert all(stage.error == friendly_error for stage in stages)
+    purposes = [stage.model_snapshot["purpose"] for stage in stages]
+    if stage_kind == "analysis":
+        assert any(purpose == "initial" for purpose in purposes)
+        assert any(purpose.startswith("analysis:") for purpose in purposes)
+    else:
+        assert purposes == ["initial"]
+
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.status == KnowledgeJobStatus.FAILED
+    assert job.error == friendly_error
+    assert job.locked_by is None
+    assert job.lock_until is None
+    assert current_knowledge_base is not None
+    assert current_knowledge_base.organization_error == friendly_error
+    persisted_errors = [friendly_error, job.error, current_knowledge_base.organization_error, *(stage.error for stage in stages)]
+    assert all(error == friendly_error for error in persisted_errors)
+    assert all(type(rejection).__name__ not in error for error in persisted_errors)
+    assert all(executor_module.KnowledgeOrganizationModelFailedError.__name__ not in error for error in persisted_errors)
+    assert all(private_response not in error for error in persisted_errors)
+
+    assert current_item is not None
+    assert (current_item.content, current_item.version, current_item.content_hash) == before_item
+    assert current_item.organization_lock_token is None
+    assert [revision.id for revision in revisions] == [revision_id]

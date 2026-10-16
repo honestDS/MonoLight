@@ -1,7 +1,7 @@
 import uuid
 
 from app.core.constants import LOG_MEMORY_RECALL_CHANNEL_FAILED
-from app.core.exceptions import LLMException
+from app.core.exceptions import LLMException, LLMRequestRejectedException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import (
@@ -106,6 +106,8 @@ async def run_memory_recall_precheck(
                     await update_output_metadata(context, response)
                     break
                 except LLMException as exc:
+                    if isinstance(exc, LLMRequestRejectedException) and not exc.allow_channel_fallback:
+                        raise
                     priority = getattr(context.channel_rule, "priority", None)
                     if isinstance(priority, int) and not isinstance(priority, bool):
                         excluded_priorities.add(priority)
@@ -122,6 +124,8 @@ async def run_memory_recall_precheck(
                         ),
                     )
                     if not await fallback_channel(context, excluded_priorities):
+                        if isinstance(exc, LLMRequestRejectedException):
+                            raise
                         _log_failure(context, "llm_exception")
                         return build_result(context, "failed", "llm_exception")
                     if correction_messages is not None:
@@ -143,6 +147,8 @@ async def run_memory_recall_precheck(
 
         _log_failure(context, "invalid_recall_response")
         return build_result(context, "failed", "invalid_recall_response")
+    except LLMRequestRejectedException:
+        raise
     except Exception as exc:
         error_type = type(exc).__name__
         _log_failure(context, error_type)

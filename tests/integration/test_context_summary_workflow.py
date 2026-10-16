@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ from sqlmodel import select
 
 from app.core.constants import GOAL_EXECUTION_PHASE_RUNNING
 from app.core.dispatchers import interactive_generation as interactive_generation_module
-from app.core.exceptions import LLMContextLengthException
+from app.core.exceptions import LLMContextLengthException, LLMRequestRejectedException
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_summary import cleanup as context_summary_cleanup
 from app.core.utils.context_summary import merge as context_summary_merge
@@ -21,6 +22,7 @@ from app.core.utils.context_summary import stage as context_summary_stage
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
+from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage, ContextSummaryStageStatus
 from app.models.message import InternalMessage, InternalResponse, Message, MessageRole
 from app.models.session import ChatSession
@@ -481,3 +483,254 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
     assert any("overflow recovery summary" in str(content) for content in attempts[1])
     assert session.context_summary == "overflow recovery summary"
     assert session.context_summary_message_id == 2
+
+
+def _summary_rejection_models() -> dict[int, ContextSummaryModelSnapshot]:
+    primary = ContextSummaryModelSnapshot(
+        channel_id=11,
+        channel_name="integration-summary",
+        model_id="summary-model",
+        protocol="openai",
+        base_url="https://summary.invalid",
+        api_key="secret",
+        priority=1,
+        context_window_tokens=65_536,
+        max_output_tokens=1024,
+        temperature=0.2,
+        top_p=None,
+        safety_margin_tokens=0,
+        input_budget_tokens=64_512,
+    )
+    return {
+        1: primary,
+        2: replace(
+            primary,
+            channel_id=12,
+            channel_name="integration-summary-fallback",
+            model_id="summary-model-fallback",
+            priority=2,
+        ),
+    }
+
+
+def _raise_summary_request_rejection(
+    kind: str,
+    *,
+    model: ContextSummaryModelSnapshot,
+    prompt: str,
+) -> None:
+    if kind == "local":
+        payload = {
+            "model": model.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        serialize_llm_json_request(payload, max_size_bytes=0)
+        raise AssertionError("serialize_llm_json_request should have rejected the request")
+
+    rejection = build_upstream_rejection(status=413, detail="<html>private</html>")
+    assert rejection is not None
+    raise rejection
+
+
+@pytest.mark.asyncio
+async def test_context_summary_local_request_rejection_invalidates_stage_without_fallback(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_summary_history(context_summary_database)
+    models = _summary_rejection_models()
+    selected_priorities: list[set[int]] = []
+    model_calls: list[ContextSummaryModelSnapshot] = []
+
+    async def select_model(*_args, excluded_priorities=None, **_kwargs):
+        excluded = set(excluded_priorities or ())
+        selected_priorities.append(excluded)
+        return next((models[priority] for priority in (1, 2) if priority not in excluded), None)
+
+    async def call_model(*, model: ContextSummaryModelSnapshot, prompt: str) -> str:
+        model_calls.append(model)
+        _raise_summary_request_rejection("local", model=model, prompt=prompt)
+
+    monkeypatch.setattr(context_summary_stage, "select_context_summary_model", select_model)
+    monkeypatch.setattr(context_summary_stage, "call_context_summary_model", call_model)
+
+    async with context_summary_database() as db:
+        snapshot = await build_context_summary_snapshot(
+            db,
+            session_id="summary-session",
+            uid="summary-user",
+            expected_summary_message_id=None,
+            before_id=5,
+            target_message_id=2,
+            content_revision=0,
+        )
+        with pytest.raises(LLMRequestRejectedException) as exc_info:
+            await context_summary_stage.generate_snapshot_summary_result(
+                db,
+                session_id="summary-session",
+                uid="summary-user",
+                profile=SimpleNamespace(id=1),
+                cfg=SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object())),
+                snapshot=snapshot,
+                existing_summary=None,
+                existing_summary_revision=0,
+                safety_margin_tokens=0,
+            )
+
+    rejection = exc_info.value
+    assert rejection.source == "local"
+    assert rejection.allow_channel_fallback is False
+    assert len(model_calls) == 1
+    assert [model.priority for model in model_calls] == [1]
+    assert selected_priorities == [set()]
+
+    async with context_summary_database() as db:
+        stages = list((await db.execute(select(ContextSummaryStage))).scalars().all())
+        fragments = list((await db.execute(select(ContextSummaryFragment))).scalars().all())
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "summary-session"))).scalar_one()
+
+    assert len(stages) == 1
+    assert stages[0].status == ContextSummaryStageStatus.INVALIDATED
+    assert stages[0].succeeded_fragment_count == 0
+    assert fragments == []
+    assert session.context_summary is None
+    assert session.context_summary_message_id is None
+    assert session.context_summary_revision == 0
+    assert session.context_content_revision == 0
+
+
+@pytest.mark.asyncio
+async def test_context_summary_upstream_request_rejection_exhausts_channels(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_summary_history(context_summary_database)
+    models = _summary_rejection_models()
+    selected_priorities: list[set[int]] = []
+    model_calls: list[ContextSummaryModelSnapshot] = []
+
+    async def select_model(*_args, excluded_priorities=None, **_kwargs):
+        excluded = set(excluded_priorities or ())
+        selected_priorities.append(excluded)
+        return next((models[priority] for priority in (1, 2) if priority not in excluded), None)
+
+    async def call_model(*, model: ContextSummaryModelSnapshot, prompt: str) -> str:
+        model_calls.append(model)
+        _raise_summary_request_rejection("upstream", model=model, prompt=prompt)
+
+    monkeypatch.setattr(context_summary_stage, "select_context_summary_model", select_model)
+    monkeypatch.setattr(context_summary_stage, "call_context_summary_model", call_model)
+
+    async with context_summary_database() as db:
+        snapshot = await build_context_summary_snapshot(
+            db,
+            session_id="summary-session",
+            uid="summary-user",
+            expected_summary_message_id=None,
+            before_id=5,
+            target_message_id=2,
+            content_revision=0,
+        )
+        with pytest.raises(LLMRequestRejectedException) as exc_info:
+            await context_summary_stage.generate_snapshot_summary_result(
+                db,
+                session_id="summary-session",
+                uid="summary-user",
+                profile=SimpleNamespace(id=1),
+                cfg=SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object())),
+                snapshot=snapshot,
+                existing_summary=None,
+                existing_summary_revision=0,
+                safety_margin_tokens=0,
+            )
+
+    rejection = exc_info.value
+    friendly_message = rejection.render_message()
+    assert rejection.source == "upstream"
+    assert rejection.upstream_status == 413
+    assert rejection.allow_channel_fallback is True
+    assert "413" in friendly_message
+    assert "<html>private</html>" not in friendly_message
+    assert len(model_calls) == 2
+    assert [model.priority for model in model_calls] == [1, 2]
+    assert selected_priorities == [set(), {1}, {1, 2}]
+
+    async with context_summary_database() as db:
+        stages = list((await db.execute(select(ContextSummaryStage))).scalars().all())
+        fragments = list((await db.execute(select(ContextSummaryFragment))).scalars().all())
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "summary-session"))).scalar_one()
+
+    assert len(stages) == 2
+    assert all(stage.status == ContextSummaryStageStatus.INVALIDATED for stage in stages)
+    assert all(stage.succeeded_fragment_count == 0 for stage in stages)
+    assert fragments == []
+    assert session.context_summary is None
+    assert session.context_summary_message_id is None
+    assert session.context_summary_revision == 0
+    assert session.context_content_revision == 0
+
+
+@pytest.mark.asyncio
+async def test_context_summary_upstream_rejection_falls_back_to_completed_summary_stage(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_summary_history(context_summary_database)
+    models = _summary_rejection_models()
+    selected_priorities: list[set[int]] = []
+    model_calls: list[ContextSummaryModelSnapshot] = []
+
+    async def select_model(*_args, excluded_priorities=None, **_kwargs):
+        excluded = set(excluded_priorities or ())
+        selected_priorities.append(excluded)
+        return next((models[priority] for priority in (1, 2) if priority not in excluded), None)
+
+    async def call_model(*, model: ContextSummaryModelSnapshot, prompt: str) -> str:
+        model_calls.append(model)
+        if model.priority == 1:
+            _raise_summary_request_rejection("upstream", model=model, prompt=prompt)
+        return "short summary"
+
+    monkeypatch.setattr(context_summary_stage, "select_context_summary_model", select_model)
+    monkeypatch.setattr(context_summary_stage, "call_context_summary_model", call_model)
+
+    async with context_summary_database() as db:
+        snapshot = await build_context_summary_snapshot(
+            db,
+            session_id="summary-session",
+            uid="summary-user",
+            expected_summary_message_id=None,
+            before_id=5,
+            target_message_id=2,
+            content_revision=0,
+        )
+        generated = await context_summary_stage.generate_snapshot_summary_result(
+            db,
+            session_id="summary-session",
+            uid="summary-user",
+            profile=SimpleNamespace(id=1),
+            cfg=SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object())),
+            snapshot=snapshot,
+            existing_summary=None,
+            existing_summary_revision=0,
+            safety_margin_tokens=0,
+        )
+
+    assert generated.content == "short summary"
+    assert generated.completed_stage is not None
+    assert len(model_calls) == 2
+    assert [model.priority for model in model_calls] == [1, 2]
+    assert selected_priorities == [set(), {1}]
+
+    async with context_summary_database() as db:
+        stages = list((await db.execute(select(ContextSummaryStage))).scalars().all())
+        fragments = list((await db.execute(select(ContextSummaryFragment))).scalars().all())
+
+    assert len(stages) == 2
+    assert sorted(stage.status for stage in stages) == [
+        ContextSummaryStageStatus.COMPLETED,
+        ContextSummaryStageStatus.INVALIDATED,
+    ]
+    assert len(fragments) == 1
+    assert fragments[0].content == "short summary"
+    assert fragments[0].status.value == "completed"

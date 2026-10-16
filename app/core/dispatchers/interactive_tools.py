@@ -438,6 +438,8 @@ async def handle_interactive_tool_round(
                 response["llm_request_metadata"] = state.latest_llm_request_metadata
             return response
         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+        if audit_round.request_error is not None:
+            raise audit_round.request_error
         return None
 
     audit_claim_token = None

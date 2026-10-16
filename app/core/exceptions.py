@@ -97,6 +97,73 @@ class LLMException(BaseBusinessException):
         super().__init__(code=code, message=message, **kwargs)
 
 
+class LLMRequestRejectedException(LLMException):
+    def __init__(
+        self,
+        message: str,
+        *,
+        source: str,
+        reason: str,
+        allow_channel_fallback: bool = False,
+        upstream_status: int | None = None,
+        upstream_detail: Any = None,
+        code: int = 400,
+        data: dict[str, Any] | None = None,
+        **kwargs,
+    ):
+        self.source = source
+        self.reason = reason
+        self.allow_channel_fallback = allow_channel_fallback
+        self.upstream_status = upstream_status
+        self.upstream_detail = upstream_detail
+
+        merged_data = dict(data or {})
+        merged_data.update(source=source, reason=reason)
+        if upstream_status is not None:
+            merged_data["upstream_status"] = upstream_status
+
+        super().__init__(message=message, code=code, data=merged_data, **kwargs)
+
+
+def find_llm_request_rejection(exc: BaseException) -> LLMRequestRejectedException | None:
+    seen: set[int] = set()
+    first_fallback: LLMRequestRejectedException | None = None
+
+    def visit(current: BaseException) -> LLMRequestRejectedException | None:
+        nonlocal first_fallback
+
+        current_id = id(current)
+        if current_id in seen:
+            return None
+        seen.add(current_id)
+
+        if isinstance(current, LLMRequestRejectedException):
+            if not current.allow_channel_fallback:
+                return current
+            if first_fallback is None:
+                first_fallback = current
+
+        if isinstance(current, BaseExceptionGroup):
+            for nested in current.exceptions:
+                rejection = visit(nested)
+                if rejection is not None:
+                    return rejection
+
+        cause = current.__cause__
+        if cause is not None:
+            rejection = visit(cause)
+            if rejection is not None:
+                return rejection
+        elif not current.__suppress_context__ and current.__context__ is not None:
+            rejection = visit(current.__context__)
+            if rejection is not None:
+                return rejection
+
+        return None
+
+    return visit(exc) or first_fallback
+
+
 class LLMModelCapabilityException(LLMException):
     """The selected model repeatedly violated a required output contract."""
 

@@ -25,6 +25,7 @@ from app.core.crud.context_summary.fragment import (
     context_summary_fragment_crud,
 )
 from app.core.crud.context_summary.stage import context_summary_stage_crud
+from app.core.exceptions import LLMRequestRejectedException, find_llm_request_rejection
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT
@@ -148,6 +149,8 @@ async def call_fixed_summary_model(
                     )
                 )
             return generated
+        except LLMRequestRejectedException:
+            raise
         except Exception as exc:
             last_error = exc
             logger.bind(
@@ -549,6 +552,9 @@ async def generate_snapshot_summary_with_model(
         await invalidate_summary_stage(stage=persisted_stage)
         if contains_context_summary_work_invalid(exc):
             raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="fragment execution")) from exc
+        rejection = find_llm_request_rejection(exc)
+        if rejection is not None:
+            raise rejection
         raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_LAYER_FAILED, error=error)) from exc
 
     logger.bind(
@@ -597,6 +603,7 @@ async def generate_snapshot_summary_result(
 ) -> GeneratedSummaryResult:
     excluded_priorities: set[int] = set()
     call_context = "context_summary"
+    last_rejection: LLMRequestRejectedException | None = None
 
     while True:
         await ensure_context_summary_work_valid(work_validity_checker)
@@ -616,6 +623,8 @@ async def generate_snapshot_summary_result(
                 snapshot=snapshot,
             )
             await release_db_session(db)
+            if last_rejection is not None:
+                raise last_rejection
             return GeneratedSummaryResult(
                 content=None,
                 message_count=summarized_message_count,
@@ -637,6 +646,23 @@ async def generate_snapshot_summary_result(
             )
         except ContextSummaryWorkInvalidError:
             raise
+        except LLMRequestRejectedException as exc:
+            if not exc.allow_channel_fallback:
+                raise
+            last_rejection = exc
+            excluded_priorities.add(model.priority)
+            call_context = "context_summary_retry"
+            logger.bind(
+                uid=uid,
+                session_id=session_id,
+                channel_id=model.channel_id,
+                channel_name=model.channel_name,
+                model_id=model.model_id,
+                stage_priority=model.priority,
+            ).warning(
+                "Context summary request rejected before model fallback: {error}",
+                error=str(exc),
+            )
         except ContextSummaryLayerError as exc:
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"

@@ -221,6 +221,8 @@ export default {
   log_locale_hint: 'Controls the language used when system logs are written to the database, including log lists and live logs.',
   temp_dir_max_size_mb: 'Temp Directory Limit (MB)',
   temp_dir_max_size_mb_hint: 'Controls the maximum space allowed for each user temp directory. When the limit is exceeded, the background cleaner removes the oldest temporary files first.',
+  llm_request_max_size_mb: 'Model Request Limit (MiB)',
+  llm_request_max_size_mb_hint: 'Limits the size of each request sent to the model. Requests over the limit are not sent.',
   audit_retention_days: 'Audit Retention Days',
   audit_retention_days_hint: 'Audit files are cleaned by this age only during system startup. No scheduled audit cleanup runs while the system is active. The default is 90 days.',
   audit_report_email: 'Audit Report Recipient',

@@ -4,8 +4,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.exceptions import LLMRequestRejectedException
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_audit as executor_audit_module
+from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request
 from app.models.session_reply_work_item import SessionReplyWorkType
 
 
@@ -386,3 +388,98 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
 
     assert unknown_calls[0]["audit_record_id"] == 42
     assert unknown_calls[0]["claim_token"] == "claim-token"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "upstream"])
+@pytest.mark.parametrize(
+    "work_type",
+    [
+        SessionReplyWorkType.FOREGROUND_REPLY,
+        SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+    ],
+)
+async def test_consumer_delivers_request_rejection_for_active_audit_work(monkeypatch, source, work_type):
+    consumer = consumer_module.SessionReplyConsumer()
+    unknown_calls = []
+    failure_calls = []
+    retry_calls = []
+    raw_html = "<html><body>private upstream rejection body</body></html>"
+    work = SimpleNamespace(
+        work_type=work_type,
+        execution_state={
+            SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: {
+                "audit_record_id": 42,
+                "claim_token": "claim-token",
+            }
+        },
+    )
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    if source == "local":
+        with pytest.raises(LLMRequestRejectedException) as exc_info:
+            serialize_llm_json_request({"content": "request body"}, max_size_bytes=0)
+        rejection = exc_info.value
+    else:
+        rejection = build_upstream_rejection(status=413, detail=raw_html)
+        assert rejection is not None
+
+    async def execute_work(work_id: int, worker_id: str) -> None:
+        raise rejection
+
+    async def get_work(db, work_id: int):
+        return work
+
+    async def has_events(db, *, work_id: int) -> bool:
+        return False
+
+    async def mark_unknown(work_id: int, worker_id: str, error: str) -> None:
+        unknown_calls.append((work_id, worker_id, error))
+
+    async def fail_work(work_id: int, worker_id: str, error: str, *, user_error: str | None = None) -> None:
+        failure_calls.append(
+            {
+                "work_id": work_id,
+                "worker_id": worker_id,
+                "error": error,
+                "user_error": user_error,
+            }
+        )
+
+    async def release_for_retry(*args, **kwargs) -> None:
+        retry_calls.append((args, kwargs))
+
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(consumer_module, "execute_session_reply_work", execute_work)
+    monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(consumer_module.session_reply_stream_event_crud, "has_events", has_events)
+    monkeypatch.setattr(consumer_module, "mark_work_audit_execution_unknown", mark_unknown)
+    monkeypatch.setattr(consumer_module, "fail_session_reply_work", fail_work)
+    monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "release_for_retry", release_for_retry)
+
+    await consumer._run_claimed(work_id=7, worker_id="worker-1", attempt_count=1, max_attempts=5)
+
+    assert len(unknown_calls) == 1
+    assert unknown_calls[0][:2] == (7, "worker-1")
+    assert len(failure_calls) == 1
+    user_error = failure_calls[0]["user_error"]
+    assert user_error == rejection.render_message()
+    assert raw_html not in user_error
+    if source == "local":
+        assert "本地拦截" in user_error
+        assert "本次调用未发送" in user_error
+    else:
+        assert "413" in user_error
+        assert "全局请求大小上限" in user_error
+    assert retry_calls == []

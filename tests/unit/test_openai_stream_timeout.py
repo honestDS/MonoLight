@@ -12,6 +12,17 @@ from app.transformers.openai import chat_completions as openai_module
 STREAM_TIMEOUT = 0.08
 
 
+@pytest.fixture(autouse=True)
+def isolate_llm_request_max_bytes(monkeypatch):
+    async def load_llm_request_max_bytes() -> int:
+        return 32 * 1024 * 1024
+
+    monkeypatch.setattr(
+        "app.core.utils.llm_request_policy.load_llm_request_max_bytes",
+        load_llm_request_max_bytes,
+    )
+
+
 def _sse_content(content: str) -> bytes:
     payload = {"choices": [{"delta": {"content": content}}]}
     return f"data: {json.dumps(payload)}\n".encode()
@@ -213,4 +224,31 @@ async def test_role_only_chunk_does_not_reset_stream_timeout(monkeypatch):
         await _collect_stream(openai_module.OpenAIChatCompletionsTransformer())
 
     assert exc_info.value.message == ERR_LLM_STREAM_TIMEOUT
+    assert response_context.exited is True
+
+
+@pytest.mark.asyncio
+async def test_slow_request_limit_loading_does_not_consume_stream_timeout(monkeypatch):
+    async def slow_load_llm_request_max_bytes() -> int:
+        await asyncio.sleep(STREAM_TIMEOUT * 2)
+        return 32 * 1024 * 1024
+
+    monkeypatch.setattr(
+        "app.core.utils.llm_request_policy.load_llm_request_max_bytes",
+        slow_load_llm_request_max_bytes,
+    )
+    first = _sse_content("first")
+    response_context = _FakeResponseContext(
+        _FakeResponse(
+            [
+                (0, first),
+                (0, b"data: [DONE]\n"),
+            ]
+        )
+    )
+    _patch_http(monkeypatch, response_context)
+
+    chunks = await _collect_stream(openai_module.OpenAIChatCompletionsTransformer())
+
+    assert chunks == [json.loads(first.decode().removeprefix("data: "))]
     assert response_context.exited is True

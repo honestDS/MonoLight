@@ -13,6 +13,7 @@ from app.core.constants import (
     KNOWLEDGE_ORGANIZATION_SUMMARY_MAX_TOKENS,
 )
 from app.core.crud.knowledge.organization import knowledge_organization_fragment_crud
+from app.core.exceptions import find_llm_request_rejection
 from app.core.i18n import t
 from app.core.knowledge import organization_pipeline, organization_scope, organization_stages
 from app.core.knowledge.errors import (
@@ -239,6 +240,14 @@ async def _execute_analysis_stage(
             await organization_stages._fail_and_invalidate_stage(session_factory, stage=stage, error=f"{type(exc).__name__}: {exc}")
             raise
         except Exception as exc:
+            rejection = find_llm_request_rejection(exc)
+            if rejection is not None:
+                await organization_stages._fail_and_invalidate_stage(
+                    session_factory,
+                    stage=stage,
+                    error=rejection.render_message(),
+                )
+                raise rejection
             last_error = exc
             if attempt + 1 >= KNOWLEDGE_ORGANIZATION_MODEL_MAX_ATTEMPTS:
                 await organization_stages._fail_and_invalidate_stage(session_factory, stage=stage, error=f"{type(exc).__name__}: {exc}")

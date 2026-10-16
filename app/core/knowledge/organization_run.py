@@ -29,7 +29,7 @@ from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.crud.knowledge.organization import knowledge_organization_stage_crud
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
-from app.core.exceptions import ResourceNotFoundException
+from app.core.exceptions import ResourceNotFoundException, find_llm_request_rejection
 from app.core.i18n import t
 from app.core.knowledge import organization_analysis, organization_plan, organization_reduction, organization_runtime, organization_scope, organization_types
 from app.core.knowledge.errors import (
@@ -251,6 +251,9 @@ async def _execute_knowledge_organization_run(
             )
             stage_count += 1 + added_analysis_stages
         except Exception as exc:
+            rejection = find_llm_request_rejection(exc)
+            if rejection is not None:
+                raise rejection
             if _contains_exception(exc, KnowledgeOrganizationContextExceededError):
                 raise KnowledgeOrganizationContextExceededError() from exc
             if _contains_exception(exc, KnowledgeOrganizationNotConvergedError):
@@ -363,7 +366,11 @@ async def _mark_direct_organization_job_terminal(
     result: organization_types.KnowledgeOrganizationExecutionResult | None,
     error: BaseException | None,
 ) -> bool:
-    error_message = None if error is None else f"{type(error).__name__}: {error}"
+    if error is None:
+        error_message = None
+    else:
+        rejection = find_llm_request_rejection(error)
+        error_message = rejection.render_message() if rejection is not None else f"{type(error).__name__}: {error}"
     async with session_factory() as db:
         if error is None:
             updated = await knowledge_job_crud.mark_succeeded(
