@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
@@ -19,6 +22,8 @@ import app.core.message_platforms.weixin_openclaw as weixin_openclaw_platform_mo
 from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
 from app.adapters.weixin_openclaw.outbound import build_weixin_openclaw_concise_output_system_prompt
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawMessage
+from app.api.v1 import chat as chat_api
+from app.api.v1 import message_platforms as message_platforms_api
 from app.core.constants import (
     ERR_MESSAGE_PLATFORM_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
@@ -30,6 +35,8 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.message_platforms.manager import MessagePlatformPollingManager
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
+from app.core.security import get_current_user
+from app.handler import register_handlers
 from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalResponse, Message, MessageRole, MessageType
 from app.models.message_platform import MessagePlatform, MessagePlatformStatus, MessagePlatformType
@@ -38,6 +45,7 @@ from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
 from app.models.user import User
+from app.providers.database import get_db
 
 UID = "owner"
 EXTERNAL_USER = "external-user"
@@ -426,7 +434,7 @@ async def test_message_platform_session_settings_flow_through_queue_and_dispatch
 
 
 @pytest.mark.asyncio
-async def test_message_platform_session_settings_update_existing_and_legacy_sessions(
+async def test_message_platform_defaults_do_not_overwrite_existing_and_legacy_sessions(
     database_factory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -461,6 +469,7 @@ async def test_message_platform_session_settings_update_existing_and_legacy_sess
         async with factory() as db:
             session = await db.get(ChatSession, SESSION_ID)
             assert session is not None
+            assert session.stream_llm_request is False
             session.profile_override_id = data["override_profile_id"]
             platform = await db.get(MessagePlatform, data["platform_id"])
             assert platform is not None
@@ -486,6 +495,7 @@ async def test_message_platform_session_settings_update_existing_and_legacy_sess
             assert session is not None
             assert session.profile_id == data["override_profile_id"]
             assert session.profile_override_id == data["override_profile_id"]
+            assert session.stream_llm_request is False
             assert {
                 "enable_markdown": session.enable_markdown,
                 "goal_mode": session.goal_mode,
@@ -495,7 +505,7 @@ async def test_message_platform_session_settings_update_existing_and_legacy_sess
             } == _session_settings(
                 enable_markdown=True,
                 goal_mode=True,
-                max_turns=11,
+                max_turns=5,
                 show_tool_calls=False,
                 show_reasoning=True,
             )
@@ -533,6 +543,7 @@ async def test_message_platform_session_settings_update_existing_and_legacy_sess
             assert legacy_session is not None
             assert legacy_session.profile_id == data["override_profile_id"]
             assert legacy_session.profile_override_id == data["override_profile_id"]
+            assert legacy_session.stream_llm_request is False
             assert {
                 "enable_markdown": legacy_session.enable_markdown,
                 "goal_mode": legacy_session.goal_mode,
@@ -1188,3 +1199,299 @@ async def test_weixin_openclaw_handle_message_concurrent_first_session_is_single
             assert {work.session_id for work in works} == {session.session_id}
             assert all(work.id is not None for work in works)
             assert len({work.id for work in works}) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_stream", [False, True], ids=["upstream-non-stream", "upstream-stream"])
+async def test_chat_session_settings_survive_next_external_message_without_affecting_sibling(
+    database_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_stream: bool,
+) -> None:
+    _patch_external_dependencies(monkeypatch)
+    async with database_factory(wal=True, foreign_keys=True) as factory:
+        platform_stream = not upstream_stream
+        platform_markdown = not upstream_stream
+        data = await _seed_platform_data(
+            factory,
+            stream_llm_request=platform_stream,
+            session_settings=_session_settings(enable_markdown=platform_markdown),
+        )
+        _patch_runtime_database(monkeypatch, factory)
+        adapter = object.__new__(WeixinOpenClawAdapter)
+        sibling_session_id = "opaque-sibling"
+
+        async with factory() as db:
+            created = await adapter.chat(
+                db,
+                "initial",
+                UID,
+                SESSION_ID,
+                message_platform_id=data["platform_id"],
+            )
+            assert created.text == ""
+
+        async with factory() as db:
+            created = await adapter.chat(
+                db,
+                "sibling-initial",
+                UID,
+                sibling_session_id,
+                message_platform_id=data["platform_id"],
+                message_platform_user_id=EXTERNAL_USER,
+            )
+            assert created.text == ""
+
+        async with factory() as db:
+            sessions = (await db.execute(select(ChatSession).where(ChatSession.session_id.in_([SESSION_ID, sibling_session_id])))).scalars().all()
+            assert len(sessions) == 2
+            platform = await db.get(MessagePlatform, data["platform_id"])
+            assert platform is not None
+            platform_config_before = dict(platform.config)
+            bindings_before = {
+                session.session_id: (
+                    session.source,
+                    session.message_platform_id,
+                    session.message_platform_user_id,
+                )
+                for session in sessions
+            }
+
+        app = FastAPI()
+        app.include_router(chat_api.router, prefix="/api/v1")
+        register_handlers(app)
+
+        async def override_get_db():
+            async with factory() as db:
+                yield db
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(uid=UID, is_superuser=False)
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            updated = await client.post(
+                "/api/v1/chat/sessions/setting",
+                json={
+                    "session_id": SESSION_ID,
+                    "stream_llm_request": upstream_stream,
+                    "enable_markdown": upstream_stream,
+                    "max_turns": 9,
+                },
+            )
+            assert updated.status_code == 200
+            assert updated.json()["code"] == 200
+
+            async with factory() as db:
+                received = await adapter.chat(
+                    db,
+                    "next-external-message",
+                    UID,
+                    SESSION_ID,
+                    message_platform_id=data["platform_id"],
+                )
+                assert received.text == ""
+
+            listed = await client.get("/api/v1/chat/sessions/list")
+            assert listed.status_code == 200
+            assert listed.json()["code"] == 200
+            listed_by_id = {item["session_id"]: item for item in listed.json()["data"]}
+            assert listed_by_id[SESSION_ID]["stream_llm_request"] is upstream_stream
+            assert listed_by_id[SESSION_ID]["enable_markdown"] is upstream_stream
+            assert listed_by_id[SESSION_ID]["max_turns"] == 9
+            assert listed_by_id[sibling_session_id]["stream_llm_request"] is platform_stream
+            assert listed_by_id[sibling_session_id]["enable_markdown"] is platform_markdown
+            assert listed_by_id[sibling_session_id]["max_turns"] == 7
+
+        async with factory() as db:
+            target_session = await db.get(ChatSession, SESSION_ID)
+            sibling_session = await db.get(ChatSession, sibling_session_id)
+            platform = await db.get(MessagePlatform, data["platform_id"])
+            assert target_session is not None
+            assert sibling_session is not None
+            assert platform is not None
+            assert target_session.stream_llm_request is upstream_stream
+            assert target_session.enable_markdown is upstream_stream
+            assert target_session.max_turns == 9
+            assert sibling_session.stream_llm_request is platform_stream
+            assert sibling_session.enable_markdown is platform_markdown
+            assert sibling_session.max_turns == 7
+            assert platform.config == platform_config_before
+
+            bindings_after = {
+                session.session_id: (
+                    session.source,
+                    session.message_platform_id,
+                    session.message_platform_user_id,
+                )
+                for session in (target_session, sibling_session)
+            }
+            assert bindings_after == bindings_before
+            assert target_session.source == "weixin-openclaw"
+            assert target_session.message_platform_id == data["platform_id"]
+            assert sibling_session.source == "weixin-openclaw"
+            assert sibling_session.message_platform_id == data["platform_id"]
+            assert sibling_session.message_platform_user_id == EXTERNAL_USER
+
+            new_message = (
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.session_id == SESSION_ID,
+                            Message.role == MessageRole.USER,
+                            Message.content == "next-external-message",
+                        )
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            assert new_message.id is not None
+            works = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == SESSION_ID).order_by(SessionReplyWorkItem.id.desc()))).scalars().all()
+            assert len(works) == 2
+            new_work = works[0]
+            assert new_work.id is not None
+            assert new_work.profile_id is not None
+            message_id = new_message.id
+            work_id = new_work.id
+            profile_id = new_work.profile_id
+
+        branches, request_messages = _patch_llm(monkeypatch)
+        dispatch_result = await _dispatch_queued_message(
+            factory,
+            work_id=work_id,
+            message_id=message_id,
+            profile_id=profile_id,
+            stream_dispatch=False,
+        )
+        assert isinstance(dispatch_result, dict)
+        assert branches == ["generate_with_stream_callback" if upstream_stream else "generate"]
+        response_settings, _ = _extract_response_settings(request_messages)
+        assert response_settings["markdown"] is upstream_stream
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "setting_name",
+    (
+        "max_turns",
+        "enable_markdown",
+        "goal_mode",
+        "show_tool_calls",
+        "show_reasoning",
+        "stream_llm_request",
+        "profile_override_id",
+        "clear_profile_override",
+    ),
+)
+async def test_platform_setting_save_updates_only_its_sessions(database_factory, setting_name: str) -> None:
+    async with database_factory(wal=True, foreign_keys=True) as factory:
+        data = await _seed_platform_data(
+            factory,
+            stream_llm_request=True,
+            session_settings=_session_settings(enable_markdown=True),
+        )
+        second_platform_id = await _seed_second_platform(
+            factory,
+            profile_id=data["primary_profile_id"],
+            stream_llm_request=False,
+            context_token=None,
+        )
+        expected_platforms = {
+            "platform-session-a": data["platform_id"],
+            "platform-session-b": data["platform_id"],
+            "unbound-session": None,
+            "other-platform-session": second_platform_id,
+        }
+        expected_sessions = {session_id: (UID, "weixin-openclaw", platform_id) for session_id, platform_id in expected_platforms.items()}
+        expected_sessions.update(
+            {
+                "other-owner-session": ("other-owner", "weixin-openclaw", data["platform_id"]),
+                "http-session": (UID, "http", data["platform_id"]),
+            }
+        )
+        async with factory() as db:
+            db.add(User(uid="other-owner", username="settings-other-owner"))
+            db.add_all(
+                [
+                    ChatSession(
+                        session_id=session_id,
+                        uid=uid,
+                        profile_id=data["primary_profile_id"],
+                        source=source,
+                        message_platform_id=platform_id,
+                        message_platform_user_id=EXTERNAL_USER,
+                        max_turns=3,
+                        enable_markdown=True,
+                        goal_mode=True,
+                        show_tool_calls=True,
+                        show_reasoning=True,
+                        stream_llm_request=True,
+                        profile_override_id=data["override_profile_id"],
+                    )
+                    for session_id, (uid, source, platform_id) in expected_sessions.items()
+                ]
+            )
+            await db.commit()
+
+        app = FastAPI()
+        app.include_router(message_platforms_api.router, prefix="/api/v1")
+        register_handlers(app)
+
+        async def override_get_db():
+            async with factory() as db:
+                yield db
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(uid=UID, is_superuser=False)
+
+        initial_settings = {
+            "max_turns": 3,
+            "enable_markdown": True,
+            "goal_mode": True,
+            "show_tool_calls": True,
+            "show_reasoning": True,
+            "stream_llm_request": True,
+            "profile_override_id": data["override_profile_id"],
+        }
+        new_value = {
+            "max_turns": 11,
+            "enable_markdown": False,
+            "goal_mode": False,
+            "show_tool_calls": False,
+            "show_reasoning": False,
+            "stream_llm_request": False,
+            "profile_override_id": data["primary_profile_id"],
+            "clear_profile_override": None,
+        }[setting_name]
+        updated_field = "profile_override_id" if setting_name == "clear_profile_override" else setting_name
+        if setting_name == "stream_llm_request":
+            request_payload = {"config": {"stream_llm_request": new_value}}
+        elif setting_name in {"profile_override_id", "clear_profile_override"}:
+            request_payload = {"profile_id": new_value}
+        else:
+            request_payload = {"config": {"session_settings": {setting_name: new_value}}}
+        target_session_ids = {"platform-session-a", "platform-session-b"}
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            for _ in range(2):
+                response = await client.post(
+                    "/api/v1/message-platforms/update",
+                    params={"platform_id": data["platform_id"]},
+                    json=request_payload,
+                )
+                assert response.status_code == 200
+                assert response.json()["code"] == 200
+
+                async with factory() as db:
+                    for session_id, (uid, source, platform_id) in expected_sessions.items():
+                        session = await db.get(ChatSession, session_id)
+                        assert session is not None
+                        expected_settings = initial_settings.copy()
+                        if session_id in target_session_ids:
+                            expected_settings[updated_field] = new_value
+                        for field, expected_value in expected_settings.items():
+                            assert getattr(session, field) == expected_value
+                        assert session.uid == uid
+                        assert session.source == source
+                        assert session.message_platform_id == platform_id
+                        assert session.message_platform_user_id == EXTERNAL_USER

@@ -46,9 +46,6 @@ export const resolveSessionProfileDisplayId = (currentSession, draftProfileId) =
   if (isValidProfileId(currentSession.profile_override_id)) {
     return currentSession.profile_override_id
   }
-  if (!['http', 'ws'].includes(currentSession.source) && isValidProfileId(currentSession.profile_id)) {
-    return currentSession.profile_id
-  }
   return null
 }
 

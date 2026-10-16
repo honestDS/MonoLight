@@ -70,7 +70,7 @@
 
 <script setup>
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import QRCode from 'qrcode'
 
@@ -219,6 +219,7 @@ const handleEdit = (row) => {
 const buildPayload = () => buildMessagePlatformPayload(form, { includeUid: userPermissions.isSuperuser })
 
 const submitForm = async () => {
+  if (submitting.value) return
   if (!form.name || !form.platform_type) {
     return ElMessage.warning(t('messagePlatforms.fill_required'))
   }
@@ -231,8 +232,26 @@ const submitForm = async () => {
   submitting.value = true
   try {
     const payload = buildPayload()
-    if (isEdit.value) {
-      await messagePlatformApi.update(currentId.value, payload)
+    const editing = isEdit.value
+    const platformId = currentId.value
+    if (editing) {
+      try {
+        await ElMessageBox.confirm(
+          t('messagePlatforms.overwrite_settings_confirm'),
+          t('messagePlatforms.overwrite_settings_title'),
+          {
+            type: 'warning',
+            confirmButtonText: t('messagePlatforms.continue_save'),
+            cancelButtonText: t('common.cancel'),
+            closeOnClickModal: false,
+            distinguishCancelAndClose: true
+          }
+        )
+      } catch (err) {
+        if (err === 'cancel' || err === 'close') return
+        throw err
+      }
+      await messagePlatformApi.update(platformId, payload)
       ElMessage.success(t('messagePlatforms.update_success'))
       dialogVisible.value = false
       fetchPlatforms()

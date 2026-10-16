@@ -157,6 +157,8 @@ async def dispatch_interactive(
             await db.refresh(session)
             state.goal_mode = session.goal_mode
             state.max_turns = session.max_turns
+            if session.stream_llm_request is not None:
+                state.stream_llm_request = session.stream_llm_request
             if session.source not in {"http", "ws"}:
                 platform = await message_platform_crud.get_platform_for_session(db, uid=uid, session_id=session_id, source=session.source)
                 if platform is None:
@@ -164,7 +166,8 @@ async def dispatch_interactive(
                         raise BaseBusinessException(message=ERR_MESSAGE_PLATFORM_NOT_FOUND)
                 else:
                     platform_config = platform.config or {}
-                    state.stream_llm_request = platform_config.get("stream_llm_request", False)
+                    if session.stream_llm_request is None:
+                        state.stream_llm_request = platform_config.get("stream_llm_request", False)
 
         initial_memory_recall_boundary = state.checkpoint_state.memory_recall_boundary_message_id
         resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None

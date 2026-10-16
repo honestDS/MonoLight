@@ -232,8 +232,13 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             if message_platform_id is not None and isinstance(profile_id, int) and not isinstance(profile_id, bool) and profile_id > 0:
                 platform_config = getattr(platform, "config", None)
                 settings: dict[str, Any] = {}
+                is_new_session = session is None
                 if isinstance(platform_config, dict) and "session_settings" in platform_config:
-                    settings = MessagePlatformSessionSettings.model_validate(platform_config["session_settings"]).model_dump(exclude_unset=True)
+                    validated_settings = MessagePlatformSessionSettings.model_validate(platform_config["session_settings"])
+                    if is_new_session:
+                        settings = validated_settings.model_dump(exclude_unset=True)
+                if is_new_session or (session is not None and session.stream_llm_request is None):
+                    settings["stream_llm_request"] = bool((platform.config or {}).get("stream_llm_request", False))
                 session = await session_crud.upsert_profile(
                     db,
                     session_id=session_id,

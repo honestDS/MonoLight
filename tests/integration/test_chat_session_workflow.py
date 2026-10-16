@@ -959,18 +959,46 @@ async def test_external_session_lifecycle_persists_guidance_allows_profile_overr
         assert external_session.show_tool_calls is False
         assert external_session.show_reasoning is False
 
-        read_only = await client.post(
+        setting = await client.post(
             "/api/v1/chat/sessions/setting",
             json={
                 "session_id": external_session.session_id,
                 "enable_markdown": False,
+                "stream_llm_request": True,
+            },
+        )
+        assert setting.status_code == 200
+        assert setting.json()["code"] == 200
+        await chat_session_database.refresh(external_session)
+        assert external_session.enable_markdown is False
+        assert external_session.stream_llm_request is True
+        assert external_session.source == "weixin-openclaw"
+        assert external_session.reply_target_source == "weixin-openclaw"
+
+        stream_disabled = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={
+                "session_id": external_session.session_id,
+                "stream_llm_request": False,
+            },
+        )
+        assert stream_disabled.status_code == 200
+        assert stream_disabled.json()["code"] == 200
+        await chat_session_database.refresh(external_session)
+        assert external_session.stream_llm_request is False
+
+        read_only = await client.post(
+            "/api/v1/chat/sessions/setting",
+            json={
+                "session_id": external_session.session_id,
+                "enable_markdown": True,
                 "transport_mode": "http",
             },
         )
         assert read_only.status_code == 200
         assert read_only.json()["code"] == 403
         await chat_session_database.refresh(external_session)
-        assert external_session.enable_markdown is True
+        assert external_session.enable_markdown is False
         assert external_session.source == "weixin-openclaw"
 
         transport_only = await client.post(
