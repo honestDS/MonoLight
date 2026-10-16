@@ -22,6 +22,7 @@ from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
+from app.core.utils.llm_request_policy import build_upstream_rejection, prepare_llm_json_request
 from app.models.message import AudioPart, InternalMessage
 
 from ..base import BaseTransformer
@@ -99,6 +100,9 @@ class BaseOpenAITransformer(BaseTransformer):
         message: str = ERR_LLM_API_RESPONSE_ERROR,
         status: int | None = None,
     ) -> None:
+        rejection = build_upstream_rejection(status=status, detail=provider_error)
+        if rejection is not None:
+            raise rejection
         raise cls._build_provider_exception(
             provider_error,
             message=message,
@@ -168,7 +172,11 @@ class BaseOpenAITransformer(BaseTransformer):
                 async with session.get(url, headers=headers, **proxy_kwargs) as resp:
                     text = await resp.text()
                     if resp.status != 200:
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=text)
+                        self._raise_provider_error(
+                            text,
+                            message=ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
+                            status=resp.status,
+                        )
                     parsed = json.loads(text)
         except LLMException:
             raise
@@ -205,12 +213,13 @@ class BaseOpenAITransformer(BaseTransformer):
         base_url: str,
     ) -> dict[str, Any]:
         try:
+            serialized_payload = await prepare_llm_json_request(payload)
             proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
+                async with session.post(url, headers=headers, data=serialized_payload, **proxy_kwargs) as resp:
                     text = await resp.text()
                     if resp.status != 200:
                         self._raise_provider_error(
@@ -243,14 +252,15 @@ class BaseOpenAITransformer(BaseTransformer):
         normalize_event: Callable[[Any], tuple[dict[str, Any] | None, bool]],
     ) -> AsyncGenerator[dict[str, Any]]:
         loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
         try:
+            serialized_payload = await prepare_llm_json_request(payload)
+            deadline = loop.time() + timeout
             proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=None),
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                response_context = session.post(url, headers=headers, json=payload, **proxy_kwargs)
+                response_context = session.post(url, headers=headers, data=serialized_payload, **proxy_kwargs)
                 try:
                     response = await asyncio.wait_for(
                         response_context.__aenter__(),

@@ -1,5 +1,15 @@
 MESSAGES = {
     "ERR_LLM_CONNECTION_FAILED": "Failed to connect to the large model provider gateway, please check network or proxy configuration",
+    "ERR_LLM_REQUEST_TOO_LARGE": (
+        "This model request is {request_size_bytes} bytes (approximately {request_size_mib} MiB), exceeding the global limit of "
+        "{max_size_bytes} bytes ({max_size_mib} MiB). The request was blocked locally, so this call was not sent. Please reduce the content or attachments; "
+        "an administrator can adjust the global request size limit after verifying the upstream limit."
+    ),
+    "ERR_LLM_UPSTREAM_REQUEST_TOO_LARGE": (
+        "The upstream service rejected this request as too large (HTTP 413). Please reduce the content or attachments, "
+        "and contact an administrator to lower the global request size limit appropriately based on the upstream limit so similar requests can be intercepted earlier. "
+        "Lowering the limit does not automatically shrink the request."
+    ),
     "ERR_LLM_API_RESPONSE_ERROR": "Large model API returned an abnormal response",
     "ERR_LLM_UNEXPECTED_ERROR": "Unexpected exception occurred when calling the large model interface",
     "ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL": "Unexpected exception occurred when calling the large model interface: {detail}",

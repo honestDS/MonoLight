@@ -8,7 +8,7 @@ from app.core.constants import (
     ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
     ERR_LLM_UNSUPPORTED_PROTOCOL,
 )
-from app.core.exceptions import LLMException
+from app.core.exceptions import LLMException, LLMRequestRejectedException
 from app.providers.embedding.client import EmbeddingClient
 from app.providers.image_generation.client import ImageGenerationClient
 from app.providers.rerank.client import RerankClient
@@ -279,6 +279,44 @@ async def test_openai_image_transport_error_semantics(
 
     assert exc_info.value.message == expected_message
     assert exc_info.value.kwargs == expected_kwargs
+
+
+@pytest.mark.parametrize(
+    "reference_images",
+    [
+        [],
+        [("reference.png", b"reference", "image/png")],
+    ],
+    ids=["json-without-reference", "multipart-with-reference"],
+)
+@pytest.mark.asyncio
+async def test_openai_image_413_rejection_preserves_upstream_detail(
+    monkeypatch,
+    reference_images: list[tuple[str, bytes, str]],
+) -> None:
+    detail = "<html><body>provider-private-413-body</body></html>"
+    _patch_fake_image_http(monkeypatch, status=413, response_text=detail)
+
+    with pytest.raises(LLMRequestRejectedException) as exc_info:
+        await ImageGenerationClient.generate_image(
+            api_key="image-api-key",
+            base_url="https://example.invalid/v1",
+            model_id="gpt-image-1",
+            protocol="openai_image",
+            prompt="draw a blue bird",
+            reference_images=reference_images,
+        )
+
+    rejection = exc_info.value
+    assert rejection.code == 502
+    assert rejection.source == "upstream"
+    assert rejection.upstream_status == 413
+    assert rejection.upstream_detail == detail
+    rendered = rejection.render_message()
+    assert "413" in rendered
+    assert detail not in rendered
+    assert "<html>" not in rendered
+    assert detail not in repr(rejection.data)
 
 
 @pytest.mark.parametrize(

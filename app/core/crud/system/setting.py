@@ -5,9 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.constants import (
+    DEFAULT_LLM_REQUEST_MAX_SIZE_MB,
     ERR_DATABASE_TYPE_UNSUPPORTED,
     ERR_SETUP_STATUS_NOT_INITIALIZED,
     ERR_SYSTEM_SETTING_NOT_FOUND_AFTER_INSERT,
+    LLM_REQUEST_MAX_SIZE_MB_UPPER_BOUND,
     SETUP_ADMIN_UID_KEY,
     SETUP_SESSION_RECORD_KEY,
     SETUP_STATUS_COMPLETED,
@@ -23,10 +25,21 @@ from app.models.system_setting import SystemRuntimeSettings, SystemSetting
 DEFAULT_SYSTEM_SETTINGS = {
     "log_locale": DEFAULT_LOCALE,
     "temp_dir_max_size_mb": "1024",
+    "llm_request_max_size_mb": str(DEFAULT_LLM_REQUEST_MAX_SIZE_MB),
     "audit_retention_days": "90",
     "audit_report_email": "",
     "session_reply_max_concurrency": "4",
 }
+
+
+def _parse_llm_request_max_size_mb(value: str | None) -> int:
+    try:
+        parsed = int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return DEFAULT_LLM_REQUEST_MAX_SIZE_MB
+    if parsed is None or not 1 <= parsed <= LLM_REQUEST_MAX_SIZE_MB_UPPER_BOUND:
+        return DEFAULT_LLM_REQUEST_MAX_SIZE_MB
+    return parsed
 
 
 class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
@@ -73,6 +86,10 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             return None
         return db_obj.value
 
+    async def get_llm_request_max_size_mb(self, db: AsyncSession) -> int:
+        db_obj = await self.get_by_key(db, "llm_request_max_size_mb")
+        return _parse_llm_request_max_size_mb(db_obj.value if db_obj else None)
+
     async def initialize_setup_state(self, db: AsyncSession, *, admin_uid: str | None) -> tuple[str, str | None]:
         initial_status = SETUP_STATUS_COMPLETED if admin_uid else SETUP_STATUS_PENDING
         await self._insert_if_missing(db, key=SETUP_STATUS_KEY, value=initial_status)
@@ -102,6 +119,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         values = {item.key: item.value for item in result.scalars().all()}
         raw_log_locale = values.get("log_locale", DEFAULT_SYSTEM_SETTINGS["log_locale"])
         raw_temp_dir_max_size_mb = values.get("temp_dir_max_size_mb", DEFAULT_SYSTEM_SETTINGS["temp_dir_max_size_mb"])
+        raw_llm_request_max_size_mb = values.get("llm_request_max_size_mb", DEFAULT_SYSTEM_SETTINGS["llm_request_max_size_mb"])
         raw_audit_retention_days = values.get("audit_retention_days", DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
         raw_audit_report_email = values.get("audit_report_email", DEFAULT_SYSTEM_SETTINGS["audit_report_email"])
         raw_session_reply_max_concurrency = values.get("session_reply_max_concurrency", DEFAULT_SYSTEM_SETTINGS["session_reply_max_concurrency"])
@@ -117,9 +135,11 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             session_reply_max_concurrency = int(raw_session_reply_max_concurrency)
         except (TypeError, ValueError):
             session_reply_max_concurrency = int(DEFAULT_SYSTEM_SETTINGS["session_reply_max_concurrency"])
+        llm_request_max_size_mb = _parse_llm_request_max_size_mb(raw_llm_request_max_size_mb)
         return SystemRuntimeSettings(
             log_locale=normalize_locale(raw_log_locale),
             temp_dir_max_size_mb=temp_dir_max_size_mb,
+            llm_request_max_size_mb=llm_request_max_size_mb,
             audit_retention_days=audit_retention_days,
             audit_report_email=str(raw_audit_report_email or "").strip(),
             session_reply_max_concurrency=session_reply_max_concurrency,
@@ -130,6 +150,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         values = {
             "log_locale": normalized.log_locale,
             "temp_dir_max_size_mb": str(normalized.temp_dir_max_size_mb),
+            "llm_request_max_size_mb": str(normalized.llm_request_max_size_mb),
             "audit_retention_days": str(normalized.audit_retention_days),
             "audit_report_email": normalized.audit_report_email,
             "session_reply_max_concurrency": str(normalized.session_reply_max_concurrency),

@@ -6,7 +6,7 @@ from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.system.setting import system_setting_crud
-from app.core.exceptions import BaseBusinessException
+from app.core.exceptions import BaseBusinessException, LLMRequestRejectedException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.log import get_logger
@@ -150,7 +150,15 @@ class SessionReplyConsumer:
             has_active_audit_execution = work is not None and (work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or work_has_active_audit_execution(work))
             if has_active_audit_execution:
                 await mark_work_audit_execution_unknown(work_id, worker_id, error)
-                await fail_session_reply_work(work_id, worker_id, error)
+                if isinstance(exc, LLMRequestRejectedException):
+                    await fail_session_reply_work(
+                        work_id,
+                        worker_id,
+                        error,
+                        user_error=exc.render_message(),
+                    )
+                else:
+                    await fail_session_reply_work(work_id, worker_id, error)
             elif isinstance(exc, BaseBusinessException):
                 await fail_session_reply_work(
                     work_id,

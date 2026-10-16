@@ -149,6 +149,7 @@ const createHarness = async (t, options = {}) => {
   const defaultSystemSettings = {
     log_locale: 'en',
     temp_dir_max_size_mb: 2048,
+    llm_request_max_size_mb: 64,
     audit_retention_days: 120,
     audit_report_email: 'audit@example.com',
     session_reply_max_concurrency: 8,
@@ -595,6 +596,7 @@ test('superuser can load, open, and save global settings', async t => {
   const loadedSettings = {
     log_locale: 'en',
     temp_dir_max_size_mb: 4096,
+    llm_request_max_size_mb: 128,
     audit_retention_days: 180,
     audit_report_email: 'ops@example.com',
     session_reply_max_concurrency: 12,
@@ -617,16 +619,48 @@ test('superuser can load, open, and save global settings', async t => {
   assert.equal(harness.module.settingsDialogVisible.value, true)
 
   harness.module.systemSettings.audit_retention_days = 365
+  harness.module.systemSettings.llm_request_max_size_mb = 256
   const expectedPayload = normalize(harness.module.systemSettings)
   await harness.module.saveSystemSettings()
 
   assert.deepEqual(harness.api.systemSettingsUpdates, [expectedPayload])
+  assert.equal(harness.api.systemSettingsUpdates[0].llm_request_max_size_mb, 256)
   assert.deepEqual(normalize(harness.module.systemSettings), {
     ...expectedPayload,
     audit_report_email: 'saved@example.com',
   })
+  assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 256)
   assert.equal(harness.module.settingsDialogVisible.value, false)
   assert.equal(harness.module.settingsSubmitting.value, false)
+})
+
+test('legacy global settings responses preserve the default request size across reloads and save', async t => {
+  const legacySettings = {
+    log_locale: 'en',
+    temp_dir_max_size_mb: 4096,
+    audit_retention_days: 180,
+    audit_report_email: 'ops@example.com',
+    session_reply_max_concurrency: 12,
+  }
+  const harness = await createHarness(t, {
+    superuser: true,
+    systemSettingsRequest: () => Promise.resolve(dataResponse(legacySettings)),
+  })
+
+  assert.equal(await harness.module.loadSystemSettings(), true)
+  assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 32)
+
+  assert.equal(await harness.module.loadSystemSettings(), true)
+  assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 32)
+
+  await harness.module.showSystemSettingsDialog()
+  assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 32)
+
+  await harness.module.saveSystemSettings()
+
+  assert.equal(harness.api.systemSettingsUpdates[0].llm_request_max_size_mb, 32)
+  assert.notEqual(harness.api.systemSettingsUpdates[0].llm_request_max_size_mb, undefined)
+  assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 32)
 })
 
 test('failed global settings load does not open the dialog', async t => {
@@ -644,6 +678,24 @@ test('failed global settings load does not open the dialog', async t => {
   assert.equal(harness.module.settingsSubmitting.value, false)
   assert.deepEqual(harness.messages.filter(message => message.type === 'error').map(message => message.args[0]), [
     'settings load failed',
+  ])
+})
+
+test('failed global settings save preserves the request size and dialog state', async t => {
+  const harness = await createHarness(t, {
+    superuser: true,
+    systemSettingsUpdate: () => Promise.reject(new Error('settings save failed')),
+  })
+
+  await harness.module.showSystemSettingsDialog()
+  harness.module.systemSettings.llm_request_max_size_mb = 256
+  await harness.module.saveSystemSettings()
+
+  assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 256)
+  assert.equal(harness.module.settingsDialogVisible.value, true)
+  assert.equal(harness.module.settingsSubmitting.value, false)
+  assert.deepEqual(harness.messages.filter(message => message.type === 'error').map(message => message.args[0]), [
+    'settings save failed',
   ])
 })
 

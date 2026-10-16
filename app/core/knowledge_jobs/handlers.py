@@ -22,6 +22,7 @@ from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, embed_texts_with_config, load_embedding_runtime_config
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
+from app.core.exceptions import LLMRequestRejectedException
 from app.core.i18n import t
 from app.core.knowledge import organization_run
 from app.core.knowledge.errors import (
@@ -542,6 +543,11 @@ async def handle_knowledge_organization(context: KnowledgeJobExecutionContext) -
             knowledge_base_id=job.knowledge_base_id,
             organization_job_id=job.id,
         )
+    except LLMRequestRejectedException as exc:
+        raise KnowledgeJobDeterministicError(
+            exc.render_message(),
+            result={"status": "llm_request_rejected", "request_error": exc.data},
+        ) from exc
     except (
         KnowledgeOrganizationConfigurationError,
         KnowledgeOrganizationContextExceededError,

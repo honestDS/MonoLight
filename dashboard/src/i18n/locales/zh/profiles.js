@@ -221,6 +221,8 @@ export default {
   log_locale_hint: '控制系统日志写入数据库时使用的语言，影响日志列表、实时日志等系统日志内容。',
   temp_dir_max_size_mb: '临时目录上限(MB)',
   temp_dir_max_size_mb_hint: '控制每个用户临时目录允许占用的最大空间。超过上限后，后台清理任务会优先删除最旧的临时文件。',
+  llm_request_max_size_mb: '模型请求上限(MiB)',
+  llm_request_max_size_mb_hint: '限制每次发送给模型的请求大小，超限时不发送。',
   audit_retention_days: '审计记录保留天数',
   audit_retention_days_hint: '审计文件仅在系统启动阶段按该天数清理，运行期间不会启动定时清理。默认保留 90 天。',
   audit_report_email: '审计报告收件地址',

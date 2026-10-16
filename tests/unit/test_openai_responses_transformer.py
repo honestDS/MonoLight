@@ -5,7 +5,8 @@ from typing import Any
 import pytest
 
 from app.core.constants import ERR_LLM_CONNECTION_FAILED, ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, ERR_LLM_EMPTY_RESPONSE, ERR_LLM_IMAGE_OUTPUT_INVALID
-from app.core.exceptions import LLMContextLengthException, LLMException
+from app.core.exceptions import LLMContextLengthException, LLMException, LLMRequestRejectedException
+from app.core.utils import llm_request_policy
 from app.core.utils.llm_request_params import (
     build_memory_recall_precheck_generation_params,
     build_session_title_generation_params,
@@ -75,6 +76,14 @@ class _FakeClientSession:
     def post(self, url, **kwargs):
         self.post_calls.append({"url": url, "kwargs": kwargs})
         return self._response
+
+
+@pytest.fixture(autouse=True)
+def _mock_llm_request_max_bytes(monkeypatch):
+    async def fake_load_llm_request_max_bytes() -> int:
+        return 32 * 1024 * 1024
+
+    monkeypatch.setattr(llm_request_policy, "load_llm_request_max_bytes", fake_load_llm_request_max_bytes)
 
 
 def test_openai_usage_normalization() -> None:
@@ -173,6 +182,31 @@ def test_chat_completions_classifies_only_explicit_context_length_code() -> None
         )
 
     assert not isinstance(ordinary_error.value, LLMContextLengthException)
+
+
+@pytest.mark.parametrize("transformer_cls", (OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer))
+@pytest.mark.parametrize(
+    "provider_error",
+    (
+        "<html>private body</html>",
+        {"error": {"code": "context_length_exceeded", "message": "private provider detail"}},
+    ),
+)
+def test_openai_transformers_prioritize_upstream_413_rejection(transformer_cls, provider_error) -> None:
+    with pytest.raises(LLMRequestRejectedException) as exc_info:
+        transformer_cls._raise_provider_error(provider_error, status=413)
+
+    rejection = exc_info.value
+    assert not isinstance(rejection, LLMContextLengthException)
+    assert rejection.source == "upstream"
+    assert rejection.upstream_status == 413
+    assert rejection.code == 502
+    assert rejection.upstream_detail == provider_error
+    rendered = rejection.render_message()
+    assert "413" in rendered
+    assert "全局请求大小上限" in rendered
+    assert "<html>private body</html>" not in rendered
+    assert "private provider detail" not in rendered
 
 
 def test_responses_classifies_nested_context_length_error_and_preserves_other_errors() -> None:
@@ -347,7 +381,7 @@ async def test_chat_completions_generate_passes_reasoning_effort(monkeypatch) ->
         **generation_params,
     )
 
-    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
     assert "reasoning_effort" not in payload
     assert "temperature" not in payload
     assert "top_p" not in payload
@@ -386,7 +420,7 @@ async def test_responses_generate_maps_reasoning_effort_to_reasoning_object(monk
         max_tokens=512,
     )
 
-    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
     assert payload["reasoning"] == {"effort": "xhigh", "summary": "auto"}
     assert "temperature" not in payload
     assert "top_p" not in payload
@@ -461,7 +495,7 @@ async def test_generate_omits_unspecified_sampling_and_output_token_params(monke
         protocol=protocol,
     )
 
-    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
     for parameter in ("temperature", "top_p", "max_tokens", "max_output_tokens"):
         assert parameter not in payload
 
@@ -590,7 +624,7 @@ async def test_llm_client_generate_sends_actual_tool_request_parameters(monkeypa
     post_call = sessions[0].post_calls[0]
     expected_endpoint = "/chat/completions" if protocol == "openai" else "/responses"
     assert post_call["url"].endswith(expected_endpoint)
-    payload = post_call["kwargs"]["json"]
+    payload = json.loads(post_call["kwargs"]["data"])
     assert payload["stream"] is streaming
     assert payload["temperature"] == 0
     assert payload["top_p"] == 0
@@ -658,7 +692,7 @@ async def test_memory_recall_precheck_stream_does_not_backfill_sampling_params(m
         **generation_params,
     )
 
-    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
     assert "temperature" not in payload
     assert "top_p" not in payload
     if protocol == "openai":
@@ -699,7 +733,7 @@ async def test_chat_completions_keeps_tools_when_tool_choice_none(monkeypatch) -
         tool_choice="none",
     )
 
-    payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
     assert payload["tools"] == tools
     assert payload["tool_choice"] == "none"
 
@@ -2458,7 +2492,7 @@ async def test_responses_stream_completed_image_done_and_snapshot_is_deduplicate
         ],
     }
     assert "result" not in result.message.provider_metadata["output"][0]
-    request_payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    request_payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
     assert request_payload["model"] == "gpt-image"
     assert request_payload["stream"] is True
 
@@ -2545,7 +2579,7 @@ async def test_responses_stream_terminal_snapshot_backfills_completed_image(
             }
         ],
     }
-    request_payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    request_payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
     assert request_payload["stream"] is True
 
 
@@ -2620,7 +2654,7 @@ async def test_responses_stream_keeps_order_for_distinct_images_with_same_data(m
             {"type": "image_generation_call", "id": "img_second", "status": "completed", "output_format": "jpeg"},
         ],
     }
-    assert sessions[0].post_calls[0]["kwargs"]["json"]["stream"] is True
+    assert json.loads(sessions[0].post_calls[0]["kwargs"]["data"])["stream"] is True
 
 
 @pytest.mark.asyncio
@@ -2703,7 +2737,7 @@ async def test_responses_stream_ignores_partial_and_noncompleted_images(monkeypa
     assert result.finish_reason == "stop"
     assert content_callbacks == []
     assert "QUJD" not in content_callbacks
-    assert sessions[0].post_calls[0]["kwargs"]["json"]["stream"] is True
+    assert json.loads(sessions[0].post_calls[0]["kwargs"]["data"])["stream"] is True
 
 
 @pytest.mark.asyncio
@@ -2847,7 +2881,7 @@ async def test_responses_stream_image_coexists_with_text_reasoning_and_function_
         ],
     }
     assert "result" not in result.message.provider_metadata["output"][2]
-    request_payload = sessions[0].post_calls[0]["kwargs"]["json"]
+    request_payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
     assert request_payload["model"] == "gpt-mixed"
     assert request_payload["stream"] is True
 
@@ -3195,7 +3229,7 @@ async def test_chat_completions_stream_reasoning_alias_round_trips_through_llm_c
     assert result.message.provider_metadata is not None
     assert result.message.provider_metadata["message"]["reasoning_content"] == expected_provider_reasoning
     assert OpenAIChatCompletionsTransformer.to_provider([result.message], channel_id=1, model_id="gpt-test") == [{"role": "assistant", "content": "Answer", "reasoning_content": expected_provider_reasoning}]
-    assert sessions[0].post_calls[0]["kwargs"]["json"]["stream"] is True
+    assert json.loads(sessions[0].post_calls[0]["kwargs"]["data"])["stream"] is True
 
 
 @pytest.mark.parametrize(

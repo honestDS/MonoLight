@@ -12,6 +12,7 @@ from sqlmodel import select
 import app.core.security as security
 from app.api.v1 import system
 from app.core.constants import ERR_ONLY_ADMIN_ALLOWED, ERR_UNAUTHORIZED
+from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.handler import register_handlers
 from app.models.system_setting import SystemSetting
@@ -25,6 +26,7 @@ SETTINGS_PATH = "/api/v1/system/settings"
 RUNTIME_KEYS = (
     "log_locale",
     "temp_dir_max_size_mb",
+    "llm_request_max_size_mb",
     "audit_retention_days",
     "audit_report_email",
     "session_reply_max_concurrency",
@@ -112,10 +114,14 @@ def _assert_error(response: httpx.Response, code: int, message: str) -> None:
 VALID_SETTINGS = {
     "log_locale": "en",
     "temp_dir_max_size_mb": 3072,
+    "llm_request_max_size_mb": 64,
     "audit_retention_days": 365,
     "audit_report_email": "updated@example.com",
     "session_reply_max_concurrency": 12,
 }
+
+INVALID_LLM_REQUEST_MAX_SIZE_VALUES = (0, -1, 1025, 1.5, None, "invalid")
+INVALID_STORED_LLM_REQUEST_MAX_SIZE_VALUES = ("-1", "0", "1025", "invalid")
 
 
 FORBIDDEN_REQUESTS = (
@@ -203,6 +209,7 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         assert initial.json()["data"] == {
             "log_locale": "en",
             "temp_dir_max_size_mb": 2048,
+            "llm_request_max_size_mb": 32,
             "audit_retention_days": 180,
             "audit_report_email": "initial@example.com",
             "session_reply_max_concurrency": 8,
@@ -214,6 +221,7 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
             json={
                 "log_locale": " EN-US ",
                 "temp_dir_max_size_mb": 3072,
+                "llm_request_max_size_mb": 64,
                 "audit_retention_days": 365,
                 "audit_report_email": "  updated@example.com  ",
                 "session_reply_max_concurrency": 12,
@@ -227,6 +235,7 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         assert persisted == {
             "log_locale": "en",
             "temp_dir_max_size_mb": "3072",
+            "llm_request_max_size_mb": "64",
             "audit_retention_days": "365",
             "audit_report_email": "updated@example.com",
             "session_reply_max_concurrency": "12",
@@ -236,3 +245,89 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         assert after.status_code == 200
         assert after.json()["code"] == 200
         assert after.json()["data"] == VALID_SETTINGS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_value", INVALID_LLM_REQUEST_MAX_SIZE_VALUES)
+async def test_superuser_rejects_invalid_llm_request_max_size_without_changes(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    invalid_value: Any,
+) -> None:
+    token = _token("admin")
+    payload = {**VALID_SETTINGS, "llm_request_max_size_mb": invalid_value}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        before = await _settings_snapshot(setup_session_factory)
+        response = await _request(client, "POST", token=token, json=payload)
+        assert response.status_code == 422
+        assert await _settings_snapshot(setup_session_factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", (1, 1024))
+async def test_superuser_persists_llm_request_max_size_boundaries(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    value: int,
+) -> None:
+    token = _token("admin")
+    payload = {**VALID_SETTINGS, "llm_request_max_size_mb": value}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        updated = await _request(client, "POST", token=token, json=payload)
+        assert updated.status_code == 200
+        assert updated.json()["code"] == 200
+        assert updated.json()["data"] == payload
+
+        persisted = {key: stored_value for _, key, stored_value in await _settings_snapshot(setup_session_factory) if key in RUNTIME_KEYS}
+        assert persisted["llm_request_max_size_mb"] == str(value)
+
+        read_back = await _request(client, "GET", token=token)
+        assert read_back.status_code == 200
+        assert read_back.json()["code"] == 200
+        assert read_back.json()["data"] == payload
+
+
+@pytest.mark.asyncio
+async def test_legacy_client_omitting_llm_request_max_size_uses_default(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    token = _token("admin")
+    payload = {key: value for key, value in VALID_SETTINGS.items() if key != "llm_request_max_size_mb"}
+    expected = {**payload, "llm_request_max_size_mb": 32}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        updated = await _request(client, "POST", token=token, json=payload)
+        assert updated.status_code == 200
+        assert updated.json()["code"] == 200
+        assert updated.json()["data"] == expected
+
+        persisted = {key: stored_value for _, key, stored_value in await _settings_snapshot(setup_session_factory) if key in RUNTIME_KEYS}
+        assert persisted["llm_request_max_size_mb"] == "32"
+
+        read_back = await _request(client, "GET", token=token)
+        assert read_back.status_code == 200
+        assert read_back.json()["code"] == 200
+        assert read_back.json()["data"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_value", INVALID_STORED_LLM_REQUEST_MAX_SIZE_VALUES)
+async def test_invalid_stored_llm_request_max_size_falls_back_without_mutation(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    stored_value: str,
+) -> None:
+    async with setup_session_factory() as session:
+        session.add(SystemSetting(key="llm_request_max_size_mb", value=stored_value))
+        await session.commit()
+        getter_value = await system_setting_crud.get_llm_request_max_size_mb(session)
+
+    assert getter_value == 32
+    token = _token("admin")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        before = await _settings_snapshot(setup_session_factory)
+        response = await _request(client, "GET", token=token)
+        assert response.status_code == 200
+        assert response.json()["code"] == 200
+        assert response.json()["data"]["llm_request_max_size_mb"] == getter_value
+        assert await _settings_snapshot(setup_session_factory) == before

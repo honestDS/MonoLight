@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.crud.channel.channel import channel_crud
 from app.core.crud.memory.job import memory_job_crud
 from app.core.crud.memory.store import memory_record_crud, memory_store_crud
+from app.core.exceptions import LLMRequestRejectedException
 from app.core.memory import (
     build_memory_active_mutation_key,
     build_memory_organization_active_mutation_key,
@@ -36,6 +37,7 @@ from app.core.memory_jobs import organization_handler
 from app.core.memory_jobs.consumer import MemoryJobConsumer
 from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobExecutor, MemoryJobRetryableError
 from app.core.memory_jobs.manager import MemoryJobManager, MemoryJobValidationError
+from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request
 from app.models.channel import ModelChannel
 from app.models.memory import (
     LongTermMemoryIndexStatus,
@@ -779,6 +781,93 @@ async def test_organization_parent_submits_only_mutation_groups_and_finishes_ato
     refreshed_other_child = await memory_job_crud.get_by_id(db_session, uid=uid, job_id=children[1].id)
     assert refreshed_parent is not None and refreshed_parent.status == LongTermMemoryMutationStatus.SUCCEEDED
     assert refreshed_other_child is not None and refreshed_other_child.status == LongTermMemoryMutationStatus.PENDING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rejection_kind", "expected_model_called"),
+    [("local", False), ("upstream", True)],
+)
+async def test_organization_model_request_rejection_fails_parent_without_retry_or_children(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    rejection_kind: str,
+    expected_model_called: bool,
+) -> None:
+    uid = f"organization-model-rejection-{rejection_kind}-user"
+    parent = await _claimed_parent(db_session, uid=uid, max_attempts=4)
+    request = replace(
+        _request(),
+        organization_model=SimpleNamespace(
+            channel_id=7,
+            channel_name="test",
+            model_id="memory-model",
+        ),
+    )
+    private_html = "<html><body>organization-private-413-body</body></html>"
+    model_calls = 0
+
+    async def reject_model_call(_request: MemoryOrganizationExecutionRequest) -> InternalResponse:
+        nonlocal model_calls
+        model_calls += 1
+        if rejection_kind == "local":
+            try:
+                serialize_llm_json_request({"content": private_html}, max_size_bytes=0)
+            except LLMRequestRejectedException as exc:
+                raise RuntimeError("wrapped local request rejection") from exc
+            raise AssertionError("local serializer should reject the request")
+
+        rejection = build_upstream_rejection(status=413, detail=private_html)
+        assert rejection is not None
+        raise RuntimeError("wrapped upstream request rejection") from rejection
+
+    monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
+    monkeypatch.setattr(organization_handler, "call_organization_model", reject_model_call)
+
+    def session_factory() -> Any:
+        return async_sessionmaker(db_session.bind, expire_on_commit=False)()  # type: ignore[arg-type]
+
+    consumer = MemoryJobConsumer(
+        MemoryJobExecutor(
+            {LongTermMemoryMutationOperation.ORGANIZE: organization_handler.handle_memory_organization},
+            session_factory=session_factory,
+        ),
+        session_factory,
+        poll_interval_seconds=0.01,
+        lease_seconds=30,
+        renew_interval_seconds=10,
+        recovery_interval_seconds=1_000_000,
+        max_concurrency=1,
+        recovery_retry_delay_seconds=1,
+        shutdown_retry_delay_seconds=0.01,
+    )
+
+    await consumer._run_claimed(parent, "organization-worker")
+
+    failed = await memory_job_crud.get_by_id(db_session, uid=uid, job_id=parent.id)
+    assert failed is not None
+    assert failed.status == LongTermMemoryMutationStatus.FAILED
+    assert failed.attempt_count == 1
+    assert failed.active_mutation_key is None
+    assert failed.result is not None
+    assert failed.result["status"] == "llm_request_rejected"
+    assert failed.result["model_called"] is expected_model_called
+    assert failed.result["request_error"]["source"] == rejection_kind
+    assert failed.result["request_error"]["reason"] == "request_too_large"
+    assert failed.error is not None
+    assert "全局" in failed.error
+    assert "请精简内容或附件" in failed.error
+    assert private_html not in failed.error
+    assert private_html not in json.dumps(failed.result, ensure_ascii=False)
+    assert model_calls == 1
+    assert failed.payload == {}
+    children = await memory_job_crud.list_children_by_parent_job_id(
+        db_session,
+        uid=uid,
+        parent_job_id=parent.id,
+    )
+    assert children == []
+    assert await consumer.run_once() == 0
 
 
 @pytest.mark.asyncio

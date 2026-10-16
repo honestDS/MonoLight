@@ -5,6 +5,8 @@ MESSAGES = {
     "ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL": "大模型接口调用发生非预期异常: {detail}",
     "ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS": "大模型 API 返回异常响应 [状态: {status}]: {detail}",
     "ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH": "模型供应商返回上下文长度超限，请检查当前渠道模型的上下文窗口配置是否与实际模型能力一致",
+    "ERR_LLM_REQUEST_TOO_LARGE": "本次模型请求大小为 {request_size_bytes} 字节（约 {request_size_mib} MiB），超过全局设置的 {max_size_bytes} 字节（{max_size_mib} MiB）上限，已在本地拦截，本次调用未发送。请精简内容或附件；管理员可在确认上游限制后调整全局请求大小上限。",
+    "ERR_LLM_UPSTREAM_REQUEST_TOO_LARGE": "上游因请求过大拒绝了本次调用（413）。请精简内容或附件，并联系管理员根据上游限制适当调低全局请求大小上限，以提前拦截类似请求。调低上限不会自动缩小请求。",
     "ERR_LLM_CHANNEL_NOT_CONFIGURED": "未检测到有效的模型渠道配置或 API Key。请检查并将包含有效密钥的 Profile 设为默认，或为当前会话/消息平台选择该 Profile。",
     "ERR_LLM_EMPTY_RESPONSE": "大模型返回了空的响应内容，请尝试重新发送指令或检查模型侧配置",
     "ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED": "这个模型连续 3 次都没能按要求生成最终回复，可能不太适合完成这类任务。请换个模型再试。",

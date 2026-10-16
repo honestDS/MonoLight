@@ -11,7 +11,7 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
 )
 from app.core.crud.session.session import session_crud
-from app.core.exceptions import LLMException
+from app.core.exceptions import LLMException, LLMRequestRejectedException, find_llm_request_rejection
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT
@@ -151,6 +151,7 @@ async def generate_summary_text(
 ) -> str | None:
     excluded_priorities: set[int] = set()
     call_context = "context_summary"
+    last_rejection: LLMRequestRejectedException | None = None
 
     while True:
         await ensure_context_summary_work_valid(work_validity_checker)
@@ -164,6 +165,8 @@ async def generate_summary_text(
         )
         if model is None:
             await release_db_session(db)
+            if last_rejection is not None:
+                raise last_rejection
             return None
 
         prompt_tokens = estimate_context_summary_prompt_tokens(model, prompt)
@@ -185,6 +188,11 @@ async def generate_summary_text(
         except Exception as exc:
             if contains_context_summary_work_invalid(exc):
                 raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="model execution")) from exc
+            rejection = find_llm_request_rejection(exc)
+            if rejection is not None:
+                if not rejection.allow_channel_fallback:
+                    raise rejection
+                last_rejection = rejection
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
             logger.bind(
@@ -549,6 +557,10 @@ async def _ensure_context_summary(
             except Exception as exc:
                 if contains_context_summary_work_invalid(exc):
                     raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="refinement")) from exc
+                rejection = find_llm_request_rejection(exc)
+                if rejection is not None:
+                    await release_db_session(db)
+                    raise rejection
                 logger.bind(
                     uid=uid,
                     session_id=session_id,

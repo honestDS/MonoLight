@@ -19,7 +19,7 @@ from app.core.constants import (
 )
 from app.core.crud.channel.channel import channel_crud
 from app.core.crud.memory.job import memory_job_crud
-from app.core.exceptions import LLMException
+from app.core.exceptions import LLMException, find_llm_request_rejection
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.memory.identifiers import build_memory_organization_active_mutation_key
@@ -446,6 +446,18 @@ async def handle_memory_organization(context: MemoryJobExecutionContext) -> Memo
     except MemoryJobExecutionError:
         raise
     except Exception as exc:
+        rejection = find_llm_request_rejection(exc)
+        if rejection is not None:
+            _log_organization_model_call_failure(request, claimed_job, exc)
+            raise MemoryJobDeterministicError(
+                rejection.render_message(),
+                result={
+                    "status": "llm_request_rejected",
+                    "operation": LongTermMemoryMutationOperation.ORGANIZE.value,
+                    "model_called": rejection.source == "upstream",
+                    "request_error": rejection.data,
+                },
+            ) from exc
         if is_external_context_length_error(exc):
             raise _organization_context_exceeded(request, external_context_error=True) from exc
         _log_organization_model_call_failure(request, claimed_job, exc)

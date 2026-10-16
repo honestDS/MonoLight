@@ -18,7 +18,13 @@ from app.core.constants import (
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_state import InteractiveDispatchState
-from app.core.exceptions import ApiKeyException, LLMContextLengthException, LLMException, LLMModelCapabilityException
+from app.core.exceptions import (
+    ApiKeyException,
+    LLMContextLengthException,
+    LLMException,
+    LLMModelCapabilityException,
+    LLMRequestRejectedException,
+)
 from app.core.i18n import t
 from app.core.log import channel_log_extra
 from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
@@ -359,6 +365,8 @@ async def generate_interactive_turn(
         except LLMModelCapabilityException:
             raise
         except LLMException as exc:
+            if isinstance(exc, LLMRequestRejectedException) and not exc.allow_channel_fallback:
+                raise
             if stream_state.emitted_stream_content:
                 raise
 
@@ -387,6 +395,8 @@ async def generate_interactive_turn(
                         protocol=resolve_model_protocol(state.model_entry),
                         force=True,
                     )
+                except LLMRequestRejectedException:
+                    raise
                 except Exception:
                     recovered_messages = previous_messages
                 if recovered_messages != previous_messages:

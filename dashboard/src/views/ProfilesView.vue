@@ -130,7 +130,7 @@
       @closed="closeMemoryEmbeddingDialog"
     />
 
-    <el-dialog v-if="userPermissions.isSuperuser" :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="520px" class="standard-dialog" center align-center>
+    <el-dialog v-if="userPermissions.isSuperuser" :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="520px" class="standard-dialog dialog-with-scroll-body" center align-center>
       <el-form :model="systemSettings" label-width="150px" size="default">
         <el-form-item :label="$t('profiles.log_locale')">
           <el-select v-model="systemSettings.log_locale" class="full-width-input">
@@ -141,6 +141,10 @@
         <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
           <el-input-number v-model="systemSettings.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right" />
           <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
+        </el-form-item>
+        <el-form-item :label="$t('profiles.llm_request_max_size_mb')">
+          <el-input-number v-model="systemSettings.llm_request_max_size_mb" :min="1" :max="1024" :precision="0" :step="1" step-strictly class="full-width-input" controls-position="right" :aria-label="$t('profiles.llm_request_max_size_mb')" />
+          <div class="help-text mt-5">{{ $t('profiles.llm_request_max_size_mb_hint') }}</div>
         </el-form-item>
         <el-form-item :label="$t('profiles.audit_retention_days')">
           <el-input-number v-model="systemSettings.audit_retention_days" :min="1" :max="3650" class="full-width-input" controls-position="right" />
