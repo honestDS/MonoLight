@@ -459,6 +459,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             current_turn=1,
             goal_mode=False,
             stream_event_callback=None,
+            stream_llm_request=None,
             request_metadata_callback=None,
             expose_tool_call_content=True,
             show_tool_calls=True,

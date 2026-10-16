@@ -113,7 +113,7 @@ def _install_dispatcher_stubs(
         return profile
 
     async def get_session(db, session_id):
-        return SimpleNamespace(goal_mode=False, max_turns=cfg.tool.max_turns)
+        return SimpleNamespace(goal_mode=False, max_turns=cfg.tool.max_turns, source="http")
 
     async def get_provider_states(*args, **kwargs):
         return []

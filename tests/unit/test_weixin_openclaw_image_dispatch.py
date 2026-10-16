@@ -192,6 +192,9 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
         assert message_platform_id == 7
         return profile
 
+    async def get_platform(db, platform_id):
+        return SimpleNamespace(uid="owner", config={})
+
     async def validate_initial_message_before_save(*args, **kwargs):
         captured["preflight_args"] = args
         captured["preflight_kwargs"] = kwargs
@@ -200,6 +203,7 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
         captured["submit_kwargs"] = kwargs
 
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.resolve_profile_for_session", resolve_profile)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.message_platform_crud.get", get_platform)
     monkeypatch.setattr(
         "app.adapters.weixin_openclaw.adapter.ChatDispatcher.validate_initial_message_before_save",
         validate_initial_message_before_save,

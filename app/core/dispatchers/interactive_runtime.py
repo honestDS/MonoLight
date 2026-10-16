@@ -17,6 +17,7 @@ from app.core.constants import (
     LOG_DISPATCHER_LLM_LOOP_TERMINATED,
 )
 from app.core.crud.account.user import user_crud
+from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_generation import generate_interactive_turn
@@ -155,6 +156,11 @@ async def dispatch_interactive(
             await db.refresh(session)
             state.goal_mode = session.goal_mode
             state.max_turns = session.max_turns
+            if session.source not in {"http", "ws"}:
+                platform = await message_platform_crud.get_platform_for_session(db, uid=uid, session_id=session_id, source=session.source)
+                if platform is not None:
+                    platform_config = platform.config or {}
+                    state.stream_llm_request = platform_config.get("stream_llm_request", False)
 
         initial_memory_recall_boundary = state.checkpoint_state.memory_recall_boundary_message_id
         resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None

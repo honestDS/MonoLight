@@ -1,5 +1,6 @@
 export default {
   title: '消息平台',
+  platform_settings: '平台连接设置',
   create: '新增平台',
   create_and_login: '创建并扫码绑定',
   edit: '编辑平台',
@@ -10,7 +11,11 @@ export default {
   uid: '绑定用户',
   profile: '配置文件',
   language: '语言',
+  stream_llm_request: '流式请求',
   use_stream_dispatch: '流式返回',
+  stream_llm_request_hint: '仅控制向模型发送请求时是否使用流式接口，与流式返回独立。',
+  use_stream_dispatch_hint: '仅控制回复是否按处理过程分段返回，不改变模型的请求方式。',
+  session_settings_hint: '这些设置用于该平台后续收到的消息；配置文件仍可由会话单独覆盖。',
   inherited_profile: '使用用户默认配置',
   default_profile_suffix: '（默认）',
   enabled: '启用',

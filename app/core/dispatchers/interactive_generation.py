@@ -245,24 +245,27 @@ async def generate_interactive_turn(
             await state.db.commit()
             provider_request_id = str(uuid.uuid4())
             attempt_started_at = get_local_time()
-            if state.stream_event_callback is None:
-                response = await LLMClient.generate(**generation_kwargs)
-            else:
-                if not emitted_agent_loop_start:
-                    await state.stream_event_callback(
-                        {
-                            "type": "agent_loop_start",
-                            "turn": state.current_turn,
-                            "response_id": response_id,
-                        }
-                    )
-                    emitted_agent_loop_start = True
+            upstream_streaming = state.stream_llm_request if state.stream_llm_request is not None else state.stream_event_callback is not None
+            if state.stream_event_callback is not None and not emitted_agent_loop_start:
+                await state.stream_event_callback(
+                    {
+                        "type": "agent_loop_start",
+                        "turn": state.current_turn,
+                        "response_id": response_id,
+                    }
+                )
+                emitted_agent_loop_start = True
 
+            if upstream_streaming:
                 response = await LLMClient.generate_with_stream_callback(
                     **generation_kwargs,
                     on_content=partial(_handle_stream_content, stream_state),
                     on_reasoning=partial(_handle_stream_reasoning, stream_state),
                 )
+            else:
+                response = await LLMClient.generate(**generation_kwargs)
+                if state.stream_event_callback is not None:
+                    await _handle_stream_reasoning(stream_state, getattr(response.message, "reasoning_content", None))
             if state.context_summary_work_validity_checker is not None and not await state.context_summary_work_validity_checker():
                 raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
             ai_msg = response.message

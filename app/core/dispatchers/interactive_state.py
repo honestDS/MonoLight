@@ -59,6 +59,7 @@ class InteractiveDispatchState:
     files_to_user: list[str] = field(default_factory=list)
     is_first_iter: bool = True
     latest_llm_request_metadata: dict[str, Any] | None = None
+    stream_llm_request: bool | None = None
     messages: list[InternalMessage] = field(default_factory=list)
     current_turn: int = 0
     goal_mode: bool = DEFAULT_SESSION_GOAL_MODE

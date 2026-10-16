@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import app.core.crypto
 from app.api.v1.message_platforms import router
-from app.core.constants import ERR_MESSAGE_PLATFORM_NAME_EXISTS
+from app.core.constants import ERR_MESSAGE_PLATFORM_NAME_EXISTS, SESSION_MAX_TURNS_UPPER_BOUND
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.i18n import t
 from app.core.security import get_current_user
@@ -524,3 +524,304 @@ async def test_message_platform_name_conflict_rolls_back_and_keeps_session_usabl
         assert persisted_recovered.uid == "user-1"
         assert persisted_recovered.name == recovered_name
         assert persisted_recovered.get_config_secret("token") == recovered_token
+
+
+@pytest.mark.asyncio
+async def test_message_platform_session_settings_api_round_trip_and_partial_updates(
+    message_platform_configuration_db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: b"0123456789abcdef0123456789abcdef")
+    test_app = FastAPI()
+    register_handlers(test_app)
+    test_app.include_router(router, prefix="/api/v1")
+
+    async def override_get_db():
+        yield message_platform_configuration_db
+
+    async def override_admin():
+        return SimpleNamespace(uid="user-1", is_superuser=True)
+
+    test_app.dependency_overrides[get_db] = override_get_db
+    test_app.dependency_overrides[get_current_user] = override_admin
+
+    session_settings = {
+        "enable_markdown": True,
+        "goal_mode": False,
+        "max_turns": 7,
+        "show_tool_calls": False,
+        "show_reasoning": False,
+    }
+    initial_config = {
+        "token": "session-settings-token",
+        "api_timeout_ms": 8000,
+        "long_poll_timeout_ms": 20000,
+        "poll_interval_ms": 300,
+        "session_settings": session_settings,
+        "stream_llm_request": True,
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=test_app),
+        base_url="http://test",
+    ) as client:
+        created = await client.post(
+            "/api/v1/message-platforms/create",
+            json={
+                "name": "session-settings-platform",
+                "is_enabled": False,
+                "use_stream_dispatch": False,
+                "config": initial_config,
+            },
+        )
+        assert created.status_code == 200
+        created_data = created.json()["data"]
+        platform_id = created_data["id"]
+        assert created_data["use_stream_dispatch"] is False
+        assert created_data["config"]["session_settings"] == session_settings
+        assert created_data["config"]["stream_llm_request"] is True
+        assert created_data["config"]["token"] == initial_config["token"]
+        assert created_data["config"]["api_timeout_ms"] == initial_config["api_timeout_ms"]
+        assert created_data["config"]["long_poll_timeout_ms"] == initial_config["long_poll_timeout_ms"]
+        assert created_data["config"]["poll_interval_ms"] == initial_config["poll_interval_ms"]
+
+        stored_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == platform_id))).scalar_one()
+        assert stored_config["session_settings"] == session_settings
+        assert stored_config["stream_llm_request"] is True
+        assert stored_config["token"].startswith("enc:v1:")
+        assert stored_config["token"] != initial_config["token"]
+        assert stored_config["api_timeout_ms"] == initial_config["api_timeout_ms"]
+        assert stored_config["long_poll_timeout_ms"] == initial_config["long_poll_timeout_ms"]
+        assert stored_config["poll_interval_ms"] == initial_config["poll_interval_ms"]
+        initial_encrypted_token = stored_config["token"]
+        persisted = await message_platform_configuration_db.get(MessagePlatform, platform_id)
+        assert persisted is not None
+        assert persisted.get_config_secret("token") == initial_config["token"]
+        assert persisted.use_stream_dispatch is False
+
+        fetched = await client.get(
+            "/api/v1/message-platforms/get",
+            params={"platform_id": platform_id},
+        )
+        assert fetched.status_code == 200
+        fetched_data = fetched.json()["data"]
+        assert fetched_data["use_stream_dispatch"] is False
+        assert fetched_data["config"]["session_settings"] == session_settings
+        assert fetched_data["config"]["stream_llm_request"] is True
+        assert fetched_data["config"]["token"] == initial_config["token"]
+        assert fetched_data["config"]["poll_interval_ms"] == initial_config["poll_interval_ms"]
+
+        listed = await client.get("/api/v1/message-platforms/list", params={"page": 1, "size": 10})
+        assert listed.status_code == 200
+        listed_data = next(item for item in listed.json()["data"]["items"] if item["id"] == platform_id)
+        assert listed_data["use_stream_dispatch"] is False
+        assert listed_data["config"]["session_settings"] == session_settings
+        assert listed_data["config"]["stream_llm_request"] is True
+        assert listed_data["config"]["token"] == initial_config["token"]
+        assert listed_data["config"]["poll_interval_ms"] == initial_config["poll_interval_ms"]
+
+        updated_settings = {**session_settings, "max_turns": 11}
+        partially_updated = await client.post(
+            "/api/v1/message-platforms/update",
+            params={"platform_id": platform_id},
+            json={"config": {"session_settings": {"max_turns": 11}}},
+        )
+        assert partially_updated.status_code == 200
+        partially_updated_data = partially_updated.json()["data"]
+        assert partially_updated_data["use_stream_dispatch"] is False
+        assert partially_updated_data["config"]["session_settings"] == updated_settings
+        assert partially_updated_data["config"]["stream_llm_request"] is True
+        assert partially_updated_data["config"]["token"] == initial_config["token"]
+        assert partially_updated_data["config"]["poll_interval_ms"] == initial_config["poll_interval_ms"]
+
+        stored_after_partial = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == platform_id))).scalar_one()
+        assert stored_after_partial["session_settings"] == updated_settings
+        assert stored_after_partial["stream_llm_request"] is True
+        assert stored_after_partial["token"] == initial_encrypted_token
+        assert stored_after_partial["api_timeout_ms"] == initial_config["api_timeout_ms"]
+        assert stored_after_partial["long_poll_timeout_ms"] == initial_config["long_poll_timeout_ms"]
+        assert stored_after_partial["poll_interval_ms"] == initial_config["poll_interval_ms"]
+        await message_platform_configuration_db.refresh(persisted)
+        assert persisted.use_stream_dispatch is False
+        assert persisted.get_config_secret("token") == initial_config["token"]
+
+        stream_disabled = await client.post(
+            "/api/v1/message-platforms/update",
+            params={"platform_id": platform_id},
+            json={"config": {"stream_llm_request": False}},
+        )
+        assert stream_disabled.status_code == 200
+        stream_disabled_data = stream_disabled.json()["data"]
+        assert stream_disabled_data["use_stream_dispatch"] is False
+        assert stream_disabled_data["config"]["stream_llm_request"] is False
+        assert stream_disabled_data["config"]["session_settings"] == updated_settings
+        assert stream_disabled_data["config"]["token"] == initial_config["token"]
+
+        dispatch_enabled = await client.post(
+            "/api/v1/message-platforms/update",
+            params={"platform_id": platform_id},
+            json={"use_stream_dispatch": True},
+        )
+        assert dispatch_enabled.status_code == 200
+        dispatch_enabled_data = dispatch_enabled.json()["data"]
+        assert dispatch_enabled_data["use_stream_dispatch"] is True
+        assert dispatch_enabled_data["config"]["stream_llm_request"] is False
+        assert dispatch_enabled_data["config"]["session_settings"] == updated_settings
+        assert dispatch_enabled_data["config"]["token"] == initial_config["token"]
+
+        stream_enabled = await client.post(
+            "/api/v1/message-platforms/update",
+            params={"platform_id": platform_id},
+            json={"config": {"stream_llm_request": True}},
+        )
+        assert stream_enabled.status_code == 200
+        stream_enabled_data = stream_enabled.json()["data"]
+        assert stream_enabled_data["use_stream_dispatch"] is True
+        assert stream_enabled_data["config"]["stream_llm_request"] is True
+        assert stream_enabled_data["config"]["session_settings"] == updated_settings
+        assert stream_enabled_data["config"]["token"] == initial_config["token"]
+
+        dispatch_disabled = await client.post(
+            "/api/v1/message-platforms/update",
+            params={"platform_id": platform_id},
+            json={"use_stream_dispatch": False},
+        )
+        assert dispatch_disabled.status_code == 200
+        dispatch_disabled_data = dispatch_disabled.json()["data"]
+        assert dispatch_disabled_data["use_stream_dispatch"] is False
+        assert dispatch_disabled_data["config"]["stream_llm_request"] is True
+        assert dispatch_disabled_data["config"]["session_settings"] == updated_settings
+        assert dispatch_disabled_data["config"]["token"] == initial_config["token"]
+
+        repeated_updates = []
+        for _ in range(2):
+            repeated = await client.post(
+                "/api/v1/message-platforms/update",
+                params={"platform_id": platform_id},
+                json={"config": {"session_settings": {"max_turns": 11}}},
+            )
+            assert repeated.status_code == 200
+            repeated_updates.append(repeated.json()["data"])
+        first_repeated = dict(repeated_updates[0])
+        second_repeated = dict(repeated_updates[1])
+        first_repeated.pop("updated_at", None)
+        second_repeated.pop("updated_at", None)
+        assert first_repeated == second_repeated
+
+        final_get = await client.get("/api/v1/message-platforms/get", params={"platform_id": platform_id})
+        assert final_get.status_code == 200
+        final_data = final_get.json()["data"]
+        assert final_data["use_stream_dispatch"] is False
+        assert final_data["config"]["session_settings"] == updated_settings
+        assert final_data["config"]["stream_llm_request"] is True
+        assert final_data["config"]["token"] == initial_config["token"]
+        assert final_data["config"]["api_timeout_ms"] == initial_config["api_timeout_ms"]
+        assert final_data["config"]["long_poll_timeout_ms"] == initial_config["long_poll_timeout_ms"]
+        assert final_data["config"]["poll_interval_ms"] == initial_config["poll_interval_ms"]
+
+        final_list = await client.get("/api/v1/message-platforms/list", params={"page": 1, "size": 10})
+        assert final_list.status_code == 200
+        final_list_data = next(item for item in final_list.json()["data"]["items"] if item["id"] == platform_id)
+        assert final_list_data["use_stream_dispatch"] is False
+        assert final_list_data["config"]["session_settings"] == updated_settings
+        assert final_list_data["config"]["stream_llm_request"] is True
+        assert final_list_data["config"]["token"] == initial_config["token"]
+        assert final_list_data["config"]["api_timeout_ms"] == initial_config["api_timeout_ms"]
+        assert final_list_data["config"]["long_poll_timeout_ms"] == initial_config["long_poll_timeout_ms"]
+        assert final_list_data["config"]["poll_interval_ms"] == initial_config["poll_interval_ms"]
+
+        final_stored_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == platform_id))).scalar_one()
+        assert final_stored_config["session_settings"] == updated_settings
+        assert final_stored_config["stream_llm_request"] is True
+        assert final_stored_config["token"] == initial_encrypted_token
+        await message_platform_configuration_db.refresh(persisted)
+        assert persisted.use_stream_dispatch is False
+
+
+@pytest.mark.parametrize("operation", ("create", "update"))
+@pytest.mark.parametrize(
+    ("invalid_config", "case_id"),
+    [
+        pytest.param({"session_settings": {"max_turns": 0}}, "max-turns-zero"),
+        pytest.param({"session_settings": {"max_turns": -1}}, "max-turns-negative"),
+        pytest.param({"session_settings": {"max_turns": 1.5}}, "max-turns-float"),
+        pytest.param({"session_settings": {"max_turns": "7"}}, "max-turns-string"),
+        pytest.param({"session_settings": {"max_turns": True}}, "max-turns-bool"),
+        pytest.param({"session_settings": {"max_turns": SESSION_MAX_TURNS_UPPER_BOUND + 1}}, "max-turns-too-large"),
+        pytest.param({"session_settings": {"goal_mode": "false"}}, "goal-mode-string"),
+        pytest.param({"stream_llm_request": "true"}, "stream-llm-request-string"),
+        pytest.param({"session_settings": {"unknown_setting": False}}, "unknown-session-setting"),
+        pytest.param({"session_settings": None}, "null-session-settings"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_message_platform_session_settings_api_rejects_invalid_config_on_create_and_update(
+    message_platform_configuration_db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    invalid_config: dict,
+    case_id: str,
+) -> None:
+    monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: b"0123456789abcdef0123456789abcdef")
+    test_app = FastAPI()
+    register_handlers(test_app)
+    test_app.include_router(router, prefix="/api/v1")
+
+    async def override_get_db():
+        yield message_platform_configuration_db
+
+    async def override_admin():
+        return SimpleNamespace(uid="user-1", is_superuser=True)
+
+    test_app.dependency_overrides[get_db] = override_get_db
+    test_app.dependency_overrides[get_current_user] = override_admin
+
+    valid_config = {
+        "token": "validation-token",
+        "poll_interval_ms": 300,
+        "session_settings": {
+            "enable_markdown": True,
+            "goal_mode": False,
+            "max_turns": 7,
+            "show_tool_calls": False,
+            "show_reasoning": False,
+        },
+        "stream_llm_request": True,
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=test_app),
+        base_url="http://test",
+    ) as client:
+        if operation == "create":
+            failed = await client.post(
+                "/api/v1/message-platforms/create",
+                json={"name": f"invalid-{case_id}", "config": invalid_config},
+            )
+            assert failed.status_code == 422
+            persisted_platforms = (await message_platform_configuration_db.execute(select(MessagePlatform))).scalars().all()
+            assert persisted_platforms == []
+        else:
+            created = await client.post(
+                "/api/v1/message-platforms/create",
+                json={"name": f"baseline-{case_id}", "config": valid_config},
+            )
+            assert created.status_code == 200
+            platform_id = created.json()["data"]["id"]
+            before_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == platform_id))).scalar_one()
+            before_platform = await message_platform_configuration_db.get(MessagePlatform, platform_id)
+            assert before_platform is not None
+            before_use_stream_dispatch = before_platform.use_stream_dispatch
+
+            failed = await client.post(
+                "/api/v1/message-platforms/update",
+                params={"platform_id": platform_id},
+                json={"config": invalid_config},
+            )
+            assert failed.status_code == 422
+
+            after_config = (await message_platform_configuration_db.execute(select(MessagePlatform.config).where(MessagePlatform.id == platform_id))).scalar_one()
+            after_platform = await message_platform_configuration_db.get(MessagePlatform, platform_id)
+            assert after_platform is not None
+            assert after_config == before_config
+            assert after_platform.use_stream_dispatch == before_use_stream_dispatch

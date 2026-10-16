@@ -1,0 +1,38 @@
+.message-platform-form-dialog {
+  .platform-settings-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    border: 0;
+
+    .el-collapse-item {
+      overflow: hidden;
+      border: 1px solid var(--el-border-color-light);
+      border-radius: var(--radius-8);
+      background: var(--el-fill-color-light);
+
+      .el-collapse-item__header {
+        padding: 0 16px;
+        border-bottom: 0;
+        background: transparent;
+        font-weight: 600;
+      }
+
+      .el-collapse-item__wrap {
+        border-bottom: 0;
+        background: transparent;
+      }
+
+      .el-collapse-item__content {
+        padding: 12px 16px;
+      }
+    }
+  }
+
+  .platform-settings-notice {
+    margin: 12px 0;
+    color: var(--el-text-color-secondary);
+    font-size: 13px;
+    line-height: normal;
+  }
+}
