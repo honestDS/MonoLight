@@ -411,6 +411,10 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
         session_ids=session_ids,
         is_admin=is_admin,
     )
+    platforms_by_session = await message_platform_crud.get_platforms_for_sessions(
+        db,
+        sessions=[row for row in sessions if row.stream_llm_request is None and row.source not in {"http", "ws"}],
+    )
     reply_works_by_session: dict[str, list[dict]] = {}
     for work in works:
         reply_works_by_session.setdefault(work.session_id, []).append(
@@ -429,12 +433,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
         stream_llm_request = row.stream_llm_request
         if stream_llm_request is None:
             if row.source not in {"http", "ws"}:
-                platform = await message_platform_crud.get_platform_for_session(
-                    db,
-                    uid=row.uid,
-                    session_id=row.session_id,
-                    source=row.source,
-                )
+                platform = platforms_by_session.get(row.session_id)
                 stream_llm_request = bool((platform.config or {}).get("stream_llm_request", False)) if platform else False
             else:
                 stream_llm_request = row.source == "ws"

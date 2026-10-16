@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import func, or_, update
@@ -134,6 +135,66 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         )
         return result.scalars().all()
 
+    async def get_platforms_for_sessions(
+        self,
+        db: AsyncSession,
+        *,
+        sessions: Sequence[Any],
+        require_available: bool = True,
+    ) -> dict[str, MessagePlatform]:
+        candidates = [session for session in sessions if session.source == "weixin-openclaw" and (session.message_platform_id is not None or (session.message_platform_user_id or "").strip() or _parse_weixin_openclaw_session_user_id(session.session_id))]
+        if not candidates:
+            return {}
+
+        owner_uids = {session.uid for session in candidates}
+        bound_platform_ids = {session.message_platform_id for session in candidates if session.message_platform_id is not None}
+        legacy_owner_uids = {session.uid for session in candidates if session.message_platform_id is None}
+        result = await db.execute(
+            select(MessagePlatform).where(
+                MessagePlatform.uid.in_(owner_uids),
+                MessagePlatform.platform_type == MessagePlatformType.WEIXIN_OPENCLAW,
+                or_(MessagePlatform.id.in_(bound_platform_ids), MessagePlatform.uid.in_(legacy_owner_uids)),
+            )
+        )
+        platforms = result.scalars().all()
+
+        platforms_by_id = {platform.id: platform for platform in platforms}
+        platforms_by_uid: dict[str, list[MessagePlatform]] = {}
+        platforms_by_uid_user: dict[tuple[str, str], list[MessagePlatform]] = {}
+        for platform in platforms:
+            platforms_by_uid.setdefault(platform.uid, []).append(platform)
+            context_tokens = (platform.state or {}).get("context_tokens")
+            if isinstance(context_tokens, dict):
+                for user_id, context_token in context_tokens.items():
+                    if str(context_token or "").strip():
+                        platforms_by_uid_user.setdefault((platform.uid, user_id), []).append(platform)
+
+        resolved: dict[str, MessagePlatform] = {}
+        for session in candidates:
+            selected_platform = None
+            if session.message_platform_id is not None:
+                platform = platforms_by_id.get(session.message_platform_id)
+                if platform is not None and platform.uid == session.uid:
+                    selected_platform = platform
+            else:
+                user_id = (session.message_platform_user_id or "").strip() or _parse_weixin_openclaw_session_user_id(session.session_id)
+                if user_id:
+                    matching_platforms = platforms_by_uid_user.get((session.uid, user_id), [])
+                    if len(matching_platforms) == 1:
+                        selected_platform = matching_platforms[0]
+                    elif not matching_platforms:
+                        uid_platforms = platforms_by_uid.get(session.uid, [])
+                        if len(uid_platforms) == 1:
+                            selected_platform = uid_platforms[0]
+
+            if selected_platform is None:
+                continue
+            if require_available and (not selected_platform.is_enabled or selected_platform.status != MessagePlatformStatus.CONNECTED):
+                continue
+            resolved[session.session_id] = selected_platform
+
+        return resolved
+
     async def get_platform_for_session(self, db: AsyncSession, *, uid: str, session_id: str, source: str) -> MessagePlatform | None:
         if source != "weixin-openclaw":
             return None
@@ -143,45 +204,8 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         if session is None or session.source != source:
             return None
 
-        if session.message_platform_id is not None:
-            result = await db.execute(
-                select(MessagePlatform).where(
-                    MessagePlatform.id == session.message_platform_id,
-                    MessagePlatform.uid == uid,
-                    MessagePlatform.platform_type == MessagePlatformType.WEIXIN_OPENCLAW,
-                    MessagePlatform.is_enabled.is_(True),
-                    MessagePlatform.status == MessagePlatformStatus.CONNECTED,
-                )
-            )
-            return result.scalars().first()
-
-        user_id = (session.message_platform_user_id or "").strip() or _parse_weixin_openclaw_session_user_id(session_id)
-        if not user_id:
-            return None
-
-        result = await db.execute(
-            select(MessagePlatform).where(
-                MessagePlatform.uid == uid,
-                MessagePlatform.platform_type == MessagePlatformType.WEIXIN_OPENCLAW,
-            )
-        )
-        platforms = result.scalars().all()
-        matching_platforms = []
-        for platform in platforms:
-            context_tokens = (platform.state or {}).get("context_tokens")
-            if isinstance(context_tokens, dict) and str(context_tokens.get(user_id) or "").strip():
-                matching_platforms.append(platform)
-
-        if len(matching_platforms) == 1:
-            selected_platform = matching_platforms[0]
-        elif not matching_platforms and len(platforms) == 1:
-            selected_platform = platforms[0]
-        else:
-            return None
-
-        if not selected_platform.is_enabled or selected_platform.status != MessagePlatformStatus.CONNECTED:
-            return None
-        return selected_platform
+        platforms_by_session = await self.get_platforms_for_sessions(db, sessions=[session])
+        return platforms_by_session.get(session_id)
 
     async def update_runtime_state(
         self,

@@ -550,6 +550,8 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 ChatSession.profile_id,
                 ChatSession.profile_override_id,
                 ChatSession.source,
+                ChatSession.message_platform_id,
+                ChatSession.message_platform_user_id,
                 ChatSession.created_at,
                 ChatSession.llm_request_metadata,
             )

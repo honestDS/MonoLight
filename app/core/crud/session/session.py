@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
+from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.session_source import default_show_tool_calls_for_source
 from app.core.utils.request_token_baseline import MAIN_DIALOGUE_REQUEST_PURPOSE
@@ -227,11 +228,36 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         if not settings:
             return 0
 
+        legacy_result = await db.execute(
+            select(ChatSession).where(
+                ChatSession.uid == uid,
+                ChatSession.source == "weixin-openclaw",
+                ChatSession.message_platform_id.is_(None),
+            )
+        )
+        legacy_sessions = list(legacy_result.scalars().all())
+        platforms_by_session = await message_platform_crud.get_platforms_for_sessions(
+            db,
+            sessions=legacy_sessions,
+            require_available=False,
+        )
+        matching_session_ids = [session_id for session_id, platform in platforms_by_session.items() if platform.id == message_platform_id]
+
+        platform_filter = ChatSession.message_platform_id == message_platform_id
+        if matching_session_ids:
+            platform_filter = or_(
+                platform_filter,
+                and_(
+                    ChatSession.message_platform_id.is_(None),
+                    ChatSession.session_id.in_(matching_session_ids),
+                ),
+            )
+
         result = await db.execute(
             update(ChatSession)
             .where(
                 ChatSession.uid == uid,
-                ChatSession.message_platform_id == message_platform_id,
+                platform_filter,
                 ChatSession.source.notin_(("http", "ws")),
             )
             .values(**settings)
