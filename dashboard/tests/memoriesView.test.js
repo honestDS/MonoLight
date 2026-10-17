@@ -2619,7 +2619,7 @@ test('shows localized unconfigured embedding guidance and restores reindex after
     {
       locale: 'zh',
       memories: zhMemories,
-      expectedMessage: '尚未配置嵌入模型，请先在 Profile 中完成配置。',
+      expectedMessage: '尚未配置嵌入模型，请先在 配置管理 中完成配置。',
     },
     {
       locale: 'en',

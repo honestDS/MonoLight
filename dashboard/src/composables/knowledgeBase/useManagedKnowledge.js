@@ -1,5 +1,5 @@
 import { ref, reactive, computed } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { knowledgeBaseApi } from '../../api/index.js'
 import {
   canManageManagedKnowledge,
@@ -8,7 +8,7 @@ import {
 } from '../../utils/knowledgeBaseManagement.js'
 import { createAbortableTaskManager, createLatestRequestTracker } from '../../utils/requestTaskManager.js'
 
-export const useManagedKnowledge = ({ t, selectedKb }) => {
+export const useManagedKnowledge = ({ t, selectedKb, scope }) => {
   const managedKnowledgeDialogVisible = ref(false)
   const managedKnowledgeLoading = ref(false)
   const managedKnowledgeItems = ref([])
@@ -25,6 +25,10 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
   const managedKnowledgeHistory = ref([])
   const managedKnowledgeHistoryKey = ref('')
   let managedKnowledgePollTimer = null
+  let managedKnowledgePollSession = 0
+  let managedKnowledgeDetailRequestSeq = 0
+  let managedKnowledgeHistoryRequestSeq = 0
+  let managedKnowledgeFormGeneration = 0
   const managedKnowledgeTaskManager = createAbortableTaskManager()
   const managedKnowledgeRequestTracker = createLatestRequestTracker()
 
@@ -41,6 +45,9 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
   }))
 
   const resetManagedKnowledgeForm = () => {
+    managedKnowledgeFormGeneration += 1
+    managedKnowledgeDetailRequestSeq += 1
+    managedKnowledgeSubmitting.value = false
     if (managedKnowledgeFormRef.value) managedKnowledgeFormRef.value.clearValidate()
     managedKnowledgeForm.knowledge_key = ''
     managedKnowledgeForm.content = ''
@@ -50,9 +57,23 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
 
   const managedKnowledgeListTaskKey = 'managed-knowledge-list'
 
+  const isManagedKnowledgeCurrent = (isScopeCurrent, selectedId) => (
+    selectedId !== null
+    && selectedId !== undefined
+    && isScopeCurrent()
+    && selectedKb.value?.id === selectedId
+  )
+
+  const isManagedKnowledgePollingCurrent = (isScopeCurrent, session, selectedId) => (
+    isManagedKnowledgeCurrent(isScopeCurrent, selectedId)
+    && managedKnowledgePollSession === session
+  )
+
   const fetchManagedKnowledgeItems = async (notifyError = true, replaceCurrent = false) => {
-    if (!selectedKb.value || !canManageManagedKnowledge(selectedKb.value)) return
+    const isScopeCurrent = scope.capture()
+    if (!isScopeCurrent() || !selectedKb.value || !canManageManagedKnowledge(selectedKb.value)) return
     const selectedId = selectedKb.value.id
+    const isCurrent = () => isManagedKnowledgeCurrent(isScopeCurrent, selectedId)
     if (replaceCurrent) {
       managedKnowledgeTaskManager.cancel(managedKnowledgeListTaskKey)
     }
@@ -67,19 +88,28 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
         query: managedKnowledgeQuery.value
       }, { signal: token.signal })
       if (
-        !managedKnowledgeTaskManager.isCurrent(token)
+        !isCurrent()
+        || !managedKnowledgeTaskManager.isCurrent(token)
         || !managedKnowledgeRequestTracker.isCurrent(requestSeq)
-        || selectedKb.value?.id !== selectedId
       ) return
       managedKnowledgeItems.value = res.data.data.items || []
       managedKnowledgeTotal.value = res.data.data.total || 0
     } catch (error) {
-      if (token.signal.aborted || !managedKnowledgeTaskManager.isCurrent(token)) return
+      if (
+        !isCurrent()
+        || token.signal.aborted
+        || !managedKnowledgeTaskManager.isCurrent(token)
+        || !managedKnowledgeRequestTracker.isCurrent(requestSeq)
+      ) return
       if (notifyError && managedKnowledgeRequestTracker.isCurrent(requestSeq)) {
         ElMessage.error(t('knowledgeBase.managed_fetch_failed') + error.message)
       }
     } finally {
-      if (managedKnowledgeTaskManager.isCurrent(token) && managedKnowledgeRequestTracker.isCurrent(requestSeq)) {
+      if (
+        isCurrent()
+        && managedKnowledgeTaskManager.isCurrent(token)
+        && managedKnowledgeRequestTracker.isCurrent(requestSeq)
+      ) {
         managedKnowledgeLoading.value = false
       }
       managedKnowledgeTaskManager.finish(token)
@@ -87,6 +117,7 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
   }
 
   const stopManagedKnowledgePolling = () => {
+    managedKnowledgePollSession += 1
     if (managedKnowledgePollTimer) {
       clearTimeout(managedKnowledgePollTimer)
       managedKnowledgePollTimer = null
@@ -96,61 +127,114 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
     managedKnowledgeLoading.value = false
   }
 
-  const scheduleManagedKnowledgePolling = () => {
+  const scheduleManagedKnowledgePolling = (
+    capturedScopeCurrent = scope.capture(),
+    session = managedKnowledgePollSession,
+    selectedId = selectedKb.value?.id
+  ) => {
+    if (!isManagedKnowledgePollingCurrent(capturedScopeCurrent, session, selectedId)) return
     if (managedKnowledgePollTimer) {
       clearTimeout(managedKnowledgePollTimer)
       managedKnowledgePollTimer = null
     }
     if (!managedKnowledgeDialogVisible.value || !managedKnowledgeItems.value.some(item => item.pending_job_id)) return
-    managedKnowledgePollTimer = setTimeout(async () => {
+    let timer
+    timer = setTimeout(async () => {
+      if (
+        !isManagedKnowledgePollingCurrent(capturedScopeCurrent, session, selectedId)
+        || managedKnowledgePollTimer !== timer
+      ) return
+      managedKnowledgePollTimer = null
       try {
         await fetchManagedKnowledgeItems(false)
       } finally {
-        scheduleManagedKnowledgePolling()
+        if (isManagedKnowledgePollingCurrent(capturedScopeCurrent, session, selectedId)) {
+          scheduleManagedKnowledgePolling(capturedScopeCurrent, session, selectedId)
+        }
       }
     }, 2000)
+    managedKnowledgePollTimer = timer
   }
 
   const showManagedKnowledgeDialog = async (row) => {
+    const isScopeCurrent = scope.capture()
+    if (!isScopeCurrent() || !row?.id) return
     stopManagedKnowledgePolling()
+    const session = managedKnowledgePollSession
     selectedKb.value = row
+    const selectedId = row.id
+    if (!isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) return
     managedKnowledgePage.value = 1
     managedKnowledgeQuery.value = ''
     managedKnowledgeItems.value = []
     managedKnowledgeTotal.value = 0
     managedKnowledgeDialogVisible.value = true
     await fetchManagedKnowledgeItems(true, true)
-    scheduleManagedKnowledgePolling()
+    if (isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) {
+      scheduleManagedKnowledgePolling(isScopeCurrent, session, selectedId)
+    }
   }
 
   const handleManagedKnowledgeSearch = async () => {
+    const isScopeCurrent = scope.capture()
+    const selectedId = selectedKb.value?.id
+    const session = managedKnowledgePollSession
+    if (!isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) return
     managedKnowledgePage.value = 1
     await fetchManagedKnowledgeItems(true, true)
-    scheduleManagedKnowledgePolling()
+    if (isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) {
+      scheduleManagedKnowledgePolling(isScopeCurrent, session, selectedId)
+    }
   }
 
   const handleManagedKnowledgeSizeChange = async () => {
+    const isScopeCurrent = scope.capture()
+    const selectedId = selectedKb.value?.id
+    const session = managedKnowledgePollSession
+    if (!isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) return
     managedKnowledgePage.value = 1
     await fetchManagedKnowledgeItems(true, true)
-    scheduleManagedKnowledgePolling()
+    if (isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) {
+      scheduleManagedKnowledgePolling(isScopeCurrent, session, selectedId)
+    }
   }
 
   const handleManagedKnowledgePageChange = async () => {
+    const isScopeCurrent = scope.capture()
+    const selectedId = selectedKb.value?.id
+    const session = managedKnowledgePollSession
+    if (!isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) return
     await fetchManagedKnowledgeItems(true, true)
-    scheduleManagedKnowledgePolling()
+    if (isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) {
+      scheduleManagedKnowledgePolling(isScopeCurrent, session, selectedId)
+    }
   }
 
   const showManagedKnowledgeCreateDialog = () => {
+    const isScopeCurrent = scope.capture()
+    if (!isScopeCurrent() || !selectedKb.value) return
     resetManagedKnowledgeForm()
     managedKnowledgeEditingId.value = null
     managedKnowledgeEditDialogVisible.value = true
   }
 
   const showManagedKnowledgeEditDialog = async (row) => {
-    if (!selectedKb.value) return
+    const isScopeCurrent = scope.capture()
+    const selectedId = selectedKb.value?.id
+    const itemId = row?.id
+    if (!isManagedKnowledgeCurrent(isScopeCurrent, selectedId) || !itemId) return
     resetManagedKnowledgeForm()
+    managedKnowledgeEditingId.value = null
+    const formGeneration = managedKnowledgeFormGeneration
+    const requestSeq = ++managedKnowledgeDetailRequestSeq
+    const isCurrent = () => (
+      isManagedKnowledgeCurrent(isScopeCurrent, selectedId)
+      && managedKnowledgeDetailRequestSeq === requestSeq
+      && managedKnowledgeFormGeneration === formGeneration
+    )
     try {
-      const res = await knowledgeBaseApi.managedItem(selectedKb.value.id, row.id)
+      const res = await knowledgeBaseApi.managedItem(selectedId, itemId)
+      if (!isCurrent()) return
       const item = res.data.data
       managedKnowledgeEditingId.value = item.id
       managedKnowledgeForm.knowledge_key = item.knowledge_key
@@ -159,7 +243,7 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
       managedKnowledgeForm.llm_maintainable = Boolean(item.llm_maintainable)
       managedKnowledgeEditDialogVisible.value = true
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.managed_fetch_item_failed') + error.message)
+      if (isCurrent()) ElMessage.error(t('knowledgeBase.managed_fetch_item_failed') + error.message)
     }
   }
 
@@ -169,109 +253,181 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
   }
 
   const submitManagedKnowledge = async () => {
-    if (!managedKnowledgeFormRef.value || !selectedKb.value) return
-    await managedKnowledgeFormRef.value.validate(async (valid) => {
-      if (!valid) return
-      managedKnowledgeSubmitting.value = true
-      try {
-        const payload = {
-          knowledge_key: managedKnowledgeForm.knowledge_key,
-          content: managedKnowledgeForm.content,
-          llm_maintainable: managedKnowledgeForm.llm_maintainable
-        }
-        let operation = 'create'
-        let res
-        if (managedKnowledgeEditingId.value) {
-          operation = 'update'
-          res = await knowledgeBaseApi.updateManagedItem(selectedKb.value.id, managedKnowledgeEditingId.value, {
-            ...payload,
-            expected_version: managedKnowledgeForm.expected_version,
-            dedupe_key: createManagedKnowledgeDedupeKey('update')
-          })
-        } else {
-          res = await knowledgeBaseApi.createManagedItem(selectedKb.value.id, {
-            ...payload,
-            dedupe_key: createManagedKnowledgeDedupeKey('create')
-          })
-        }
-        const status = res.data.data.status
-        showManagedKnowledgeMutationFeedback(operation, status)
-        if (!['existing_key', 'existing_content'].includes(status)) {
-          managedKnowledgeEditDialogVisible.value = false
-        }
-        await fetchManagedKnowledgeItems(true, true)
-        scheduleManagedKnowledgePolling()
-      } catch (error) {
-        ElMessage.error((managedKnowledgeEditingId.value ? t('knowledgeBase.managed_update_failed') : t('knowledgeBase.managed_create_failed')) + error.message)
-      } finally {
-        managedKnowledgeSubmitting.value = false
+    const formRef = managedKnowledgeFormRef.value
+    const isScopeCurrent = scope.capture()
+    const selectedId = selectedKb.value?.id
+    const editingId = managedKnowledgeEditingId.value
+    const formGeneration = managedKnowledgeFormGeneration
+    const session = managedKnowledgePollSession
+    if (!formRef || !isManagedKnowledgeCurrent(isScopeCurrent, selectedId) || managedKnowledgeSubmitting.value) return
+    const isCurrent = () => (
+      isManagedKnowledgeCurrent(isScopeCurrent, selectedId)
+      && managedKnowledgeFormGeneration === formGeneration
+    )
+    managedKnowledgeSubmitting.value = true
+
+    let valid
+    try {
+      valid = await formRef.validate()
+    } catch (_error) {
+      if (isCurrent()) managedKnowledgeSubmitting.value = false
+      return
+    }
+    if (!isCurrent()) return
+    if (!valid) {
+      managedKnowledgeSubmitting.value = false
+      return
+    }
+
+    const payload = {
+      knowledge_key: managedKnowledgeForm.knowledge_key,
+      content: managedKnowledgeForm.content,
+      llm_maintainable: managedKnowledgeForm.llm_maintainable
+    }
+    const operation = editingId ? 'update' : 'create'
+    try {
+      let res
+      if (editingId) {
+        res = await knowledgeBaseApi.updateManagedItem(selectedId, editingId, {
+          ...payload,
+          expected_version: managedKnowledgeForm.expected_version,
+          dedupe_key: createManagedKnowledgeDedupeKey('update')
+        })
+      } else {
+        res = await knowledgeBaseApi.createManagedItem(selectedId, {
+          ...payload,
+          dedupe_key: createManagedKnowledgeDedupeKey('create')
+        })
       }
-    })
+      if (!isCurrent()) return
+      const status = res.data.data.status
+      showManagedKnowledgeMutationFeedback(operation, status)
+      if (!['existing_key', 'existing_content'].includes(status)) {
+        managedKnowledgeEditDialogVisible.value = false
+      }
+      await fetchManagedKnowledgeItems(true, true)
+      if (isCurrent() && isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) {
+        scheduleManagedKnowledgePolling(isScopeCurrent, session, selectedId)
+      }
+    } catch (error) {
+      if (isCurrent()) {
+        const failureKey = editingId ? 'knowledgeBase.managed_update_failed' : 'knowledgeBase.managed_create_failed'
+        ElMessage.error(t(failureKey) + error.message)
+      }
+    } finally {
+      if (isCurrent()) managedKnowledgeSubmitting.value = false
+    }
   }
 
   const handleDeleteManagedKnowledge = async (row) => {
-    if (!selectedKb.value) return
+    const isScopeCurrent = scope.capture()
+    const selectedId = selectedKb.value?.id
+    const itemId = row?.id
+    const session = managedKnowledgePollSession
+    if (!isManagedKnowledgeCurrent(isScopeCurrent, selectedId) || !itemId) return
+    const key = row.knowledge_key
+    const version = row.version
+    const confirmed = await scope.confirm(
+      t('knowledgeBase.managed_delete_confirm', { key }),
+      t('knowledgeBase.prompt'),
+      {
+        confirmButtonText: t('knowledgeBase.confirm'),
+        cancelButtonText: t('knowledgeBase.cancel'),
+        type: 'warning'
+      }
+    )
+    if (!isManagedKnowledgeCurrent(isScopeCurrent, selectedId) || !confirmed) return
     try {
-      await ElMessageBox.confirm(
-        t('knowledgeBase.managed_delete_confirm', { key: row.knowledge_key }),
-        t('knowledgeBase.prompt'),
-        {
-          confirmButtonText: t('knowledgeBase.confirm'),
-          cancelButtonText: t('knowledgeBase.cancel'),
-          type: 'warning'
-        }
-      )
-    } catch (action) {
-      if (action === 'cancel' || action === 'close') return
-      throw action
-    }
-    try {
-      const res = await knowledgeBaseApi.deleteManagedItem(selectedKb.value.id, row.id, {
-        expected_version: row.version,
+      const res = await knowledgeBaseApi.deleteManagedItem(selectedId, itemId, {
+        expected_version: version,
         dedupe_key: createManagedKnowledgeDedupeKey('delete')
       })
+      if (!isManagedKnowledgeCurrent(isScopeCurrent, selectedId)) return
       showManagedKnowledgeMutationFeedback('delete', res.data.data.status)
       await fetchManagedKnowledgeItems(true, true)
-      scheduleManagedKnowledgePolling()
+      if (isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) {
+        scheduleManagedKnowledgePolling(isScopeCurrent, session, selectedId)
+      }
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.managed_delete_failed') + error.message)
+      if (isManagedKnowledgeCurrent(isScopeCurrent, selectedId)) {
+        ElMessage.error(t('knowledgeBase.managed_delete_failed') + error.message)
+      }
     }
   }
 
   const retryManagedKnowledgePublication = async (row) => {
+    const isScopeCurrent = scope.capture()
+    const selectedId = selectedKb.value?.id
+    const itemId = row?.id
+    const session = managedKnowledgePollSession
     if (
-      !selectedKb.value
+      !isManagedKnowledgeCurrent(isScopeCurrent, selectedId)
+      || !itemId
       || row.publication_job_status !== 'failed'
       || !row.publication_job_id
     ) return
+    const version = row.version
+    const failedJobId = row.publication_job_id
     try {
-      const res = await knowledgeBaseApi.retryManagedItem(selectedKb.value.id, row.id, {
-        expected_version: row.version,
-        failed_job_id: row.publication_job_id,
+      const res = await knowledgeBaseApi.retryManagedItem(selectedId, itemId, {
+        expected_version: version,
+        failed_job_id: failedJobId,
         dedupe_key: createManagedKnowledgeDedupeKey('retry')
       })
+      if (!isManagedKnowledgeCurrent(isScopeCurrent, selectedId)) return
       showManagedKnowledgeMutationFeedback('retry', res.data.data.status)
       await fetchManagedKnowledgeItems(true, true)
-      scheduleManagedKnowledgePolling()
+      if (isManagedKnowledgePollingCurrent(isScopeCurrent, session, selectedId)) {
+        scheduleManagedKnowledgePolling(isScopeCurrent, session, selectedId)
+      }
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.managed_retry_failed') + error.message)
+      if (isManagedKnowledgeCurrent(isScopeCurrent, selectedId)) {
+        ElMessage.error(t('knowledgeBase.managed_retry_failed') + error.message)
+      }
     }
   }
 
   const showManagedKnowledgeHistory = async (row) => {
-    if (!selectedKb.value) return
+    const isScopeCurrent = scope.capture()
+    const selectedId = selectedKb.value?.id
+    const itemId = row?.id
+    if (!isManagedKnowledgeCurrent(isScopeCurrent, selectedId) || !itemId) return
+    const requestSeq = ++managedKnowledgeHistoryRequestSeq
+    const isCurrent = () => (
+      isManagedKnowledgeCurrent(isScopeCurrent, selectedId)
+      && managedKnowledgeHistoryRequestSeq === requestSeq
+    )
     managedKnowledgeHistoryKey.value = row.knowledge_key
     managedKnowledgeHistory.value = []
     managedKnowledgeHistoryDialogVisible.value = true
     managedKnowledgeHistoryLoading.value = true
     try {
-      const res = await knowledgeBaseApi.managedHistory(selectedKb.value.id, row.id)
+      const res = await knowledgeBaseApi.managedHistory(selectedId, itemId)
+      if (!isCurrent()) return
       managedKnowledgeHistory.value = res.data.data || []
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.managed_history_failed') + error.message)
+      if (isCurrent()) ElMessage.error(t('knowledgeBase.managed_history_failed') + error.message)
     } finally {
-      managedKnowledgeHistoryLoading.value = false
+      if (isCurrent()) managedKnowledgeHistoryLoading.value = false
     }
+  }
+
+  const resetManagedKnowledgeState = () => {
+    stopManagedKnowledgePolling()
+    managedKnowledgeHistoryRequestSeq += 1
+    managedKnowledgeDialogVisible.value = false
+    managedKnowledgeEditDialogVisible.value = false
+    managedKnowledgeHistoryDialogVisible.value = false
+    managedKnowledgeItems.value = []
+    managedKnowledgeTotal.value = 0
+    managedKnowledgePage.value = 1
+    managedKnowledgePageSize.value = 10
+    managedKnowledgeQuery.value = ''
+    managedKnowledgeEditingId.value = null
+    managedKnowledgeHistoryKey.value = ''
+    managedKnowledgeHistory.value = []
+    managedKnowledgeHistoryLoading.value = false
+    resetManagedKnowledgeForm()
   }
 
   const handleManagedKnowledgeMoreAction = (command, row) => {
@@ -332,6 +488,7 @@ export const useManagedKnowledge = ({ t, selectedKb }) => {
     managedKnowledgeHistoryKey,
     managedKnowledgeForm,
     managedKnowledgeRules,
+    resetManagedKnowledgeState,
     fetchManagedKnowledgeItems,
     scheduleManagedKnowledgePolling,
     stopManagedKnowledgePolling,

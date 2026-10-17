@@ -15,9 +15,10 @@ import {
   getKnowledgeBaseProfileLabel,
   normalizeKnowledgeBase
 } from '../../utils/knowledgeBaseManagement.js'
-import { useDeleteConfirm } from '../useDeleteConfirm.js'
+import { createKnowledgeBaseScope } from '../../utils/knowledgeBaseScope.js'
 import { useUserPermissionsStore } from '../useUserPermissions.js'
 import { useKnowledgeBaseDocuments } from './useKnowledgeBaseDocuments.js'
+import { useKnowledgeBaseQueryTest } from './useKnowledgeBaseQueryTest.js'
 import { useManagedKnowledge } from './useManagedKnowledge.js'
 import { useKnowledgeOrganization } from './useKnowledgeOrganization.js'
 
@@ -43,6 +44,7 @@ export function useKnowledgeBaseView() {
   const ownerUsersLoading = ref(false)
   const ownerUsersError = ref(null)
   let ownerUsersRequestVersion = 0
+  let formGeneration = 0
   const migrationDialogVisible = ref(false)
   const migrationTargetKey = ref('')
   const migrationSubmitting = ref(false)
@@ -63,13 +65,15 @@ export function useKnowledgeBaseView() {
   let repairDedupe = null
   let fetchDataRequestVersion = 0
   let knowledgeBaseViewDisposed = false
-  const queryTestDialogVisible = ref(false)
-  const queryTesting = ref(false)
-  const queryTested = ref(false)
-  const queryTestFormRef = ref(null)
-  const queryTestResults = ref([])
-  const retrievalMode = ref(null)
-  const rerankError = ref(null)
+
+  const scope = createKnowledgeBaseScope({
+    isActive: () => (
+      !knowledgeBaseViewDisposed &&
+      (userPermissions.currentUser?.uid ?? null) !== null
+    ),
+    confirm: (...args) => ElMessageBox.confirm(...args),
+    closeConfirmations: () => ElMessageBox.close()
+  })
 
   const form = reactive({
     name: '',
@@ -94,30 +98,25 @@ export function useKnowledgeBaseView() {
   const migrationProgress = computed(() => getKnowledgeBaseMigrationProgress(selectedKb.value))
   const managedMigrationTerminalHintKey = computed(() => getManagedKnowledgeBaseMigrationTerminalHintKey(selectedKb.value))
 
-  const queryTestForm = reactive({
-    query: '',
-    top_k: 5
-  })
-
-  const queryTestRules = computed(() => ({
-    query: [{ required: true, message: t('knowledgeBase.input_query_err'), trigger: 'blur' }],
-    top_k: [{ required: true, message: t('knowledgeBase.set_top_k'), trigger: 'blur' }]
-  }))
-
-  const documents = useKnowledgeBaseDocuments({ t, selectedKb })
-  const managedKnowledge = useManagedKnowledge({ t, selectedKb })
+  const documents = useKnowledgeBaseDocuments({ t, selectedKb, scope })
+  const queryTest = useKnowledgeBaseQueryTest({ t, selectedKb, scope })
+  const managedKnowledge = useManagedKnowledge({ t, selectedKb, scope })
   const organization = useKnowledgeOrganization({
     t,
     selectedKb,
+    scope,
     fetchManagedKnowledgeItems: managedKnowledge.fetchManagedKnowledgeItems,
     scheduleManagedKnowledgePolling: managedKnowledge.scheduleManagedKnowledgePolling
   })
 
   const fetchData = async () => {
+    const scopeGuard = scope.capture()
+    if (!scopeGuard()) return
     const requestVersion = ++fetchDataRequestVersion
     const uid = userPermissions.currentUser?.uid ?? null
     const requestIsSuperuser = isSuperuser.value
     const isRequestCurrent = () => (
+      scopeGuard() &&
       !knowledgeBaseViewDisposed &&
       requestVersion === fetchDataRequestVersion &&
       (userPermissions.currentUser?.uid ?? null) === uid &&
@@ -156,11 +155,13 @@ export function useKnowledgeBaseView() {
   }
 
   const handleRefresh = () => {
+    if (!scope.capture()()) return
     currentPage.value = 1
     fetchData()
   }
 
   const handleSizeChange = () => {
+    if (!scope.capture()()) return
     currentPage.value = 1
     fetchData()
   }
@@ -278,7 +279,7 @@ export function useKnowledgeBaseView() {
   }
 
   const showRepairDialog = () => {
-    if (repairSubmitting.value || migrationSubmitting.value || knowledgeBaseViewDisposed) return
+    if (!scope.capture()() || repairSubmitting.value || migrationSubmitting.value) return
 
     clearRepairDedupe()
     const generation = ++repairGeneration
@@ -369,6 +370,7 @@ export function useKnowledgeBaseView() {
 
   const repairKnowledgeBase = async (row) => {
     if (
+      !scope.capture()() ||
       !canRepairKnowledgeBase(row) ||
       repairSubmitting.value ||
       migrationSubmitting.value ||
@@ -382,35 +384,31 @@ export function useKnowledgeBaseView() {
     }
     repairSession = session
     const isCurrent = () => isCurrentRepairSession(generation, session)
-    const scope = `knowledge_base:${row.id}`
+    const repairScope = `knowledge_base:${row.id}`
     const name = row.name
     const username = getKnowledgeBaseOwnerLabel(row)
     repairSubmitting.value = true
 
     try {
-      try {
-        await ElMessageBox.confirm(
-          t('knowledgeBase.repair_confirm', { name, username, id: row.id }),
-          t('knowledgeBase.repair_confirm_title'),
-          {
-            confirmButtonText: t('knowledgeBase.repair'),
-            cancelButtonText: t('knowledgeBase.cancel'),
-            type: 'warning',
-            dangerouslyUseHTMLString: false
-          }
-        )
-      } catch {
-        return
-      }
-      if (!isCurrent()) return
+      const confirmed = await scope.confirm(
+        t('knowledgeBase.repair_confirm', { name, username, id: row.id }),
+        t('knowledgeBase.repair_confirm_title'),
+        {
+          confirmButtonText: t('knowledgeBase.repair'),
+          cancelButtonText: t('knowledgeBase.cancel'),
+          type: 'warning',
+          dangerouslyUseHTMLString: false
+        }
+      )
+      if (!confirmed || !isCurrent()) return
 
       const res = await knowledgeBaseApi.repair(
-        { dedupe_key: getRepairDedupeKey(scope) },
+        { dedupe_key: getRepairDedupeKey(repairScope) },
         { kb_id: row.id }
       )
       if (!isCurrent()) return
 
-      clearRepairDedupe(scope)
+      clearRepairDedupe(repairScope)
       await fetchData()
       if (!isCurrent()) return
       const repairedItem = res?.data?.data?.items?.[0]
@@ -515,6 +513,7 @@ export function useKnowledgeBaseView() {
   }
 
   const showMigrationDialog = async (row) => {
+    if (!scope.capture()()) return
     stopMigrationPolling()
     const generation = ++migrationDialogGeneration
     const session = {
@@ -522,6 +521,7 @@ export function useKnowledgeBaseView() {
       isSuperuser: isSuperuser.value
     }
     migrationDialogSession = session
+    migrationSubmitting.value = false
     selectedKb.value = row
     migrationTargetKey.value = row.target_embedding_channel_id && row.target_embedding_model_id
       ? `${row.target_embedding_channel_id}::${row.target_embedding_model_id}`
@@ -542,38 +542,18 @@ export function useKnowledgeBaseView() {
     migrationDialogGeneration += 1
     migrationDialogSession = null
     stopMigrationPolling()
+    migrationSubmitting.value = false
     migrationStateLoading.value = false
     migrationStateError.value = null
   }
 
-  watch(
-    () => [userPermissions.currentUser?.uid ?? null, isSuperuser.value],
-    () => {
-      fetchDataRequestVersion += 1
-      repairRequiredCount.value = 0
-      loading.value = false
-      repairGeneration += 1
-      repairSession = null
-      repairOwnersRequestVersion += 1
-      repairDialogVisible.value = false
-      repairOwnerUid.value = null
-      repairOwners.value = []
-      repairOwnersLoading.value = false
-      repairOwnersError.value = null
-      repairSubmitting.value = false
-      clearRepairDedupe()
-
-      if (!migrationDialogSession) return
-      migrationDialogGeneration += 1
-      migrationDialogSession = null
-      stopMigrationPolling()
-      migrationStateLoading.value = false
-    },
-    { flush: 'sync' }
-  )
-
   const submitEmbeddingMigration = async () => {
+    const generation = migrationDialogGeneration
+    const selectedId = selectedKb.value?.id
+    const session = migrationDialogSession
+    const isCurrent = () => isCurrentMigrationRequest(generation, selectedId, session)
     if (
+      !isCurrent() ||
       repairSubmitting.value ||
       migrationSubmitting.value ||
       !selectedKb.value ||
@@ -584,31 +564,34 @@ export function useKnowledgeBaseView() {
       ElMessage.error(t('knowledgeBase.select_embedding_model_err'))
       return
     }
-    try {
-      await ElMessageBox.confirm(
-        t('knowledgeBase.embedding_migration_confirm', {
-          name: selectedKb.value.name,
-          target: target.label
-        }),
-        t('knowledgeBase.embedding_migration_confirm_title'),
-        {
-          confirmButtonText: t('knowledgeBase.start_migration'),
-          cancelButtonText: t('knowledgeBase.cancel'),
-          type: 'warning'
-        }
-      )
-    } catch (action) {
-      if (action === 'cancel' || action === 'close') return
-      throw action
-    }
+    const confirmed = await scope.confirm(
+      t('knowledgeBase.embedding_migration_confirm', {
+        name: selectedKb.value.name,
+        target: target.label
+      }),
+      t('knowledgeBase.embedding_migration_confirm_title'),
+      {
+        confirmButtonText: t('knowledgeBase.start_migration'),
+        cancelButtonText: t('knowledgeBase.cancel'),
+        type: 'warning'
+      }
+    )
+    if (!confirmed) return
 
-    if (repairSubmitting.value || !selectedKb.value || !canStartKnowledgeBaseMigration(selectedKb.value)) return
+    if (
+      !isCurrent() ||
+      repairSubmitting.value ||
+      migrationSubmitting.value ||
+      !selectedKb.value ||
+      !canStartKnowledgeBaseMigration(selectedKb.value)
+    ) return
     migrationSubmitting.value = true
     try {
-      const res = await knowledgeBaseApi.migrateEmbedding(selectedKb.value.id, {
+      const res = await knowledgeBaseApi.migrateEmbedding(selectedId, {
         embedding_channel_id: target.channel_id,
         embedding_model_id: target.model_id
       })
+      if (!isCurrent()) return
       const refreshed = normalizeKnowledgeBase(res.data.data)
       selectedKb.value = refreshed
       const index = tableData.value.findIndex(item => item.id === refreshed.id)
@@ -616,13 +599,16 @@ export function useKnowledgeBaseView() {
       ElMessage.success(t('knowledgeBase.embedding_migration_submitted'))
       scheduleMigrationPolling()
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.embedding_migration_failed') + error.message)
+      if (isCurrent()) {
+        ElMessage.error(t('knowledgeBase.embedding_migration_failed') + error.message)
+      }
     } finally {
-      migrationSubmitting.value = false
+      if (isCurrent()) migrationSubmitting.value = false
     }
   }
 
   const handleKnowledgeBaseMoreAction = (command, row) => {
+    if (!scope.capture()()) return
     if (command === 'import_document') {
       documents.showImportDialog(row)
       return
@@ -640,15 +626,17 @@ export function useKnowledgeBaseView() {
   }
 
   const fetchOwnerUsers = async () => {
-    if (!isSuperuser.value || isEditing.value) return
-
+    const scopeGuard = scope.capture()
+    const currentUserUid = userPermissions.currentUser?.uid ?? null
+    const requestIsSuperuser = isSuperuser.value
+    if (!scopeGuard() || !requestIsSuperuser || isEditing.value) return
     const requestVersion = ++ownerUsersRequestVersion
-    const currentUserUid = userPermissions.currentUser?.uid || null
     const isCurrent = () => (
+      scopeGuard() &&
       requestVersion === ownerUsersRequestVersion &&
-      isSuperuser.value &&
+      isSuperuser.value === requestIsSuperuser &&
       !isEditing.value &&
-      (userPermissions.currentUser?.uid || null) === currentUserUid
+      (userPermissions.currentUser?.uid ?? null) === currentUserUid
     )
 
     ownerUsersLoading.value = true
@@ -679,6 +667,7 @@ export function useKnowledgeBaseView() {
   }
 
   const showDialog = () => {
+    if (!scope.capture()()) return
     resetFormFields()
     isEditing.value = false
     editingId.value = null
@@ -687,6 +676,7 @@ export function useKnowledgeBaseView() {
   }
 
   const showEditDialog = (row) => {
+    if (!scope.capture()() || !row) return
     resetFormFields()
     isEditing.value = true
     editingId.value = row.id
@@ -694,11 +684,13 @@ export function useKnowledgeBaseView() {
     form.description = row.description || ''
     form.embedding_model_key = `${row.embedding_channel_id}::${row.embedding_model_id}`
     form.username = row.username || ''
-    form.uid = row.uid || null
+    form.uid = row.uid ?? null
     dialogVisible.value = true
   }
 
-  const resetFormFields = () => {
+  const resetFormFields = (initializeOwner = true) => {
+    formGeneration += 1
+    submitting.value = false
     ownerUsersRequestVersion += 1
     ownerUsersLoading.value = false
     ownerUsersError.value = null
@@ -706,45 +698,67 @@ export function useKnowledgeBaseView() {
     form.name = ''
     form.description = ''
     form.embedding_model_key = ''
-    form.username = userPermissions.currentUser?.username || ''
-    form.uid = isSuperuser.value ? userPermissions.currentUser?.uid || null : null
-    ownerUsers.value = isSuperuser.value && userPermissions.currentUser?.uid && userPermissions.currentUser?.username
-      ? [{ uid: userPermissions.currentUser.uid, username: userPermissions.currentUser.username }]
-      : []
+    if (initializeOwner) {
+      form.username = userPermissions.currentUser?.username || ''
+      form.uid = isSuperuser.value ? userPermissions.currentUser?.uid || null : null
+      ownerUsers.value = isSuperuser.value && userPermissions.currentUser?.uid && userPermissions.currentUser?.username
+        ? [{ uid: userPermissions.currentUser.uid, username: userPermissions.currentUser.username }]
+        : []
+    } else {
+      form.username = ''
+      form.uid = null
+      ownerUsers.value = []
+    }
   }
 
-  const showQueryTestDialog = (row) => {
-    selectedKb.value = row
-    queryTestForm.query = ''
-    queryTestForm.top_k = 5
-    queryTestResults.value = []
-    queryTested.value = false
-    if (queryTestFormRef.value) queryTestFormRef.value.clearValidate()
-    queryTestDialogVisible.value = true
+  const resetKnowledgeBaseState = () => {
+    scope.invalidate()
+    fetchDataRequestVersion += 1
+    tableData.value = []
+    total.value = 0
+    embeddingModels.value = []
+    selectedKb.value = null
+    currentPage.value = 1
+    pageSize.value = 20
+    repairRequiredCount.value = 0
+    loading.value = false
+
+    resetFormFields(false)
+    editingId.value = null
+    isEditing.value = false
+    dialogVisible.value = false
+
+    repairGeneration += 1
+    repairSession = null
+    repairOwnersRequestVersion += 1
+    repairDialogVisible.value = false
+    repairOwnerUid.value = null
+    repairOwners.value = []
+    repairOwnersLoading.value = false
+    repairOwnersError.value = null
+    repairSubmitting.value = false
+    clearRepairDedupe()
+
+    closeMigrationDialog()
+    migrationTargetKey.value = ''
+
+    documents.resetDocumentsState()
+    managedKnowledge.resetManagedKnowledgeState()
+    organization.resetOrganizationState()
+    queryTest.resetQueryTestState()
   }
 
-  const submitQueryTest = async () => {
-    if (!queryTestFormRef.value || !selectedKb.value) return
-    await queryTestFormRef.value.validate(async (valid) => {
-      if (!valid) return
-      queryTesting.value = true
-      queryTested.value = false
-      try {
-        const res = await knowledgeBaseApi.queryTest(selectedKb.value.id, {
-          query: queryTestForm.query,
-          top_k: queryTestForm.top_k
-        })
-        queryTestResults.value = res.data.data.items || []
-        retrievalMode.value = res.data.data.retrieval_mode || null
-        rerankError.value = res.data.data.rerank_error || null
-        queryTested.value = true
-      } catch (error) {
-        ElMessage.error(t('knowledgeBase.query_test_failed') + error.message)
-      } finally {
-        queryTesting.value = false
-      }
-    })
-  }
+  watch(
+    [
+      () => userPermissions.currentUser?.uid ?? null,
+      () => isSuperuser.value
+    ],
+    ([uid]) => {
+      resetKnowledgeBaseState()
+      if (uid !== null && !knowledgeBaseViewDisposed) fetchData()
+    },
+    { flush: 'sync' }
+  )
 
   const formatDistance = (distance) => {
     if (distance === null || distance === undefined) return '-'
@@ -757,50 +771,99 @@ export function useKnowledgeBaseView() {
   }
 
   const submitForm = async () => {
-    if (submitting.value) return
-    if (!formRef.value) return
-    if (!isEditing.value && isSuperuser.value && (ownerUsersLoading.value || ownerUsersError.value)) return
-    await formRef.value.validate(async (valid) => {
-      if (valid) {
-        submitting.value = true
-        try {
-          if (isEditing.value) {
-            await knowledgeBaseApi.update(editingId.value, {
-              name: form.name,
-              description: form.description
-            })
-            ElMessage.success(t('knowledgeBase.update_success'))
-          } else {
-            const [embeddingChannelId, embeddingModelId] = form.embedding_model_key.split('::')
-            await knowledgeBaseApi.create({
-              name: form.name,
-              description: form.description,
-              embedding_channel_id: Number(embeddingChannelId),
-              embedding_model_id: embeddingModelId,
-              ...(isSuperuser.value ? { uid: form.uid } : {})
-            })
-            ElMessage.success(t('knowledgeBase.create_success'))
-          }
-          dialogVisible.value = false
-          fetchData()
-        } catch (error) {
-          ElMessage.error((isEditing.value ? t('knowledgeBase.update_failed') : t('knowledgeBase.create_failed')) + error.message)
-        } finally {
-          submitting.value = false
+    const scopeGuard = scope.capture()
+    const generation = formGeneration
+    const requestIsEditing = isEditing.value
+    const requestEditingId = editingId.value
+    const requestIsSuperuser = isSuperuser.value
+    const formRefForRequest = formRef.value
+    if (
+      !scopeGuard() ||
+      !dialogVisible.value ||
+      submitting.value ||
+      !formRefForRequest ||
+      (!requestIsEditing && requestIsSuperuser && (ownerUsersLoading.value || ownerUsersError.value))
+    ) return
+
+    const isCurrent = () => scopeGuard() && generation === formGeneration
+    submitting.value = true
+    try {
+      let valid
+      try {
+        valid = await formRefForRequest.validate()
+      } catch {
+        return
+      }
+      if (
+        !valid ||
+        !isCurrent() ||
+        !dialogVisible.value ||
+        !submitting.value ||
+        isSuperuser.value !== requestIsSuperuser ||
+        (!requestIsEditing && requestIsSuperuser && (ownerUsersLoading.value || ownerUsersError.value))
+      ) return
+
+      try {
+        if (requestIsEditing) {
+          await knowledgeBaseApi.update(requestEditingId, {
+            name: form.name,
+            description: form.description
+          })
+          if (!isCurrent()) return
+          ElMessage.success(t('knowledgeBase.update_success'))
+        } else {
+          const [embeddingChannelId, embeddingModelId] = form.embedding_model_key.split('::')
+          await knowledgeBaseApi.create({
+            name: form.name,
+            description: form.description,
+            embedding_channel_id: Number(embeddingChannelId),
+            embedding_model_id: embeddingModelId,
+            ...(requestIsSuperuser ? { uid: form.uid } : {})
+          })
+          if (!isCurrent()) return
+          ElMessage.success(t('knowledgeBase.create_success'))
+        }
+        if (!isCurrent()) return
+        dialogVisible.value = false
+        fetchData()
+      } catch (error) {
+        if (isCurrent()) {
+          ElMessage.error((requestIsEditing ? t('knowledgeBase.update_failed') : t('knowledgeBase.create_failed')) + error.message)
         }
       }
-    })
+    } finally {
+      if (isCurrent()) submitting.value = false
+    }
   }
 
-  const { handleDelete: confirmDeleteKnowledgeBase } = useDeleteConfirm(knowledgeBaseApi.delete, fetchData)
+  const handleDelete = async (row) => {
+    const scopeGuard = scope.capture()
+    if (!scopeGuard() || !row) return
+    const id = row.id
+    const name = row.name
+    const username = getKnowledgeBaseOwnerLabel(row)
+    const confirmed = await scope.confirm(
+      t('knowledgeBase.delete_kb_confirm', { name, username, id }),
+      t('knowledgeBase.prompt'),
+      {
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+        type: 'warning',
+        dangerouslyUseHTMLString: false
+      }
+    )
+    if (!scopeGuard() || !confirmed) return
 
-  const handleDelete = (row) => {
-    return confirmDeleteKnowledgeBase(row.id, row.name, {
-      title: t('knowledgeBase.prompt'),
-      message: t('knowledgeBase.delete_kb_confirm', { name: row.name, username: getKnowledgeBaseOwnerLabel(row), id: row.id }),
-      dangerouslyUseHTMLString: false,
-      errorMessage: t('knowledgeBase.delete_kb_failed')
-    })
+    try {
+      await knowledgeBaseApi.delete(id)
+    } catch (error) {
+      if (scopeGuard()) ElMessage.error(error?.message || t('knowledgeBase.delete_kb_failed'))
+      return
+    }
+
+    if (!scopeGuard()) return
+    ElMessage.success(t('common.delete_success'))
+    await fetchData()
   }
 
   onMounted(() => {
@@ -808,28 +871,8 @@ export function useKnowledgeBaseView() {
   })
 
   onBeforeUnmount(() => {
-    fetchDataRequestVersion += 1
-    repairRequiredCount.value = 0
-    loading.value = false
-    ownerUsersRequestVersion += 1
-    ownerUsersLoading.value = false
     knowledgeBaseViewDisposed = true
-    repairGeneration += 1
-    repairSession = null
-    repairOwnersRequestVersion += 1
-    repairDialogVisible.value = false
-    repairOwnerUid.value = null
-    repairOwners.value = []
-    repairOwnersLoading.value = false
-    repairOwnersError.value = null
-    repairSubmitting.value = false
-    clearRepairDedupe()
-    migrationDialogGeneration += 1
-    migrationDialogSession = null
-    stopMigrationPolling()
-    migrationStateLoading.value = false
-    managedKnowledge.stopManagedKnowledgePolling()
-    organization.stopOrganizationPolling()
+    resetKnowledgeBaseState()
   })
 
   return {
@@ -890,17 +933,7 @@ export function useKnowledgeBaseView() {
     showEditDialog,
     resetFormFields,
     fetchOwnerUsers,
-    queryTestDialogVisible,
-    queryTesting,
-    queryTested,
-    queryTestFormRef,
-    queryTestResults,
-    retrievalMode,
-    rerankError,
-    queryTestForm,
-    queryTestRules,
-    showQueryTestDialog,
-    submitQueryTest,
+    ...queryTest,
     formatDistance,
     formatScore,
     submitForm,

@@ -1,5 +1,5 @@
 import { ref, computed } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { knowledgeBaseApi } from '../../api/index.js'
 import {
   canManageManagedKnowledge,
@@ -10,6 +10,7 @@ import { createAbortableTaskManager, createLatestRequestTracker } from '../../ut
 export function useKnowledgeOrganization ({
   t,
   selectedKb,
+  scope,
   fetchManagedKnowledgeItems,
   scheduleManagedKnowledgePolling
 }) {
@@ -22,6 +23,8 @@ export function useKnowledgeOrganization ({
   const organizationJobPageSize = 20
   let organizationPollTimer = null
   let organizationPollingSession = 0
+  let organizationActionGeneration = 0
+  let organizationSubmitGeneration = 0
   const organizationTaskManager = createAbortableTaskManager()
   const organizationRequestTracker = createLatestRequestTracker()
 
@@ -134,6 +137,13 @@ export function useKnowledgeOrganization ({
     `${t('knowledgeBase.organization_conflict_count')}: ${getOrganizationConflictCount(job)}`
   ].join(' / ')
 
+  const isOrganizationScopeCurrent = (scopeGuard, selectedId) => Boolean(
+    selectedId !== null
+    && selectedId !== undefined
+    && scopeGuard()
+    && selectedKb.value?.id === selectedId
+  )
+
   const isOrganizationJobForSelectedKnowledgeBase = (job) => Boolean(
     selectedKb.value
     && job?.knowledge_base_id === selectedKb.value.id
@@ -158,14 +168,16 @@ export function useKnowledgeOrganization ({
   )
 
   const fetchOrganizationJobs = async (notifyError = true, session = organizationPollingSession) => {
+    const scopeGuard = scope.capture()
+    const selectedId = selectedKb.value?.id
     if (
-      !organizationDialogVisible.value
+      !isOrganizationScopeCurrent(scopeGuard, selectedId)
+      || !organizationDialogVisible.value
       || !selectedKb.value
       || !canManageManagedKnowledge(selectedKb.value)
       || session !== organizationPollingSession
     ) return
 
-    const selectedId = selectedKb.value.id
     const taskKey = `organization-jobs-${session}`
     const token = organizationTaskManager.begin(taskKey)
     if (!token) return
@@ -184,9 +196,9 @@ export function useKnowledgeOrganization ({
       if (
         !organizationTaskManager.isCurrent(token)
         || !organizationRequestTracker.isCurrent(requestSeq)
+        || !isOrganizationScopeCurrent(scopeGuard, selectedId)
         || !organizationDialogVisible.value
         || session !== organizationPollingSession
-        || selectedKb.value?.id !== selectedId
       ) return
       organizationJobs.value = items
       organizationTotal.value = getOrganizationNumber(data.total) ?? items.length
@@ -195,6 +207,7 @@ export function useKnowledgeOrganization ({
         notifyError
         && organizationTaskManager.isCurrent(token)
         && organizationRequestTracker.isCurrent(requestSeq)
+        && isOrganizationScopeCurrent(scopeGuard, selectedId)
         && session === organizationPollingSession
       ) {
         ElMessage.error(t('knowledgeBase.organization_fetch_failed') + error.message)
@@ -203,6 +216,7 @@ export function useKnowledgeOrganization ({
       if (
         organizationTaskManager.isCurrent(token)
         && organizationRequestTracker.isCurrent(requestSeq)
+        && isOrganizationScopeCurrent(scopeGuard, selectedId)
         && session === organizationPollingSession
       ) organizationLoading.value = false
       organizationTaskManager.finish(token)
@@ -215,6 +229,7 @@ export function useKnowledgeOrganization ({
       organizationPollTimer = null
     }
     organizationPollingSession += 1
+    organizationTaskManager.invalidate()
     organizationRequestTracker.invalidate()
     organizationLoading.value = false
     return organizationPollingSession
@@ -225,126 +240,184 @@ export function useKnowledgeOrganization ({
   }
 
   const scheduleOrganizationPolling = (session = organizationPollingSession) => {
+    if (session !== organizationPollingSession) return
     if (organizationPollTimer) {
       clearTimeout(organizationPollTimer)
       organizationPollTimer = null
     }
+    const scopeGuard = scope.capture()
+    const selectedId = selectedKb.value?.id
     if (
-      !organizationDialogVisible.value
-      || session !== organizationPollingSession
+      !isOrganizationScopeCurrent(scopeGuard, selectedId)
+      || !organizationDialogVisible.value
       || !organizationJobs.value.some(job => !isOrganizationJobTerminal(job))
     ) return
 
-    organizationPollTimer = setTimeout(async () => {
-      organizationPollTimer = null
+    const timer = setTimeout(async () => {
+      if (
+        session !== organizationPollingSession
+        || !isOrganizationScopeCurrent(scopeGuard, selectedId)
+      ) return
+      if (organizationPollTimer === timer) organizationPollTimer = null
       try {
         await fetchOrganizationJobs(false, session)
       } finally {
-        if (session === organizationPollingSession) scheduleOrganizationPolling(session)
+        if (
+          session === organizationPollingSession
+          && isOrganizationScopeCurrent(scopeGuard, selectedId)
+        ) scheduleOrganizationPolling(session)
       }
     }, 2000)
+    organizationPollTimer = timer
   }
 
   const showOrganizationDialog = async () => {
-    if (!selectedKb.value || !canManageManagedKnowledge(selectedKb.value)) return
+    const scopeGuard = scope.capture()
+    const selectedId = selectedKb.value?.id
+    if (
+      !isOrganizationScopeCurrent(scopeGuard, selectedId)
+      || !selectedKb.value
+      || !canManageManagedKnowledge(selectedKb.value)
+    ) return
     stopOrganizationPolling()
     organizationJobs.value = []
     organizationTotal.value = 0
     organizationDialogVisible.value = true
     const session = organizationPollingSession
     await fetchOrganizationJobs(true, session)
-    scheduleOrganizationPolling(session)
+    if (
+      isOrganizationScopeCurrent(scopeGuard, selectedId)
+      && session === organizationPollingSession
+    ) scheduleOrganizationPolling(session)
   }
 
-  const refreshOrganizationData = async () => {
+  const refreshOrganizationData = async (scopeGuard, selectedId) => {
+    if (!isOrganizationScopeCurrent(scopeGuard, selectedId)) return
     const session = beginOrganizationPollingSession()
     await Promise.all([
       fetchOrganizationJobs(true, session),
       fetchManagedKnowledgeItems(true, true)
     ])
+    if (!isOrganizationScopeCurrent(scopeGuard, selectedId)) return
     scheduleManagedKnowledgePolling()
-    if (organizationDialogVisible.value) scheduleOrganizationPolling(session)
+    if (
+      organizationDialogVisible.value
+      && session === organizationPollingSession
+    ) scheduleOrganizationPolling(session)
   }
 
   const submitKnowledgeOrganization = async () => {
-    if (!selectedKb.value || !canManageManagedKnowledge(selectedKb.value) || organizationSubmitting.value) return
+    const scopeGuard = scope.capture()
+    const selectedId = selectedKb.value?.id
+    if (
+      !isOrganizationScopeCurrent(scopeGuard, selectedId)
+      || !selectedKb.value
+      || !canManageManagedKnowledge(selectedKb.value)
+      || organizationSubmitting.value
+    ) return
 
-    const selectedId = selectedKb.value.id
+    const generation = ++organizationSubmitGeneration
+    const isCurrent = () => (
+      generation === organizationSubmitGeneration
+      && isOrganizationScopeCurrent(scopeGuard, selectedId)
+    )
     organizationSubmitting.value = true
     try {
       await knowledgeBaseApi.organize(selectedId, {})
+      if (!isCurrent()) return
       if (selectedKb.value?.id === selectedId) selectedKb.value.organization_error = null
       ElMessage.success(t('knowledgeBase.organization_submitted'))
-      await refreshOrganizationData()
+      await refreshOrganizationData(scopeGuard, selectedId)
+      if (!isCurrent()) return
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.organization_submit_failed') + error.message)
+      if (isCurrent()) ElMessage.error(t('knowledgeBase.organization_submit_failed') + error.message)
     } finally {
-      organizationSubmitting.value = false
+      if (isCurrent()) organizationSubmitting.value = false
     }
   }
 
   const handleCancelOrganizationJob = async (job) => {
+    const scopeGuard = scope.capture()
     const selectedId = selectedKb.value?.id
     const jobId = getOrganizationJobId(job)
-    if (!selectedId || !jobId || !canCancelOrganizationJob(job)) return
-    try {
-      await ElMessageBox.confirm(
-        t('knowledgeBase.organization_cancel_confirm'),
-        t('knowledgeBase.prompt'),
-        {
-          confirmButtonText: t('knowledgeBase.organization_cancel'),
-          cancelButtonText: t('knowledgeBase.cancel'),
-          type: 'warning'
-        }
-      )
-    } catch (action) {
-      if (action === 'cancel' || action === 'close') return
-      throw action
-    }
-    if (selectedKb.value?.id !== selectedId || !canCancelOrganizationJob(job)) return
+    const isCurrent = () => isOrganizationScopeCurrent(scopeGuard, selectedId)
+    if (!isCurrent() || !selectedId || !jobId || !canCancelOrganizationJob(job)) return
+    const confirmed = await scope.confirm(
+      t('knowledgeBase.organization_cancel_confirm'),
+      t('knowledgeBase.prompt'),
+      {
+        confirmButtonText: t('knowledgeBase.organization_cancel'),
+        cancelButtonText: t('knowledgeBase.cancel'),
+        type: 'warning'
+      }
+    )
+    if (!isCurrent() || !confirmed || !canCancelOrganizationJob(job)) return
 
+    const generation = ++organizationActionGeneration
+    const isCurrentAction = () => (
+      generation === organizationActionGeneration
+      && isCurrent()
+    )
     organizationActionJobId.value = jobId
     try {
       await knowledgeBaseApi.cancelOrganizationJob(selectedId, jobId)
+      if (!isCurrentAction()) return
       ElMessage.success(t('knowledgeBase.organization_cancelled'))
-      await refreshOrganizationData()
+      await refreshOrganizationData(scopeGuard, selectedId)
+      if (!isCurrentAction()) return
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.organization_cancel_failed') + error.message)
+      if (isCurrentAction()) ElMessage.error(t('knowledgeBase.organization_cancel_failed') + error.message)
     } finally {
-      organizationActionJobId.value = null
+      if (isCurrentAction()) organizationActionJobId.value = null
     }
   }
 
   const handleRetryOrganizationJob = async (job) => {
+    const scopeGuard = scope.capture()
     const selectedId = selectedKb.value?.id
     const jobId = getOrganizationJobId(job)
-    if (!selectedId || !jobId || !canRetryOrganizationJob(job)) return
-    try {
-      await ElMessageBox.confirm(
-        t('knowledgeBase.organization_retry_confirm'),
-        t('knowledgeBase.prompt'),
-        {
-          confirmButtonText: t('knowledgeBase.organization_retry'),
-          cancelButtonText: t('knowledgeBase.cancel'),
-          type: 'warning'
-        }
-      )
-    } catch (action) {
-      if (action === 'cancel' || action === 'close') return
-      throw action
-    }
-    if (selectedKb.value?.id !== selectedId || !canRetryOrganizationJob(job)) return
+    const isCurrent = () => isOrganizationScopeCurrent(scopeGuard, selectedId)
+    if (!isCurrent() || !selectedId || !jobId || !canRetryOrganizationJob(job)) return
+    const confirmed = await scope.confirm(
+      t('knowledgeBase.organization_retry_confirm'),
+      t('knowledgeBase.prompt'),
+      {
+        confirmButtonText: t('knowledgeBase.organization_retry'),
+        cancelButtonText: t('knowledgeBase.cancel'),
+        type: 'warning'
+      }
+    )
+    if (!isCurrent() || !confirmed || !canRetryOrganizationJob(job)) return
 
+    const generation = ++organizationActionGeneration
+    const isCurrentAction = () => (
+      generation === organizationActionGeneration
+      && isCurrent()
+    )
     organizationActionJobId.value = jobId
     try {
       await knowledgeBaseApi.retryOrganizationJob(selectedId, jobId)
+      if (!isCurrentAction()) return
       ElMessage.success(t('knowledgeBase.organization_retried'))
-      await refreshOrganizationData()
+      await refreshOrganizationData(scopeGuard, selectedId)
+      if (!isCurrentAction()) return
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.organization_retry_failed') + error.message)
+      if (isCurrentAction()) ElMessage.error(t('knowledgeBase.organization_retry_failed') + error.message)
     } finally {
-      organizationActionJobId.value = null
+      if (isCurrentAction()) organizationActionJobId.value = null
     }
+  }
+
+  const resetOrganizationState = () => {
+    stopOrganizationPolling()
+    organizationActionGeneration += 1
+    organizationSubmitGeneration += 1
+    organizationDialogVisible.value = false
+    organizationJobs.value = []
+    organizationTotal.value = 0
+    organizationLoading.value = false
+    organizationSubmitting.value = false
+    organizationActionJobId.value = null
   }
 
   return {
@@ -371,6 +444,7 @@ export function useKnowledgeOrganization ({
     handleCancelOrganizationJob,
     handleRetryOrganizationJob,
     stopOrganizationPolling,
-    fetchOrganizationJobs
+    fetchOrganizationJobs,
+    resetOrganizationState
   }
 }

@@ -6,6 +6,7 @@ import { computed, effectScope, ref } from 'vue'
 import { createI18n } from 'vue-i18n'
 
 import * as knowledgeBaseManagement from '../src/utils/knowledgeBaseManagement.js'
+import { createKnowledgeBaseScope } from '../src/utils/knowledgeBaseScope.js'
 import * as requestTaskManager from '../src/utils/requestTaskManager.js'
 import zhKnowledgeBase from '../src/i18n/locales/zh/knowledgeBase.js'
 import enKnowledgeBase from '../src/i18n/locales/en/knowledgeBase.js'
@@ -95,7 +96,11 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
     return Promise.resolve()
   }
   const scheduleManagedKnowledgePolling = (...args) => scheduled.push(args)
-  const scope = effectScope()
+  const scope = createKnowledgeBaseScope({
+    confirm: (...args) => ElMessageBox.confirm(...args),
+    closeConfirmations: () => {},
+  })
+  const vueEffectScope = effectScope()
   const context = vm.createContext({
     AbortController,
     clearTimeout() {},
@@ -107,15 +112,16 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
     ref,
     scheduleManagedKnowledgePolling,
     selectedKb,
+    scope,
     setTimeout: (...args) => (timers.push(args), timers.length),
     t: (...args) => i18n.global.t(...args),
     ...knowledgeBaseManagement,
     ...requestTaskManager,
     console: { log() {}, warn() {}, error() {}, info() {} },
   })
-  scope.run(() => vm.runInContext(
+  vueEffectScope.run(() => vm.runInContext(
     `${useKnowledgeOrganizationScript}\n` +
-    'globalThis.__module = useKnowledgeOrganization({ t, selectedKb, fetchManagedKnowledgeItems, scheduleManagedKnowledgePolling })',
+    'globalThis.__module = useKnowledgeOrganization({ t, selectedKb, scope, fetchManagedKnowledgeItems, scheduleManagedKnowledgePolling })',
     context,
     { filename: 'useKnowledgeOrganization.js' },
   ))
@@ -127,8 +133,12 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
     refreshed,
     scheduled,
     selectedKb,
+    scope,
     timers,
-    dispose: () => scope.stop(),
+    dispose: () => {
+      scope.invalidate()
+      vueEffectScope.stop()
+    },
   }
   t.after(harness.dispose)
   return harness
@@ -382,4 +392,43 @@ test('keeps the organization dialog visible and shows the new job after retry', 
   assert.equal(harness.module.organizationJobs.value[1].id, failedJob.id)
   assert.equal(harness.module.organizationJobs.value[1].status, 'failed')
   assert.equal(harness.module.organizationJobs.value[1].error, failedJob.error)
+})
+
+test('ignores late organization submissions after a new session starts', async t => {
+  for (const outcome of ['success', 'failure']) {
+    const oldDeferred = deferred()
+    const newDeferred = deferred()
+    const selectedKb = { id: 'managed-kb', knowledge_base_type: 'llm_managed' }
+    let submissionCount = 0
+    const harness = await createKnowledgeOrganizationHarness(t, {
+      selectedKb,
+      organize: () => ++submissionCount === 1 ? oldDeferred.promise : newDeferred.promise,
+    })
+
+    const oldSubmit = harness.module.submitKnowledgeOrganization()
+    harness.scope.invalidate()
+    harness.module.resetOrganizationState()
+    const newSubmit = harness.module.submitKnowledgeOrganization()
+
+    assert.equal(harness.module.organizationSubmitting.value, true)
+    if (outcome === 'success') oldDeferred.resolve(dataResponse({}))
+    else oldDeferred.reject(new Error('late organization failure'))
+    await oldSubmit
+
+    assert.deepEqual(harness.messages, [])
+    assert.deepEqual(harness.refreshed, [])
+    assert.deepEqual(harness.scheduled, [])
+    assert.equal(harness.module.organizationSubmitting.value, true)
+    assert.deepEqual(normalize(harness.module.organizationJobs.value), [])
+
+    newDeferred.resolve(dataResponse({}))
+    await newSubmit
+
+    assert.equal(harness.messages.length, 1)
+    assert.equal(harness.messages[0].type, 'success')
+    assert.equal(harness.messages[0].args[0], '知识整理已提交')
+    assert.deepEqual(harness.refreshed, [[true, true]])
+    assert.deepEqual(harness.scheduled, [[]])
+    assert.equal(harness.module.organizationSubmitting.value, false)
+  }
 })
