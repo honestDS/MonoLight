@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.constants import (
@@ -58,7 +58,10 @@ from app.core.knowledge.bindings import (
     replace_user_knowledge_base_bindings,
 )
 from app.core.knowledge.deletion import delete_owned_knowledge_base
-from app.core.knowledge.embedding_migration import submit_user_knowledge_base_embedding_migration
+from app.core.knowledge.embedding_migration import (
+    submit_knowledge_base_repairs,
+    submit_user_knowledge_base_embedding_migration,
+)
 from app.core.knowledge.errors import ManagedKnowledgeConflictError, ManagedKnowledgeNotFoundError
 from app.core.knowledge.managed import build_managed_knowledge_snapshot, managed_knowledge_service
 from app.core.knowledge.migration import record_knowledge_base_migration_change
@@ -88,6 +91,8 @@ from app.models.knowledge_base import (
     KnowledgeBaseProfileBindingUpdate,
     KnowledgeBaseQueryTestRequest,
     KnowledgeBaseQueryTestResponse,
+    KnowledgeBaseRepairRequest,
+    KnowledgeBaseRepairResponse,
     KnowledgeBaseResponse,
     KnowledgeBaseType,
     KnowledgeBaseUpdate,
@@ -435,12 +440,14 @@ async def list_knowledge_bases(
 ):
     """获取知识库列表及可用配置"""
     skip = (page - 1) * size
+    scoped_uid = None if getattr(current_user, "is_superuser", False) else current_user.uid
     kbs, total = await knowledge_base_crud.list_page(
         db,
-        uid=None if getattr(current_user, "is_superuser", False) else current_user.uid,
+        uid=scoped_uid,
         skip=skip,
         limit=size,
     )
+    repair_required_count = await knowledge_base_crud.count_repair_required(db, uid=scoped_uid)
     users = await user_crud.get_multi_by_uids(db, list({knowledge_base.uid for knowledge_base in kbs}))
     usernames_by_uid = {user.uid: user.username for user in users}
 
@@ -451,10 +458,62 @@ async def list_knowledge_bases(
     data = KnowledgeBaseListResponse(
         items=knowledge_base_items,
         total=total,
+        repair_required_count=repair_required_count,
         embedding_models=await list_embedding_model_options(db),
     )
 
     return StandardResponse.success(data=data)
+
+
+@router.post("/repair", response_model=StandardResponse[KnowledgeBaseRepairResponse])
+async def repair_knowledge_bases(
+    repair_in: KnowledgeBaseRepairRequest,
+    kb_id: int | None = Query(default=None, gt=0),
+    uid: str | None = Query(default=None, min_length=1, max_length=50, pattern=r"\S"),
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    is_superuser = bool(getattr(current_user, "is_superuser", False))
+    if kb_id is not None:
+        knowledge_base = await load_owned_knowledge_base(db, kb_id, current_user)
+        owner_uid = knowledge_base.uid
+        if uid is not None and uid.strip() != owner_uid:
+            raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
+    elif uid is None:
+        owner_uid = current_user.uid
+    else:
+        owner_uid = uid.strip()
+        if not is_superuser and owner_uid != current_user.uid:
+            raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
+        if is_superuser and await user_crud.get_by_uid(db, owner_uid) is None:
+            raise HTTPException(status_code=404, detail=ERR_USER_NOT_FOUND)
+
+    repaired = await submit_knowledge_base_repairs(
+        db,
+        uid=owner_uid,
+        dedupe_key=managed_user_dedupe_key("knowledge-repair", repair_in.dedupe_key),
+        knowledge_base_id=kb_id,
+    )
+    items = []
+    for knowledge_base in repaired:
+        items.append(await build_knowledge_base_response(db, knowledge_base))
+    return StandardResponse.success(
+        data=KnowledgeBaseRepairResponse(items=items, total=len(items)),
+        message=MSG_GENERIC_SUCCESS,
+    )
+
+
+@router.get("/get", response_model=StandardResponse[KnowledgeBaseResponse])
+async def get_knowledge_base(
+    kb_id: int = Query(..., gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_knowledge_base(db, kb_id, current_user)
+    return StandardResponse.success(
+        data=await build_knowledge_base_response(db, knowledge_base),
+        message=MSG_GENERIC_SUCCESS,
+    )
 
 
 @router.post("/embedding-migration", response_model=StandardResponse[KnowledgeBaseResponse])

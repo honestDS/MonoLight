@@ -8,10 +8,19 @@
         </div>
         <div class="heading-actions">
           <el-button type="primary" @click="openRuntimeDialog('organize')" :disabled="!memoryScopeReady || Boolean(actionLoading)">{{ $t('memories.organize_now') }}</el-button>
-          <el-button @click="openRuntimeDialog('reindex')" :disabled="!memoryScopeReady || Boolean(actionLoading)">{{ $t('memories.reindex') }}</el-button>
+          <el-button type="warning" @click="openRuntimeDialog('reindex')" :disabled="!memoryScopeReady || Boolean(actionLoading)">{{ $t('memories.reindex') }}</el-button>
           <el-button @click="openRuntimeDialog('status')" :disabled="!memoryScopeReady || Boolean(actionLoading)">{{ $t('memories.view_status') }}</el-button>
         </div>
       </div>
+      <el-alert
+        v-if="repairRequiredCount > 0"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="settings-error"
+        :title="$t('memories.repair_warning_title', { count: repairRequiredCount })"
+        :description="$t('memories.repair_warning_description')"
+      />
     </section>
 
     <div v-if="isSuperuser" class="memory-owner-filter">
@@ -196,32 +205,85 @@
       :model-value="runtimeDialogVisible"
       @update:model-value="closeRuntimeDialog"
       :title="runtimeDialogTitle"
-      :width="runtimeDialogAction === 'status' ? '1000px' : '560px'"
-      class="standard-dialog dialog-with-scroll-body memory-runtime-dialog"
+      :width="runtimeDialogAction === 'status' ? '1000px' : runtimeDialogAction === 'reindex' ? '600px' : '560px'"
+      class="standard-dialog memory-runtime-dialog"
+      :class="{ 'dialog-with-scroll-body': runtimeDialogAction !== 'reindex' }"
+      :center="runtimeDialogAction === 'reindex'"
       align-center
       :close-on-click-modal="!actionLoading"
       :close-on-press-escape="!actionLoading"
       :show-close="!actionLoading">
-      <el-form label-width="120px">
-        <el-form-item :label="$t('memories.owner_user')">
+      <el-alert
+        v-if="runtimeDialogAction === 'reindex'"
+        type="warning"
+        :title="$t('memories.reindex')"
+        :description="$t('memories.reindex_scope')"
+        :closable="false"
+        class="memory-repair-notice"
+      />
+      <el-alert
+        v-if="runtimeDialogAction === 'reindex' && settingsLoadError"
+        type="error"
+        :title="settingsLoadError"
+        :closable="false"
+        class="memory-repair-notice"
+      />
+      <el-button
+        v-if="runtimeDialogAction === 'reindex' && settingsLoadError"
+        link
+        type="primary"
+        :loading="settingsLoading"
+        :disabled="settingsLoading || Boolean(actionLoading)"
+        class="memory-repair-notice"
+        @click="loadSettings()">
+        {{ $t('memories.refresh') }}
+      </el-button>
+      <el-form label-width="120px" size="default">
+        <el-form-item
+          :label="$t('memories.owner_user')"
+          :for="runtimeDialogAction === 'reindex' ? 'memory-repair-owner' : undefined">
           <el-select
             v-if="isSuperuser"
             :model-value="runtimeOwnerFilter"
             filterable
-            clearable
+            :clearable="runtimeDialogAction !== 'reindex'"
             :loading="ownersLoading"
-            :disabled="Boolean(actionLoading)"
+            :disabled="Boolean(actionLoading) || (runtimeDialogAction === 'reindex' && ownersLoading)"
+            :id="runtimeDialogAction === 'reindex' ? 'memory-repair-owner' : undefined"
             :placeholder="$t('memories.select_owner')"
             class="full-width-input"
             :aria-label="$t('memories.owner_user')"
             @change="handleRuntimeOwnerChange">
             <el-option v-for="owner in owners" :key="owner.uid" :label="owner.username" :value="owner.uid" />
           </el-select>
+          <el-input
+            v-else-if="runtimeDialogAction === 'reindex'"
+            id="memory-repair-owner"
+            :model-value="ownerLabel(runtimeOwnerUid)"
+            readonly
+          />
           <span v-else>{{ ownerLabel(runtimeOwnerUid) }}</span>
         </el-form-item>
       </el-form>
 
+      <el-alert
+        v-if="runtimeDialogAction === 'reindex' && runtimeBlockingMessage"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="runtimeBlockingMessage"
+      >
+        <template v-if="!configured" #title>
+          <i18n-t keypath="memories.no_config" tag="span" scope="global">
+            <template #profile>
+              <router-link to="/profiles" class="memory-profile-link">{{ $t('memories.no_config_profile') }}</router-link>
+            </template>
+          </i18n-t>
+        </template>
+      </el-alert>
+
       <div
+        v-if="runtimeDialogAction !== 'reindex'"
         class="memory-runtime-body"
         :aria-busy="settingsLoading"
         :class="{ 'is-loading': settingsLoading && !settingsLoaded }"
@@ -232,7 +294,6 @@
           <template #title>{{ settingsLoadError }}</template>
         </el-alert>
         <p v-if="runtimeDialogAction === 'organize' && runtimeOwnerUid" class="help-text">{{ $t('memories.organize_scope', { owner: ownerLabel(runtimeOwnerUid) }) }}</p>
-        <p v-if="runtimeDialogAction === 'reindex' && runtimeOwnerUid" class="help-text">{{ $t('memories.reindex_scope', { owner: ownerLabel(runtimeOwnerUid) }) }}</p>
 
         <div v-if="settingsLoaded && currentMemoryTask" class="memory-task-summary">
           <div class="memory-task-summary-item">
@@ -249,7 +310,7 @@
           </div>
         </div>
 
-        <el-descriptions v-if="runtimeOwnerUid && !settingsLoadError && ['organize', 'reindex'].includes(runtimeDialogAction)" :column="1" border>
+        <el-descriptions v-if="runtimeOwnerUid && !settingsLoadError && runtimeDialogAction === 'organize'" :column="1" border>
           <el-descriptions-item :label="$t('memories.active_record_count')">{{ activeRecordCount }}</el-descriptions-item>
           <el-descriptions-item :label="$t('memories.index_status')">
             <StatusTag
@@ -261,10 +322,26 @@
             />
           </el-descriptions-item>
         </el-descriptions>
-        <el-alert v-if="runtimeBlockingMessage" type="warning" :closable="false" show-icon :title="runtimeBlockingMessage" />
+        <el-alert v-if="runtimeBlockingMessage" type="warning" :closable="false" show-icon :title="runtimeBlockingMessage">
+          <template v-if="!configured" #title>
+            <i18n-t keypath="memories.no_config" tag="span" scope="global">
+              <template #profile>
+                <router-link to="/profiles" class="memory-profile-link">{{ $t('memories.no_config_profile') }}</router-link>
+              </template>
+            </i18n-t>
+          </template>
+        </el-alert>
 
         <div v-if="runtimeOwnerUid && !settingsLoadError && runtimeDialogAction === 'status'" class="settings-content">
-          <el-alert v-if="settingsLoaded && !configured" type="info" :closable="false" show-icon :title="$t('memories.no_config')" />
+          <el-alert v-if="settingsLoaded && !configured" type="info" :closable="false" show-icon>
+            <template #title>
+              <i18n-t keypath="memories.no_config" tag="span" scope="global">
+                <template #profile>
+                  <router-link to="/profiles" class="memory-profile-link">{{ $t('memories.no_config_profile') }}</router-link>
+                </template>
+              </i18n-t>
+            </template>
+          </el-alert>
           <div class="settings-grid runtime-settings-grid" v-loading="settingsLoading">
             <div class="config-block">
               <strong>{{ $t('memories.active_config') }}</strong>
@@ -359,7 +436,7 @@
         </div>
       </div>
       <template #footer>
-        <el-button @click="loadSettings()" :loading="settingsLoading" :disabled="!runtimeOwnerUid || Boolean(actionLoading)">{{ $t('memories.refresh') }}</el-button>
+        <el-button v-if="runtimeDialogAction !== 'reindex'" @click="loadSettings()" :loading="settingsLoading" :disabled="!runtimeOwnerUid || Boolean(actionLoading)">{{ $t('memories.refresh') }}</el-button>
         <el-button
           v-if="runtimeDialogAction === 'status' && settingsLoaded && cleanupRetryId"
           type="danger"
@@ -371,11 +448,11 @@
         <el-button @click="closeRuntimeDialog" :disabled="Boolean(actionLoading)">{{ runtimeDialogAction === 'status' ? $t('memories.close') : $t('memories.cancel') }}</el-button>
         <el-button
           v-if="runtimeDialogAction !== 'status'"
-          type="primary"
-          :loading="actionLoading === runtimeDialogAction"
-          :disabled="runtimeDialogAction === 'organize' ? organizeBlocked : reindexBlocked"
+          :type="runtimeDialogAction === 'reindex' ? 'warning' : 'primary'"
+          :loading="actionLoading === runtimeDialogAction || (runtimeDialogAction === 'reindex' && settingsLoading)"
+          :disabled="runtimeDialogAction === 'organize' ? organizeBlocked : reindexBlocked || ownersLoading"
           @click="submitRuntimeOperation(runtimeDialogAction)">
-          {{ $t(runtimeDialogAction === 'organize' ? 'memories.confirm_organize' : 'memories.confirm_reindex') }}
+          {{ $t(runtimeDialogAction === 'organize' ? 'memories.confirm_organize' : 'memories.reindex') }}
         </el-button>
       </template>
     </el-dialog>
@@ -521,6 +598,7 @@ const {
   owners,
   ownersLoading,
   memoryScopeReady,
+  repairRequiredCount,
   ownerFilter,
   memories,
   memoriesLoading,

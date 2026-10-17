@@ -28,6 +28,13 @@ from app.models.knowledge_base import (
 
 
 class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBaseUpdate]):
+    async def count_repair_required(self, db: AsyncSession, *, uid: str | None) -> int:
+        conditions = [KnowledgeBase.index_status == KnowledgeBaseIndexStatus.FAILED]
+        if uid is not None:
+            conditions.append(KnowledgeBase.uid == uid)
+        result = await db.execute(select(func.count()).select_from(KnowledgeBase).where(*conditions))
+        return int(result.scalar() or 0)
+
     async def list_page(
         self,
         db: AsyncSession,

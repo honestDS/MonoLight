@@ -747,10 +747,22 @@ class KnowledgeBaseResponse(KnowledgeBaseCore):
         return self
 
 
+class KnowledgeBaseRepairRequest(SQLModel):
+    dedupe_key: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class KnowledgeBaseRepairResponse(SQLModel):
+    items: list[KnowledgeBaseResponse]
+    total: int
+
+
 class KnowledgeBaseListResponse(SQLModel):
     items: list[KnowledgeBaseResponse]
     total: int
     embedding_models: list[dict[str, Any]]
+    repair_required_count: int = Field(default=0, ge=0)
 
 
 class KnowledgeBaseUpdate(SQLModel):

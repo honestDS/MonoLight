@@ -100,7 +100,7 @@ export function useMemoryRuntime({
   const blockingText = (state) => state?.blocked ? t('memories.blocked_with_reason', { reason: blockingReason(state.reason), job: state.job_id || '-' }) : t('memories.not_blocked')
   const runtimeBlockingMessage = computed(() => {
     if (!runtimeDialogVisible.value || !settingsLoaded.value || runtimeDialogAction.value === 'status') return ''
-    if (!configured.value) return t('memories.no_config')
+    if (!configured.value) return t('memories.no_config', { profile: t('memories.no_config_profile') })
     const blocking = runtimeDialogAction.value === 'organize'
       ? settings.blocking?.organize
       : runtimeDialogAction.value === 'reindex'

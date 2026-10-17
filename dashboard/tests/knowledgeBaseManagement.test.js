@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { createPinia, setActivePinia } from 'pinia'
-import { computed, effectScope, reactive, ref } from 'vue'
+import { computed, effectScope, reactive, ref, watch } from 'vue'
 import { createI18n } from 'vue-i18n'
 
 import { getKnowledgeBaseProfileLabel } from '../src/utils/knowledgeBaseManagement.js'
@@ -57,6 +57,9 @@ const deferred = () => {
   })
   return { promise, resolve, reject }
 }
+const flushPromises = async () => {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve()
+}
 
 const createHarness = async (t, options = {}) => {
   const currentUid = options.currentUid ?? (options.superuser ? 'admin-user' : 'user-a')
@@ -68,6 +71,17 @@ const createHarness = async (t, options = {}) => {
   const confirms = []
   const mountedCallbacks = []
   const unmountedCallbacks = []
+  const timers = []
+  let nextTimerId = 1
+  const setTimeout = (callback, delay, ...args) => {
+    const timer = { id: nextTimerId++, callback, delay, args, cancelled: false, ran: false }
+    timers.push(timer)
+    return timer.id
+  }
+  const clearTimeout = id => {
+    const timer = timers.find(item => item.id === id)
+    if (timer) timer.cancelled = true
+  }
   const api = {
     requests,
     lists: [],
@@ -75,6 +89,8 @@ const createHarness = async (t, options = {}) => {
     updates: [],
     deletes: [],
     userLists: [],
+    repairs: [],
+    gets: [],
   }
 
   const knowledgeBaseApi = {
@@ -82,11 +98,13 @@ const createHarness = async (t, options = {}) => {
       const request = { method: 'list', params: { ...params } }
       requests.push(request)
       api.lists.push(request)
+      if (typeof options.list === 'function') return options.list(params, request)
       const items = knowledgeBases.map(item => ({ ...item }))
       return Promise.resolve(dataResponse({
         items,
         total: items.length,
         embedding_models: [],
+        repair_required_count: 0,
       }))
     },
     create: payload => {
@@ -106,6 +124,27 @@ const createHarness = async (t, options = {}) => {
       requests.push(request)
       api.deletes.push(request)
       return Promise.resolve(dataResponse({ id }))
+    },
+    repair: (payload, params) => {
+      const request = { method: 'repair', payload, params: params ? { ...params } : params }
+      requests.push(request)
+      api.repairs.push(request)
+      if (typeof options.repair === 'function') return options.repair(payload, params, request)
+      const items = knowledgeBases
+        .filter(item => params?.uid ? item.uid === params.uid : item.id === params?.kb_id)
+        .map(item => ({ ...item, migration_job_id: 1 }))
+      return Promise.resolve(dataResponse({
+        items,
+        total: items.length,
+      }))
+    },
+    get: id => {
+      const request = { method: 'get', id }
+      requests.push(request)
+      api.gets.push(request)
+      if (typeof options.get === 'function') return options.get(id, request)
+      const knowledgeBase = knowledgeBases.find(item => item.id === id)
+      return Promise.resolve(dataResponse(knowledgeBase ? { ...knowledgeBase } : { id }))
     },
   }
 
@@ -167,10 +206,13 @@ const createHarness = async (t, options = {}) => {
     formatTime: value => value,
     adminApi,
     knowledgeBaseApi,
+    setTimeout,
+    clearTimeout,
     onBeforeUnmount: callback => unmountedCallbacks.push(callback),
     onMounted: callback => mountedCallbacks.push(callback),
     reactive,
     ref,
+    watch,
     useI18n: () => ({
       t: (key, params) => i18n.global.t(
         key,
@@ -200,10 +242,21 @@ const createHarness = async (t, options = {}) => {
     api,
     confirms,
     messages,
+    timers,
     permissionsStore,
     mountedCallbacks,
     unmountedCallbacks,
     module: context.__module,
+    async runNextTimer() {
+      const timer = timers.find(item => !item.cancelled && !item.ran)
+      if (!timer) return false
+      timer.ran = true
+      await timer.callback(...timer.args)
+      return true
+    },
+    activeTimers() {
+      return timers.filter(timer => !timer.cancelled && !timer.ran)
+    },
     dispose() {
       if (this.disposed) return
       this.disposed = true
@@ -214,6 +267,89 @@ const createHarness = async (t, options = {}) => {
   t.after(() => harness.dispose())
   return harness
 }
+
+test('uses the list-wide repair count for the warning and clears it at zero', async t => {
+  const responses = [
+    dataResponse({ items: [], total: 0, embedding_models: [], repair_required_count: 4 }),
+    dataResponse({ items: [], total: 0, embedding_models: [], repair_required_count: 0 }),
+  ]
+  const harness = await createHarness(t, { list: () => Promise.resolve(responses.shift()) })
+
+  assert.equal(harness.module.repairRequiredCount.value, 0)
+  await harness.module.fetchData()
+  assert.equal(harness.module.tableData.value.length, 0)
+  assert.equal(harness.module.repairRequiredCount.value, 4)
+
+  await harness.module.fetchData()
+  assert.equal(harness.module.repairRequiredCount.value, 0)
+})
+
+test('clears the repair count on identity changes and ignores an old list response', async t => {
+  for (const changedField of ['uid', 'superuser']) {
+    const stale = deferred()
+    const fresh = deferred()
+    let listCalls = 0
+    const harness = await createHarness(t, {
+      currentUid: 'user-a',
+      list: () => {
+        listCalls += 1
+        if (listCalls === 1) {
+          return Promise.resolve(dataResponse({
+            items: [], total: 0, embedding_models: [], repair_required_count: 6,
+          }))
+        }
+        return listCalls === 2 ? stale.promise : fresh.promise
+      },
+    })
+
+    await harness.module.fetchData()
+    const staleLoad = harness.module.fetchData()
+
+    harness.permissionsStore.currentUser = changedField === 'uid'
+      ? { uid: 'user-b', username: 'Bob', is_superuser: false }
+      : { uid: 'user-a', username: 'Alice', is_superuser: true }
+    await flushPromises()
+    assert.equal(harness.module.repairRequiredCount.value, 0)
+
+    const freshLoad = harness.api.lists.length === 2 ? harness.module.fetchData() : null
+    fresh.resolve(dataResponse({
+      items: [], total: 0, embedding_models: [], repair_required_count: 3,
+    }))
+    if (freshLoad) await freshLoad
+    else await flushPromises()
+
+    stale.resolve(dataResponse({
+      items: [], total: 0, embedding_models: [], repair_required_count: 99,
+    }))
+    await staleLoad
+    await flushPromises()
+    assert.equal(harness.module.repairRequiredCount.value, 3, changedField)
+  }
+})
+
+test('clears the repair count when the list request is unauthorized', async t => {
+  for (const status of [401, 403]) {
+    let listCalls = 0
+    const harness = await createHarness(t, {
+      list: () => {
+        listCalls += 1
+        if (listCalls === 1) {
+          return Promise.resolve(dataResponse({
+            items: [], total: 0, embedding_models: [], repair_required_count: 5,
+          }))
+        }
+        return Promise.reject(Object.assign(new Error('unauthorized'), {
+          response: { status },
+        }))
+      },
+    })
+
+    await harness.module.fetchData()
+    assert.equal(harness.module.repairRequiredCount.value, 5)
+    await harness.module.fetchData()
+    assert.equal(harness.module.repairRequiredCount.value, 0, String(status))
+  }
+})
 
 test('renders user profile names in source order', () => {
   const profileNames = Object.freeze(['中文配置', 'English Profile'])
@@ -867,4 +1003,448 @@ test('waits for confirmation and preserves literal names and unknown owner place
     assert.equal(missingOptions.dangerouslyUseHTMLString, false)
     assert.deepEqual(harness.api.deletes.map(request => request.id), [specialRow.id, missingUsernameRow.id])
   }
+})
+
+test('repairs a selected owner from the complete admin user list without opening an arbitrary migration', async t => {
+  const users = Array.from({ length: 205 }, (_, index) => ({
+    uid: `owner-${index}`,
+    username: `Owner ${index}`,
+  }))
+  users[100] = { uid: 'admin-user', username: 'Administrator' }
+  const selectedOwner = users[204]
+  const harness = await createHarness(t, {
+    superuser: true,
+    currentUid: 'admin-user',
+    currentUsername: 'Administrator',
+    users,
+    knowledgeBases: [{
+      id: 'kb-current-page',
+      uid: 'owner-0',
+      name: 'Current page KB',
+      knowledge_base_type: 'user',
+      embedding_channel_id: 1,
+      embedding_model_id: 'embedding-model',
+    }],
+  })
+
+  await harness.module.fetchData()
+  await harness.module.showRepairDialog()
+
+  assert.equal(harness.module.repairDialogVisible.value, true)
+  assert.equal(harness.api.userLists.length, 3)
+  assert.deepEqual(harness.api.userLists.map(request => request.params), [
+    { page: 1, size: 100 },
+    { page: 2, size: 100 },
+    { page: 3, size: 100 },
+  ])
+  assert.deepEqual(normalize(harness.module.repairOwners.value), users)
+  assert.equal(harness.module.repairOwnerUid.value, 'admin-user')
+  assert.equal(harness.module.tableData.value.some(row => row.uid === selectedOwner.uid), false)
+
+  harness.module.repairOwnerUid.value = selectedOwner.uid
+  await harness.module.submitUserRepair()
+
+  assert.equal(harness.api.repairs.length, 1)
+  assert.deepEqual(harness.api.repairs[0].params, { uid: selectedOwner.uid })
+  assert.equal(typeof harness.api.repairs[0].payload.dedupe_key, 'string')
+  assert.ok(harness.api.repairs[0].payload.dedupe_key.length > 0)
+  assert.equal(harness.module.repairDialogVisible.value, false)
+  assert.equal(harness.module.migrationDialogVisible.value, false)
+  assert.equal(harness.api.gets.length, 0)
+  assert.ok(harness.api.lists.length >= 2)
+})
+
+test('repairs an ordinary user only for the logged-in uid without loading admin users', async t => {
+  const harness = await createHarness(t, {
+    currentUid: 'user-a',
+    currentUsername: 'Alice',
+    users: [{ uid: 'other-user', username: 'Other user' }],
+  })
+
+  await harness.module.showRepairDialog()
+
+  assert.equal(harness.module.repairDialogVisible.value, true)
+  assert.equal(harness.module.repairOwnerUid.value, 'user-a')
+  assert.equal(harness.api.userLists.length, 0)
+
+  await harness.module.submitUserRepair()
+
+  assert.equal(harness.api.repairs.length, 1)
+  assert.deepEqual(harness.api.repairs[0].params, { uid: 'user-a' })
+  assert.equal(harness.api.userLists.length, 0)
+  assert.equal(harness.module.repairDialogVisible.value, false)
+  assert.equal(harness.module.migrationDialogVisible.value, false)
+})
+
+test('blocks user repair while owners load, after owner-list failure, or without a valid selection', async t => {
+  const pendingUsers = deferred()
+  const loadingHarness = await createHarness(t, {
+    superuser: true,
+    currentUid: 'admin-user',
+    currentUsername: 'Administrator',
+    userList: () => pendingUsers.promise,
+  })
+  const loading = loadingHarness.module.showRepairDialog()
+
+  assert.equal(loadingHarness.module.repairOwnersLoading.value, true)
+  await loadingHarness.module.submitUserRepair()
+  assert.equal(loadingHarness.api.repairs.length, 0)
+
+  pendingUsers.resolve(dataResponse({
+    items: [
+      { uid: 'admin-user', username: 'Administrator' },
+      { uid: 'owner-b', username: 'Bob' },
+    ],
+    total: 2,
+  }))
+  await loading
+  loadingHarness.module.repairOwnerUid.value = 'not-in-loaded-list'
+  await loadingHarness.module.submitUserRepair()
+  assert.equal(loadingHarness.api.repairs.length, 0)
+
+  const failedHarness = await createHarness(t, {
+    superuser: true,
+    currentUid: 'admin-user',
+    currentUsername: 'Administrator',
+    userList: () => Promise.reject(new Error('users unavailable')),
+  })
+  await failedHarness.module.showRepairDialog()
+  assert.equal(failedHarness.module.repairOwnersLoading.value, false)
+  assert.notEqual(failedHarness.module.repairOwnersError.value, null)
+  await failedHarness.module.submitUserRepair()
+  assert.equal(failedHarness.api.repairs.length, 0)
+
+  const emptyHarness = await createHarness(t, {
+    superuser: true,
+    currentUid: 'admin-user',
+    currentUsername: 'Administrator',
+    users: [],
+  })
+  await emptyHarness.module.showRepairDialog()
+  assert.deepEqual(normalize(emptyHarness.module.repairOwners.value), [])
+  assert.equal(emptyHarness.module.repairOwnerUid.value, null)
+  await emptyHarness.module.submitUserRepair()
+  assert.equal(emptyHarness.api.repairs.length, 0)
+})
+
+test('keeps user repair open and retryable after an API failure, and blocks duplicate submissions', async t => {
+  const request = deferred()
+  const knowledgeBase = {
+    id: 'kb-user-a',
+    uid: 'user-a',
+    username: 'Alice',
+    name: 'Alice KB',
+    knowledge_base_type: 'user',
+    embedding_channel_id: 1,
+    embedding_model_id: 'embedding-model',
+  }
+  let repairCalls = 0
+  const harness = await createHarness(t, {
+    currentUid: 'user-a',
+    currentUsername: 'Alice',
+    knowledgeBases: [knowledgeBase],
+    repair: (payload, params) => {
+      repairCalls += 1
+      if (repairCalls === 1) return Promise.reject(new Error('repair unavailable'))
+      if (repairCalls === 2) return request.promise
+      return Promise.resolve(dataResponse({
+        items: [{ ...knowledgeBase, migration_job_id: 103 }],
+        total: 1,
+      }))
+    },
+  })
+
+  await harness.module.showRepairDialog()
+  await harness.module.submitUserRepair()
+  assert.equal(harness.module.repairDialogVisible.value, true)
+  assert.equal(harness.module.repairSubmitting.value, false)
+
+  const retry = harness.module.submitUserRepair()
+  await harness.module.submitUserRepair()
+  assert.equal(harness.api.repairs.length, 2)
+  assert.equal(harness.module.repairSubmitting.value, true)
+  request.resolve(dataResponse({
+    items: [{ ...knowledgeBase, migration_job_id: 103 }],
+    total: 1,
+  }))
+  await retry
+
+  assert.equal(harness.module.repairDialogVisible.value, false)
+  assert.equal(harness.api.repairs.length, 2)
+  assert.ok(harness.api.repairs.every(item => item.params.uid === 'user-a'))
+})
+
+test('confirms per-knowledge-base repair with literal owner identity and skips cancel or close', async t => {
+  const row = {
+    id: 'kb-repair-special',
+    uid: 'opaque-owner-id',
+    username: 'Alice <admin>',
+    name: 'Knowledge base <alpha> & "quotes"',
+    knowledge_base_type: 'user',
+    embedding_channel_id: 1,
+    embedding_model_id: 'embedding-model',
+  }
+
+  for (const action of ['cancel', 'close']) {
+    const harness = await createHarness(t, {
+      confirm: async () => {
+        if (action === 'close') throw 'close'
+        return false
+      },
+    })
+
+    await harness.module.repairKnowledgeBase(row)
+
+    assert.equal(harness.confirms.length, 1)
+    const [message, , options] = harness.confirms[0]
+    assert.ok(message.includes(row.name))
+    assert.ok(message.includes(row.username))
+    assert.ok(message.includes(row.id))
+    assert.equal(options.dangerouslyUseHTMLString, false)
+    assert.equal(harness.api.repairs.length, 0)
+  }
+})
+
+test('does not confirm or submit a second knowledge-base repair while one is pending', async t => {
+  const confirmation = deferred()
+  const repair = deferred()
+  const firstRow = {
+    id: 'kb-repair-first',
+    name: 'First KB',
+    username: 'Alice',
+    knowledge_base_type: 'user',
+    embedding_channel_id: 1,
+    embedding_model_id: 'embedding-model',
+  }
+  const secondRow = {
+    id: 'kb-repair-second',
+    name: 'Second KB',
+    username: 'Bob',
+    knowledge_base_type: 'user',
+    embedding_channel_id: 1,
+    embedding_model_id: 'embedding-model',
+  }
+  const harness = await createHarness(t, {
+    confirm: () => confirmation.promise,
+    repair: () => repair.promise,
+    get: id => Promise.resolve(dataResponse({ id, migration_status: 'succeeded' })),
+  })
+
+  const first = harness.module.repairKnowledgeBase(firstRow)
+  await harness.module.repairKnowledgeBase(secondRow)
+  assert.equal(harness.confirms.length, 1)
+  assert.equal(harness.api.repairs.length, 0)
+
+  confirmation.resolve(true)
+  await flushPromises()
+  assert.equal(harness.api.repairs.length, 1)
+  const duplicateDuringRequest = harness.module.repairKnowledgeBase(secondRow)
+  await duplicateDuringRequest
+  assert.equal(harness.confirms.length, 1)
+  assert.equal(harness.api.repairs.length, 1)
+
+  repair.resolve(dataResponse({ items: [{ id: firstRow.id, migration_job_id: 101 }], total: 1 }))
+  await first
+  assert.deepEqual(harness.api.repairs[0].params, { kb_id: firstRow.id })
+  assert.equal(harness.module.selectedKb.value.id, firstRow.id)
+  assert.equal(harness.module.migrationDialogVisible.value, true)
+  assert.deepEqual(harness.api.gets.map(request => request.id), [firstRow.id])
+})
+
+test('releases a failed per-knowledge-base repair so it can be retried', async t => {
+  let repairCalls = 0
+  const row = {
+    id: 'kb-retry',
+    name: 'Retry KB',
+    username: 'Alice',
+    knowledge_base_type: 'user',
+    embedding_channel_id: 1,
+    embedding_model_id: 'embedding-model',
+  }
+  const harness = await createHarness(t, {
+    repair: () => {
+      repairCalls += 1
+      if (repairCalls === 1) return Promise.reject(new Error('repair unavailable'))
+      return Promise.resolve(dataResponse({ items: [{ id: row.id, migration_job_id: 102 }], total: 1 }))
+    },
+    get: id => Promise.resolve(dataResponse({ id, migration_status: 'succeeded' })),
+  })
+
+  await harness.module.repairKnowledgeBase(row)
+  assert.equal(harness.api.repairs.length, 1)
+  await harness.module.repairKnowledgeBase(row)
+
+  assert.equal(harness.api.repairs.length, 2)
+  assert.ok(harness.api.repairs.every(request => request.params.kb_id === row.id))
+  assert.equal(harness.module.migrationDialogVisible.value, true)
+})
+
+test('immediately refreshes migration state by id and polls a KB absent from the current page', async t => {
+  const row = {
+    id: 'kb-not-in-page',
+    name: 'Finished in the table',
+    migration_status: 'succeeded',
+    migration_total_count: 5,
+    migration_success_count: 5,
+  }
+  let getCalls = 0
+  const harness = await createHarness(t, {
+    get: id => {
+      getCalls += 1
+      return Promise.resolve(dataResponse(getCalls === 1
+        ? {
+            ...row,
+            migration_status: 'building',
+            migration_total_count: 5,
+            migration_success_count: 2,
+          }
+        : {
+            ...row,
+            migration_status: 'succeeded',
+            migration_total_count: 5,
+            migration_success_count: 5,
+          }))
+    },
+  })
+
+  await harness.module.showMigrationDialog(row)
+
+  assert.equal(harness.module.tableData.value.some(item => item.id === row.id), false)
+  assert.equal(harness.module.migrationDialogVisible.value, true)
+  assert.deepEqual(harness.api.gets.map(request => request.id), [row.id])
+  assert.equal(harness.module.selectedKb.value.migration_status, 'building')
+  assert.equal(harness.module.selectedKb.value.migration_total_count, 5)
+  assert.equal(harness.module.selectedKb.value.migration_success_count, 2)
+  assert.equal(harness.module.migrationProgress.value, 40)
+  assert.equal(harness.activeTimers().length, 1)
+
+  await harness.runNextTimer()
+  assert.deepEqual(harness.api.gets.map(request => request.id), [row.id, row.id])
+  assert.equal(harness.module.selectedKb.value.migration_status, 'succeeded')
+  assert.equal(harness.module.selectedKb.value.migration_total_count, 5)
+  assert.equal(harness.module.selectedKb.value.migration_success_count, 5)
+  assert.equal(harness.module.migrationProgress.value, 100)
+  assert.equal(harness.activeTimers().length, 0)
+})
+
+test('ignores stale migration responses after close, switching KB, unmount, or identity change', async t => {
+  for (const action of ['close', 'switch', 'unmount', 'identity']) {
+    const stale = deferred()
+    const firstRow = {
+      id: 'kb-stale',
+      name: 'Stale KB',
+      migration_status: 'succeeded',
+      migration_total_count: 5,
+      migration_success_count: 5,
+    }
+    const secondRow = {
+      id: 'kb-current',
+      name: 'Current KB',
+      migration_status: 'succeeded',
+      migration_total_count: 5,
+      migration_success_count: 5,
+    }
+    const harness = await createHarness(t, {
+      currentUid: 'user-a',
+      currentUsername: 'Alice',
+      get: id => id === firstRow.id
+        ? stale.promise
+        : Promise.resolve(dataResponse({ ...secondRow, id })),
+    })
+    const pending = harness.module.showMigrationDialog(firstRow)
+    assert.deepEqual(harness.api.gets.map(request => request.id), [firstRow.id])
+
+    if (action === 'close') {
+      harness.module.closeMigrationDialog()
+    } else if (action === 'switch') {
+      await harness.module.showMigrationDialog(secondRow)
+    } else if (action === 'unmount') {
+      for (const callback of harness.unmountedCallbacks) callback()
+    } else {
+      harness.permissionsStore.currentUser = {
+        uid: 'user-b',
+        username: 'Bob',
+        is_superuser: false,
+      }
+      await flushPromises()
+    }
+
+    const selectedBeforeStaleResponse = normalize(harness.module.selectedKb.value ?? null)
+    stale.resolve(dataResponse({
+      ...firstRow,
+      migration_status: 'building',
+      migration_total_count: 5,
+      migration_success_count: 2,
+    }))
+    await pending
+    await flushPromises()
+
+    assert.deepEqual(normalize(harness.module.selectedKb.value ?? null), selectedBeforeStaleResponse, action)
+    assert.equal(harness.activeTimers().length, 0, action)
+    if (action === 'close') assert.equal(harness.module.migrationDialogVisible.value, false)
+    if (action === 'switch') assert.equal(harness.module.selectedKb.value.id, secondRow.id)
+  }
+})
+
+test('accepts the page-change event page number and updates the requested page normally', async t => {
+  const harness = await createHarness(t, {
+    knowledgeBases: [{
+      id: 'kb-page-two',
+      uid: 'user-a',
+      username: 'Alice',
+      name: 'Page two KB',
+      knowledge_base_type: 'user',
+      embedding_channel_id: 1,
+      embedding_model_id: 'embedding-model',
+    }],
+  })
+  harness.module.currentPage.value = 2
+
+  await harness.module.fetchData(2)
+
+  assert.equal(harness.api.lists.at(-1).params.page, 2)
+  assert.deepEqual(harness.module.tableData.value.map(row => row.id), ['kb-page-two'])
+  assert.equal(harness.messages.some(message => message.type === 'error'), false)
+})
+
+test('routes the more-menu repair action through confirmation and repairs only that knowledge base', async t => {
+  const row = {
+    id: 'kb-more-repair',
+    uid: 'owner-a',
+    username: 'Alice',
+    name: 'More menu KB',
+    knowledge_base_type: 'user',
+    embedding_channel_id: 1,
+    embedding_model_id: 'embedding-model',
+  }
+  const cancelled = await createHarness(t, { confirm: async () => false })
+
+  await cancelled.module.handleKnowledgeBaseMoreAction('repair', row)
+
+  assert.equal(cancelled.confirms.length, 1)
+  assert.ok(cancelled.confirms[0][0].includes(row.name))
+  assert.ok(cancelled.confirms[0][0].includes(row.username))
+  assert.ok(cancelled.confirms[0][0].includes(row.id))
+  assert.equal(cancelled.confirms[0][2].dangerouslyUseHTMLString, false)
+  assert.equal(cancelled.api.repairs.length, 0)
+
+  const repaired = await createHarness(t, {
+    repair: () => Promise.resolve(dataResponse({
+      items: [{ ...row, migration_job_id: 501 }],
+      total: 1,
+    })),
+    get: id => Promise.resolve(dataResponse({ id, migration_status: 'succeeded' })),
+  })
+
+  await repaired.module.handleKnowledgeBaseMoreAction('repair', row)
+  await flushPromises()
+
+  assert.equal(repaired.confirms.length, 1)
+  assert.ok(repaired.confirms[0][0].includes(row.name))
+  assert.ok(repaired.confirms[0][0].includes(row.username))
+  assert.ok(repaired.confirms[0][0].includes(row.id))
+  assert.equal(repaired.api.repairs.length, 1)
+  assert.deepEqual(repaired.api.repairs[0].params, { kb_id: row.id })
+  assert.deepEqual(repaired.api.gets.map(request => request.id), [row.id])
+  assert.equal(repaired.module.selectedKb.value.id, row.id)
 })

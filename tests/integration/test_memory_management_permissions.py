@@ -191,6 +191,7 @@ async def test_memory_management_permissions_scope_list_and_meta(
             "is_superuser": True,
             "current_uid": "user-a",
             "current_username": None,
+            "repair_required_count": 0,
         }
 
         filtered = _assert_standard(
@@ -226,10 +227,76 @@ async def test_memory_management_permissions_scope_list_and_meta(
             "is_superuser": False,
             "current_uid": "user-a",
             "current_username": None,
+            "repair_required_count": 0,
         }
         own_explicit = _assert_standard(await client.get("/api/v1/memories/list?uid=user-a"), 200)
         _assert_page(own_explicit, total=3)
         assert {item["owner_uid"] for item in own_explicit["data"]["items"]} == {"user-a"}
+
+
+@pytest.mark.asyncio
+async def test_memory_list_meta_counts_failed_indexes_in_authorized_scope(
+    api_app: tuple[object, object],
+    db_session: AsyncSession,
+) -> None:
+    app, current_user = api_app
+    db_session.add_all(
+        [
+            User(uid="user-c", username="user-c", is_superuser=False),
+            User(uid="user-d", username="user-d", is_superuser=False),
+        ]
+    )
+    await db_session.commit()
+    for uid in ("user-a", "user-b", "user-c", "user-d"):
+        await _create_store(db_session, uid)
+
+    statuses = {
+        "user-a": LongTermMemoryIndexStatus.FAILED,
+        "user-b": LongTermMemoryIndexStatus.PENDING,
+        "user-c": LongTermMemoryIndexStatus.READY,
+        "user-d": LongTermMemoryIndexStatus.REINDEXING,
+    }
+    for uid, status in statuses.items():
+        store = await memory_store_crud.get_by_uid(db_session, uid=uid)
+        assert store is not None
+        store.index_status = status
+    await db_session.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        current_user.is_superuser = True
+        all_users = _assert_standard(
+            await client.get(
+                "/api/v1/memories/list",
+                params={"page": 1, "size": 1, "keyword": "no-match", "memory_type": LongTermMemoryType.FACT.value},
+            ),
+            200,
+        )
+        _assert_page(all_users, total=0, page=1, size=1)
+        assert all_users["data"]["meta"]["repair_required_count"] == 1
+
+        selected_owner = _assert_standard(
+            await client.get("/api/v1/memories/list", params={"uid": "user-a", "keyword": "no-match"}),
+            200,
+        )
+        _assert_page(selected_owner, total=0)
+        assert selected_owner["data"]["meta"]["repair_required_count"] == 1
+        selected_healthy_owner = _assert_standard(
+            await client.get("/api/v1/memories/list", params={"uid": "user-b"}),
+            200,
+        )
+        assert selected_healthy_owner["data"]["meta"]["repair_required_count"] == 0
+
+        current_user.is_superuser = False
+        own_scope = _assert_standard(await client.get("/api/v1/memories/list"), 200)
+        assert own_scope["data"]["meta"]["repair_required_count"] == 1
+        _assert_standard(await client.get("/api/v1/memories/list", params={"uid": "user-b"}), 403)
+
+        failed_store = await memory_store_crud.get_by_uid(db_session, uid="user-a")
+        assert failed_store is not None
+        failed_store.index_status = LongTermMemoryIndexStatus.READY
+        await db_session.commit()
+        repaired_scope = _assert_standard(await client.get("/api/v1/memories/list"), 200)
+        assert repaired_scope["data"]["meta"]["repair_required_count"] == 0
 
 
 @pytest.mark.asyncio

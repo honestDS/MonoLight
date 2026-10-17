@@ -33,6 +33,11 @@
 .memory-action-buttons { width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }.memory-action-buttons .el-button { margin-left: 0; }.job-tree { display: flex; align-items: center; gap: 6px; }
 .memory-owner-filter { display: flex; align-items: center; gap: 12px; padding: 0 20px 16px; color: var(--color-text-regular); }
 .memory-runtime-dialog { max-width: calc(100vw - 32px); align-self: center; }
+.memory-runtime-dialog .memory-profile-link {
+  color: var(--el-color-primary);
+  text-decoration: underline;
+}
+.memory-repair-notice { margin-bottom: 15px; }
 .memory-runtime-body { display: flex; flex-direction: column; gap: 16px; }
 .memory-runtime-body.is-loading > :not(.el-loading-mask) { visibility: hidden; }
 .memory-runtime-body .help-text { margin: 0; color: var(--color-text-regular); line-height: 1.5; }

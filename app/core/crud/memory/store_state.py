@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, or_, update
+from sqlalchemy import delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -30,6 +30,13 @@ __all__ = [
 
 
 class CRUDLongTermMemoryStore:
+    async def count_repair_required(self, db: AsyncSession, *, uid: str | None) -> int:
+        statement = select(func.count()).select_from(LongTermMemoryStore).where(LongTermMemoryStore.index_status == LongTermMemoryIndexStatus.FAILED)
+        if uid is not None:
+            statement = statement.where(LongTermMemoryStore.uid == uid)
+        result = await db.execute(statement)
+        return result.scalar_one()
+
     async def get_by_uid(self, db: AsyncSession, *, uid: str) -> LongTermMemoryStore | None:
         result = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
         return result.scalars().first()
