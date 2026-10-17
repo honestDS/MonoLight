@@ -34,10 +34,16 @@ export function useChatComposer({
 
   const guidanceSubmitting = ref(false)
 
+  const showStopReply = computed(() => isStopping.value || (
+    isReplyRunning.value &&
+    !inputMsg.value.trim() &&
+    attachments.value.length === 0
+  ))
+
   const actionButtonLabel = computed(() => t(
     isStopping.value
       ? 'chat.stopping_reply'
-      : isReplyRunning.value
+      : showStopReply.value
         ? 'chat.stop_reply'
         : 'chat.send_message'
   ))
@@ -227,6 +233,7 @@ export function useChatComposer({
     uploadTriggerRef,
     openUploadPicker,
     guidanceSubmitting,
+    showStopReply,
     actionButtonLabel,
     send,
     handleAuditDecision,

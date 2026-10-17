@@ -170,6 +170,114 @@ test('sends normally, queues while loading, and preserves empty loading input', 
   assert.deepEqual(composer.uploadFileList.value, queuedList)
 })
 
+test('switches reply action for typed drafts and queues only submitted text', async () => {
+  const { chat, composer, sendPayloads, enqueuePayloads } = makeFixture()
+
+  assert.equal(composer.showStopReply.value, false)
+  assert.equal(composer.actionButtonLabel.value, 'chat.send_message')
+
+  chat.isReplyRunning.value = true
+  assert.equal(composer.showStopReply.value, true)
+  assert.equal(composer.actionButtonLabel.value, 'chat.stop_reply')
+
+  chat.inputMsg.value = '   '
+  assert.equal(composer.showStopReply.value, true)
+  assert.equal(composer.actionButtonLabel.value, 'chat.stop_reply')
+
+  chat.inputMsg.value = 'h'
+  assert.equal(composer.showStopReply.value, false)
+  assert.equal(composer.actionButtonLabel.value, 'chat.send_message')
+  chat.inputMsg.value = 'hello during reply'
+  assert.equal(composer.showStopReply.value, false)
+  assert.equal(composer.actionButtonLabel.value, 'chat.send_message')
+
+  chat.loading.value = true
+  await composer.send()
+
+  assert.deepEqual(enqueuePayloads, [{ content: 'hello during reply', attachments: [] }])
+  assert.deepEqual(sendPayloads, [])
+  assert.equal(chat.inputMsg.value, '')
+  assert.equal(composer.showStopReply.value, true)
+  assert.equal(composer.actionButtonLabel.value, 'chat.stop_reply')
+
+  await composer.send()
+  assert.equal(enqueuePayloads.length, 1)
+
+  chat.inputMsg.value = 'draft to clear'
+  assert.equal(composer.showStopReply.value, false)
+  chat.inputMsg.value = ''
+  assert.equal(composer.showStopReply.value, true)
+  assert.equal(composer.actionButtonLabel.value, 'chat.stop_reply')
+})
+
+test('switches reply action for attachments and queues attachment-only drafts', async () => {
+  const { chat, composer, sendPayloads, enqueuePayloads } = makeFixture()
+  const attachment = { uid: 'reply-attachment', name: 'reply.txt', path: '/reply.txt' }
+  const uploadItem = { uid: attachment.uid, name: attachment.name }
+
+  chat.isReplyRunning.value = true
+  chat.attachments.value = [attachment]
+  composer.uploadFileList.value = [uploadItem]
+
+  assert.equal(composer.showStopReply.value, false)
+  assert.equal(composer.actionButtonLabel.value, 'chat.send_message')
+
+  composer.handleRemoveCustomFile(attachment)
+  composer.handleRemoveCustomFile(attachment)
+  assert.deepEqual(chat.attachments.value, [])
+  assert.deepEqual(composer.uploadFileList.value, [])
+  assert.equal(composer.showStopReply.value, true)
+  assert.equal(composer.actionButtonLabel.value, 'chat.stop_reply')
+
+  chat.attachments.value = [attachment]
+  composer.uploadFileList.value = [uploadItem]
+  chat.loading.value = true
+  assert.equal(composer.showStopReply.value, false)
+
+  await composer.send()
+
+  assert.deepEqual(enqueuePayloads, [{ content: '', attachments: [attachment] }])
+  assert.deepEqual(sendPayloads, [])
+  assert.deepEqual(chat.attachments.value, [])
+  assert.deepEqual(composer.uploadFileList.value, [])
+  assert.equal(composer.showStopReply.value, true)
+  assert.equal(composer.actionButtonLabel.value, 'chat.stop_reply')
+})
+
+test('keeps stopping action dominant and preserves drafts until stopping ends', async () => {
+  const { chat, composer, sendPayloads, enqueuePayloads } = makeFixture()
+  const attachment = { uid: 'stopping-attachment', name: 'keep.txt', path: '/keep.txt' }
+  const uploadItem = { uid: attachment.uid, name: attachment.name }
+
+  chat.isStopping.value = true
+  chat.isReplyRunning.value = true
+  chat.loading.value = true
+  chat.inputMsg.value = 'keep this draft'
+  chat.attachments.value = [attachment]
+  composer.uploadFileList.value = [uploadItem]
+
+  assert.equal(composer.showStopReply.value, true)
+  assert.equal(composer.actionButtonLabel.value, 'chat.stopping_reply')
+
+  await composer.send()
+
+  assert.deepEqual(sendPayloads, [])
+  assert.deepEqual(enqueuePayloads, [])
+  assert.equal(chat.inputMsg.value, 'keep this draft')
+  assert.deepEqual(chat.attachments.value, [attachment])
+  assert.deepEqual(composer.uploadFileList.value, [uploadItem])
+
+  chat.isReplyRunning.value = false
+  assert.equal(composer.showStopReply.value, true)
+  assert.equal(composer.actionButtonLabel.value, 'chat.stopping_reply')
+
+  chat.isStopping.value = false
+  assert.equal(composer.showStopReply.value, false)
+  assert.equal(composer.actionButtonLabel.value, 'chat.send_message')
+  assert.equal(chat.inputMsg.value, 'keep this draft')
+  assert.deepEqual(chat.attachments.value, [attachment])
+})
+
 test('stopping or submitting settings blocks send without changing input or attachments', async () => {
   const blockedCases = [
     ['stopping', 'isStopping'],
