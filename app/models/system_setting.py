@@ -1,4 +1,4 @@
-from pydantic import ConfigDict
+from pydantic import ConfigDict, StrictBool
 from sqlmodel import Field, SQLModel
 
 from app.core.constants import DEFAULT_LLM_REQUEST_MAX_SIZE_MB, LLM_REQUEST_MAX_SIZE_MB_UPPER_BOUND
@@ -18,6 +18,7 @@ class SystemSetting(SystemSettingBase, table=True):
 
 class SystemRuntimeSettings(SQLModel):
     log_locale: str = Field(default=DEFAULT_LOCALE)
+    log_redaction_enabled: StrictBool = Field(default=False)
     temp_dir_max_size_mb: int = Field(default=1024, ge=1, le=1048576)
     llm_request_max_size_mb: int = Field(
         default=DEFAULT_LLM_REQUEST_MAX_SIZE_MB,

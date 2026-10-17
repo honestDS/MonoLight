@@ -10,6 +10,7 @@ python-jose[cryptography]
 aiohttp
 python-multipart
 loguru
+greenlet
 sqlalchemy
 sqlmodel
 Pillow

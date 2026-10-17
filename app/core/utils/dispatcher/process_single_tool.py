@@ -273,119 +273,6 @@ def _build_schema_validation_result(tool_name: str, errors: list[str]) -> str:
     return _build_tool_error_result(tool_name, t(ERR_TOOL_ARGUMENT_SCHEMA_INVALID, tool_name=tool_name, detail=detail))
 
 
-def _serialize_longterm_memory_log_arguments(arguments: dict[str, Any]) -> str:
-    safe_arguments: dict[str, Any] = {}
-    for field, value in arguments.items():
-        if field in {"content", "change_evidence", "knowledge_content"}:
-            continue
-        if field == "knowledge_key":
-            safe_arguments["knowledge_key_length"] = len(value) if isinstance(value, str) else None
-            continue
-        if field in {"query", "knowledge_query"}:
-            safe_arguments[f"{field}_length"] = len(value) if isinstance(value, str) else None
-            continue
-        safe_arguments[field] = value
-    return json.dumps(safe_arguments, ensure_ascii=False, default=str)
-
-
-def _serialize_longterm_memory_log_result(result: str) -> str:
-    try:
-        payload = json.loads(result)
-    except (TypeError, ValueError):
-        return json.dumps({"status": "unavailable"}, ensure_ascii=False)
-    if not isinstance(payload, dict):
-        return json.dumps({}, ensure_ascii=False)
-
-    safe_payload: dict[str, Any] = {}
-    for field, value in payload.items():
-        if field in {"content", "change_evidence", "query"}:
-            continue
-        if field == "items" and isinstance(value, list):
-            safe_items = []
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                safe_items.append({key: item_value for key, item_value in item.items() if key not in {"content", "change_evidence", "query"}})
-            safe_payload["items"] = safe_items
-            continue
-        if field == "chat_history" and isinstance(value, list):
-            safe_chat_history = []
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                safe_chat_history.append({key: item[key] for key in ("role", "truncated") if key in item})
-            safe_payload["chat_history"] = safe_chat_history
-            continue
-        if field == "knowledge_base" and isinstance(value, list):
-            safe_knowledge_items = []
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                safe_knowledge_items.append(
-                    {
-                        key: item[key]
-                        for key in (
-                            "knowledge_base_id",
-                            "source_type",
-                            "knowledge_id",
-                            "knowledge_expected_version",
-                            "truncated",
-                            "llm_maintainable",
-                        )
-                        if key in item
-                    }
-                )
-            safe_payload["knowledge_base"] = safe_knowledge_items
-            continue
-        safe_payload[field] = value
-    return json.dumps(safe_payload, ensure_ascii=False, default=str)
-
-
-def _serialize_knowledge_base_query_log_arguments(arguments: dict[str, Any]) -> str:
-    query = arguments.get("query")
-    return json.dumps(
-        {
-            "knowledge_base_id": arguments.get("knowledge_base_id"),
-            "query_length": len(query) if isinstance(query, str) else None,
-        },
-        ensure_ascii=False,
-        default=str,
-    )
-
-
-def _serialize_knowledge_base_query_log_result(result: str) -> str:
-    try:
-        payload = json.loads(result)
-    except (TypeError, ValueError):
-        return json.dumps({"status": "unavailable"}, ensure_ascii=False)
-    if not isinstance(payload, dict):
-        return json.dumps({}, ensure_ascii=False)
-
-    safe_payload: dict[str, Any] = {}
-    if "error" in payload:
-        safe_payload["error"] = True
-    items = payload.get("items")
-    if isinstance(items, list):
-        safe_items = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            safe_items.append(
-                {
-                    key: item[key]
-                    for key in (
-                        "source",
-                        "knowledge_type",
-                        "knowledge_id",
-                        "knowledge_expected_version",
-                    )
-                    if key in item
-                }
-            )
-        safe_payload["items"] = safe_items
-    return json.dumps(safe_payload, ensure_ascii=False, default=str)
-
-
 def prevalidate_tool_round_protocol(
     tool_calls: list[Any],
     cfg: ProfileConfig,
@@ -488,12 +375,7 @@ async def process_single_tool(
     background_required = tool_runs_in_background(tool_name)
     run_in_background = background_required or background_requested
 
-    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
-        log_args = _serialize_longterm_memory_log_arguments(args)
-    elif tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
-        log_args = _serialize_knowledge_base_query_log_arguments(args)
-    else:
-        log_args = json.dumps(args, ensure_ascii=False)
+    log_args = json.dumps(args, ensure_ascii=False)
     LogManager.log_tool_call(turn, tool_name, log_args, session_id, uid)
 
     if not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
@@ -646,12 +528,6 @@ async def process_single_tool(
         )
 
     processed_result = tool_msg.content or ""
-    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
-        log_result = _serialize_longterm_memory_log_result(processed_result)
-    elif tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
-        log_result = _serialize_knowledge_base_query_log_result(processed_result)
-    else:
-        log_result = processed_result
-    LogManager.log_tool_result(turn, log_result, session_id, uid)
+    LogManager.log_tool_result(turn, processed_result, session_id, uid)
 
     return tool_msg

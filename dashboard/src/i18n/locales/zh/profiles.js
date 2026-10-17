@@ -219,6 +219,8 @@ export default {
   global_settings: '全局设置',
   log_locale: '日志语言',
   log_locale_hint: '控制系统日志写入数据库时使用的语言，影响日志列表、实时日志等系统日志内容。',
+  log_redaction_enabled: '日志入库脱敏',
+  log_redaction_enabled_hint: '默认关闭。开启后，新保存的日志会遮盖密钥等敏感信息，历史日志不变。',
   temp_dir_max_size_mb: '临时目录上限(MB)',
   temp_dir_max_size_mb_hint: '控制每个用户临时目录允许占用的最大空间。超过上限后，后台清理任务会优先删除最旧的临时文件。',
   llm_request_max_size_mb: '模型请求上限(MiB)',

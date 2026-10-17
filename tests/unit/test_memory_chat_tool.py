@@ -696,67 +696,6 @@ async def test_executor_mutation_requires_source_boundary_and_does_not_call_serv
     assert service.calls == []
 
 
-def test_longterm_memory_log_serializers_remove_sensitive_arguments_and_results():
-    log_arguments = process_single_tool_module._serialize_longterm_memory_log_arguments(
-        {
-            "operation": "create",
-            "query": "private query body",
-            "content": "private content body",
-            "knowledge_content": "private managed knowledge body",
-            "knowledge_key": "private.managed.key",
-            "change_evidence": "private evidence body",
-        }
-    )
-    log_result = process_single_tool_module._serialize_longterm_memory_log_result(
-        '{"items":[{"memory_id":12,"expected_version":2,"memory_key":"stable-fact",'
-        '"memory_type":"fact","content":"private recalled item body"},{"memory_id":13,'
-        '"expected_version":1,"memory_key":"another-fact","memory_type":"fact",'
-        '"content":"second recalled item body","truncated":true}],"current_session_id":"session-1",'
-        '"chat_history":['
-        '{"role":"user","content":"private chat body","truncated":true,"message_id":501,'
-        '"score":0.7,"session_id":"old-session","created_at":"2026-08-04 12:31:00"},'
-        '{"role":"assistant",'
-        '"content":"private assistant body","message_id":502,'
-        '"updated_at":"2026-08-04T12:32:00Z","session_id":"another-session",'
-        '"created_at":"2026-08-04 12:32:00"}]}'
-    )
-
-    arguments_payload = json.loads(log_arguments)
-    assert arguments_payload["query_length"] == len("private query body")
-    assert "private query body" not in log_arguments
-    assert "private content body" not in log_arguments
-    assert "private managed knowledge body" not in log_arguments
-    assert "private.managed.key" not in log_arguments
-    assert arguments_payload["knowledge_key_length"] == len("private.managed.key")
-    assert "private evidence body" not in log_arguments
-    assert "private recalled item body" not in log_result
-    assert "second recalled item body" not in log_result
-    assert "private chat body" not in log_result
-    assert "private assistant body" not in log_result
-    assert json.loads(log_result) == {
-        "items": [
-            {
-                "memory_id": 12,
-                "expected_version": 2,
-                "memory_key": "stable-fact",
-                "memory_type": "fact",
-            },
-            {
-                "memory_id": 13,
-                "expected_version": 1,
-                "memory_key": "another-fact",
-                "memory_type": "fact",
-                "truncated": True,
-            },
-        ],
-        "current_session_id": "session-1",
-        "chat_history": [
-            {"role": "user", "truncated": True},
-            {"role": "assistant"},
-        ],
-    }
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("memory_enabled", "include_longterm_memory", "expected_in_prompt"),

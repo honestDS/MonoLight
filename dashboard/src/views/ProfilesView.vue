@@ -138,6 +138,15 @@
           </el-select>
           <div class="help-text mt-5">{{ $t('profiles.log_locale_hint') }}</div>
         </el-form-item>
+        <el-form-item :label="$t('profiles.log_redaction_enabled')">
+          <el-switch
+            v-model="systemSettings.log_redaction_enabled"
+            :aria-label="$t('profiles.log_redaction_enabled')"
+            aria-describedby="log-redaction-hint"
+            :disabled="settingsSubmitting"
+          />
+          <div id="log-redaction-hint" class="help-text mt-5 full-width-input">{{ $t('profiles.log_redaction_enabled_hint') }}</div>
+        </el-form-item>
         <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
           <el-input-number v-model="systemSettings.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right" />
           <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
