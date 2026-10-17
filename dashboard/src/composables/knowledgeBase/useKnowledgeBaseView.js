@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { adminApi, knowledgeBaseApi } from '../../api/index.js'
@@ -29,6 +29,7 @@ export function useKnowledgeBaseView() {
   const tableData = ref([])
   const loading = ref(false)
   const total = ref(0)
+  const repairRequiredCount = ref(0)
   const currentPage = ref(1)
   const pageSize = ref(20)
   const dialogVisible = ref(false)
@@ -45,7 +46,23 @@ export function useKnowledgeBaseView() {
   const migrationDialogVisible = ref(false)
   const migrationTargetKey = ref('')
   const migrationSubmitting = ref(false)
+  const migrationStateLoading = ref(false)
+  const migrationStateError = ref(null)
   let migrationPollTimer = null
+  let migrationDialogGeneration = 0
+  let migrationDialogSession = null
+  const repairDialogVisible = ref(false)
+  const repairOwnerUid = ref(null)
+  const repairOwners = ref([])
+  const repairOwnersLoading = ref(false)
+  const repairOwnersError = ref(null)
+  const repairSubmitting = ref(false)
+  let repairGeneration = 0
+  let repairOwnersRequestVersion = 0
+  let repairSession = null
+  let repairDedupe = null
+  let fetchDataRequestVersion = 0
+  let knowledgeBaseViewDisposed = false
   const queryTestDialogVisible = ref(false)
   const queryTesting = ref(false)
   const queryTested = ref(false)
@@ -97,20 +114,44 @@ export function useKnowledgeBaseView() {
   })
 
   const fetchData = async () => {
+    const requestVersion = ++fetchDataRequestVersion
+    const uid = userPermissions.currentUser?.uid ?? null
+    const requestIsSuperuser = isSuperuser.value
+    const isRequestCurrent = () => (
+      !knowledgeBaseViewDisposed &&
+      requestVersion === fetchDataRequestVersion &&
+      (userPermissions.currentUser?.uid ?? null) === uid &&
+      isSuperuser.value === requestIsSuperuser
+    )
     loading.value = true
     try {
       const res = await knowledgeBaseApi.list({
         page: currentPage.value,
         size: pageSize.value
       })
-      const { items, total: totalCount, embedding_models: embeddingModelItems } = res.data.data
+      if (!isRequestCurrent()) return
+      const {
+        items,
+        total: totalCount,
+        embedding_models: embeddingModelItems,
+        repair_required_count: repairRequiredCountValue
+      } = res.data.data
       tableData.value = (items || []).map(normalizeKnowledgeBase)
       total.value = totalCount || 0
       embeddingModels.value = embeddingModelItems || []
+      repairRequiredCount.value = Number.isFinite(repairRequiredCountValue) && repairRequiredCountValue >= 0
+        ? repairRequiredCountValue
+        : 0
     } catch (error) {
-      ElMessage.error(t('knowledgeBase.fetch_list_failed') + error.message)
+      if (isRequestCurrent()) {
+        const responseCodes = [error?.response?.status, error?.response?.data?.code]
+        if (responseCodes.some(code => [401, 403, '401', '403'].includes(code))) {
+          repairRequiredCount.value = 0
+        }
+        ElMessage.error(t('knowledgeBase.fetch_list_failed') + error.message)
+      }
     } finally {
-      loading.value = false
+      if (isRequestCurrent()) loading.value = false
     }
   }
 
@@ -153,12 +194,257 @@ export function useKnowledgeBaseView() {
 
   const getKnowledgeBaseOwnerLabel = (row) => row?.username || t('knowledgeBase.owner_unknown')
 
+  const canRepairKnowledgeBase = (row) => (
+    row?.id !== null &&
+    row?.id !== undefined &&
+    ['user', 'llm_managed'].includes(row.knowledge_base_type) &&
+    !isKnowledgeBaseMigrationActive(row.migration_status) &&
+    !['pending', 'running', 'failed'].includes(row.old_collection_cleanup_status)
+  )
+
+  const clearRepairDedupe = (scope) => {
+    if (!scope || repairDedupe?.scope === scope) repairDedupe = null
+  }
+
+  const getRepairDedupeKey = (scope) => {
+    if (repairDedupe?.scope !== scope) {
+      repairDedupe = {
+        scope,
+        key: `knowledge-base-repair:${Date.now()}:${Math.random().toString(36).slice(2)}`
+      }
+    }
+    return repairDedupe.key
+  }
+
+  const isCurrentRepairSession = (generation, session) => (
+    !knowledgeBaseViewDisposed &&
+    !!session &&
+    generation === repairGeneration &&
+    repairSession === session &&
+    (userPermissions.currentUser?.uid ?? null) === session.uid &&
+    isSuperuser.value === session.isSuperuser
+  )
+
+  watch(repairOwnerUid, (uid, previousUid) => {
+    if (uid !== previousUid) clearRepairDedupe()
+  })
+
+  const fetchRepairOwners = async (
+    generation = repairGeneration,
+    session = repairSession
+  ) => {
+    if (
+      !isCurrentRepairSession(generation, session) ||
+      !repairDialogVisible.value ||
+      !session.isSuperuser
+    ) return
+
+    const requestVersion = ++repairOwnersRequestVersion
+    const isCurrent = () => (
+      requestVersion === repairOwnersRequestVersion &&
+      isCurrentRepairSession(generation, session) &&
+      repairDialogVisible.value
+    )
+    repairOwnersLoading.value = true
+    repairOwnersError.value = null
+    const users = []
+    let page = 1
+
+    try {
+      while (isCurrent()) {
+        const res = await adminApi.userList({ page, size: 100 })
+        if (!isCurrent()) return
+        const { items = [], total = 0 } = res.data.data
+        users.push(...items)
+        if (items.length === 0 || users.length >= total) break
+        page += 1
+      }
+
+      if (!isCurrent()) return
+      repairOwners.value = users
+      if (
+        repairOwnerUid.value === session.uid &&
+        !users.some(item => item.uid === session.uid)
+      ) repairOwnerUid.value = null
+    } catch (error) {
+      if (isCurrent()) {
+        repairOwnersError.value = t('knowledgeBase.fetch_owner_users_failed', {
+          message: error?.message || ''
+        })
+      }
+    } finally {
+      if (isCurrent()) repairOwnersLoading.value = false
+    }
+  }
+
+  const showRepairDialog = () => {
+    if (repairSubmitting.value || migrationSubmitting.value || knowledgeBaseViewDisposed) return
+
+    clearRepairDedupe()
+    const generation = ++repairGeneration
+    const session = {
+      uid: userPermissions.currentUser?.uid ?? null,
+      isSuperuser: isSuperuser.value
+    }
+    repairSession = session
+    repairDialogVisible.value = true
+    repairOwnerUid.value = session.uid
+    repairOwners.value = []
+    repairOwnersLoading.value = false
+    repairOwnersError.value = null
+
+    if (session.isSuperuser) return fetchRepairOwners(generation, session)
+    if (session.uid !== null) repairOwners.value = [userPermissions.currentUser]
+  }
+
+  const closeRepairDialog = () => {
+    if (repairSubmitting.value) return
+    repairGeneration += 1
+    repairSession = null
+    repairOwnersRequestVersion += 1
+    repairDialogVisible.value = false
+    repairOwnerUid.value = null
+    repairOwners.value = []
+    repairOwnersLoading.value = false
+    repairOwnersError.value = null
+    clearRepairDedupe()
+  }
+
+  const submitUserRepair = async () => {
+    const session = repairSession
+    const generation = repairGeneration
+    const uid = repairOwnerUid.value
+    if (
+      !repairDialogVisible.value ||
+      repairSubmitting.value ||
+      migrationSubmitting.value ||
+      repairOwnersLoading.value ||
+      repairOwnersError.value ||
+      !isCurrentRepairSession(generation, session) ||
+      uid === null ||
+      uid === undefined ||
+      (session.isSuperuser
+        ? !repairOwners.value.some(item => item.uid === uid)
+        : uid !== session.uid)
+    ) return
+
+    const scope = `user:${uid}`
+    const isCurrent = () => (
+      isCurrentRepairSession(generation, session) &&
+      repairDialogVisible.value &&
+      repairOwnerUid.value === uid
+    )
+    const isOperationCurrent = () => isCurrentRepairSession(generation, session)
+    repairSubmitting.value = true
+    try {
+      const res = await knowledgeBaseApi.repair(
+        { dedupe_key: getRepairDedupeKey(scope) },
+        { uid }
+      )
+      if (!isCurrent()) return
+
+      const items = res?.data?.data?.items || []
+      clearRepairDedupe(scope)
+      repairDialogVisible.value = false
+      repairOwnersRequestVersion += 1
+      repairOwnerUid.value = null
+      repairOwners.value = []
+      repairOwnersLoading.value = false
+      repairOwnersError.value = null
+      if (items.length === 0) {
+        ElMessage.warning(t('knowledgeBase.repair_no_knowledge_bases'))
+      } else {
+        ElMessage.success(t('knowledgeBase.repair_submitted', { count: items.length }))
+      }
+      await fetchData()
+      if (!isOperationCurrent()) return
+    } catch (error) {
+      if (isCurrent()) {
+        ElMessage.error(t('knowledgeBase.repair_failed', { message: error?.message || '' }))
+      }
+    } finally {
+      if (isOperationCurrent()) repairSubmitting.value = false
+    }
+  }
+
+  const repairKnowledgeBase = async (row) => {
+    if (
+      !canRepairKnowledgeBase(row) ||
+      repairSubmitting.value ||
+      migrationSubmitting.value ||
+      knowledgeBaseViewDisposed
+    ) return
+
+    const generation = ++repairGeneration
+    const session = {
+      uid: userPermissions.currentUser?.uid ?? null,
+      isSuperuser: isSuperuser.value
+    }
+    repairSession = session
+    const isCurrent = () => isCurrentRepairSession(generation, session)
+    const scope = `knowledge_base:${row.id}`
+    const name = row.name
+    const username = getKnowledgeBaseOwnerLabel(row)
+    repairSubmitting.value = true
+
+    try {
+      try {
+        await ElMessageBox.confirm(
+          t('knowledgeBase.repair_confirm', { name, username, id: row.id }),
+          t('knowledgeBase.repair_confirm_title'),
+          {
+            confirmButtonText: t('knowledgeBase.repair'),
+            cancelButtonText: t('knowledgeBase.cancel'),
+            type: 'warning',
+            dangerouslyUseHTMLString: false
+          }
+        )
+      } catch {
+        return
+      }
+      if (!isCurrent()) return
+
+      const res = await knowledgeBaseApi.repair(
+        { dedupe_key: getRepairDedupeKey(scope) },
+        { kb_id: row.id }
+      )
+      if (!isCurrent()) return
+
+      clearRepairDedupe(scope)
+      await fetchData()
+      if (!isCurrent()) return
+      const repairedItem = res?.data?.data?.items?.[0]
+      await showMigrationDialog(normalizeKnowledgeBase({
+        ...row,
+        ...(repairedItem || {}),
+        id: row.id
+      }))
+    } catch (error) {
+      if (isCurrent()) {
+        ElMessage.error(t('knowledgeBase.repair_failed', { message: error?.message || '' }))
+      }
+    } finally {
+      if (isCurrent()) repairSubmitting.value = false
+    }
+  }
+
   const stopMigrationPolling = () => {
     if (migrationPollTimer) {
       clearTimeout(migrationPollTimer)
       migrationPollTimer = null
     }
   }
+
+  const isCurrentMigrationRequest = (generation, selectedId, session) => (
+    !knowledgeBaseViewDisposed &&
+    !!session &&
+    migrationDialogVisible.value &&
+    generation === migrationDialogGeneration &&
+    migrationDialogSession === session &&
+    selectedKb.value?.id === selectedId &&
+    (userPermissions.currentUser?.uid ?? null) === session.uid &&
+    isSuperuser.value === session.isSuperuser
+  )
 
   const shouldPollMigration = () => {
     if (!selectedKb.value) return false
@@ -168,46 +454,131 @@ export function useKnowledgeBaseView() {
     )
   }
 
-  const refreshMigrationState = async () => {
-    if (!selectedKb.value) return
-    const selectedId = selectedKb.value.id
-    const res = await knowledgeBaseApi.list({
-      page: currentPage.value,
-      size: pageSize.value
-    })
-    const { items, total: totalCount, embedding_models: embeddingModelItems } = res.data.data
-    tableData.value = (items || []).map(normalizeKnowledgeBase)
-    total.value = totalCount || 0
-    embeddingModels.value = embeddingModelItems || []
-    const refreshed = tableData.value.find(item => item.id === selectedId)
-    if (refreshed) selectedKb.value = refreshed
+  const refreshMigrationState = async (
+    generation = migrationDialogGeneration,
+    selectedId = selectedKb.value?.id,
+    session = migrationDialogSession
+  ) => {
+    if (!isCurrentMigrationRequest(generation, selectedId, session)) return null
+
+    migrationStateLoading.value = true
+    migrationStateError.value = null
+    try {
+      const res = await knowledgeBaseApi.get(selectedId)
+      if (!isCurrentMigrationRequest(generation, selectedId, session)) return null
+
+      const refreshed = normalizeKnowledgeBase(res.data.data)
+      const previous = selectedKb.value
+      const indexStatusChanged = previous?.index_status !== refreshed.index_status
+      const migrationFinished = (
+        isKnowledgeBaseMigrationActive(previous?.migration_status) &&
+        !isKnowledgeBaseMigrationActive(refreshed.migration_status)
+      )
+      selectedKb.value = refreshed
+      const index = tableData.value.findIndex(item => item.id === selectedId)
+      if (index >= 0) tableData.value.splice(index, 1, refreshed)
+      if (
+        (indexStatusChanged || migrationFinished) &&
+        isCurrentMigrationRequest(generation, selectedId, session)
+      ) await fetchData()
+      return refreshed
+    } catch (error) {
+      if (isCurrentMigrationRequest(generation, selectedId, session)) {
+        migrationStateError.value = t('knowledgeBase.fetch_migration_status_failed') + (error?.message || '')
+      }
+      throw error
+    } finally {
+      if (isCurrentMigrationRequest(generation, selectedId, session)) migrationStateLoading.value = false
+    }
   }
 
-  const scheduleMigrationPolling = () => {
+  const scheduleMigrationPolling = (
+    generation = migrationDialogGeneration,
+    selectedId = selectedKb.value?.id,
+    session = migrationDialogSession
+  ) => {
     stopMigrationPolling()
-    if (!migrationDialogVisible.value || !shouldPollMigration()) return
+    if (
+      !isCurrentMigrationRequest(generation, selectedId, session) ||
+      (!shouldPollMigration() && !migrationStateError.value)
+    ) return
     migrationPollTimer = setTimeout(async () => {
+      migrationPollTimer = null
+      if (!isCurrentMigrationRequest(generation, selectedId, session)) return
       try {
-        await refreshMigrationState()
-      } catch (error) {
-        ElMessage.error(t('knowledgeBase.fetch_migration_status_failed') + error.message)
-      } finally {
-        scheduleMigrationPolling()
+        await refreshMigrationState(generation, selectedId, session)
+      } catch {}
+      if (isCurrentMigrationRequest(generation, selectedId, session)) {
+        scheduleMigrationPolling(generation, selectedId, session)
       }
     }, 2000)
   }
 
-  const showMigrationDialog = (row) => {
+  const showMigrationDialog = async (row) => {
+    stopMigrationPolling()
+    const generation = ++migrationDialogGeneration
+    const session = {
+      uid: userPermissions.currentUser?.uid ?? null,
+      isSuperuser: isSuperuser.value
+    }
+    migrationDialogSession = session
     selectedKb.value = row
     migrationTargetKey.value = row.target_embedding_channel_id && row.target_embedding_model_id
       ? `${row.target_embedding_channel_id}::${row.target_embedding_model_id}`
       : ''
     migrationDialogVisible.value = true
-    scheduleMigrationPolling()
+    migrationStateLoading.value = false
+    migrationStateError.value = null
+    try {
+      await refreshMigrationState(generation, row.id, session)
+    } catch {}
+    if (isCurrentMigrationRequest(generation, row.id, session)) {
+      scheduleMigrationPolling(generation, row.id, session)
+    }
   }
 
+  const closeMigrationDialog = () => {
+    migrationDialogVisible.value = false
+    migrationDialogGeneration += 1
+    migrationDialogSession = null
+    stopMigrationPolling()
+    migrationStateLoading.value = false
+    migrationStateError.value = null
+  }
+
+  watch(
+    () => [userPermissions.currentUser?.uid ?? null, isSuperuser.value],
+    () => {
+      fetchDataRequestVersion += 1
+      repairRequiredCount.value = 0
+      loading.value = false
+      repairGeneration += 1
+      repairSession = null
+      repairOwnersRequestVersion += 1
+      repairDialogVisible.value = false
+      repairOwnerUid.value = null
+      repairOwners.value = []
+      repairOwnersLoading.value = false
+      repairOwnersError.value = null
+      repairSubmitting.value = false
+      clearRepairDedupe()
+
+      if (!migrationDialogSession) return
+      migrationDialogGeneration += 1
+      migrationDialogSession = null
+      stopMigrationPolling()
+      migrationStateLoading.value = false
+    },
+    { flush: 'sync' }
+  )
+
   const submitEmbeddingMigration = async () => {
-    if (!selectedKb.value || !canStartKnowledgeBaseMigration(selectedKb.value)) return
+    if (
+      repairSubmitting.value ||
+      migrationSubmitting.value ||
+      !selectedKb.value ||
+      !canStartKnowledgeBaseMigration(selectedKb.value)
+    ) return
     const target = embeddingModelOptions.value.find(item => item.key === migrationTargetKey.value)
     if (!target) {
       ElMessage.error(t('knowledgeBase.select_embedding_model_err'))
@@ -231,6 +602,7 @@ export function useKnowledgeBaseView() {
       throw action
     }
 
+    if (repairSubmitting.value || !selectedKb.value || !canStartKnowledgeBaseMigration(selectedKb.value)) return
     migrationSubmitting.value = true
     try {
       const res = await knowledgeBaseApi.migrateEmbedding(selectedKb.value.id, {
@@ -255,6 +627,7 @@ export function useKnowledgeBaseView() {
       documents.showImportDialog(row)
       return
     }
+    if (command === 'repair') return repairKnowledgeBase(row)
     if (command === 'embedding_status') {
       showMigrationDialog(row)
       return
@@ -435,9 +808,26 @@ export function useKnowledgeBaseView() {
   })
 
   onBeforeUnmount(() => {
+    fetchDataRequestVersion += 1
+    repairRequiredCount.value = 0
+    loading.value = false
     ownerUsersRequestVersion += 1
     ownerUsersLoading.value = false
+    knowledgeBaseViewDisposed = true
+    repairGeneration += 1
+    repairSession = null
+    repairOwnersRequestVersion += 1
+    repairDialogVisible.value = false
+    repairOwnerUid.value = null
+    repairOwners.value = []
+    repairOwnersLoading.value = false
+    repairOwnersError.value = null
+    repairSubmitting.value = false
+    clearRepairDedupe()
+    migrationDialogGeneration += 1
+    migrationDialogSession = null
     stopMigrationPolling()
+    migrationStateLoading.value = false
     managedKnowledge.stopManagedKnowledgePolling()
     organization.stopOrganizationPolling()
   })
@@ -446,6 +836,7 @@ export function useKnowledgeBaseView() {
     tableData,
     loading,
     total,
+    repairRequiredCount,
     currentPage,
     pageSize,
     dialogVisible,
@@ -471,13 +862,29 @@ export function useKnowledgeBaseView() {
     migrationDialogVisible,
     migrationTargetKey,
     migrationSubmitting,
+    migrationStateLoading,
+    migrationStateError,
     migrationProgress,
     managedMigrationTerminalHintKey,
+    repairDialogVisible,
+    repairOwnerUid,
+    repairOwners,
+    repairOwnersLoading,
+    repairOwnersError,
+    repairSubmitting,
     getMigrationStatusLabel,
     getCleanupStatusLabel,
     stopMigrationPolling,
+    refreshMigrationState,
     showMigrationDialog,
+    closeMigrationDialog,
     submitEmbeddingMigration,
+    canRepairKnowledgeBase,
+    showRepairDialog,
+    fetchRepairOwners,
+    closeRepairDialog,
+    submitUserRepair,
+    repairKnowledgeBase,
     handleKnowledgeBaseMoreAction,
     showDialog,
     showEditDialog,

@@ -31,6 +31,7 @@ export function useMemoriesView() {
   const channels = ref([])
 
   const memories = ref([])
+  const repairRequiredCount = ref(0)
   const memoriesLoading = ref(false)
   const memoryPage = ref(1)
   const memoryPageSize = ref(20)
@@ -172,6 +173,10 @@ export function useMemoriesView() {
       currentUid.value = currentMetaUid
       currentUsername.value = typeof meta.current_username === 'string' ? meta.current_username : ''
       memoryScopeReady.value = true
+      const nextRepairRequiredCount = Number(meta.repair_required_count || 0)
+      repairRequiredCount.value = Number.isFinite(nextRepairRequiredCount) && nextRepairRequiredCount >= 0
+        ? nextRepairRequiredCount
+        : 0
       if (isSuperuser.value) {
         if (!ownersLoaded.value && !ownersLoading.value) loadOwners()
       } else {
@@ -266,6 +271,7 @@ export function useMemoriesView() {
     migrationsRequestTracker.invalidate()
     resetOwnerState()
     memories.value = []
+    repairRequiredCount.value = 0
     memoryTotal.value = 0
     jobs.value = []
     jobTotal.value = 0
@@ -348,6 +354,7 @@ export function useMemoriesView() {
     ownersLoading.value = false
     ownerFilter.value = ''
     memories.value = []
+    repairRequiredCount.value = 0
     memoryTotal.value = 0
     memoryPage.value = 1
     jobs.value = []
@@ -372,6 +379,7 @@ export function useMemoriesView() {
 
   onBeforeUnmount(() => {
     pollingStopped = true
+    repairRequiredCount.value = 0
     if (pollTimer.value) window.clearTimeout(pollTimer.value)
     pollingTaskManager.invalidate()
     memoriesRequestTracker.invalidate()
@@ -396,6 +404,7 @@ export function useMemoriesView() {
     ownerFilter,
     channels,
     memories,
+    repairRequiredCount,
     memoriesLoading,
     memoryPage,
     memoryPageSize,

@@ -25,6 +25,7 @@ from app.models.knowledge_base import (
     KnowledgeBase,
     KnowledgeBaseCollectionOwner,
     KnowledgeBaseDocument,
+    KnowledgeBaseIndexStatus,
     KnowledgeBaseType,
     KnowledgeJob,
     KnowledgeJobOperation,
@@ -367,17 +368,10 @@ async def test_maintenance_cleans_only_orphan_vectors_and_accepts_document_uuid_
             errors=errors,
         )
 
-    rebuild_calls: list[int] = []
-
-    async def submit_rebuild(_context, *, knowledge_base):
-        rebuild_calls.append(knowledge_base.id)
-        return SimpleNamespace(id=999)
-
     monkeypatch.setattr(maintenance_module, "async_get_collection_items", get_items)
     monkeypatch.setattr(maintenance_module, "async_get_collection_items_by_ids", get_items_by_ids)
     monkeypatch.setattr(maintenance_module, "async_delete_collection_items", delete_items)
     monkeypatch.setattr(maintenance_module, "async_validate_collection", validate)
-    monkeypatch.setattr(maintenance_module, "_submit_rebuild", submit_rebuild)
 
     result = await handle_knowledge_maintenance(
         KnowledgeJobExecutionContext(
@@ -391,28 +385,52 @@ async def test_maintenance_cleans_only_orphan_vectors_and_accepts_document_uuid_
     assert set(vectors) == {"valid-doc-vector"}
     assert result.result["orphan_vectors_deleted"] == 1
     assert result.result["consistent"] is True
-    assert result.result["rebuild_job_id"] is None
-    assert rebuild_calls == []
+    assert result.result["history_deleted"] == 0
+    assert result.result["repair_required"] is False
+
+    async with session_factory() as db:
+        current_knowledge_base = await db.get(KnowledgeBase, knowledge_base.id)
+        migration_jobs = list(
+            (
+                await db.execute(
+                    select(KnowledgeJob).where(
+                        KnowledgeJob.knowledge_base_id == knowledge_base.id,
+                        KnowledgeJob.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert current_knowledge_base is not None
+    assert current_knowledge_base.index_status == knowledge_base.index_status
+    assert migration_jobs == []
 
 
 @pytest.mark.asyncio
-async def test_maintenance_submits_rebuild_when_relation_vector_is_missing(
+@pytest.mark.parametrize(
+    "anomaly",
+    ["missing_collection", "missing_vector", "count_mismatch", "dimension_mismatch"],
+)
+async def test_maintenance_marks_index_failed_without_submitting_embedding_migration(
     session_factory,
     monkeypatch: pytest.MonkeyPatch,
+    anomaly: str,
 ) -> None:
     knowledge_base = await _create_user_knowledge_base(session_factory)
     async with session_factory() as db:
         db.add(
             KnowledgeBaseDocument(
                 knowledge_base_id=knowledge_base.id,
-                filename="missing.txt",
-                content="missing vector",
+                filename=f"{anomaly}.txt",
+                content=anomaly,
                 chunk_size=100,
                 chunk_overlap=0,
                 batch_size=10,
                 chunk_count=1,
-                chunk_ids=["missing-vector"],
-                metadata_={"document_uuid": "missing-uuid"},
+                chunk_ids=["expected-vector"],
+                metadata_={"document_uuid": "expected-uuid"},
             )
         )
         await db.commit()
@@ -420,47 +438,73 @@ async def test_maintenance_submits_rebuild_when_relation_vector_is_missing(
     claimed = await _claim_maintenance(
         session_factory,
         knowledge_base=knowledge_base,
-        owner="knowledge_maintenance-missing-vector-worker",
+        owner="knowledge_maintenance-anomaly-worker",
     )
 
+    vectors = {}
+    if anomaly in {"count_mismatch", "dimension_mismatch"}:
+        vectors["expected-vector"] = {
+            "knowledge_base_id": knowledge_base.id,
+            "document_uuid": "expected-uuid",
+        }
+
     async def get_items(_collection_name, offset=0, limit=None, include=None):
-        del offset, limit, include
-        return {"ids": [], "metadatas": []}
+        del include
+        rows = list(vectors.items())
+        rows = rows[offset:] if limit is None else rows[offset : offset + limit]
+        return {
+            "ids": [item_id for item_id, _metadata in rows],
+            "metadatas": [metadata for _item_id, metadata in rows],
+        }
 
     async def get_items_by_ids(_collection_name, ids, include=None):
-        del ids, include
-        return {"ids": []}
+        del include
+        return {"ids": [item_id for item_id in ids if item_id in vectors]}
 
     async def validate(_collection_name, expected_count=None, expected_metadata=None, expected_dimension=None, sample_size=1):
         del expected_metadata, expected_dimension, sample_size
+        if anomaly == "missing_collection":
+            return SimpleNamespace(exists=False, valid=False, count=0, errors=("collection_missing",))
         if expected_count is None:
-            return SimpleNamespace(exists=True, valid=True, count=0, errors=())
+            return SimpleNamespace(exists=True, valid=True, count=len(vectors), errors=())
+        error = "dimension_mismatch" if anomaly == "dimension_mismatch" else "count_mismatch"
         return SimpleNamespace(
             exists=True,
-            valid=expected_count == 0,
-            count=0,
-            errors=() if expected_count == 0 else ("count_mismatch",),
+            valid=False,
+            count=len(vectors) + (1 if anomaly == "count_mismatch" else 0),
+            errors=(error,),
         )
-
-    rebuild_calls: list[int] = []
-
-    async def submit_rebuild(_context, *, knowledge_base):
-        rebuild_calls.append(knowledge_base.id)
-        return SimpleNamespace(id=321)
 
     monkeypatch.setattr(maintenance_module, "async_get_collection_items", get_items)
     monkeypatch.setattr(maintenance_module, "async_get_collection_items_by_ids", get_items_by_ids)
     monkeypatch.setattr(maintenance_module, "async_validate_collection", validate)
-    monkeypatch.setattr(maintenance_module, "_submit_rebuild", submit_rebuild)
 
     result = await handle_knowledge_maintenance(
         KnowledgeJobExecutionContext(
             job=claimed,
-            worker_id="knowledge_maintenance-missing-vector-worker",
+            worker_id="knowledge_maintenance-anomaly-worker",
             session_factory=session_factory,
         )
     )
 
     assert result.result["consistent"] is False
-    assert result.result["rebuild_job_id"] == 321
-    assert rebuild_calls == [knowledge_base.id]
+    assert result.result["repair_required"] is True
+
+    async with session_factory() as db:
+        current_knowledge_base = await db.get(KnowledgeBase, knowledge_base.id)
+        migration_jobs = list(
+            (
+                await db.execute(
+                    select(KnowledgeJob).where(
+                        KnowledgeJob.knowledge_base_id == knowledge_base.id,
+                        KnowledgeJob.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert current_knowledge_base is not None
+    assert current_knowledge_base.index_status == KnowledgeBaseIndexStatus.FAILED
+    assert migration_jobs == []

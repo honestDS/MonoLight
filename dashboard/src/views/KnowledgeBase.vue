@@ -1,5 +1,14 @@
 <template>
   <div class="view-container">
+    <el-alert
+      v-if="repairRequiredCount > 0"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="mb-15"
+      :title="$t('knowledgeBase.repair_warning_title', { count: repairRequiredCount })"
+      :description="$t('knowledgeBase.repair_warning_description')"
+    />
     <BaseDataTable
       :data="tableData"
       :loading="loading"
@@ -15,6 +24,17 @@
       @page-change="fetchData"
       @size-change="handleSizeChange"
     >
+      <template #actions>
+        <el-button type="primary" @click="showDialog">
+          {{ $t('knowledgeBase.create_kb') }}
+        </el-button>
+        <el-button type="warning" :disabled="repairSubmitting || migrationSubmitting" @click="showRepairDialog">
+          {{ $t('knowledgeBase.repair') }}
+        </el-button>
+        <el-button @click="handleRefresh">
+          {{ $t('knowledgeBase.refresh') }}
+        </el-button>
+      </template>
       <el-table-column
         prop="name"
         :label="$t('knowledgeBase.kb_name')"
@@ -51,6 +71,11 @@
       <el-table-column :resizable="false" :label="$t('knowledgeBase.migration_status')" width="130" align="center">
         <template #default="{ row }">{{ getMigrationStatusLabel(row.migration_status) }}</template>
       </el-table-column>
+      <el-table-column :resizable="false" :label="$t('knowledgeBase.index_status')" width="110" align="center">
+        <template #default="{ row }">
+          <el-tag :type="row.index_status === 'failed' ? 'danger' : row.index_status === 'ready' ? 'success' : 'warning'">{{ $t(`knowledgeBase.index_status_${row.index_status || 'pending'}`) }}</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column :resizable="false" prop="created_at" :label="$t('knowledgeBase.created_at')" width="180" sortable>
         <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
       </el-table-column>
@@ -67,6 +92,9 @@
                 <el-dropdown-menu>
                   <el-dropdown-item v-if="canManageKnowledgeBaseDocuments(row)" command="import_document">{{ $t('knowledgeBase.import_doc') }}</el-dropdown-item>
                   <el-dropdown-item command="embedding_status">{{ $t('knowledgeBase.embedding_status') }}</el-dropdown-item>
+                  <el-dropdown-item command="repair" :disabled="repairSubmitting || migrationSubmitting || !canRepairKnowledgeBase(row)">
+                    {{ $t('knowledgeBase.repair') }}
+                  </el-dropdown-item>
                   <el-dropdown-item command="edit">{{ $t('knowledgeBase.edit') }}</el-dropdown-item>
                   <el-dropdown-item command="delete" class="danger-dropdown-item">{{ $t('knowledgeBase.delete') }}</el-dropdown-item>
                 </el-dropdown-menu>
@@ -159,6 +187,19 @@
       </template>
     </el-dialog>
 
+    <KnowledgeBaseRepairDialog
+      :visible="repairDialogVisible"
+      :is-superuser="isSuperuser"
+      v-model:owner-uid="repairOwnerUid"
+      :owners="repairOwners"
+      :loading="repairOwnersLoading"
+      :error="repairOwnersError"
+      :submitting="repairSubmitting"
+      @close="closeRepairDialog"
+      @submit="submitUserRepair"
+      @refresh="fetchRepairOwners()"
+    />
+
     <el-dialog
       :title="$t('knowledgeBase.embedding_migration_title', { name: selectedKb?.name || '' })"
       v-model="migrationDialogVisible"
@@ -166,8 +207,15 @@
       class="standard-dialog"
       center
       align-center
-      @closed="stopMigrationPolling"
+      @closed="closeMigrationDialog"
     >
+      <el-alert
+        v-if="migrationStateError"
+        type="error"
+        :title="migrationStateError"
+        :closable="false"
+        class="mb-15"
+      />
       <el-form label-width="150px" size="default">
         <el-form-item :label="$t('knowledgeBase.knowledge_base_type')">
           <el-tag :type="selectedKb?.knowledge_base_type === 'llm_managed' ? 'warning' : 'info'">
@@ -182,6 +230,9 @@
               · {{ $t('knowledgeBase.embedding_revision_value', { revision: selectedKb?.active_embedding_revision || '-' }) }}
             </div>
           </div>
+        </el-form-item>
+        <el-form-item :label="$t('knowledgeBase.index_status')">
+          <el-tag :type="selectedKb?.index_status === 'failed' ? 'danger' : selectedKb?.index_status === 'ready' ? 'success' : 'warning'">{{ $t(`knowledgeBase.index_status_${selectedKb?.index_status || 'pending'}`) }}</el-tag>
         </el-form-item>
 
         <el-alert
@@ -208,7 +259,7 @@
             :placeholder="$t('knowledgeBase.select_embedding_model')"
             class="full-width-input"
             filterable
-            :disabled="!canStartKnowledgeBaseMigration(selectedKb)"
+            :disabled="migrationStateLoading || !!migrationStateError || repairSubmitting || migrationSubmitting || !canStartKnowledgeBaseMigration(selectedKb)"
           >
             <el-option
               v-for="item in embeddingModelOptions"
@@ -249,12 +300,12 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="migrationDialogVisible = false" size="default">{{ $t('knowledgeBase.close') }}</el-button>
+        <el-button @click="closeMigrationDialog" size="default">{{ $t('knowledgeBase.close') }}</el-button>
         <el-button
           v-if="selectedKb?.knowledge_base_type === 'user'"
           type="primary"
           :loading="migrationSubmitting"
-          :disabled="!migrationTargetKey || !canStartKnowledgeBaseMigration(selectedKb)"
+          :disabled="migrationStateLoading || !!migrationStateError || repairSubmitting || migrationSubmitting || !migrationTargetKey || !canStartKnowledgeBaseMigration(selectedKb)"
           @click="submitEmbeddingMigration"
         >
           {{ $t('knowledgeBase.start_migration') }}
@@ -738,12 +789,14 @@
 
 <script setup>
 import BaseDataTable from '@/components/BaseDataTable.vue'
+import KnowledgeBaseRepairDialog from '@/components/KnowledgeBaseRepairDialog.vue'
 import { useKnowledgeBaseView } from '@/composables/knowledgeBase/useKnowledgeBaseView.js'
 
 const {
   tableData,
   loading,
   total,
+  repairRequiredCount,
   currentPage,
   pageSize,
   showDialog,
@@ -751,6 +804,17 @@ const {
   fetchData,
   handleSizeChange,
   canManageManagedKnowledge,
+  repairDialogVisible,
+  repairOwnerUid,
+  repairOwners,
+  repairOwnersLoading,
+  repairOwnersError,
+  repairSubmitting,
+  showRepairDialog,
+  fetchRepairOwners,
+  closeRepairDialog,
+  submitUserRepair,
+  canRepairKnowledgeBase,
   getKnowledgeBaseOwnerLabel,
   getKnowledgeBaseProfileLabel,
   getEmbeddingModelName,
@@ -778,7 +842,9 @@ const {
   submitForm,
   migrationDialogVisible,
   selectedKb,
-  stopMigrationPolling,
+  closeMigrationDialog,
+  migrationStateLoading,
+  migrationStateError,
   managedMigrationTerminalHintKey,
   migrationTargetKey,
   canStartKnowledgeBaseMigration,

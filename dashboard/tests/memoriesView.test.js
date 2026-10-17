@@ -10,8 +10,11 @@ import {
   ref,
   watch,
 } from 'vue'
+import { createI18n } from 'vue-i18n'
 import * as memoryManagement from '../src/utils/memoryManagement.js'
 import { createAbortableTaskManager } from '../src/utils/channelTestManager.js'
+import enMemories from '../src/i18n/locales/en/memories.js'
+import zhMemories from '../src/i18n/locales/zh/memories.js'
 import {
   MEMORY_JOB_OPERATIONS,
   MEMORY_JOB_STATUSES,
@@ -189,7 +192,7 @@ const createHarness = (t, options = {}) => {
     ref,
     onMounted: callback => mountedCallbacks.push(callback),
     onBeforeUnmount: callback => beforeUnmountCallbacks.push(callback),
-    useI18n: () => ({ t: translate }),
+    useI18n: () => ({ t: options.translate ?? translate }),
     ElMessage,
     ElMessageBox,
     adminApi,
@@ -2134,52 +2137,60 @@ test('cancels and clears runtime settings on close before reopening the same own
   }
 })
 
-test('blocks runtime confirmation during an organize refresh failure and restores it after success', async t => {
-  const harness = createRuntimeSettingsHarness(t)
-  await harness.mount()
-  harness.module.ownerFilter.value = 'user-a'
-  harness.module.openRuntimeDialog('organize')
-  const initialRequest = harness.calls('memoryApi.settings')[0]
-  initialRequest.deferred.resolve(runtimeSettingsData('before-refresh', 13, 50))
-  await harness.flush()
-  assert.equal(harness.module.organizeBlocked.value, false)
-  assert.equal(harness.module.reindexBlocked.value, false)
-  assert.equal(harness.module.settings.capacity.active_record_count, 13)
-  assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-before-refresh')
-  const messagesBeforeFailure = normalize(harness.messages)
+test('blocks runtime confirmation during an organize or reindex refresh failure and restores it after success', async t => {
+  for (const action of ['organize', 'reindex']) {
+    const harness = createRuntimeSettingsHarness(t)
+    await harness.mount()
+    harness.module.ownerFilter.value = 'user-a'
+    harness.module.openRuntimeDialog(action)
+    const initialRequest = harness.calls('memoryApi.settings')[0]
+    initialRequest.deferred.resolve(runtimeSettingsData('before-refresh', 13, 50))
+    await harness.flush()
+    assert.equal(harness.module.organizeBlocked.value, false)
+    assert.equal(harness.module.reindexBlocked.value, false)
+    assert.equal(harness.module.settings.capacity.active_record_count, 13)
+    assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-before-refresh')
+    const messagesBeforeFailure = normalize(harness.messages)
 
-  const failedPending = harness.module.loadSettings()
-  const failedRequest = harness.calls('memoryApi.settings')[1]
-  assert.equal(harness.module.settingsLoading.value, true)
-  assert.equal(harness.module.settingsLoaded.value, true)
-  assert.equal(harness.module.organizeBlocked.value, true)
-  assert.equal(harness.module.reindexBlocked.value, true)
-  failedRequest.deferred.reject(new Error('runtime refresh failed'))
-  await failedPending
-  await harness.flush()
+    const failedPending = harness.module.loadSettings()
+    const failedRequest = harness.calls('memoryApi.settings')[1]
+    assert.equal(harness.module.settingsLoading.value, true)
+    assert.equal(harness.module.settingsLoaded.value, true)
+    assert.equal(harness.module.organizeBlocked.value, true)
+    assert.equal(harness.module.reindexBlocked.value, true)
+    await harness.module.submitRuntimeOperation(action)
+    assert.equal(harness.calls('memoryApi.organize').length, 0)
+    assert.equal(harness.calls('memoryApi.reindex').length, 0)
+    failedRequest.deferred.reject(new Error('runtime refresh failed'))
+    await failedPending
+    await harness.flush()
 
-  assert.deepEqual(normalize(harness.module.settings), {})
-  assert.equal(harness.module.currentMemoryTask.value, null)
-  assert.equal(harness.module.settingsLoaded.value, false)
-  assert.equal(harness.module.settingsLoading.value, false)
-  assert.equal(harness.module.settingsLoadError.value, 'runtime refresh failed')
-  assert.equal(harness.module.organizeBlocked.value, true)
-  assert.equal(harness.module.reindexBlocked.value, true)
-  assert.deepEqual(normalize(harness.messages), messagesBeforeFailure)
+    assert.deepEqual(normalize(harness.module.settings), {})
+    assert.equal(harness.module.currentMemoryTask.value, null)
+    assert.equal(harness.module.settingsLoaded.value, false)
+    assert.equal(harness.module.settingsLoading.value, false)
+    assert.equal(harness.module.settingsLoadError.value, 'runtime refresh failed')
+    assert.equal(harness.module.organizeBlocked.value, true)
+    assert.equal(harness.module.reindexBlocked.value, true)
+    await harness.module.submitRuntimeOperation(action)
+    assert.equal(harness.calls('memoryApi.organize').length, 0)
+    assert.equal(harness.calls('memoryApi.reindex').length, 0)
+    assert.deepEqual(normalize(harness.messages), messagesBeforeFailure)
 
-  const successfulPending = harness.module.loadSettings()
-  const successfulRequest = harness.calls('memoryApi.settings')[2]
-  successfulRequest.deferred.resolve(runtimeSettingsData('after-refresh', 31, 70))
-  await successfulPending
-  await harness.flush()
-  assert.equal(harness.module.settings.capacity.active_record_count, 31)
-  assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-after-refresh')
-  assert.equal(harness.module.settingsLoaded.value, true)
-  assert.equal(harness.module.settingsLoading.value, false)
-  assert.equal(harness.module.settingsLoadError.value, '')
-  assert.equal(harness.module.organizeBlocked.value, false)
-  assert.equal(harness.module.reindexBlocked.value, false)
-  assert.deepEqual(normalize(harness.messages), messagesBeforeFailure)
+    const successfulPending = harness.module.loadSettings()
+    const successfulRequest = harness.calls('memoryApi.settings')[2]
+    successfulRequest.deferred.resolve(runtimeSettingsData('after-refresh', 31, 70))
+    await successfulPending
+    await harness.flush()
+    assert.equal(harness.module.settings.capacity.active_record_count, 31)
+    assert.equal(harness.module.currentMemoryTask.value.id, 'runtime-after-refresh')
+    assert.equal(harness.module.settingsLoaded.value, true)
+    assert.equal(harness.module.settingsLoading.value, false)
+    assert.equal(harness.module.settingsLoadError.value, '')
+    assert.equal(harness.module.organizeBlocked.value, false)
+    assert.equal(harness.module.reindexBlocked.value, false)
+    assert.deepEqual(normalize(harness.messages), messagesBeforeFailure)
+  }
 })
 
 test('polls runtime settings only for the open owner and keeps silent reads out of loading state', async t => {
@@ -2600,6 +2611,58 @@ test('blocks runtime operation submission for unavailable settings, owners, mode
     await pending
     await harness.flush()
     assert.equal(harness.module.runtimeDialogVisible.value, false, recoveryCase.name)
+  }
+})
+
+test('shows localized unconfigured embedding guidance and restores reindex after settings recovery', async t => {
+  const localeCases = [
+    {
+      locale: 'zh',
+      memories: zhMemories,
+      expectedMessage: '尚未配置嵌入模型，请先在 Profile 中完成配置。',
+    },
+    {
+      locale: 'en',
+      memories: enMemories,
+      expectedMessage: 'No embedding model is configured. Configure it in Profiles first.',
+    },
+  ]
+
+  for (const localeCase of localeCases) {
+    const i18n = createI18n({
+      legacy: false,
+      locale: localeCase.locale,
+      messages: { [localeCase.locale]: { memories: localeCase.memories } },
+    })
+    let configured = false
+    const harness = createHarness(t, {
+      translate: (key, params) => i18n.global.t(key, params ? { ...params } : {}),
+      apiOverrides: {
+        memoryApi: {
+          settings: () => dataResponse({ configured }),
+        },
+      },
+    })
+    await harness.mount()
+    harness.module.openRuntimeDialog('reindex')
+    await harness.flush()
+
+    assert.equal(harness.module.runtimeBlockingMessage.value, localeCase.expectedMessage, localeCase.locale)
+    assert.equal(harness.module.reindexBlocked.value, true, localeCase.locale)
+    await harness.module.submitRuntimeOperation('reindex')
+    assert.equal(harness.calls('memoryApi.reindex').length, 0, localeCase.locale)
+
+    await harness.module.loadSettings()
+    await harness.flush()
+    assert.equal(harness.module.runtimeBlockingMessage.value, localeCase.expectedMessage, localeCase.locale)
+    assert.equal(harness.module.reindexBlocked.value, true, localeCase.locale)
+    assert.equal(harness.calls('memoryApi.reindex').length, 0, localeCase.locale)
+
+    configured = true
+    await harness.module.loadSettings()
+    await harness.flush()
+    assert.equal(harness.module.runtimeBlockingMessage.value, '', localeCase.locale)
+    assert.equal(harness.module.reindexBlocked.value, false, localeCase.locale)
   }
 })
 
@@ -3697,6 +3760,145 @@ test('clears authorization state after unauthorized list responses and recovers 
     assert.deepEqual(normalize(harness.module.memories.value), [{ id: 'ordinary-own', owner_uid: 'admin-user' }], authorizationCase.name)
     assert.equal(harness.module.memoryTotal.value, 1, authorizationCase.name)
   }
+})
+
+const repairRequiredMeta = (count, identity = {}) => ({
+  is_superuser: false,
+  current_uid: 'user-a',
+  current_username: 'Alice',
+  repair_required_count: count,
+  ...identity,
+})
+
+test('uses the authorized list metadata count rather than the current page or pending records', async t => {
+  let listCallCount = 0
+  const harness = createHarness(t, {
+    apiOverrides: {
+      memoryApi: {
+        list: () => {
+          listCallCount += 1
+          return listCallCount === 1
+            ? pageResponse([], 0, repairRequiredMeta(4))
+            : pageResponse([{ id: 'pending-record', pending_mutation_job_id: 91 }], 1, repairRequiredMeta(0))
+        },
+      },
+    },
+  })
+  await harness.mount()
+
+  assert.deepEqual(normalize(harness.module.memories.value), [])
+  assert.equal(harness.module.repairRequiredCount.value, 4)
+
+  await harness.module.loadMemories()
+
+  assert.equal(harness.module.memories.value[0].pending_mutation_job_id, 91)
+  assert.equal(harness.module.repairRequiredCount.value, 0)
+})
+
+test('ignores an old repair count after an administrator switches list owners', async t => {
+  let listCallCount = 0
+  const adminIdentity = {
+    is_superuser: true,
+    current_uid: 'admin-user',
+    current_username: 'Administrator',
+  }
+  const harness = createHarness(t, {
+    superuser: true,
+    currentUid: 'admin-user',
+    currentUsername: 'Administrator',
+    apiOverrides: {
+      memoryApi: {
+        list: (...args) => {
+          listCallCount += 1
+          return listCallCount === 1
+            ? pageResponse([], 0, repairRequiredMeta(2, adminIdentity))
+            : args.at(-1).deferred.promise
+        },
+      },
+    },
+  })
+  await harness.mount()
+  harness.module.ownerFilter.value = 'owner-a'
+  const oldPending = harness.module.loadMemories()
+  const oldRequest = harness.calls('memoryApi.list')[1]
+
+  harness.module.ownerFilter.value = 'owner-b'
+  harness.module.handleOwnerChange()
+  assert.equal(harness.module.repairRequiredCount.value, 0)
+  await harness.flush()
+  const newRequest = harness.calls('memoryApi.list')[2]
+  assert.equal(newRequest.args[0].uid, 'owner-b')
+
+  newRequest.deferred.resolve(pageResponse([], 0, repairRequiredMeta(8, adminIdentity)))
+  await harness.flush()
+  assert.equal(harness.module.repairRequiredCount.value, 8)
+
+  oldRequest.deferred.resolve(pageResponse([], 0, repairRequiredMeta(3, adminIdentity)))
+  await oldPending
+  await harness.flush()
+  assert.equal(harness.module.repairRequiredCount.value, 8)
+})
+
+test('clears the repair count after authorization failures or list metadata without authorization', async t => {
+  const invalidCases = [
+    { name: '401', errorResponse: { status: 401 } },
+    { name: '403', errorResponse: { data: { code: 403 } } },
+    { name: 'missing authorization metadata' },
+  ]
+
+  for (const invalidCase of invalidCases) {
+    let listCallCount = 0
+    const harness = createHarness(t, {
+      apiOverrides: {
+        memoryApi: {
+          list: () => {
+            listCallCount += 1
+            if (listCallCount === 1) return pageResponse([], 0, repairRequiredMeta(6))
+            if (invalidCase.errorResponse) {
+              return Promise.reject(Object.assign(new Error('authorization expired'), {
+                response: invalidCase.errorResponse,
+              }))
+            }
+            return pageResponse([], 0, { repair_required_count: 99 })
+          },
+        },
+      },
+    })
+    await harness.mount()
+    assert.equal(harness.module.repairRequiredCount.value, 6, invalidCase.name)
+
+    await harness.module.loadMemories()
+
+    assert.equal(harness.module.repairRequiredCount.value, 0, invalidCase.name)
+  }
+})
+
+test('clears the repair count on unmount and ignores a late list response', async t => {
+  let listCallCount = 0
+  const harness = createHarness(t, {
+    apiOverrides: {
+      memoryApi: {
+        list: (...args) => {
+          listCallCount += 1
+          return listCallCount === 1
+            ? pageResponse([], 0, repairRequiredMeta(5))
+            : args.at(-1).deferred.promise
+        },
+      },
+    },
+  })
+  await harness.mount()
+  assert.equal(harness.module.repairRequiredCount.value, 5)
+
+  const pending = harness.module.loadMemories()
+  const request = harness.calls('memoryApi.list')[1]
+  harness.unmount()
+  assert.equal(harness.module.repairRequiredCount.value, 0)
+
+  request.deferred.resolve(pageResponse([], 0, repairRequiredMeta(55)))
+  await pending
+  await harness.flush()
+  assert.equal(harness.module.repairRequiredCount.value, 0)
 })
 
 test('preserves a valid ordinary-user scope after a non-authorization list failure', async t => {

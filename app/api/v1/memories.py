@@ -39,7 +39,7 @@ from app.core.constants import (
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.memory.job import memory_job_crud
-from app.core.crud.memory.store import memory_record_crud, memory_revision_crud
+from app.core.crud.memory.store import memory_record_crud, memory_revision_crud, memory_store_crud
 from app.core.exceptions import ForbiddenException, ResourceNotFoundException
 from app.core.memory import (
     cancel_embedding_migration,
@@ -209,6 +209,7 @@ async def list_memories_api(
     current_user: User = Depends(get_current_user),
 ):
     scoped_uid = await _resolve_user_scope(db, current_user, uid, all_users=True)
+    repair_required_count = await memory_store_crud.count_repair_required(db, uid=scoped_uid)
     result = await list_memories(
         db,
         uid=scoped_uid,
@@ -224,6 +225,7 @@ async def list_memories_api(
         "is_superuser": bool(getattr(current_user, "is_superuser", False)),
         "current_uid": current_user.uid,
         "current_username": getattr(current_user, "username", None),
+        "repair_required_count": repair_required_count,
     }
     return StandardResponse.success(data=data, message=MSG_MEMORY_LIST_SUCCESS)
 

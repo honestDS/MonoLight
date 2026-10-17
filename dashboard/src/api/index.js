@@ -256,9 +256,11 @@ export const fileApi = {
 
 export const knowledgeBaseApi = {
   list: (params) => request.get('/knowledge-base/list', { params }),
+  get: (id) => request.get('/knowledge-base/get', { params: { kb_id: id } }),
   create: (data) => request.post('/knowledge-base/create', data),
   migrateEmbedding: (id, data) => request.post(`/knowledge-base/embedding-migration?kb_id=${id}`, data),
   update: (id, data) => request.post(`/knowledge-base/update?kb_id=${id}`, data),
+  repair: (data, params = {}) => request.post('/knowledge-base/repair', data, { params }),
   delete: (id) => request.post(`/knowledge-base/delete?kb_id=${id}`),
   managedItems: (id, params, config = {}) => request.get('/knowledge-base/managed-items/list', { ...config, params: { kb_id: id, ...params } }),
   managedItem: (id, knowledgeId) => request.get('/knowledge-base/managed-items/get', { params: { kb_id: id, knowledge_id: knowledgeId } }),

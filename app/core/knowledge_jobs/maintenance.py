@@ -16,7 +16,6 @@ from app.core.crud.knowledge.base import knowledge_base_crud, knowledge_base_doc
 from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.crud.knowledge.organization import knowledge_organization_stage_crud
-from app.core.embedding.common import build_embedding_signature
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.i18n import t
 from app.core.knowledge_jobs.executor import (
@@ -25,10 +24,8 @@ from app.core.knowledge_jobs.executor import (
     KnowledgeJobExecutionResult,
     KnowledgeJobRetryableError,
 )
-from app.core.knowledge_jobs.manager import KnowledgeJobConflictError, KnowledgeJobTargetBusyError
 from app.core.knowledge_jobs.migration_common import _ACTIVE_MIGRATION_STATUSES, _request_hash
-from app.core.knowledge_jobs.migration_prepare import prepare_knowledge_base_embedding_migration
-from app.models.knowledge_base import KnowledgeBase, KnowledgeJob, KnowledgeJobOperation
+from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseIndexStatus, KnowledgeJobOperation
 from app.providers.database.time import get_database_time
 from app.providers.vector import (
     async_delete_collection_items,
@@ -348,50 +345,43 @@ async def _relation_vector_references(
     return expected_count, missing
 
 
-async def _submit_rebuild(
+async def _mark_repair_required(
     context: KnowledgeJobExecutionContext,
     *,
     knowledge_base: KnowledgeBase,
-) -> KnowledgeJob:
-    await _assert_consistency_fence(context, knowledge_base=knowledge_base)
-    active = resolve_active_knowledge_base_embedding(knowledge_base)
-    if active.dimensions is None or active.dimensions < 1:
-        raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
-    signature = knowledge_base.active_embedding_signature or build_embedding_signature(
-        active.channel_id,
-        active.model_id,
-        active.dimensions,
-    )
+) -> None:
+    baseline_active = resolve_active_knowledge_base_embedding(knowledge_base)
+    await context.checkpoint()
     async with context.session_factory() as db:
-        if await knowledge_job_crud.has_active_for_knowledge_base_except(
+        current = await knowledge_base_crud.lock_owned_by_id(
+            db,
+            uid=knowledge_base.uid,
+            knowledge_base_id=knowledge_base.id,
+        )
+        has_other_active_job = await knowledge_job_crud.has_active_for_knowledge_base_except(
             db,
             uid=knowledge_base.uid,
             knowledge_base_id=knowledge_base.id,
             excluded_job_id=context.job.id,
+        )
+        if (
+            current is None
+            or current.uid != knowledge_base.uid
+            or current.index_revision != knowledge_base.index_revision
+            or current.active_embedding_revision != knowledge_base.active_embedding_revision
+            or current.migration_status in _ACTIVE_MIGRATION_STATUSES
+            or resolve_active_knowledge_base_embedding(current) != baseline_active
+            or has_other_active_job
         ):
             await db.commit()
             raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
-        current = await knowledge_base_crud.get(db, knowledge_base.id)
-        if current is None or current.uid != knowledge_base.uid or current.index_revision != knowledge_base.index_revision:
-            await db.commit()
-            raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
-        try:
-            rebuild = await prepare_knowledge_base_embedding_migration(
-                db,
-                uid=knowledge_base.uid,
-                knowledge_base_id=knowledge_base.id,
-                target_channel_id=active.channel_id,
-                target_model_id=active.model_id,
-                target_dimensions=active.dimensions,
-                target_signature=signature,
-                dedupe_key=f"kb-consistency-rebuild:{knowledge_base.id}:index:{knowledge_base.index_revision}",
-                commit=False,
-            )
-        except (KnowledgeJobConflictError, KnowledgeJobTargetBusyError) as exc:
-            await db.rollback()
-            raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT)) from exc
+        await knowledge_base_crud.update(
+            db,
+            db_obj=current,
+            obj_in={"index_status": KnowledgeBaseIndexStatus.FAILED},
+            commit=False,
+        )
         await db.commit()
-        return rebuild
 
 
 def _collection_validation_failed(validation: Any, *, expected_count: int | None = None) -> bool:
@@ -461,13 +451,14 @@ async def handle_knowledge_maintenance(
         )
         inconsistent = inconsistent or unknown_metadata or missing_references or _collection_validation_failed(final_validation, expected_count=expected_count)
 
-    rebuild = await _submit_rebuild(context, knowledge_base=knowledge_base) if inconsistent else None
+    if inconsistent:
+        await _mark_repair_required(context, knowledge_base=knowledge_base)
     return KnowledgeJobExecutionResult(
         result={
             "history_deleted": history_deleted,
             "orphan_vectors_deleted": orphan_deleted,
             "consistent": not inconsistent,
-            "rebuild_job_id": rebuild.id if rebuild is not None else None,
+            "repair_required": inconsistent,
         }
     )
 
