@@ -384,18 +384,18 @@
 
                 <div class="action-btn-container">
                   <el-button
-                    :type="isReplyRunning ? 'danger' : 'primary'"
-                    @click="isReplyRunning ? stopReply() : send()"
-                    :loading="isReplyRunning ? isStopping : (isCurrentSessionReadOnly && guidanceSubmitting)"
-                    :disabled="isReplyRunning ? (isStopping || !currentSessionId) : (isCurrentSessionReadOnly ? guidanceSubmitting || agentSettingSubmitting || !inputMsg.trim() : modeSettingSubmitting || agentSettingSubmitting || (!inputMsg.trim() && attachments.length === 0))"
-                    :class="{ 'is-stop-reply': isReplyRunning }"
+                    :type="showStopReply ? 'danger' : 'primary'"
+                    @click="showStopReply ? stopReply() : send()"
+                    :loading="showStopReply ? isStopping : (isCurrentSessionReadOnly && guidanceSubmitting)"
+                    :disabled="showStopReply ? (isStopping || !currentSessionId) : (isCurrentSessionReadOnly ? guidanceSubmitting || agentSettingSubmitting || !inputMsg.trim() : modeSettingSubmitting || agentSettingSubmitting || (!inputMsg.trim() && attachments.length === 0))"
+                    :class="{ 'is-stop-reply': showStopReply }"
                     :title="actionButtonLabel"
                     :aria-label="actionButtonLabel"
                     :aria-busy="isStopping || (isCurrentSessionReadOnly && guidanceSubmitting)"
                     class="action-btn"
                     circle
                   >
-                    <span v-if="isReplyRunning" class="stop-reply-icon" aria-hidden="true"></span>
+                    <span v-if="showStopReply" class="stop-reply-icon" aria-hidden="true"></span>
                     <el-icon v-else class="send-reply-icon" aria-hidden="true"><Position /></el-icon>
                   </el-button>
                 </div>
@@ -471,7 +471,6 @@ const {
   messages,
   inputMsg,
   loading,
-  isReplyRunning,
   isStopping,
   messageList,
   sessions,
@@ -544,6 +543,7 @@ const {
   uploadTriggerRef,
   openUploadPicker,
   guidanceSubmitting,
+  showStopReply,
   actionButtonLabel,
   send,
   handleAuditDecision,
