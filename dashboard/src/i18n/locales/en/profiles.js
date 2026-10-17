@@ -219,6 +219,8 @@ export default {
   global_settings: 'Global Settings',
   log_locale: 'Log Locale',
   log_locale_hint: 'Controls the language used when system logs are written to the database, including log lists and live logs.',
+  log_redaction_enabled: 'Stored Log Redaction',
+  log_redaction_enabled_hint: 'Off by default. Applies only to new database logs after saving. When enabled, credentials and sensitive tool content are redacted before storage. Historical logs and frontend visibility are unchanged. When disabled, new logs may contain sensitive information.',
   temp_dir_max_size_mb: 'Temp Directory Limit (MB)',
   temp_dir_max_size_mb_hint: 'Controls the maximum space allowed for each user temp directory. When the limit is exceeded, the background cleaner removes the oldest temporary files first.',
   llm_request_max_size_mb: 'Model Request Limit (MiB)',

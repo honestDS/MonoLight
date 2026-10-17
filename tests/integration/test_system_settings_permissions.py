@@ -25,6 +25,7 @@ SETTINGS_PATH = "/api/v1/system/settings"
 
 RUNTIME_KEYS = (
     "log_locale",
+    "log_redaction_enabled",
     "temp_dir_max_size_mb",
     "llm_request_max_size_mb",
     "audit_retention_days",
@@ -113,6 +114,7 @@ def _assert_error(response: httpx.Response, code: int, message: str) -> None:
 
 VALID_SETTINGS = {
     "log_locale": "en",
+    "log_redaction_enabled": True,
     "temp_dir_max_size_mb": 3072,
     "llm_request_max_size_mb": 64,
     "audit_retention_days": 365,
@@ -208,6 +210,7 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         assert initial.json()["code"] == 200
         assert initial.json()["data"] == {
             "log_locale": "en",
+            "log_redaction_enabled": False,
             "temp_dir_max_size_mb": 2048,
             "llm_request_max_size_mb": 32,
             "audit_retention_days": 180,
@@ -220,6 +223,7 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
             headers={"Authorization": f"Bearer {token}"},
             json={
                 "log_locale": " EN-US ",
+                "log_redaction_enabled": True,
                 "temp_dir_max_size_mb": 3072,
                 "llm_request_max_size_mb": 64,
                 "audit_retention_days": 365,
@@ -234,6 +238,7 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         persisted = {key: value for _, key, value in await _settings_snapshot(setup_session_factory) if key in RUNTIME_KEYS}
         assert persisted == {
             "log_locale": "en",
+            "log_redaction_enabled": "true",
             "temp_dir_max_size_mb": "3072",
             "llm_request_max_size_mb": "64",
             "audit_retention_days": "365",
@@ -245,6 +250,96 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         assert after.status_code == 200
         assert after.json()["code"] == 200
         assert after.json()["data"] == VALID_SETTINGS
+
+
+@pytest.mark.asyncio
+async def test_superuser_can_disable_log_redaction_and_persists_false(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    token = _token("admin")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        enabled = await _request(client, "POST", token=token, json=VALID_SETTINGS)
+        assert enabled.status_code == 200
+        assert enabled.json()["data"]["log_redaction_enabled"] is True
+
+        disabled_payload = {**VALID_SETTINGS, "log_redaction_enabled": False}
+        disabled = await _request(client, "POST", token=token, json=disabled_payload)
+        assert disabled.status_code == 200
+        assert disabled.json()["code"] == 200
+        assert disabled.json()["data"] == disabled_payload
+
+        persisted = {key: value for _, key, value in await _settings_snapshot(setup_session_factory) if key in RUNTIME_KEYS}
+        assert persisted["log_redaction_enabled"] == "false"
+
+        read_back = await _request(client, "GET", token=token)
+        assert read_back.status_code == 200
+        assert read_back.json()["data"]["log_redaction_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_omitting_log_redaction_enabled_uses_false_default(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    token = _token("admin")
+    payload = {key: value for key, value in VALID_SETTINGS.items() if key != "log_redaction_enabled"}
+    expected = {**payload, "log_redaction_enabled": False}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        updated = await _request(client, "POST", token=token, json=payload)
+        assert updated.status_code == 200
+        assert updated.json()["code"] == 200
+        assert updated.json()["data"] == expected
+
+        persisted = {key: value for _, key, value in await _settings_snapshot(setup_session_factory) if key in RUNTIME_KEYS}
+        assert persisted["log_redaction_enabled"] == "false"
+
+        read_back = await _request(client, "GET", token=token)
+        assert read_back.status_code == 200
+        assert read_back.json()["data"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_value", (None, 0, 1, "true", "false", [], {}))
+async def test_superuser_rejects_invalid_log_redaction_enabled_without_changes(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    invalid_value: Any,
+) -> None:
+    token = _token("admin")
+    payload = {**VALID_SETTINGS, "log_redaction_enabled": invalid_value}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        before = await _settings_snapshot(setup_session_factory)
+        response = await _request(client, "POST", token=token, json=payload)
+        assert response.status_code == 422
+        assert await _settings_snapshot(setup_session_factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_value", "expected"),
+    (("true", True), ("TRUE", True), ("false", False), ("invalid", False), ("1", False)),
+)
+async def test_stored_log_redaction_enabled_is_parsed_consistently_without_mutation(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    stored_value: str,
+    expected: bool,
+) -> None:
+    async with setup_session_factory() as session:
+        session.add(SystemSetting(key="log_redaction_enabled", value=stored_value))
+        await session.commit()
+        before = await _settings_snapshot(setup_session_factory)
+        getter_value = await system_setting_crud.get_log_redaction_enabled(session)
+
+    assert getter_value is expected
+    token = _token("admin")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        response = await _request(client, "GET", token=token)
+        assert response.status_code == 200
+        assert response.json()["code"] == 200
+        assert response.json()["data"]["log_redaction_enabled"] is getter_value
+        assert await _settings_snapshot(setup_session_factory) == before
 
 
 @pytest.mark.asyncio

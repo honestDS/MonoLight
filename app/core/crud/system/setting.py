@@ -29,6 +29,7 @@ DEFAULT_SYSTEM_SETTINGS = {
     "audit_retention_days": "90",
     "audit_report_email": "",
     "session_reply_max_concurrency": "4",
+    "log_redaction_enabled": "false",
 }
 
 
@@ -40,6 +41,10 @@ def _parse_llm_request_max_size_mb(value: str | None) -> int:
     if parsed is None or not 1 <= parsed <= LLM_REQUEST_MAX_SIZE_MB_UPPER_BOUND:
         return DEFAULT_LLM_REQUEST_MAX_SIZE_MB
     return parsed
+
+
+def _parse_log_redaction_enabled(value: str | None) -> bool:
+    return value is not None and value.strip().lower() == "true"
 
 
 class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
@@ -90,6 +95,10 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         db_obj = await self.get_by_key(db, "llm_request_max_size_mb")
         return _parse_llm_request_max_size_mb(db_obj.value if db_obj else None)
 
+    async def get_log_redaction_enabled(self, db: AsyncSession) -> bool:
+        result = await db.execute(select(SystemSetting.value).where(SystemSetting.key == "log_redaction_enabled"))
+        return _parse_log_redaction_enabled(result.scalar_one_or_none())
+
     async def initialize_setup_state(self, db: AsyncSession, *, admin_uid: str | None) -> tuple[str, str | None]:
         initial_status = SETUP_STATUS_COMPLETED if admin_uid else SETUP_STATUS_PENDING
         await self._insert_if_missing(db, key=SETUP_STATUS_KEY, value=initial_status)
@@ -123,6 +132,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         raw_audit_retention_days = values.get("audit_retention_days", DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
         raw_audit_report_email = values.get("audit_report_email", DEFAULT_SYSTEM_SETTINGS["audit_report_email"])
         raw_session_reply_max_concurrency = values.get("session_reply_max_concurrency", DEFAULT_SYSTEM_SETTINGS["session_reply_max_concurrency"])
+        raw_log_redaction_enabled = values.get("log_redaction_enabled", DEFAULT_SYSTEM_SETTINGS["log_redaction_enabled"])
         try:
             temp_dir_max_size_mb = int(raw_temp_dir_max_size_mb)
         except (TypeError, ValueError):
@@ -143,6 +153,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             audit_retention_days=audit_retention_days,
             audit_report_email=str(raw_audit_report_email or "").strip(),
             session_reply_max_concurrency=session_reply_max_concurrency,
+            log_redaction_enabled=_parse_log_redaction_enabled(raw_log_redaction_enabled),
         )
 
     async def update_runtime_settings(self, db: AsyncSession, settings: SystemRuntimeSettings) -> SystemRuntimeSettings:
@@ -154,6 +165,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             "audit_retention_days": str(normalized.audit_retention_days),
             "audit_report_email": normalized.audit_report_email,
             "session_reply_max_concurrency": str(normalized.session_reply_max_concurrency),
+            "log_redaction_enabled": "true" if normalized.log_redaction_enabled else "false",
         }
         for key, value in values.items():
             db_obj = await self.get_by_key(db, key)

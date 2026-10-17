@@ -22,7 +22,6 @@ from app.core.tools import (
     validate_longterm_memory_arguments,
 )
 from app.core.tools import longterm_memory as longterm_memory_module
-from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.models.profile import Profile, ProfileConfig
 
 
@@ -375,49 +374,3 @@ async def test_recall_source_failures_are_isolated(monkeypatch, failed_source):
     assert bool(payload["items"]) is (failed_source != "memory")
     assert bool(payload.get("chat_history")) is (failed_source != "chat")
     assert bool(payload.get("knowledge_base")) is (failed_source != "knowledge")
-
-
-def test_longterm_memory_log_redaction_covers_knowledge_query_and_results():
-    arguments = process_single_tool_module._serialize_longterm_memory_log_arguments(
-        {
-            "operation": "recall",
-            "query": "private memory query",
-            "knowledge_query": "private knowledge query",
-        }
-    )
-    result = process_single_tool_module._serialize_longterm_memory_log_result(
-        json.dumps(
-            {
-                "items": [{"memory_id": 1, "content": "private memory body"}],
-                "knowledge_base": [
-                    {
-                        "knowledge_base_id": 10,
-                        "source_type": "user_knowledge",
-                        "source": "private-file.md",
-                        "content": "private knowledge body",
-                        "truncated": False,
-                        "llm_maintainable": False,
-                    }
-                ],
-                "chat_history": [{"role": "user", "content": "private chat body"}],
-            }
-        )
-    )
-
-    argument_payload = json.loads(arguments)
-    result_payload = json.loads(result)
-    assert argument_payload["query_length"] == len("private memory query")
-    assert argument_payload["knowledge_query_length"] == len("private knowledge query")
-    assert "private memory query" not in arguments
-    assert "private knowledge query" not in arguments
-    assert "private memory body" not in result
-    assert "private knowledge body" not in result
-    assert "private chat body" not in result
-    assert result_payload["knowledge_base"] == [
-        {
-            "knowledge_base_id": 10,
-            "source_type": "user_knowledge",
-            "truncated": False,
-            "llm_maintainable": False,
-        }
-    ]

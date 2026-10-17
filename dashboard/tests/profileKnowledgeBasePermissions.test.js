@@ -153,6 +153,7 @@ const createHarness = async (t, options = {}) => {
     audit_retention_days: 120,
     audit_report_email: 'audit@example.com',
     session_reply_max_concurrency: 8,
+    log_redaction_enabled: false,
   }
   const channelApi = {
     list: params => {
@@ -524,6 +525,7 @@ test('unknown and ordinary users never request or mutate global settings', async
     const dialogBefore = harness.module.settingsDialogVisible.value
     const submittingBefore = harness.module.settingsSubmitting.value
 
+    assert.equal(harness.module.systemSettings.log_redaction_enabled, false, scenario.name)
     for (const callback of harness.mountedCallbacks) callback()
     await flush()
     harness.module.handleRefresh()
@@ -600,6 +602,7 @@ test('superuser can load, open, and save global settings', async t => {
     audit_retention_days: 180,
     audit_report_email: 'ops@example.com',
     session_reply_max_concurrency: 12,
+    log_redaction_enabled: true,
   }
   const harness = await createHarness(t, {
     superuser: true,
@@ -610,28 +613,50 @@ test('superuser can load, open, and save global settings', async t => {
     }),
   })
 
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
   assert.equal(await harness.module.loadSystemSettings(), true)
   assert.equal(harness.api.systemSettings.length, 1)
   assert.deepEqual(normalize(harness.module.systemSettings), loadedSettings)
+  assert.equal(typeof harness.module.systemSettings.log_redaction_enabled, 'boolean')
 
   await harness.module.showSystemSettingsDialog()
   assert.equal(harness.api.systemSettings.length, 2)
   assert.equal(harness.module.settingsDialogVisible.value, true)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, true)
 
   harness.module.systemSettings.audit_retention_days = 365
   harness.module.systemSettings.llm_request_max_size_mb = 256
+  harness.module.systemSettings.log_redaction_enabled = false
   const expectedPayload = normalize(harness.module.systemSettings)
+  assert.equal(typeof expectedPayload.log_redaction_enabled, 'boolean')
+  assert.equal(expectedPayload.log_redaction_enabled, false)
   await harness.module.saveSystemSettings()
 
   assert.deepEqual(harness.api.systemSettingsUpdates, [expectedPayload])
   assert.equal(harness.api.systemSettingsUpdates[0].llm_request_max_size_mb, 256)
+  assert.equal(typeof harness.api.systemSettingsUpdates[0].log_redaction_enabled, 'boolean')
+  assert.equal(harness.api.systemSettingsUpdates[0].log_redaction_enabled, false)
   assert.deepEqual(normalize(harness.module.systemSettings), {
     ...expectedPayload,
     audit_report_email: 'saved@example.com',
   })
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 256)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
+  assert.equal(typeof harness.module.systemSettings.log_redaction_enabled, 'boolean')
   assert.equal(harness.module.settingsDialogVisible.value, false)
   assert.equal(harness.module.settingsSubmitting.value, false)
+
+  await harness.module.showSystemSettingsDialog()
+  assert.equal(harness.api.systemSettings.length, 3)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, true)
+  harness.module.systemSettings.log_redaction_enabled = false
+  await harness.module.saveSystemSettings()
+
+  assert.equal(harness.api.systemSettingsUpdates.length, 2)
+  assert.equal(typeof harness.api.systemSettingsUpdates[1].log_redaction_enabled, 'boolean')
+  assert.equal(harness.api.systemSettingsUpdates[1].log_redaction_enabled, false)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
+  assert.equal(typeof harness.module.systemSettings.log_redaction_enabled, 'boolean')
 })
 
 test('legacy global settings responses preserve the default request size across reloads and save', async t => {
@@ -647,20 +672,27 @@ test('legacy global settings responses preserve the default request size across 
     systemSettingsRequest: () => Promise.resolve(dataResponse(legacySettings)),
   })
 
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
   assert.equal(await harness.module.loadSystemSettings(), true)
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 32)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
 
   assert.equal(await harness.module.loadSystemSettings(), true)
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 32)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
 
   await harness.module.showSystemSettingsDialog()
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 32)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
 
   await harness.module.saveSystemSettings()
 
   assert.equal(harness.api.systemSettingsUpdates[0].llm_request_max_size_mb, 32)
   assert.notEqual(harness.api.systemSettingsUpdates[0].llm_request_max_size_mb, undefined)
+  assert.equal(typeof harness.api.systemSettingsUpdates[0].log_redaction_enabled, 'boolean')
+  assert.equal(harness.api.systemSettingsUpdates[0].log_redaction_enabled, false)
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 32)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
 })
 
 test('failed global settings load does not open the dialog', async t => {
@@ -689,9 +721,12 @@ test('failed global settings save preserves the request size and dialog state', 
 
   await harness.module.showSystemSettingsDialog()
   harness.module.systemSettings.llm_request_max_size_mb = 256
+  harness.module.systemSettings.log_redaction_enabled = true
   await harness.module.saveSystemSettings()
 
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 256)
+  assert.equal(harness.module.systemSettings.log_redaction_enabled, true)
+  assert.equal(typeof harness.module.systemSettings.log_redaction_enabled, 'boolean')
   assert.equal(harness.module.settingsDialogVisible.value, true)
   assert.equal(harness.module.settingsSubmitting.value, false)
   assert.deepEqual(harness.messages.filter(message => message.type === 'error').map(message => message.args[0]), [
