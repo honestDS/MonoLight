@@ -50,6 +50,7 @@ MESSAGES = {
     "TOOL_SEND_FILE_TO_USER_LABEL": "Send File to User",
     "TOOL_LIST_BACKGROUND_TASKS_LABEL": "List Background Tasks",
     "TOOL_CANCEL_BACKGROUND_TASK_LABEL": "Cancel Background Task",
+    "TOOL_MANAGE_SCHEDULED_TASKS_LABEL": "Manage Scheduled Tasks",
     "TOOL_GENERATE_IMAGE_LABEL": "Generate Image",
     "TOOL_READ_MULTIMODAL_FILE_LABEL": "Read Multimodal File",
 }

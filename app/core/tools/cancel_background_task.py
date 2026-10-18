@@ -1,6 +1,7 @@
 import json
 
 from app.core.constants import (
+    CANCEL_BACKGROUND_TASK_TOOL_NAME,
     ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE,
     ERR_BACKGROUND_TASK_NOT_FOUND,
     MSG_BACKGROUND_TASK_ALREADY_FINISHED,
@@ -15,7 +16,7 @@ from .base import BaseExecutor
 CANCEL_BACKGROUND_TASK_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "cancel_background_task",
+        "name": CANCEL_BACKGROUND_TASK_TOOL_NAME,
         "description": "Cancel one of the current user's pending or running background tool tasks by task_id.",
         "parameters": {
             "type": "object",

@@ -6,12 +6,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from app.core.constants import READ_TEXT_FILE_TOOL_NAME
 from app.core.utils.tokenizer import truncate_text_to_tokens
 
 READ_TEXT_FILE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "read_text_file",
+        "name": READ_TEXT_FILE_TOOL_NAME,
         "description": "Read a UTF-8 text file. Relative paths are resolved from the supplied working directory.",
         "parameters": {
             "type": "object",

@@ -28,6 +28,7 @@ from app.core.constants import (
     ERR_TOOL_PATH_OUTSIDE_ALLOWED_OPERATION_DIRS,
     ERR_UNAUTHORIZED,
     MSG_FILE_COUNT_TRUNCATED,
+    SEND_FILE_TO_USER_TOOL_NAME,
 )
 from app.core.crypto import _get_encryption_key
 from app.core.i18n import t
@@ -372,7 +373,7 @@ class SendFileToUserExecutor(BaseExecutor):
 SEND_FILE_TO_USER_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "send_file_to_user",
+        "name": SEND_FILE_TO_USER_TOOL_NAME,
         "description": "Send existing local files to the user. Provide one or more absolute file paths. All paths must be absolute. The tool validates paths and returns safe downloadable file metadata without exposing real server paths.",
         "parameters": {
             "type": "object",

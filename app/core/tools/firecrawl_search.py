@@ -2,7 +2,12 @@ import json
 
 from firecrawl import AsyncV1FirecrawlApp
 
-from app.core.constants import ERR_TOOL_FIRECRAWL_API_KEY_MISSING, ERR_TOOL_FIRECRAWL_AUTH_FAILED, ERR_TOOL_FIRECRAWL_NETWORK_FAILED
+from app.core.constants import (
+    ERR_TOOL_FIRECRAWL_API_KEY_MISSING,
+    ERR_TOOL_FIRECRAWL_AUTH_FAILED,
+    ERR_TOOL_FIRECRAWL_NETWORK_FAILED,
+    FIRECRAWL_SEARCH_TOOL_NAME,
+)
 from app.core.i18n import t
 from app.core.utils.system import get_full_system_context
 
@@ -65,7 +70,7 @@ class FirecrawlSearchExecutor(BaseExecutor):
 FIRECRAWL_SEARCH_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "firecrawl_search",
+        "name": FIRECRAWL_SEARCH_TOOL_NAME,
         "description": "Search the web using Firecrawl and return 10 results.",
         "parameters": {
             "type": "object",

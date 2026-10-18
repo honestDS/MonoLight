@@ -1,6 +1,10 @@
 import json
 
-from app.core.constants import ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE, MSG_BACKGROUND_TASK_LIST_SUCCESS
+from app.core.constants import (
+    ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE,
+    LIST_BACKGROUND_TASKS_TOOL_NAME,
+    MSG_BACKGROUND_TASK_LIST_SUCCESS,
+)
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.models.background_task import BackgroundTaskResponse
@@ -10,7 +14,7 @@ from .base import BaseExecutor
 LIST_BACKGROUND_TASKS_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "list_background_tasks",
+        "name": LIST_BACKGROUND_TASKS_TOOL_NAME,
         "description": "List the current user's active background tool tasks, optionally limited to a chat session. Only pending and running tasks are returned.",
         "parameters": {
             "type": "object",

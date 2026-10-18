@@ -24,6 +24,7 @@ from app.core.constants import (
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
+    SHELL_TOOL_NAME,
     TOOL_TIMEOUT_EXCLUDED_TOOL_NAMES,
 )
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
@@ -77,7 +78,7 @@ def _is_tool_enabled(tool_name: str, cfg: ProfileConfig, *, goal_mode: bool = Fa
         return False
     enabled_tool_names = {name for name in enabled_tools if isinstance(name, str)}
     if tool_name in SHELL_COMPANION_TOOL_NAMES:
-        return "execute_shell" in enabled_tool_names
+        return SHELL_TOOL_NAME in enabled_tool_names
     return tool_name in enabled_tool_names
 
 

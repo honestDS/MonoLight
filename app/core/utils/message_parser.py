@@ -1,5 +1,6 @@
 import json
 
+from app.core.constants import SEND_FILE_TO_USER_TOOL_NAME
 from app.core.prompts import SCHEDULED_TASK_TRIGGER_PROMPT
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import (
@@ -27,7 +28,7 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
 
 def _remove_completed_file_send_chains(messages: list[InternalMessage]) -> list[InternalMessage]:
     completed_tool_call_ids = {message.tool_call_id for message in messages if message.role == MessageRole.TOOL and message.tool_call_id}
-    file_send_call_ids = {tool_call.id for message in messages if message.role == MessageRole.ASSISTANT and message.tool_calls for tool_call in message.tool_calls if tool_call.name == "send_file_to_user" and tool_call.id in completed_tool_call_ids}
+    file_send_call_ids = {tool_call.id for message in messages if message.role == MessageRole.ASSISTANT and message.tool_calls for tool_call in message.tool_calls if tool_call.name == SEND_FILE_TO_USER_TOOL_NAME and tool_call.id in completed_tool_call_ids}
     if not file_send_call_ids:
         return messages
 

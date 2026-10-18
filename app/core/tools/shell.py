@@ -11,6 +11,7 @@ from app.core.constants import (
     ERR_TOOL_COMMAND_TIMEOUT,
     ERR_TOOL_SHELL_BLACKLISTED,
     ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED,
+    SHELL_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.i18n import t
@@ -342,7 +343,7 @@ class ShellExecutor(BaseExecutor):
 SHELL_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "execute_shell",
+        "name": SHELL_TOOL_NAME,
         "description": (
             "Execute the original command and return its result. The required execution_mode describes the input/output and lifecycle of the same command process, not a programming language; this mode is independent of programming language. "
             "Both modes run the same original command unchanged; never replace or wrap the command in Python, a Python REPL, or another executable to satisfy this choice. "

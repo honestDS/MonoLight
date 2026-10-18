@@ -28,12 +28,23 @@ from sqlmodel import (
 )
 
 from app.core.constants import (
+    CANCEL_BACKGROUND_TASK_TOOL_NAME,
     ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED,
     ERR_PROFILE_CHAT_HISTORY_CANDIDATE_K_TOO_SMALL,
     ERR_PROFILE_KNOWLEDGE_CANDIDATE_K_TOO_SMALL,
     ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL,
     ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE,
+    FILE_TOOL_NAME,
+    FIRECRAWL_SCRAPE_TOOL_NAME,
+    FIRECRAWL_SEARCH_TOOL_NAME,
+    IMAGE_GENERATION_TOOL_NAME,
+    LEGACY_WRITE_FILE_TOOL_NAME,
+    LIST_BACKGROUND_TASKS_TOOL_NAME,
+    MANAGE_SCHEDULED_TASKS_TOOL_NAME,
+    READ_MULTIMODAL_FILE_TOOL_NAME,
+    SEND_FILE_TO_USER_TOOL_NAME,
+    SHELL_TOOL_NAME,
 )
 from app.core.i18n import t
 from app.core.i18n.locale import DEFAULT_LOCALE, SUPPORTED_LOCALES
@@ -104,23 +115,24 @@ class ToolConfig(BaseModel):
     firecrawl_api_key: str | None = PydanticField(None, description="Firecrawl API Key")
     enabled_tools: list[str] = PydanticField(
         default_factory=lambda: [
-            "execute_shell",
-            "file_tool",
-            "firecrawl_search",
-            "firecrawl_scrape",
-            "send_file_to_user",
-            "list_background_tasks",
-            "cancel_background_task",
-            "generate_image",
-            "read_multimodal_file",
+            SHELL_TOOL_NAME,
+            FILE_TOOL_NAME,
+            FIRECRAWL_SEARCH_TOOL_NAME,
+            FIRECRAWL_SCRAPE_TOOL_NAME,
+            SEND_FILE_TO_USER_TOOL_NAME,
+            LIST_BACKGROUND_TASKS_TOOL_NAME,
+            CANCEL_BACKGROUND_TASK_TOOL_NAME,
+            MANAGE_SCHEDULED_TASKS_TOOL_NAME,
+            IMAGE_GENERATION_TOOL_NAME,
+            READ_MULTIMODAL_FILE_TOOL_NAME,
         ],
         description="允许向 LLM 暴露的工具名称列表",
     )
-    allowed_operation_dirs: list[str] = PydanticField(default_factory=list, description="file_tool、send_file_to_user 和 read_multimodal_file 允许操作文件的安全目录白名单，目录必须使用绝对路径")
-    file_send_max_count: int = PydanticField(10, ge=1, le=100, description="send_file_to_user 单次最多允许发送的文件数量")
-    file_send_max_single_size_mb: int = PydanticField(50, ge=1, le=1024, description="send_file_to_user 单个文件大小上限（MB）")
-    file_send_max_total_size_mb: int = PydanticField(100, ge=1, le=4096, description="send_file_to_user 单次发送总大小上限（MB）")
-    file_send_blocked_extensions: list[str] = PydanticField(default_factory=list, description="send_file_to_user 禁止发送的文件后缀列表，例如 .pem、.key")
+    allowed_operation_dirs: list[str] = PydanticField(default_factory=list, description=f"{FILE_TOOL_NAME}、{SEND_FILE_TO_USER_TOOL_NAME} 和 {READ_MULTIMODAL_FILE_TOOL_NAME} 允许操作文件的安全目录白名单，目录必须使用绝对路径")
+    file_send_max_count: int = PydanticField(10, ge=1, le=100, description=f"{SEND_FILE_TO_USER_TOOL_NAME} 单次最多允许发送的文件数量")
+    file_send_max_single_size_mb: int = PydanticField(50, ge=1, le=1024, description=f"{SEND_FILE_TO_USER_TOOL_NAME} 单个文件大小上限（MB）")
+    file_send_max_total_size_mb: int = PydanticField(100, ge=1, le=4096, description=f"{SEND_FILE_TO_USER_TOOL_NAME} 单次发送总大小上限（MB）")
+    file_send_blocked_extensions: list[str] = PydanticField(default_factory=list, description=f"{SEND_FILE_TO_USER_TOOL_NAME} 禁止发送的文件后缀列表，例如 .pem、.key")
     executor_max_workers: int = PydanticField(
         default_factory=lambda: (os.cpu_count() or 1) * 5,
         ge=1,
@@ -291,7 +303,7 @@ class ProfileConfig(BaseModel):
             for tool_name in tool["enabled_tools"]:
                 if not isinstance(tool_name, str):
                     continue
-                normalized_name = "file_tool" if tool_name == "write_file" else tool_name
+                normalized_name = FILE_TOOL_NAME if tool_name == LEGACY_WRITE_FILE_TOOL_NAME else tool_name
                 if normalized_name not in enabled_tools:
                     enabled_tools.append(normalized_name)
             tool["enabled_tools"] = enabled_tools
@@ -366,7 +378,7 @@ PROFILE_EXAMPLE = {
             "background_task_max_concurrency": 2,
             "scheduled_task_max_concurrency": 4,
             "firecrawl_api_key": "",
-            "enabled_tools": ["execute_shell", "file_tool", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "read_multimodal_file"],
+            "enabled_tools": [SHELL_TOOL_NAME, FILE_TOOL_NAME, FIRECRAWL_SEARCH_TOOL_NAME, FIRECRAWL_SCRAPE_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, LIST_BACKGROUND_TASKS_TOOL_NAME, CANCEL_BACKGROUND_TASK_TOOL_NAME, MANAGE_SCHEDULED_TASKS_TOOL_NAME, IMAGE_GENERATION_TOOL_NAME, READ_MULTIMODAL_FILE_TOOL_NAME],
             "allowed_operation_dirs": [],
             "file_send_max_count": 10,
             "file_send_max_single_size_mb": 50,
