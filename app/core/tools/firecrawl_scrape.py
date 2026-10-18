@@ -2,7 +2,7 @@ import json
 
 from firecrawl import AsyncV1FirecrawlApp
 
-from app.core.constants import ERR_TOOL_FIRECRAWL_API_KEY_MISSING, ERR_TOOL_FIRECRAWL_AUTH_FAILED, ERR_TOOL_FIRECRAWL_NETWORK_FAILED
+from app.core.constants import ERR_TOOL_FIRECRAWL_API_KEY_MISSING, ERR_TOOL_FIRECRAWL_AUTH_FAILED, ERR_TOOL_FIRECRAWL_NETWORK_FAILED, FIRECRAWL_SCRAPE_TOOL_NAME
 from app.core.i18n import t
 from app.core.utils.system import get_full_system_context
 
@@ -74,7 +74,7 @@ class FirecrawlScrapeExecutor(BaseExecutor):
 FIRECRAWL_SCRAPE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "firecrawl_scrape",
+        "name": FIRECRAWL_SCRAPE_TOOL_NAME,
         "description": "Scrape and parse a web page using Firecrawl with advanced options.",
         "parameters": {
             "type": "object",

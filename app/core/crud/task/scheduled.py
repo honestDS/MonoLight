@@ -66,21 +66,43 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         await db.refresh(scheduled_task)
         return scheduled_task
 
-    async def list_tasks(self, db: AsyncSession, *, uid: str, is_admin: bool = False, skip: int = 0, limit: int = 100, status: ScheduledTaskStatus | None = None) -> list[ScheduledTask]:
-        stmt = select(ScheduledTask).order_by(ScheduledTask.created_at.desc()).offset(skip).limit(limit)
+    async def list_tasks(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        is_admin: bool = False,
+        skip: int = 0,
+        limit: int = 100,
+        status: ScheduledTaskStatus | None = None,
+        session_id: str | None = None,
+    ) -> list[ScheduledTask]:
+        stmt = select(ScheduledTask).order_by(ScheduledTask.created_at.desc(), ScheduledTask.id.desc()).offset(skip).limit(limit)
         if not is_admin:
             stmt = stmt.where(ScheduledTask.uid == uid)
         if status is not None:
             stmt = stmt.where(ScheduledTask.status == status)
+        if session_id is not None:
+            stmt = stmt.where(ScheduledTask.session_id == session_id)
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def count_tasks(self, db: AsyncSession, *, uid: str, is_admin: bool = False, status: ScheduledTaskStatus | None = None) -> int:
+    async def count_tasks(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        is_admin: bool = False,
+        status: ScheduledTaskStatus | None = None,
+        session_id: str | None = None,
+    ) -> int:
         stmt = select(func.count()).select_from(ScheduledTask)
         if not is_admin:
             stmt = stmt.where(ScheduledTask.uid == uid)
         if status is not None:
             stmt = stmt.where(ScheduledTask.status == status)
+        if session_id is not None:
+            stmt = stmt.where(ScheduledTask.session_id == session_id)
         result = await db.execute(stmt)
         return result.scalar() or 0
 
@@ -173,6 +195,19 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
     async def delete_task(self, db: AsyncSession, *, scheduled_task: ScheduledTask) -> None:
         await db.delete(scheduled_task)
         await db.commit()
+
+    async def delete_user_task(self, db: AsyncSession, *, task_id: int, uid: str, session_id: str) -> bool:
+        result = await db.execute(
+            delete(ScheduledTask)
+            .where(
+                ScheduledTask.id == task_id,
+                ScheduledTask.uid == uid,
+                ScheduledTask.session_id == session_id,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        return result.rowcount == 1
 
 
 scheduled_task_crud = CRUDScheduledTask(ScheduledTask)

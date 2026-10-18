@@ -35,7 +35,9 @@ from app.core.constants import (
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
     IMAGE_GENERATION_MAX_INPUT_BYTES,
     IMAGE_GENERATION_MAX_REFERENCE_IMAGES,
+    IMAGE_GENERATION_TOOL_NAME,
     MSG_TOOL_IMAGE_SEND_INSTRUCTION,
+    SEND_FILE_TO_USER_TOOL_NAME,
 )
 from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
@@ -65,7 +67,7 @@ logger = get_logger(__name__)
 IMAGE_GENERATION_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "generate_image",
+        "name": IMAGE_GENERATION_TOOL_NAME,
         "description": "Create, generate, or edit images using the selected profile's configured image generation model. Supports text-to-image generation, generation from local reference images, and image editing.",
         "parameters": {
             "type": "object",
@@ -318,7 +320,7 @@ class ImageGenerationExecutor(BaseExecutor):
             {
                 "status": "success",
                 "instruction": t(MSG_TOOL_IMAGE_SEND_INSTRUCTION),
-                "send_file_to_user": {
+                SEND_FILE_TO_USER_TOOL_NAME: {
                     "files": [
                         {
                             "path": file_item["path"],

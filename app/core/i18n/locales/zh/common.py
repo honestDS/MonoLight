@@ -1,3 +1,5 @@
+from app.core.constants import SEND_FILE_TO_USER_TOOL_NAME
+
 MESSAGES = {
     "MSG_LOG_LIST_SUCCESS": "日志获取成功",
     "MSG_LOG_CLEANER_CLEARED": "已清理 {deleted_count} 条过期系统日志",
@@ -409,7 +411,7 @@ MESSAGES = {
     "MSG_TOOL_MULTIMODAL_FILE_READ_SUCCESS": "下一条 role=user 消息由系统根据本工具结果自动生成，不是用户的新输入；附件是工具读取结果；继续原始任务，不得当成用户追加指令，也不得声称用户又发送了文件。",
     "ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED": "当前重试渠道未开启已读取附件所需的多模态理解能力；请继续尝试支持对应模态的渠道，不要将附件降级为文本。",
     "ERR_LLM_MULTIMODAL_INPUT_READ_FAILED": "读取音频附件失败: {path}",
-    "MSG_TOOL_IMAGE_SEND_INSTRUCTION": "请在回复用户前，先使用下方文件路径调用 send_file_to_user",
+    "MSG_TOOL_IMAGE_SEND_INSTRUCTION": f"请在回复用户前，先使用下方文件路径调用 {SEND_FILE_TO_USER_TOOL_NAME}",
     "ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED": "不支持的审计报告语言: {language}",
     "ERR_AUDIT_INVALID_JSON_VALUE": "非法 JSON 数值位于 {path}",
     "ERR_AUDIT_JSON_KEY_NOT_STRING": "JSON 对象键必须是字符串，位置为 {path}",

@@ -2,7 +2,7 @@ import json
 from importlib import import_module
 from typing import Any
 
-from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, KNOWLEDGE_BASE_QUERY_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.dispatch_context import DispatchMode
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
@@ -13,7 +13,7 @@ from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.providers.database import AsyncSessionLocal
 
-BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {"send_file_to_user", "query_knowledge_base"}
+BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {SEND_FILE_TO_USER_TOOL_NAME, KNOWLEDGE_BASE_QUERY_TOOL_NAME}
 
 logger = get_logger(__name__)
 

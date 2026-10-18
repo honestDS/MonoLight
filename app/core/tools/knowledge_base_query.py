@@ -6,13 +6,12 @@ from app.core.constants import (
     ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
     ERR_TOOL_UNAUTHORIZED_KNOWLEDGE_BASE,
+    KNOWLEDGE_BASE_QUERY_TOOL_NAME,
     MSG_TOOL_KNOWLEDGE_SOURCE_UNKNOWN,
 )
 from app.core.embedding.knowledge_base import get_profile_kb_query_top_k, query_knowledge_base
 from app.core.i18n import t
 from app.core.tools.base import BaseExecutor
-
-KNOWLEDGE_BASE_QUERY_TOOL_NAME = "query_knowledge_base"
 
 _MANAGED_SOURCE_DISPLAY_FIELDS = (
     "title",

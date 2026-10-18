@@ -20,6 +20,7 @@ from app.core.constants import (
     ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     MSG_AUDIT_STATUS_CANCELLED,
+    SHELL_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
@@ -507,7 +508,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     protocol=confirmed_tool_protocol,
                 )
                 await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
-                terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == "execute_shell" else None
+                terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == SHELL_TOOL_NAME else None
                 if get_queued_background_task_id(tool_result.content) is None and terminal_session_id is None:
                     execution_status = AuditExecutionStatus(get_tool_execution_status(tool_result))
                     succeeded = execution_status == AuditExecutionStatus.SUCCEEDED

@@ -10,6 +10,7 @@ from app.core.constants import (
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_VALUE_MUST_BE_POSITIVE,
     GOAL_EXECUTION_PHASE_RUNNING,
+    READ_MULTIMODAL_FILE_TOOL_NAME,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
 from app.core.crud.audit.audit import audit_crud
@@ -34,7 +35,7 @@ def collect_pending_multimodal_file_inputs(messages: list[InternalMessage]) -> l
 
     inputs: list[dict[str, str]] = []
     for tool_call in messages[assistant_index].tool_calls:
-        if getattr(tool_call, "name", None) != "read_multimodal_file":
+        if getattr(tool_call, "name", None) != READ_MULTIMODAL_FILE_TOOL_NAME:
             continue
         for tool_response in messages[assistant_index + 1 :]:
             if tool_response.role != MessageRole.TOOL or tool_response.tool_call_id != tool_call.id:

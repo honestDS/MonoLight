@@ -3,7 +3,7 @@ import hashlib
 import json
 from typing import Any
 
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, FILE_TOOL_NAME
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA
 from app.core.utils.tokenizer import estimate_tokens, truncate_text_to_tokens
 from app.models.message import InternalMessage, MessageRole
@@ -71,7 +71,7 @@ def fit_file_tool_payload_to_context(
         return adapted_payload
     content_fields: list[tuple[int, str, str, int, str]] = []
     for index, tool_call in enumerate(tool_calls):
-        if not isinstance(tool_call, dict) or tool_call.get("tool_name", tool_call.get("name")) != "file_tool":
+        if not isinstance(tool_call, dict) or tool_call.get("tool_name", tool_call.get("name")) != FILE_TOOL_NAME:
             continue
         arguments = tool_call.get("arguments")
         if not isinstance(arguments, dict):

@@ -17,6 +17,7 @@ from app.core.constants import (
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     MANAGE_TODO_TOOL_NAME,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    SHELL_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
@@ -598,7 +599,7 @@ async def handle_interactive_tool_round(
             if audit_claim_token is not None:
                 execution_id = audit_execution_ids[tool_res.tool_call_id]
                 queued_task_id = get_queued_background_task_id(tool_res.content)
-                terminal_session_id = get_handed_off_terminal_session_id(tool_res.content) if tool_call is not None and tool_call.name == "execute_shell" else None
+                terminal_session_id = get_handed_off_terminal_session_id(tool_res.content) if tool_call is not None and tool_call.name == SHELL_TOOL_NAME else None
                 if queued_task_id is None and terminal_session_id is None:
                     execution_status = AuditExecutionStatus(get_tool_execution_status(tool_res))
                     execution_succeeded = execution_status == AuditExecutionStatus.SUCCEEDED

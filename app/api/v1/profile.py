@@ -11,6 +11,7 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    CANCEL_BACKGROUND_TASK_TOOL_NAME,
     ERR_DELETE_DEFAULT_PROFILE,
     ERR_DELETE_LAST_PROFILE,
     ERR_ONLY_ADMIN_ALLOWED,
@@ -21,6 +22,12 @@ from app.core.constants import (
     ERR_PROMPT_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
     ERR_USER_NOT_FOUND,
+    FILE_TOOL_NAME,
+    FIRECRAWL_SCRAPE_TOOL_NAME,
+    FIRECRAWL_SEARCH_TOOL_NAME,
+    IMAGE_GENERATION_TOOL_NAME,
+    LIST_BACKGROUND_TASKS_TOOL_NAME,
+    MANAGE_SCHEDULED_TASKS_TOOL_NAME,
     MSG_MEMORY_SETTINGS_SUCCESS,
     MSG_PROFILE_CREATED,
     MSG_PROFILE_DELETE_CONFIRMATION_REQUIRED,
@@ -29,6 +36,9 @@ from app.core.constants import (
     MSG_PROFILE_MEMORY_EMBEDDING_PREVIEW_READY,
     MSG_PROFILE_SET_DEFAULT,
     MSG_PROFILE_UPDATED,
+    READ_MULTIMODAL_FILE_TOOL_NAME,
+    SEND_FILE_TO_USER_TOOL_NAME,
+    SHELL_TOOL_NAME,
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.channel.channel import channel_crud
@@ -88,15 +98,16 @@ _MEMORY_STORE_UNSET = object()
 
 
 PROFILE_TOOL_OPTIONS = [
-    {"value": "execute_shell", "label_key": "TOOL_EXECUTE_SHELL_LABEL"},
-    {"value": "file_tool", "label_key": "TOOL_FILE_TOOL_LABEL"},
-    {"value": "firecrawl_search", "label_key": "TOOL_FIRECRAWL_SEARCH_LABEL"},
-    {"value": "firecrawl_scrape", "label_key": "TOOL_FIRECRAWL_SCRAPE_LABEL"},
-    {"value": "send_file_to_user", "label_key": "TOOL_SEND_FILE_TO_USER_LABEL"},
-    {"value": "list_background_tasks", "label_key": "TOOL_LIST_BACKGROUND_TASKS_LABEL"},
-    {"value": "cancel_background_task", "label_key": "TOOL_CANCEL_BACKGROUND_TASK_LABEL"},
-    {"value": "generate_image", "label_key": "TOOL_GENERATE_IMAGE_LABEL"},
-    {"value": "read_multimodal_file", "label_key": "TOOL_READ_MULTIMODAL_FILE_LABEL"},
+    {"value": SHELL_TOOL_NAME, "label_key": "TOOL_EXECUTE_SHELL_LABEL"},
+    {"value": FILE_TOOL_NAME, "label_key": "TOOL_FILE_TOOL_LABEL"},
+    {"value": FIRECRAWL_SEARCH_TOOL_NAME, "label_key": "TOOL_FIRECRAWL_SEARCH_LABEL"},
+    {"value": FIRECRAWL_SCRAPE_TOOL_NAME, "label_key": "TOOL_FIRECRAWL_SCRAPE_LABEL"},
+    {"value": SEND_FILE_TO_USER_TOOL_NAME, "label_key": "TOOL_SEND_FILE_TO_USER_LABEL"},
+    {"value": LIST_BACKGROUND_TASKS_TOOL_NAME, "label_key": "TOOL_LIST_BACKGROUND_TASKS_LABEL"},
+    {"value": CANCEL_BACKGROUND_TASK_TOOL_NAME, "label_key": "TOOL_CANCEL_BACKGROUND_TASK_LABEL"},
+    {"value": MANAGE_SCHEDULED_TASKS_TOOL_NAME, "label_key": "TOOL_MANAGE_SCHEDULED_TASKS_LABEL"},
+    {"value": IMAGE_GENERATION_TOOL_NAME, "label_key": "TOOL_GENERATE_IMAGE_LABEL"},
+    {"value": READ_MULTIMODAL_FILE_TOOL_NAME, "label_key": "TOOL_READ_MULTIMODAL_FILE_LABEL"},
 ]
 
 

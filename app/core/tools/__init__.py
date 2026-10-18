@@ -4,6 +4,7 @@ from typing import Any
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.channel_router import select_channel
+from app.core.constants import FILE_TOOL_NAME, LEGACY_WRITE_FILE_TOOL_NAME
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.embedding.knowledge_base import build_knowledge_base_whitelist
 from app.core.log import get_logger
@@ -40,6 +41,7 @@ from .read_multimodal_file import READ_MULTIMODAL_FILE_TOOL_SCHEMA, ReadMultimod
 from .read_text_file import READ_TEXT_FILE_TOOL_SCHEMA as READ_TEXT_FILE_TOOL_SCHEMA
 from .read_text_file import TextFileReadResult as TextFileReadResult
 from .read_text_file import read_text_file as read_text_file
+from .scheduled_tasks import MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA, ManageScheduledTasksExecutor
 from .send_file_to_user import SEND_FILE_TO_USER_TOOL_SCHEMA, SendFileToUserExecutor
 from .shell import SHELL_TOOL_SCHEMA, ShellExecutor
 from .terminal import SHELL_COMPANION_TOOL_NAMES as SHELL_COMPANION_TOOL_NAMES
@@ -76,6 +78,7 @@ CONFIGURABLE_TOOL_SCHEMAS = [
     SEND_FILE_TO_USER_TOOL_SCHEMA,
     LIST_BACKGROUND_TASKS_TOOL_SCHEMA,
     CANCEL_BACKGROUND_TASK_TOOL_SCHEMA,
+    MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA,
     READ_MULTIMODAL_FILE_TOOL_SCHEMA,
 ]
 
@@ -114,6 +117,7 @@ TOOL_EXECUTOR_MAP = {
     SEND_FILE_TO_USER_TOOL_SCHEMA["function"]["name"]: SendFileToUserExecutor,
     LIST_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"]: ListBackgroundTasksExecutor,
     CANCEL_BACKGROUND_TASK_TOOL_SCHEMA["function"]["name"]: CancelBackgroundTaskExecutor,
+    MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA["function"]["name"]: ManageScheduledTasksExecutor,
     READ_MULTIMODAL_FILE_TOOL_SCHEMA["function"]["name"]: ReadMultimodalFileExecutor,
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
@@ -239,7 +243,7 @@ def _get_enabled_tool_names(profile: Profile) -> set[str]:
     for name in enabled_tools:
         if not isinstance(name, str):
             continue
-        normalized_names.add("file_tool" if name == "write_file" else name)
+        normalized_names.add(FILE_TOOL_NAME if name == LEGACY_WRITE_FILE_TOOL_NAME else name)
     return normalized_names
 
 

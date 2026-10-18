@@ -15,6 +15,7 @@ from app.core.constants import (
     ERR_TOOL_OPERATION_DIRS_UNCONFIGURED,
     ERR_TOOL_PATH_OUTSIDE_ALLOWED_OPERATION_DIRS,
     MSG_TOOL_MULTIMODAL_FILE_READ_SUCCESS,
+    READ_MULTIMODAL_FILE_TOOL_NAME,
 )
 from app.core.i18n import t
 from app.core.utils.operation_directories import (
@@ -33,7 +34,7 @@ SUPPORTED_MODALITIES = frozenset({"image", "audio", "video"})
 READ_MULTIMODAL_FILE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "read_multimodal_file",
+        "name": READ_MULTIMODAL_FILE_TOOL_NAME,
         "description": ("Read an existing multimodal file from the hard drive. After success, the system appends the tool artifact to the next model request; it is not new user input. Images and audio are sent to the model. Video explicitly reports that local reading is not implemented."),
         "parameters": {
             "type": "object",

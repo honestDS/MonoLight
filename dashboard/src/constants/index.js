@@ -28,6 +28,18 @@ export const MEMORY_JOB_STATUSES = ['pending', 'running', 'retry', 'succeeded', 
 export const MEMORY_JOB_OPERATIONS = ['create', 'update', 'restore', 'reindex', 'delete_cleanup', 'embedding_migration', 'create_with_eviction', 'organize', 'organize_merge']
 export const MEMORY_MIGRATION_STATUSES = ['preparing', 'building', 'catching_up', 'validating', 'switching', 'succeeded', 'failed', 'cancelled']
 
+export const SHELL_TOOL_NAME = 'execute_shell'
+export const FILE_TOOL_NAME = 'file_tool'
+export const FIRECRAWL_SEARCH_TOOL_NAME = 'firecrawl_search'
+export const FIRECRAWL_SCRAPE_TOOL_NAME = 'firecrawl_scrape'
+export const SEND_FILE_TO_USER_TOOL_NAME = 'send_file_to_user'
+export const LIST_BACKGROUND_TASKS_TOOL_NAME = 'list_background_tasks'
+export const CANCEL_BACKGROUND_TASK_TOOL_NAME = 'cancel_background_task'
+export const MANAGE_SCHEDULED_TASKS_TOOL_NAME = 'manage_scheduled_tasks'
+export const IMAGE_GENERATION_TOOL_NAME = 'generate_image'
+export const READ_MULTIMODAL_FILE_TOOL_NAME = 'read_multimodal_file'
+export const MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME = 'manage_memory_and_knowledge'
+
 // 默认渠道配置
 const defaultChannelConfig = () => ({
   chat_timeout: 60.0,
@@ -52,7 +64,7 @@ export const defaultProfileConfigs = () => ({
     background_task_max_concurrency: 2,
     scheduled_task_max_concurrency: 4,
     firecrawl_api_key: '',
-    enabled_tools: ['execute_shell', 'file_tool', 'firecrawl_search', 'firecrawl_scrape', 'send_file_to_user', 'list_background_tasks', 'cancel_background_task', 'generate_image', 'read_multimodal_file'],
+    enabled_tools: [SHELL_TOOL_NAME, FILE_TOOL_NAME, FIRECRAWL_SEARCH_TOOL_NAME, FIRECRAWL_SCRAPE_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, LIST_BACKGROUND_TASKS_TOOL_NAME, CANCEL_BACKGROUND_TASK_TOOL_NAME, MANAGE_SCHEDULED_TASKS_TOOL_NAME, IMAGE_GENERATION_TOOL_NAME, READ_MULTIMODAL_FILE_TOOL_NAME],
     allowed_operation_dirs: [],
     file_send_max_count: 10,
     file_send_max_single_size_mb: 50,

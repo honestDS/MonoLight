@@ -37,12 +37,15 @@ from app.core.constants import (
     ERR_AUDIT_SCORE_INVALID,
     ERR_AUDIT_SERVICE_FAILED_STOP,
     ERR_TOOL_SHELL_BLACKLISTED,
+    FILE_TOOL_NAME,
     MSG_AUDIT_CONFIRMATION_IM,
     MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK,
     MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM,
     MSG_AUDIT_ROUND_SKIPPED,
     MSG_AUDIT_STATUS_CANCELLED,
     MSG_AUDIT_WAITING_CONFIRMATION,
+    READ_TEXT_FILE_TOOL_NAME,
+    SHELL_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel.channel import channel_crud
@@ -103,7 +106,7 @@ def _round_conflict_ids(
     writers: dict[str, list[str]] = {}
     for tool_call in tool_calls:
         arguments = tool_call.arguments or {}
-        if tool_call.name != "file_tool" or arguments.get("operation") not in {"write", "edit", "patch"}:
+        if tool_call.name != FILE_TOOL_NAME or arguments.get("operation") not in {"write", "edit", "patch"}:
             continue
         path = str(arguments.get("path", ""))
         try:
@@ -126,7 +129,7 @@ def _collect_file_mutation_snapshots(
     database_snapshots: dict[str, list[dict[str, Any]]] = {}
     for tool_call in tool_calls:
         arguments = tool_call.arguments or {}
-        if tool_call.name != "file_tool" or arguments.get("operation") not in {"edit", "patch"}:
+        if tool_call.name != FILE_TOOL_NAME or arguments.get("operation") not in {"edit", "patch"}:
             continue
         original_path = arguments.get("path")
         try:
@@ -194,7 +197,7 @@ async def _execute_audit_read_tool_call(
     max_tokens: int,
 ) -> dict[str, Any]:
     if tool_call.name != AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["name"]:
-        return {"status": "denied", "error": "only read_text_file is available"}
+        return {"status": "denied", "error": f"only {READ_TEXT_FILE_TOOL_NAME} is available"}
     requested_path = tool_call.arguments.get("path")
     original_tool_call_id = tool_call.arguments.get("tool_call_id")
     if not isinstance(requested_path, str) or not requested_path or not isinstance(original_tool_call_id, str) or not original_tool_call_id:
@@ -688,7 +691,7 @@ async def audit_tool_round(
                 ]
             else:
                 for item in audited_tool_calls:
-                    if item.name == "execute_shell":
+                    if item.name == SHELL_TOOL_NAME:
                         blacklisted = ShellExecutor.check_blacklist(str((item.arguments or {}).get("command", "")))
                         if blacklisted:
                             server_blocked_tool_call_ids.add(item.id)

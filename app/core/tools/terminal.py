@@ -3,7 +3,14 @@ import hashlib
 import json
 from typing import Any
 
-from app.core.constants import ERR_TOOL_RUNTIME_CONTEXT_MISSING
+from app.core.constants import (
+    ERR_TOOL_RUNTIME_CONTEXT_MISSING,
+    TERMINAL_CLOSE_TOOL_NAME,
+    TERMINAL_READ_TOOL_NAME,
+    TERMINAL_RESIZE_TOOL_NAME,
+    TERMINAL_STATUS_TOOL_NAME,
+    TERMINAL_WRITE_TOOL_NAME,
+)
 from app.core.i18n import t
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import (
@@ -32,7 +39,7 @@ _TERMINAL_SESSION_ID_SCHEMA = {
 TERMINAL_STATUS_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "terminal_status",
+        "name": TERMINAL_STATUS_TOOL_NAME,
         "description": "Get the current status, output bounds, and exit result of an interactive terminal session.",
         "parameters": {
             "type": "object",
@@ -48,7 +55,7 @@ TERMINAL_STATUS_TOOL_SCHEMA = {
 TERMINAL_READ_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "terminal_read",
+        "name": TERMINAL_READ_TOOL_NAME,
         "description": "Read retained merged output from an interactive terminal session by byte offset.",
         "parameters": {
             "type": "object",
@@ -66,11 +73,11 @@ TERMINAL_READ_TOOL_SCHEMA = {
 TERMINAL_WRITE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "terminal_write",
+        "name": TERMINAL_WRITE_TOOL_NAME,
         "description": (
             "Write input data to an interactive terminal session, then automatically wait for and read newly merged "
             "output for up to the tool timeout. Use '\\n' to submit a line; the service handles platform-specific "
-            "newline conversion. If read_timed_out is true, the terminal remains running; use terminal_read from "
+            f"newline conversion. If read_timed_out is true, the terminal remains running; use {TERMINAL_READ_TOOL_NAME} from "
             "read_offset to continue."
         ),
         "parameters": {
@@ -88,7 +95,7 @@ TERMINAL_WRITE_TOOL_SCHEMA = {
 TERMINAL_RESIZE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "terminal_resize",
+        "name": TERMINAL_RESIZE_TOOL_NAME,
         "description": "Resize an interactive terminal session.",
         "parameters": {
             "type": "object",
@@ -106,7 +113,7 @@ TERMINAL_RESIZE_TOOL_SCHEMA = {
 TERMINAL_CLOSE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "terminal_close",
+        "name": TERMINAL_CLOSE_TOOL_NAME,
         "description": "Close an interactive terminal session, optionally forcing process termination.",
         "parameters": {
             "type": "object",

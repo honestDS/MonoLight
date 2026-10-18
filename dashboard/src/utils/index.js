@@ -1,4 +1,5 @@
 // 公共工具函数
+import { MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME } from '../constants'
 import i18n from '../i18n'
 import {
   findAssistantResponseReplacementIndex,
@@ -173,7 +174,7 @@ export const getToolCalls = (msg) => {
 
 export const getToolCallName = (toolCall) => {
   const name = toolCall?.name || toolCall?.function?.name
-  if (name === 'manage_memory_and_knowledge') {
+  if (name === MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME) {
     const rawArguments = toolCall?.arguments ?? toolCall?.function?.arguments
     let argumentsValue = rawArguments
     if (typeof rawArguments === 'string') {

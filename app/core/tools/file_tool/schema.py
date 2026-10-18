@@ -1,10 +1,12 @@
+from app.core.constants import FILE_TOOL_NAME
+
 FILE_TOOL_OPERATIONS = ("read", "write", "edit", "patch", "grep")
 
 
 FILE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "file_tool",
+        "name": FILE_TOOL_NAME,
         "description": (
             "Read, write, precisely edit, patch, or grep UTF-8 text files. Prefer edit for ordinary code changes, patch for several nearby or multi-hunk changes, and grep for regex search. edit new_text and patch added lines are literal text: backslash sequences such as \\n are never interpreted by the tool."
         ),
