@@ -56,16 +56,31 @@ MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA = {
             "Use separate create calls for different entities, topics, or unrelated facts. "
             "Recall returns a compact JSON object with top-level current_session_id for the current conversation, "
             "whose items always contain all published long-term memory results first, with only the exact memory "
-            "identifiers, memory key, type, and content in final ranking order. knowledge_base contains globally reranked "
+            "identifiers, memory key, type, content, updated_at, and optional truncated:true in final ranking order. knowledge_base contains globally reranked "
             "managed-knowledge and user-knowledge-base results using the independent knowledge retrieval configuration. "
             "When available, chat_history follows "
             "as secondary BM25 matches from the current user's ordinary USER/ASSISTANT TEXT records; each item "
             "contains role, content, session_id for the session owning that historical message, and created_at for "
             "the server-saved message time in yyyy-mm-dd HH:mm:ss format, with optional truncated:true. "
+            "updated_at and chat_history created_at use yyyy-mm-dd HH:mm:ss with no timezone offset and are null when unavailable; "
+            "use only these server-saved values and never infer a timezone. updated_at is a record-maintenance time and may refresh "
+            "when a pending change is submitted or organization claims the item, even if published content is unchanged; it is not "
+            "the fact's effective time or user-confirmation time. created_at is only when the message was saved. Do not judge truth "
+            "or chronology solely by timestamps or ordering, or assume timezone-less timestamps are directly comparable. "
             "Chat history is cross-session historical context: always use session_id to distinguish its source, and "
             "never treat a historical session_id as the current session. Chat history is context only and must never be used for "
-            "update or delete, and it never replaces or displaces an items result. Assistant-role content is "
+            "update or delete, and it never replaces or displaces an items result in retrieval output; "
+            "this is not an absolute factual-priority rule for published memories. Assistant-role content is "
             "not a user fact; historical user content may be stale and cannot alone trigger a memory mutation. "
+            "Use new information for the answer separately from any persistent write. An explicit current statement or correction "
+            "by the real user about their own state governs this reply; quoted text, assumptions, and hypotheticals are not their "
+            "own statement. Otherwise use published memories as a baseline while assessing original historical USER wording and "
+            "whether it clearly states a later applicable change; do not mechanically let memory override newer evidence. Treat "
+            "statements as conflicting only when they concern the same subject, attribute, and scope and cannot coexist. A temporary "
+            "choice or compatible preferences do not establish a lasting preference change. For objective knowledge, weigh source "
+            "authority, applicability, version, and fact-effective time rather than giving personal memory priority. Historical "
+            "content or conflict alone never authorizes a write; preserve uncertainty for unresolved contradictions and verify "
+            "safety-critical conflicts before acting. "
             "For update and delete, use memory_id and expected_version as a pair only when they come from the same "
             "exact recall item, are explicitly supplied by the user, or are supplied by other trusted context that "
             "binds them to the exact topic. Both fields are required for update and delete. Never infer or transfer "
@@ -297,6 +312,7 @@ def _format_recall_items(items: Any, knowledge_items: Any, chat_items: Any, curr
             "memory_key": item.memory_key,
             "memory_type": item.memory_type,
             "content": item.content,
+            "updated_at": _format_server_datetime(item.updated_at),
         }
         if item.truncated:
             formatted_item["truncated"] = True
