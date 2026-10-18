@@ -70,3 +70,4 @@ class WeixinOpenClawConfig:
     poll_interval_ms: int = DEFAULT_POLL_INTERVAL_MS
     max_inbound_media_size_mb: int = DEFAULT_MAX_INBOUND_MEDIA_SIZE_MB
     merge_single_poll_messages: bool = DEFAULT_MERGE_SINGLE_POLL_MESSAGES
+    owner_uid: str = ""

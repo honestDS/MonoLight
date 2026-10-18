@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.adapters.weixin_openclaw import media
 from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
 from app.adapters.weixin_openclaw.client import WeixinOpenClawClient
+from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.adapters.weixin_openclaw.constants import (
     WEIXIN_OPENCLAW_OUTBOUND_TEXT_ASCII_CHAR_LIMIT,
     WEIXIN_OPENCLAW_OUTBOUND_TEXT_CHINESE_CHAR_LIMIT,
@@ -14,6 +16,8 @@ from app.adapters.weixin_openclaw.constants import (
 )
 from app.adapters.weixin_openclaw.message import extract_text_and_attachments, merge_message_pair
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, WeixinOpenClawMessage
+from app.core.constants import ERR_FILE_ARGUMENT_INVALID, ERR_SESSION_NO_PERMISSION
+from app.core.exceptions import ForbiddenException, ParameterException
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.prompts import WEIXIN_OPENCLAW_CONCISE_OUTPUT_SYSTEM_PROMPT
 from app.core.utils.context_messages import to_jsonable
@@ -23,10 +27,69 @@ from app.models.message import InternalMessage, MessageRole
 
 class InboundMediaAdapter:
     async def resolve_inbound_image(self, item):
-        return Path("temp/weixin_openclaw/inbound.jpg")
+        return Path("temp/temp_owner/inbound.jpg")
 
     async def resolve_inbound_file(self, item):
         return None
+
+
+@pytest.mark.parametrize(
+    "owner_uid",
+    [
+        "",
+        " \t\n",
+        None,
+        ".",
+        "..",
+        "owner/child",
+        "owner\\child",
+        "bad\x00uid",
+        "C:\\owner",
+    ],
+    ids=["empty", "whitespace", "none", "dot", "dot-dot", "posix-separator", "windows-separator", "nul", "windows-drive"],
+)
+def test_save_inbound_media_rejects_invalid_owner_uid_without_creating_files(monkeypatch, tmp_path, owner_uid):
+    adapter = WeixinOpenClawAdapter(WeixinOpenClawConfig(owner_uid=owner_uid))
+    temp_dir = tmp_path / "temp"
+    monkeypatch.setattr(media, "TEMP_DIR", temp_dir)
+
+    with pytest.raises(ParameterException) as exc_info:
+        adapter.save_inbound_media(
+            b"image-data",
+            prefix="weixin_openclaw_img",
+            file_name="image.jpg",
+            fallback_suffix=".jpg",
+        )
+
+    assert exc_info.value.message == ERR_FILE_ARGUMENT_INVALID
+    assert not temp_dir.exists()
+
+
+def test_save_inbound_media_rejects_owner_directory_symlink_escape(monkeypatch, tmp_path):
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    owner_dir = temp_dir / "temp_owner"
+    try:
+        owner_dir.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Directory symlinks are unsupported: {exc}")
+
+    monkeypatch.setattr(media, "TEMP_DIR", temp_dir)
+    adapter = WeixinOpenClawAdapter(WeixinOpenClawConfig(owner_uid="owner"))
+
+    with pytest.raises(ForbiddenException) as exc_info:
+        adapter.save_inbound_media(
+            b"image-data",
+            prefix="weixin_openclaw_img",
+            file_name="image.jpg",
+            fallback_suffix=".jpg",
+        )
+
+    assert exc_info.value.message == ERR_SESSION_NO_PERMISSION
+    assert list(outside.iterdir()) == []
+    assert not (temp_dir / "weixin_openclaw").exists()
 
 
 @pytest.mark.asyncio
@@ -50,7 +113,7 @@ async def test_text_item_keeps_referenced_image_attachment():
 
     text, attachments = await extract_text_and_attachments(InboundMediaAdapter(), item_list)
 
-    expected_attachment = str(Path("temp/weixin_openclaw/inbound.jpg"))
+    expected_attachment = str(Path("temp/temp_owner/inbound.jpg"))
     assert text == "测试一下你的识图能力"
     assert attachments == [expected_attachment]
 
@@ -63,7 +126,7 @@ async def test_converted_referenced_image_reaches_chat_dispatch(monkeypatch):
     title_calls = []
 
     async def resolve_inbound_image(item):
-        return Path("temp/weixin_openclaw/inbound.jpg")
+        return Path("temp/temp_owner/inbound.jpg")
 
     async def chat(**kwargs):
         captured.update(kwargs)
@@ -100,7 +163,7 @@ async def test_converted_referenced_image_reaches_chat_dispatch(monkeypatch):
         }
     )
 
-    expected_attachment = str(Path("temp/weixin_openclaw/inbound.jpg"))
+    expected_attachment = str(Path("temp/temp_owner/inbound.jpg"))
     assert converted is not None
     assert converted.attachments == [expected_attachment]
 

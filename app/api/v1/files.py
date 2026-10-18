@@ -113,7 +113,7 @@ async def download_file(
         )
         owner_uid = session.uid
 
-    resolved_path = await resolve_user_temp_file(path, uid=owner_uid, db=db, temp_root=TEMP_DIR)
+    resolved_path = await resolve_user_temp_file(path, uid=owner_uid, temp_root=TEMP_DIR)
     filename = resolved_path.name
     display_name = filename[9:] if len(filename) > 9 and filename[8] == "_" else filename
     return FileResponse(resolved_path, filename=display_name)

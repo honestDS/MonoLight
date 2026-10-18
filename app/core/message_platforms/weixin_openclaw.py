@@ -164,6 +164,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         return WeixinOpenClawAdapter(
             WeixinOpenClawConfig(
                 token=platform.get_config_secret("token"),
+                owner_uid=platform.uid,
                 base_url=str(config.get("base_url") or DEFAULT_BASE_URL),
                 cdn_base_url=str(config["cdn_base_url"]),
                 bot_type=DEFAULT_BOT_TYPE,
@@ -182,6 +183,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
     def _adapter_signature(platform: MessagePlatform) -> tuple:
         config = normalize_weixin_openclaw_config(platform.config)
         return (
+            platform.uid,
             platform.get_config_secret("token"),
             str(config.get("base_url") or DEFAULT_BASE_URL),
             str(config["cdn_base_url"]),
