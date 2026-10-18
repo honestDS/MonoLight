@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -171,6 +172,7 @@ async def _seed_memory_recall_workflow(session_factory):
             role=MessageRole.USER,
             type=MessageType.TEXT,
             content="I prefer VS Code as my editor for Python projects.",
+            created_at=datetime(2026, 8, 4, 12, 31, 0),
             is_processed=True,
         )
         old_assistant = Message(
@@ -180,6 +182,7 @@ async def _seed_memory_recall_workflow(session_factory):
             role=MessageRole.ASSISTANT,
             type=MessageType.TEXT,
             content="Noted your VS Code editor preference.",
+            created_at=datetime(2026, 8, 4, 12, 32, 0),
             is_processed=True,
         )
         current_user = Message(
@@ -219,6 +222,8 @@ async def _seed_memory_recall_workflow(session_factory):
             source=LongTermMemorySource.USER_API,
             source_id="seed-preference",
             source_message_id=old_user.id,
+            created_at=datetime(2026, 8, 4, 12, 30, 0),
+            updated_at=datetime(2026, 8, 4, 12, 30, 0),
             is_active=True,
             index_status=LongTermMemoryRecordIndexStatus.READY,
         )
@@ -428,7 +433,13 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         tool_payload = json.loads(first.turn_messages[-1].content)
         assert tool_payload["items"][0]["memory_id"] == memory_id
         assert tool_payload["items"][0]["content"] == "The user's preferred Python editor is VS Code."
+        assert tool_payload["items"][0]["updated_at"] == "2026-08-04 12:30:00"
         assert any("VS Code" in item["content"] for item in tool_payload["chat_history"])
+        chat_history_by_content = {item["content"]: item for item in tool_payload["chat_history"]}
+        assert chat_history_by_content[history_user_content]["role"] == MessageRole.USER.value
+        assert chat_history_by_content[history_user_content]["created_at"] == "2026-08-04 12:31:00"
+        assert chat_history_by_content[history_assistant_text]["role"] == MessageRole.ASSISTANT.value
+        assert chat_history_by_content[history_assistant_text]["created_at"] == "2026-08-04 12:32:00"
 
     assert len(captured_precheck_messages) == 1
     precheck_messages = captured_precheck_messages[0]
@@ -501,6 +512,8 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         rows = list((await db.execute(select(Message).where(Message.session_id == "session-recall").order_by(Message.id))).scalars().all())
         recalled_record = await db.get(LongTermMemoryRecord, memory_id)
         assert recalled_record is not None and recalled_record.last_recalled_at is not None
+        assert recalled_record.content == "The user's preferred Python editor is VS Code."
+        assert recalled_record.updated_at == datetime(2026, 8, 4, 12, 30, 0)
         chat_session = await db.get(ChatSession, "session-recall")
         assert chat_session is not None
         assert chat_session.llm_request_metadata is not None
@@ -514,6 +527,8 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         assert chat_session.llm_request_metadata["total_output_tokens"] == 200
         recall_rows = [row for row in rows if row.dedupe_key and row.dedupe_key.startswith("memory-recall-")]
         assert [row.type for row in recall_rows] == [MessageType.TOOL_CALL, MessageType.TOOL_RESULT]
+        persisted_tool_message = InternalMessage.model_validate_json(recall_rows[1].content)
+        assert json.loads(persisted_tool_message.content) == tool_payload
         persisted_count = len(rows)
 
     assert llm_calls == 1
@@ -547,7 +562,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         assert resumed.status == "completed"
         assert [message.role for message in resumed.turn_messages] == [MessageRole.ASSISTANT, MessageRole.TOOL]
         resumed_payload = json.loads(resumed.turn_messages[-1].content)
-        assert resumed_payload["items"][0]["memory_id"] == memory_id
+        assert resumed_payload == tool_payload
 
     async with memory_recall_session_factory() as db:
         current_count = len(list((await db.execute(select(Message).where(Message.session_id == "session-recall"))).scalars().all()))
