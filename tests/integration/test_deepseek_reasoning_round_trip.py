@@ -104,6 +104,7 @@ class _FakeSession:
         if self.boundary.stream:
             events = self.boundary.stream_events(request_index, url)
             body = b"".join(f"data: {json.dumps(event, ensure_ascii=False, separators=(',', ':'))}\n\n".encode() for event in events)
+            body += self.boundary.stream_suffix
             return _FakeResponse(body)
 
         response = self.boundary.json_response(request_index, url)
@@ -116,6 +117,7 @@ class _FakeHTTPBoundary:
         self.stream = False
         self.with_tools = False
         self.reasoning: str | None = ""
+        self.stream_suffix = b""
         self.requests: list[dict[str, Any]] = []
 
     def client_session(self, **kwargs) -> _FakeSession:
@@ -608,3 +610,78 @@ async def test_deepseek_reasoning_round_trip(
     for private_value in (_PRIVATE_RESPONSE, _PRIVATE_MESSAGE, _PRIVATE_REASONING, _PRIVATE_TOOL):
         assert private_value not in serialized_payload
     assert "provider_metadata" not in serialized_payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", "length"])
+@pytest.mark.parametrize("terminal", ["DONE", "EOF"])
+async def test_deepseek_chat_stream_keeps_usage_after_finish_reason(
+    fake_http_boundary: _FakeHTTPBoundary,
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+    terminal: str,
+) -> None:
+    fake_http_boundary.protocol = "deepseek"
+    fake_http_boundary.stream = True
+    fake_http_boundary.reasoning = "thinking"
+    fake_http_boundary.with_tools = finish_reason == "tool_calls"
+    fake_http_boundary.stream_suffix = b"data: [DONE]\n\n" if terminal == "DONE" else b""
+
+    def stream_events(request_index: int, _url: str) -> list[dict[str, Any]]:
+        events = fake_http_boundary._chat_events(request_index)
+        events[-1]["choices"][0]["finish_reason"] = finish_reason
+        usage = events[-1].pop("usage")
+        events.append({"model": events[-1]["model"], "choices": [], "usage": usage})
+        return events
+
+    monkeypatch.setattr(fake_http_boundary, "stream_events", stream_events)
+
+    tool_specs = (
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": _TOOL_NAME,
+                    "description": "query weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {key: {"type": "string"} for key in _TOOL_ARGUMENTS},
+                        "required": list(_TOOL_ARGUMENTS),
+                    },
+                },
+            }
+        ]
+        if fake_http_boundary.with_tools
+        else None
+    )
+    content_callbacks: list[str] = []
+    reasoning_callbacks: list[str] = []
+
+    async def on_content(value: str) -> None:
+        content_callbacks.append(value)
+
+    async def on_reasoning(value: str) -> None:
+        reasoning_callbacks.append(value)
+
+    response = await _generate(
+        protocol="deepseek",
+        stream=True,
+        messages=[InternalMessage(role=MessageRole.USER, content="weather")],
+        tools=tool_specs,
+        on_content=on_content,
+        on_reasoning=on_reasoning,
+    )
+
+    expected_content = fake_http_boundary._content(0)
+    assert response.usage == {**_usage("deepseek", 0), "cached_tokens": 11}
+    assert response.finish_reason == finish_reason
+    assert response.message.content == expected_content
+    assert response.message.reasoning_content == fake_http_boundary.reasoning
+    assert content_callbacks == _split_text(expected_content)
+    assert reasoning_callbacks == _split_text(fake_http_boundary.reasoning)
+
+    tool_calls = response.message.tool_calls or []
+    assert len(tool_calls) == int(fake_http_boundary.with_tools)
+    if fake_http_boundary.with_tools:
+        assert tool_calls[0].name == _TOOL_NAME
+        assert tool_calls[0].arguments == _TOOL_ARGUMENTS
