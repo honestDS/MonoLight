@@ -1,4 +1,6 @@
 import asyncio
+import copy
+import json
 
 import pytest
 from sqlalchemy import event
@@ -6,14 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.util import await_only
 from sqlmodel import select
 
-from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem
+from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
+from app.core.session_reply_queue import executor_replies as executor_replies_module
 from app.core.session_reply_queue.manager import SessionReplyQueueManager
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
@@ -25,6 +30,7 @@ from app.models.session_reply_work_item import (
 )
 from app.models.user import User
 from app.providers.database.client import CancellationSafeAsyncSession
+from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransformer
 from tests.integration.session_reply_queue_fixture import concurrent_session_factory as _concurrent_session_factory
 from tests.integration.session_reply_queue_fixture import db_session as _db_session
 from tests.integration.session_reply_queue_test_support import AsyncBarrier, enqueue
@@ -744,3 +750,210 @@ async def test_failed_reply_reuses_persisted_message_id_across_notification_hist
             assert stream_event["work_id"] == notification["work_id"] == work_id
             assert stream_event["request_ids"] == notification["request_ids"] == request_ids
             assert stream_event["message"] == error_message.content == user_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario",
+    ["missing_single", "persisted_result", "parallel", "complete_checkpoint"],
+)
+async def test_foreground_reply_restores_tool_results_before_dispatch(db_session: AsyncSession, monkeypatch, scenario: str):
+    session_id, uid, worker_id, profile_id = "session-1", "user-1", "worker-1", 1
+    guidance = "[系统提示信息]请停止所有操作[系统提示信息结束]"
+    attachments = ["/tmp/attachment.txt"]
+    environment_prompt = json.dumps(
+        {"environment": {"runtime_context": "runtime-context"}, "response_settings": {"markdown": True, "max_output_tokens": 321}, "platform_constraints": "platform-constraints"},
+        ensure_ascii=False,
+    )
+    call_ids = {
+        "missing_single": ["call-1"],
+        "persisted_result": ["call-1"],
+        "parallel": ["call-1", "call-2", "call-3"],
+        "complete_checkpoint": ["call-1", "call-2", "call-3"],
+    }[scenario]
+    real_content = '{"status":"success","value":"真实结果"}'
+
+    def serialize(message: InternalMessage) -> dict:
+        return message.model_dump(mode="json", exclude_none=True)
+
+    def tool_call(call_id: str) -> InternalToolCall:
+        return InternalToolCall(id=call_id, name="execute_shell", arguments={"command": "echo test"})
+
+    def tool_result(call_id: str, message_id: int) -> InternalMessage:
+        return InternalMessage(
+            id=message_id,
+            role=MessageRole.TOOL,
+            tool_call_id=call_id,
+            content=real_content,
+            tool_execution_status="succeeded",
+        )
+
+    original = InternalMessage(id=1, role=MessageRole.USER, content="原任务")
+    assistant = InternalMessage(id=2, role=MessageRole.ASSISTANT, tool_calls=[tool_call(call_id) for call_id in call_ids])
+    continuation = InternalMessage(
+        id=3,
+        role=MessageRole.USER,
+        content="继续",
+        guidance_prompt=guidance,
+        attachments=attachments,
+        environment_prompt=environment_prompt,
+    )
+    checkpoint_result_specs = {"parallel": [("call-1", 4)], "complete_checkpoint": [(c, 4 + i) for i, c in enumerate(call_ids)]}.get(scenario, [])
+    database_result_specs = {"persisted_result": [("call-1", 210)], "parallel": [("call-1", 4), ("call-2", 5)], "complete_checkpoint": [(c, 4 + i) for i, c in enumerate(call_ids)]}.get(scenario, [])
+    checkpoint_results = {call_id: tool_result(call_id, message_id) for call_id, message_id in checkpoint_result_specs}
+    database_results = {call_id: (message_id, tool_result(call_id, message_id)) for call_id, message_id in database_result_specs}
+    checkpoint_tool_messages = [serialize(message) for message in checkpoint_results.values()]
+    checkpoint = {
+        "messages": [serialize(original), serialize(assistant), *checkpoint_tool_messages, serialize(continuation)],
+        "turn_messages": [serialize(assistant), *checkpoint_tool_messages, serialize(continuation)],
+        "current_turn": 7,
+        "total_output_tokens": 9,
+        "files_to_user": [],
+    }
+    initial_checkpoint = copy.deepcopy(checkpoint)
+
+    db_session.add(ChatSession(session_id=session_id, uid=uid, profile_id=profile_id))
+    message_fields = {"uid": uid, "session_id": session_id, "profile_id": profile_id, "is_processed": True}
+    db_session.add_all(
+        [
+            Message(id=1, **message_fields, role=MessageRole.USER, type=MessageType.TEXT, content="原任务"),
+            Message(id=2, **message_fields, role=MessageRole.ASSISTANT, type=MessageType.TOOL_CALL, content=assistant.model_dump_json(exclude_none=True)),
+            Message(id=3, **message_fields, role=MessageRole.USER, type=MessageType.TEXT, content="继续", guidance_prompt=guidance, attachments=attachments, environment_prompt=environment_prompt),
+        ]
+    )
+    if scenario == "persisted_result":
+        db_session.add_all([Message(id=i, **message_fields, role=MessageRole.USER, type=MessageType.TEXT, content=f"填充消息 {i}") for i in range(4, 210)])
+    db_session.add_all([Message(id=message_id, **message_fields, role=MessageRole.TOOL, type=MessageType.TOOL_RESULT, content=result.model_dump_json(exclude_none=True)) for _call_id, (message_id, result) in database_results.items()])
+    await db_session.flush()
+
+    work = await enqueue(
+        CRUDSessionReplyWorkItem(),
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=1,
+        dedupe_key=f"foreground-tool-recovery:{scenario}",
+    )
+    work.status = SessionReplyWorkStatus.RUNNING
+    work.locked_by = worker_id
+    work.lock_until = 9999999999
+    work.input_message_ids = [1]
+    work.execution_state = {"stream_requested": False, "dispatcher_checkpoint": checkpoint}
+    db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+    await db_session.commit()
+
+    async def load_messages() -> list[Message]:
+        result = await db_session.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid).order_by(Message.id).execution_options(populate_existing=True))
+        return list(result.scalars().all())
+
+    async def load_tool_results() -> dict[str, tuple[int, InternalMessage]]:
+        result = await db_session.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid, Message.type == MessageType.TOOL_RESULT).order_by(Message.id).execution_options(populate_existing=True))
+        parsed = {}
+        for row in result.scalars().all():
+            message = InternalMessage.model_validate_json(row.content or "{}")
+            assert row.id is not None and message.tool_call_id is not None
+            parsed[message.tool_call_id] = (row.id, message)
+        return parsed
+
+    def check_protocol(provider_messages: list[dict]) -> None:
+        assistant_calls = [call["id"] for message in provider_messages if message.get("role") == "assistant" for call in message.get("tool_calls", [])]
+        tool_messages = [(i, m) for i, m in enumerate(provider_messages) if m.get("role") == "tool"]
+        tool_call_ids = [message["tool_call_id"] for _, message in tool_messages]
+        assert set(assistant_calls) == set(call_ids) and len(assistant_calls) == len(call_ids)
+        assert set(tool_call_ids) == set(call_ids) and len(tool_call_ids) == len(call_ids)
+        assistant_index = next(i for i, m in enumerate(provider_messages) if m.get("role") == "assistant" and m.get("tool_calls"))
+        continuation_index = next(i for i, m in enumerate(provider_messages) if m.get("role") == "user" and json.loads(m["content"]).get("user_message") == "继续")
+        assert assistant_index < continuation_index
+        assert all(assistant_index < index < continuation_index for index, _ in tool_messages)
+        payload = json.loads(provider_messages[continuation_index]["content"])
+        assert (payload["user_message"], payload["platform_guidance"], payload["attachment_paths"]) == ("继续", guidance, attachments)
+        assert (
+            payload["environment"],
+            payload["response_settings"],
+            payload["platform_constraints"],
+        ) == (
+            {"runtime_context": "runtime-context"},
+            {"markdown": True, "max_output_tokens": 321},
+            "platform-constraints",
+        )
+
+    dispatched_checkpoints = []
+    test_session_factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", test_session_factory)
+
+    async def dispatch(**kwargs):
+        resume_state = kwargs["execution_resume_state"]
+        async with test_session_factory() as verify_db:
+            saved = await verify_db.get(SessionReplyWorkItem, work.id)
+            assert saved is not None
+            assert saved.execution_state["dispatcher_checkpoint"] == resume_state
+        internal_messages = [InternalMessage.model_validate(message) for message in resume_state["messages"]]
+        materialized_messages = materialize_user_environment_prompts(internal_messages)
+        provider_messages = OpenAIChatCompletionsTransformer.to_provider(materialized_messages)
+        check_protocol(provider_messages)
+        dispatched_checkpoints.append(copy.deepcopy(resume_state))
+        return {"choices": []}
+
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+    initial_message_count = len(await load_messages())
+    expected_new_results = {"missing_single": 1, "persisted_result": 0, "parallel": 1, "complete_checkpoint": 0}[scenario]
+    result_snapshots, message_counts, checkpoint_snapshots = [], [], []
+
+    for _ in range(2):
+        assert await executor_replies_module._execute_foreground(db_session, work, worker_id) == {"choices": []}
+        await db_session.refresh(work)
+        saved_work_result = await db_session.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work.id).execution_options(populate_existing=True))
+        saved_work = saved_work_result.scalar_one()
+        saved_checkpoint = saved_work.execution_state["dispatcher_checkpoint"]
+        checkpoint_snapshots.append(copy.deepcopy(saved_checkpoint))
+        assert saved_work.status == SessionReplyWorkStatus.RUNNING
+        assert saved_work.locked_by == worker_id
+        assert {key: saved_checkpoint[key] for key in ("current_turn", "total_output_tokens", "files_to_user")} == {
+            "current_turn": 7,
+            "total_output_tokens": 9,
+            "files_to_user": [],
+        }
+        if scenario == "complete_checkpoint":
+            assert saved_checkpoint == initial_checkpoint
+
+        checkpoint_tool_maps = []
+        for key in ("messages", "turn_messages"):
+            messages = [InternalMessage.model_validate(raw) for raw in saved_checkpoint[key]]
+            tools = [message for message in messages if message.role == MessageRole.TOOL]
+            tool_map = {message.tool_call_id: message for message in tools}
+            assert len(tools) == len(call_ids) and set(tool_map) == set(call_ids)
+            assistant_index = next(i for i, m in enumerate(messages) if m.role == MessageRole.ASSISTANT and m.tool_calls)
+            continuation_index = next(i for i, m in enumerate(messages) if m.role == MessageRole.USER and m.content == "继续")
+            assert all(assistant_index < messages.index(message) < continuation_index for message in tools)
+            checkpoint_tool_maps.append(tool_map)
+
+        def tool_signature(values):
+            return {call_id: (m.id, m.content, m.tool_execution_status) for call_id, m in values.items()}
+
+        assert tool_signature(checkpoint_tool_maps[0]) == tool_signature(checkpoint_tool_maps[1])
+
+        persisted = await load_tool_results()
+        assert set(persisted) == set(call_ids)
+        for call_id, (result_id, result) in database_results.items():
+            row_id, stored = persisted[call_id]
+            actual = checkpoint_tool_maps[0][call_id]
+            assert row_id == result_id
+            assert stored.content == result.content and stored.tool_execution_status == "succeeded"
+            assert actual.id == result_id and actual.id == result.id
+            assert actual.content == result.content
+            assert actual.tool_execution_status == "succeeded"
+        for call_id in set(call_ids) - set(database_results) - set(checkpoint_results):
+            row_id, stored = persisted[call_id]
+            unknown = {"status": "execution_unknown", "error": PROMPT_TOOL_INTERRUPTED}
+            assert json.loads(stored.content or "{}") == unknown and stored.tool_execution_status == "execution_unknown"
+            recovered = checkpoint_tool_maps[0][call_id]
+            assert recovered.id == row_id and json.loads(recovered.content or "{}") == unknown
+            assert recovered.tool_execution_status == "execution_unknown"
+
+        result_snapshots.append({call_id: (row_id, result.content, result.tool_execution_status) for call_id, (row_id, result) in persisted.items()})
+        message_counts.append(len(await load_messages()))
+        assert message_counts[-1] == initial_message_count + expected_new_results
+
+    assert result_snapshots[0] == result_snapshots[1]
+    assert message_counts[0] == message_counts[1]
+    assert checkpoint_snapshots[0] == checkpoint_snapshots[1]
+    assert len(dispatched_checkpoints) == 2 and dispatched_checkpoints[0] == dispatched_checkpoints[1]
