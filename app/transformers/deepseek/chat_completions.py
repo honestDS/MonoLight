@@ -680,6 +680,5 @@ class DeepSeekChatCompletionsTransformer(BaseTransformer):
             http_proxy=http_proxy,
             normalize_event=normalize_event,
             raise_error=self.raise_error,
-            is_terminal=self._stream_is_terminal,
         ):
             yield chunk

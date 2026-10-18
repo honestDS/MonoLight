@@ -478,8 +478,9 @@ async def test_generate_stream_normalizes_reasoning_content_tools_and_terminal_u
 
     async def stream_sse_json(**kwargs):
         calls.append(kwargs)
+        is_terminal = kwargs.get("is_terminal")
         for event in events:
-            terminal = kwargs["is_terminal"](event)
+            terminal = is_terminal(event) if is_terminal is not None else False
             normalized, has_output = kwargs["normalize_event"](event)
             output_flags.append(has_output)
             if normalized is not None:
