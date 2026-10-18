@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import mimetypes
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from app.adapters.weixin_openclaw.client import WeixinOpenClawClient
@@ -25,12 +26,15 @@ from app.adapters.weixin_openclaw.crypto import (
     pkcs7_unpad,
 )
 from app.core.constants import (
+    ERR_FILE_ARGUMENT_INVALID,
+    ERR_SESSION_NO_PERMISSION,
     ERR_WEIXIN_OPENCLAW_INBOUND_MEDIA_TOO_LARGE,
     ERR_WEIXIN_OPENCLAW_UPLOAD_URL_MISSING,
 )
+from app.core.exceptions import ForbiddenException, ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.paths import TEMP_DIR
+from app.core.paths import TEMP_DIR, USER_TEMP_DIR_PREFIX, get_user_temp_dir
 from app.core.tools.send_file_to_user import resolve_file_token
 
 logger = get_logger(__name__)
@@ -65,7 +69,13 @@ class WeixinOpenClawMediaMixin:
             else:
                 content = await self.client.download_cdn_bytes(encrypted_query_param)
             image_suffix = self.detect_image_suffix(content)
-            return self.save_inbound_media(content, prefix="weixin_openclaw_img", file_name=f"image{image_suffix}", fallback_suffix=image_suffix)
+            return await asyncio.to_thread(
+                self.save_inbound_media,
+                content,
+                prefix="weixin_openclaw_img",
+                file_name=f"image{image_suffix}",
+                fallback_suffix=image_suffix,
+            )
         except Exception as exc:
             logger.bind(item_type=IMAGE_ITEM_TYPE).warning(t("LOG_WEIXIN_OPENCLAW_INBOUND_IMAGE_RESOLVE_FAILED", error=str(exc)))
             return None
@@ -82,7 +92,13 @@ class WeixinOpenClawMediaMixin:
         file_name = self.normalize_inbound_filename(str(file_item.get("file_name", "")).strip(), "file.bin")
         try:
             content = await self.download_and_decrypt_media(encrypted_query_param, aes_key_value)
-            return self.save_inbound_media(content, prefix="weixin_openclaw_file", file_name=file_name, fallback_suffix=".bin")
+            return await asyncio.to_thread(
+                self.save_inbound_media,
+                content,
+                prefix="weixin_openclaw_file",
+                file_name=file_name,
+                fallback_suffix=".bin",
+            )
         except Exception as exc:
             logger.bind(item_type=FILE_ITEM_TYPE, file_name=file_name).warning(t("LOG_WEIXIN_OPENCLAW_INBOUND_FILE_RESOLVE_FAILED", error=str(exc)))
             return None
@@ -98,11 +114,28 @@ class WeixinOpenClawMediaMixin:
                 )
             )
 
+        owner_uid = self.config.owner_uid
+        if not isinstance(owner_uid, str) or not owner_uid.strip() or "\x00" in owner_uid or owner_uid in {".", ".."} or PurePosixPath(owner_uid).name != owner_uid or PureWindowsPath(owner_uid).name != owner_uid:
+            raise ParameterException(ERR_FILE_ARGUMENT_INVALID)
+
         normalized_name = self.normalize_inbound_filename(file_name, f"{prefix}{fallback_suffix}")
         stem = Path(normalized_name).stem or prefix
         suffix = Path(normalized_name).suffix or fallback_suffix
-        target_dir = TEMP_DIR / "weixin_openclaw"
+        target_dir = get_user_temp_dir(TEMP_DIR.parent, owner_uid)
+        expected_dir_name = f"{USER_TEMP_DIR_PREFIX}{owner_uid}"
+        normalized_temp_dir = TEMP_DIR.resolve(strict=False)
+
+        def ensure_target_dir_is_safe() -> None:
+            try:
+                resolved_target_dir = target_dir.resolve(strict=False)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ForbiddenException(ERR_SESSION_NO_PERMISSION) from exc
+            if resolved_target_dir.parent != normalized_temp_dir or resolved_target_dir.name != expected_dir_name:
+                raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
+
+        ensure_target_dir_is_safe()
         target_dir.mkdir(parents=True, exist_ok=True)
+        ensure_target_dir_is_safe()
         target = target_dir / f"{prefix}_{uuid.uuid4().hex}_{stem}{suffix}"
         target.write_bytes(content)
         return target

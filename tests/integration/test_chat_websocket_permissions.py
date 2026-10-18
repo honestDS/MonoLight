@@ -965,19 +965,52 @@ async def test_websocket_file_inputs_use_session_owner_for_initial_and_active_st
 ) -> None:
     runtime = websocket_runtime
     session_id = "ws-file-owner-boundary"
-    await _seed_sessions(runtime, [(session_id, "owner", "ws")])
+    old_session_id = "ws-file-owner-boundary-old"
+    old_session_file = runtime.temp_root / f"temp_{old_session_id}" / "old.txt"
+    shared_file = runtime.temp_root / "weixin_openclaw" / "shared.txt"
+    for path in (old_session_file, shared_file):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(path.name, encoding="utf-8")
+
+    await _seed_sessions(
+        runtime,
+        [
+            (session_id, "owner", "ws"),
+            (old_session_id, "owner", "ws"),
+        ],
+    )
+    async with runtime.factory() as db:
+        db.add(
+            Message(
+                session_id=old_session_id,
+                uid="owner",
+                profile_id=runtime.owner_profile_id,
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content="old session attachment",
+                attachments=[str(old_session_file), str(shared_file)],
+                is_processed=True,
+            )
+        )
+        await db.commit()
     _hold_stream(monkeypatch)
 
     forbidden_initial = [
         ("initial-other-attachment", {"message": "other", "attachments": [str(runtime.other_file)]}),
         ("initial-outside-attachment", {"message": "outside", "attachments": [str(runtime.outside_file)]}),
         ("initial-admin-attachment", {"message": "admin", "attachments": [str(runtime.admin_file)]}),
+        ("initial-old-session-attachment", {"message": "old session", "attachments": [str(old_session_file)]}),
+        ("initial-shared-attachment", {"message": "shared", "attachments": [str(shared_file)]}),
         ("initial-other-file", {"message": _structured_file_message("file", runtime.other_file)}),
         ("initial-outside-file", {"message": _structured_file_message("file", runtime.outside_file)}),
         ("initial-admin-file", {"message": _structured_file_message("file", runtime.admin_file)}),
+        ("initial-old-session-file", {"message": _structured_file_message("file", old_session_file)}),
+        ("initial-shared-file", {"message": _structured_file_message("file", shared_file)}),
         ("initial-other-audio", {"message": _structured_file_message("audio", runtime.other_file)}),
         ("initial-outside-audio", {"message": _structured_file_message("audio", runtime.outside_file)}),
         ("initial-admin-audio", {"message": _structured_file_message("audio", runtime.admin_file)}),
+        ("initial-old-session-audio", {"message": _structured_file_message("audio", old_session_file)}),
+        ("initial-shared-audio", {"message": _structured_file_message("audio", shared_file)}),
     ]
 
     socket, task = await _open_socket(uid="admin", is_superuser=True)
@@ -1005,12 +1038,18 @@ async def test_websocket_file_inputs_use_session_owner_for_initial_and_active_st
             ("active-other-attachment", {"message": "other", "attachments": [str(runtime.other_file)]}),
             ("active-outside-attachment", {"message": "outside", "attachments": [str(runtime.outside_file)]}),
             ("active-admin-attachment", {"message": "admin", "attachments": [str(runtime.admin_file)]}),
+            ("active-old-session-attachment", {"message": "old session", "attachments": [str(old_session_file)]}),
+            ("active-shared-attachment", {"message": "shared", "attachments": [str(shared_file)]}),
             ("active-other-file", {"message": _structured_file_message("file", runtime.other_file)}),
             ("active-outside-file", {"message": _structured_file_message("file", runtime.outside_file)}),
             ("active-admin-file", {"message": _structured_file_message("file", runtime.admin_file)}),
+            ("active-old-session-file", {"message": _structured_file_message("file", old_session_file)}),
+            ("active-shared-file", {"message": _structured_file_message("file", shared_file)}),
             ("active-other-audio", {"message": _structured_file_message("audio", runtime.other_file)}),
             ("active-outside-audio", {"message": _structured_file_message("audio", runtime.outside_file)}),
             ("active-admin-audio", {"message": _structured_file_message("audio", runtime.admin_file)}),
+            ("active-old-session-audio", {"message": _structured_file_message("audio", old_session_file)}),
+            ("active-shared-audio", {"message": _structured_file_message("audio", shared_file)}),
         ]
         for request_id, payload in forbidden_active:
             before = await _snapshot_session(runtime, session_id)

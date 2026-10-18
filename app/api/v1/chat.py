@@ -329,7 +329,6 @@ async def chat_completions(
         request.message,
         request.attachments,
         uid=owner_uid,
-        db=db,
     )
     data = await web_chat_adapter.submit(
         db=db,
@@ -1082,7 +1081,6 @@ async def chat_websocket(
                         message,
                         attachments,
                         uid=session.uid if session is not None else uid,
-                        db=db,
                     )
             except BaseBusinessException as exc:
                 await websocket.send_json(

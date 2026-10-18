@@ -9,10 +9,14 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from PIL import Image
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.adapters.weixin_openclaw.media as weixin_media_module
 import app.core.security as security_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
+from app.adapters.weixin_openclaw.constants import FILE_ITEM_TYPE, IMAGE_ITEM_TYPE, TEXT_ITEM_TYPE
+from app.adapters.weixin_openclaw.crypto import aes_ecb_encrypt, pkcs7_pad
 from app.api.v1 import files as files_module
 from app.core.constants import (
     ERR_FILE_NOT_FOUND,
@@ -22,11 +26,13 @@ from app.core.constants import (
     ERR_UNAUTHORIZED,
 )
 from app.core.i18n import t
+from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.paths import get_user_temp_dir
 from app.core.security import get_current_user
 from app.core.utils.assistant_files import materialize_generated_images
 from app.handler import register_handlers
 from app.models.message import InternalGeneratedImage, InternalMessage, Message, MessageRole
+from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.profile import ProfileConfig
 from app.models.session import ChatSession
 from app.models.user import User
@@ -215,7 +221,7 @@ async def test_upload_files_are_shared_per_user_across_web_sessions(
 
 
 @pytest.mark.asyncio
-async def test_legacy_file_paths_remain_downloadable_after_new_user_scoped_writes(
+async def test_legacy_attachment_paths_are_not_downloadable_after_new_user_scoped_writes(
     db_session: AsyncSession,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -233,20 +239,27 @@ async def test_legacy_file_paths_remain_downloadable_after_new_user_scoped_write
         image.close()
     image_bytes = image_buffer.getvalue()
     legacy_text_bytes = b"legacy upload fixture"
+    legacy_weixin_file_bytes = b"legacy weixin file fixture"
 
     legacy_session_dir = temp_root / "temp_legacy-session"
     legacy_generated_dir = legacy_session_dir / "generated_images"
+    legacy_weixin_dir = temp_root / "weixin_openclaw"
     user_generated_dir = temp_root / "temp_user-1" / "generated_images"
     legacy_native_path = legacy_generated_dir / "generated_image_legacy-native.png"
     legacy_upload_path = legacy_session_dir / "12345678_legacy.txt"
+    legacy_weixin_image_path = legacy_weixin_dir / "legacy_image.png"
+    legacy_weixin_file_path = legacy_weixin_dir / "legacy_file.txt"
     legacy_tool_path = user_generated_dir / "generated_image_legacy-tool.png"
     unreferenced_dir = temp_root / "temp_unreferenced-session"
     unreferenced_path = unreferenced_dir / "87654321_unreferenced.txt"
     legacy_generated_dir.mkdir(parents=True)
+    legacy_weixin_dir.mkdir(parents=True)
     user_generated_dir.mkdir(parents=True)
     unreferenced_dir.mkdir(parents=True)
     legacy_native_path.write_bytes(image_bytes)
     legacy_upload_path.write_bytes(legacy_text_bytes)
+    legacy_weixin_image_path.write_bytes(image_bytes)
+    legacy_weixin_file_path.write_bytes(legacy_weixin_file_bytes)
     legacy_tool_path.write_bytes(image_bytes)
     unreferenced_path.write_bytes(b"unreferenced legacy upload")
 
@@ -259,6 +272,12 @@ async def test_legacy_file_paths_remain_downloadable_after_new_user_scoped_write
                 source="http",
                 reply_target_source="http",
             ),
+            ChatSession(
+                session_id="weixin-openclaw-session",
+                uid="user-1",
+                source="weixin-openclaw",
+                reply_target_source="weixin-openclaw",
+            ),
             Message(
                 session_id="legacy-session",
                 uid="user-1",
@@ -267,6 +286,14 @@ async def test_legacy_file_paths_remain_downloadable_after_new_user_scoped_write
                 profile_id=1,
                 attachments=[str(legacy_upload_path)],
             ),
+            Message(
+                session_id="weixin-openclaw-session",
+                uid="user-1",
+                role=MessageRole.USER,
+                content="legacy weixin attachments",
+                profile_id=1,
+                attachments=[str(legacy_weixin_image_path), str(legacy_weixin_file_path)],
+            ),
         ]
     )
     await db_session.commit()
@@ -274,19 +301,54 @@ async def test_legacy_file_paths_remain_downloadable_after_new_user_scoped_write
     legacy_native_token = send_file_to_user_module._encode_token({"path": str(legacy_native_path), "uid": "user-1", "id": "legacy-native-id"})
     legacy_tool_token = send_file_to_user_module._encode_token({"path": str(legacy_tool_path), "uid": "user-1", "id": "legacy-tool-id"})
     legacy_downloads = (
-        (f"/api/v1/download-sent?token={quote(legacy_native_token)}", image_bytes),
-        (f"/api/v1/download?path={quote(str(legacy_upload_path), safe='')}", legacy_text_bytes),
-        (f"/api/v1/download-sent?token={quote(legacy_tool_token)}", image_bytes),
+        (f"/api/v1/download-sent?token={quote(legacy_native_token)}", image_bytes, 200, None),
+        (
+            f"/api/v1/download?path={quote(str(legacy_upload_path), safe='')}",
+            legacy_text_bytes,
+            403,
+            "legacy-session",
+        ),
+        (
+            f"/api/v1/download?path={quote(str(legacy_weixin_image_path), safe='')}",
+            image_bytes,
+            403,
+            "weixin-openclaw-session",
+        ),
+        (
+            f"/api/v1/download?path={quote(str(legacy_weixin_file_path), safe='')}",
+            legacy_weixin_file_bytes,
+            403,
+            "weixin-openclaw-session",
+        ),
+        (f"/api/v1/download-sent?token={quote(legacy_tool_token)}", image_bytes, 200, None),
     )
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
     ) as client:
-        for url, expected_bytes in legacy_downloads:
-            response = await client.get(url)
-            assert response.status_code == 200
-            assert response.content == expected_bytes
+
+        async def assert_legacy_downloads() -> None:
+            for uid, username, is_superuser, include_session_id in (
+                ("user-1", "user_one", False, False),
+                ("user-1", "user_one", False, True),
+                ("admin", "admin", True, False),
+                ("admin", "admin", True, True),
+            ):
+                auth_state.update(uid=uid, username=username, is_superuser=is_superuser)
+                for url, expected_bytes, expected_status, session_id in legacy_downloads:
+                    request_url = httpx.URL(url)
+                    if include_session_id and session_id:
+                        request_url = request_url.copy_add_param("session_id", session_id)
+                    response = await client.get(request_url)
+                    assert response.status_code == expected_status
+                    if expected_status == 200:
+                        assert response.content == expected_bytes
+                    else:
+                        assert response.json()["message"] == t(ERR_SESSION_NO_PERMISSION)
+
+        await assert_legacy_downloads()
+        auth_state.update(uid="user-1", username="user_one", is_superuser=False)
 
         unreferenced_response = await client.get(
             "/api/v1/download",
@@ -329,12 +391,13 @@ async def test_legacy_file_paths_remain_downloadable_after_new_user_scoped_write
         assert generated_download.status_code == 200
         assert generated_download.content == image_bytes
 
-        for url, expected_bytes in legacy_downloads:
-            response = await client.get(url)
-            assert response.status_code == 200
-            assert response.content == expected_bytes
+        await assert_legacy_downloads()
 
-    assert all(path.is_file() for path in (legacy_native_path, legacy_upload_path, legacy_tool_path))
+    assert legacy_native_path.read_bytes() == image_bytes
+    assert legacy_upload_path.read_bytes() == legacy_text_bytes
+    assert legacy_weixin_image_path.read_bytes() == image_bytes
+    assert legacy_weixin_file_path.read_bytes() == legacy_weixin_file_bytes
+    assert legacy_tool_path.read_bytes() == image_bytes
 
 
 @pytest.mark.asyncio
@@ -645,3 +708,217 @@ async def test_upload_rejects_non_writable_sessions(
     assert response.status_code == 403
     assert response.json()["message"] == t(error)
     assert not temp_root.exists()
+
+
+@pytest.mark.asyncio
+async def test_weixin_inbound_attachments_are_user_scoped_and_downloadable(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owners = (
+        ("system-owner-one", "owner_one", "wx-sender-one", "forged-owner-one"),
+        ("system-owner-two", "owner_two", "wx-sender-two", "forged-owner-two"),
+    )
+    users = [User(uid=uid, username=username) for uid, username, _, _ in owners]
+    users.append(User(uid="admin", username="admin", is_superuser=True))
+    db_session.add_all(users)
+    await db_session.commit()
+
+    temp_root = tmp_path / "temp"
+    monkeypatch.setattr(files_module, "TEMP_DIR", temp_root)
+    monkeypatch.setattr(weixin_media_module, "TEMP_DIR", temp_root)
+
+    def make_png(color: tuple[int, int, int]) -> bytes:
+        image_buffer = io.BytesIO()
+        image = Image.new("RGB", (2, 2), color=color)
+        try:
+            image.save(image_buffer, format="PNG")
+        finally:
+            image.close()
+        return image_buffer.getvalue()
+
+    sessions: list[ChatSession] = []
+    messages: list[Message] = []
+    expected_by_owner: dict[str, list[tuple[str, bytes, str]]] = {}
+    for owner_index, (owner_uid, _, sender_uid, forged_owner_uid) in enumerate(owners):
+        platform = MessagePlatform(
+            uid=owner_uid,
+            config={"owner_uid": forged_owner_uid},
+            name=f"weixin-{owner_uid}",
+            platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+        )
+        adapter = WeixinOpenClawPlatformHandler._build_adapter(platform)
+        assert adapter.config.owner_uid == owner_uid
+
+        direct_png = make_png((32 + owner_index, 96, 160))
+        quoted_png = make_png((160, 96, 32 + owner_index))
+        file_bytes = f"encrypted attachment for {owner_uid}".encode()
+        image_key = bytes([owner_index + 1]) * 16
+        file_key = bytes([owner_index + 3]) * 16
+        direct_query = f"{sender_uid}/direct-image"
+        quoted_query = f"{sender_uid}/quoted-image"
+        file_query = f"{sender_uid}/document"
+        downloaded_payloads = {
+            direct_query: direct_png,
+            quoted_query: aes_ecb_encrypt(pkcs7_pad(quoted_png), image_key),
+            file_query: aes_ecb_encrypt(pkcs7_pad(file_bytes), file_key),
+        }
+
+        async def download_cdn_bytes(encrypted_query_param: str) -> bytes:
+            return downloaded_payloads[encrypted_query_param]
+
+        monkeypatch.setattr(adapter.client, "download_cdn_bytes", download_cdn_bytes)
+        encrypted_image_item = {
+            "type": IMAGE_ITEM_TYPE,
+            "image_item": {
+                "aeskey": image_key.hex(),
+                "media": {"encrypt_query_param": quoted_query},
+            },
+        }
+        inbound_messages = (
+            (
+                "direct-image",
+                {"from_user_id": sender_uid, "item_list": [{"type": IMAGE_ITEM_TYPE, "image_item": {"media": {"encrypt_query_param": direct_query}}}]},
+                direct_png,
+                ".png",
+            ),
+            (
+                "quoted-image",
+                {
+                    "from_user_id": sender_uid,
+                    "item_list": [
+                        {
+                            "type": TEXT_ITEM_TYPE,
+                            "text_item": {"text": "quoted image"},
+                            "ref_msg": {"message_item": encrypted_image_item},
+                        }
+                    ],
+                },
+                quoted_png,
+                ".png",
+            ),
+            (
+                "encrypted-file",
+                {
+                    "from_user_id": sender_uid,
+                    "item_list": [
+                        {
+                            "type": FILE_ITEM_TYPE,
+                            "file_item": {
+                                "file_name": "report.pdf",
+                                "media": {
+                                    "aes_key": base64.b64encode(file_key).decode("ascii"),
+                                    "encrypt_query_param": file_query,
+                                },
+                            },
+                        }
+                    ],
+                },
+                file_bytes,
+                ".pdf",
+            ),
+        )
+
+        try:
+            session_id = f"weixin-openclaw:{sender_uid}"
+            owner_expectations: list[tuple[str, bytes, str]] = []
+            for case_name, raw_message, expected_content, expected_suffix in inbound_messages:
+                converted = await adapter.convert_message(raw_message)
+                assert converted is not None
+                assert converted.user_id == sender_uid
+                assert converted.session_id == session_id
+                assert len(converted.attachments) == 1
+                owner_expectations.append((case_name, expected_content, expected_suffix))
+                messages.append(
+                    Message(
+                        session_id=converted.session_id,
+                        uid=owner_uid,
+                        role=MessageRole.USER,
+                        content=str(converted.text),
+                        profile_id=1,
+                        attachments=converted.attachments,
+                    )
+                )
+
+            sessions.append(
+                ChatSession(
+                    session_id=session_id,
+                    uid=owner_uid,
+                    source="weixin-openclaw",
+                    reply_target_source="weixin-openclaw",
+                    message_platform_user_id=sender_uid,
+                )
+            )
+            expected_by_owner[owner_uid] = owner_expectations
+        finally:
+            await adapter.close()
+
+    db_session.add_all([*sessions, *messages])
+    await db_session.commit()
+
+    persisted_attachments: list[tuple[str, str, Path, bytes]] = []
+    all_attachment_paths: list[Path] = []
+    for owner_index, (owner_uid, _, sender_uid, forged_owner_uid) in enumerate(owners):
+        session_id = f"weixin-openclaw:{sender_uid}"
+        result = await db_session.execute(select(Message).where(Message.uid == owner_uid, Message.session_id == session_id).order_by(Message.id))
+        persisted_messages = result.scalars().all()
+        expectations = expected_by_owner[owner_uid]
+        assert len(persisted_messages) == len(expectations) == 3
+        for persisted_message, (_, expected_content, expected_suffix) in zip(persisted_messages, expectations, strict=True):
+            assert persisted_message.attachments is not None
+            assert len(persisted_message.attachments) == 1
+            attachment_path = Path(persisted_message.attachments[0])
+            assert attachment_path.parent == get_user_temp_dir(tmp_path, owner_uid)
+            assert attachment_path.suffix == expected_suffix
+            assert attachment_path.read_bytes() == expected_content
+            all_attachment_paths.append(attachment_path)
+            persisted_attachments.append((owner_uid, session_id, attachment_path, expected_content))
+
+        assert session_id == sessions[owner_index].session_id
+        assert not get_user_temp_dir(tmp_path, sender_uid).exists()
+        assert not get_user_temp_dir(tmp_path, forged_owner_uid).exists()
+
+    assert len({path.name for path in all_attachment_paths}) == len(all_attachment_paths) == 6
+    assert sorted(path.name for path in temp_root.iterdir()) == sorted(f"temp_{uid}" for uid, _, _, _ in owners)
+    assert all(path.is_dir() for path in temp_root.iterdir())
+
+    username_by_uid = {uid: username for uid, username, _, _ in owners}
+    auth_state: dict[str, str | bool] = {"uid": owners[0][0], "username": owners[0][1], "is_superuser": False}
+    app = _build_app(db_session, auth_state)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        for owner_uid, session_id, attachment_path, expected_content in persisted_attachments:
+            for include_session_id in (False, True):
+                auth_state.update(uid=owner_uid, username=username_by_uid[owner_uid], is_superuser=False)
+                params = {"path": str(attachment_path)}
+                if include_session_id:
+                    params["session_id"] = session_id
+                owner_download = await client.get("/api/v1/download", params=params)
+                assert owner_download.status_code == 200
+                assert owner_download.content == expected_content
+
+            other_uid, other_username = next((uid, username) for uid, username, _, _ in owners if uid != owner_uid)
+            auth_state.update(uid=other_uid, username=other_username, is_superuser=False)
+            other_download = await client.get("/api/v1/download", params={"path": str(attachment_path)})
+            assert other_download.status_code == 403
+            assert other_download.json()["message"] == t(ERR_SESSION_NO_PERMISSION)
+            forged_session_download = await client.get(
+                "/api/v1/download",
+                params={"path": str(attachment_path), "session_id": session_id},
+            )
+            assert forged_session_download.status_code == 403
+            assert forged_session_download.json()["message"] == t(ERR_SESSION_NO_PERMISSION)
+
+            auth_state.update(uid="admin", username="admin", is_superuser=True)
+            admin_session_download = await client.get(
+                "/api/v1/download",
+                params={"path": str(attachment_path), "session_id": session_id},
+            )
+            assert admin_session_download.status_code == 200
+            assert admin_session_download.content == expected_content
+            admin_unscoped_download = await client.get("/api/v1/download", params={"path": str(attachment_path)})
+            assert admin_unscoped_download.status_code == 403
+            assert admin_unscoped_download.json()["message"] == t(ERR_SESSION_NO_PERMISSION)

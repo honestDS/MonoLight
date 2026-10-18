@@ -115,13 +115,23 @@ async def test_http_chat_file_inputs_stay_bound_to_session_owner(
     admin_dir = temp_root / "temp_admin"
     old_dir = temp_root / "temp_attachment-permission-old-session"
     unreferenced_dir = temp_root / "temp_attachment-permission-unreferenced"
+    shared_dir = temp_root / "weixin_openclaw"
     owner_file = owner_dir / "owner.txt"
     other_file = other_dir / "other.txt"
     admin_file = admin_dir / "admin.txt"
     old_file = old_dir / "old.txt"
     unreferenced_file = unreferenced_dir / "unreferenced.txt"
+    shared_file = shared_dir / "shared.txt"
     outside_file = tmp_path / "outside-project.txt"
-    for path in (owner_file, other_file, admin_file, old_file, unreferenced_file, outside_file):
+    for path in (
+        owner_file,
+        other_file,
+        admin_file,
+        old_file,
+        unreferenced_file,
+        shared_file,
+        outside_file,
+    ):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(path.name, encoding="utf-8")
 
@@ -132,7 +142,7 @@ async def test_http_chat_file_inputs_stay_bound_to_session_owner(
             role=MessageRole.USER,
             content="historical attachment",
             profile_id=primary_profile.id,
-            attachments=[str(old_file)],
+            attachments=[str(old_file), str(shared_file)],
         )
     )
     await chat_session_database.commit()
@@ -290,26 +300,43 @@ async def test_http_chat_file_inputs_stay_bound_to_session_owner(
         _assert_forbidden(admin_path_response)
         assert await _session_ids(chat_session_database, session_id) == before_admin_path
 
-        auth_state.update(uid="user-1", is_superuser=False)
-        old_request_id = "historical-owner-attachment-request"
-        old_response = await client.post(
-            "/api/v1/chat/completions",
-            json={
-                "message": "historical owner attachment",
-                "attachments": [str(old_file)],
-                "session_id": session_id,
-                "request_id": old_request_id,
-            },
-        )
-        await _assert_submission(
-            chat_session_database,
-            old_response,
-            request_id=old_request_id,
-            session_id=session_id,
-            uid="user-1",
-            expected_attachments=[str(old_file)],
-        )
+        for role, uid, is_superuser in (
+            ("owner", "user-1", False),
+            ("admin", "admin", True),
+        ):
+            auth_state.update(uid=uid, is_superuser=is_superuser)
+            for directory, path in (("old", old_file), ("shared", shared_file)):
+                invalid_requests = (
+                    (
+                        "attachment",
+                        {
+                            "message": f"{role} {directory} attachment",
+                            "attachments": [str(path)],
+                        },
+                    ),
+                    (
+                        "structured-file",
+                        {"message": [{"type": "file", "path": str(path)}]},
+                    ),
+                    (
+                        "structured-audio",
+                        {"message": [{"type": "audio", "format": "wav", "path": str(path)}]},
+                    ),
+                )
+                for input_type, invalid_request in invalid_requests:
+                    before = await _session_ids(chat_session_database, session_id)
+                    response = await client.post(
+                        "/api/v1/chat/completions",
+                        json={
+                            **invalid_request,
+                            "session_id": session_id,
+                            "request_id": f"{role}-{directory}-{input_type}-request",
+                        },
+                    )
+                    _assert_forbidden(response)
+                    assert await _session_ids(chat_session_database, session_id) == before
 
+        auth_state.update(uid="user-1", is_superuser=False)
         before_unreferenced = await _session_ids(chat_session_database, session_id)
         unreferenced_response = await client.post(
             "/api/v1/chat/completions",
