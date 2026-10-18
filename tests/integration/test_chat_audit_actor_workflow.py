@@ -150,6 +150,8 @@ async def actor_workflow_runtime(
             _cfg: Any,
             request_payload: dict[str, Any],
             _working_directory: Path,
+            *,
+            read_budget: Any = None,
         ) -> tuple[dict[str, Any], dict[str, Any]]:
             tool_call_id = request_payload["tool_calls"][0]["tool_call_id"]
             return (
@@ -161,6 +163,7 @@ async def actor_workflow_runtime(
                                 "tool_call_id": tool_call_id,
                                 "score": 6,
                                 "reason": "test confirmation",
+                                "deny": False,
                                 "file_checks": [],
                             }
                         ]

@@ -859,3 +859,168 @@ test('clearing permissions removes default-profile permission', async t => {
   superuserHarness.permissionsStore.clear()
   assert.equal(superuserHarness.module.canSetDefaultProfile(otherRow), false)
 })
+
+test('create form saves system-directory protection and audit depth without leaking between dialogs', async t => {
+  const harness = await createHarness(t)
+
+  harness.module.showDialog('create')
+  await flush()
+  assert.equal(harness.module.form.configs.security.protect_system_directories, true)
+  assert.equal(harness.module.form.configs.security.audit_depth, 3)
+
+  harness.module.form.name = 'custom security settings'
+  harness.module.form.configs.security.protect_system_directories = false
+  harness.module.form.configs.security.audit_depth = 1
+  await harness.module.submitForm()
+  await flush()
+
+  const customPayload = harness.api.creates[0]
+  assert.ok(customPayload)
+  assert.equal(customPayload.name, 'custom security settings')
+  assert.equal(typeof customPayload.configs.security.protect_system_directories, 'boolean')
+  assert.equal(customPayload.configs.security.protect_system_directories, false)
+  assert.equal(customPayload.configs.security.audit_depth, 1)
+
+  harness.module.showDialog('create')
+  await flush()
+  assert.equal(harness.module.form.configs.security.protect_system_directories, true)
+  assert.equal(harness.module.form.configs.security.audit_depth, 3)
+  assert.equal(customPayload.configs.security.protect_system_directories, false)
+  assert.equal(customPayload.configs.security.audit_depth, 1)
+
+  harness.module.form.name = 'default security settings'
+  await harness.module.submitForm()
+  await flush()
+
+  assert.equal(harness.api.creates.length, 2)
+  assert.equal(harness.api.creates[1].configs.security.protect_system_directories, true)
+  assert.equal(harness.api.creates[1].configs.security.audit_depth, 3)
+})
+
+test('editing legacy security configs supplies defaults and converts timeout without mutating the row', async t => {
+  const harness = await createHarness(t)
+  const row = {
+    id: 81,
+    uid: 'user-a',
+    name: 'legacy security profile',
+    prompt_id: null,
+    knowledge_base_ids: [],
+    configs: {
+      security: {
+        audit_threshold: 0,
+        audit_confirmation_timeout_minutes: 10,
+      },
+    },
+  }
+  const originalRow = normalize(row)
+
+  for (let iteration = 0; iteration < 2; iteration += 1) {
+    harness.module.showDialog('edit', row)
+    await flush()
+
+    assert.equal(harness.module.form.configs.security.protect_system_directories, true)
+    assert.equal(harness.module.form.configs.security.audit_depth, 3)
+    assert.equal(harness.module.form.configs.security.audit_threshold, 0)
+    assert.equal(harness.module.form.configs.security.audit_confirmation_timeout_seconds, 600)
+
+    await harness.module.submitForm()
+    await flush()
+
+    const update = harness.api.updates[iteration]
+    assert.equal(update.id, row.id)
+    assert.equal(typeof update.payload.configs.security.protect_system_directories, 'boolean')
+    assert.equal(update.payload.configs.security.protect_system_directories, true)
+    assert.equal(update.payload.configs.security.audit_depth, 3)
+    assert.equal(update.payload.configs.security.audit_threshold, 0)
+    assert.equal(update.payload.configs.security.audit_confirmation_timeout_seconds, 600)
+    assert.equal(Object.prototype.hasOwnProperty.call(update.payload.configs.security, 'audit_confirmation_timeout_minutes'), false)
+    assert.deepEqual(normalize(row), originalRow)
+  }
+})
+
+test('editing and resaving configured audit and tool settings preserves boundary values', async t => {
+  const modelOptionsItems = [{
+    id: 71,
+    name: 'Audit channel',
+    is_active: true,
+    model_ids: [{ model_id: 'audit-model', usage: 'CHAT', is_enabled: true }],
+  }]
+  const enabledTools = ['file_tool', 'read_multimodal_file']
+  const allowedOperationDirs = ['D:/workspace/allowed']
+  const scenarios = [
+    { id: 91, protectSystemDirectories: false, auditDepth: 1, auditThreshold: 0 },
+    { id: 92, protectSystemDirectories: true, auditDepth: 100, auditThreshold: 7 },
+  ]
+
+  for (const scenario of scenarios) {
+    const harness = await createHarness(t, {
+      superuser: false,
+      currentUid: 'user-a',
+      modelOptionsItems,
+    })
+    for (const callback of harness.mountedCallbacks) callback()
+    await flush()
+
+    const configs = defaultProfileConfigs()
+    configs.security = {
+      ...configs.security,
+      audit_channel_id: modelOptionsItems[0].id,
+      audit_model_id: 'audit-model',
+      audit_threshold: scenario.auditThreshold,
+      audit_confirmation_timeout_seconds: 420,
+      audit_report_language: 'en',
+      audit_depth: scenario.auditDepth,
+      protect_system_directories: scenario.protectSystemDirectories,
+    }
+    configs.tool = {
+      ...configs.tool,
+      enabled_tools: [...enabledTools],
+      allowed_operation_dirs: [...allowedOperationDirs],
+    }
+    let editableRow = {
+      id: scenario.id,
+      uid: 'user-a',
+      name: `configured security profile ${scenario.id}`,
+      prompt_id: null,
+      knowledge_base_ids: [],
+      configs,
+    }
+    const originalRow = normalize(editableRow)
+
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      harness.module.showDialog('edit', editableRow)
+      await flush()
+
+      assert.equal(harness.module.auditModelKey.value, '71::audit-model')
+      assert.equal(typeof harness.module.form.configs.security.protect_system_directories, 'boolean')
+      assert.equal(harness.module.form.configs.security.protect_system_directories, scenario.protectSystemDirectories)
+      assert.equal(harness.module.form.configs.security.audit_depth, scenario.auditDepth)
+      assert.deepEqual(normalize(harness.module.form.configs.tool.enabled_tools), enabledTools)
+      assert.deepEqual(normalize(harness.module.form.configs.tool.allowed_operation_dirs), allowedOperationDirs)
+
+      const expectedSecurity = normalize(editableRow.configs.security)
+      const expectedTool = normalize(editableRow.configs.tool)
+      await harness.module.submitForm()
+      await flush()
+
+      const update = harness.api.updates[iteration]
+      assert.equal(update.id, scenario.id)
+      assert.deepEqual(normalize(update.payload.configs.security), expectedSecurity)
+      assert.equal(typeof update.payload.configs.security.protect_system_directories, 'boolean')
+      assert.equal(update.payload.configs.security.protect_system_directories, scenario.protectSystemDirectories)
+      assert.equal(update.payload.configs.security.audit_depth, scenario.auditDepth)
+      assert.equal(update.payload.configs.security.audit_threshold, scenario.auditThreshold)
+      assert.equal(update.payload.configs.security.audit_channel_id, modelOptionsItems[0].id)
+      assert.equal(update.payload.configs.security.audit_model_id, 'audit-model')
+      assert.deepEqual(normalize(update.payload.configs.tool), expectedTool)
+      assert.deepEqual(normalize(update.payload.configs.tool.enabled_tools), enabledTools)
+      assert.deepEqual(normalize(update.payload.configs.tool.allowed_operation_dirs), allowedOperationDirs)
+      assert.deepEqual(normalize(editableRow), originalRow)
+
+      editableRow = {
+        ...editableRow,
+        configs: normalize(update.payload.configs),
+      }
+    }
+  }
+})

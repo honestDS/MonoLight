@@ -343,6 +343,13 @@
             <div class="tab-pane-content">
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.security_settings') }}</div>
+                <el-alert
+                  :title="$t('profiles.audit_protection_notice')"
+                  type="info"
+                  :closable="false"
+                  show-icon
+                  class="mb-15"
+                ></el-alert>
                 <el-form-item :label="$t('profiles.audit_model_id')" label-width="auto">
                   <el-select
                     :model-value="auditModelKey" @update:model-value="$emit('update:auditModelKey', $event)"
@@ -372,6 +379,37 @@
                       :value="locale.value"
                     ></el-option>
                   </el-select>
+                </el-form-item>
+                <el-form-item label-width="auto">
+                  <template #label>
+                    {{ $t('profiles.audit_depth') }}
+                    <HelpTooltip :content="$t('profiles.audit_depth_hint')" />
+                  </template>
+                  <el-input-number
+                    v-model="form.configs.security.audit_depth"
+                    :min="1"
+                    :max="100"
+                    :step="1"
+                    step-strictly
+                    controls-position="right"
+                    class="full-width-input"
+                    :aria-label="$t('profiles.audit_depth')"
+                  />
+                </el-form-item>
+                <el-form-item label-width="auto">
+                  <template #label>
+                    {{ $t('profiles.protect_system_directories') }}
+                  </template>
+                  <div>
+                    <el-switch
+                      v-model="form.configs.security.protect_system_directories"
+                      :aria-label="$t('profiles.protect_system_directories')"
+                      aria-describedby="protect-system-directories-hint"
+                    ></el-switch>
+                    <div id="protect-system-directories-hint" class="help-text">
+                      {{ $t('profiles.protect_system_directories_hint') }}
+                    </div>
+                  </div>
                 </el-form-item>
                 <div class="secondary-confirmation-controls">
                   <el-form-item class="secondary-confirmation-toggle" label-width="auto">

@@ -18,8 +18,10 @@ from app.core.audit.context_budget import (
     read_token_budget,
 )
 from app.core.audit.service import (
+    AuditReadBudget,
     _call_auditor,
     _collect_file_mutation_snapshots,
+    _execute_audit_read_tool_call,
     _file_checks_are_sufficient,
     _file_snapshots_from_reads,
     _parse_results,
@@ -33,8 +35,9 @@ from app.core.audit.service import (
 from app.core.constants import DEFAULT_CHAT_MAX_TOKENS, MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_ROUND_SKIPPED
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
-from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
+from app.core.prompts import AUDIT_SUMMARY_PROMPT
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
+from app.core.utils.operation_directories import get_write_protected_dirs
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditToolConclusion
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
@@ -75,46 +78,6 @@ def test_audit_score_conclusion_uses_configured_confirmation_threshold(score, th
     assert classify_audit_score(score, threshold) == expected
 
 
-def test_audit_prompt_requires_script_content_evidence():
-    assert "MUST call read_text_file for every explicitly named script" in AUDIT_BATCH_PROMPT
-    assert "This requirement cannot be skipped" in AUDIT_BATCH_PROMPT
-    assert "decide yourself whether it executes script code" in AUDIT_BATCH_PROMPT
-    assert "does not classify commands" in AUDIT_BATCH_PROMPT
-    assert "script_execution marker" in AUDIT_BATCH_PROMPT
-    assert "credential-stealing" not in AUDIT_BATCH_PROMPT
-    assert "Ordinary read-only operations that do not read or access sensitive information are score 0" in AUDIT_BATCH_PROMPT
-    assert "Reading or accessing sensitive information is an exception" in AUDIT_BATCH_PROMPT
-    assert "Reading, extracting, accessing, copying, or externally transmitting sensitive information must score at least the supplied confirmation_threshold" in AUDIT_BATCH_PROMPT
-    assert "passwords, API keys, access tokens, cookies, private keys" in AUDIT_BATCH_PROMPT
-    assert "Clearly malicious credential theft, collection for unauthorized use, or unauthorized external transmission must still score 8-10" in AUDIT_BATCH_PROMPT
-    assert "must not be reduced because confirmation_threshold is lower" in AUDIT_BATCH_PROMPT
-    assert "Each file_checks entry must contain only original_path" in AUDIT_BATCH_PROMPT
-    assert "Do not return file content in file_checks" in AUDIT_BATCH_PROMPT
-    assert "For a successful truncated read" in AUDIT_BATCH_PROMPT
-    assert "For a failed read" in AUDIT_BATCH_PROMPT
-    assert "only when its behavior has been verified as non-high-risk" in AUDIT_BATCH_PROMPT
-    assert "clearly high-risk script behavior must be scored 8-10" in AUDIT_BATCH_PROMPT
-    assert "must never be capped at 7 merely because it is a script" in AUDIT_BATCH_PROMPT
-    assert "platform mismatch, insufficient permission, or another environmental condition may prevent them from succeeding" in AUDIT_BATCH_PROMPT
-    assert "score 7 is appropriate when the uncertainty cannot be narrowed" in AUDIT_BATCH_PROMPT
-    assert "file_tool call with operation=write, operation=edit, or operation=patch" in AUDIT_BATCH_PROMPT
-    assert "creates or modifies a script, source code, or loadable configuration" in AUDIT_BATCH_PROMPT
-    assert "must be scored 8-10" in AUDIT_BATCH_PROMPT
-    assert "prepares the file on disk and does not execute its contents" in AUDIT_BATCH_PROMPT
-    assert "Score the preparation of high-risk content" in AUDIT_BATCH_PROMPT
-    assert "argument_evidence.content" in AUDIT_BATCH_PROMPT
-    assert "argument_evidence.old_text and argument_evidence.new_text for operation=edit" in AUDIT_BATCH_PROMPT
-    assert "argument_evidence.patch for operation=patch" in AUDIT_BATCH_PROMPT
-    assert "argument_evidence.pattern for operation=grep" in AUDIT_BATCH_PROMPT
-    assert "old_text and new_text for operation=edit" in AUDIT_SUMMARY_PROMPT
-    assert "patch for operation=patch" in AUDIT_SUMMARY_PROMPT
-    assert "pattern for operation=grep" in AUDIT_SUMMARY_PROMPT
-    assert "remaining content was not reviewed" in AUDIT_BATCH_PROMPT
-    assert "You receive every complete tool call" not in AUDIT_BATCH_PROMPT
-    assert "explicit_script_paths" not in AUDIT_BATCH_PROMPT
-    assert "marked script_execution" not in AUDIT_BATCH_PROMPT
-
-
 def test_audit_report_language_defaults_and_rejects_unsupported_locale():
     assert _profile_config().security.audit_report_language == "zh"
     assert _profile_config().security.audit_confirmation_timeout_seconds == 600
@@ -140,6 +103,73 @@ def test_audit_configuration_requires_positive_integer_channel_and_nonblank_mode
     cfg.security.audit_model_id = model_id
 
     assert is_audit_configured(cfg) is expected
+
+
+def test_audit_depth_defaults_to_three_and_is_serialized_in_security():
+    cfg = ProfileConfig.model_validate({})
+
+    assert cfg.security.audit_depth == 3
+    assert cfg.model_dump()["security"]["audit_depth"] == 3
+
+
+def test_protect_system_directories_defaults_to_true_and_is_serialized_in_security():
+    cfg = ProfileConfig.model_validate({})
+
+    assert cfg.security.protect_system_directories is True
+    assert cfg.model_dump()["security"]["protect_system_directories"] is True
+
+
+@pytest.mark.parametrize("shape", ["nested", "flat", "configswrapper"])
+@pytest.mark.parametrize("value", [True, False])
+def test_protect_system_directories_is_preserved_across_supported_config_shapes(shape, value):
+    security = {"protect_system_directories": value}
+    config = {
+        "nested": {"security": security},
+        "flat": security,
+        "configswrapper": {"configs": {"security": security}},
+    }[shape]
+    cfg = ProfileConfig.model_validate(config)
+
+    assert cfg.security.protect_system_directories is value
+    dumped = cfg.model_dump()
+    assert dumped["security"]["protect_system_directories"] is value
+    assert ProfileConfig.model_validate(dumped).security.protect_system_directories is value
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false"])
+def test_protect_system_directories_rejects_non_boolean_values(value):
+    with pytest.raises(ValueError):
+        ProfileConfig.model_validate({"security": {"protect_system_directories": value}})
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"security": {"audit_depth": 6}},
+        {"audit_depth": 6},
+        {"configs": {"security": {"audit_depth": 6}}},
+    ],
+)
+def test_audit_depth_is_preserved_across_supported_config_shapes(config):
+    cfg = ProfileConfig.model_validate(config)
+
+    assert cfg.security.audit_depth == 6
+    dumped = cfg.model_dump()
+    assert dumped["security"]["audit_depth"] == 6
+    assert ProfileConfig.model_validate(dumped).security.audit_depth == 6
+
+
+@pytest.mark.parametrize("audit_depth", [1, 100])
+def test_audit_depth_accepts_configured_boundaries(audit_depth):
+    cfg = ProfileConfig.model_validate({"security": {"audit_depth": audit_depth}})
+
+    assert cfg.security.audit_depth == audit_depth
+
+
+@pytest.mark.parametrize("audit_depth", [0, -1, 101, 1.5, "3", True, None])
+def test_audit_depth_rejects_invalid_values(audit_depth):
+    with pytest.raises(ValueError):
+        ProfileConfig.model_validate({"security": {"audit_depth": audit_depth}})
 
 
 @pytest.mark.parametrize("timeout", [1, 86400])
@@ -204,7 +234,7 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
         return SimpleNamespace(id=123)
 
     async def call_auditor(*_args, **_kwargs):
-        return {"messages": []}, {"parsed": {"results": [{"tool_call_id": "call-1", "score": 5, "reason": "confirm", "file_checks": []}]}}
+        return {"messages": []}, {"parsed": {"results": [{"tool_call_id": "call-1", "score": 5, "reason": "confirm", "deny": False, "file_checks": []}]}}
 
     async def summarize_pending(*_args, **_kwargs):
         return "Confirm command", {}
@@ -460,7 +490,7 @@ async def test_mixed_tool_round_audits_only_declared_calls_and_persists_full_rou
 
     async def call_auditor(*args, **_kwargs):
         captured["request_payload"] = args[2]
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "risk-call", "score": 0, "reason": "safe", "file_checks": []}]}}
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "risk-call", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]}}
 
     async def persist(*_args, **kwargs):
         captured.update(kwargs)
@@ -597,7 +627,7 @@ async def test_persistence_failure_does_not_reaccess_expired_record(monkeypatch,
         return record
 
     async def call_auditor(*_args, **_kwargs):
-        return {"messages": []}, {"parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "file_checks": []}]}}
+        return {"messages": []}, {"parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]}}
 
     async def fail_persistence(*_args, **_kwargs):
         record.expired = True
@@ -695,20 +725,21 @@ def test_batch_result_parser_requires_exact_call_mapping_and_file_results():
     parsed = _parse_results(
         {
             "results": [
-                {"tool_call_id": "call-1", "score": 1, "reason": "safe", "file_checks": []},
-                {"tool_call_id": "call-2", "score": 5, "reason": "confirm", "file_checks": []},
+                {"tool_call_id": "call-1", "score": 1, "reason": "safe", "deny": False, "file_checks": []},
+                {"tool_call_id": "call-2", "score": 5, "reason": "confirm", "deny": False, "file_checks": []},
             ]
         },
         ["call-1", "call-2"],
     )
     assert [item["tool_call_id"] for item in parsed] == ["call-1", "call-2"]
+    assert [item["deny"] for item in parsed] == [False, False]
 
     with pytest.raises(ValueError):
         _parse_results(
             {
                 "results": [
-                    {"tool_call_id": "call-1", "score": 1, "reason": "safe", "file_checks": []},
-                    {"tool_call_id": "call-1", "score": 1, "reason": "safe", "file_checks": []},
+                    {"tool_call_id": "call-1", "score": 1, "reason": "safe", "deny": False, "file_checks": []},
+                    {"tool_call_id": "call-1", "score": 1, "reason": "safe", "deny": False, "file_checks": []},
                 ]
             },
             ["call-1", "call-2"],
@@ -716,30 +747,60 @@ def test_batch_result_parser_requires_exact_call_mapping_and_file_results():
 
     with pytest.raises(ValueError):
         _parse_results(
-            {"results": [{"tool_call_id": "call-1", "score": 1, "reason": "safe"}]},
+            {"results": [{"tool_call_id": "call-1", "score": 1, "reason": "safe", "deny": False}]},
             ["call-1"],
         )
+
+
+@pytest.mark.parametrize(
+    ("deny_value", "include_deny"),
+    [
+        (None, False),
+        (None, True),
+        (0, True),
+        (1, True),
+        ("false", True),
+        ([], True),
+        ({}, True),
+    ],
+)
+def test_batch_result_parser_rejects_missing_or_non_boolean_deny(deny_value, include_deny):
+    result = {"tool_call_id": "call-1", "score": 4, "reason": "review", "file_checks": []}
+    if include_deny:
+        result["deny"] = deny_value
+
+    with pytest.raises(ValueError):
+        _parse_results({"results": [result]}, ["call-1"])
+
+
+@pytest.mark.parametrize("deny", [False, True])
+def test_batch_result_parser_preserves_boolean_deny_without_changing_score(deny):
+    parsed = _parse_results(
+        {"results": [{"tool_call_id": "call-1", "score": 6, "reason": "review", "deny": deny, "file_checks": []}]},
+        ["call-1"],
+    )
+
+    assert parsed[0]["deny"] is deny
+    assert parsed[0]["score"] == 6
 
 
 def test_audit_file_reader_accepts_any_path_but_requires_round_tool_id(tmp_path):
     outside_file = tmp_path.parent / "audit-anywhere.txt"
     outside_file.write_text("unrestricted evidence", encoding="utf-8")
-    state = {"calls": 0}
 
-    result = _read_for_audit_sync(str(outside_file), "call-1", {"call-1"}, tmp_path, state, 100)
-    invalid = _read_for_audit_sync(str(outside_file), "other-call", {"call-1"}, tmp_path, state, 100)
+    result = _read_for_audit_sync(str(outside_file), "call-1", {"call-1"}, tmp_path, 100)
+    invalid = _read_for_audit_sync(str(outside_file), "other-call", {"call-1"}, tmp_path, 100)
 
     assert result["status"] == "ok"
     assert result["content"] == "unrestricted evidence"
     assert result["tool_call_id"] == "call-1"
     assert invalid["status"] == "invalid"
-    assert state == {"calls": 2}
 
 
 def test_file_checks_are_bound_to_the_actual_read_snapshot(tmp_path):
     source = tmp_path / "entry.txt"
     source.write_text("evidence", encoding="utf-8")
-    read = _read_for_audit_sync(str(source), "call-1", {"call-1"}, tmp_path, {"calls": 0}, 100)
+    read = _read_for_audit_sync(str(source), "call-1", {"call-1"}, tmp_path, 100)
     snapshots = _file_snapshots_from_reads([read], {"call-1"})["call-1"]
     valid_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated", "bytes_read")}
 
@@ -759,7 +820,7 @@ def test_truncated_file_check_with_matching_metadata_does_not_require_confirmati
     source = tmp_path / "entry.txt"
     source.write_text("alpha beta gamma delta", encoding="utf-8")
     tool_call = InternalToolCall(id="call-1", name="execute_shell", arguments={})
-    read = _read_for_audit_sync(str(source), "call-1", {"call-1"}, tmp_path, {"calls": 0}, 1)
+    read = _read_for_audit_sync(str(source), "call-1", {"call-1"}, tmp_path, 1)
     snapshots = _file_snapshots_from_reads([read], {"call-1"})["call-1"]
     valid_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated", "bytes_read")}
 
@@ -952,7 +1013,7 @@ async def test_call_auditor_sends_adapted_file_tool_payload(monkeypatch, tmp_pat
         return InternalResponse(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
-                content='{"results":[{"tool_call_id":"call-1","score":0,"reason":"safe","file_checks":[]}]}',
+                content='{"results":[{"tool_call_id":"call-1","score":0,"reason":"safe","deny":false,"file_checks":[]}]}',
             ),
             model="audit-model",
         )
@@ -1176,7 +1237,7 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
         return InternalResponse(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
-                content='{"results":[{"tool_call_id":"call-1","score":0,"reason":"safe","file_checks":[]}]}',
+                content='{"results":[{"tool_call_id":"call-1","score":0,"reason":"safe","deny":false,"file_checks":[]}]}',
             ),
             model="audit-model",
         )
@@ -1273,7 +1334,7 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
         return InternalResponse(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
-                content='{"results":[{"tool_call_id":"call-1","score":0,"reason":"safe","file_checks":[]},{"tool_call_id":"call-2","score":0,"reason":"safe","file_checks":[]}]}',
+                content='{"results":[{"tool_call_id":"call-1","score":0,"reason":"safe","deny":false,"file_checks":[]},{"tool_call_id":"call-2","score":0,"reason":"safe","deny":false,"file_checks":[]}]}',
             ),
             model="audit-model",
         )
@@ -1337,20 +1398,33 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
         assert result.confirmation_payload is None
 
 
-def test_audit_file_reader_enforces_token_truncation_and_call_count(monkeypatch, tmp_path):
-    import app.core.audit.service as service
-
+@pytest.mark.asyncio
+async def test_audit_file_reader_enforces_token_truncation_and_call_count(tmp_path):
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("alpha beta gamma delta", encoding="utf-8")
     second.write_text("one two three four", encoding="utf-8")
-    monkeypatch.setattr(service, "AUDIT_FILE_MAX_CALLS", 2)
-    state = {"calls": 0}
+    budget = AuditReadBudget(limit=2)
 
-    first_result = service._read_for_audit_sync(str(first), "call-1", {"call-1"}, tmp_path, state, 1)
-    second_result = service._read_for_audit_sync(str(second), "call-1", {"call-1"}, tmp_path, state, 1)
-    third_result = service._read_for_audit_sync(str(first), "call-1", {"call-1"}, tmp_path, state, 1)
+    async def read(path):
+        return await _execute_audit_read_tool_call(
+            InternalToolCall(
+                id="read-1",
+                name="read_text_file",
+                arguments={"path": str(path), "tool_call_id": "call-1"},
+            ),
+            expected_tool_call_ids={"call-1"},
+            working_directory=tmp_path,
+            read_budget=budget,
+            max_tokens=1,
+        )
 
+    first_result = await read(first)
+    second_result = await read(second)
+    third_result = await read(first)
+
+    assert first_result["status"] == "ok"
+    assert second_result["status"] == "ok"
     assert "alpha beta gamma delta".startswith(first_result["content"])
     assert "one two three four".startswith(second_result["content"])
     assert estimate_tokens(first_result["content"]) <= 1
@@ -1360,7 +1434,11 @@ def test_audit_file_reader_enforces_token_truncation_and_call_count(monkeypatch,
     assert first_result["truncated"] is True
     assert second_result["truncated"] is True
     assert third_result["status"] == "limit_exceeded"
-    assert state == {"calls": 3}
+    assert first_result["remaining_file_reads"] == 1
+    assert second_result["remaining_file_reads"] == 0
+    assert third_result["remaining_file_reads"] == 0
+    assert budget.calls == 2
+    assert budget.remaining == 0
 
 
 @pytest.mark.parametrize("file_kind", ["missing", "truncated", "non_utf8"])
@@ -1375,7 +1453,7 @@ def test_read_failure_snapshots_are_rechecked_before_confirmed_execution(tmp_pat
         target.write_bytes(b"\xff\xfe")
 
     max_tokens = 1 if file_kind == "truncated" else 100
-    read = service._read_for_audit_sync(str(target), "call-1", {"call-1"}, tmp_path, {"calls": 0}, max_tokens)
+    read = service._read_for_audit_sync(str(target), "call-1", {"call-1"}, tmp_path, max_tokens)
     snapshots = service._file_snapshots_from_reads([read], {"call-1"})["call-1"]
     assert len(snapshots) == 1
     assert snapshots[0]["absolute_path"] == str(target)
@@ -1448,7 +1526,7 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
     cfg = _profile_config()
     source = tmp_path / "evidence.txt"
     source.write_text("review me", encoding="utf-8")
-    read = _read_for_audit_sync(str(source), "call-1", {"call-1", "call-2"}, tmp_path, {"calls": 0}, 100)
+    read = _read_for_audit_sync(str(source), "call-1", {"call-1", "call-2"}, tmp_path, 100)
     captured = {}
 
     class FakeDb:
@@ -1467,8 +1545,8 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
             "file_reads": [read],
             "parsed": {
                 "results": [
-                    {"tool_call_id": "call-1", "score": 0, "reason": "review me", "file_checks": []},
-                    {"tool_call_id": "call-2", "score": 0, "reason": "safe", "file_checks": []},
+                    {"tool_call_id": "call-1", "score": 0, "reason": "review me", "deny": False, "file_checks": []},
+                    {"tool_call_id": "call-2", "score": 0, "reason": "safe", "deny": False, "file_checks": []},
                 ]
             },
         }
@@ -1539,7 +1617,7 @@ async def test_service_does_not_classify_dynamic_script_command_or_change_model_
 
     async def call_auditor(*args, **_kwargs):
         captured["request_payload"] = args[2]
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": model_score, "reason": "model assessed command", "file_checks": []}]}}
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": model_score, "reason": "model assessed command", "deny": False, "file_checks": []}]}}
 
     async def summarize_pending(*_args, **_kwargs):
         return "Model-selected confirmation summary", {}
@@ -1606,7 +1684,7 @@ async def test_service_does_not_infer_missing_script_evidence_from_command_text(
 
     async def call_auditor(*args, **_kwargs):
         captured["request_payload"] = args[2]
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "file_checks": []}]}}
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]}}
 
     async def persist(*_args, **kwargs):
         captured.update(kwargs)
@@ -1655,7 +1733,7 @@ async def test_zero_score_for_ordinary_command_stays_zero_without_summary_or_con
         return SimpleNamespace(id=125)
 
     async def call_auditor(*_args, **_kwargs):
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "read only", "file_checks": []}]}}
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "read only", "deny": False, "file_checks": []}]}}
 
     async def summarize_pending(*_args, **_kwargs):
         raise AssertionError("ordinary low-risk commands must not be summarized")
@@ -1696,6 +1774,7 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     cfg.security.audit_channel_id = 1
     cfg.security.audit_model_id = "audit-model"
     cfg.security.audit_report_language = "en"
+    cfg.tool.allowed_operation_dirs = [str(tmp_path)]
     captured = {}
     calls = []
     script = tmp_path / "test.py"
@@ -1755,26 +1834,23 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     system_prompt = calls[0]["messages"][0].content
     assert summary == "Run test.py, which deletes important.txt; execution is awaiting confirmation."
     assert len(calls) == 2
+    assert all(call["model_id"] == cfg.security.audit_model_id for call in calls)
     assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
     assert all(call["max_tokens"] == DEFAULT_CHAT_MAX_TOKENS for call in calls)
     assert all(isinstance(call["request_context_tokens"], int) and call["request_context_tokens"] >= 0 for call in calls)
     tool_payload = json.loads(calls[1]["messages"][-1].content)
-    assert "Path('important.txt').unlink()" in tool_payload["content"]
-    assert "locale code: en" in system_prompt
-    assert "entire sentence only in that language" in system_prompt
-    assert "awaiting user confirmation and has not started execution" in system_prompt
-    assert "No writes, deletions, sends, external requests, commands, or other target side effects from this round have occurred" in system_prompt
-    assert "will execute only after confirmation" in system_prompt
-    assert "Do not describe the target file, system, or external object as created" in system_prompt
-    assert "action, concrete target or path, intended effect" in system_prompt
-    assert "does not provide a script classification" in system_prompt
-    assert "what the command or target script would do after confirmation" in system_prompt
-    assert "the script itself was not executed" in system_prompt
-    assert "never reduce this to a vague phrase" in system_prompt
-    assert json.loads(calls[0]["messages"][1].content) == {
-        "working_directory": str(tmp_path.resolve()),
-        "tool_calls": [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "python test.py"}}],
-        "server_confirmation_reasons": reasons,
+    assert tool_payload["content"] == script.read_bytes().decode("utf-8")
+    assert system_prompt == AUDIT_SUMMARY_PROMPT.format(audit_report_language=cfg.security.audit_report_language)
+    summary_payload = json.loads(calls[0]["messages"][1].content)
+    assert summary_payload["working_directory"] == str(tmp_path.resolve())
+    assert summary_payload["tool_calls"] == [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "python test.py"}}]
+    assert summary_payload["server_confirmation_reasons"] == reasons
+    assert summary_payload["audit_results"] == []
+    assert summary_payload["audit_depth"] == cfg.security.audit_depth == 3
+    assert summary_payload["remaining_file_reads"] == cfg.security.audit_depth
+    assert summary_payload["directory_policy"] == {
+        "write_protected_directories": [str(directory) for directory in get_write_protected_dirs(os.getcwd())],
+        "allowed_operation_dirs": cfg.tool.allowed_operation_dirs,
     }
 
 

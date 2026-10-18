@@ -358,7 +358,7 @@ async def _read_unconfirmed_audit_state(session_factory):
 
 
 def _install_isolated_auditor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def fake_call_auditor(_db, _cfg, request_payload, _working_directory):
+    async def fake_call_auditor(_db, _cfg, request_payload, _working_directory, *, read_budget=None):
         return (
             {"messages": []},
             {
@@ -368,6 +368,7 @@ def _install_isolated_auditor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
                             "tool_call_id": item["tool_call_id"],
                             "score": 0,
                             "reason": "automatic pass",
+                            "deny": False,
                             "file_checks": [],
                         }
                         for item in request_payload["tool_calls"]

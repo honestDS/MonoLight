@@ -494,6 +494,7 @@ async def test_scheduled_task_mutation_waits_for_audit_confirmation(
                         {
                             "tool_call_id": "scheduled-audited-call",
                             "score": 9,
+                            "deny": False,
                             "reason": "Persistent scheduled action requires confirmation",
                             "file_checks": [],
                         }

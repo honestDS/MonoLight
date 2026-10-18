@@ -28,6 +28,8 @@ from sqlmodel import (
 )
 
 from app.core.constants import (
+    AUDIT_DEFAULT_DEPTH,
+    AUDIT_MAX_DEPTH,
     CANCEL_BACKGROUND_TASK_TOOL_NAME,
     ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED,
@@ -78,8 +80,10 @@ class SecurityConfig(BaseModel):
     audit_channel_id: int | None = PydanticField(None, gt=0, description="执行安全审计的渠道 ID")
     audit_model_id: str | None = PydanticField(None, description="用于审计的具体模型 ID")
     audit_threshold: int = PydanticField(5, ge=0, le=7, description="触发二次确认的风险评分阈值（1-7），0 表示关闭二次确认")
+    audit_depth: StrictInt = PydanticField(AUDIT_DEFAULT_DEPTH, ge=1, le=AUDIT_MAX_DEPTH, description="审计深度：单次审计与确认摘要合计允许的文件读取调用次数，失败和重复读取也计数，默认 3")
     audit_confirmation_timeout_seconds: StrictInt = PydanticField(600, ge=1, le=86400, description="审计二次确认卡片有效期（秒）")
     audit_report_language: str = PydanticField(DEFAULT_LOCALE, description="审计报告摘要使用的语言")
+    protect_system_directories: StrictBool = PydanticField(True, description="是否启用系统目录写保护")
 
     @model_validator(mode="before")
     @classmethod
@@ -254,9 +258,11 @@ class ProfileConfig(BaseModel):
                 "audit_channel_id",
                 "audit_model_id",
                 "audit_threshold",
+                "audit_depth",
                 "audit_confirmation_timeout_seconds",
                 "audit_confirmation_timeout_minutes",
                 "audit_report_language",
+                "protect_system_directories",
             ],
             "tool": [
                 "tool_timeout",
@@ -368,8 +374,10 @@ PROFILE_EXAMPLE = {
             "audit_channel_id": 1,
             "audit_model_id": "gemini-3-flash-preview",
             "audit_threshold": 5,
+            "audit_depth": AUDIT_DEFAULT_DEPTH,
             "audit_confirmation_timeout_seconds": 600,
             "audit_report_language": "zh",
+            "protect_system_directories": True,
         },
         "tool": {
             "tool_timeout": 30,

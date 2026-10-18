@@ -1645,6 +1645,7 @@ async def test_stop_during_preparing_audit_discards_delayed_result_without_confi
                             "tool_call_id": tool_call.id,
                             "score": score,
                             "reason": "delayed audit",
+                            "deny": False,
                             "file_checks": [],
                         }
                     ]

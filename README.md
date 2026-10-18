@@ -73,10 +73,6 @@ MonoLight is designed for multi-turn tool use, context summarization, and contin
 
 Image, audio, and video understanding, as well as image generation, are optional capabilities. They are only required when the corresponding features are used.
 
-## Known Issues
-
-- The audit system only reviews the script directly executed in the current operation. It does not recursively track and audit other scripts that the entry script indirectly calls, imports, or launches. Recursive auditing has no clear natural boundary and can cause very large token consumption for large projects, so chained auditing is currently unsupported.
-
 ## 2. Interaction Entry Points
 
 - **Dashboard**: A modern management interface built with Vue 3 and Element Plus for smooth configuration and interaction.

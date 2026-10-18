@@ -604,6 +604,16 @@ class CRUDTerminalControlCommand:
         result = await db.execute(select(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id == terminal_session_id).order_by(TerminalControlCommand.id.asc()))
         return list(result.scalars().all())
 
+    async def list_recent_by_session(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        *,
+        limit: int,
+    ) -> list[TerminalControlCommand]:
+        result = await db.execute(select(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id == terminal_session_id).order_by(TerminalControlCommand.id.desc()).limit(limit).execution_options(populate_existing=True))
+        return list(result.scalars().all())
+
     async def claim_next(
         self,
         db: AsyncSession,

@@ -25,6 +25,7 @@ from app.core.constants import (
     ERR_AUDIT_CONFIG_MISSING,
     ERR_AUDIT_FILE_CHECKS_INVALID,
     ERR_AUDIT_FILE_EVIDENCE_INSUFFICIENT,
+    ERR_AUDIT_FILE_READ_LIMIT_EXCEEDED,
     ERR_AUDIT_FILE_ROUNDS_EXCEEDED,
     ERR_AUDIT_PERSISTENCE_FAILED_STOP,
     ERR_AUDIT_REASON_INVALID,
@@ -37,6 +38,7 @@ from app.core.constants import (
     ERR_AUDIT_SCORE_INVALID,
     ERR_AUDIT_SERVICE_FAILED_STOP,
     ERR_TOOL_SHELL_BLACKLISTED,
+    ERR_TOOL_WRITE_PROTECTED_DIRECTORY,
     FILE_TOOL_NAME,
     MSG_AUDIT_CONFIRMATION_IM,
     MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK,
@@ -46,6 +48,7 @@ from app.core.constants import (
     MSG_AUDIT_WAITING_CONFIRMATION,
     READ_TEXT_FILE_TOOL_NAME,
     SHELL_TOOL_NAME,
+    TERMINAL_WRITE_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel.channel import channel_crud
@@ -53,7 +56,8 @@ from app.core.crud.session.reply_work_item import ensure_session_reply_work_clai
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
-from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
+from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_STANDARD_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
+from app.core.terminal.manager import terminal_session_manager
 from app.core.tools import tool_requires_audit
 from app.core.tools.file_tool import resolve_file_tool_target_path
 from app.core.tools.read_text_file import read_text_file
@@ -62,7 +66,7 @@ from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
-from app.core.utils.operation_directories import get_allowed_operation_dirs
+from app.core.utils.operation_directories import get_allowed_operation_dirs, get_write_protected_dirs, is_path_write_protected
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConclusion
 from app.models.channel import ModelUsage, resolve_model_protocol
@@ -72,8 +76,21 @@ from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
 
-AUDIT_FILE_MAX_CALLS = 10
-AUDIT_FILE_MAX_ROUNDS = 4
+
+@dataclass(slots=True)
+class AuditReadBudget:
+    limit: int
+    calls: int = 0
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.limit - self.calls)
+
+    def consume(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.calls += 1
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +136,39 @@ def _round_conflict_ids(
         if len(call_ids) > 1:
             conflicts.update(call_ids)
     return conflicts
+
+
+def _collect_local_block_reasons(
+    tool_calls: list[InternalToolCall],
+    working_directory: Path,
+    allowed_operation_dirs: list[str],
+    *,
+    protect_system_directories: bool = True,
+) -> dict[str, str]:
+    conflict_ids = _round_conflict_ids(tool_calls, working_directory, allowed_operation_dirs)
+    if conflict_ids:
+        return {tool_call.id: t(ERR_AUDIT_ROUND_FILE_CONFLICT) for tool_call in tool_calls if tool_call.id in conflict_ids}
+
+    for tool_call in tool_calls:
+        if tool_call.name != SHELL_TOOL_NAME:
+            continue
+        blacklisted = ShellExecutor.check_blacklist(str((tool_call.arguments or {}).get("command", "")))
+        if blacklisted:
+            return {tool_call.id: t(ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted)}
+
+    reasons: dict[str, str] = {}
+    for tool_call in tool_calls:
+        arguments = tool_call.arguments or {}
+        if tool_call.name != FILE_TOOL_NAME or arguments.get("operation") not in {"write", "edit", "patch"}:
+            continue
+        original_path = arguments.get("path")
+        try:
+            target_path = resolve_file_tool_target_path(original_path, working_directory, allowed_operation_dirs)
+        except (TypeError, ValueError):
+            continue
+        if protect_system_directories and is_path_write_protected(working_directory / Path(original_path), os.getcwd()):
+            reasons[tool_call.id] = t(ERR_TOOL_WRITE_PROTECTED_DIRECTORY, path=str(target_path))
+    return reasons
 
 
 def _collect_file_mutation_snapshots(
@@ -175,12 +225,8 @@ def _read_for_audit_sync(
     original_tool_call_id: str,
     expected_tool_call_ids: set[str],
     working_directory: Path,
-    read_state: dict[str, int],
     max_tokens: int,
 ) -> dict[str, Any]:
-    read_state["calls"] += 1
-    if read_state["calls"] > AUDIT_FILE_MAX_CALLS:
-        return {"path": path, "tool_call_id": original_tool_call_id, "status": "limit_exceeded", "error": "audit file call limit exceeded"}
     if original_tool_call_id not in expected_tool_call_ids:
         return {"path": path, "tool_call_id": original_tool_call_id, "status": "invalid", "error": "tool_call_id does not belong to this audit round"}
     # 审计 LLM 必须拥有系统内最高且高于其他 LLM 的文件读取权限，否则可能因证据不可达而无法正常审计。
@@ -193,26 +239,35 @@ async def _execute_audit_read_tool_call(
     *,
     expected_tool_call_ids: set[str],
     working_directory: Path,
-    read_state: dict[str, int],
+    read_budget: AuditReadBudget,
     max_tokens: int,
 ) -> dict[str, Any]:
+    if not read_budget.consume():
+        return {
+            "path": tool_call.arguments.get("path"),
+            "tool_call_id": tool_call.arguments.get("tool_call_id"),
+            "status": "limit_exceeded",
+            "error": t(ERR_AUDIT_FILE_READ_LIMIT_EXCEEDED),
+            "remaining_file_reads": read_budget.remaining,
+        }
     if tool_call.name != AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["name"]:
-        return {"status": "denied", "error": f"only {READ_TEXT_FILE_TOOL_NAME} is available"}
+        return {"status": "denied", "error": f"only {READ_TEXT_FILE_TOOL_NAME} is available", "remaining_file_reads": read_budget.remaining}
     requested_path = tool_call.arguments.get("path")
     original_tool_call_id = tool_call.arguments.get("tool_call_id")
     if not isinstance(requested_path, str) or not requested_path or not isinstance(original_tool_call_id, str) or not original_tool_call_id:
-        return {"status": "invalid", "error": "path and tool_call_id are required"}
+        return {"status": "invalid", "error": "path and tool_call_id are required", "remaining_file_reads": read_budget.remaining}
     arguments_summary = serialize_execution_summary(tool_call.arguments)
     logger.bind(audit_llm_tool_call=True).info(t("LOG_AUDIT_LLM_TOOL_CALL", tool_name=tool_call.name, args=arguments_summary))
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         _read_for_audit_sync,
         requested_path,
         original_tool_call_id,
         expected_tool_call_ids,
         working_directory,
-        read_state,
         max_tokens,
     )
+    result["remaining_file_reads"] = read_budget.remaining
+    return result
 
 
 def _file_snapshots_from_reads(file_reads: list[dict[str, Any]], expected_tool_call_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
@@ -290,7 +345,12 @@ def _extract_json_object(content: str | None) -> dict[str, Any]:
     return value
 
 
-def _parse_results(payload: dict[str, Any], expected_ids: list[str]) -> list[dict[str, Any]]:
+def _parse_results(
+    payload: dict[str, Any],
+    expected_ids: list[str],
+    *,
+    protect_system_directories: bool = True,
+) -> list[dict[str, Any]]:
     raw_results = payload.get("results")
     if not isinstance(raw_results, list) or len(raw_results) != len(expected_ids):
         raise ValueError(t(ERR_AUDIT_RESULT_COUNT_MISMATCH))
@@ -302,6 +362,9 @@ def _parse_results(payload: dict[str, Any], expected_ids: list[str]) -> list[dic
         score = item.get("score")
         reason = item.get("reason")
         file_checks = item.get("file_checks")
+        deny = item.get("deny")
+        if protect_system_directories and not isinstance(deny, bool):
+            raise ValueError(t(ERR_AUDIT_RESULT_INVALID))
         if call_id not in expected_ids or call_id in parsed:
             raise ValueError(t(ERR_AUDIT_RESULT_MAPPING_MISMATCH))
         if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 10:
@@ -314,6 +377,7 @@ def _parse_results(payload: dict[str, Any], expected_ids: list[str]) -> list[dic
             "tool_call_id": call_id,
             "score": score,
             "reason": reason.strip(),
+            "deny": deny if protect_system_directories else False,
             "file_checks": file_checks,
         }
     if set(parsed) != set(expected_ids):
@@ -386,11 +450,14 @@ def _result_message(tool_call: InternalToolCall, status: AuditRecordStatus, reas
     )
 
 
-async def _call_auditor(
+async def _run_audit_model(
     db: AsyncSession,
     cfg: ProfileConfig,
-    request_payload: dict[str, Any],
+    system_prompt: str,
+    payload: dict[str, Any],
     working_directory: Path,
+    expected_tool_call_ids: set[str],
+    read_budget: AuditReadBudget,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     channel_id = cfg.security.audit_channel_id
     model_id = cfg.security.audit_model_id
@@ -407,27 +474,36 @@ async def _call_auditor(
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(t(ERR_AUDIT_CHANNEL_UNAVAILABLE)) from exc
     chat_params = resolve_chat_params(model_entry, cfg.channel.chat_channel)
+    directory_policy = {"allowed_operation_dirs": get_allowed_operation_dirs(cfg)}
+    if cfg.security.protect_system_directories:
+        directory_policy["write_protected_directories"] = [str(directory) for directory in await asyncio.to_thread(get_write_protected_dirs, os.getcwd())]
+    model_payload = {
+        **payload,
+        "audit_depth": read_budget.limit,
+        "remaining_file_reads": read_budget.remaining,
+        "directory_policy": directory_policy,
+    }
     audit_payload = fit_file_tool_payload_to_context(
-        AUDIT_BATCH_PROMPT,
-        request_payload,
+        system_prompt,
+        model_payload,
         chat_params,
         model_id=model_id,
         protocol=protocol,
     )
     messages = [
-        InternalMessage(role=MessageRole.SYSTEM, content=AUDIT_BATCH_PROMPT),
+        InternalMessage(role=MessageRole.SYSTEM, content=system_prompt),
         InternalMessage(role=MessageRole.USER, content=json.dumps(audit_payload, ensure_ascii=False)),
     ]
-    expected_tool_call_ids = {item.get("tool_call_id") for item in request_payload.get("tool_calls", []) if isinstance(item, dict) and isinstance(item.get("tool_call_id"), str)}
-    read_state = {"calls": 0}
     read_results: list[dict[str, Any]] = []
-    for _round_index in range(AUDIT_FILE_MAX_ROUNDS):
+    max_rounds = read_budget.remaining + 1
+    for _round_index in range(max_rounds):
         await ensure_session_reply_work_claim(db)
         await db.commit()
-        _, request_context_tokens = read_token_budget(
-            messages,
-            chat_params,
+        active_tools = [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA] if read_budget.remaining > 0 else None
+        request_context_tokens = LLMClient.estimate_request_input_tokens_locally(
             model_id=model_id,
+            messages=messages,
+            tools=active_tools,
             protocol=protocol,
         )
         response = await LLMClient.generate(
@@ -441,47 +517,74 @@ async def _call_auditor(
             max_tokens=chat_params["max_tokens"],
             timeout=chat_params["chat_timeout"],
             protocol=protocol,
-            tools=[AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
+            tools=active_tools,
             request_context_tokens=request_context_tokens,
             http_proxy=get_channel_http_proxy(channel),
             custom_headers=get_model_custom_headers(model_entry),
         )
-        if not response.message.tool_calls:
-            parsed = _extract_json_object(response.message.content)
-            return (
-                {"messages": [item.model_dump(mode="json", exclude_none=True) for item in messages]},
-                {
-                    "content": response.message.content,
-                    "parsed": parsed,
-                    "file_reads": read_results,
-                },
-            )
-        messages.append(response.message)
-        for tool_call in response.message.tool_calls:
-            read_max_tokens, _ = read_token_budget(
-                messages,
-                chat_params,
-                model_id=model_id,
-                protocol=protocol,
-            )
-            read_result = await _execute_audit_read_tool_call(
-                tool_call,
-                expected_tool_call_ids=expected_tool_call_ids,
-                working_directory=working_directory,
-                read_state=read_state,
-                max_tokens=read_max_tokens,
-            )
-            read_result = fit_read_result_to_context(
-                messages,
-                tool_call.id,
-                read_result,
-                chat_params,
-                model_id=model_id,
-                protocol=protocol,
-            )
-            read_results.append(read_result)
-            messages.append(build_read_tool_message(tool_call.id, read_result))
+        if response.message.tool_calls:
+            if read_budget.remaining <= 0:
+                raise RuntimeError(t(ERR_AUDIT_FILE_ROUNDS_EXCEEDED))
+            messages.append(response.message)
+            for tool_call in response.message.tool_calls:
+                read_max_tokens, _ = read_token_budget(
+                    messages,
+                    chat_params,
+                    model_id=model_id,
+                    protocol=protocol,
+                )
+                read_result = await _execute_audit_read_tool_call(
+                    tool_call,
+                    expected_tool_call_ids=expected_tool_call_ids,
+                    working_directory=working_directory,
+                    read_budget=read_budget,
+                    max_tokens=read_max_tokens,
+                )
+                read_result = fit_read_result_to_context(
+                    messages,
+                    tool_call.id,
+                    read_result,
+                    chat_params,
+                    model_id=model_id,
+                    protocol=protocol,
+                )
+                read_results.append(read_result)
+                messages.append(build_read_tool_message(tool_call.id, read_result))
+            continue
+        if not (response.message.content or "").strip():
+            raise RuntimeError(t(ERR_AUDIT_FILE_ROUNDS_EXCEEDED))
+        return (
+            {"messages": [item.model_dump(mode="json", exclude_none=True) for item in messages]},
+            {
+                "content": response.message.content,
+                "file_reads": read_results,
+            },
+        )
     raise RuntimeError(t(ERR_AUDIT_FILE_ROUNDS_EXCEEDED))
+
+
+async def _call_auditor(
+    db: AsyncSession,
+    cfg: ProfileConfig,
+    request_payload: dict[str, Any],
+    working_directory: Path,
+    *,
+    read_budget: AuditReadBudget | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if read_budget is None:
+        read_budget = AuditReadBudget(limit=cfg.security.audit_depth)
+    expected_tool_call_ids = {item.get("tool_call_id") for item in request_payload.get("tool_calls", []) if isinstance(item, dict) and isinstance(item.get("tool_call_id"), str)}
+    request_context, response_context = await _run_audit_model(
+        db,
+        cfg,
+        AUDIT_BATCH_PROMPT if cfg.security.protect_system_directories else AUDIT_STANDARD_BATCH_PROMPT,
+        request_payload,
+        working_directory,
+        expected_tool_call_ids,
+        read_budget,
+    )
+    response_context["parsed"] = _extract_json_object(response_context.get("content"))
+    return request_context, response_context
 
 
 async def _summarize_pending(
@@ -490,102 +593,39 @@ async def _summarize_pending(
     tool_calls: list[dict[str, Any]],
     server_confirmation_reasons: dict[str, list[dict[str, Any]]] | None = None,
     working_directory: str | Path | None = None,
+    *,
+    read_budget: AuditReadBudget | None = None,
+    audit_results: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     fallback_summary = t(MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK, locale=cfg.security.audit_report_language)
-    channel = await channel_crud.get(db, cfg.security.audit_channel_id)
-    if channel is None or not channel.is_active or not cfg.security.audit_model_id:
-        return fallback_summary, {"fallback": True}
-    model_entry = get_model_entry(channel, cfg.security.audit_model_id, ModelUsage.CHAT.value)
-    if model_entry is None:
-        return fallback_summary, {"fallback": True}
-    try:
-        protocol = resolve_model_protocol(model_entry)
-    except (KeyError, TypeError, ValueError):
-        return fallback_summary, {"fallback": True}
-    chat_params = resolve_chat_params(model_entry, cfg.channel.chat_channel)
     workdir = Path(working_directory or os.getcwd()).resolve(strict=False)
     summary_payload = {
         "working_directory": str(workdir),
         "tool_calls": tool_calls,
         "server_confirmation_reasons": server_confirmation_reasons or {},
+        "audit_results": audit_results or [],
     }
     summary_prompt = AUDIT_SUMMARY_PROMPT.format(audit_report_language=cfg.security.audit_report_language)
-    audit_payload = fit_file_tool_payload_to_context(
-        summary_prompt,
-        summary_payload,
-        chat_params,
-        model_id=cfg.security.audit_model_id,
-        protocol=protocol,
-    )
-    messages = [
-        InternalMessage(
-            role=MessageRole.SYSTEM,
-            content=summary_prompt,
-        ),
-        InternalMessage(
-            role=MessageRole.USER,
-            content=json.dumps(audit_payload, ensure_ascii=False),
-        ),
-    ]
     expected_tool_call_ids = {item.get("id") for item in tool_calls if isinstance(item, dict) and isinstance(item.get("id"), str)}
-    read_state = {"calls": 0}
-    read_results: list[dict[str, Any]] = []
+    if read_budget is None:
+        read_budget = AuditReadBudget(limit=cfg.security.audit_depth)
     try:
-        for _round_index in range(AUDIT_FILE_MAX_ROUNDS):
-            await ensure_session_reply_work_claim(db)
-            await db.commit()
-            _, request_context_tokens = read_token_budget(
-                messages,
-                chat_params,
-                model_id=cfg.security.audit_model_id,
-                protocol=protocol,
-            )
-            response = await LLMClient.generate(
-                api_key=channel.get_decrypted_api_key(),
-                base_url=channel.base_url,
-                model_id=cfg.security.audit_model_id,
-                messages=messages,
-                temperature=chat_params["temperature"],
-                top_p=chat_params["top_p"],
-                reasoning_effort=chat_params.get("reasoning_effort"),
-                max_tokens=chat_params["max_tokens"],
-                timeout=chat_params["chat_timeout"],
-                protocol=protocol,
-                tools=[AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
-                request_context_tokens=request_context_tokens,
-                http_proxy=get_channel_http_proxy(channel),
-                custom_headers=get_model_custom_headers(model_entry),
-            )
-            if not response.message.tool_calls:
-                summary = (response.message.content or "").strip()
-                if summary:
-                    return summary[:500], {"request": [item.model_dump(mode="json", exclude_none=True) for item in messages], "response": summary, "file_reads": read_results}
-                break
-            messages.append(response.message)
-            for tool_call in response.message.tool_calls:
-                read_max_tokens, _ = read_token_budget(
-                    messages,
-                    chat_params,
-                    model_id=cfg.security.audit_model_id,
-                    protocol=protocol,
-                )
-                read_result = await _execute_audit_read_tool_call(
-                    tool_call,
-                    expected_tool_call_ids=expected_tool_call_ids,
-                    working_directory=workdir,
-                    read_state=read_state,
-                    max_tokens=read_max_tokens,
-                )
-                read_result = fit_read_result_to_context(
-                    messages,
-                    tool_call.id,
-                    read_result,
-                    chat_params,
-                    model_id=cfg.security.audit_model_id,
-                    protocol=protocol,
-                )
-                read_results.append(read_result)
-                messages.append(build_read_tool_message(tool_call.id, read_result))
+        request_context, response_context = await _run_audit_model(
+            db,
+            cfg,
+            summary_prompt,
+            summary_payload,
+            workdir,
+            expected_tool_call_ids,
+            read_budget,
+        )
+        summary = (response_context.get("content") or "").strip()
+        if summary:
+            return summary[:500], {
+                "request": request_context["messages"],
+                "response": summary,
+                "file_reads": response_context["file_reads"],
+            }
     except Exception as exc:
         return fallback_summary, {"fallback": True, "error": str(exc)}
     return fallback_summary, {"fallback": True}
@@ -613,6 +653,7 @@ async def audit_tool_round(
     audited_tool_call_id_set = set(audited_tool_call_ids)
     await cancel_confirmation_by_session(db, uid=uid, session_id=session_id, locale=cfg.security.audit_report_language)
     workdir = Path(working_directory or get_user_temp_dir(os.getcwd(), uid)).resolve(strict=False)
+    read_budget = AuditReadBudget(limit=cfg.security.audit_depth)
     allowed_operation_dirs = get_allowed_operation_dirs(cfg)
     payload_calls = _tool_payload(tool_calls)
     file_mutation_snapshots = await asyncio.to_thread(
@@ -676,44 +717,51 @@ async def audit_tool_round(
         read_file_snapshots: dict[str, list[dict[str, Any]]] = {}
         high_risk_override = False
         try:
-            conflict_ids = _round_conflict_ids(audited_tool_calls, workdir, allowed_operation_dirs)
-            if conflict_ids:
-                server_blocked_tool_call_ids.update(conflict_ids)
-                response_context = {"local_block": "same-round file write conflict"}
+            local_block_reasons = await asyncio.to_thread(
+                _collect_local_block_reasons,
+                audited_tool_calls,
+                workdir,
+                allowed_operation_dirs,
+                protect_system_directories=cfg.security.protect_system_directories,
+            )
+            if local_block_reasons:
+                server_blocked_tool_call_ids.update(local_block_reasons)
+                response_context = {"local_block": "; ".join(local_block_reasons.values())}
                 audited_results = [
                     {
                         "tool_call_id": call.id,
-                        "score": 10 if call.id in conflict_ids else 0,
-                        "reason": t(ERR_AUDIT_ROUND_FILE_CONFLICT) if call.id in conflict_ids else t(MSG_AUDIT_ROUND_SKIPPED),
+                        "score": 10 if call.id in local_block_reasons else 0,
+                        "reason": local_block_reasons.get(call.id, t(MSG_AUDIT_ROUND_SKIPPED)),
                         "file_checks": [],
                     }
                     for call in audited_tool_calls
                 ]
             else:
-                for item in audited_tool_calls:
-                    if item.name == SHELL_TOOL_NAME:
-                        blacklisted = ShellExecutor.check_blacklist(str((item.arguments or {}).get("command", "")))
-                        if blacklisted:
-                            server_blocked_tool_call_ids.add(item.id)
-                            response_context = {"local_block": blacklisted}
-                            audited_results = [
-                                {
-                                    "tool_call_id": call.id,
-                                    "score": 10 if call.id == item.id else 0,
-                                    "reason": t(ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted) if call.id == item.id else t(MSG_AUDIT_ROUND_SKIPPED),
-                                    "file_checks": [],
-                                }
-                                for call in audited_tool_calls
-                            ]
-                            break
-                else:
-                    request_context, response_context = await _call_auditor(
-                        db,
-                        cfg,
-                        request_payload,
-                        workdir,
-                    )
-                    audited_results = _parse_results(response_context["parsed"], audited_tool_call_ids)
+                terminal_contexts: dict[str, dict[str, Any]] = {}
+                for tool_call_payload in request_payload["tool_calls"]:
+                    if tool_call_payload["tool_name"] != TERMINAL_WRITE_TOOL_NAME:
+                        continue
+                    terminal_session_id = tool_call_payload["arguments"].get("terminal_session_id")
+                    if terminal_session_id not in terminal_contexts:
+                        terminal_contexts[terminal_session_id] = await terminal_session_manager.get_audit_context(
+                            db,
+                            terminal_session_id,
+                            uid,
+                            session_id,
+                        )
+                    tool_call_payload["terminal_context"] = terminal_contexts[terminal_session_id]
+                request_context, response_context = await _call_auditor(
+                    db,
+                    cfg,
+                    request_payload,
+                    workdir,
+                    read_budget=read_budget,
+                )
+                audited_results = _parse_results(
+                    response_context["parsed"],
+                    audited_tool_call_ids,
+                    protect_system_directories=cfg.security.protect_system_directories,
+                )
             audited_results_by_id = {item["tool_call_id"]: item for item in audited_results}
             parsed_results = [
                 audited_results_by_id.get(
@@ -766,7 +814,7 @@ async def audit_tool_round(
                     server_confirmation_reasons[tool_call.id] = local_reasons
                 if local_reasons:
                     result["reason"] = f"{result['reason']}; {'; '.join(item['message'] for item in local_reasons)}"
-                if tool_call.id in server_blocked_tool_call_ids:
+                if tool_call.id in server_blocked_tool_call_ids or result.get("deny", False):
                     conclusion = AuditToolConclusion.BLOCKED
                 else:
                     conclusion = classify_audit_score(result["score"], cfg.security.audit_threshold)
@@ -787,12 +835,19 @@ async def audit_tool_round(
         summary_context = None
         expires_at = None
         if status == AuditRecordStatus.PENDING:
+            summary_tool_calls = _tool_payload(audited_tool_calls)
+            for tool_call_payload in summary_tool_calls:
+                if tool_call_payload["name"] == TERMINAL_WRITE_TOOL_NAME:
+                    terminal_session_id = tool_call_payload["arguments"].get("terminal_session_id")
+                    tool_call_payload["terminal_context"] = terminal_contexts[terminal_session_id]
             intent_summary, summary_context = await _summarize_pending(
                 db,
                 cfg,
-                _tool_payload(audited_tool_calls),
+                summary_tool_calls,
                 server_confirmation_reasons,
                 working_directory=workdir,
+                read_budget=read_budget,
+                audit_results=parsed_results,
             )
             expires_at = get_local_time() + timedelta(seconds=cfg.security.audit_confirmation_timeout_seconds)
 
@@ -817,6 +872,8 @@ async def audit_tool_round(
             "audit_record_id": audit_record_id,
             "source_assistant_message_id": source_assistant_message_id,
             "round_arguments_hash": snapshot.round_sha256,
+            "audit_depth": read_budget.limit,
+            "file_read_calls": read_budget.calls,
             "tool_calls": payload_calls,
             "audited_tool_call_ids": audited_tool_call_ids,
             "server_confirmation_reasons": server_confirmation_reasons,
