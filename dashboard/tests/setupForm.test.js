@@ -4,8 +4,20 @@ import test from 'node:test'
 import { defaultModelEntry } from '../src/constants/index.js'
 import {
   addSetupDetectedModels,
-  buildSetupRequest
+  buildSetupRequest,
+  validateSetupProtocol
 } from '../src/utils/setupForm.js'
+import {
+  getModelProtocolLabel,
+  SETUP_PROTOCOLS
+} from '../src/utils/channelModelMetadata.js'
+
+const chatProtocols = [
+  'OPENAI',
+  'OPENAI_RESPONSES',
+  'DEEPSEEK',
+  'DEEPSEEK_RESPONSES'
+]
 
 const createModel = (overrides = {}) => ({
   ...defaultModelEntry(),
@@ -262,4 +274,66 @@ test('returns no models when model_ids is missing, non-array, or empty', () => {
       `${name} model_ids should not fall back to flat fields`
     )
   }
+})
+
+test('accepts each supported chat protocol during setup validation', () => {
+  for (const protocol of chatProtocols) {
+    assert.equal(validateSetupProtocol(protocol), null)
+  }
+})
+
+test('serializes setup protocols unchanged without mutating the form', () => {
+  const form = {
+    channel: {
+      model_ids: chatProtocols.map(protocol => ({
+        model_id: protocol,
+        protocol
+      }))
+    }
+  }
+  const before = structuredClone(form)
+
+  const request = buildSetupRequest(form)
+
+  assert.deepEqual(request.channel.model_ids.map(model => model.protocol), chatProtocols)
+  assert.deepEqual(form, before)
+})
+
+test('exposes only immutable chat setup protocols', () => {
+  assert.deepEqual(SETUP_PROTOCOLS, chatProtocols)
+  assert.equal(Object.isFrozen(SETUP_PROTOCOLS), true)
+  for (const protocol of ['OPENAI_EMBEDDING', 'OPENAI_IMAGE', 'COHERE_RERANK']) {
+    assert.equal(SETUP_PROTOCOLS.includes(protocol), false)
+  }
+  assert.throws(() => SETUP_PROTOCOLS.push('OPENAI_IMAGE'), TypeError)
+  assert.deepEqual(SETUP_PROTOCOLS, chatProtocols)
+})
+
+test('returns labels for every supported model protocol', () => {
+  const labels = [
+    ['OPENAI', 'openai-completions'],
+    ['OPENAI_RESPONSES', 'openai-responses'],
+    ['DEEPSEEK', 'deepseek-completions'],
+    ['DEEPSEEK_RESPONSES', 'deepseek-responses'],
+    ['OPENAI_EMBEDDING', 'openai-embedding'],
+    ['OPENAI_IMAGE', 'openai-image'],
+    ['COHERE_RERANK', 'cohere-rerank']
+  ]
+
+  for (const [protocol, label] of labels) {
+    assert.equal(getModelProtocolLabel(protocol), label)
+  }
+})
+
+test('returns unknown and empty protocol values unchanged', () => {
+  for (const value of ['UNKNOWN_PROTOCOL', null, undefined, '']) {
+    assert.strictEqual(getModelProtocolLabel(value), value)
+  }
+})
+
+test('returns the required validation error for an unsupported protocol', () => {
+  assert.deepEqual(validateSetupProtocol('OPENAI_IMAGE'), {
+    key: 'required',
+    params: {}
+  })
 })

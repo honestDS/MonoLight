@@ -55,6 +55,7 @@ import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import ChannelFormDialog from '../components/ChannelFormDialog.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
+import { getModelProtocolLabel } from '../utils/channelModelMetadata.js'
 
 const { t } = useI18n()
 
@@ -65,17 +66,6 @@ const currentPage = ref(1)
 const pageSize = ref(10)
 const dialogVisible = ref(false)
 const selectedChannel = ref(null)
-
-const getModelProtocolLabel = (value) => {
-  const map = {
-    OPENAI: 'openai-completions',
-    OPENAI_RESPONSES: 'openai-responses',
-    OPENAI_EMBEDDING: 'openai-embedding',
-    OPENAI_IMAGE: 'openai-image',
-    COHERE_RERANK: 'cohere-rerank'
-  }
-  return map[value] || value
-}
 
 const getModelUsageLabel = (value) => {
   const map = {

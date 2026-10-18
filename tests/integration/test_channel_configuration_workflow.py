@@ -106,10 +106,15 @@ def _assert_standard(response: httpx.Response, code: int) -> dict:
     return payload
 
 
+@pytest.mark.parametrize(
+    "protocol",
+    ["OPENAI_RESPONSES", "DEEPSEEK", "DEEPSEEK_RESPONSES"],
+)
 @pytest.mark.asyncio
 async def test_channel_configuration_enforces_usage_protocol_contract(
     channel_config_app: FastAPI,
     channel_config_db: AsyncSession,
+    protocol: str,
 ) -> None:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=channel_config_app),
@@ -117,10 +122,12 @@ async def test_channel_configuration_enforces_usage_protocol_contract(
     ) as client:
         channel_types = _assert_standard(await client.get("/api/v1/channels/types"), 200)
         assert channel_types["data"]["model_protocols"]["IMAGE_GENERATION"] == ["OPENAI_IMAGE"]
-        assert "OPENAI_RESPONSES" in channel_types["data"]["model_protocols"]["CHAT"]
+        chat_protocols = channel_types["data"]["model_protocols"]["CHAT"]
+        assert "OPENAI_RESPONSES" in chat_protocols
+        assert {"DEEPSEEK", "DEEPSEEK_RESPONSES"} <= set(chat_protocols)
 
         chat_model = _chat_model("chat-model")
-        chat_model["protocol"] = "OPENAI_RESPONSES"
+        chat_model["protocol"] = protocol
         image_model = {
             "model_id": "image-model",
             "usage": "IMAGE_GENERATION",
@@ -150,13 +157,13 @@ async def test_channel_configuration_enforces_usage_protocol_contract(
             200,
         )
         assert [(item["usage"], item["protocol"]) for item in persisted["data"]["model_ids"]] == [
-            ("CHAT", "OPENAI_RESPONSES"),
+            ("CHAT", protocol),
             ("IMAGE_GENERATION", "OPENAI_IMAGE"),
         ]
         persisted_channel = await channel_crud.get(channel_config_db, channel_id)
         assert persisted_channel is not None
         assert [(item["usage"], item["protocol"]) for item in persisted_channel.model_ids] == [
-            ("CHAT", "OPENAI_RESPONSES"),
+            ("CHAT", protocol),
             ("IMAGE_GENERATION", "OPENAI_IMAGE"),
         ]
 
@@ -177,13 +184,13 @@ async def test_channel_configuration_enforces_usage_protocol_contract(
             200,
         )
         assert [(item["usage"], item["protocol"]) for item in unchanged["data"]["model_ids"]] == [
-            ("CHAT", "OPENAI_RESPONSES"),
+            ("CHAT", protocol),
             ("IMAGE_GENERATION", "OPENAI_IMAGE"),
         ]
         persisted_channel = await channel_crud.get(channel_config_db, channel_id)
         assert persisted_channel is not None
         assert [(item["usage"], item["protocol"]) for item in persisted_channel.model_ids] == [
-            ("CHAT", "OPENAI_RESPONSES"),
+            ("CHAT", protocol),
             ("IMAGE_GENERATION", "OPENAI_IMAGE"),
         ]
 

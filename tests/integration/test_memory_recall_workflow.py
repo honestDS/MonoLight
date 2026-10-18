@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -44,6 +45,7 @@ from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
+from app.transformers import http_transport
 from tests.database_support import clone_sqlite_schema
 
 
@@ -344,6 +346,8 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     }
     history_user_content = "I prefer VS Code as my editor for Python projects."
     history_assistant_text = "Noted your VS Code editor preference."
+    preserved_reasoning_content = "PRESERVED_INTERNAL_REASONING"
+    preserved_provider_metadata = {"source": {"marker": "PRESERVED_PROVIDER_METADATA"}}
     summary_content = '<conversation_summary through_message_id="41">\nEarlier background: The user is working on Python projects.\n</conversation_summary>'
     todo_snapshot = '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"STALE_TODO_MUST_NOT_LEAK","status":"pending"}]}</current_session_todo_snapshot>'
 
@@ -374,9 +378,9 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
                         }
                     ],
                 ),
-                reasoning_content="PRIVATE_REASONING_MUST_NOT_LEAK",
+                reasoning_content=preserved_reasoning_content,
                 refusal="PRIVATE_REFUSAL_MUST_NOT_LEAK",
-                provider_metadata={"private": "PRIVATE_PROVIDER_METADATA_MUST_NOT_LEAK"},
+                provider_metadata=preserved_provider_metadata,
                 environment_prompt="PRIVATE_ENVIRONMENT_MUST_NOT_LEAK",
                 guidance_prompt="PRIVATE_GUIDANCE_MUST_NOT_LEAK",
                 attachments=["PRIVATE_ATTACHMENT_MUST_NOT_LEAK"],
@@ -448,7 +452,12 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     assert sum(message.role == MessageRole.SYSTEM for message in precheck_messages) == 1
     assert all(not message.tool_calls and message.tool_call_id is None for message in precheck_messages)
     assert any(message.role == MessageRole.USER and message.content == history_user_content for message in precheck_messages)
-    assert any(message.role == MessageRole.ASSISTANT and message.content == history_assistant_text for message in precheck_messages)
+    precheck_assistant = next(message for message in precheck_messages if message.role == MessageRole.ASSISTANT and message.content == history_assistant_text)
+    source_assistant = next(message for message in first_context.messages if message.role == MessageRole.ASSISTANT and message.reasoning_content == preserved_reasoning_content)
+    assert precheck_assistant.reasoning_content == source_assistant.reasoning_content == preserved_reasoning_content
+    assert precheck_assistant.provider_metadata == source_assistant.provider_metadata == preserved_provider_metadata
+    assert precheck_assistant.provider_metadata is not source_assistant.provider_metadata
+    assert precheck_assistant.provider_metadata["source"] is not source_assistant.provider_metadata["source"]
     assert any(message.role == MessageRole.USER and message.content == summary_content for message in precheck_messages)
     todo_messages = [message for message in precheck_messages if message.role == MessageRole.USER and isinstance(message.content, str) and "current_session_todo" in message.content]
     assert len(todo_messages) == 1
@@ -468,9 +477,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     for forbidden in (
         "private-file-token-must-not-leak",
         "https://download.invalid/private-file-token",
-        "PRIVATE_REASONING_MUST_NOT_LEAK",
         "PRIVATE_REFUSAL_MUST_NOT_LEAK",
-        "PRIVATE_PROVIDER_METADATA_MUST_NOT_LEAK",
         "PRIVATE_ENVIRONMENT_MUST_NOT_LEAK",
         "PRIVATE_GUIDANCE_MUST_NOT_LEAK",
         "PRIVATE_ATTACHMENT_MUST_NOT_LEAK",
@@ -483,27 +490,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         assert forbidden not in precheck_dump
     original_message_count = len(first_context_messages_before)
     first_context_messages_after = [message.model_dump(mode="json") for message in first_context.messages[:original_message_count]]
-    for before, after in zip(first_context_messages_before, first_context_messages_after, strict=True):
-        if before["role"] == MessageRole.ASSISTANT.value:
-            assert after["reasoning_content"] is None
-            if before["reasoning_content"] is not None or bool(before["provider_metadata"]) or any(tool_call["provider_metadata"] for tool_call in before["tool_calls"] or []):
-                assert after["provider_metadata"] == {}
-            else:
-                assert after["provider_metadata"] == before["provider_metadata"]
-            if before["tool_calls"] is not None:
-                assert all(tool_call["provider_metadata"] is None for tool_call in after["tool_calls"])
-            after = dict(after)
-            after["reasoning_content"] = before["reasoning_content"]
-            after["provider_metadata"] = before["provider_metadata"]
-            if before["tool_calls"] is not None:
-                after["tool_calls"] = [
-                    {
-                        **after_tool_call,
-                        "provider_metadata": before_tool_call["provider_metadata"],
-                    }
-                    for before_tool_call, after_tool_call in zip(before["tool_calls"], after["tool_calls"], strict=True)
-                ]
-        assert after == before
+    assert first_context_messages_after == first_context_messages_before
     appended_messages = first_context.messages[original_message_count:]
     assert len(appended_messages) == 2
     assert [message.model_dump(mode="json") for message in appended_messages] == [message.model_dump(mode="json") for message in first.turn_messages]
@@ -571,3 +558,232 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     assert embedding_calls == 1
     assert vector_query_calls == 1
     assert events == []
+
+
+def _build_reasoning_provider_metadata(
+    protocol: str,
+    *,
+    channel_id: int,
+    model_id: str,
+    reasoning_text: str,
+    include_response_reasoning: bool,
+) -> dict[str, Any]:
+    metadata_protocol = "openai_chat_completions" if protocol == "openai" else protocol
+    metadata: dict[str, Any] = {
+        "protocol": metadata_protocol,
+        "source": {"channel_id": channel_id, "model_id": model_id, "protocol": protocol},
+        "response": {
+            "id": "source-response-id",
+            "status": "completed",
+            "provider_marker": "SOURCE_RESPONSE_METADATA",
+        },
+    }
+    if protocol in {"deepseek", "openai"}:
+        metadata["message"] = {
+            "reasoning": reasoning_text,
+            "provider_marker": "SOURCE_MESSAGE_METADATA",
+        }
+    else:
+        metadata["output"] = [
+            {
+                "type": "reasoning",
+                "id": "source-reasoning-id",
+                "content": ([{"type": "reasoning_text", "text": reasoning_text}] if include_response_reasoning else []),
+                "summary": [{"type": "summary_text", "text": "SUMMARY_MUST_NOT_BE_SENT"}],
+                "encrypted_content": "ENCRYPTED_MUST_NOT_BE_SENT",
+            },
+            {"type": "unknown_reasoning", "text": "UNKNOWN_MUST_NOT_BE_SENT"},
+        ]
+    return metadata
+
+
+@pytest.mark.parametrize("target_protocol", ["deepseek", "deepseek_responses"])
+@pytest.mark.parametrize(
+    ("source_protocol", "source_kind"),
+    [
+        ("deepseek", "chat"),
+        ("openai", "chat"),
+        ("deepseek_responses", "responses"),
+        ("openai_responses", "responses"),
+        ("openai_responses", "summary_only"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_memory_request_replays_only_recoverable_provider_reasoning(
+    memory_recall_session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    source_protocol: str,
+    source_kind: str,
+    target_protocol: str,
+) -> None:
+    profile, cfg, current_user_id, _memory_id, _vector_item_id = await _seed_memory_recall_workflow(memory_recall_session_factory)
+    assert current_user_id is not None
+
+    chat_reasoning = "CHAT_REASONING_SECRET"
+    responses_reasoning = "RESPONSES_REASONING_SECRET"
+    summary_text = "OPENAI_RESPONSES_SUMMARY_NOT_REASONING"
+    include_response_reasoning = source_kind == "responses"
+    source_reasoning = chat_reasoning if source_kind == "chat" else responses_reasoning
+    stored_reasoning = chat_reasoning if source_kind == "chat" else summary_text if source_protocol == "openai_responses" else responses_reasoning
+    expected_reasoning = None if source_kind == "summary_only" else source_reasoning
+    source_metadata = _build_reasoning_provider_metadata(
+        source_protocol,
+        channel_id=1,
+        model_id="chat-model",
+        reasoning_text=source_reasoning,
+        include_response_reasoning=include_response_reasoning,
+    )
+
+    history_assistant_text = "Noted your VS Code editor preference."
+    async with memory_recall_session_factory() as db:
+        history_assistant = (
+            (
+                await db.execute(
+                    select(Message)
+                    .where(
+                        Message.session_id == "session-recall",
+                        Message.role == MessageRole.ASSISTANT,
+                    )
+                    .order_by(Message.id)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert history_assistant is not None and history_assistant.id is not None
+        history_assistant_id = int(history_assistant.id)
+        history_assistant.reasoning_content = stored_reasoning
+        history_assistant.provider_metadata = source_metadata
+        await db.commit()
+
+        context_messages = await dispatcher_module.ContextManager.get_messages(
+            db,
+            session_id="session-recall",
+            uid="owner",
+            profile=profile,
+            current_message="Which editor do I prefer?",
+            context_window_k=32,
+        )
+        context = MemoryRecallContext(
+            db=db,
+            uid="owner",
+            session_id="session-recall",
+            profile=profile,
+            cfg=cfg,
+            username="owner",
+            messages=context_messages,
+            turn_messages=[],
+            current_user_boundary_message_id=current_user_id,
+            upper_message_id=current_user_id,
+            chat_channel=cfg.channel.chat_channel,
+            chat_cursor_key="1:CHAT",
+            chat_channel_obj=SimpleNamespace(
+                id=1,
+                base_url="https://chat.invalid",
+                http_proxy=None,
+                get_decrypted_api_key=lambda: "chat-key",
+            ),
+            model_entry={
+                "model_id": "chat-model",
+                "usage": "CHAT",
+                "protocol": target_protocol.upper(),
+                "is_enabled": True,
+                "context_window_k": 32,
+                "max_tokens": 1024,
+            },
+            channel_rule=SimpleNamespace(priority=1),
+            chat_params={
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "max_tokens": 1024,
+                "chat_timeout": 60,
+                "context_window_k": 32,
+            },
+        )
+        context_messages_before = [message.model_dump(mode="json") for message in context.messages]
+
+        captured_payloads: list[dict[str, Any]] = []
+
+        async def capture_post_json(*, payload, **_kwargs):
+            captured_payloads.append(deepcopy(payload))
+            if target_protocol == "deepseek":
+                return {
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": "chat-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+            return {
+                "id": "resp-test",
+                "object": "response",
+                "status": "completed",
+                "model": "chat-model",
+                "output": [
+                    {
+                        "id": "msg-test",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+
+        monkeypatch.setattr(http_transport, "post_json", capture_post_json)
+
+        request_sources = [(1, "chat-model"), (2, "chat-model"), (1, "other-model"), (1, "chat-model")]
+        for channel_id, model_id in request_sources:
+            context.chat_channel_obj.id = channel_id
+            context.model_entry["model_id"] = model_id
+            request_messages, metadata, _response_id = await memory_request_module.prepare_request_messages(
+                context,
+                context.messages,
+                is_main_context=True,
+            )
+            assert all(message.role != MessageRole.TOOL and not message.tool_calls for message in request_messages)
+            prepared_assistant = next(message for message in request_messages if message.role == MessageRole.ASSISTANT and message.content == history_assistant_text)
+            assert prepared_assistant.reasoning_content == stored_reasoning
+            assert prepared_assistant.provider_metadata == source_metadata
+            await memory_request_module.generate(context, request_messages, metadata)
+
+        assert len(captured_payloads) == 4
+        for index, payload in enumerate(captured_payloads):
+            is_original_source = index in {0, 3}
+            request_reasoning = expected_reasoning if is_original_source else None
+            payload_text = json.dumps(payload, ensure_ascii=False)
+            assert history_assistant_text in payload_text
+            assert MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME in payload_text
+            for forbidden in (
+                "SUMMARY_MUST_NOT_BE_SENT",
+                "ENCRYPTED_MUST_NOT_BE_SENT",
+                "UNKNOWN_MUST_NOT_BE_SENT",
+                "OPENAI_RESPONSES_SUMMARY_NOT_REASONING",
+            ):
+                assert forbidden not in payload_text
+
+            if target_protocol == "deepseek":
+                assistant_payload = next(message for message in payload["messages"] if message.get("role") == "assistant" and message.get("content") == history_assistant_text)
+                assert assistant_payload.get("reasoning_content", "") == (request_reasoning or "")
+            else:
+                request_items = [item for item in payload["input"] if isinstance(item, dict)]
+                reasoning_items = [item for item in request_items if item.get("type") == "reasoning"]
+                if request_reasoning is None:
+                    assert reasoning_items == [{"type": "reasoning", "content": [{"type": "reasoning_text", "text": "(thinking unavailable)"}]}]
+                else:
+                    assert len(reasoning_items) == 1
+                    assert request_reasoning in json.dumps(reasoning_items, ensure_ascii=False)
+
+        db.expire_all()
+        persisted_assistant = await db.get(Message, history_assistant_id)
+        assert persisted_assistant is not None
+        assert persisted_assistant.reasoning_content == stored_reasoning
+        assert persisted_assistant.provider_metadata == source_metadata
+        assert [message.model_dump(mode="json") for message in context.messages] == context_messages_before

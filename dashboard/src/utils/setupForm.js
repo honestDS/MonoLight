@@ -1,8 +1,6 @@
 import { defaultModelEntry } from '../constants/index.js'
 import { isValidHttpProxy, normalizeHttpProxy } from './channelHttpProxy.js'
-import { getModelReasoningEfforts } from './channelModelMetadata.js'
-
-export const SETUP_PROTOCOLS = Object.freeze(['OPENAI', 'OPENAI_RESPONSES'])
+import { SETUP_PROTOCOLS, getModelReasoningEfforts } from './channelModelMetadata.js'
 
 function stringValue(value) {
   return typeof value === 'string' ? value : ''

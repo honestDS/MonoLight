@@ -67,6 +67,8 @@ class ModelUsage(enum.StrEnum):
 class ModelProtocol(enum.StrEnum):
     OPENAI = "OPENAI"
     OPENAI_RESPONSES = "OPENAI_RESPONSES"
+    DEEPSEEK = "DEEPSEEK"
+    DEEPSEEK_RESPONSES = "DEEPSEEK_RESPONSES"
     OPENAI_EMBEDDING = "OPENAI_EMBEDDING"
     OPENAI_IMAGE = "OPENAI_IMAGE"
     COHERE_RERANK = "COHERE_RERANK"
@@ -78,7 +80,12 @@ class ChannelModelLifecycleStatus(enum.StrEnum):
 
 
 MODEL_PROTOCOLS_BY_USAGE: dict[ModelUsage, tuple[ModelProtocol, ...]] = {
-    ModelUsage.CHAT: (ModelProtocol.OPENAI, ModelProtocol.OPENAI_RESPONSES),
+    ModelUsage.CHAT: (
+        ModelProtocol.OPENAI,
+        ModelProtocol.OPENAI_RESPONSES,
+        ModelProtocol.DEEPSEEK,
+        ModelProtocol.DEEPSEEK_RESPONSES,
+    ),
     ModelUsage.EMBEDDING: (ModelProtocol.OPENAI_EMBEDDING,),
     ModelUsage.RERANK: (ModelProtocol.COHERE_RERANK,),
     ModelUsage.IMAGE_GENERATION: (ModelProtocol.OPENAI_IMAGE,),

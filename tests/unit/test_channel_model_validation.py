@@ -73,6 +73,8 @@ def test_model_requires_protocol(usage: ModelUsage) -> None:
     [
         (ModelUsage.CHAT, ModelProtocol.OPENAI),
         (ModelUsage.CHAT, ModelProtocol.OPENAI_RESPONSES),
+        (ModelUsage.CHAT, ModelProtocol.DEEPSEEK),
+        (ModelUsage.CHAT, ModelProtocol.DEEPSEEK_RESPONSES),
         (ModelUsage.EMBEDDING, ModelProtocol.OPENAI_EMBEDDING),
         (ModelUsage.RERANK, ModelProtocol.COHERE_RERANK),
         (ModelUsage.IMAGE_GENERATION, ModelProtocol.OPENAI_IMAGE),
@@ -678,6 +680,12 @@ def test_channel_response_defaults_missing_http_proxy_to_none() -> None:
         (ModelUsage.RERANK, ModelProtocol.OPENAI_IMAGE),
         (ModelUsage.IMAGE_GENERATION, ModelProtocol.COHERE_RERANK),
         (ModelUsage.IMAGE_GENERATION, ModelProtocol.OPENAI_RESPONSES),
+        (ModelUsage.EMBEDDING, ModelProtocol.DEEPSEEK),
+        (ModelUsage.RERANK, ModelProtocol.DEEPSEEK),
+        (ModelUsage.IMAGE_GENERATION, ModelProtocol.DEEPSEEK),
+        (ModelUsage.EMBEDDING, ModelProtocol.DEEPSEEK_RESPONSES),
+        (ModelUsage.RERANK, ModelProtocol.DEEPSEEK_RESPONSES),
+        (ModelUsage.IMAGE_GENERATION, ModelProtocol.DEEPSEEK_RESPONSES),
     ],
 )
 def test_model_rejects_protocol_for_different_usage(usage: ModelUsage, protocol: ModelProtocol) -> None:
@@ -696,6 +704,8 @@ def test_model_rejects_protocol_for_different_usage(usage: ModelUsage, protocol:
     [
         (ModelProtocol.OPENAI, "openai"),
         (ModelProtocol.OPENAI_RESPONSES, "openai_responses"),
+        (ModelProtocol.DEEPSEEK, "deepseek"),
+        (ModelProtocol.DEEPSEEK_RESPONSES, "deepseek_responses"),
     ],
 )
 def test_resolve_model_protocol_returns_lowercase_client_key(

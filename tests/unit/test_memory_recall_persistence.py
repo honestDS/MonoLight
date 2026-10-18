@@ -9,16 +9,7 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
 )
-from app.core.utils.dispatcher import provider_state
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
-
-
-@pytest.fixture(autouse=True)
-def _isolate_provider_state_reads(monkeypatch):
-    async def get_provider_states(*_args, **_kwargs):
-        return []
-
-    monkeypatch.setattr(provider_state.message_crud, "get_provider_states", get_provider_states)
 
 
 class _FakeDb:

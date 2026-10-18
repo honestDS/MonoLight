@@ -24,6 +24,8 @@ from app.models.message import (
 from app.providers.llm.token_estimation import (
     estimate_request_tokens_locally,
 )
+from app.transformers.deepseek.chat_completions import DeepSeekChatCompletionsTransformer
+from app.transformers.deepseek.responses import DeepSeekResponsesTransformer
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 logger = get_logger(__name__)
@@ -32,6 +34,8 @@ _OPENAI_STREAM_APPEND_STRING_METADATA_FIELDS = frozenset({"reasoning_content"})
 _CHAT_TRANSFORMERS = {
     "openai": OpenAIChatCompletionsTransformer(),
     "openai_responses": OpenAIResponsesTransformer(),
+    "deepseek": DeepSeekChatCompletionsTransformer(),
+    "deepseek_responses": DeepSeekResponsesTransformer(),
 }
 
 
