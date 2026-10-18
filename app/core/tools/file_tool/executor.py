@@ -1,10 +1,15 @@
 import json
+from pathlib import Path
 from typing import Any
 
-from app.core.constants import ERR_FILE_TOOL_NOT_REGULAR, ERR_FILE_TOOL_OPERATION_INVALID
+from app.core.constants import (
+    ERR_FILE_TOOL_NOT_REGULAR,
+    ERR_FILE_TOOL_OPERATION_INVALID,
+    ERR_TOOL_WRITE_PROTECTED_DIRECTORY,
+)
 from app.core.i18n import t
 from app.core.paths import get_user_temp_dir
-from app.core.utils.operation_directories import get_allowed_operation_dirs
+from app.core.utils.operation_directories import get_allowed_operation_dirs, is_path_write_protected
 
 from ..base import BaseExecutor
 from .edit import edit_file
@@ -69,7 +74,20 @@ class FileToolExecutor(BaseExecutor):
             return self._failed(str(operation), t(ERR_FILE_TOOL_OPERATION_INVALID, operation=operation))
 
         try:
-            target = self._resolve_target_path(path)
+            target = await self.run_sync(self._resolve_target_path, path)
+            if operation in {"write", "edit", "patch"} and getattr(getattr(self.cfg, "security", None), "protect_system_directories", True):
+                protection_path = Path(path)
+                if not protection_path.is_absolute():
+                    protection_path = await self.run_sync(self.user_temp_dir.resolve) / protection_path
+                if await self.run_sync(is_path_write_protected, protection_path, self.project_root):
+                    return self._dump(
+                        {
+                            "status": "blocked",
+                            "operation": operation,
+                            "path": str(target),
+                            "error": t(ERR_TOOL_WRITE_PROTECTED_DIRECTORY, path=str(target)),
+                        }
+                    )
             if operation == "read":
                 result = await self.run_sync(read_file, target, start_line=start_line, end_line=end_line)
             elif operation == "write":

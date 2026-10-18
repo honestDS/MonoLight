@@ -21,6 +21,13 @@ def _executor(tmp_path, *, allowed_operation_dirs=None):
     return executor
 
 
+def _create_symlink_or_skip(target, link):
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"当前系统不允许创建测试链接: {exc}")
+
+
 def test_file_tool_schema_exposes_general_file_operations():
     function = FILE_TOOL_SCHEMA["function"]
 
@@ -334,6 +341,194 @@ async def test_file_tool_grep_allows_workspace_root_with_dot_path(tmp_path):
     assert result["status"] == "success"
     assert result["path"] == str(executor.user_temp_dir.resolve())
     assert result["match_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "operation_kwargs"),
+    [
+        ("write", {"content": "replacement\n"}),
+        ("edit", {"old_text": "original", "new_text": "replacement"}),
+        ("patch", {"patch": "@@\n-original\n+replacement"}),
+    ],
+    ids=["write", "edit", "patch"],
+)
+async def test_file_tool_direct_writes_without_audit_are_blocked_even_when_project_root_is_allowed(tmp_path, operation, operation_kwargs):
+    protected_dir = tmp_path / "data" / "skills"
+    protected_dir.mkdir(parents=True)
+    target = protected_dir / "protected.txt"
+    original = "original\n"
+    target.write_text(original, encoding="utf-8")
+    executor = _executor(tmp_path, allowed_operation_dirs=[str(tmp_path)])
+
+    result = json.loads(await executor.execute(operation=operation, path=str(target), **operation_kwargs))
+
+    assert result["status"] == "blocked"
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "operation_kwargs"),
+    [
+        ("write", {"content": "replacement\n"}),
+        ("edit", {"old_text": "original", "new_text": "replacement"}),
+        ("patch", {"patch": "@@\n-original\n+replacement"}),
+    ],
+    ids=["write", "edit", "patch"],
+)
+async def test_file_tool_allows_protected_directory_writes_when_protection_is_disabled(tmp_path, operation, operation_kwargs):
+    protected_dir = tmp_path / "data" / "skills"
+    protected_dir.mkdir(parents=True)
+    target = protected_dir / "protected.txt"
+    target.write_text("original\n", encoding="utf-8")
+    cfg = ProfileConfig.model_validate(
+        {
+            "tool": {
+                "enabled_tools": ["file_tool"],
+                "allowed_operation_dirs": [str(tmp_path)],
+            },
+            "security": {"protect_system_directories": False},
+        }
+    )
+    executor = FileToolExecutor(project_root=str(tmp_path), uid="u1")
+    executor.set_config(cfg)
+
+    result = json.loads(await executor.execute(operation=operation, path=str(target), **operation_kwargs))
+
+    assert result["status"] == "success"
+    assert target.read_text(encoding="utf-8") == "replacement\n"
+
+
+@pytest.mark.asyncio
+async def test_file_tool_protection_disabled_still_enforces_allowed_operation_dirs(tmp_path):
+    allowed_dir = tmp_path / "allowed"
+    allowed_dir.mkdir()
+    target = tmp_path / "outside.txt"
+    original = "original\n"
+    target.write_text(original, encoding="utf-8")
+    cfg = ProfileConfig.model_validate(
+        {
+            "tool": {
+                "enabled_tools": ["file_tool"],
+                "allowed_operation_dirs": [str(allowed_dir)],
+            },
+            "security": {"protect_system_directories": False},
+        }
+    )
+    executor = FileToolExecutor(project_root=str(tmp_path), uid="u1")
+    executor.set_config(cfg)
+
+    result = json.loads(await executor.execute(operation="write", path=str(target), content="replacement\n"))
+
+    assert result["status"] == "failed"
+    assert "allowed" in result["error"].lower() or "允许" in result["error"]
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_file_tool_blocks_relative_write_from_user_temp_dir_into_protected_directory(tmp_path):
+    protected_dir = tmp_path / "data" / "skills"
+    protected_dir.mkdir(parents=True)
+    target = protected_dir / "protected.txt"
+    target.write_text("original\n", encoding="utf-8")
+    executor = _executor(tmp_path, allowed_operation_dirs=[str(tmp_path)])
+
+    result = json.loads(
+        await executor.execute(
+            operation="write",
+            path="../../data/skills/protected.txt",
+            content="replacement\n",
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert target.read_text(encoding="utf-8") == "original\n"
+
+
+@pytest.mark.asyncio
+async def test_file_tool_does_not_create_missing_protected_directory_for_write(tmp_path):
+    protected_dir = tmp_path / "data" / "skills"
+    target = protected_dir / "nested" / "protected.txt"
+    executor = _executor(tmp_path, allowed_operation_dirs=[str(tmp_path)])
+
+    result = json.loads(await executor.execute(operation="write", path=str(target), content="blocked"))
+
+    assert result["status"] == "blocked"
+    assert not protected_dir.exists()
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_file_tool_read_and_grep_allow_protected_directory(tmp_path):
+    protected_dir = tmp_path / "data" / "skills"
+    protected_dir.mkdir(parents=True)
+    target = protected_dir / "protected.txt"
+    target.write_text("needle\n", encoding="utf-8")
+    executor = _executor(tmp_path, allowed_operation_dirs=[str(tmp_path)])
+
+    read_result = json.loads(await executor.execute(operation="read", path=str(target)))
+    grep_result = json.loads(await executor.execute(operation="grep", path=str(protected_dir), pattern="needle"))
+
+    assert read_result["status"] == "success"
+    assert read_result["content"] == "1: needle"
+    assert grep_result["status"] == "success"
+    assert grep_result["match_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("relative_directory", "allowed_root"),
+    [("data/skills_backup", "data"), ("ordinary", "ordinary")],
+    ids=["skills-backup-sibling", "ordinary-whitelist"],
+)
+async def test_file_tool_write_allows_non_protected_whitelisted_directories(tmp_path, relative_directory, allowed_root):
+    target = tmp_path / relative_directory / "result.txt"
+    target.parent.mkdir(parents=True)
+    allowed_dir = tmp_path / allowed_root
+    allowed_dir.mkdir(parents=True, exist_ok=True)
+    executor = _executor(tmp_path, allowed_operation_dirs=[str(allowed_dir)])
+
+    result = json.loads(await executor.execute(operation="write", path=str(target), content="allowed"))
+
+    assert result["status"] == "success"
+    assert target.read_text(encoding="utf-8") == "allowed"
+
+
+@pytest.mark.asyncio
+async def test_file_tool_blocks_external_symlink_into_protected_directory(tmp_path):
+    protected_dir = tmp_path / "data" / "skills"
+    protected_dir.mkdir(parents=True)
+    protected_target = protected_dir / "protected.txt"
+    protected_target.write_text("original\n", encoding="utf-8")
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    link = external_dir / "protected-link.txt"
+    _create_symlink_or_skip(protected_target, link)
+    executor = _executor(tmp_path, allowed_operation_dirs=[str(tmp_path)])
+
+    result = json.loads(await executor.execute(operation="write", path=str(link), content="replacement\n"))
+
+    assert result["status"] == "blocked"
+    assert protected_target.read_text(encoding="utf-8") == "original\n"
+
+
+@pytest.mark.asyncio
+async def test_file_tool_blocks_protected_symlink_to_external_file(tmp_path):
+    protected_dir = tmp_path / "data" / "skills"
+    protected_dir.mkdir(parents=True)
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_target = external_dir / "external.txt"
+    external_target.write_text("original\n", encoding="utf-8")
+    link = protected_dir / "external-link.txt"
+    _create_symlink_or_skip(external_target, link)
+    executor = _executor(tmp_path, allowed_operation_dirs=[str(tmp_path)])
+
+    result = json.loads(await executor.execute(operation="write", path=str(link), content="replacement\n"))
+
+    assert result["status"] == "blocked"
+    assert external_target.read_text(encoding="utf-8") == "original\n"
 
 
 @pytest.mark.asyncio

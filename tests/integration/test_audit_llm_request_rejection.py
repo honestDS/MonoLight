@@ -7,7 +7,7 @@ from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
 from app.core.audit.persistence import persist_prepared_audit_round
-from app.core.constants import ERR_AUDIT_SERVICE_FAILED_STOP, MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK
+from app.core.constants import ERR_AUDIT_ROUND_BLOCKED, ERR_AUDIT_SERVICE_FAILED_STOP, MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel import cursor as channel_cursor_module
 from app.core.dispatchers import ChatDispatcher
@@ -135,6 +135,7 @@ def _pending_audit_response() -> InternalResponse:
                         {
                             "tool_call_id": "shell-call",
                             "score": 5,
+                            "deny": False,
                             "reason": "requires confirmation",
                             "file_checks": [],
                         }
@@ -357,8 +358,17 @@ async def test_summary_request_rejection_preserves_pending_confirmation_with_fal
         ("local", True),
         ("upstream", False),
         ("upstream", True),
+        ("policy-denied", False),
+        ("policy-denied", True),
     ],
-    ids=["local-non-stream", "local-stream", "upstream-413-non-stream", "upstream-413-stream"],
+    ids=[
+        "local-non-stream",
+        "local-stream",
+        "upstream-413-non-stream",
+        "upstream-413-stream",
+        "policy-denied-non-stream",
+        "policy-denied-stream",
+    ],
 )
 @pytest.mark.asyncio
 async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
@@ -368,6 +378,14 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
     rejection_kind: str,
     stream_callback: bool,
 ) -> None:
+    policy_denied = rejection_kind == "policy-denied"
+    policy_denial_reason = "操作将修改系统受保护目录，已拒绝执行。"
+    expected_status = AuditRecordStatus.BLOCKED if policy_denied else AuditRecordStatus.AUDIT_FAILED
+    expected_error = t(ERR_AUDIT_ROUND_BLOCKED if policy_denied else ERR_AUDIT_SERVICE_FAILED_STOP)
+    expected_failure_type = None if policy_denied else AuditFailureType.AUDIT_SERVICE_FAILED
+    expected_conclusion = AuditToolConclusion.BLOCKED if policy_denied else AuditToolConclusion.AUDIT_FAILED
+    expected_score = 0 if policy_denied else None
+
     audit_cfg = _audit_config(tmp_path)
     profile_configs = audit_cfg.model_dump()
     profile_configs["channel"]["chat_channel"]["rules"] = [
@@ -423,10 +441,14 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
     monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", audit_database)
     _patch_audit_root(monkeypatch, tmp_path)
 
-    async def unexpected_shell_execution(*_args: Any, **_kwargs: Any) -> str:
-        raise AssertionError("execute_shell must not run after audit rejection")
+    shell_execution_count = 0
 
-    monkeypatch.setattr(ShellExecutor, "execute", unexpected_shell_execution)
+    async def count_shell_execution(*_args: Any, **_kwargs: Any) -> str:
+        nonlocal shell_execution_count
+        shell_execution_count += 1
+        return "unexpected shell execution"
+
+    monkeypatch.setattr(ShellExecutor, "execute", count_shell_execution)
 
     calls: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
@@ -440,6 +462,29 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
             }
         )
         if kwargs["model_id"] == AUDIT_MODEL_ID:
+            if policy_denied:
+                return InternalResponse(
+                    message=InternalMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=json.dumps(
+                            {
+                                "results": [
+                                    {
+                                        "tool_call_id": "shell-call",
+                                        "score": 0,
+                                        "deny": True,
+                                        "reason": policy_denial_reason,
+                                        "file_checks": [],
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                    model=AUDIT_MODEL_ID,
+                    usage={"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+                    finish_reason="stop",
+                )
             _raise_request_rejection(rejection_kind, kwargs)
 
         assert kwargs["model_id"] == CHAT_MODEL_ID
@@ -453,7 +498,7 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
                             id="shell-call",
                             name="execute_shell",
                             arguments={
-                                "command": "echo audit-safe",
+                                "command": (f'echo audit-safe > "{tmp_path / "data" / "skills" / "protected.txt"}"' if policy_denied else "echo audit-safe"),
                                 "execution_mode": "non_interactive",
                             },
                         )
@@ -467,10 +512,12 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
             tool_messages = [message for message in kwargs["messages"] if message.role == MessageRole.TOOL and message.tool_call_id == "shell-call"]
             assert len(tool_messages) == 1
             tool_payload = json.loads(tool_messages[0].content or "{}")
-            assert tool_payload["status"] == AuditRecordStatus.AUDIT_FAILED.value
-            assert tool_payload["error"] == t(ERR_AUDIT_SERVICE_FAILED_STOP)
+            assert tool_payload["status"] == expected_status.value
+            assert tool_payload["error"] == expected_error
             assert isinstance(tool_payload["reason"], str)
             assert tool_payload["reason"]
+            if policy_denied:
+                assert tool_payload["reason"] == policy_denial_reason
             assert PRIVATE_RESPONSE not in json.dumps(tool_payload, ensure_ascii=False)
             return InternalResponse(
                 message=InternalMessage(
@@ -511,6 +558,7 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
         )
 
     assert response["choices"][0]["message"]["content"] == FINAL_CHAT_CONTENT
+    assert shell_execution_count == 0
     assert [call["model_id"] for call in calls] == [CHAT_MODEL_ID, AUDIT_MODEL_ID, CHAT_MODEL_ID]
     assert [call["base_url"] for call in calls] == [CHAT_PRIMARY_URL, "https://llm.invalid", CHAT_PRIMARY_URL]
     assert all(call["base_url"] != CHAT_FALLBACK_URL for call in calls)
@@ -522,13 +570,13 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
         records = list((await db.execute(select(AuditRecord).where(AuditRecord.uid == UID, AuditRecord.session_id == SESSION_ID))).scalars().all())
         assert len(records) == 1
         record = records[0]
-        assert record.status is AuditRecordStatus.AUDIT_FAILED
-        assert record.failure_type is AuditFailureType.AUDIT_SERVICE_FAILED
+        assert record.status is expected_status
+        assert record.failure_type is expected_failure_type
 
         details = await audit_crud.list_tool_details(db, record.id)
         assert len(details) == 1
-        assert details[0].conclusion is AuditToolConclusion.AUDIT_FAILED
-        assert details[0].score is None
+        assert details[0].conclusion is expected_conclusion
+        assert details[0].score == expected_score
 
         stored_messages = list((await db.execute(select(Message).where(Message.uid == UID, Message.session_id == SESSION_ID).order_by(Message.id.asc()))).scalars().all())
         tool_results = [message for message in stored_messages if message.type == MessageType.TOOL_RESULT]
@@ -536,10 +584,14 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
         stored_tool_result = InternalMessage.model_validate_json(tool_results[0].content or "{}")
         tool_result_payload = json.loads(stored_tool_result.content or "{}")
         assert stored_tool_result.tool_call_id == "shell-call"
-        assert tool_result_payload["status"] == AuditRecordStatus.AUDIT_FAILED.value
-        assert tool_result_payload["error"] == t(ERR_AUDIT_SERVICE_FAILED_STOP)
+        assert tool_result_payload["status"] == expected_status.value
+        assert tool_result_payload["error"] == expected_error
         assert PRIVATE_RESPONSE not in json.dumps(tool_result_payload, ensure_ascii=False)
-        assert record.error_reason == tool_result_payload["reason"]
+        if policy_denied:
+            assert record.error_reason is None
+            assert tool_result_payload["reason"] == policy_denial_reason
+        else:
+            assert record.error_reason == tool_result_payload["reason"]
         assert details[0].reason == tool_result_payload["reason"]
 
         tool_calls = [message for message in stored_messages if message.type == MessageType.TOOL_CALL]

@@ -8,6 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    AUDIT_TERMINAL_CONTEXT_MAX_CHARS,
+    AUDIT_TERMINAL_HISTORY_LIMIT,
     ERR_TERMINAL_ACTION_NOT_ALLOWED,
     ERR_TERMINAL_COMMAND_FAILED,
     ERR_TERMINAL_COMMAND_REQUEST_CONFLICT,
@@ -241,6 +243,96 @@ class TerminalSessionManager:
                 terminal_session_id=terminal_session_id,
             )
         return terminal_session
+
+    async def get_audit_context(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        uid: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        terminal_session = await self.get_owned_session(db, terminal_session_id, uid, session_id)
+        commands = await terminal_control_command_crud.list_recent_by_session(
+            db,
+            terminal_session_id,
+            limit=AUDIT_TERMINAL_HISTORY_LIMIT + 1,
+        )
+        history_truncated = len(commands) > AUDIT_TERMINAL_HISTORY_LIMIT
+        recent_commands = commands[:AUDIT_TERMINAL_HISTORY_LIMIT]
+
+        command_text = terminal_session.command or ""
+        command_budget = AUDIT_TERMINAL_CONTEXT_MAX_CHARS // 4
+        command_truncated = len(command_text) > command_budget
+        command = command_text[:command_budget]
+        remaining_chars = AUDIT_TERMINAL_CONTEXT_MAX_CHARS - len(command)
+        history_truncated = history_truncated or command_truncated
+        history: list[dict[str, Any]] = []
+
+        def retain_latest_text(value: str) -> tuple[str, bool]:
+            nonlocal remaining_chars
+            if len(value) <= remaining_chars:
+                remaining_chars -= len(value)
+                return value, False
+            if remaining_chars <= 0:
+                return "", True
+            retained = value[-remaining_chars:]
+            remaining_chars = 0
+            return retained, True
+
+        for control_command in recent_commands:
+            action = getattr(control_command.action, "value", control_command.action)
+            status = getattr(control_command.status, "value", control_command.status)
+            item: dict[str, Any] = {
+                "id": control_command.id,
+                "action": action,
+                "status": status,
+            }
+            payload = control_command.payload or {}
+            result = control_command.result or {}
+
+            if action == TerminalAction.WRITE.value:
+                data = payload.get("data")
+                item["data"] = data
+                item["data_truncated"] = False
+                if isinstance(data, str):
+                    item["data"], item["data_truncated"] = retain_latest_text(data)
+                    history_truncated = history_truncated or item["data_truncated"]
+                if status == TerminalControlCommandStatus.SUCCEEDED.value and "bytes_written" in result:
+                    item["bytes_written"] = result["bytes_written"]
+            elif action == TerminalAction.READ.value:
+                read_status = result.get("read_status")
+                read_status_value = getattr(read_status, "value", read_status)
+                status_truncated = isinstance(read_status_value, str) and read_status_value.lower() in {
+                    "truncated",
+                    "expired",
+                }
+                if "read_status" in result:
+                    item["read_status"] = read_status
+                output_truncated = bool(result.get("output_truncated", False)) or status_truncated
+                if "output" in result:
+                    output = result["output"]
+                    if isinstance(output, str):
+                        item["output"], context_truncated = retain_latest_text(output)
+                        output_truncated = output_truncated or context_truncated
+                    else:
+                        item["output"] = output
+                if "output_truncated" in result or output_truncated:
+                    item["output_truncated"] = output_truncated
+                history_truncated = history_truncated or output_truncated
+
+            history.append(item)
+
+        history.reverse()
+        return {
+            "terminal_session_id": terminal_session.terminal_session_id,
+            "command": command,
+            "command_truncated": command_truncated,
+            "initial_working_directory": terminal_session.working_directory,
+            "status": getattr(terminal_session.status, "value", terminal_session.status),
+            "history": history,
+            "history_truncated": history_truncated,
+            "output_is_live": False,
+        }
 
     async def get_snapshot(
         self,
