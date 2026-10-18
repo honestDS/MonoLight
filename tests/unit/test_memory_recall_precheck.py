@@ -11,7 +11,6 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.exceptions import LLMException
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
-from app.core.utils.dispatcher import provider_state
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
@@ -300,6 +299,7 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
                 role=MessageRole.ASSISTANT,
                 content="已发黄色图片",
                 reasoning_content="THOUGHT_PRIVATE_MARKER",
+                provider_metadata={"protocol": "OPENAI", "source": "provider"},
             ),
             InternalMessage(
                 id=5,
@@ -328,8 +328,6 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
         ]
     )
     original_messages = [message.model_dump(mode="json") for message in context.messages]
-    original_messages[3]["reasoning_content"] = None
-    original_messages[3]["provider_metadata"] = {}
     invalid = _assistant(call_id="invalid-call", content="unexpected body", message_id=20)
     valid = _assistant(call_id="valid-call", message_id=21)
     model_requests = []
@@ -341,9 +339,6 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
     async def get_session(_db, _session_id):
         return SimpleNamespace(llm_request_metadata={})
 
-    async def get_provider_states(*_args, **_kwargs):
-        return []
-
     async def generate(**kwargs):
         model_requests.append([message.model_copy(deep=True) for message in kwargs["messages"]])
         return [_response(invalid), _response(valid)][len(model_requests) - 1]
@@ -352,7 +347,6 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
         accepted.append(message)
 
     monkeypatch.setattr(precheck_module, "load_dedupe_messages", load)
-    monkeypatch.setattr(provider_state.message_crud, "get_provider_states", get_provider_states)
     monkeypatch.setattr(request_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(request_module.LLMClient, "generate", generate)
     monkeypatch.setattr(precheck_module, "save_and_execute_recall", save)
@@ -370,6 +364,9 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
     assert first_request[-1].role == MessageRole.USER
     assert first_request[-1].content == "多找其他颜色"
     assert any(message.content == "已发黄色图片" for message in first_request)
+    historical_assistant = next(message for message in first_request if message.role == MessageRole.ASSISTANT and message.content == "已发黄色图片")
+    assert historical_assistant.reasoning_content == "THOUGHT_PRIVATE_MARKER"
+    assert historical_assistant.provider_metadata == {"protocol": "OPENAI", "source": "provider"}
     assert any(message.role == MessageRole.USER and isinstance(message.content, str) and "Magic9询图" in message.content for message in first_request)
     assert any(message.role == MessageRole.USER and isinstance(message.content, str) and message.content.startswith("<conversation_summary ") for message in first_request)
     todo_messages = [message for message in first_request if message.role == MessageRole.USER and isinstance(message.content, str) and "current_session_todo" in message.content]
@@ -395,10 +392,10 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
         "TOOL_RESULT_PRIVATE_MARKER",
         "ENVIRONMENT_PRIVATE_MARKER",
         "CURRENT_ENVIRONMENT_PRIVATE_MARKER",
-        "THOUGHT_PRIVATE_MARKER",
         "CURRENT_THOUGHT_PRIVATE_MARKER",
     ):
         assert private_marker not in first_text
+    assert all("THOUGHT_PRIVATE_MARKER" not in json.dumps(message.content, ensure_ascii=False) for message in first_request)
 
     second_request = model_requests[1]
     assert [message.model_dump(mode="json") for message in second_request[: len(first_request)]] == first_dump

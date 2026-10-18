@@ -214,7 +214,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import HelpTooltip from './HelpTooltip.vue'
-import { getModelReasoningEfforts, normalizeReasoningEfforts } from '../utils/channelModelMetadata.js'
+import { getModelProtocolLabel, getModelReasoningEfforts, normalizeReasoningEfforts } from '../utils/channelModelMetadata.js'
 
 const props = defineProps({
   entry: {
@@ -353,17 +353,6 @@ const getTestStatusLabel = (status) => {
     error: t('channels.model_test_failed')
   }
   return labels[status] || t('channels.model_test_running')
-}
-
-const getModelProtocolLabel = (value) => {
-  const map = {
-    OPENAI: 'openai-completions',
-    OPENAI_RESPONSES: 'openai-responses',
-    OPENAI_EMBEDDING: 'openai-embedding',
-    OPENAI_IMAGE: 'openai-image',
-    COHERE_RERANK: 'cohere-rerank'
-  }
-  return map[value] || value
 }
 
 const getModelUsageLabel = (value) => {

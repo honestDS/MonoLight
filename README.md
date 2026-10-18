@@ -25,7 +25,6 @@ From everyday office tasks to server operations and complex automation workflows
 
 ## 0. Current Progress
 - Fixing remaining issues
-- LLM-hosted scheduled task tool
 - Skill support
 
 ## 1. Core Features
@@ -207,6 +206,22 @@ The original independent entry points `message_platform`, `background_task`, and
 ### Multi-instance Deployment
 
 All instances must connect to the same database. The messaging-platform, background-task, and session-reply roles inside `general` continue to contend for their respective leases independently. A Worker that does not acquire its corresponding lease remains on standby and automatically takes over after the current lease holder exits or the lease expires.
+
+## FAQ
+
+### Why does MonoLight exit silently when creating long-term memory on Windows, then exit again after a restart?
+
+**Symptoms**: With long-term memory enabled, creating a memory may terminate the entire system without a Python exception in the application logs. The WebUI may show a memory with an empty body and an in-progress status. Memory creation saves a placeholder first and publishes the content only after the vector write succeeds. Unfinished jobs resume after a restart and may trigger the same failure again. When any long-lived process exits abnormally, the launcher shuts down the remaining processes, making the entire service stop.
+
+**Diagnosis**: Open **Event Viewer → Windows Logs → Application** and look for an `Application Error` (event ID `1000`) involving `python.exe` around the time of the exit. If the faulting module is `MSVCP140.dll` and the exception code is `0xc0000005` (access violation), especially with an older runtime such as `14.36.32532.0`, prioritize checking compatibility between the Microsoft Visual C++ runtime and native dependencies such as Chroma. This error does not mean that the system is out of memory, and the DLL name alone does not prove that the file is corrupted.
+
+**Resolution**:
+
+1. Stop all MonoLight processes and back up the existing database and vector data.
+2. Install or repair the [latest official Microsoft Visual C++ v14 x64 Redistributable](https://aka.ms/vc14/vc_redist.x64.exe). Installing Visual Studio is not required. The runtime must be at least as recent as the build tools used for the native components; see [Microsoft's documentation](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+3. Restart Windows if prompted by the installer, then start MonoLight and verify that unfinished jobs and newly created memories work correctly.
+
+> Changing Python versions or reinstalling pip dependencies usually does not update the system VC++ runtime. Do not download individual DLLs from third-party websites to overwrite system files, or delete the database or vector directories as a workaround. Runtime incompatibility must still be confirmed by retesting after the update. If the process still exits, retain the new faulting module, version, exception code, and native crash stack for further investigation.
 
 ## Automated Tests
 

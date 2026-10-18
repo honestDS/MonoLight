@@ -11,12 +11,12 @@ import {
   mergeCustomHeaders,
 } from '../../utils/channelAdvancedSettings.js'
 import {
+  SETUP_PROTOCOLS,
   getOpenRouterModelMatches,
   getOpenRouterReasoningEfforts,
   applyOpenRouterModelMetadata,
 } from '../../utils/channelModelMetadata.js'
 import {
-  SETUP_PROTOCOLS,
   validateSetupApiKey,
   validateSetupBaseUrl,
   validateSetupModelId,

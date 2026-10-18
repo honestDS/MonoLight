@@ -29,7 +29,6 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.markdown_instruction import refresh_latest_user_max_output_tokens_instruction
-from app.core.utils.dispatcher.provider_state import discard_mismatched_provider_state
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
     parse_session_todo_snapshot,
@@ -130,6 +129,13 @@ def build_precheck_request_messages(
         text = message_token_text(plain_message)
         if not text.strip():
             return None
+        if message.role == MessageRole.ASSISTANT:
+            return InternalMessage(
+                role=message.role,
+                content=text,
+                reasoning_content=message.reasoning_content,
+                provider_metadata=deepcopy(message.provider_metadata),
+            )
         return InternalMessage(role=message.role, content=text)
 
     history_limit = max(0, MEMORY_RECALL_PRECHECK_MAX_USER_TURNS - 1)
@@ -209,15 +215,6 @@ async def prepare_request_messages(
     *,
     is_main_context: bool,
 ) -> tuple[list[InternalMessage], dict[str, Any], str]:
-    await discard_mismatched_provider_state(
-        context.db,
-        session_id=context.session_id,
-        uid=context.uid,
-        messages=[*context.messages, *messages],
-        channel_id=context.chat_channel_obj.id,
-        model_id=context.model_entry["model_id"],
-        protocol=resolve_model_protocol(context.model_entry),
-    )
     todo_snapshot = None
     if is_main_context and isinstance(context.db, AsyncSession):
         todo_snapshot = await load_current_session_todo_snapshot(

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.core.constants import (
     MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
     SESSION_TITLE_MAX_OUTPUT_TOKENS,
@@ -54,7 +56,19 @@ def _todo_payload(result: list[InternalMessage]) -> dict[str, object]:
     return payloads[0]
 
 
-def test_precheck_request_keeps_recent_rounds_and_filters_runtime_metadata():
+@pytest.mark.parametrize("reasoning_content", [None, "", "private reasoning"])
+def test_precheck_request_keeps_recent_rounds_and_filters_runtime_metadata(reasoning_content):
+    assistant_metadata = {
+        "protocol": "openai_responses",
+        "source": "response.output",
+        "output": [
+            {
+                "type": "reasoning",
+                "id": "rs_123",
+                "summary": [{"type": "summary_text", "text": "private reasoning"}],
+            }
+        ],
+    }
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="system"),
         InternalMessage(role=MessageRole.ERR, content="error"),
@@ -65,8 +79,8 @@ def test_precheck_request_keeps_recent_rounds_and_filters_runtime_metadata():
         InternalMessage(
             role=MessageRole.ASSISTANT,
             content="tool-assisted answer",
-            reasoning_content="private reasoning",
-            provider_metadata={"provider": "private"},
+            reasoning_content=reasoning_content,
+            provider_metadata=assistant_metadata,
             tool_calls=[InternalToolCall(id="call-1", name="tool", arguments={"secret": "do-not-send"})],
         ),
         InternalMessage(
@@ -88,6 +102,7 @@ def test_precheck_request_keeps_recent_rounds_and_filters_runtime_metadata():
             reasoning_content="should not leak",
         ),
     ]
+    original_messages = [message.model_dump(mode="json") for message in messages]
 
     result = build_precheck_request_messages(messages)
 
@@ -115,9 +130,16 @@ def test_precheck_request_keeps_recent_rounds_and_filters_runtime_metadata():
     assert current.tool_call_id is None
 
     mixed_assistant = result[4]
-    assert mixed_assistant.reasoning_content is None
-    assert mixed_assistant.provider_metadata is None
+    assert mixed_assistant.reasoning_content == reasoning_content
+    assert mixed_assistant.provider_metadata == messages[6].provider_metadata
+    assert mixed_assistant.provider_metadata is not messages[6].provider_metadata
+    assert mixed_assistant.provider_metadata["output"] is not messages[6].provider_metadata["output"]
     assert mixed_assistant.tool_calls is None
+    assert [message.model_dump(mode="json") for message in messages] == original_messages
+
+    mixed_assistant.provider_metadata["output"][0]["summary"][0]["text"] = "changed in precheck copy"
+    assert messages[6].provider_metadata["output"][0]["summary"][0]["text"] == "private reasoning"
+    assert [message.model_dump(mode="json") for message in messages] == original_messages
 
 
 def test_precheck_request_limits_to_five_real_user_rounds_without_counting_tools():

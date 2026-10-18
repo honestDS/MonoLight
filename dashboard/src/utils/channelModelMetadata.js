@@ -4,6 +4,24 @@ import {
   DEFAULT_CHAT_MAX_TOKENS,
 } from '../constants/channelModel.js'
 
+const MODEL_PROTOCOL_DEFINITIONS = Object.freeze([
+  Object.freeze({ value: 'OPENAI', label: 'openai-completions', usage: 'CHAT' }),
+  Object.freeze({ value: 'OPENAI_RESPONSES', label: 'openai-responses', usage: 'CHAT' }),
+  Object.freeze({ value: 'DEEPSEEK', label: 'deepseek-completions', usage: 'CHAT' }),
+  Object.freeze({ value: 'DEEPSEEK_RESPONSES', label: 'deepseek-responses', usage: 'CHAT' }),
+  Object.freeze({ value: 'OPENAI_EMBEDDING', label: 'openai-embedding', usage: 'EMBEDDING' }),
+  Object.freeze({ value: 'OPENAI_IMAGE', label: 'openai-image', usage: 'IMAGE_GENERATION' }),
+  Object.freeze({ value: 'COHERE_RERANK', label: 'cohere-rerank', usage: 'RERANK' }),
+])
+
+export const SETUP_PROTOCOLS = Object.freeze(
+  MODEL_PROTOCOL_DEFINITIONS.filter(protocol => protocol.usage === 'CHAT').map(protocol => protocol.value),
+)
+
+export function getModelProtocolLabel(value) {
+  return MODEL_PROTOCOL_DEFINITIONS.find(protocol => protocol.value === value)?.label || value
+}
+
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }

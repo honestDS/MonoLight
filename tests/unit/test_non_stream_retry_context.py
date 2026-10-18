@@ -20,7 +20,6 @@ from app.core.terminal.schemas import (
     TerminalSessionStatus,
 )
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
-from app.core.utils.dispatcher import provider_state
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
@@ -67,11 +66,7 @@ def _patch_session_crud(monkeypatch):
             stream_llm_request=None,
         )
 
-    async def fake_get_provider_states(*args, **kwargs):
-        return []
-
     monkeypatch.setattr(interactive_runtime_module.session_crud, "get_by_session_id", get_session_by_id)
-    monkeypatch.setattr(provider_state.message_crud, "get_provider_states", fake_get_provider_states)
 
 
 async def _passthrough_context_summary_checkpoint(db, **kwargs):
