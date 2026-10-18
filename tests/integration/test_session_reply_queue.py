@@ -957,3 +957,222 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
     assert message_counts[0] == message_counts[1]
     assert checkpoint_snapshots[0] == checkpoint_snapshots[1]
     assert len(dispatched_checkpoints) == 2 and dispatched_checkpoints[0] == dispatched_checkpoints[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "historical_checkpoint_current_missing",
+        "both_rounds_from_database",
+        "both_rounds_unknown",
+        "same_assistant_repeated_id_unknown",
+        "parallel_checkpoint_plus_unknown",
+        "parallel_checkpoint_plus_database",
+        "parallel_database_results_across_page",
+        "later_round_result_stays_in_later_round",
+        "future_database_result_is_not_borrowed",
+    ],
+)
+async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurrence(
+    db_session: AsyncSession,
+    monkeypatch,
+    scenario: str,
+):
+    session_id, uid, worker_id, profile_id, call_id = "session-1", "user-1", "worker-1", 1, "reused-call"
+
+    def result(row_id: int, label: str) -> tuple[int, str]:
+        return row_id, json.dumps({"result": label})
+
+    def turn(assistant_id: int, calls: list[str], checkpoint=(), database=(), expected=()) -> dict:
+        return dict(assistant_id=assistant_id, calls=calls, checkpoint=checkpoint, database=database, expected=expected)
+
+    hist, db1, db2 = result(20, "history"), result(20, "db-round-1"), result(50, "db-round-2")
+    cp, db_parallel, page1, page2 = result(20, "checkpoint"), result(21, "parallel-db"), result(210, "page-1"), result(211, "page-2")
+    later, future = result(50, "later-round"), result(40, "future-round")
+    specs = {
+        "historical_checkpoint_current_missing": ([turn(10, ["old"], [hist], [hist], [20]), turn(40, ["current"], expected=[None])], 1),
+        "both_rounds_from_database": ([turn(10, ["first"], database=[db1], expected=[20]), turn(40, ["second"], database=[db2], expected=[50])], 1),
+        "both_rounds_unknown": ([turn(10, ["round-1"], expected=[None]), turn(40, ["round-2"], expected=[None])], 1),
+        "same_assistant_repeated_id_unknown": ([turn(10, ["parallel-1", "parallel-2"], expected=[None, None])], 0),
+        "parallel_checkpoint_plus_unknown": ([turn(10, ["parallel-1", "parallel-2"], [cp], [cp], [20, None])], 0),
+        "parallel_checkpoint_plus_database": ([turn(10, ["parallel-1", "parallel-2"], [cp], [cp, db_parallel], [20, 21])], 0),
+        "parallel_database_results_across_page": ([turn(10, ["page-1", "page-2"], database=[page1, page2], expected=[210, 211])], 0),
+        "later_round_result_stays_in_later_round": ([turn(10, ["early"], expected=[None]), turn(40, ["later"], [later], [later], [50])], 1),
+        "future_database_result_is_not_borrowed": ([turn(10, ["current"], expected=[None])], 0),
+    }
+    rounds, current_index = specs[scenario]
+    current = rounds[current_index]
+    continuation_id = 20 if scenario == "future_database_result_is_not_borrowed" else 500
+
+    def tool_result(row_id: int, content: str, status: str = "succeeded") -> InternalMessage:
+        return InternalMessage(id=row_id, role=MessageRole.TOOL, tool_call_id=call_id, content=content, tool_execution_status=status)
+
+    def assistant(turn_spec: dict) -> InternalMessage:
+        return InternalMessage(
+            id=turn_spec["assistant_id"],
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id=call_id, name="execute_shell", arguments={"command": command}) for command in turn_spec["calls"]],
+        )
+
+    def serialize(message: InternalMessage) -> dict:
+        return message.model_dump(mode="json", exclude_none=True)
+
+    assistants = [assistant(turn) for turn in rounds]
+    checkpoint_results = [[tool_result(*item) for item in turn["checkpoint"]] for turn in rounds]
+    continuation = InternalMessage(id=continuation_id, role=MessageRole.USER, content="继续")
+    original = InternalMessage(id=1, role=MessageRole.USER, content="原任务")
+    checkpoint = {
+        "messages": [serialize(original), *[raw for a, rs in zip(assistants, checkpoint_results) for raw in [serialize(a), *(serialize(r) for r in rs)]], serialize(continuation)],
+        "turn_messages": [serialize(assistants[current_index]), *(serialize(r) for r in checkpoint_results[current_index]), serialize(continuation)],
+        "current_turn": 7,
+        "total_output_tokens": 9,
+        "files_to_user": [],
+    }
+
+    db_session.add(ChatSession(session_id=session_id, uid=uid, profile_id=profile_id))
+    fields = {"uid": uid, "session_id": session_id, "profile_id": profile_id, "is_processed": True}
+    db_messages = [
+        Message(id=1, **fields, role=MessageRole.USER, type=MessageType.TEXT, content="原任务"),
+        *(Message(id=a.id, **fields, role=MessageRole.ASSISTANT, type=MessageType.TOOL_CALL, content=a.model_dump_json(exclude_none=True)) for a in assistants),
+        *(Message(id=row_id, **fields, role=MessageRole.TOOL, type=MessageType.TOOL_RESULT, content=tool_result(row_id, body).model_dump_json(exclude_none=True)) for t in rounds for row_id, body in t["database"]),
+        *(Message(id=i, **fields, role=MessageRole.USER, type=MessageType.TEXT, content=f"fill {i}") for i in (range(11, 210) if scenario == "parallel_database_results_across_page" else ())),
+        Message(id=continuation.id, **fields, role=MessageRole.USER, type=MessageType.TEXT, content="继续"),
+    ]
+    if scenario == "future_database_result_is_not_borrowed":
+        future_assistant = assistant(turn(30, ["future-other-assistant"]))
+        db_messages.extend(
+            [
+                Message(id=future_assistant.id, **fields, role=MessageRole.ASSISTANT, type=MessageType.TOOL_CALL, content=future_assistant.model_dump_json(exclude_none=True)),
+                Message(id=future[0], **fields, role=MessageRole.TOOL, type=MessageType.TOOL_RESULT, content=tool_result(*future).model_dump_json(exclude_none=True)),
+            ]
+        )
+    db_session.add_all(db_messages)
+    await db_session.flush()
+
+    work = await enqueue(
+        CRUDSessionReplyWorkItem(),
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=1,
+        dedupe_key=f"foreground-reused-call:{scenario}",
+    )
+    work.status = SessionReplyWorkStatus.RUNNING
+    work.locked_by = worker_id
+    work.lock_until = 9999999999
+    work.input_message_ids = [1]
+    work.execution_state = {"stream_requested": False, "dispatcher_checkpoint": checkpoint}
+    db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+    await db_session.commit()
+
+    async def load_messages() -> list[Message]:
+        result = await db_session.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid))
+        return list(result.scalars().all())
+
+    async def tool_rows() -> list[tuple[int, InternalMessage]]:
+        result = await db_session.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid, Message.type == MessageType.TOOL_RESULT).order_by(Message.id))
+        rows = []
+        for row in result.scalars().all():
+            assert row.id is not None
+            message = InternalMessage.model_validate_json(row.content or "{}")
+            message.id = row.id
+            rows.append((row.id, message))
+        return rows
+
+    def results_after(messages: list[InternalMessage], assistant_id: int) -> list[InternalMessage]:
+        start = next(i for i, m in enumerate(messages) if m.role == MessageRole.ASSISTANT and m.id == assistant_id)
+        end = next((i for i in range(start + 1, len(messages)) if messages[i].role in (MessageRole.ASSISTANT, MessageRole.USER)), len(messages))
+        return [m for m in messages[start + 1 : end] if m.role == MessageRole.TOOL]
+
+    def assert_provider(raw: list[dict], expected_turns: list[dict]) -> None:
+        internal = [InternalMessage.model_validate(m) for m in raw]
+        provider = OpenAIChatCompletionsTransformer.to_provider(internal)
+        positions = [i for i, m in enumerate(provider) if m.get("role") == "assistant" and m.get("tool_calls")]
+        assert len(positions) == len(expected_turns)
+        covered_tools = []
+        for n, turn_spec in enumerate(expected_turns):
+            start = positions[n]
+            end = next((i for i in range(start + 1, len(provider)) if provider[i].get("role") in ("assistant", "user")), len(provider))
+            calls = provider[start]["tool_calls"]
+            tools = [m for m in provider[start + 1 : end] if m.get("role") == "tool"]
+            covered_tools.extend(i for i in range(start + 1, end) if provider[i].get("role") == "tool")
+            raw_tools = results_after(internal, turn_spec["assistant_id"])
+            assert len(calls) == len(tools) == len(raw_tools) == len(turn_spec["calls"])
+            assert [c["id"] for c in calls] == [m["tool_call_id"] for m in tools] == [call_id] * len(calls)
+            for call, command in zip(calls, turn_spec["calls"]):
+                args = call["function"]["arguments"]
+                if isinstance(args, str):
+                    args = json.loads(args)
+                assert args == {"command": command}
+            assert [m.get("content") for m in tools] == [m.content for m in raw_tools]
+        assert covered_tools == [i for i, m in enumerate(provider) if m.get("role") == "tool"]
+        assert any(m.role == MessageRole.USER and m.content == "继续" for m in internal)
+
+    test_session_factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", test_session_factory)
+
+    async def dispatch(**kwargs):
+        resume = kwargs["execution_resume_state"]
+        async with test_session_factory() as verify_db:
+            saved = await verify_db.get(SessionReplyWorkItem, work.id)
+            assert saved is not None and saved.execution_state["dispatcher_checkpoint"] == resume
+        assert_provider(resume["messages"], rounds)
+        assert_provider(resume["turn_messages"], [current])
+        return {"choices": []}
+
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+    initial_rows, initial_messages = await tool_rows(), await load_messages()
+    initial_by_id = {row_id: message for row_id, message in initial_rows}
+    unknown_count = sum(row_id is None for t in rounds for row_id in t["expected"])
+    checkpoints, results_snapshots, message_counts = [], [], []
+    for _ in range(2):
+        unknown_checkpoint_ids = []
+        assert await executor_replies_module._execute_foreground(db_session, work, worker_id) == {"choices": []}
+        await db_session.refresh(work)
+        saved = await db_session.get(SessionReplyWorkItem, work.id)
+        checkpoint = saved.execution_state["dispatcher_checkpoint"]
+        checkpoints.append(copy.deepcopy(checkpoint))
+        messages = [InternalMessage.model_validate(m) for m in checkpoint["messages"]]
+        current_messages = [InternalMessage.model_validate(m) for m in checkpoint["turn_messages"]]
+        assert sum(m.role == MessageRole.USER and m.content == "继续" for m in messages) == 1
+        assert sum(m.role == MessageRole.USER and m.content == "继续" for m in current_messages) == 1
+
+        for t in rounds:
+            assistant = next(m for m in messages if m.role == MessageRole.ASSISTANT and m.id == t["assistant_id"])
+            tools = results_after(messages, t["assistant_id"])
+            assert len(assistant.tool_calls or []) == len(tools) == len(t["expected"])
+            assert [c.id for c in assistant.tool_calls or []] == [m.tool_call_id for m in tools] == [call_id] * len(tools)
+            for result_message, expected_id in zip(tools, t["expected"]):
+                assert result_message.id is not None
+                if expected_id is None:
+                    assert result_message.id not in initial_by_id
+                    unknown_checkpoint_ids.append(result_message.id)
+                    assert result_message.tool_execution_status == "execution_unknown"
+                    assert json.loads(result_message.content or "{}") == {"status": "execution_unknown", "error": PROMPT_TOOL_INTERRUPTED}
+                else:
+                    expected = initial_by_id[expected_id]
+                    assert expected.tool_execution_status == "succeeded"
+                    assert (result_message.id, result_message.content, result_message.tool_execution_status) == (expected_id, expected.content, expected.tool_execution_status)
+
+        def signature(message: InternalMessage) -> tuple:
+            return message.id, message.tool_call_id, message.content, message.tool_execution_status
+
+        assert [signature(m) for m in results_after(current_messages, current["assistant_id"])] == [signature(m) for m in results_after(messages, current["assistant_id"])]
+        persisted = await tool_rows()
+        persisted_by_id = {row_id: message for row_id, message in persisted}
+        for row_id, message in initial_rows:
+            assert signature(persisted_by_id[row_id]) == signature(message)
+        unknown = [(row_id, m) for row_id, m in persisted if m.tool_execution_status == "execution_unknown"]
+        persisted_unknown_ids = {row_id for row_id, _ in unknown}
+        assert len(unknown) == len(persisted_unknown_ids) == len(set(unknown_checkpoint_ids)) == unknown_count
+        assert persisted_unknown_ids == set(unknown_checkpoint_ids)
+        for t in rounds:
+            for result_message in results_after(messages, t["assistant_id"]):
+                assert signature(persisted_by_id[result_message.id]) == signature(result_message)
+        results_snapshots.append([(row_id, signature(m)) for row_id, m in persisted])
+        message_counts.append(len(await load_messages()))
+        assert message_counts[-1] == len(initial_messages) + unknown_count
+
+    assert checkpoints[0] == checkpoints[1]
+    assert results_snapshots[0] == results_snapshots[1]
+    assert message_counts[0] == message_counts[1]

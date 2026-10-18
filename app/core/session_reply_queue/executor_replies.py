@@ -1,6 +1,7 @@
 import hashlib
 import json
 import time
+from collections import Counter, deque
 from functools import partial
 from typing import Any
 
@@ -45,87 +46,166 @@ async def _restore_foreground_tool_replies(
     checkpoint: dict[str, Any],
 ) -> dict[str, Any]:
     messages = [InternalMessage.model_validate(message) for message in checkpoint["messages"]]
-    existing_call_ids = {message.tool_call_id for message in messages if message.role == MessageRole.TOOL and message.tool_call_id}
-    missing_calls = {tool_call.id: (tool_call, message.id) for message in messages if message.role == MessageRole.ASSISTANT for tool_call in message.tool_calls or [] if tool_call.id not in existing_call_ids}
-    if not missing_calls:
+
+    def assistant_identity(message: InternalMessage, from_end: int) -> tuple[str, int]:
+        if message.id is not None:
+            return ("message_id", message.id)
+        return ("assistant_from_end", from_end)
+
+    assistant_indexes = [index for index, message in enumerate(messages) if message.role == MessageRole.ASSISTANT]
+    assistant_from_end = {index: ordinal for ordinal, index in enumerate(reversed(assistant_indexes), start=1)}
+    groups: list[dict[str, Any]] = []
+    checkpoint_result_row_ids: set[int] = set()
+    current_group = None
+    for index, message in enumerate(messages):
+        if message.role == MessageRole.ASSISTANT:
+            current_group = {
+                "identity": assistant_identity(message, assistant_from_end[index]),
+                "assistant": message,
+                "existing_counts": Counter(),
+                "existing_without_id_counts": Counter(),
+                "missing": [],
+            }
+            groups.append(current_group)
+        elif current_group is not None and message.role == MessageRole.TOOL:
+            if message.id is not None:
+                checkpoint_result_row_ids.add(message.id)
+            if message.tool_call_id is not None:
+                current_group["existing_counts"][message.tool_call_id] += 1
+                if message.id is None:
+                    current_group["existing_without_id_counts"][message.tool_call_id] += 1
+
+    for group in groups:
+        remaining_existing = Counter(group["existing_counts"])
+        for call_index, tool_call in enumerate(group["assistant"].tool_calls or []):
+            if remaining_existing[tool_call.id] > 0:
+                remaining_existing[tool_call.id] -= 1
+                continue
+            group["missing"].append((call_index, tool_call))
+
+    if not any(group["missing"] for group in groups):
         return checkpoint
 
     await ensure_session_reply_work_claim(db)
-    after_id = None if any(assistant_id is None for _, assistant_id in missing_calls.values()) else min(assistant_id for _, assistant_id in missing_calls.values())
-    restored_results: dict[str, InternalMessage] = {}
-    cursor = None
-    while len(restored_results) < len(missing_calls):
-        page = await message_crud.get_history_forward_by_id(
-            db,
-            session_id=work.session_id,
-            uid=work.uid,
-            after_id=after_id,
-            page_after_id=cursor,
-            limit=200,
-        )
-        if not page:
-            break
-        tool_result_rows = [row for row in page if row.role == MessageRole.TOOL and row.type == MessageType.TOOL_RESULT]
-        rows_by_id = {row.id: row for row in tool_result_rows}
-        for result in parse_db_messages_to_internal(tool_result_rows):
-            if result.tool_call_id not in missing_calls or result.tool_call_id in restored_results:
-                continue
-            row = rows_by_id.get(result.id)
-            if row is not None:
-                result.created_at = row.created_at.timestamp()
-            restored_results[result.tool_call_id] = result
-        cursor = page[-1].id
-
-    for call_id, (tool_call, _) in missing_calls.items():
-        if call_id in restored_results:
+    restored_results: dict[tuple[tuple[str, int], int], InternalMessage] = {}
+    for group in groups:
+        assistant = group["assistant"]
+        if not group["missing"] or assistant.id is None:
             continue
-        tool_result = InternalMessage(
-            role=MessageRole.TOOL,
-            tool_call_id=call_id,
-            tool_execution_status="execution_unknown",
-            content=json.dumps(
-                {"status": "execution_unknown", "error": PROMPT_TOOL_INTERRUPTED},
-                ensure_ascii=False,
-            ),
-        )
-        saved = await save_message(
-            db,
-            work.session_id,
-            work.uid,
-            MessageRole.TOOL,
-            MessageType.TOOL_RESULT,
-            tool_result,
-            work.profile_id,
-            is_processed=True,
-            commit=False,
-            dedupe_key=hashlib.sha256(json.dumps([work.id, tool_call.id]).encode()).hexdigest(),
-        )
-        tool_result.id = saved.id
-        tool_result.created_at = saved.created_at
-        restored_results[call_id] = tool_result
 
-    def insert_results_after_assistants(raw_messages: list[Any]) -> list[Any]:
+        pending_by_id: dict[str, deque[int]] = {}
+        for call_index, tool_call in group["missing"]:
+            pending_by_id.setdefault(tool_call.id, deque()).append(call_index)
+        no_id_results_to_skip = Counter(group["existing_without_id_counts"])
+        cursor = None
+        while any(pending_by_id.values()):
+            page = await message_crud.get_history_forward_by_id(
+                db,
+                session_id=work.session_id,
+                uid=work.uid,
+                after_id=assistant.id,
+                page_after_id=cursor,
+                limit=200,
+            )
+            if not page:
+                break
+
+            tool_result_rows = []
+            reached_next_assistant = False
+            # 只在当前assistant区间内恢复，遇到下一条assistant即停止。
+            for row in page:
+                if row.role == MessageRole.ASSISTANT:
+                    reached_next_assistant = True
+                    break
+                if row.role == MessageRole.TOOL and row.type == MessageType.TOOL_RESULT:
+                    tool_result_rows.append(row)
+
+            rows_by_id = {row.id: row for row in tool_result_rows}
+            for result in parse_db_messages_to_internal(tool_result_rows):
+                row = rows_by_id.get(result.id)
+                if row is None or row.id in checkpoint_result_row_ids:
+                    continue
+                call_id = result.tool_call_id
+                if no_id_results_to_skip[call_id] > 0:
+                    no_id_results_to_skip[call_id] -= 1
+                    continue
+                pending = pending_by_id.get(call_id)
+                if not pending:
+                    continue
+                call_index = pending.popleft()
+                result.created_at = row.created_at.timestamp()
+                restored_results[(group["identity"], call_index)] = result
+
+            if reached_next_assistant:
+                break
+            cursor = page[-1].id
+
+    # 全部区间扫描完成后再生成未知结果，避免后续区间误认新写入行。
+    for group in groups:
+        for call_index, tool_call in group["missing"]:
+            result_key = (group["identity"], call_index)
+            if result_key in restored_results:
+                continue
+            tool_result = InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id=tool_call.id,
+                tool_execution_status="execution_unknown",
+                content=json.dumps(
+                    {"status": "execution_unknown", "error": PROMPT_TOOL_INTERRUPTED},
+                    ensure_ascii=False,
+                ),
+            )
+            dedupe_payload = [
+                _result_message_dedupe_key(work),
+                group["identity"],
+                call_index,
+                tool_call.id,
+            ]
+            saved = await save_message(
+                db,
+                work.session_id,
+                work.uid,
+                MessageRole.TOOL,
+                MessageType.TOOL_RESULT,
+                tool_result,
+                work.profile_id,
+                is_processed=True,
+                commit=False,
+                dedupe_key=hashlib.sha256(json.dumps(dedupe_payload, ensure_ascii=False).encode()).hexdigest(),
+            )
+            tool_result.id = saved.id
+            tool_result.created_at = saved.created_at
+            restored_results[result_key] = tool_result
+
+    def insert_results(raw_messages: list[Any]) -> list[Any]:
+        parsed_messages = [InternalMessage.model_validate(message) for message in raw_messages]
+        assistant_indexes = [index for index, message in enumerate(parsed_messages) if message.role == MessageRole.ASSISTANT]
+        assistant_from_end = {index: ordinal for ordinal, index in enumerate(reversed(assistant_indexes), start=1)}
         output = []
-        inserted_call_ids: set[str] = set()
-        for raw_message in raw_messages:
-            message = InternalMessage.model_validate(raw_message)
-            output.append(raw_message)
+        index = 0
+        while index < len(parsed_messages):
+            message = parsed_messages[index]
+            output.append(raw_messages[index])
+            index += 1
             if message.role != MessageRole.ASSISTANT:
                 continue
-            for tool_call in message.tool_calls or []:
-                result = restored_results.get(tool_call.id)
-                if result is not None and tool_call.id not in inserted_call_ids:
+            identity = assistant_identity(message, assistant_from_end[index - 1])
+            while index < len(parsed_messages) and parsed_messages[index].role == MessageRole.TOOL:
+                output.append(raw_messages[index])
+                index += 1
+            for call_index, _ in enumerate(message.tool_calls or []):
+                result = restored_results.get((identity, call_index))
+                if result is not None:
                     output.append(result.model_dump(mode="json"))
-                    inserted_call_ids.add(tool_call.id)
         return output
 
     new_checkpoint = {
         **checkpoint,
-        "messages": insert_results_after_assistants(checkpoint["messages"]),
+        "messages": insert_results(checkpoint["messages"]),
     }
     turn_messages = checkpoint.get("turn_messages")
     if isinstance(turn_messages, list):
-        new_checkpoint["turn_messages"] = insert_results_after_assistants(turn_messages)
+        new_checkpoint["turn_messages"] = insert_results(turn_messages)
     await _save_interactive_work_execution_checkpoint(
         db,
         new_checkpoint.copy(),
