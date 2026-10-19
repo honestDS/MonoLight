@@ -204,7 +204,10 @@ export const finishWorkLifecycle = (messages, event) => {
 
   return messages
     .filter(message => {
-      if (message?.role !== 'thinking') return true
+      if (
+        message?.role !== 'thinking'
+        && !(event?.type === 'cancelled' && message?.role === 'reasoning')
+      ) return true
       const markerWorkId = normalizeIdentity(message.work_id)
       if (workId && markerWorkId) return !sameIdentity(markerWorkId, workId)
       if (requestIds.size === 0) return true

@@ -123,6 +123,28 @@ async def _persist_and_emit_session_todo_update(
     )
 
 
+async def _emit_precheck_tool_end_events(
+    state: InteractiveDispatchState,
+    *,
+    ai_msg: InternalMessage,
+    tool_results: list[InternalMessage],
+    response_id: str,
+) -> None:
+    if state.stream_event_callback is None or not state.show_tool_calls:
+        return
+    for stored_tool_result in tool_results:
+        matched_tool_call = _find_tool_call_by_id(ai_msg.tool_calls, stored_tool_result.tool_call_id)
+        await state.stream_event_callback(
+            {
+                "type": "tool_end",
+                "name": matched_tool_call.name if matched_tool_call else "unknown",
+                "result": stored_tool_result.content,
+                "tool_call_id": stored_tool_result.tool_call_id,
+                "response_id": response_id,
+            }
+        )
+
+
 async def handle_interactive_tool_round(
     state: InteractiveDispatchState,
     *,
@@ -131,6 +153,20 @@ async def handle_interactive_tool_round(
     response_id: str,
 ) -> dict[str, Any] | None:
     await ensure_session_reply_work_claim(state.db, commit=True)
+    if state.stream_event_callback is not None and state.show_tool_calls:
+        for tool_call_index, tool_call in enumerate(ai_msg.tool_calls):
+            await state.stream_event_callback(
+                {
+                    "type": "tool_start",
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                    "tool_call_id": tool_call.id,
+                    "response_id": response_id,
+                    "tool_call_index": tool_call_index,
+                    "tool_call_count": len(ai_msg.tool_calls),
+                }
+            )
+
     # 完整整轮协议预检必须先于部分限额执行，以保留独占/原子语义。
     protocol_precheck_errors = prevalidate_tool_round_protocol(ai_msg.tool_calls, state.cfg)
     if protocol_precheck_errors:
@@ -162,6 +198,12 @@ async def handle_interactive_tool_round(
                     state.turn_messages,
                 )
             )
+        await _emit_precheck_tool_end_events(
+            state,
+            ai_msg=ai_msg,
+            tool_results=stored_tool_results,
+            response_id=response_id,
+        )
         await _persist_and_emit_session_todo_update(
             state,
             ai_msg=ai_msg,
@@ -212,6 +254,12 @@ async def handle_interactive_tool_round(
                     state.turn_messages,
                 )
             )
+        await _emit_precheck_tool_end_events(
+            state,
+            ai_msg=ai_msg,
+            tool_results=stored_tool_results,
+            response_id=response_id,
+        )
         await _persist_and_emit_session_todo_update(
             state,
             ai_msg=ai_msg,
@@ -219,20 +267,6 @@ async def handle_interactive_tool_round(
         )
         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
         return None
-
-    if state.stream_event_callback is not None and state.show_tool_calls:
-        for tool_call_index, tool_call in enumerate(ai_msg.tool_calls):
-            await state.stream_event_callback(
-                {
-                    "type": "tool_start",
-                    "name": tool_call.name,
-                    "arguments": tool_call.arguments,
-                    "tool_call_id": tool_call.id,
-                    "response_id": response_id,
-                    "tool_call_index": tool_call_index,
-                    "tool_call_count": len(ai_msg.tool_calls),
-                }
-            )
 
     if rejected_tool_results:
         stored_rejected_tool_results: list[InternalMessage] = []

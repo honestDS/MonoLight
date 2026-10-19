@@ -283,3 +283,42 @@ test('multiple tool starts with one response share one assistant message', () =>
   assert.deepEqual(content.tool_calls.map(toolCall => toolCall.id), ['call-a', 'call-b'])
   assert.equal(messagesRef.value[0].response_id, 'response-1')
 })
+
+test('terminal history matches an archived tool call without stealing the final assistant response', () => {
+  const messagesRef = {
+    value: [
+      { ...toolCallMessage('call-1', 'file_tool'), work_id: 7, response_id: 'first-response' },
+      { id: 'final', role: 'assistant', work_id: 7, response_id: 'final-response', content: 'final answer' }
+    ]
+  }
+  const history = [
+    { ...toolCallMessage('call-1', 'file_tool'), id: 'archived-call', db_id: 42, work_id: 7 }
+  ]
+
+  insertTerminalHistory(messagesRef, history)
+
+  assert.equal(messagesRef.value.length, 2)
+  assert.deepEqual(messagesRef.value.map(message => message.id), ['tool-call-call-1', 'final'])
+  assert.deepEqual(parseContent(messagesRef.value[0]).tool_calls.map(call => call.id), ['call-1'])
+  assert.equal(String(messagesRef.value[0].db_id), '42')
+  assert.equal(messagesRef.value[0].response_id, 'first-response')
+  assert.equal(messagesRef.value[1].content, 'final answer')
+  assert.equal(messagesRef.value[1].response_id, 'final-response')
+  assert.equal(parseContent(messagesRef.value[1])?.tool_calls, undefined)
+
+  const firstPass = messagesRef.value.map(message => ({
+    id: message.id,
+    role: message.role,
+    content: parseContent(message) ?? message.content,
+    response_id: message.response_id,
+    db_id: message.db_id
+  }))
+  insertTerminalHistory(messagesRef, history)
+  assert.deepEqual(messagesRef.value.map(message => ({
+    id: message.id,
+    role: message.role,
+    content: parseContent(message) ?? message.content,
+    response_id: message.response_id,
+    db_id: message.db_id
+  })), firstPass)
+})

@@ -166,11 +166,23 @@ class SessionReplyResult:
                         else 0
                     )
 
-                events = await session_reply_stream_event_crud.list_after_sequence(
-                    db,
-                    work_id=target_work_id,
-                    after_sequence_no=after_sequence_no,
-                )
+                if (
+                    resume_mode
+                    and work.status == SessionReplyWorkStatus.CANCELLED
+                    and not await session_reply_stream_event_crud.has_unseen_persisted_turn(
+                        db,
+                        work_id=target_work_id,
+                        history_message_id=history_message_id,
+                    )
+                ):
+                    # Cancellation already covers this output; do not resume its stale tail.
+                    events = []
+                else:
+                    events = await session_reply_stream_event_crud.list_after_sequence(
+                        db,
+                        work_id=target_work_id,
+                        after_sequence_no=after_sequence_no,
+                    )
                 for item in events:
                     after_sequence_no = item.sequence_no
                     yield item.event

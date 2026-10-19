@@ -58,6 +58,18 @@ class CRUDSessionReplyStreamEvent:
         )
         return int(result.scalar() or 0)
 
+    async def has_unseen_persisted_turn(self, db: AsyncSession, *, work_id: int, history_message_id: int) -> bool:
+        result = await db.execute(
+            select(SessionReplyStreamEvent.id)
+            .where(
+                SessionReplyStreamEvent.work_id == work_id,
+                SessionReplyStreamEvent.event["type"].as_string() == "turn_end",
+                SessionReplyStreamEvent.event["message_id"].as_integer() > history_message_id,
+            )
+            .limit(1)
+        )
+        return result.scalar() is not None
+
     async def has_events(self, db: AsyncSession, *, work_id: int) -> bool:
         result = await db.execute(select(SessionReplyStreamEvent.id).where(SessionReplyStreamEvent.work_id == work_id).limit(1))
         return result.scalar() is not None

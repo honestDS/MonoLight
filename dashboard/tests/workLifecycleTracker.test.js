@@ -593,3 +593,90 @@ test('cleans up only the matching work marker when the terminal event has a work
   assert.equal(messages.some(message => message.response_id === 'response-a'), false)
   assert.equal(messages.some(message => message.response_id === 'response-b'), true)
 })
+
+test('cancelled work removes only its temporary thinking and reasoning messages', () => {
+  const tracker = createWorkLifecycleTracker()
+  const sharedRequestId = 'request-shared'
+  const archivedAssistant = {
+    id: 'archived-assistant',
+    role: 'assistant',
+    content: 'Final answer',
+    reasoning_content: 'Archived reasoning',
+    work_id: 7,
+    request_id: sharedRequestId
+  }
+  const toolResult = {
+    id: 'tool-result',
+    role: 'tool',
+    content: 'Tool output',
+    work_id: 7,
+    request_id: sharedRequestId
+  }
+  let messages = [
+    { id: 'cancelled-thinking', role: 'thinking', content: 'Pending', work_id: 7, request_id: sharedRequestId },
+    { id: 'cancelled-reasoning', role: 'reasoning', content: 'Temporary', work_id: '7', request_id: sharedRequestId },
+    archivedAssistant,
+    toolResult,
+    { id: 'other-thinking', role: 'thinking', content: 'Other work', work_id: 'work-b', request_id: sharedRequestId },
+    { id: 'other-reasoning', role: 'reasoning', content: 'Other work', work_id: 'work-b', request_id: sharedRequestId }
+  ]
+
+  const cancelled = { type: 'cancelled', work_id: '7', request_ids: [sharedRequestId] }
+  messages = tracker.finishWorkLifecycle(messages, cancelled)
+
+  assert.deepEqual(messages.map(message => message.id), [
+    'archived-assistant',
+    'tool-result',
+    'other-thinking',
+    'other-reasoning'
+  ])
+  assert.equal(messages.find(message => message.id === 'archived-assistant').reasoning_content, 'Archived reasoning')
+  assert.equal(messages.find(message => message.id === 'archived-assistant').content, 'Final answer')
+  assert.equal(messages.find(message => message.id === 'tool-result').content, 'Tool output')
+
+  const repeatedCancel = tracker.finishWorkLifecycle(messages, cancelled)
+  assert.deepEqual(repeatedCancel, messages)
+})
+
+test('cancelled work without a work id removes only temporary messages sharing request ids', () => {
+  let messages = [
+    { id: 'matching-thinking', role: 'thinking', content: 'Pending', request_ids: ['request-a'] },
+    { id: 'matching-reasoning', role: 'reasoning', content: 'Temporary', request_id: 'request-b' },
+    { id: 'other-thinking', role: 'thinking', content: 'Unrelated', request_id: 'request-c' },
+    { id: 'other-reasoning', role: 'reasoning', content: 'Unrelated', request_ids: ['request-c'] }
+  ]
+
+  messages = finishWorkLifecycle(messages, {
+    type: 'cancelled',
+    request_id: 'request-a',
+    request_ids: ['request-b']
+  })
+
+  assert.deepEqual(messages.map(message => message.id), ['other-thinking', 'other-reasoning'])
+})
+
+test('cancelled work without identity leaves temporary messages unchanged', () => {
+  const messages = [
+    { id: 'thinking', role: 'thinking', content: 'Pending' },
+    { id: 'reasoning', role: 'reasoning', content: 'Temporary' }
+  ]
+
+  assert.deepEqual(finishWorkLifecycle(messages, { type: 'cancelled' }), messages)
+})
+
+for (const terminalType of ['done', 'error']) {
+  test(`${terminalType} keeps temporary reasoning available for normal processing`, () => {
+    let messages = [
+      { id: 'thinking-marker', role: 'thinking', content: 'Pending', work_id: 'work-a' },
+      { id: 'temporary-reasoning', role: 'reasoning', content: 'Reasoning to archive', work_id: 'work-a' }
+    ]
+
+    messages = finishWorkLifecycle(messages, {
+      type: terminalType,
+      work_id: 'work-a',
+      request_ids: ['request-a']
+    })
+
+    assert.deepEqual(messages.map(message => message.id), ['temporary-reasoning'])
+  })
+}

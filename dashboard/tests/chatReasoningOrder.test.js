@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { createHarness, createSession } from '../chatDraftHarness.js'
-
-// 临时缺陷复现用例：终态正确性断言预期失败。
-// 在 dashboard 目录运行：node --experimental-default-type=module --test tests/tmp/reasoningOrderRepro.test.js
+import { createHarness, createSession } from './chatDraftHarness.js'
 
 const persistedHistory = [
   { id: 41, role: 'user', content: '复现工具参数预检失败' },
@@ -63,23 +60,6 @@ const hasToolCall = message => (
   || (Array.isArray(parseContent(message)?.tool_calls) && parseContent(message).tool_calls.length > 0)
 )
 
-const isToolMessage = message => (
-  hasToolCall(message)
-  || message?.type === 'tool_call'
-  || message?.type === 'tool_result'
-  || message?.role === 'tool'
-  || parseContent(message)?.role === 'tool'
-)
-
-const diagnosticSnapshot = messages => messages.map(message => ({
-  id: message.id ?? null,
-  db_id: message.db_id ?? null,
-  role: message.role ?? null,
-  type: message.type ?? null,
-  tool: isToolMessage(message),
-  reasoning: message.reasoning_content || (message.role === 'reasoning' ? message.content : '')
-}))
-
 const thoughtOrder = messages => messages
   .map(message => message.reasoning_content || (message.role === 'reasoning' ? message.content : ''))
   .filter(Boolean)
@@ -90,7 +70,7 @@ for (const scenario of [
   { name: '完整终态遗留孤立思考', sendsToolEvents: false, recovery: 'done' },
   { name: '连续两轮预检失败造成思考回跳', sendsToolEvents: false, recovery: 'done', repeatedPrecheck: true }
 ]) {
-  test(`TMP 思考顺序复现：${scenario.name}`, async t => {
+  test(`思考顺序与终态历史：${scenario.name}`, async t => {
     let loadPersistedHistory = false
     let historyForReload = persistedHistory
     const harness = await createHarness(t, {
@@ -193,17 +173,17 @@ for (const scenario of [
       message.response_id === 'response-second' && message._stream_finalized === true
     )), Boolean(scenario.repeatedPrecheck))
 
-    t.diagnostic(`重入前 ${scenario.name}: ${JSON.stringify(diagnosticSnapshot(chat.messages.value))}`)
     if (scenario.recovery === null) {
       assert.equal(hasToolCall(firstResponse), true)
       assert.equal(JSON.parse(firstResponse.content).tool_calls[0].id, 'invalid-file-call')
       return
     }
 
-    // 临时诊断：断言已知异常形态以确认复现成功，不作为修复回归断言。
-    assert.equal(firstResponse.content || '', '')
-    assert.equal(firstResponse.type, undefined)
-    assert.equal(hasToolCall(firstResponse), false)
+    if (!scenario.sendsToolEvents) {
+      assert.equal(firstResponse.content || '', '')
+      assert.equal(firstResponse.type, undefined)
+      assert.equal(hasToolCall(firstResponse), false)
+    }
 
     if (scenario.recovery === 'done') {
       const finalTurn = scenario.repeatedPrecheck ? 3 : 2
@@ -266,7 +246,7 @@ for (const scenario of [
         reasoning_content: finalReasoning
       })
 
-      await receiveWs(harness, streamEvent('done', finalResponseId, finalTurn, {
+      const doneEvent = streamEvent('done', finalResponseId, finalTurn, {
         request_ids: [request.request_id],
         message_id: finalMessageId,
         response: {
@@ -283,11 +263,65 @@ for (const scenario of [
           }],
           history: responseHistory
         }
-      }))
+      })
+      await receiveWs(harness, doneEvent)
+
+      const terminalState = JSON.stringify(chat.messages.value)
+      await receiveWs(harness, doneEvent)
+      assert.equal(
+        JSON.stringify(chat.messages.value),
+        terminalState,
+        '重复回放同一 done 事件不应改变已展示消息'
+      )
 
       const terminalMessages = Array.from(chat.messages.value, message => ({ ...message }))
       const terminalThoughts = Array.from(thoughtOrder(terminalMessages))
-      t.diagnostic(`终态后 ${scenario.name}: ${JSON.stringify(diagnosticSnapshot(terminalMessages))}`)
+      const terminalDbIds = terminalMessages
+        .filter(message => message.db_id != null)
+        .map(message => String(message.db_id))
+      assert.equal(new Set(terminalDbIds).size, terminalDbIds.length)
+      assert.deepEqual(
+        terminalDbIds.sort(),
+        scenario.repeatedPrecheck ? ['42', '43', '44', '45', '46'] : ['42', '43', '44']
+      )
+
+      const expectedToolCalls = scenario.repeatedPrecheck
+        ? [['42', 'invalid-file-call'], ['44', 'invalid-file-call-second']]
+        : [['42', 'invalid-file-call']]
+      for (const [dbId, toolCallId] of expectedToolCalls) {
+        const message = terminalMessages.find(item => String(item.db_id) === dbId)
+        assert.ok(message)
+        assert.equal(hasToolCall(message), true)
+        const messageContent = parseContent(message)
+        const toolCalls = message.tool_calls?.length
+          ? message.tool_calls
+          : messageContent.tool_calls
+        assert.equal(toolCalls[0].id, toolCallId)
+      }
+
+      const expectedToolResults = scenario.repeatedPrecheck
+        ? [['43', 'invalid-file-call'], ['45', 'invalid-file-call-second']]
+        : [['43', 'invalid-file-call']]
+      for (const [dbId, toolCallId] of expectedToolResults) {
+        const message = terminalMessages.find(item => String(item.db_id) === dbId)
+        assert.ok(message)
+        assert.equal(message.role, 'tool')
+        const resultEnvelope = parseContent(message)
+        assert.equal(message.tool_call_id ?? resultEnvelope.tool_call_id, toolCallId)
+        const result = resultEnvelope.status
+          ? resultEnvelope
+          : parseContent({ content: resultEnvelope.content })
+        assert.equal(result.status, 'failed')
+        assert.equal(result.tool_name, 'file_tool')
+        assert.match(result.error, /Missing required argument: operation/)
+      }
+
+      assert.equal(terminalMessages.some(message => (
+        message.role === 'reasoning' || message.role === 'thinking' || message.type === 'thinking'
+      )), false)
+      assert.equal(terminalMessages.some(message => (
+        message.role === 'assistant' && !hasToolCall(message) && !String(message.content || '').trim()
+      )), false)
 
       historyForReload = [
         persistedHistory[0],
@@ -332,6 +366,16 @@ for (const scenario of [
       assert.equal(restoredFirstResponse.role, 'assistant')
       assert.equal(hasToolCall(restoredFirstResponse), true)
       assert.equal(parseContent(restoredFirstResponse).tool_calls[0].id, 'invalid-file-call')
+      const restoredDbIds = Array.from(chat.messages.value)
+        .filter(message => message.db_id != null)
+        .map(message => String(message.db_id))
+      assert.equal(new Set(restoredDbIds).size, restoredDbIds.length)
+      assert.deepEqual(
+        restoredDbIds.sort(),
+        scenario.repeatedPrecheck
+          ? ['41', '42', '43', '44', '45', '46']
+          : ['41', '42', '43', '44']
+      )
       assert.deepEqual(
         Array.from(thoughtOrder(chat.messages.value)),
         scenario.repeatedPrecheck
@@ -344,7 +388,6 @@ for (const scenario of [
       assert.equal(chat.messages.value.some(message => (
         message.role === 'assistant' && !hasToolCall(message) && !String(message.content || '').trim()
       )), false)
-      t.diagnostic(`终态后再重入 ${scenario.name}: ${JSON.stringify(diagnosticSnapshot(chat.messages.value))}`)
 
       assert.deepEqual(
         terminalThoughts,
@@ -385,6 +428,5 @@ for (const scenario of [
       && !String(message.content || '').trim()
     )), false)
 
-    t.diagnostic(`重入后: ${JSON.stringify(diagnosticSnapshot(chat.messages.value))}`)
   })
 }
