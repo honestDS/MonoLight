@@ -153,16 +153,18 @@ export const insertTerminalHistory = (
 
   const findExistingMessageIndex = message => {
     const messageKeys = getToolMessageDedupeKeys(message)
-    if (messageKeys.length > 0) {
-      return messagesRef.value.findIndex(existingMessage => {
+    const toolIndex = messageKeys.length > 0
+      ? messagesRef.value.findIndex(existingMessage => {
         const existingKeys = getToolMessageDedupeKeys(existingMessage)
         return messageKeys.some(key => existingKeys.includes(key))
       })
-    }
+      : -1
+    if (toolIndex !== -1) return toolIndex
 
     if (isAssistantResponse(message)) {
       return findAssistantResponseReplacementIndex(messagesRef.value, message)
     }
+
     return -1
   }
 

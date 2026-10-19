@@ -13,6 +13,7 @@ from sqlmodel import select
 
 import app.core.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_tools as interactive_tools
+from app.core.constants import END_SESSION_TOOL_NAME
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.tools.file_tool import FILE_TOOL_SCHEMA
@@ -484,3 +485,118 @@ async def test_background_parallel_tool_limit_budget_uses_executable_call_count(
     assert len(rows) == 8
     tool_results = _read_tool_results(rows, tool_calls)
     _assert_tool_result_budget(tool_results)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["missing_operation", "exclusive_end_session"])
+@pytest.mark.parametrize(
+    ("show_tool_calls", "has_stream_callback"),
+    [(True, True), (True, False), (False, True), (False, False)],
+)
+async def test_interactive_precheck_tool_events_match_persisted_failures(
+    parallel_tool_limit_budget_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_kind: str,
+    show_tool_calls: bool,
+    has_stream_callback: bool,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = _profile_config(tmp_path)
+    write_target = tmp_path / f"{failure_kind}-must-not-be-created.txt"
+
+    if failure_kind == "missing_operation":
+        tool_calls = [
+            InternalToolCall(
+                id="missing-operation-call",
+                name="file_tool",
+                arguments={"path": str(write_target)},
+            )
+        ]
+    else:
+        tool_calls = [
+            InternalToolCall(
+                id="exclusive-end-session-call",
+                name=END_SESSION_TOOL_NAME,
+                arguments={},
+            ),
+            InternalToolCall(
+                id="exclusive-file-write-call",
+                name="file_tool",
+                arguments={
+                    "operation": "write",
+                    "path": str(write_target),
+                    "content": "precheck must prevent this write",
+                },
+            ),
+        ]
+
+    assistant_message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=tool_calls)
+    profile, saved_assistant_message = await _persist_profile_and_session(
+        parallel_tool_limit_budget_session_factory,
+        cfg,
+        assistant_message,
+    )
+    monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", parallel_tool_limit_budget_session_factory)
+
+    stream_events: list[dict[str, Any]] = []
+
+    async def capture_stream_event(event: dict[str, Any]) -> None:
+        stream_events.append(event)
+
+    async with parallel_tool_limit_budget_session_factory() as db:
+        state = _build_interactive_state(db, profile, cfg, assistant_message)
+        state.show_tool_calls = show_tool_calls
+        state.stream_event_callback = capture_stream_event if has_stream_callback else None
+        await interactive_tools.handle_interactive_tool_round(
+            state,
+            ai_msg=assistant_message,
+            saved_msg=SimpleNamespace(id=saved_assistant_message.id),
+            response_id="precheck-events-response",
+        )
+
+        state_tool_results = [message for message in state.turn_messages if message.role is MessageRole.TOOL]
+
+    async with parallel_tool_limit_budget_session_factory() as db:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == SESSION_ID,
+                Message.uid == UID,
+                Message.type == MessageType.TOOL_RESULT,
+            )
+            .order_by(Message.id.asc())
+        )
+        rows = list(result.scalars().all())
+
+    assert not write_target.exists()
+    assert len(rows) == len(tool_calls)
+    tool_results = _read_tool_results(rows, tool_calls)
+    assert [message.tool_call_id for message in state_tool_results] == [tool_call.id for tool_call in tool_calls]
+    assert [message.content for message in state_tool_results] == [message.content for message in tool_results]
+    assert all(json.loads(tool_result.content or "{}")["status"] == "failed" for tool_result in tool_results)
+
+    if show_tool_calls and has_stream_callback:
+        assert [event["type"] for event in stream_events] == [
+            *("tool_start" for _ in tool_calls),
+            *("tool_end" for _ in tool_calls),
+        ]
+        starts = stream_events[: len(tool_calls)]
+        ends = stream_events[len(tool_calls) :]
+        assert [event["tool_call_id"] for event in starts] == [tool_call.id for tool_call in tool_calls]
+        assert [event["tool_call_id"] for event in ends] == [tool_call.id for tool_call in tool_calls]
+
+        for index, (start, end, tool_call, tool_result) in enumerate(zip(starts, ends, tool_calls, tool_results, strict=True)):
+            assert start["response_id"] == "precheck-events-response"
+            assert start["tool_call_id"] == tool_call.id
+            assert start["name"] == tool_call.name
+            assert start["arguments"] == tool_call.arguments
+            assert start["tool_call_index"] == index
+            assert start["tool_call_count"] == len(tool_calls)
+            assert end["response_id"] == "precheck-events-response"
+            assert end["tool_call_id"] == tool_call.id
+            assert end["name"] == tool_call.name
+            assert end["result"] == tool_result.content
+            assert json.loads(end["result"])["status"] == "failed"
+    else:
+        assert stream_events == []
