@@ -17,6 +17,7 @@ import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_generation as interactive_generation_module
 from app.core.constants import MANAGE_SCHEDULED_TASKS_TOOL_NAME
+from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
@@ -25,7 +26,7 @@ from app.models.audit import AuditRecord, AuditRecordStatus, AuditToolConclusion
 from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
-from app.models.scheduled_task import ScheduledTask
+from app.models.scheduled_task import ScheduledTask, ScheduledTaskStatus
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -55,13 +56,43 @@ async def db_session(session_factory: async_sessionmaker[AsyncSession]) -> Async
         yield db
 
 
+async def _create_due_run_once_scheduled_task(db: AsyncSession) -> ScheduledTask:
+    profile = Profile(
+        id=PROFILE_ID,
+        uid=UID,
+        name="scheduled-task-run-once-profile",
+        configs=ProfileConfig.model_validate({}).model_dump(),
+    )
+    db.add_all([User(uid=UID, username=UID), profile])
+    await db.flush()
+    db.add(ChatSession(session_id=SESSION_ID, uid=UID, profile_id=PROFILE_ID))
+    await db.flush()
+
+    scheduled_task = ScheduledTask(
+        name="One-time reminder",
+        uid=UID,
+        session_id=SESSION_ID,
+        profile_id=PROFILE_ID,
+        message="Run this reminder once",
+        interval_seconds=60,
+        run_once=True,
+        next_run_at=get_local_time() - timedelta(seconds=1),
+    )
+    db.add(scheduled_task)
+    await db.commit()
+    await db.refresh(scheduled_task)
+    return scheduled_task
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+@pytest.mark.parametrize("run_once", [False, True], ids=["recurring", "one-time"])
 async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
+    run_once: bool,
 ) -> None:
     configs = ProfileConfig.model_validate({}).model_dump()
     configs["channel"]["chat_channel"]["rules"] = [{"channel_id": 1, "model_id": MODEL_ID, "priority": 1, "weight": 1}]
@@ -138,15 +169,18 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
 
         turn = len(calls)
         if turn == 1:
+            create_arguments = {
+                "operation": "create",
+                "name": "Pipeline reminder",
+                "message": "Review deployment status",
+                "interval_seconds": 60,
+            }
+            if run_once:
+                create_arguments["run_once"] = True
             tool_call = InternalToolCall(
                 id="scheduled-create-call",
                 name=MANAGE_SCHEDULED_TASKS_TOOL_NAME,
-                arguments={
-                    "operation": "create",
-                    "name": "Pipeline reminder",
-                    "message": "Review deployment status",
-                    "interval_seconds": 60,
-                },
+                arguments=create_arguments,
             )
         elif turn == 2:
             created = tool_result(kwargs["messages"], "scheduled-create-call")
@@ -247,11 +281,13 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
 
     created_task = observed_results[0]["task"]
     assert (created_task["uid"], created_task["session_id"], created_task["profile_id"]) == (UID, SESSION_ID, PROFILE_ID)
+    assert created_task["run_once"] is run_once
     listed_tasks = observed_results[1]["tasks"]
     assert len(listed_tasks) == 1
     listed_task = listed_tasks[0]
     assert listed_task["id"] == created_task["id"]
     assert (listed_task["uid"], listed_task["session_id"], listed_task["profile_id"]) == (UID, SESSION_ID, PROFILE_ID)
+    assert listed_task["run_once"] is run_once
     assert observed_results[2]["task_id"] == created_task["id"]
 
     async with session_factory() as verification_db:
@@ -400,13 +436,189 @@ async def test_scheduled_task_dispatch_enqueues_once_and_delete_preserves_queued
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["create", "delete"])
+async def test_run_once_scheduled_task_is_not_redispatched_from_stale_snapshot_or_later_poll(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled_task = await _create_due_run_once_scheduled_task(db_session)
+    assert scheduled_task.id is not None
+    task_id = scheduled_task.id
+    due_time = scheduled_task.next_run_at
+
+    async with session_factory() as snapshot_db:
+        stale_snapshot = await snapshot_db.get(ScheduledTask, task_id)
+        assert stale_snapshot is not None
+        assert stale_snapshot.status == ScheduledTaskStatus.ENABLED
+        snapshot_db.expunge(stale_snapshot)
+
+    monkeypatch.setattr(scheduler_module, "AsyncSessionLocal", session_factory)
+    scheduler = scheduler_module.ScheduledTaskScheduler()
+    await scheduler._dispatch_one(task_id)
+
+    async with session_factory() as stale_db:
+        await scheduler._dispatch_one_with_db(stale_db, stale_snapshot)
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_local_time",
+        lambda: due_time + timedelta(seconds=scheduled_task.interval_seconds + 1),
+    )
+    await scheduler._dispatch_one(task_id)
+
+    async with session_factory() as reader:
+        persisted_task = await reader.get(ScheduledTask, task_id)
+        trigger_messages = list(
+            (
+                await reader.execute(
+                    select(Message).where(
+                        Message.session_id == SESSION_ID,
+                        Message.type == MessageType.SCHEDULED_TASK_TRIGGER,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert persisted_task is not None
+        assert persisted_task.status == ScheduledTaskStatus.DISABLED
+        assert persisted_task.run_count == 1
+        assert persisted_task.next_run_at == due_time
+        assert persisted_task.last_message_id is not None
+        assert len(trigger_messages) == 1
+
+        work_items = list(
+            (
+                await reader.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN,
+                        SessionReplyWorkItem.source_id == str(trigger_messages[0].id),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(work_items) == 1
+        assert work_items[0].work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY
+        assert work_items[0].status == SessionReplyWorkStatus.READY_FOR_LLM
+        assert work_items[0].uid == UID
+        assert work_items[0].session_id == SESSION_ID
+        assert work_items[0].profile_id == PROFILE_ID
+        assert all(task.id != task_id for task in await scheduled_task_crud.list_due(reader))
+
+
+@pytest.mark.asyncio
+async def test_run_once_scheduled_task_enqueue_failure_rolls_back_before_retry(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled_task = await _create_due_run_once_scheduled_task(db_session)
+    assert scheduled_task.id is not None
+    task_id = scheduled_task.id
+    due_time = scheduled_task.next_run_at
+
+    monkeypatch.setattr(scheduler_module, "AsyncSessionLocal", session_factory)
+    scheduler = scheduler_module.ScheduledTaskScheduler()
+    queue_manager = scheduler_module.session_reply_queue_manager
+    original_enqueue = queue_manager.enqueue_scheduled_summary
+
+    async def enqueue_then_fail(*args: Any, **kwargs: Any) -> None:
+        await original_enqueue(*args, **kwargs)
+        raise RuntimeError("simulated scheduled summary enqueue failure")
+
+    monkeypatch.setattr(queue_manager, "enqueue_scheduled_summary", enqueue_then_fail)
+    with pytest.raises(RuntimeError, match="simulated scheduled summary enqueue failure"):
+        await scheduler._dispatch_one(task_id)
+
+    async with session_factory() as reader:
+        persisted_task = await reader.get(ScheduledTask, task_id)
+        trigger_messages = list(
+            (
+                await reader.execute(
+                    select(Message).where(
+                        Message.session_id == SESSION_ID,
+                        Message.type == MessageType.SCHEDULED_TASK_TRIGGER,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        work_items = list(
+            (
+                await reader.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert persisted_task is not None
+        assert persisted_task.status == ScheduledTaskStatus.ENABLED
+        assert persisted_task.run_count == 0
+        assert persisted_task.last_run_at is None
+        assert persisted_task.last_message_id is None
+        assert persisted_task.next_run_at == due_time
+        assert trigger_messages == []
+        assert work_items == []
+
+    monkeypatch.setattr(queue_manager, "enqueue_scheduled_summary", original_enqueue)
+    await scheduler._dispatch_one(task_id)
+
+    async with session_factory() as reader:
+        persisted_task = await reader.get(ScheduledTask, task_id)
+        trigger_messages = list(
+            (
+                await reader.execute(
+                    select(Message).where(
+                        Message.session_id == SESSION_ID,
+                        Message.type == MessageType.SCHEDULED_TASK_TRIGGER,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert persisted_task is not None
+        assert persisted_task.status == ScheduledTaskStatus.DISABLED
+        assert persisted_task.run_count == 1
+        assert persisted_task.last_message_id is not None
+        assert len(trigger_messages) == 1
+
+        work_items = list(
+            (
+                await reader.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN,
+                        SessionReplyWorkItem.source_id == str(trigger_messages[0].id),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(work_items) == 1
+        assert work_items[0].work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY
+        assert work_items[0].status == SessionReplyWorkStatus.READY_FOR_LLM
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "run_once"),
+    [("create", False), ("create", True), ("delete", False)],
+    ids=["create-recurring", "create-one-time", "delete"],
+)
 async def test_scheduled_task_mutation_waits_for_audit_confirmation(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     operation: str,
+    run_once: bool,
 ) -> None:
     configs = ProfileConfig.model_validate({}).model_dump()
     configs["channel"]["chat_channel"]["rules"] = [{"channel_id": 1, "model_id": MODEL_ID, "priority": 1, "weight": 1}]
@@ -518,16 +730,17 @@ async def test_scheduled_task_mutation_waits_for_audit_confirmation(
                 finish_reason="stop",
             )
 
-        arguments = (
-            {
+        if operation == "create":
+            arguments = {
                 "operation": "create",
                 "name": "Pipeline reminder",
                 "message": "Review deployment status",
                 "interval_seconds": 60,
             }
-            if operation == "create"
-            else {"operation": "delete", "task_id": 1}
-        )
+            if run_once:
+                arguments["run_once"] = True
+        else:
+            arguments = {"operation": "delete", "task_id": 1}
         return InternalResponse(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
@@ -575,7 +788,10 @@ async def test_scheduled_task_mutation_waits_for_audit_confirmation(
         assert detail.tool_name == MANAGE_SCHEDULED_TASKS_TOOL_NAME
         assert detail.original_tool_call_id == "scheduled-audited-call"
         assert detail.conclusion == AuditToolConclusion.PENDING
-        assert json.loads(detail.arguments_summary)["operation"] == operation
+        arguments_summary = json.loads(detail.arguments_summary)
+        assert arguments_summary["operation"] == operation
+        if operation == "create":
+            assert arguments_summary.get("run_once", False) is run_once
 
         confirmation_messages = list(
             (

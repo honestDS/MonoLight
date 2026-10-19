@@ -244,6 +244,7 @@ CREATE_SUCCESS_CASES = (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operator,session_id,expected_uid,expected_profile_id,owner_username", CREATE_SUCCESS_CASES)
+@pytest.mark.parametrize("run_once", (pytest.param(False, id="recurring-default"), pytest.param(True, id="one-time")))
 async def test_create_persists_target_session_owner_and_profile(
     api_app: FastAPI,
     scheduled_task_session_factory: async_sessionmaker[AsyncSession],
@@ -252,6 +253,7 @@ async def test_create_persists_target_session_owner_and_profile(
     expected_uid: str,
     expected_profile_id: int,
     owner_username: str,
+    run_once: bool,
 ) -> None:
     before = await _task_snapshot(scheduled_task_session_factory)
     request_body = {
@@ -263,6 +265,8 @@ async def test_create_persists_target_session_owner_and_profile(
         "profile_id": 9999,
         "is_superuser": True,
     }
+    if run_once:
+        request_body["run_once"] = True
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
         response = await client.post(CREATE_PATH, headers=_headers(operator), json=request_body)
         assert response.status_code == 200
@@ -273,10 +277,13 @@ async def test_create_persists_target_session_owner_and_profile(
         assert payload["data"]["uid"] == expected_uid
         assert payload["data"]["session_id"] == session_id
         assert payload["data"]["profile_id"] == expected_profile_id
+        assert payload["data"]["run_once"] is run_once
 
         list_response = await client.get(LIST_PATH, headers=_headers(owner_username))
     list_data = _success_data(list_response)
     assert task_id in {item["id"] for item in list_data["items"]}
+    listed_task = next(item for item in list_data["items"] if item["id"] == task_id)
+    assert listed_task["run_once"] is run_once
 
     after = await _task_snapshot(scheduled_task_session_factory)
     before_by_id = {task["id"]: task for task in before}
@@ -292,12 +299,14 @@ async def test_create_persists_target_session_owner_and_profile(
     assert created_task["uid"] == expected_uid
     assert created_task["session_id"] == session_id
     assert created_task["profile_id"] == expected_profile_id
+    assert created_task["run_once"] is run_once
     async with scheduled_task_session_factory() as session:
         result = await session.execute(select(ScheduledTask).where(ScheduledTask.id == task_id))
         persisted_task = result.scalar_one()
         assert persisted_task.uid == expected_uid
         assert persisted_task.session_id == session_id
         assert persisted_task.profile_id == expected_profile_id
+        assert persisted_task.run_once is run_once
 
 
 CREATE_REJECTION_CASES = (
@@ -442,6 +451,145 @@ def _assert_task_unchanged_except(
 ) -> None:
     ignored = set(ignored_fields)
     assert {key: value for key, value in before.items() if key not in ignored} == {key: value for key, value in after.items() if key not in ignored}
+
+
+@pytest.mark.asyncio
+async def test_update_preserves_and_reschedules_one_time_task_contract(
+    api_app: FastAPI,
+    scheduled_task_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = await _task_snapshot(scheduled_task_session_factory)
+    before_task = {task["id"]: task for task in before}[1]
+    assert before_task["run_once"] is False
+
+    clock = {"now": datetime(2026, 4, 1, tzinfo=UTC)}
+    monkeypatch.setattr(scheduled_tasks, "get_local_time", lambda: clock["now"])
+    interval_seconds = before_task["interval_seconds"]
+
+    def assert_deadline(task: dict[str, Any], expected: datetime) -> None:
+        actual = datetime.fromisoformat(task["next_run_at"])
+        if actual.tzinfo is None:
+            actual = actual.replace(tzinfo=UTC)
+        assert actual == expected
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+
+        async def update_task(request_body: dict[str, Any]) -> dict[str, Any]:
+            response = await client.post(
+                UPDATE_PATH,
+                headers=_headers("task-owner"),
+                params={"task_id": 1},
+                json=request_body,
+            )
+            data = _success_data(response)
+            assert data["id"] == 1
+            assert data["uid"] == before_task["uid"]
+            assert data["session_id"] == before_task["session_id"]
+            assert data["profile_id"] == before_task["profile_id"]
+            return data
+
+        one_time_task = await update_task({"run_once": True})
+        assert one_time_task["run_once"] is True
+        first_deadline = clock["now"] + timedelta(seconds=interval_seconds)
+        assert_deadline(one_time_task, first_deadline)
+
+        message_update = await update_task({"message": "one-time task message changed"})
+        assert message_update["run_once"] is True
+        assert_deadline(message_update, first_deadline)
+
+        repeated_enable = await update_task({"status": ScheduledTaskStatus.ENABLED.value})
+        assert repeated_enable["run_once"] is True
+        assert repeated_enable["status"] == ScheduledTaskStatus.ENABLED.value
+        assert_deadline(repeated_enable, first_deadline)
+
+        null_run_once = await update_task({"run_once": None})
+        assert null_run_once["run_once"] is True
+        assert_deadline(null_run_once, first_deadline)
+
+        disabled_task = await update_task({"status": ScheduledTaskStatus.DISABLED.value})
+        assert disabled_task["run_once"] is True
+        assert disabled_task["status"] == ScheduledTaskStatus.DISABLED.value
+        assert_deadline(disabled_task, first_deadline)
+
+        clock["now"] += timedelta(minutes=5)
+        reenabled_task = await update_task({"status": ScheduledTaskStatus.ENABLED.value})
+        assert reenabled_task["run_once"] is True
+        assert reenabled_task["status"] == ScheduledTaskStatus.ENABLED.value
+        second_deadline = clock["now"] + timedelta(seconds=interval_seconds)
+        assert_deadline(reenabled_task, second_deadline)
+
+        clock["now"] += timedelta(minutes=5)
+        recurring_task = await update_task({"run_once": False})
+        assert recurring_task["run_once"] is False
+        third_deadline = clock["now"] + timedelta(seconds=interval_seconds)
+        assert third_deadline != second_deadline
+        assert_deadline(recurring_task, third_deadline)
+
+        list_response = await client.get(LIST_PATH, headers=_headers("task-owner"))
+    list_data = _success_data(list_response)
+    listed_task = next(item for item in list_data["items"] if item["id"] == 1)
+    assert listed_task["run_once"] is False
+    assert listed_task["uid"] == before_task["uid"]
+    assert listed_task["session_id"] == before_task["session_id"]
+    assert listed_task["profile_id"] == before_task["profile_id"]
+
+    after = await _task_snapshot(scheduled_task_session_factory)
+    _assert_other_tasks_unchanged(before, after, 1)
+    updated_task = {task["id"]: task for task in after}[1]
+    assert updated_task["run_once"] is False
+    assert updated_task["status"] == ScheduledTaskStatus.ENABLED.value
+    assert updated_task["message"] == "one-time task message changed"
+    assert updated_task["uid"] == before_task["uid"]
+    assert updated_task["session_id"] == before_task["session_id"]
+    assert updated_task["profile_id"] == before_task["profile_id"]
+    assert_deadline(updated_task, third_deadline)
+
+
+INVALID_RUN_ONCE_REQUESTS = (
+    pytest.param("create", 0, id="create-zero"),
+    pytest.param("create", 1, id="create-one"),
+    pytest.param("create", "true", id="create-string"),
+    pytest.param("create", [], id="create-list"),
+    pytest.param("create", None, id="create-null"),
+    pytest.param("update", 0, id="update-zero"),
+    pytest.param("update", 1, id="update-one"),
+    pytest.param("update", "true", id="update-string"),
+    pytest.param("update", [], id="update-list"),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation,run_once", INVALID_RUN_ONCE_REQUESTS)
+async def test_create_and_update_reject_non_boolean_run_once_without_persisting(
+    api_app: FastAPI,
+    scheduled_task_session_factory: async_sessionmaker[AsyncSession],
+    operation: str,
+    run_once: Any,
+) -> None:
+    before = await _task_snapshot(scheduled_task_session_factory)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        if operation == "create":
+            response = await client.post(
+                CREATE_PATH,
+                headers=_headers("task-owner"),
+                json={
+                    "name": "invalid-run-once-create",
+                    "session_id": "owner-main",
+                    "message": "invalid run once flag",
+                    "interval_seconds": 60,
+                    "run_once": run_once,
+                },
+            )
+        else:
+            response = await client.post(
+                UPDATE_PATH,
+                headers=_headers("task-owner"),
+                params={"task_id": 1},
+                json={"run_once": run_once},
+            )
+    assert response.status_code == 422
+    assert await _task_snapshot(scheduled_task_session_factory) == before
 
 
 UPDATE_SUCCESS_CASES = (
