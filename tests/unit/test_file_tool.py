@@ -4,9 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core import paths
 from app.core.tools.file_tool import FILE_TOOL_SCHEMA, FileToolExecutor
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.models.profile import Profile, ProfileConfig
+
+
+@pytest.fixture(autouse=True)
+def isolate_shared_skills_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "SKILLS_DIR", tmp_path / "data" / "skills")
 
 
 def _executor(tmp_path, *, allowed_operation_dirs=None):
@@ -365,6 +371,39 @@ async def test_file_tool_direct_writes_without_audit_are_blocked_even_when_proje
 
     assert result["status"] == "blocked"
     assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "operation_kwargs"),
+    [
+        ("write", {"content": "replacement\n"}),
+        ("edit", {"old_text": "original", "new_text": "replacement"}),
+        ("patch", {"patch": "@@\n-original\n+replacement"}),
+    ],
+    ids=["write", "edit", "patch"],
+)
+async def test_shared_skill_protection_is_independent_of_executor_project_root(tmp_path, monkeypatch, operation, operation_kwargs):
+    protected_dir = paths.SKILLS_DIR
+    protected_dir.mkdir(parents=True)
+    protected_target = protected_dir / "protected.txt"
+    original = "original\n"
+    protected_target.write_text(original, encoding="utf-8")
+
+    launch_root = tmp_path / "launcher"
+    launch_target = launch_root / "data" / "skills" / "protected.txt"
+    launch_target.parent.mkdir(parents=True)
+    launch_target.write_text(original, encoding="utf-8")
+    monkeypatch.chdir(launch_root)
+    executor = _executor(launch_root, allowed_operation_dirs=[str(tmp_path)])
+
+    protected_result = json.loads(await executor.execute(operation=operation, path=str(protected_target.resolve()), **operation_kwargs))
+    launch_result = json.loads(await executor.execute(operation=operation, path=str(launch_target.resolve()), **operation_kwargs))
+
+    assert protected_result["status"] == "blocked"
+    assert protected_target.read_text(encoding="utf-8") == original
+    assert launch_result["status"] == "success"
+    assert launch_target.read_text(encoding="utf-8") == "replacement\n"
 
 
 @pytest.mark.asyncio

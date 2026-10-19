@@ -44,6 +44,7 @@ from .read_text_file import read_text_file as read_text_file
 from .scheduled_tasks import MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA, ManageScheduledTasksExecutor
 from .send_file_to_user import SEND_FILE_TO_USER_TOOL_SCHEMA, SendFileToUserExecutor
 from .shell import SHELL_TOOL_SCHEMA, ShellExecutor
+from .skill import SKILL_TOOL_SCHEMA, SkillExecutor
 from .terminal import SHELL_COMPANION_TOOL_NAMES as SHELL_COMPANION_TOOL_NAMES
 from .terminal import (
     SHELL_COMPANION_TOOL_SCHEMAS,
@@ -66,6 +67,7 @@ logger = get_logger(__name__)
 SYSTEM_BUILTIN_TOOL_SCHEMAS = [
     MANAGE_TODO_TOOL_SCHEMA,
     END_SESSION_TOOL_SCHEMA,
+    SKILL_TOOL_SCHEMA,
 ]
 SYSTEM_BUILTIN_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS)
 
@@ -128,6 +130,7 @@ TOOL_EXECUTOR_MAP = {
     TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
     TERMINAL_CLOSE_TOOL_SCHEMA["function"]["name"]: TerminalCloseExecutor,
     MANAGE_TODO_TOOL_NAME: ManageTodoExecutor,
+    SKILL_TOOL_SCHEMA["function"]["name"]: SkillExecutor,
 }
 
 CONTROL_TOOL_ROUND_EXECUTION_POLICIES = {

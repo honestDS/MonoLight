@@ -1,7 +1,7 @@
 import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from app.core.constants import ERR_AUDIT_RECORD_ID_INVALID, ERR_AUDIT_USER_DIR_INVALID, ERR_AUDIT_USER_ID_INVALID
+from app.core.constants import ERR_AUDIT_RECORD_ID_INVALID, ERR_AUDIT_USER_DIR_INVALID, ERR_AUDIT_USER_ID_INVALID, SKILLS_DIRECTORY
 from app.core.i18n import t
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -12,6 +12,7 @@ DASHBOARD_PUBLIC_DIR = DASHBOARD_DIR / "public"
 FAVICON_PATH = DASHBOARD_PUBLIC_DIR / "favicon.ico"
 
 DATA_DIR = ROOT_DIR / "data"
+SKILLS_DIR = ROOT_DIR / SKILLS_DIRECTORY
 SYSTEM_SECRETS_PATH = DATA_DIR / "system_secrets.json"
 SYSTEM_SECRETS_LOCK_PATH = DATA_DIR / "system_secrets.lock"
 LOGS_DIR = DATA_DIR / "logs"
@@ -50,6 +51,7 @@ def get_audit_file_path(uid: str, audit_record_id: int, *, audit_root: str | Pat
 
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)

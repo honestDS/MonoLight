@@ -5,6 +5,7 @@ aiomysql
 pydantic
 pydantic-settings
 python-dotenv
+PyYAML
 passlib[bcrypt]
 python-jose[cryptography]
 aiohttp

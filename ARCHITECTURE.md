@@ -155,6 +155,7 @@ app/core/
 ├── session_source.py       # 会话来源信息
 ├── setup.py                # 系统初始化应用服务
 ├── setup_session.py        # 初始化会话令牌签发与校验
+├── skills.py               # 全局共享技能包发现与目录结构访问
 ├── system_secrets.py       # 系统密钥管理
 └── validation.py           # 通用输入校验
 ```
@@ -520,6 +521,7 @@ app/core/tools/
 ├── read_text_file.py       # 文本文件读取工具
 ├── read_multimodal_file.py # 多模态文件读取工具
 ├── send_file_to_user.py    # 文件发送工具
+├── skill.py                # 全局共享技能包只读目录访问工具
 ├── terminal.py             # 交互终端工具
 ├── todo.py                 # 当前会话 Todo 计划工具
 └── shell.py                # Shell 工具
@@ -761,6 +763,7 @@ scripts/                    # 数据库迁移和运行维护脚本
 ```text
 data/                       # SQLite、Chroma、日志与审计等持久化数据
 ├── audit/                  # 审计文件
+├── skills/                 # 全局共享技能包
 ├── system_secrets.json     # 系统密钥持久化文件
 └── system_secrets.lock     # 系统密钥初始化锁文件
 
@@ -768,6 +771,7 @@ temp/                       # 上传文件、工具结果和其他临时数据
 ```
 
 关系型数据由 `app/providers/database/` 管理，向量数据由 `app/providers/vector/` 管理，文件型持久化由核心服务和路径组件管理。
+共享技能资产访问与 Shell 执行职责分离。
 
 ## 依赖方向
 

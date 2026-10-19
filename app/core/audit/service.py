@@ -476,7 +476,7 @@ async def _run_audit_model(
     chat_params = resolve_chat_params(model_entry, cfg.channel.chat_channel)
     directory_policy = {"allowed_operation_dirs": get_allowed_operation_dirs(cfg)}
     if cfg.security.protect_system_directories:
-        directory_policy["write_protected_directories"] = [str(directory) for directory in await asyncio.to_thread(get_write_protected_dirs, os.getcwd())]
+        directory_policy["write_protected_directories"] = [str(directory) for directory in await asyncio.to_thread(get_write_protected_dirs)]
     model_payload = {
         **payload,
         "audit_depth": read_budget.limit,
