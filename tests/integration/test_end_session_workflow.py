@@ -28,6 +28,7 @@ from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_P
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
+from app.models.background_task import BackgroundTask
 from app.models.channel import ModelChannel
 from app.models.message import (
     InternalMessage,
@@ -462,8 +463,8 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
     assert len(calls) == 2
     assert calls[0]["tool_choice"] == "auto"
     assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
-    assert calls[1]["tool_choice"] == "none"
-    assert calls[1]["tools"] == []
+    assert calls[1]["tool_choice"] == "auto"
+    assert calls[1]["tools"] == calls[0]["tools"]
     assert any(message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_FINAL_RESPONSE_PROMPT for message in calls[1]["messages"])
     assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for message in calls[1]["messages"] if message.role == MessageRole.SYSTEM)
     assert any(checkpoint.get("execution_phase") == GOAL_EXECUTION_PHASE_FINALIZING for checkpoint in checkpoints)
@@ -728,8 +729,8 @@ async def test_goal_mode_continues_beyond_configured_and_legacy_turn_limits_then
 
     assert len(calls) == 27
     assert all(call["tool_choice"] == "auto" for call in calls[:-1])
-    assert calls[-1]["tool_choice"] == "none"
-    assert calls[-1]["tools"] == []
+    assert calls[-1]["tool_choice"] == "auto"
+    assert calls[-1]["tools"] == calls[0]["tools"]
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=1)
     for call in calls[:-1]:
         assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in call["tools"])
@@ -823,7 +824,9 @@ async def test_non_goal_mode_stops_at_configured_turn_limit_then_ends(
     response = _response_from_dispatch_result(result, stream=stream)
 
     assert len(calls) == max_turns
-    assert [call["tool_choice"] for call in calls] == ["auto"] * (max_turns - 1) + ["none"]
+    assert all(call["tool_choice"] == "auto" for call in calls)
+    assert all(call["tools"] == calls[0]["tools"] for call in calls)
+    assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
     assert all(all(tool["function"]["name"] != END_SESSION_TOOL_NAME for tool in call["tools"]) for call in calls)
     assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for call in calls for message in call["messages"] if message.role == MessageRole.SYSTEM)
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
@@ -906,7 +909,9 @@ async def test_external_source_non_goal_mode_honors_configured_turn_limit(
     assert (session.goal_mode, session.max_turns) == (False, 3)
 
     assert len(calls) == 3
-    assert [call["tool_choice"] for call in calls] == ["auto", "auto", "none"]
+    assert all(call["tool_choice"] == "auto" for call in calls)
+    assert all(call["tools"] == calls[0]["tools"] for call in calls)
+    assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
     assert all(all(tool["function"]["name"] != END_SESSION_TOOL_NAME for tool in call["tools"]) for call in calls)
     assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for call in calls for message in call["messages"] if message.role == MessageRole.SYSTEM)
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=3)
@@ -959,14 +964,15 @@ async def test_execution_resume_state_restarts_over_limit_and_preserves_mode_con
     response = _response_from_dispatch_result(result, stream=stream)
 
     assert len(calls) == (2 if goal_mode else 1)
-    assert calls[0]["tool_choice"] == ("auto" if goal_mode else "none")
+    assert calls[0]["tool_choice"] == "auto"
+    assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
     has_end_session = any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
     assert has_end_session is goal_mode
     goal_mode_messages = [message for message in calls[0]["messages"] if message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_SYSTEM_PROMPT]
     assert len(goal_mode_messages) == (1 if goal_mode else 0)
     if goal_mode:
-        assert calls[1]["tool_choice"] == "none"
-        assert calls[1]["tools"] == []
+        assert calls[1]["tool_choice"] == "auto"
+        assert calls[1]["tools"] == calls[0]["tools"]
         assert any(message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_FINAL_RESPONSE_PROMPT for message in calls[1]["messages"])
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=1)
     user_payloads = [json.loads(message.content)["user_message"] for message in calls[0]["messages"] if message.role == MessageRole.USER]
@@ -1025,8 +1031,9 @@ async def test_finalizing_resume_skips_tools_and_generates_only_final_reply(
     response = _response_from_dispatch_result(result, stream=stream)
 
     assert len(calls) == 1
-    assert calls[0]["tool_choice"] == "none"
-    assert calls[0]["tools"] == []
+    assert calls[0]["tool_choice"] == "auto"
+    assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
+    assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
     assert any(message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_FINAL_RESPONSE_PROMPT for message in calls[0]["messages"])
     assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for message in calls[0]["messages"] if message.role == MessageRole.SYSTEM)
     assert response["choices"][0]["message"]["content"] == SUMMARY
@@ -1041,11 +1048,13 @@ async def test_finalizing_resume_skips_tools_and_generates_only_final_reply(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
 @pytest.mark.parametrize("goal_mode", [False, True], ids=["max-turn-final", "goal-finalizing"])
+@pytest.mark.parametrize("illegal_rounds", [1, 3], ids=["one-illegal-round", "three-illegal-rounds"])
 async def test_text_only_final_reply_never_executes_provider_tool_calls(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
     goal_mode: bool,
+    illegal_rounds: int,
 ) -> None:
     _patch_runtime_database(monkeypatch, session_factory)
     session_id = f"final-tool-call-forbidden-{int(stream)}-{int(goal_mode)}"
@@ -1064,17 +1073,30 @@ async def test_text_only_final_reply_never_executes_provider_tool_calls(
             "turn_messages": [],
             "files_to_user": [],
         }
-    calls = _patch_llm(
-        monkeypatch,
-        [
+    forbidden_texts: list[str] = []
+    forbidden_call_ids: dict[int, list[str]] = {}
+    responses: list[InternalResponse] = []
+    for attempt in range(1, illegal_rounds + 1):
+        todo_call_id = f"forbidden-final-todo-{attempt}"
+        shell_call_id = f"forbidden-final-shell-{attempt}"
+        forbidden_call_ids[attempt] = [todo_call_id, shell_call_id]
+        forbidden_texts.extend([f"违规最终正文-{attempt}", f"违规最终推理-{attempt}"])
+        responses.append(
             _response_for_tool_calls(
-                [_todo_write_call("forbidden-final-tool")],
-                content="这段内容也不能作为最终回复提前发送",
-            ),
-            _final_response("纠正后的最终回复"),
-        ],
-        stream=stream,
-    )
+                [
+                    _todo_write_call(todo_call_id),
+                    InternalToolCall(
+                        id=shell_call_id,
+                        name="execute_shell",
+                        arguments={"command": f"echo forbidden-{attempt}", "run_in_background": True},
+                    ),
+                ],
+                content=f"违规最终正文-{attempt}",
+                reasoning=f"违规最终推理-{attempt}",
+            )
+        )
+    responses.append(_final_response("纠正后的最终回复"))
+    calls = _patch_llm(monkeypatch, responses, stream=stream)
 
     result = await _dispatch(
         session_factory,
@@ -1086,53 +1108,88 @@ async def test_text_only_final_reply_never_executes_provider_tool_calls(
     )
     response = _response_from_dispatch_result(result, stream=stream)
 
-    assert len(calls) == 2
-    assert [call["tool_choice"] for call in calls] == ["none", "none"]
-    assert [call["tools"] for call in calls] == [[], []]
-    correction_tool_results = [message for message in calls[1]["messages"] if message.role == MessageRole.TOOL and message.tool_call_id == "forbidden-final-tool"]
-    assert len(correction_tool_results) == 1
-    assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT in (correction_tool_results[0].content or "")
+    assert len(calls) == illegal_rounds + 1
+    assert all(call["tool_choice"] == "auto" for call in calls)
+    assert all(call["tools"] == calls[0]["tools"] for call in calls)
+    assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
+    assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"]) is goal_mode
+    assert any(message.role == MessageRole.USER and INITIAL_MESSAGE in (message.content or "") for message in calls[0]["messages"])
+    earlier_call_ids: list[str] = []
+    for correction_attempt in range(1, illegal_rounds + 1):
+        earlier_call_ids.extend(forbidden_call_ids[correction_attempt])
+        correction_tool_results = [message for message in calls[correction_attempt]["messages"] if message.role == MessageRole.TOOL and message.tool_call_id in earlier_call_ids]
+        assert {message.tool_call_id for message in correction_tool_results} == set(earlier_call_ids)
+        assert len(correction_tool_results) == len(earlier_call_ids)
+        for tool_result in correction_tool_results:
+            feedback = json.loads(tool_result.content or "{}")
+            assert feedback["status"] == "rejected"
+            assert feedback["executed"] is False
+            assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT in (tool_result.content or "")
     assert response["choices"][0]["message"]["content"] == "纠正后的最终回复"
+    public_result = json.dumps(result, ensure_ascii=False)
+    assert all(text not in public_result for text in forbidden_texts)
     messages = await _list_messages(session_factory, session_id)
     assert not [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT}]
     assistant_rows = [message for message in messages if message.role == MessageRole.ASSISTANT]
     assert len(assistant_rows) == 1
     assert assistant_rows[0].content == "纠正后的最终回复"
+    assert all(text not in (assistant_rows[0].content or "") for text in forbidden_texts)
     async with session_factory() as db:
         assert await db.get(SessionTodoPlan, session_id) is None
+        assert not (await db.execute(select(BackgroundTask))).scalars().all()
     if stream:
         assert [event["content"] for event in result if event.get("type") == "content"] == ["纠正后的最终回复"]
+        assert not [event for event in result if event.get("type") in {"tool_start", "tool_end"}]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+@pytest.mark.parametrize("goal_mode", [False, True], ids=["max-turn-final", "goal-finalizing"])
 async def test_text_only_final_reply_stops_after_three_failed_corrections(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
+    goal_mode: bool,
 ) -> None:
     _patch_runtime_database(monkeypatch, session_factory)
-    session_id = f"final-tool-call-correction-exhausted-{int(stream)}"
+    session_id = f"final-tool-call-correction-exhausted-{int(stream)}-{int(goal_mode)}"
     initial_message = await _seed_conversation(
         session_factory,
         session_id,
-        goal_mode=True,
+        goal_mode=goal_mode,
         max_turns=1,
     )
-    execution_resume_state = {
-        "current_turn": 6,
-        "execution_phase": GOAL_EXECUTION_PHASE_FINALIZING,
-        "messages": [initial_message.model_dump(mode="json")],
-        "turn_messages": [],
-        "files_to_user": [],
-    }
-    responses = [
-        _response_for_tool_calls(
-            [_todo_write_call(f"forbidden-final-tool-{attempt}")],
-            content=f"错误最终回复 {attempt}",
+    execution_resume_state = None
+    if goal_mode:
+        execution_resume_state = {
+            "current_turn": 6,
+            "execution_phase": GOAL_EXECUTION_PHASE_FINALIZING,
+            "messages": [initial_message.model_dump(mode="json")],
+            "turn_messages": [],
+            "files_to_user": [],
+        }
+    forbidden_texts: list[str] = []
+    responses: list[InternalResponse] = []
+    forbidden_call_ids: dict[int, list[str]] = {}
+    for attempt in range(1, FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS + 2):
+        todo_call_id = f"forbidden-final-todo-{attempt}"
+        shell_call_id = f"forbidden-final-shell-{attempt}"
+        forbidden_call_ids[attempt] = [todo_call_id, shell_call_id]
+        forbidden_texts.extend([f"错误最终正文-{attempt}", f"错误最终推理-{attempt}"])
+        responses.append(
+            _response_for_tool_calls(
+                [
+                    _todo_write_call(todo_call_id),
+                    InternalToolCall(
+                        id=shell_call_id,
+                        name="execute_shell",
+                        arguments={"command": f"echo forbidden-{attempt}", "run_in_background": True},
+                    ),
+                ],
+                content=f"错误最终正文-{attempt}",
+                reasoning=f"错误最终推理-{attempt}",
+            )
         )
-        for attempt in range(FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS + 1)
-    ]
     calls = _patch_llm(monkeypatch, responses, stream=stream)
 
     if stream:
@@ -1160,14 +1217,33 @@ async def test_text_only_final_reply_stops_after_three_failed_corrections(
             )
         assert exc_info.value.render_message() == t(ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED)
 
-    assert len(calls) == FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS + 1
-    assert all(call["tool_choice"] == "none" for call in calls)
-    assert all(call["tools"] == [] for call in calls)
+    assert len(calls) == FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS + 1 == 4
+    assert all(call["tool_choice"] == "auto" for call in calls)
+    assert all(call["tools"] == calls[0]["tools"] for call in calls)
+    assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
+    assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"]) is goal_mode
+    assert any(message.role == MessageRole.USER and INITIAL_MESSAGE in (message.content or "") for message in calls[0]["messages"])
+    earlier_call_ids: list[str] = []
+    for correction_attempt in range(1, FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS + 1):
+        earlier_call_ids.extend(forbidden_call_ids[correction_attempt])
+        correction_tool_results = [message for message in calls[correction_attempt]["messages"] if message.role == MessageRole.TOOL and message.tool_call_id in earlier_call_ids]
+        assert {message.tool_call_id for message in correction_tool_results} == set(earlier_call_ids)
+        assert len(correction_tool_results) == len(earlier_call_ids)
+        for tool_result in correction_tool_results:
+            feedback = json.loads(tool_result.content or "{}")
+            assert feedback["status"] == "rejected"
+            assert feedback["executed"] is False
+            assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT in (tool_result.content or "")
+    if stream:
+        assert all(text not in json.dumps(result, ensure_ascii=False) for text in forbidden_texts)
+    else:
+        assert all(text not in exc_info.value.render_message() for text in forbidden_texts)
     messages = await _list_messages(session_factory, session_id)
     assert not [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT}]
     assert not [message for message in messages if message.role == MessageRole.ASSISTANT]
     async with session_factory() as db:
         assert await db.get(SessionTodoPlan, session_id) is None
+        assert not (await db.execute(select(BackgroundTask))).scalars().all()
 
 
 @pytest.mark.asyncio

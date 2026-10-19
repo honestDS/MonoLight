@@ -16,17 +16,17 @@ from app.core.constants import (
     ERR_BACKGROUND_TASK_NOT_FOUND,
     ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
     ERR_LLM_EMPTY_RESPONSE,
+    ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
-    MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES,
-    MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES,
+    FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS,
 )
 from app.core.context import ContextManager
 from app.core.crud.account.user import user_crud
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.task.background import background_task_crud
-from app.core.exceptions import LLMException, ServerException
+from app.core.exceptions import LLMException, LLMModelCapabilityException, ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger
 from app.core.prompts import (
@@ -35,8 +35,6 @@ from app.core.prompts import (
     BACKGROUND_PROACTIVE_TEXT_ONLY_FALLBACK_PROMPT,
     BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
     BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
-    BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT,
-    TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
 )
 from app.core.tools import (
     END_SESSION_TOOL_NAME,
@@ -161,18 +159,14 @@ class BackgroundDispatcherMixin:
         cleaned_platform_constraints = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
         cleaned_guidance_prompt = guidance_prompt.strip() if isinstance(guidance_prompt, str) else ""
 
-        tools = None
-        allowed_knowledge_base_ids = None
-        allowed_tool_names = None
-        if allow_tools:
-            profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
-            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") not in {END_SESSION_TOOL_NAME, MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
-            if restrict_tools_to_background_allowlist:
-                profile_tools = filter_background_proactive_tools(profile_tools)
-                allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
-            else:
-                allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
-            tools = profile_tools or None
+        profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
+        profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") not in {END_SESSION_TOOL_NAME, MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
+        if restrict_tools_to_background_allowlist:
+            profile_tools = filter_background_proactive_tools(profile_tools)
+            allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
+        else:
+            allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
+        tools = profile_tools or None
 
         async def recover_context_length(chat_params, chat_channel_obj, model_entry, *, active_tools, target_messages=None):
             nonlocal messages
@@ -202,6 +196,73 @@ class BackgroundDispatcherMixin:
             if target_messages is None:
                 messages = recovery_messages
             return True
+
+        async def correct_final_reply(
+            ai_msg: InternalMessage,
+            *,
+            context_messages: list[InternalMessage],
+            correction_call_context: str,
+        ) -> InternalMessage:
+            if not ai_msg.tool_calls:
+                return ai_msg
+            correction_context_messages = [*context_messages]
+            for attempt in range(FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS):
+                repeated_tool_names = sorted({tool_call.name for tool_call in ai_msg.tool_calls})
+                logger.bind(
+                    uid=uid,
+                    session_id=session_id,
+                    reply_source=reply_source,
+                    repeated_tools=repeated_tool_names,
+                ).warning(t("LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_RETRY"))
+                correction_context_messages.extend(
+                    build_virtual_tool_feedback_messages(
+                        ai_msg,
+                        {
+                            "type": "background_proactive_final_tool_correction",
+                            "error": t(ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN),
+                            "instruction": BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT,
+                            "ignored_tool_calls": repeated_tool_names,
+                            "status": "rejected",
+                            "executed": False,
+                        },
+                    )
+                )
+                build_correction_request = partial(
+                    cls._build_text_only_correction_request,
+                    db=db,
+                    messages=correction_context_messages,
+                    uid=uid,
+                    session_id=session_id,
+                )
+                corrected_response, _chat_channel_obj, _model_entry, _channel_rule, _chat_params = await generate_chat_with_fallback(
+                    db,
+                    chat_channel=chat_channel,
+                    request_builder=build_correction_request,
+                    call_context=f"{correction_call_context}_{attempt + 1}",
+                    cursor_key=chat_cursor_key,
+                    uid=uid,
+                    session_id=session_id,
+                    tools=tools,
+                    tool_choice="auto",  # 最终阶段由本地拦截，避免上游 none 处理差异。
+                    require_content_or_tools=False,
+                    request_metadata_callback=request_metadata_callback,
+                    context_length_recovery_callback=partial(
+                        recover_context_length,
+                        active_tools=tools,
+                        target_messages=correction_context_messages,
+                    ),
+                )
+                ai_msg = corrected_response.message
+                if not ai_msg.tool_calls:
+                    return ai_msg
+
+            logger.bind(
+                uid=uid,
+                session_id=session_id,
+                reply_source=reply_source,
+                repeated_tools=sorted({tool_call.name for tool_call in ai_msg.tool_calls}),
+            ).warning(t(ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED))
+            raise LLMModelCapabilityException(message=ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED)
 
         async def build_initial_request(chat_params, chat_channel_obj, model_entry):
             nonlocal messages
@@ -261,7 +322,7 @@ class BackgroundDispatcherMixin:
                         message.guidance_prompt = cleaned_guidance_prompt
                         break
             return ContextManager.prepare_messages_for_model_request(
-                messages=_materialize_reply_request_messages(messages, tools_available=bool(tools)),
+                messages=_materialize_reply_request_messages(messages, tools_available=allow_tools and bool(tools)),
                 context_window_k=chat_params["context_window_k"],
                 max_tokens=chat_params["max_tokens"],
             )
@@ -276,6 +337,7 @@ class BackgroundDispatcherMixin:
             uid=uid,
             session_id=session_id,
             tools=tools,
+            tool_choice="auto",
             request_metadata_callback=request_metadata_callback,
             context_length_recovery_callback=partial(
                 recover_context_length,
@@ -284,58 +346,12 @@ class BackgroundDispatcherMixin:
         )
         ai_msg = response.message
 
-        if not allow_tools and ai_msg.tool_calls:
-            ignored_tool_names = sorted({tool_call.name for tool_call in ai_msg.tool_calls})
-            logger.bind(
-                uid=uid,
-                session_id=session_id,
-                reply_source=reply_source,
-                ignored_tools=ignored_tool_names,
-            ).warning(t("LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTING"))
-            messages.extend(
-                build_virtual_tool_feedback_messages(
-                    ai_msg,
-                    {
-                        "type": "background_proactive_tools_disabled_tool_correction",
-                        "error": "Tool calls are disabled for this reply.",
-                        "instruction": TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
-                        "ignored_tool_calls": ignored_tool_names,
-                    },
-                )
+        if not allow_tools or not tools:
+            ai_msg = await correct_final_reply(
+                ai_msg,
+                context_messages=messages,
+                correction_call_context=f"{call_context}_text_only_tool_correction",
             )
-            build_text_only_correction_request = partial(
-                cls._build_text_only_correction_request,
-                db=db,
-                messages=messages,
-                uid=uid,
-                session_id=session_id,
-            )
-            corrected_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
-                db,
-                chat_channel=chat_channel,
-                request_builder=build_text_only_correction_request,
-                call_context=f"{call_context}_text_only_tool_correction",
-                cursor_key=chat_cursor_key,
-                uid=uid,
-                session_id=session_id,
-                tools=None,
-                require_content=True,
-                request_metadata_callback=request_metadata_callback,
-                context_length_recovery_callback=partial(
-                    recover_context_length,
-                    active_tools=None,
-                    target_messages=messages,
-                ),
-            )
-            ai_msg = corrected_response.message
-            if ai_msg.tool_calls:
-                logger.bind(
-                    uid=uid,
-                    session_id=session_id,
-                    reply_source=reply_source,
-                    ignored_tools=sorted({tool_call.name for tool_call in ai_msg.tool_calls}),
-                ).warning(t("LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTION_TOOL_IGNORED"))
-                ai_msg.tool_calls = []
 
         if allow_tools and ai_msg.tool_calls:
             unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
@@ -369,6 +385,7 @@ class BackgroundDispatcherMixin:
                     uid=uid,
                     session_id=session_id,
                     tools=tools,
+                    tool_choice="auto",
                     request_metadata_callback=request_metadata_callback,
                     context_length_recovery_callback=partial(
                         recover_context_length,
@@ -408,22 +425,28 @@ class BackgroundDispatcherMixin:
                         cursor_key=chat_cursor_key,
                         uid=uid,
                         session_id=session_id,
-                        tools=None,
-                        require_content=True,
+                        tools=tools,
+                        tool_choice="auto",  # 最终阶段由本地拦截，避免上游 none 处理差异。
                         request_metadata_callback=request_metadata_callback,
                         context_length_recovery_callback=partial(
                             recover_context_length,
-                            active_tools=None,
+                            active_tools=tools,
                             target_messages=text_only_context_messages,
                         ),
                     )
                     ai_msg = text_only_response.message
                     if ai_msg.tool_calls:
-                        ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content=BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT)
+                        ai_msg = await correct_final_reply(
+                            ai_msg,
+                            context_messages=text_only_context_messages,
+                            correction_call_context=f"{call_context}_unsupported_final_tool_correction",
+                        )
                     if not (ai_msg.content or "").strip() and not ai_msg.generated_images:
                         raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
         safe_content = parse_assistant_files_content(ai_msg.content)
+        if not ai_msg.tool_calls and not safe_content.strip() and not ai_msg.generated_images:
+            raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
         ai_msg.content = safe_content
         generated_image_files = await materialize_generated_images(
             ai_msg,
@@ -731,7 +754,7 @@ class BackgroundDispatcherMixin:
                     fixed_upper_message_id=initial_fixed_upper_message_id,
                     context_window_k=final_chat_params["context_window_k"],
                     max_tokens=final_chat_params["max_tokens"],
-                    tools=None,
+                    tools=tools,
                     channel_id=chat_channel_obj.id,
                     model_id=model_entry["model_id"],
                     protocol=resolve_model_protocol(model_entry),
@@ -752,69 +775,21 @@ class BackgroundDispatcherMixin:
             cursor_key=chat_cursor_key,
             uid=uid,
             session_id=session_id,
-            tools=None,
+            tools=tools,
+            tool_choice="auto",  # 最终阶段由本地拦截，避免上游 none 处理差异。
             require_content_or_tools=False,
             request_metadata_callback=request_metadata_callback,
             context_length_recovery_callback=partial(
                 recover_context_length,
-                active_tools=None,
+                active_tools=tools,
             ),
         )
         final_msg = final_response.message
-        if final_msg.tool_calls:
-            repeated_tool_names = sorted({tool_call.name for tool_call in final_msg.tool_calls})
-            logger.bind(
-                uid=uid,
-                session_id=session_id,
-                reply_source=reply_source,
-                repeated_tools=repeated_tool_names,
-            ).warning(t("LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_RETRY"))
-            final_correction_messages = build_virtual_tool_feedback_messages(
-                final_msg,
-                {
-                    "type": "background_proactive_final_tool_correction",
-                    "error": t(ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN),
-                    "instruction": BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT,
-                    "ignored_tool_calls": repeated_tool_names,
-                },
-            )
-            final_correction_context_messages = [*messages, *final_correction_messages]
-            build_text_only_correction_request = partial(
-                cls._build_text_only_correction_request,
-                db=db,
-                messages=final_correction_context_messages,
-                uid=uid,
-                session_id=session_id,
-            )
-
-            corrected_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
-                db,
-                chat_channel=chat_channel,
-                request_builder=build_text_only_correction_request,
-                call_context=f"{call_context}_final_tool_correction",
-                cursor_key=chat_cursor_key,
-                uid=uid,
-                session_id=session_id,
-                tools=None,
-                require_content_or_tools=True,
-                request_metadata_callback=request_metadata_callback,
-                context_length_recovery_callback=partial(
-                    recover_context_length,
-                    active_tools=None,
-                    target_messages=final_correction_context_messages,
-                ),
-            )
-            final_msg = corrected_response.message
-            if final_msg.tool_calls:
-                logger.bind(
-                    uid=uid,
-                    session_id=session_id,
-                    reply_source=reply_source,
-                    repeated_tools=sorted({tool_call.name for tool_call in final_msg.tool_calls}),
-                ).warning(t("LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_IGNORED"))
-                final_msg.tool_calls = []
-                fallback_message = MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES if files_to_user else MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES
-                final_msg.content = t(fallback_message)
+        final_msg = await correct_final_reply(
+            final_msg,
+            context_messages=messages,
+            correction_call_context=f"{call_context}_final_tool_correction",
+        )
         final_generated_image_files = await materialize_generated_images(
             final_msg,
             project_root=os.getcwd(),

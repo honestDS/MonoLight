@@ -316,23 +316,17 @@ async def dispatch_interactive(
 
                     state.current_turn += 1
 
-                    if state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING:
-                        current_tools = []
-                        current_tool_choice = "none"
-                    elif not goal_mode and state.current_turn == max_turns:
+                    if not goal_mode and state.current_turn == max_turns and state.checkpoint_state.execution_phase != GOAL_EXECUTION_PHASE_FINALIZING:
                         summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                         state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
-                        current_tools = []
-                        current_tool_choice = "none"
-                    else:
-                        current_tools = state.tools
-                        current_tool_choice = "auto"
+                        state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
 
                     response_id = str(uuid.uuid4())
                     generation_result = await generate_interactive_turn(
                         state,
-                        current_tools=current_tools,
-                        tool_choice=current_tool_choice,
+                        current_tools=state.tools,
+                        # 最终阶段由本地阶段拦截，避免依赖上游对 none 的处理差异。
+                        tool_choice="auto",
                         response_id=response_id,
                     )
                     ai_msg = generation_result.message

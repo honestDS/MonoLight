@@ -1587,7 +1587,8 @@ async def test_completed_background_image_tasks_do_not_regenerate_images_in_fina
                     "content": [{"type": "output_text", "text": "The completed background images are ready."}],
                 }
             ]
-            if payload.get("tool_choice") != "none":
+            request_tools = payload.get("tools")
+            if payload.get("tool_choice") != "none" and isinstance(request_tools, list) and any(isinstance(tool, dict) and tool.get("type") == "image_generation" for tool in request_tools):
                 output.append(
                     {
                         "type": "image_generation_call",
@@ -1736,8 +1737,9 @@ async def test_completed_background_image_tasks_do_not_regenerate_images_in_fina
     assert len(gateway_requests) == 2
     assert gateway_requests[0]["tools"]
     assert gateway_requests[0]["tool_choice"] == "auto"
-    assert "tools" not in gateway_requests[1]
-    assert gateway_requests[1].get("tool_choice") == "none"
+    assert gateway_requests[1]["tools"] == gateway_requests[0]["tools"]
+    assert gateway_requests[1]["tool_choice"] == "auto"
+    assert all(not any(isinstance(tool, dict) and tool.get("type") == "image_generation" for tool in request.get("tools", [])) for request in gateway_requests)
     assert not any(isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") == "send_file_to_user" for item in gateway_requests[0].get("input", []))
     assert any(isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") == "send_file_to_user" for item in gateway_requests[1].get("input", []))
     assert len(gateway_responses) == 2

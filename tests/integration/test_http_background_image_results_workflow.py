@@ -12,13 +12,17 @@ from sqlmodel import SQLModel, select
 
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatcher as dispatcher_module
+import app.core.session_reply_queue.consumer as consumer_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
 from app.api.v1.chat import router
 from app.core.background_tasks.manager import BackgroundTaskManager
+from app.core.constants import ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED
+from app.core.i18n import t
 from app.core.prompts import (
     BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT,
+    BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT,
     BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
 )
 from app.core.security import get_current_user
@@ -169,11 +173,13 @@ async def test_http_reply_work_status_exposes_hidden_background_image_activity(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
+@pytest.mark.parametrize("final_tool_violations", [0, 1, 3, 4])
 async def test_completed_background_image_message_is_returned_by_http_history(
     database_factory,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     protocol: str,
+    final_tool_violations: int,
 ) -> None:
     image_path = tmp_path / "completed-background-image.png"
     image = Image.new("RGB", (2, 2), color=(32, 128, 224))
@@ -182,6 +188,10 @@ async def test_completed_background_image_message_is_returned_by_http_history(
     finally:
         image.close()
     image_size = image_path.stat().st_size
+    task_result = build_background_task_success_result(
+        "generate_image",
+        {"path": str(image_path)},
+    )
 
     async with database_factory(foreign_keys=True, wal=True) as factory:
         async with factory() as db:
@@ -250,10 +260,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 tool_name="generate_image",
                 status=BackgroundTaskStatus.SUCCEEDED,
                 arguments={"prompt": "test apple"},
-                result=build_background_task_success_result(
-                    "generate_image",
-                    {"path": str(image_path)},
-                ),
+                result=task_result,
                 auto_reply=True,
                 reply_status=BackgroundTaskReplyStatus.RUNNING,
                 extra={"submission_context": []},
@@ -286,6 +293,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert task_id is not None
 
         provider_payloads = []
+        invalid_tool_call_ids = []
 
         def provider_items(payload: dict) -> list[dict]:
             return payload["messages"] if protocol == "OPENAI" else payload["input"]
@@ -332,17 +340,20 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             system_indexes = [index for index, item in enumerate(items) if item.get("role") == MessageRole.SYSTEM.value]
             assert system_indexes == [0]
             _guidance_index, guidance = find_guidance(items)
-            has_tools = bool(payload.get("tools"))
-            expected_guidance = BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT
-            if not has_tools:
-                expected_guidance = f"{expected_guidance}\n\n{BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT}"
-            assert guidance == {
-                "user_message": None,
-                "platform_guidance": expected_guidance,
-            }
+            request_index = len(provider_payloads) - 1
+            if request_index == 0:
+                assert guidance == {
+                    "user_message": None,
+                    "platform_guidance": BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
+                }
+            else:
+                expected_guidance = f"{BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT}\n\n{BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT}"
+                assert guidance == {
+                    "user_message": None,
+                    "platform_guidance": expected_guidance,
+                }
 
-            if len(provider_payloads) == 1:
-                assert has_tools
+            if request_index == 0:
                 assert tool_names(payload) == ["send_file_to_user"]
                 background_result = find_tool_output(items, "generate-image-call")
                 assert background_result["status"] == "succeeded"
@@ -395,22 +406,117 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                     "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
                 }
 
-            assert len(provider_payloads) == 2
-            assert not has_tools
-            assert "tools" not in payload
-            assert payload["tool_choice"] == "none"
+            assert payload.get("tools") == provider_payloads[0].get("tools")
+            assert tool_names(payload) == ["send_file_to_user"]
+            assert payload["tool_choice"] == "auto"
             send_file_call = find_send_file_call(items)
             if protocol == "OPENAI":
                 send_file_call_id = send_file_call["id"]
                 send_file_arguments = json.loads(send_file_call["function"]["arguments"])
+                actual_function_calls = [call for item in items if item.get("role") == MessageRole.ASSISTANT.value for call in item.get("tool_calls") or []]
+                actual_call_ids = [call["id"] for call in actual_function_calls]
             else:
                 send_file_call_id = send_file_call["call_id"]
                 send_file_arguments = json.loads(send_file_call["arguments"])
+                actual_function_calls = [item for item in items if item.get("type") == "function_call"]
+                actual_call_ids = [call["call_id"] for call in actual_function_calls]
             assert send_file_arguments == {"files": [{"path": str(image_path)}]}
+
+            rejected_calls = [call for call, call_id in zip(actual_function_calls, actual_call_ids) if call_id != send_file_call_id]
+            rejected_call_ids = [call_id for call_id in actual_call_ids if call_id != send_file_call_id]
+            violation_rounds = len(invalid_tool_call_ids) // 2
+            assert len(rejected_calls) == len(invalid_tool_call_ids)
+            rejected_names = [call["function"]["name"] if protocol == "OPENAI" else call["name"] for call in rejected_calls]
+            assert rejected_names.count("send_file_to_user") == violation_rounds
+            assert rejected_names.count("generate_image") == violation_rounds
+            for rejected_call, call_id in zip(rejected_calls, rejected_call_ids):
+                rejected_result = find_tool_output(items, call_id)
+                assert rejected_result["status"] == "rejected"
+                assert rejected_result["executed"] is False
+                assert rejected_result["instruction"] == BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT
+                assert rejected_result["tool_call"]["id"] == call_id
+
             send_file_result = find_tool_output(items, send_file_call_id)
             assert send_file_result["type"] == "files_to_user"
             assert send_file_result["status"] == "success"
             assert len(send_file_result["files"]) == 1
+            final_request_index = request_index - 1
+            if final_request_index < final_tool_violations:
+                round_number = final_request_index + 1
+                send_call_id = f"final-violation-{round_number}-send-file-call"
+                generate_call_id = f"final-violation-{round_number}-generate-image-call"
+                invalid_tool_call_ids.extend([send_call_id, generate_call_id])
+                send_arguments = json.dumps({"files": [{"path": str(image_path)}]}, ensure_ascii=False)
+                generate_arguments = json.dumps(
+                    {"prompt": "do not generate", "run_in_background": True},
+                    ensure_ascii=False,
+                )
+                if protocol == "OPENAI":
+                    return {
+                        "id": f"chatcmpl-background-image-violation-{round_number}",
+                        "object": "chat.completion",
+                        "model": MODEL_ID,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "伪成功正文",
+                                    "tool_calls": [
+                                        {
+                                            "id": send_call_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": "send_file_to_user",
+                                                "arguments": send_arguments,
+                                            },
+                                        },
+                                        {
+                                            "id": generate_call_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": "generate_image",
+                                                "arguments": generate_arguments,
+                                            },
+                                        },
+                                    ],
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    }
+                return {
+                    "id": f"resp-background-image-violation-{round_number}",
+                    "object": "response",
+                    "model": MODEL_ID,
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "伪成功正文"}],
+                        },
+                        {
+                            "type": "function_call",
+                            "id": send_call_id,
+                            "call_id": send_call_id,
+                            "name": "send_file_to_user",
+                            "arguments": send_arguments,
+                            "status": "completed",
+                        },
+                        {
+                            "type": "function_call",
+                            "id": generate_call_id,
+                            "call_id": generate_call_id,
+                            "name": "generate_image",
+                            "arguments": generate_arguments,
+                            "status": "completed",
+                        },
+                    ],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                }
+
             if protocol == "OPENAI":
                 return {
                     "id": "chatcmpl-background-image-final",
@@ -448,6 +554,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
         transformer_cls = OpenAIChatCompletionsTransformer if protocol == "OPENAI" else OpenAIResponsesTransformer
         monkeypatch.setattr(transformer_cls, "_post_json", fake_post_json)
+        monkeypatch.setattr(consumer_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", factory)
@@ -456,17 +563,80 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         monkeypatch.setattr(send_file_to_user_module, "FILE_TOKEN_DIR", tmp_path / "file_download_tokens")
         monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_send_session_event)
 
-        await executor_lifecycle_module.execute_session_reply_work(work_id, "image-worker")
+        await consumer_module.SessionReplyConsumer()._run_claimed(
+            work_id,
+            "image-worker",
+            attempt_count=1,
+            max_attempts=3,
+        )
 
-        assert len(provider_payloads) == 2
+        expected_request_count = 2 + min(final_tool_violations, 3)
+        assert len(provider_payloads) == expected_request_count
         first_items = provider_items(provider_payloads[0])
-        second_items = provider_items(provider_payloads[1])
         first_system = next(item for item in first_items if item.get("role") == MessageRole.SYSTEM.value)
-        second_system = next(item for item in second_items if item.get("role") == MessageRole.SYSTEM.value)
-        assert first_system["content"] == second_system["content"]
+        for payload in provider_payloads[1:]:
+            final_items = provider_items(payload)
+            final_system = next(item for item in final_items if item.get("role") == MessageRole.SYSTEM.value)
+            assert first_system["content"] == final_system["content"]
         first_prefix = first_items[:-1]
-        second_prefix = second_items[:-1]
-        assert second_prefix[: len(first_prefix)] == first_prefix
+        for payload in provider_payloads[1:]:
+            final_prefix = provider_items(payload)[:-1]
+            assert final_prefix[: len(first_prefix)] == first_prefix
+
+        if final_tool_violations == 4:
+            expected_error = t(ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED)
+            assert len(provider_payloads) == 5
+            assert len(events) == 1
+            event_uid, event_session_id, event = events[0]
+            assert (event_uid, event_session_id) == (UID, SESSION_ID)
+            assert event["type"] == "proactive_reply_error"
+            assert event["content"] == expected_error
+            assert "伪成功正文" not in event["content"]
+
+            async with factory() as db:
+                persisted_work = await db.get(SessionReplyWorkItem, work_id)
+                persisted_task = await db.get(BackgroundTask, task_id)
+                assert persisted_work is not None
+                assert persisted_task is not None
+                assert persisted_work.status == SessionReplyWorkStatus.FAILED
+                assert persisted_work.attempt_count == 1
+                assert persisted_task.status == BackgroundTaskStatus.SUCCEEDED
+                assert persisted_task.reply_status == BackgroundTaskReplyStatus.FAILED
+                assert persisted_task.result == task_result
+                persisted_work_items = (await db.execute(select(SessionReplyWorkItem))).scalars().all()
+                assert len(persisted_work_items) == 1
+                persisted_tasks = (await db.execute(select(BackgroundTask))).scalars().all()
+                assert len(persisted_tasks) == 1
+                persisted_messages = (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all()
+                tool_calls = [message for message in persisted_messages if message.type == MessageType.TOOL_CALL]
+                tool_results = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
+                assert len(tool_calls) == 1
+                assert len(tool_results) == 1
+                persisted_dump = json.dumps([message.content for message in persisted_messages], ensure_ascii=False)
+                persisted_send_call = InternalMessage.model_validate_json(tool_calls[0].content)
+                assert len(persisted_send_call.tool_calls or []) == 1
+                persisted_send_tool_call = persisted_send_call.tool_calls[0]
+                assert persisted_send_tool_call.name == "send_file_to_user"
+                persisted_send_result = InternalMessage.model_validate_json(tool_results[0].content)
+                assert persisted_send_result.tool_call_id == persisted_send_tool_call.id
+                assert json.loads(persisted_send_result.content or "{}")["status"] == "success"
+                assert "generate_image" not in persisted_dump
+                assert "final-violation-" not in persisted_dump
+                assert "伪成功正文" not in persisted_dump
+                assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in persisted_dump
+                assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in persisted_dump
+                assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in persisted_dump
+                error_texts = [message for message in persisted_messages if message.role == MessageRole.ERR and message.type == MessageType.TEXT]
+                assert len(error_texts) == 1
+                assert error_texts[0].content == expected_error
+                assistant_texts = [message for message in persisted_messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+                assert len(assistant_texts) == 0
+                assert "assistant_files" not in persisted_dump
+
+            await executor_lifecycle_module.execute_session_reply_work(work_id, "image-worker")
+            assert len(provider_payloads) == 5
+            assert len(events) == 1
+            return
 
         assert len(events) == 1
         event_uid, event_session_id, event = events[0]
@@ -480,6 +650,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         event_dump = json.dumps(event, ensure_ascii=False)
         assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in event_dump
         assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in event_dump
+        assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in event_dump
         assert not any(item.get("role") == MessageRole.USER.value for item in event.get("history", []))
 
         async with factory() as db:
@@ -492,6 +663,9 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert persisted_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
             assert persisted_task.extra["submission_context"] == []
             persisted_messages = (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all()
+            persisted_message_dump = json.dumps([message.content for message in persisted_messages], ensure_ascii=False)
+            assert "final-violation-" not in persisted_message_dump
+            assert "伪成功正文" not in persisted_message_dump
             assert not any(message.role == MessageRole.USER for message in persisted_messages)
             assert all(message.guidance_prompt is None for message in persisted_messages)
             persisted_response = (persisted_work.execution_state or {}).get("response")
@@ -500,6 +674,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             persisted_response_dump = json.dumps(persisted_response, ensure_ascii=False)
             assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in persisted_response_dump
             assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in persisted_response_dump
+            assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in persisted_response_dump
             assert not any(item.get("role") == MessageRole.USER.value for item in persisted_response.get("history", []))
             result_message_id = persisted_work.result_message_id
 
@@ -526,6 +701,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             reply_work_dump = json.dumps(reply_work_data, ensure_ascii=False)
             assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in reply_work_dump
             assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in reply_work_dump
+            assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in reply_work_dump
             assert not any(item.get("role") == MessageRole.USER.value for item in reply_work_data["response"].get("history", []))
             return history.json()["data"]
 
@@ -548,6 +724,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         history_dump = json.dumps(history_items, ensure_ascii=False)
         assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in history_dump
         assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in history_dump
+        assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in history_dump
         assert not any(item.get("role") == MessageRole.USER.value for item in history_items)
         assistant_file_items = find_assistant_file_items(history_items)
         assert len(assistant_file_items) == 1
@@ -564,7 +741,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         repeated_matches = find_assistant_file_items(await request_history())
         assert len(repeated_matches) == 1
         assert repeated_matches[0][0]["id"] == history_item["id"]
-        assert len(provider_payloads) == 2
+        assert len(provider_payloads) == expected_request_count
         assert len(events) == 1
 
 

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.core.context import ContextManager
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -67,7 +69,7 @@ def test_background_task_result_is_preserved_as_new_user_trigger():
     assert audited[-1].content == result_content
 
 
-def test_historical_file_send_chain_is_removed_without_dropping_parallel_tools():
+def test_historical_file_send_chain_and_parallel_tool_are_preserved():
     raw_messages = [
         Message(
             id=5,
@@ -162,15 +164,29 @@ def test_historical_file_send_chain_is_removed_without_dropping_parallel_tools()
         MessageRole.USER,
         MessageRole.ASSISTANT,
         MessageRole.TOOL,
+        MessageRole.TOOL,
         MessageRole.ASSISTANT,
     ]
-    assert [tool_call.name for tool_call in audited[1].tool_calls] == ["execute_shell"]
-    assert audited[2].tool_call_id == "call-shell"
-    assert audited[3].content == "计算结果是 12.59375，图片已发送。"
-    assert all(message.tool_call_id != "call-send-file" for message in audited)
+    assert [tool_call.name for tool_call in audited[1].tool_calls] == [
+        "send_file_to_user",
+        "execute_shell",
+    ]
+    assert audited[2].tool_call_id == "call-send-file"
+    assert json.loads(audited[2].content) == {
+        "type": "files_to_user_result",
+        "status": "success",
+    }
+    assert audited[3].tool_call_id == "call-shell"
+    assert json.loads(audited[3].content) == {"stdout": "12.59375"}
+    assert audited[4].content == "计算结果是 12.59375，图片已发送。"
 
 
-def test_historical_file_send_only_chain_is_removed_but_final_reply_is_kept():
+@pytest.mark.parametrize("send_status", ["success", "failed"])
+def test_historical_file_send_only_chain_is_preserved(send_status):
+    tool_result = json.dumps(
+        {"type": "files_to_user_result", "status": send_status},
+        ensure_ascii=False,
+    )
     raw_messages = [
         Message(
             id=4,
@@ -192,12 +208,7 @@ def test_historical_file_send_only_chain_is_removed_but_final_reply_is_kept():
             content=json.dumps(
                 {
                     "tool_call_id": "call-send-file",
-                    "content": json.dumps(
-                        {
-                            "type": "files_to_user_result",
-                            "status": "success",
-                        }
-                    ),
+                    "content": tool_result,
                 },
                 ensure_ascii=False,
             ),
@@ -238,11 +249,20 @@ def test_historical_file_send_only_chain_is_removed_but_final_reply_is_kept():
     ]
 
     parsed = list(reversed(parse_db_messages_to_internal(raw_messages)))
+    audited = ContextManager.audit_tool_chain(parsed, uid="u1", session_id="s1")
 
-    assert [(message.role, message.content) for message in parsed] == [
-        (MessageRole.USER, "发送图片。"),
-        (MessageRole.ASSISTANT, "图片已发送。"),
+    assert [message.role for message in audited] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
     ]
+    assert audited[1].tool_calls[0].name == "send_file_to_user"
+    assert audited[1].tool_calls[0].arguments == {"files": [{"path": "generated.png"}]}
+    assert audited[2].tool_call_id == "call-send-file"
+    assert audited[2].content == tool_result
+    assert json.loads(audited[2].content)["status"] == send_status
+    assert audited[3].content == "图片已发送。"
 
 
 def test_incomplete_historical_file_send_chain_is_kept_for_tool_audit():
