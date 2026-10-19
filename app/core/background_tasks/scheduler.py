@@ -106,9 +106,10 @@ class ScheduledTaskScheduler:
                 ScheduledTask.next_run_at <= now,
             )
             .values(
+                status=ScheduledTaskStatus.DISABLED if scheduled_task.run_once else ScheduledTaskStatus.ENABLED,
                 last_run_at=now,
                 run_count=ScheduledTask.run_count + 1,
-                next_run_at=now + timedelta(seconds=scheduled_task.interval_seconds),
+                next_run_at=old_next_run_at if scheduled_task.run_once else now + timedelta(seconds=scheduled_task.interval_seconds),
                 updated_at=now,
             )
             .execution_options(synchronize_session=False)

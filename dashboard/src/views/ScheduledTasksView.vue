@@ -20,7 +20,10 @@
       </el-table-column>
       <el-table-column :resizable="false" prop="session_id" :label="$t('scheduledTasks.session_id')" min-width="180" show-overflow-tooltip />
       <el-table-column :resizable="false" prop="message" :label="$t('scheduledTasks.message')" min-width="240" show-overflow-tooltip />
-      <el-table-column :resizable="false" prop="interval_seconds" :label="$t('scheduledTasks.interval_seconds')" width="130" align="center" />
+      <el-table-column :resizable="false" prop="run_once" :label="$t('scheduledTasks.schedule_type')" width="130" align="center">
+        <template #default="scope">{{ scope.row.run_once === true ? $t('scheduledTasks.one_time') : $t('scheduledTasks.repeating') }}</template>
+      </el-table-column>
+      <el-table-column :resizable="false" prop="interval_seconds" :label="$t('scheduledTasks.delay_or_interval_seconds')" width="160" align="center" />
       <el-table-column :resizable="false" prop="status" :label="$t('scheduledTasks.status')" width="110" align="center">
         <template #default="scope">
           <el-switch
@@ -32,7 +35,7 @@
         </template>
       </el-table-column>
       <el-table-column :resizable="false" prop="next_run_at" :label="$t('scheduledTasks.next_run_at')" width="180">
-        <template #default="scope">{{ formatTime(scope.row.next_run_at) }}</template>
+        <template #default="scope">{{ scope.row.run_once === true && scope.row.status === 'disabled' ? '-' : formatTime(scope.row.next_run_at) }}</template>
       </el-table-column>
       <el-table-column :resizable="false" prop="last_run_at" :label="$t('scheduledTasks.last_run_at')" width="180">
         <template #default="scope">{{ formatTime(scope.row.last_run_at) }}</template>
@@ -48,7 +51,7 @@
       </el-table-column>
     </BaseDataTable>
 
-    <el-dialog :title="dialogType === 'create' ? $t('scheduledTasks.create_task') : $t('scheduledTasks.edit_task')" v-model="dialogVisible" width="620px" class="standard-dialog" center align-center>
+    <el-dialog :title="dialogType === 'create' ? $t('scheduledTasks.create_task') : $t('scheduledTasks.edit_task')" v-model="dialogVisible" width="620px" class="standard-dialog dialog-with-scroll-body" center align-center>
       <el-form :model="form" label-width="130px" size="default">
         <el-form-item :label="$t('scheduledTasks.name')">
           <el-input v-model="form.name" :placeholder="$t('scheduledTasks.input_name')" />
@@ -63,8 +66,15 @@
             </el-option>
           </el-select>
         </el-form-item>
-        <el-form-item :label="$t('scheduledTasks.interval_seconds')">
-          <el-input-number v-model="form.interval_seconds" :min="60" controls-position="right" class="full-width-input" />
+        <el-form-item :label="$t('scheduledTasks.schedule_type')">
+          <el-select v-model="form.run_once" class="full-width-input">
+            <el-option :label="$t('scheduledTasks.repeating')" :value="false" />
+            <el-option :label="$t('scheduledTasks.one_time')" :value="true" />
+          </el-select>
+          <div v-if="form.run_once" class="help-text mt-4">{{ $t('scheduledTasks.one_time_hint') }}</div>
+        </el-form-item>
+        <el-form-item :label="$t(form.run_once ? 'scheduledTasks.delay_seconds' : 'scheduledTasks.interval_seconds')">
+          <el-input-number v-model="form.interval_seconds" :min="60" :precision="0" controls-position="right" class="full-width-input" />
         </el-form-item>
         <el-form-item :label="$t('scheduledTasks.status')" v-if="dialogType === 'edit'">
           <el-select v-model="form.status" class="full-width-input">
@@ -110,6 +120,7 @@ const form = reactive({
   name: '',
   session_id: '',
   interval_seconds: 300,
+  run_once: false,
   status: 'enabled',
   message: ''
 })
@@ -164,6 +175,7 @@ const resetForm = () => {
   form.name = ''
   form.session_id = ''
   form.interval_seconds = 300
+  form.run_once = false
   form.status = 'enabled'
   form.message = ''
 }
@@ -177,6 +189,7 @@ const showDialog = (type, row = null) => {
     form.name = row.name
     form.session_id = row.session_id
     form.interval_seconds = row.interval_seconds
+    form.run_once = row.run_once === true
     form.status = row.status
     form.message = row.message || ''
   }
@@ -184,15 +197,20 @@ const showDialog = (type, row = null) => {
 }
 
 const buildPayload = () => {
-  if (!form.name || !form.session_id || !form.message || !form.interval_seconds) {
+  if (!form.name || !form.session_id || !form.message) {
     ElMessage.warning(t('scheduledTasks.fill_required'))
+    return null
+  }
+  if (!Number.isInteger(form.interval_seconds) || form.interval_seconds < 60) {
+    ElMessage.warning(t('scheduledTasks.invalid_interval'))
     return null
   }
   const payload = {
     name: form.name,
     session_id: form.session_id,
     message: form.message,
-    interval_seconds: form.interval_seconds
+    interval_seconds: form.interval_seconds,
+    run_once: form.run_once === true
   }
   if (dialogType.value === 'edit') payload.status = form.status
   return payload
@@ -221,8 +239,10 @@ const submitForm = async () => {
 const toggleStatus = async (row) => {
   const status = row.status === 'enabled' ? 'disabled' : 'enabled'
   try {
-    await scheduledTaskApi.update(row.id, { status })
-    row.status = status
+    const res = await scheduledTaskApi.update(row.id, { status })
+    const updatedTask = res.data.data
+    row.status = updatedTask.status
+    row.next_run_at = updatedTask.next_run_at
   } catch (err) {
     ElMessage.error(err.message || t('scheduledTasks.status_update_failed'))
   }

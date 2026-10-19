@@ -96,6 +96,7 @@ async def create_scheduled_task(
         profile_id=profile_id,
         message=request.message,
         interval_seconds=request.interval_seconds,
+        run_once=request.run_once,
     )
     return StandardResponse.success(data=ScheduledTaskResponse.model_validate(task), message=MSG_GENERIC_SUCCESS)
 
@@ -115,8 +116,8 @@ async def update_scheduled_task(
     session_id = obj_in.get("session_id", task.session_id)
     await _validate_user_session(db, session_id, task.uid)
 
-    if "interval_seconds" in obj_in:
-        obj_in["next_run_at"] = get_local_time() + timedelta(seconds=obj_in["interval_seconds"])
+    if "interval_seconds" in obj_in or obj_in.get("run_once", task.run_once) != task.run_once or (obj_in.get("run_once", task.run_once) and obj_in.get("status") == ScheduledTaskStatus.ENABLED and task.status != ScheduledTaskStatus.ENABLED):
+        obj_in["next_run_at"] = get_local_time() + timedelta(seconds=obj_in.get("interval_seconds", task.interval_seconds))
     if obj_in.get("status") == ScheduledTaskStatus.ENABLED or "session_id" in obj_in:
         profile_id = await _get_session_profile_id(db, session_id, task.uid)
         if profile_id is None:

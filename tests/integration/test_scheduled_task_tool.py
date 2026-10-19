@@ -131,6 +131,7 @@ async def _snapshot(session_factory: async_sessionmaker[AsyncSession]) -> list[t
                 task.profile_id,
                 task.message,
                 task.interval_seconds,
+                task.run_once,
                 task.status,
                 task.next_run_at,
                 task.last_run_at,
@@ -144,10 +145,12 @@ async def _snapshot(session_factory: async_sessionmaker[AsyncSession]) -> list[t
 
 
 @pytest.mark.parametrize("mode", ["interactive", "scheduled"])
+@pytest.mark.parametrize("run_once", [False, True])
 async def test_create_persists_scheduled_task_for_runtime_context(
     db_session: AsyncSession,
     scheduled_tool_session_factory: async_sessionmaker[AsyncSession],
     mode: DispatchMode,
+    run_once: bool,
 ) -> None:
     executor = await _executor(db_session, mode=mode)
 
@@ -157,6 +160,7 @@ async def test_create_persists_scheduled_task_for_runtime_context(
             name="  Daily reminder  ",
             message="  Review the deployment  ",
             interval_seconds=60,
+            **({"run_once": True} if run_once else {}),
         )
     )
 
@@ -169,6 +173,7 @@ async def test_create_persists_scheduled_task_for_runtime_context(
         "session_id",
         "profile_id",
         "interval_seconds",
+        "run_once",
         "status",
         "run_count",
         "next_run_at",
@@ -184,6 +189,8 @@ async def test_create_persists_scheduled_task_for_runtime_context(
     assert task.session_id == "owner-main"
     assert task.profile_id == 1
     assert task.interval_seconds == 60
+    assert response["task"]["run_once"] is run_once
+    assert task.run_once is run_once
     assert task.status == "enabled"
     assert task.run_count == 0
     assert task.last_run_at is None
@@ -232,6 +239,16 @@ async def test_create_uses_dispatch_context_owner_and_runtime_profile(
         pytest.param({"name": "name", "message": "message", "interval_seconds": True}, id="interval-bool"),
         pytest.param({"name": "name", "message": "message", "interval_seconds": 60.0}, id="interval-float"),
         pytest.param({"name": "name", "message": "message", "interval_seconds": "60"}, id="interval-string"),
+        pytest.param({"name": "name", "message": "message", "interval_seconds": 60, "run_once": 0}, id="run-once-zero"),
+        pytest.param({"name": "name", "message": "message", "interval_seconds": 60, "run_once": 1}, id="run-once-one"),
+        pytest.param(
+            {"name": "name", "message": "message", "interval_seconds": 60, "run_once": "true"},
+            id="run-once-string",
+        ),
+        pytest.param(
+            {"name": "name", "message": "message", "interval_seconds": 60, "run_once": None},
+            id="run-once-none",
+        ),
         pytest.param(
             {"name": "name", "message": "message", "interval_seconds": 2147483648},
             id="interval-too-large",
@@ -377,6 +394,7 @@ async def _seed_list_tasks(db: AsyncSession) -> datetime:
                 profile_id=1,
                 message="Oldest owner-main task",
                 interval_seconds=60,
+                run_once=True,
                 status=ScheduledTaskStatus.ENABLED,
                 next_run_at=created_at + timedelta(seconds=60),
                 created_at=created_at,
@@ -469,6 +487,7 @@ async def test_list_paginates_current_session_tasks_without_mutation(
         "profile_id": 1,
         "message": "Newest task message",
         "interval_seconds": 180,
+        "run_once": False,
         "status": "enabled",
         "next_run_at": (created_at + timedelta(seconds=180)).isoformat(),
         "last_run_at": (created_at + timedelta(seconds=60)).isoformat(),
@@ -478,6 +497,8 @@ async def test_list_paginates_current_session_tasks_without_mutation(
         "updated_at": (created_at + timedelta(seconds=60)).isoformat(),
         "username": None,
     }
+    assert default_response["tasks"][2]["id"] == 1
+    assert default_response["tasks"][2]["run_once"] is True
     assert all(set(task) == set(default_response["tasks"][0]) for task in default_response["tasks"])
 
     paged_tasks = []
@@ -528,6 +549,7 @@ async def test_list_allows_owner_session_without_runtime_profile(
         pytest.param({"name": "create argument"}, id="extra-name"),
         pytest.param({"message": "create argument"}, id="extra-message"),
         pytest.param({"interval_seconds": 60}, id="extra-interval"),
+        pytest.param({"run_once": True}, id="extra-run-once"),
         pytest.param({"task_id": 1}, id="extra-task-id"),
         pytest.param({"uid": "peer"}, id="extra-uid"),
         pytest.param({"session_id": "peer-main"}, id="extra-session-id"),
@@ -636,6 +658,7 @@ async def test_delete_does_not_disclose_or_remove_unowned_task(
         pytest.param({"task_id": 1.0}, id="task-id-float"),
         pytest.param({"task_id": "1"}, id="task-id-string"),
         pytest.param({"task_id": 1, "name": "create argument"}, id="extra-name"),
+        pytest.param({"task_id": 1, "run_once": True}, id="extra-run-once"),
         pytest.param({"task_id": 1, "page": 1}, id="extra-page"),
         pytest.param({"task_id": 1, "uid": "peer"}, id="extra-uid"),
         pytest.param({"task_id": 1, "session_id": "peer-main"}, id="extra-session-id"),
@@ -678,10 +701,12 @@ async def test_delete_requires_owned_session(
 
 
 @pytest.mark.parametrize("allow_background", [True, False])
+@pytest.mark.parametrize("run_once", [False, True])
 async def test_default_profile_exposes_and_executes_scheduled_task_tool(
     db_session: AsyncSession,
     scheduled_tool_session_factory: async_sessionmaker[AsyncSession],
     allow_background: bool,
+    run_once: bool,
 ) -> None:
     profile = await db_session.get(Profile, 1)
     assert profile is not None
@@ -692,7 +717,9 @@ async def test_default_profile_exposes_and_executes_scheduled_task_tool(
     assert len(tool_schemas) == 1
     parameters = tool_schemas[0]["function"]["parameters"]
     assert parameters["properties"]["operation"]["enum"] == ["create", "list", "delete"]
-    assert {"name", "message", "interval_seconds", "page", "size", "task_id"} <= parameters["properties"].keys()
+    assert {"name", "message", "interval_seconds", "run_once", "page", "size", "task_id"} <= parameters["properties"].keys()
+    assert parameters["properties"]["run_once"]["type"] == "boolean"
+    assert parameters["properties"]["run_once"]["default"] is False
     assert not {"uid", "session_id", "profile_id", "is_admin", "run_in_background"} & parameters["properties"].keys()
 
     tool_call = InternalToolCall(
@@ -703,6 +730,7 @@ async def test_default_profile_exposes_and_executes_scheduled_task_tool(
             "name": "Profile enabled task",
             "message": "Created through the standard tool executor",
             "interval_seconds": 60,
+            **({"run_once": True} if run_once else {}),
         },
     )
     result = await process_single_tool(
@@ -729,6 +757,7 @@ async def test_default_profile_exposes_and_executes_scheduled_task_tool(
     assert tasks[0].message == "Created through the standard tool executor"
     assert tasks[0].uid == "owner"
     assert tasks[0].session_id == "owner-main"
+    assert tasks[0].run_once is run_once
 
 
 @pytest.mark.parametrize("enabled_tools", [pytest.param([], id="empty-list"), pytest.param(["file_tool"], id="other-tool-only")])

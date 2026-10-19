@@ -26,8 +26,10 @@ MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA = {
     "function": {
         "name": MANAGE_SCHEDULED_TASKS_TOOL_NAME,
         "description": (
-            "Create repeating interval tasks in the current user's current session; the first run occurs after the specified interval. "
-            "Only repeating intervals are supported; one-off tasks, absolute times, and cron schedules are not supported. "
+            "Create repeating interval tasks by default in the current user's current session. Set run_once=true for a single delayed task. "
+            "The first trigger waits for interval_seconds in either mode; repeating tasks then trigger at that interval. "
+            "After a single task is successfully enqueued, it is automatically disabled so it triggers only once; enqueue does not mean the LLM has completed execution. "
+            "Absolute times and cron schedules are not supported. "
             "List all scheduled tasks, including disabled tasks, or delete a task only within the current user's current session. "
             "Deleting a task prevents future triggers but does not cancel already queued replies. "
             "Ownership, session, and the current runtime profile come from runtime context and cannot be specified through arguments."
@@ -55,7 +57,12 @@ MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA = {
                     "type": "integer",
                     "minimum": 60,
                     "maximum": 2147483647,
-                    "description": "Required only when operation=create.",
+                    "description": "Required only when operation=create; the initial wait before the first trigger, and the repeating interval unless run_once=true.",
+                },
+                "run_once": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Used only when operation=create; defaults to false for repeating tasks. Set true for a single delayed task.",
                 },
                 "page": {
                     "type": "integer",
@@ -89,6 +96,7 @@ class _CreateArguments(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1)
     interval_seconds: int = Field(ge=60, le=2147483647)
+    run_once: bool = False
 
 
 class _ListArguments(BaseModel):
@@ -217,6 +225,7 @@ class ManageScheduledTasksExecutor(BaseExecutor):
                 profile_id=profile_id,
                 message=params.message,
                 interval_seconds=params.interval_seconds,
+                run_once=params.run_once,
             )
         except Exception:
             await db.rollback()

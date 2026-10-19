@@ -20,6 +20,7 @@ class ScheduledTaskBase(SQLModel):
     profile_id: int | None = Field(default=None, index=True, foreign_key="profile.id", ondelete="RESTRICT")
     message: str
     interval_seconds: int = Field(ge=60)
+    run_once: bool = Field(default=False)
     status: ScheduledTaskStatus = Field(default=ScheduledTaskStatus.ENABLED, index=True, max_length=20)
     next_run_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
     last_run_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))

@@ -50,6 +50,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         profile_id: int | None,
         message: str,
         interval_seconds: int,
+        run_once: bool = False,
     ) -> ScheduledTask:
         now = get_local_time()
         scheduled_task = ScheduledTask(
@@ -59,6 +60,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             profile_id=profile_id,
             message=message,
             interval_seconds=interval_seconds,
+            run_once=run_once,
             next_run_at=now + timedelta(seconds=interval_seconds),
         )
         db.add(scheduled_task)
@@ -138,7 +140,10 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         scheduled_task.last_run_at = now
         scheduled_task.last_message_id = message_id
         scheduled_task.run_count += 1
-        scheduled_task.next_run_at = now + timedelta(seconds=scheduled_task.interval_seconds)
+        if scheduled_task.run_once:
+            scheduled_task.status = ScheduledTaskStatus.DISABLED
+        else:
+            scheduled_task.next_run_at = now + timedelta(seconds=scheduled_task.interval_seconds)
         scheduled_task.updated_at = now
         db.add(scheduled_task)
         await db.commit()
@@ -147,7 +152,10 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
 
     async def mark_skipped(self, db: AsyncSession, *, scheduled_task: ScheduledTask) -> ScheduledTask:
         now = get_local_time()
-        scheduled_task.next_run_at = now + timedelta(seconds=scheduled_task.interval_seconds)
+        if scheduled_task.run_once:
+            scheduled_task.status = ScheduledTaskStatus.DISABLED
+        else:
+            scheduled_task.next_run_at = now + timedelta(seconds=scheduled_task.interval_seconds)
         scheduled_task.updated_at = now
         db.add(scheduled_task)
         await db.commit()
