@@ -2,7 +2,6 @@ import json
 from collections.abc import AsyncGenerator
 from copy import deepcopy
 from typing import Any
-from uuid import uuid4
 
 from app.core.constants import (
     DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER,
@@ -12,7 +11,6 @@ from app.core.constants import (
     ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED,
 )
 from app.core.exceptions import LLMContextLengthException, LLMException
-from app.core.log import get_logger
 from app.core.utils.llm_request_policy import build_upstream_rejection
 from app.core.utils.model_request_headers import build_model_request_headers
 from app.models.message import (
@@ -28,131 +26,6 @@ from app.models.message import (
 )
 from app.transformers import http_transport
 from app.transformers.base import BaseTransformer
-
-_logger = get_logger(__name__)
-
-
-def _debug_scalar(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        return value[:160]
-    return type(value).__name__
-
-
-def _value_shape(value: Any) -> dict[str, Any]:
-    shape = {"type": type(value).__name__, "length": None}
-    if isinstance(value, (str, list, tuple, dict, bytes, bytearray)):
-        shape["length"] = len(value)
-    return shape
-
-
-def _reasoning_item_structure(item: Any) -> dict[str, Any]:
-    if not isinstance(item, dict):
-        return {"item_type": type(item).__name__}
-
-    summary = {field: _debug_scalar(item[field]) for field in ("type", "role", "id", "call_id") if field in item}
-
-    if item.get("type") == "reasoning":
-        summary["content_present"] = "content" in item
-        content = item.get("content")
-        if isinstance(content, list):
-            summary["content_parts"] = [
-                {
-                    "type": _debug_scalar(part.get("type")) if isinstance(part, dict) else type(part).__name__,
-                    "text_present": isinstance(part, dict) and "text" in part,
-                    "text": _value_shape(part["text"]) if isinstance(part, dict) and "text" in part else None,
-                }
-                for part in content
-            ]
-        elif "content" in item:
-            summary["content_shape"] = _value_shape(content)
-    return summary
-
-
-def _items_structure(value: Any) -> dict[str, Any]:
-    if not isinstance(value, list):
-        return {**_value_shape(value), "items": None}
-    return {
-        "type": "list",
-        "length": len(value),
-        "items": [_reasoning_item_structure(item) for item in value],
-    }
-
-
-def _response_structure(response: Any) -> dict[str, Any]:
-    if not isinstance(response, dict):
-        return {
-            "response_type": type(response).__name__,
-            "response_id_present": False,
-            "status_present": False,
-            "output_present": False,
-            "output_structure": {"present": False},
-        }
-    output_present = "output" in response
-    return {
-        "response_type": "dict",
-        "response_id_present": "id" in response,
-        "response_id": _debug_scalar(response.get("id")) if "id" in response else None,
-        "status_present": "status" in response,
-        "status": _debug_scalar(response.get("status")) if "status" in response else None,
-        "output_present": output_present,
-        "output_structure": _items_structure(response.get("output")) if output_present else {"present": False},
-    }
-
-
-def _log_reasoning_debug(diagnostic_id: str, phase: str, **summary: Any) -> None:
-    _logger.bind(diagnostic_id=diagnostic_id, phase=phase, summary=summary).debug(
-        "DeepSeek Responses reasoning debug diagnostic_id={} phase={} summary={}",
-        diagnostic_id,
-        phase,
-        summary,
-    )
-
-
-def _log_request_debug(
-    diagnostic_id: str,
-    *,
-    channel_id: Any,
-    model_id: Any,
-    messages: list[InternalMessage],
-    payload: dict[str, Any],
-) -> None:
-    reasoning = payload.get("reasoning")
-    assistant_history = []
-    for message in messages:
-        role = getattr(message.role, "value", message.role)
-        if str(role).lower() != MessageRole.ASSISTANT.value:
-            continue
-        metadata = message.provider_metadata if isinstance(message.provider_metadata, dict) else {}
-        source = metadata.get("source")
-        source = source if isinstance(source, dict) else {}
-        assistant_history.append(
-            {
-                "id": _debug_scalar(message.id),
-                "reasoning_content": _value_shape(message.reasoning_content),
-                "source_channel_id": _debug_scalar(source.get("channel_id")),
-                "source_model_id": _debug_scalar(source.get("model_id")),
-                "source_protocol_compatible": DeepSeekResponsesTransformer._compatible_source_protocol(
-                    message,
-                    channel_id=channel_id,
-                    model_id=model_id,
-                ),
-                "tool_calls_count": len(message.tool_calls or []),
-            }
-        )
-    _log_reasoning_debug(
-        diagnostic_id,
-        "request",
-        channel_id=_debug_scalar(channel_id),
-        model_id=_debug_scalar(model_id),
-        stream=payload.get("stream"),
-        tools_count=len(payload.get("tools")) if isinstance(payload.get("tools"), list) else 0,
-        max_output_tokens=payload.get("max_output_tokens"),
-        reasoning_effort=reasoning.get("effort") if isinstance(reasoning, dict) else None,
-        assistant_history=assistant_history,
-        input_structure=_items_structure(payload.get("input")),
-    )
 
 
 class DeepSeekResponsesTransformer(BaseTransformer):
@@ -215,7 +88,6 @@ class DeepSeekResponsesTransformer(BaseTransformer):
         custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:
-        diagnostic_id = str(uuid4())
         channel_id = kwargs.get("channel_id")
         payload = self._request_payload(
             model_id=model_id,
@@ -229,14 +101,7 @@ class DeepSeekResponsesTransformer(BaseTransformer):
             top_p=kwargs.get("top_p"),
             reasoning_effort=kwargs.get("reasoning_effort"),
         )
-        _log_request_debug(
-            diagnostic_id,
-            channel_id=channel_id,
-            model_id=model_id,
-            messages=messages,
-            payload=payload,
-        )
-        response = await http_transport.post_json(
+        return await http_transport.post_json(
             url=f"{base_url.rstrip('/')}/responses",
             headers=build_model_request_headers(api_key, custom_headers),
             payload=payload,
@@ -244,8 +109,6 @@ class DeepSeekResponsesTransformer(BaseTransformer):
             http_proxy=http_proxy,
             raise_error=self._raise_http_error,
         )
-        _log_reasoning_debug(diagnostic_id, "response", **_response_structure(response))
-        return response
 
     async def generate_stream(
         self,
@@ -262,7 +125,6 @@ class DeepSeekResponsesTransformer(BaseTransformer):
         custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
-        diagnostic_id = str(uuid4())
         channel_id = kwargs.get("channel_id")
         payload = self._request_payload(
             model_id=model_id,
@@ -276,21 +138,12 @@ class DeepSeekResponsesTransformer(BaseTransformer):
             top_p=kwargs.get("top_p"),
             reasoning_effort=kwargs.get("reasoning_effort"),
         )
-        _log_request_debug(
-            diagnostic_id,
-            channel_id=channel_id,
-            model_id=model_id,
-            messages=messages,
-            payload=payload,
-        )
         text_values: dict[tuple[Any, Any], str] = {}
         reasoning_values: dict[tuple[Any, Any], str] = {}
         refusal_values: dict[tuple[Any, Any], str] = {}
         tools_by_index: dict[int, dict[str, Any]] = {}
         tools_by_alias: dict[str, dict[str, Any]] = {}
         reasoning_done_items: list[tuple[Any, dict[str, Any]]] = []
-        raw_event_type_counts: dict[str, int] = {}
-        raw_reasoning_text_chars = {"delta": 0, "done": 0}
 
         def output_index(event: dict[str, Any]) -> Any:
             value = event.get("output_index")
@@ -478,34 +331,6 @@ class DeepSeekResponsesTransformer(BaseTransformer):
             if not isinstance(event, dict):
                 return None, False
             event_type = event.get("type")
-            event_type_key = event_type[:160] if isinstance(event_type, str) else f"<{type(event_type).__name__}>"
-            raw_event_type_counts[event_type_key] = raw_event_type_counts.get(event_type_key, 0) + 1
-
-            if event_type == "response.reasoning_text.delta":
-                raw_text = event.get("delta")
-                if isinstance(raw_text, str):
-                    raw_reasoning_text_chars["delta"] += len(raw_text)
-            elif event_type == "response.reasoning_text.done":
-                raw_text = event.get("text", event.get("delta"))
-                if isinstance(raw_text, str):
-                    raw_reasoning_text_chars["done"] += len(raw_text)
-
-            if event_type == "response.output_item.done":
-                _log_reasoning_debug(
-                    diagnostic_id,
-                    "output_item_done",
-                    event_type=_debug_scalar(event_type),
-                    item_structure=_reasoning_item_structure(event.get("item")),
-                )
-            elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
-                response = event.get("response")
-                response = response if isinstance(response, dict) else event
-                _log_reasoning_debug(
-                    diagnostic_id,
-                    "terminal_event",
-                    event_type=_debug_scalar(event_type),
-                    **_response_structure(response),
-                )
 
             if event_type in {"response.failed", "error"}:
                 self._raise_provider_error(event, status=None)
@@ -645,39 +470,22 @@ class DeepSeekResponsesTransformer(BaseTransformer):
                         reasoning_done_items=reasoning_done_items,
                     ),
                 }
-                message_metadata = normalized.get("message_provider_metadata")
-                message_metadata = message_metadata if isinstance(message_metadata, dict) else {}
-                _log_reasoning_debug(
-                    diagnostic_id,
-                    "normalized_metadata",
-                    message_provider_metadata_output=_items_structure(message_metadata.get("output")),
-                )
                 substantive = any(bool(delta.get(field)) for field in ("content", "reasoning_content", "refusal", "tool_calls"))
                 return normalized, substantive
 
             return None, False
 
-        try:
-            async for chunk in http_transport.stream_sse_json(
-                url=f"{base_url.rstrip('/')}/responses",
-                headers=build_model_request_headers(api_key, custom_headers),
-                payload=payload,
-                timeout=timeout,
-                http_proxy=http_proxy,
-                normalize_event=normalize_event,
-                raise_error=self._raise_http_error,
-                is_terminal=lambda event: isinstance(event, dict) and event.get("type") in {"response.completed", "response.incomplete", "response.failed"},
-            ):
-                yield chunk
-        finally:
-            _log_reasoning_debug(
-                diagnostic_id,
-                "stream_summary",
-                raw_event_type_counts=dict(sorted(raw_event_type_counts.items())),
-                raw_reasoning_text_chars=raw_reasoning_text_chars,
-                parsed_reasoning_chars=sum(len(value) for value in reasoning_values.values() if isinstance(value, str)),
-                reasoning_done_items=[{"output_index": _debug_scalar(index), "item": _reasoning_item_structure(item)} for index, item in reasoning_done_items],
-            )
+        async for chunk in http_transport.stream_sse_json(
+            url=f"{base_url.rstrip('/')}/responses",
+            headers=build_model_request_headers(api_key, custom_headers),
+            payload=payload,
+            timeout=timeout,
+            http_proxy=http_proxy,
+            normalize_event=normalize_event,
+            raise_error=self._raise_http_error,
+            is_terminal=lambda event: isinstance(event, dict) and event.get("type") in {"response.completed", "response.incomplete", "response.failed"},
+        ):
+            yield chunk
 
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
