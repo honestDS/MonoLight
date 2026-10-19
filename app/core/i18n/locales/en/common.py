@@ -327,6 +327,8 @@ MESSAGES = {
     "ERR_SKILL_NOT_DIRECTORY": "Target is not a skill directory",
     "ERR_SKILL_PAGE_INVALID": "Invalid pagination",
     "ERR_SKILL_ACCESS_FAILED": "Skill directory or file is inaccessible",
+    "ERR_SKILL_DELETE_FAILED": "Failed to delete the skill; check directory permissions and try again",
+    "MSG_SKILL_DELETED": "Skill deleted",
     "ERR_TOOL_EXECUTION_TIMEOUT": "Timed out waiting for tool {tool_name} after {timeout} seconds. The underlying operation may still be running; verify its result before retrying.",
     "ERR_BACKGROUND_TASK_UNSUPPORTED": "Tool {tool_name} does not support background execution",
     "ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE": "Database context is not available",

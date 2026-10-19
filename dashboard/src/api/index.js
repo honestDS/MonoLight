@@ -200,6 +200,8 @@ export const messagePlatformApi = {
 export const systemApi = {
   settings: () => request.get('/system/settings'),
   updateSettings: (data) => request.post('/system/settings', data),
+  skills: (params) => request.get('/system/skills', { params }),
+  deleteSkill: (skillId) => request.post('/system/skills/delete', null, { params: { skill_id: skillId } }),
   // 获取后端可用语言列表
   i18nLocales: () => request.get('/system/i18n/locales'),
   // 获取历史系统日志

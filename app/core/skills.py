@@ -1,10 +1,12 @@
 import os
+import shutil
 import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import yaml
 
 from app.core.constants import (
+    ERR_SKILL_DELETE_FAILED,
     ERR_SKILL_ID_INVALID,
     ERR_SKILL_NOT_DIRECTORY,
     ERR_SKILL_NOT_FOUND,
@@ -16,6 +18,7 @@ from app.core.constants import (
     SKILL_PAGE_DEFAULT_LIMIT,
     SKILL_PAGE_MAX_LIMIT,
 )
+from app.core.exceptions import ParameterException, ResourceNotFoundException, ServerException
 from app.core.i18n import t
 
 
@@ -310,3 +313,32 @@ def browse_skill(
         "truncated": truncated,
         "next_offset": offset + len(page) if truncated else None,
     }
+
+
+def delete_skill(skills_root: Path, skill_id: str) -> None:
+    if not _valid_skill_id(skill_id):
+        raise ParameterException(ERR_SKILL_ID_INVALID)
+
+    try:
+        root = _resolve_root(skills_root)
+        if root is None:
+            raise ResourceNotFoundException(ERR_SKILL_NOT_FOUND)
+
+        package = root / skill_id
+        resolved = package.resolve(strict=True)
+        if resolved == root or not _within(resolved, root):
+            raise ParameterException(ERR_SKILL_PATH_INVALID)
+        if not resolved.is_dir():
+            raise ParameterException(ERR_SKILL_NOT_DIRECTORY)
+
+        info = package.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            package.unlink()
+        elif getattr(info, "st_reparse_tag", 0):
+            package.rmdir()
+        else:
+            shutil.rmtree(package)
+    except FileNotFoundError as exc:
+        raise ResourceNotFoundException(ERR_SKILL_NOT_FOUND) from exc
+    except (OSError, RuntimeError) as exc:
+        raise ServerException(ERR_SKILL_DELETE_FAILED, cause=str(exc)) from exc

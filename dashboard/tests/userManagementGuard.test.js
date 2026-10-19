@@ -157,6 +157,7 @@ const managementRouteCases = [
   { path: '/channels', view: '../views/ChannelsView.vue' },
   { path: '/logs/realtime', view: '../views/RealTimeLogs.vue' },
   { path: '/logs/history', view: '../views/HistoryLogs.vue' },
+  { path: '/skills', view: '../views/SkillsView.vue' },
 ]
 
 const authenticatedRouteCases = [

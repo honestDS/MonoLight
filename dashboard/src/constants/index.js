@@ -20,6 +20,7 @@ export const routeNameMap = {
   '/logs/realtime': 'common.menu.logs',
   '/logs/history': 'common.menu.logs',
   '/docs': 'common.menu.docs',
+  '/skills': 'common.menu.skills',
   '/support': 'common.menu.support'
 }
 

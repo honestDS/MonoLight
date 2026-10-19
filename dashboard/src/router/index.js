@@ -15,6 +15,7 @@ const routes = [
   { path: '/channels', component: () => import('../views/ChannelsView.vue'), meta: { requiresSuperuser: true } },
   { path: '/message-platforms', component: () => import('../views/MessagePlatformsView.vue') },
   { path: '/users', component: () => import('../views/UsersView.vue'), meta: { requiresSuperuser: true } },
+  { path: '/skills', component: () => import('../views/SkillsView.vue'), meta: { requiresSuperuser: true } },
   { path: '/memories', component: () => import('../views/MemoriesView.vue') },
   { path: '/knowledge-base', component: () => import('../views/KnowledgeBase.vue') },
   { path: '/logs/realtime', component: () => import('../views/RealTimeLogs.vue'), meta: { requiresSuperuser: true } },

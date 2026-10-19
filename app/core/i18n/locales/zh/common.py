@@ -397,6 +397,8 @@ MESSAGES = {
     "ERR_SKILL_NOT_DIRECTORY": "目标不是技能目录",
     "ERR_SKILL_PAGE_INVALID": "技能分页参数无效",
     "ERR_SKILL_ACCESS_FAILED": "无法访问技能目录或文件",
+    "ERR_SKILL_DELETE_FAILED": "技能删除失败，请检查目录权限后重试",
+    "MSG_SKILL_DELETED": "技能已删除",
     "ERR_TOOL_SHELL_BLACKLISTED": "不允许通过 shell 工具执行该命令: {command}",
     "ERR_TOOL_SHELL_EXECUTION_MODE_INVALID": "非法的 Shell 执行模式: {value}，仅允许 interactive、non_interactive",
     "ERR_TOOL_COMMAND_TIMEOUT": "命令执行超时: {timeout} 秒",
