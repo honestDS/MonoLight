@@ -47,12 +47,23 @@ export default {
     channels: '渠道管理',
     message_platforms: '消息平台',
     prompts: '提示词管理',
+    skills: '技能管理',
     scheduled_tasks: '定时任务',
     logs: '系统日志',
     realtime_logs: '实时日志',
     history_logs: '历史日志',
     docs: '文档中心',
     support: '技术支持'
+  },
+  skills: {
+    name: '名称',
+    description: '描述',
+    actions: '操作',
+    no_description: '暂无描述',
+    load_failed: '加载技能列表失败',
+    delete_confirm: '确定要删除技能“{name}”（目录：{id}）及其全部文件吗？该技能由所有用户共享，删除后无法恢复。',
+    delete_success: '技能已删除',
+    delete_failed: '删除技能失败'
   },
   construction: {
     status: '页面建设中',

@@ -120,6 +120,9 @@
             <el-menu-item index="/prompts">
               <span>{{ $t('common.menu.prompts') }}</span>
             </el-menu-item>
+            <el-menu-item v-if="userPermissions.isSuperuser" index="/skills">
+              <span>{{ $t('common.menu.skills') }}</span>
+            </el-menu-item>
           </el-sub-menu>
           <el-sub-menu v-if="userPermissions.isSuperuser" index="/logs" popper-class="sidebar-submenu-popper">
             <template #title>

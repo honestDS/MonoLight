@@ -742,6 +742,7 @@ dashboard/src/views/
 ├── RealTimeLogs.vue        # 实时日志页面
 ├── ScheduledTasksView.vue  # 定时任务管理页面
 ├── SetupView.vue           # 系统初始化页面
+├── SkillsView.vue          # 全局共享技能包管理页面
 ├── UnderConstructionView.vue # 通用建设中占位页面
 └── UsersView.vue           # 用户管理页面
 ```

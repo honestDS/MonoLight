@@ -47,12 +47,23 @@ export default {
     channels: 'Channels',
     message_platforms: 'Message Platforms',
     prompts: 'Prompts',
+    skills: 'Skills',
     scheduled_tasks: 'Scheduled Tasks',
     logs: 'System Logs',
     realtime_logs: 'Real-time Logs',
     history_logs: 'History Logs',
     docs: 'Documentation',
     support: 'Support'
+  },
+  skills: {
+    name: 'Name',
+    description: 'Description',
+    actions: 'Actions',
+    no_description: 'No description',
+    load_failed: 'Failed to load skills',
+    delete_confirm: 'Permanently delete the skill "{name}" (directory: {id}) and all its files? This skill is shared by all users and cannot be restored after deletion.',
+    delete_success: 'Skill deleted',
+    delete_failed: 'Failed to delete the skill'
   },
   construction: {
     status: 'Page under construction',

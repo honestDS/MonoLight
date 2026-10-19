@@ -1,16 +1,25 @@
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import check_admin_privilege
-from app.core.constants import MSG_LOG_LIST_SUCCESS
+from app.core import paths
+from app.core.constants import (
+    ERR_SKILL_ACCESS_FAILED,
+    MSG_LOG_LIST_SUCCESS,
+    MSG_SKILL_DELETED,
+    SKILL_PAGE_MAX_LIMIT,
+)
 from app.core.crud.system.log import system_log_crud
 from app.core.crud.system.setting import system_setting_crud
+from app.core.exceptions import ServerException
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import DEFAULT_LOCALE, get_available_locales, normalize_locale
 from app.core.log import get_logger
 from app.core.log_broadcaster import log_broadcaster
+from app.core.skills import delete_skill, list_skills
 from app.models.system_log import SystemLogResponse
 from app.models.system_setting import SystemRuntimeSettings
 from app.providers.database import get_db
@@ -43,6 +52,36 @@ async def get_system_settings(db: AsyncSession = Depends(get_db)):
 async def update_system_settings(settings_in: SystemRuntimeSettings, db: AsyncSession = Depends(get_db)):
     settings = await system_setting_crud.update_runtime_settings(db, settings_in)
     return StandardResponse.success(data=settings)
+
+
+@router.get("/skills", response_model=StandardResponse[PageData[dict]])
+async def get_skills(
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=SKILL_PAGE_MAX_LIMIT),
+):
+    try:
+        result = await asyncio.to_thread(
+            list_skills,
+            paths.SKILLS_DIR,
+            offset=(page - 1) * size,
+            limit=size,
+        )
+    except (OSError, RuntimeError) as exc:
+        raise ServerException(ERR_SKILL_ACCESS_FAILED, cause=str(exc)) from exc
+
+    page_data = PageData(
+        items=[{key: skill[key] for key in ("id", "name", "description")} for skill in result["skills"]],
+        total=result["total"],
+        page=page,
+        size=size,
+    )
+    return StandardResponse.success(data=page_data)
+
+
+@router.post("/skills/delete", response_model=StandardResponse)
+async def remove_skill(skill_id: str = Query(..., min_length=1)):
+    await asyncio.to_thread(delete_skill, paths.SKILLS_DIR, skill_id)
+    return StandardResponse.success(message=MSG_SKILL_DELETED)
 
 
 @router.get("/logs", response_model=StandardResponse)
