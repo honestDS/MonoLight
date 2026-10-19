@@ -6,6 +6,7 @@ import pytest
 from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
+from app.core import paths
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.crud.audit.audit import audit_crud
 from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_STANDARD_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
@@ -43,6 +44,7 @@ _MISSING = object()
 @pytest.fixture(autouse=True)
 def isolate_system_protection_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(paths, "SKILLS_DIR", tmp_path / "data" / "skills")
 
 
 @pytest.fixture

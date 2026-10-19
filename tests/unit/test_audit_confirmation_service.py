@@ -1849,7 +1849,7 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     assert summary_payload["audit_depth"] == cfg.security.audit_depth == 3
     assert summary_payload["remaining_file_reads"] == cfg.security.audit_depth
     assert summary_payload["directory_policy"] == {
-        "write_protected_directories": [str(directory) for directory in get_write_protected_dirs(os.getcwd())],
+        "write_protected_directories": [str(directory) for directory in get_write_protected_dirs()],
         "allowed_operation_dirs": cfg.tool.allowed_operation_dirs,
     }
 
