@@ -370,7 +370,7 @@ def build_correction_messages(
     """Copies the already prepared precheck request before appending corrections."""
     correction_messages = [message.model_copy(deep=True) for message in base_messages]
     response_message = getattr(response, "message", None)
-    if isinstance(response_message, InternalMessage):
+    if isinstance(response_message, InternalMessage) and (_has_content(response_message.content) or response_message.tool_calls):
         correction_messages.append(response_message.model_copy(deep=True))
         for tool_call in response_message.tool_calls or []:
             correction_messages.append(

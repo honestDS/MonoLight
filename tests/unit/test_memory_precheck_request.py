@@ -10,6 +10,7 @@ from app.core.dispatchers.memory.request import (
     build_correction_messages,
     build_precheck_request_messages,
 )
+from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.utils.assistant_files import build_assistant_files_content
 from app.core.utils.llm_request_params import (
     build_context_summary_generation_params,
@@ -365,6 +366,71 @@ def test_precheck_request_keeps_selected_background_without_secondary_token_budg
     ]
 
 
+@pytest.mark.parametrize(
+    "content",
+    [None, "", " \t\n", []],
+    ids=["none", "empty", "whitespace", "empty-list"],
+)
+@pytest.mark.parametrize(
+    "reasoning_content",
+    [None, "", "private reasoning"],
+    ids=["no-reasoning", "empty-reasoning", "reasoning-only"],
+)
+def test_build_correction_messages_omits_responses_without_visible_content(content, reasoning_content):
+    base_messages = [
+        InternalMessage(
+            role=MessageRole.USER,
+            content="current user",
+            provider_metadata={"nested": {"value": "unchanged"}},
+        ),
+        InternalMessage(role=MessageRole.ASSISTANT, content="precheck context"),
+    ]
+    response = InternalResponse(
+        model="test-model",
+        message=InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content=content,
+            reasoning_content=reasoning_content,
+            provider_metadata={"provider": "test", "reasoning": {"text": "private reasoning"}},
+        ),
+    )
+    original_base = [message.model_dump(mode="json") for message in base_messages]
+    original_response = response.model_dump(mode="json")
+
+    result = build_correction_messages(base_messages, response)
+
+    assert result[:-1] == base_messages
+    assert len(result) == len(base_messages) + 1
+    assert result[-1].role == MessageRole.USER
+    assert result[-1].content == LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
+    assert all(actual is not original for actual, original in zip(result, base_messages))
+    assert result[0].provider_metadata is not base_messages[0].provider_metadata
+    assert result[0].provider_metadata["nested"] is not base_messages[0].provider_metadata["nested"]
+    assert [message.model_dump(mode="json") for message in base_messages] == original_base
+    assert response.model_dump(mode="json") == original_response
+
+
+def test_build_correction_messages_keeps_visible_response_without_tool_calls():
+    base_messages = [InternalMessage(role=MessageRole.USER, content="current user")]
+    response = InternalResponse(
+        model="test-model",
+        message=InternalMessage(role=MessageRole.ASSISTANT, content="visible response"),
+    )
+    original_base = [message.model_dump(mode="json") for message in base_messages]
+    original_response = response.model_dump(mode="json")
+
+    result = build_correction_messages(base_messages, response)
+
+    assert [(message.role, message.content) for message in result] == [
+        (MessageRole.USER, "current user"),
+        (MessageRole.ASSISTANT, "visible response"),
+        (MessageRole.USER, LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT),
+    ]
+    assert result[1] is not response.message
+    assert [message.model_dump(mode="json") for message in base_messages] == original_base
+    assert response.model_dump(mode="json") == original_response
+
+
 def test_build_correction_messages_keeps_precheck_context_without_mutating_base_messages():
     base_messages = [
         InternalMessage(role=MessageRole.USER, content="old user"),
@@ -380,6 +446,7 @@ def test_build_correction_messages_keeps_precheck_context_without_mutating_base_
             tool_calls=[InternalToolCall(id="call-1", name="tool", arguments={"secret": "private"})],
         ),
     )
+    original_response = response.model_dump(mode="json")
 
     result = build_correction_messages(base_messages, response)
 
@@ -395,6 +462,7 @@ def test_build_correction_messages_keeps_precheck_context_without_mutating_base_
     assert result[4].content == '{"status":"ignored"}'
     assert result[-1].role == MessageRole.USER
     assert [message.model_dump(mode="json") for message in base_messages] == original_base
+    assert response.model_dump(mode="json") == original_response
     assert response.message.tool_calls[0].arguments == {"secret": "private"}
 
 
