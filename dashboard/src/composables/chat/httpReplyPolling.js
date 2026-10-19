@@ -99,7 +99,7 @@ export function createHttpReplyPolling({
     return false
   }
 
-  const finishHttpWorkLifecycle = ({ sessionId, workId, resolvedWorkId, requestIds }) => {
+  const finishHttpWorkLifecycle = ({ sessionId, workId, resolvedWorkId, requestIds, type }) => {
     const normalizedSessionId = normalizeHttpIdentity(sessionId)
     const normalizedWorkId = normalizeHttpIdentity(workId)
     const normalizedResolvedWorkId = normalizeHttpIdentity(resolvedWorkId)
@@ -113,7 +113,8 @@ export function createHttpReplyPolling({
     if (isCurrentWritableHttpSession(normalizedSessionId)) {
       const lifecycleEvent = {
         ...(lifecycleWorkId ? { work_id: lifecycleWorkId } : {}),
-        request_ids: Array.from(relatedRequestIds)
+        request_ids: Array.from(relatedRequestIds),
+        type
       }
       chatState.messages.value = workLifecycleTracker.finishWorkLifecycle(
         chatState.messages.value,
@@ -122,7 +123,7 @@ export function createHttpReplyPolling({
       for (const requestId of relatedRequestIds) {
         chatState.messages.value = workLifecycleTracker.finishWorkLifecycle(
           chatState.messages.value,
-          { request_ids: [requestId] }
+          { type, request_ids: [requestId] }
         )
       }
     }
@@ -298,7 +299,8 @@ export function createHttpReplyPolling({
       sessionId: normalizedSessionId,
       workId,
       resolvedWorkId,
-      requestIds: Array.from(relatedRequestIds)
+      requestIds: Array.from(relatedRequestIds),
+      type: status === 'cancelled' ? 'cancelled' : undefined
     })
     resolvedHttpWorks.add(workId)
     resolvedHttpWorks.add(resolvedWorkId)

@@ -614,8 +614,19 @@ test('cancelled HTTP work status finishes quietly and clears its lifecycle state
     inputMsg: 'keep this draft',
     messages: [
       { id: 'history', db_id: 42, role: 'assistant', content: 'historical answer' },
+      {
+        id: 'work-history',
+        db_id: 43,
+        role: 'assistant',
+        content: 'completed answer',
+        reasoning_content: 'completed reasoning',
+        work_id: 'work-A'
+      },
+      { id: 'tool-result', role: 'tool', content: 'completed tool result', work_id: 'work-A' },
       { id: 'queued', role: 'user', content: 'queued prompt', request_id: 'request-A', status: 'queued' },
-      { id: 'thinking', role: 'thinking', content: 'partial reply', work_id: 'work-A', request_ids: ['request-A', 'request-B'] }
+      { id: 'thinking', role: 'thinking', content: 'partial reply', work_id: 'work-A', request_ids: ['request-A', 'request-B'] },
+      { id: 'reasoning', role: 'reasoning', content: 'temporary reasoning', work_id: 'work-A' },
+      { id: 'unrelated-reasoning', role: 'reasoning', content: 'unrelated reasoning', work_id: 'work-other', request_id: 'request-other' }
     ],
     pendingHttpRequests: [
       ['request-A', { sessionId: 'A', workId: 'work-A' }],
@@ -624,29 +635,127 @@ test('cancelled HTTP work status finishes quietly and clears its lifecycle state
     ]
   })
 
-  const result = harness.applyHttpWorkStatus(
-    { work_id: 'work-A', request_ids: ['request-A', 'request-B'] },
-    {
-      session_id: 'A',
-      status: 'cancelled',
-      error: 'backend cancellation details',
-      request_ids: ['request-A', 'request-B']
-    },
-    'A'
-  )
+  const work = { work_id: 'work-A', request_ids: ['request-A', 'request-B'] }
+  const statusData = {
+    session_id: 'A',
+    status: 'cancelled',
+    error: 'backend cancellation details',
+    request_ids: ['request-A', 'request-B']
+  }
+  const result = harness.applyHttpWorkStatus(work, statusData, 'A')
 
   assert.equal(result?.terminal, true)
   assert.equal(result?.succeeded, false)
   assert.deepEqual(harness.messageProcessorErrors, [])
   assert.deepEqual(harness.errors, [])
   assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), false)
+  assert.equal(harness.chatState.messages.value.some(message => message.id === 'reasoning'), false)
+  assert.equal(
+    harness.chatState.messages.value.find(message => message.id === 'unrelated-reasoning').content,
+    'unrelated reasoning'
+  )
   assert.equal(harness.chatState.messages.value.find(message => message.id === 'queued').status, undefined)
   assert.equal(harness.chatState.messages.value.find(message => message.id === 'history').content, 'historical answer')
+  assert.equal(harness.chatState.messages.value.find(message => message.id === 'work-history').content, 'completed answer')
+  assert.equal(harness.chatState.messages.value.find(message => message.id === 'work-history').reasoning_content, 'completed reasoning')
+  assert.equal(harness.chatState.messages.value.find(message => message.id === 'tool-result').content, 'completed tool result')
   assert.equal(harness.chatState.inputMsg.value, 'keep this draft')
   assert.equal(harness.pendingHttpRequests.has('request-A'), false)
   assert.equal(harness.pendingHttpRequests.has('request-B'), false)
   assert.equal(harness.pendingHttpRequests.has('request-other'), true)
   assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), true)
+
+  const messagesAfterCancellation = harness.chatState.messages.value.map(message => ({ ...message }))
+  harness.applyHttpWorkStatus(work, statusData, 'A')
+  assert.deepEqual(harness.chatState.messages.value, messagesAfterCancellation)
+
+  const afterLateCancellation = harness.workLifecycleTracker.finishWorkLifecycle(
+    harness.chatState.messages.value,
+    {
+      type: 'cancelled',
+      session_id: 'A',
+      work_id: 'work-A',
+      request_ids: ['request-A', 'request-B']
+    }
+  )
+  assert.deepEqual(afterLateCancellation, messagesAfterCancellation)
+
+  const afterLateLoop = harness.workLifecycleTracker.startAgentLoop(
+    harness.chatState.messages.value,
+    { work_id: 'work-A', response_id: 'late-response', request_ids: ['request-A', 'request-B'] }
+  )
+  assert.deepEqual(afterLateLoop, messagesAfterCancellation)
+  assert.equal(afterLateLoop.some(message => message.role === 'thinking'), false)
+})
+
+test('cancelled merged HTTP work clears reasoning by resolved work and request fallback', () => {
+  const harness = createHarness({
+    sessions: [{ session_id: 'A', source: 'http' }],
+    currentSessionId: 'A',
+    messages: [
+      { id: 'original-thinking', role: 'thinking', content: 'original work', work_id: 10, request_id: 'merge-request' },
+      { id: 'original-reasoning', role: 'reasoning', content: 'original reasoning', work_id: '10', request_id: 'merge-request' },
+      { id: 'resolved-reasoning', role: 'reasoning', content: 'resolved work', work_id: '20' },
+      { id: 'request-reasoning', role: 'reasoning', content: 'request only', request_id: 'merge-request' },
+      { id: 'unrelated-reasoning', role: 'reasoning', content: 'unrelated', work_id: 'work-other', request_id: 'request-other' }
+    ],
+    pendingHttpRequests: [
+      ['merge-request', { sessionId: 'A', workId: '10' }],
+      ['request-other', { sessionId: 'A', workId: 'work-other' }]
+    ]
+  })
+  const work = { work_id: 10, request_ids: ['merge-request'] }
+  const statusData = {
+    session_id: 'A',
+    status: 'cancelled',
+    resolved_work_id: '20'
+  }
+
+  const result = harness.applyHttpWorkStatus(
+    work,
+    statusData,
+    'A'
+  )
+
+  assert.equal(result?.terminal, true)
+  assert.deepEqual(
+    harness.chatState.messages.value.map(message => message.id),
+    ['unrelated-reasoning']
+  )
+  assert.equal(
+    harness.chatState.messages.value.find(message => message.id === 'unrelated-reasoning').content,
+    'unrelated'
+  )
+  assert.equal(harness.pendingHttpRequests.has('merge-request'), false)
+  assert.equal(harness.pendingHttpRequests.has('request-other'), true)
+  assert.equal(harness.workLifecycleTracker.isWorkTerminal('20'), true)
+})
+
+test('succeeded and failed HTTP work statuses preserve temporary reasoning', () => {
+  for (const status of ['succeeded', 'failed']) {
+    const harness = createHarness({
+      sessions: [{ session_id: 'A', source: 'http' }],
+      currentSessionId: 'A',
+      messages: [
+        { id: 'thinking', role: 'thinking', content: 'partial reply', work_id: 'work-A' },
+        { id: 'reasoning', role: 'reasoning', content: 'temporary reasoning', work_id: 'work-A' }
+      ]
+    })
+
+    harness.applyHttpWorkStatus(
+      { work_id: 'work-A', request_ids: ['request-A'] },
+      {
+        session_id: 'A',
+        status,
+        error: status === 'failed' ? 'backend failure details' : undefined,
+        request_ids: ['request-A']
+      },
+      'A'
+    )
+
+    assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), false)
+    assert.equal(harness.chatState.messages.value.find(message => message.id === 'reasoning').content, 'temporary reasoning')
+  }
 })
 
 test('failed HTTP work status reports its actual error once and cleans up lifecycle state', async () => {
