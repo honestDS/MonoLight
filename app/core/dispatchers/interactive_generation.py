@@ -102,7 +102,7 @@ async def generate_interactive_turn(
         response_id=response_id,
         expose_tool_call_content=state.expose_tool_call_content,
         show_tool_calls=state.show_tool_calls,
-        defer_output_until_response=(tool_choice == "none" or (state.goal_mode is True and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING)),
+        defer_output_until_response=(state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING or tool_choice == "none" or (state.goal_mode is True and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING)),
     )
     goal_mode = state.goal_mode is True
     execution_phase = state.checkpoint_state.execution_phase
@@ -264,7 +264,7 @@ async def generate_interactive_turn(
             response_provider_metadata = getattr(response, "provider_metadata", None)
             ai_refusal = getattr(ai_msg, "refusal", None)
             ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
-            tool_calls_forbidden = tool_choice == "none" and bool(ai_msg.tool_calls)
+            tool_calls_forbidden = execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and bool(ai_msg.tool_calls)
             end_session_signal = goal_mode and execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)
             if tool_calls_forbidden or end_session_signal:
                 stream_state.buffered_content_chunks.clear()
@@ -302,7 +302,9 @@ async def generate_interactive_turn(
                         ai_msg,
                         {
                             "type": "interactive_final_reply_tool_correction",
-                            "error": "Tool calls are disabled for this reply.",
+                            "status": "rejected",
+                            "executed": False,
+                            "error": "Tool calls are forbidden during the final response stage and were not executed.",
                             "instruction": TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
                             "ignored_tool_calls": ignored_tool_names,
                         },

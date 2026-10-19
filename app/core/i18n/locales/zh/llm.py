@@ -9,7 +9,7 @@ MESSAGES = {
     "ERR_LLM_UPSTREAM_REQUEST_TOO_LARGE": "上游因请求过大拒绝了本次调用（413）。请精简内容或附件，并联系管理员根据上游限制适当调低全局请求大小上限，以提前拦截类似请求。调低上限不会自动缩小请求。",
     "ERR_LLM_CHANNEL_NOT_CONFIGURED": "未检测到有效的模型渠道配置或 API Key。请检查并将包含有效密钥的 Profile 设为默认，或为当前会话/消息平台选择该 Profile。",
     "ERR_LLM_EMPTY_RESPONSE": "大模型返回了空的响应内容，请尝试重新发送指令或检查模型侧配置",
-    "ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED": "这个模型连续 3 次都没能按要求生成最终回复，可能不太适合完成这类任务。请换个模型再试。",
+    "ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED": "当前模型多次未能遵守 MonoLight 的最终回复规范，本次回复生成失败。请重试，或更换模型。",
     "ERR_LLM_FIRST_CHAR_TIMEOUT": "等待对话模型首字响应超时（{timeout} 秒）",
     "ERR_LLM_STREAM_TIMEOUT": "等待对话模型流响应超时（{timeout} 秒）",
     "ERR_API_KEY_CRYPTO_FAILED": "API Key 加解密失败：{reason}",

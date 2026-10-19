@@ -1,6 +1,5 @@
 import json
 
-from app.core.constants import SEND_FILE_TO_USER_TOOL_NAME
 from app.core.prompts import SCHEDULED_TASK_TRIGGER_PROMPT
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import (
@@ -24,29 +23,6 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
             attachments=msg.attachments,
         )
     ]
-
-
-def _remove_completed_file_send_chains(messages: list[InternalMessage]) -> list[InternalMessage]:
-    completed_tool_call_ids = {message.tool_call_id for message in messages if message.role == MessageRole.TOOL and message.tool_call_id}
-    file_send_call_ids = {tool_call.id for message in messages if message.role == MessageRole.ASSISTANT and message.tool_calls for tool_call in message.tool_calls if tool_call.name == SEND_FILE_TO_USER_TOOL_NAME and tool_call.id in completed_tool_call_ids}
-    if not file_send_call_ids:
-        return messages
-
-    filtered_messages: list[InternalMessage] = []
-    for message in messages:
-        if message.role == MessageRole.TOOL and message.tool_call_id in file_send_call_ids:
-            continue
-        if message.role != MessageRole.ASSISTANT or not message.tool_calls:
-            filtered_messages.append(message)
-            continue
-
-        remaining_tool_calls = [tool_call for tool_call in message.tool_calls if tool_call.id not in file_send_call_ids]
-        if remaining_tool_calls:
-            filtered_messages.append(message.model_copy(update={"tool_calls": remaining_tool_calls}))
-        elif message.content:
-            filtered_messages.append(message.model_copy(update={"tool_calls": None}))
-
-    return filtered_messages
 
 
 def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalMessage]:
@@ -128,4 +104,4 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 parsed_history.append(InternalMessage(role=role, **message_kwargs))
         except Exception:
             continue
-    return _remove_completed_file_send_chains(parsed_history)
+    return parsed_history

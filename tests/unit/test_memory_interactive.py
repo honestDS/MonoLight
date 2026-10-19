@@ -724,9 +724,8 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
     response = await _dispatch_non_stream(additional_fetcher=lambda: _empty_batch())
 
     assert len(request_log) == 3
-    assert all(item["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA] for item in request_log[:2])
-    assert request_log[-1]["tools"] == []
-    assert [item["tool_choice"] for item in request_log] == ["auto", "auto", "none"]
+    assert all(item["tools"] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA] for item in request_log)
+    assert [item["tool_choice"] for item in request_log] == ["auto", "auto", "auto"]
     summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=cfg.tool.max_turns)
     assert any(message.role == MessageRole.USER and summary_notice in (message.content or "") for message in request_log[-1]["messages"])
     assert [tool_call.id for tool_call in execution_calls] == [first_call.id, second_call.id]
