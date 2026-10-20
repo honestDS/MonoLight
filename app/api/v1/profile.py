@@ -8,6 +8,8 @@ from fastapi import (
     Depends,
     Query,
 )
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
@@ -392,9 +394,13 @@ async def update_profile(
     if profile_in.confirm_memory_embedding_selection or profile_in.memory_embedding_selection_signature is not None:
         raise ParameterException(ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED)
 
-    submitted_configs = profile_in.configs
-    profile_in.configs = ProfileConfig.model_validate(submitted_configs if submitted_configs is not None else db_profile.configs or {}).model_dump()
+    submitted_configs = profile_in.configs if profile_in.configs is not None else {}
     try:
+        profile_in.configs = prepare_profile_configs(
+            submitted_configs,
+            current_user,
+            existing_configs=db_profile.configs or {},
+        )
         old_channel_ids = []
         old_cfg = ProfileConfig.model_validate(db_profile.configs or {})
         for old_channel_config in (
@@ -433,7 +439,7 @@ async def update_profile(
         profile_in.configs = normalize_profile_memory_for_update(
             db_profile,
             prepare_profile_configs(
-                submitted_configs if submitted_configs is not None else db_profile.configs or {},
+                submitted_configs,
                 current_user,
                 existing_configs=db_profile.configs or {},
             ),
@@ -478,6 +484,9 @@ async def update_profile(
         )
         await sync_profile_memory_organization(db, uid=db_profile.uid, memory_organization=memory_organization)
         await db.commit()
+    except ValidationError as exc:
+        await db.rollback()
+        raise RequestValidationError([{**error, "loc": ("body", "configs", *error["loc"])} for error in exc.errors()]) from exc
     except Exception:
         await db.rollback()
         raise

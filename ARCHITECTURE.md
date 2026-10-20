@@ -146,6 +146,7 @@ app/core/
 ├── knowledge_base_collection_cleanup.py # 已删除知识库 collection owner 持久化清理处理服务
 ├── paths.py                # 数据和临时目录定义
 ├── profile_deletion.py     # Profile 删除影响预览、确认与级联清理
+├── profile_permissions.py  # Profile 配置权限与受限字段合并
 ├── profile_selection.py    # Profile 选择服务
 ├── profile_validation.py   # Profile 配置检查
 ├── prompts.py              # 内置提示内容

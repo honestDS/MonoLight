@@ -18,13 +18,6 @@ def _get_path(data: dict, path: str):
     return data
 
 
-def _set_path(data: dict, path: str, value) -> None:
-    parts = path.split(".")
-    for part in parts[:-1]:
-        data = data.setdefault(part, {})
-    data[parts[-1]] = value
-
-
 def _has_changed_leaf(submitted, baseline) -> bool:
     if submitted is _MISSING:
         return False
@@ -32,6 +25,20 @@ def _has_changed_leaf(submitted, baseline) -> bool:
         baseline_dict = baseline if isinstance(baseline, dict) else {}
         return any(_has_changed_leaf(value, baseline_dict.get(key, _MISSING)) for key, value in submitted.items())
     return submitted != baseline
+
+
+def _merge_dicts(baseline: dict, submitted: dict) -> dict:
+    merged = copy.deepcopy(baseline)
+    for key, value in submitted.items():
+        baseline_value = merged.get(key)
+        if isinstance(value, dict):
+            merged[key] = _merge_dicts(
+                baseline_value if isinstance(baseline_value, dict) else {},
+                value,
+            )
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
 
 
 def get_profile_config_permissions(current_user) -> dict[str, bool]:
@@ -44,9 +51,11 @@ def prepare_profile_configs(
     *,
     existing_configs: dict | None = None,
 ) -> dict:
-    submitted_model = ProfileConfig.model_validate(copy.deepcopy(configs))
+    submitted_model = ProfileConfig.model_validate(
+        copy.deepcopy(configs),
+        context={"partial_update": existing_configs is not None},
+    )
     submitted = submitted_model.model_dump(exclude_unset=True)
-    normalized = submitted_model.model_dump()
 
     baseline_model = ProfileConfig.model_validate(copy.deepcopy(existing_configs)) if existing_configs is not None else ProfileConfig.model_validate({})
     baseline = baseline_model.model_dump()
@@ -58,6 +67,6 @@ def prepare_profile_configs(
         baseline_value = _get_path(baseline, path)
         if _has_changed_leaf(submitted_value, baseline_value):
             raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
-        _set_path(normalized, path, copy.deepcopy(baseline_value))
 
-    return ProfileConfig.model_validate(normalized).model_dump()
+    merged = _merge_dicts(baseline, submitted)
+    return ProfileConfig.model_validate(merged).model_dump()

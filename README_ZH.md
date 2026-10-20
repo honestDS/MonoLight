@@ -2,6 +2,8 @@
 
 [English](./README.md) | **中文**
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/honestDS/MonoLight)
+
 MonoLight 是一个专注于安全执行与人机协同的通用自主智能体（General Autonomous Agent）运行时。
 
 <p align="center">
