@@ -17,6 +17,8 @@ def resolve_file_tool_target_path(
     path: str,
     workspace_path: str | Path,
     allowed_operation_dirs: list[str] | None = None,
+    *,
+    enforce_allowed_dirs: bool = True,
 ) -> Path:
     if not isinstance(path, str) or not path.strip():
         raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
@@ -28,7 +30,8 @@ def resolve_file_tool_target_path(
         raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
 
     target = candidate.resolve(strict=False) if candidate.is_absolute() else (workspace / candidate).resolve(strict=False)
-    roots = [workspace, *normalize_allowed_operation_dirs(allowed_operation_dirs)]
-    if not any(is_within(target, root) for root in roots):
-        raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
+    if enforce_allowed_dirs:
+        roots = [workspace, *normalize_allowed_operation_dirs(allowed_operation_dirs)]
+        if not any(is_within(target, root) for root in roots):
+            raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
     return target

@@ -26,8 +26,12 @@ from app.core.audit import confirmation_events as confirmation_events_module
 from app.core.audit import service as audit_service_module
 from app.core.audit.confirmation_persistence import persist_pending_confirmation_bundle
 from app.core.audit.integrity import build_tool_round_integrity_snapshot
-from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import (
+    ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+)
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.i18n import t
 from app.core.prompts import LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
 from app.core.security import get_current_user
 from app.core.session.notifier import SessionNotifier
@@ -154,6 +158,7 @@ async def _seed_pending_confirmation(
     *,
     working_directory: Path,
     include_parallel_limit_exceeded_call: bool = False,
+    include_initial_user_message: bool = False,
 ) -> int:
     uid = "owner"
     session_id = "session-confirmation"
@@ -219,6 +224,20 @@ async def _seed_pending_confirmation(
             )
         )
         await db.flush()
+
+        if include_initial_user_message:
+            db.add(
+                Message(
+                    session_id=session_id,
+                    uid=uid,
+                    profile_id=1,
+                    role=MessageRole.USER,
+                    type=MessageType.TEXT,
+                    content="Run the proposed shell commands.",
+                    is_processed=True,
+                )
+            )
+            await db.flush()
 
         source = Message(
             session_id=session_id,
@@ -2033,6 +2052,7 @@ async def test_confirmation_audit_decision_continues_without_forced_memory_recal
     audit_record_id = await _seed_pending_confirmation(
         confirmation_workflow_session_factory,
         working_directory=tmp_path,
+        include_initial_user_message=True,
     )
 
     async with confirmation_workflow_session_factory() as db:
@@ -2273,6 +2293,28 @@ async def test_confirmation_audit_decision_continues_without_forced_memory_recal
         assert not any(json.loads(InternalMessage.model_validate_json(message.content or "{}").content or "{}").get("operation") == "read" for message in messages if message.type == MessageType.TOOL_RESULT)
         assert captured_requests[0]["tools"] is None
         assert len(captured_requests) == 1
+        captured_messages = captured_requests[0]["messages"]
+        assert isinstance(captured_messages, list)
+        original_shell_call_ids = {"original-shell-call-1", "original-shell-call-2"}
+        original_shell_results = {message.tool_call_id: json.loads(message.content or "{}") for message in captured_messages if isinstance(message, InternalMessage) and message.tool_call_id in original_shell_call_ids}
+        assert set(original_shell_results) == original_shell_call_ids
+        for result in original_shell_results.values():
+            assert result["status"] == "rejected"
+            assert result["reason"] == t(ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER)
+            assert result["error"] == t(ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER)
+            assert result["confirmation_status"] == "reject"
+            assert result["confirmation_decision"] == decision
+            assert not (
+                {
+                    "score",
+                    "deny",
+                    "file_checks",
+                    "intent_summary",
+                    "arguments_summary",
+                    "file_snapshots",
+                }
+                & result.keys()
+            )
     else:
         assert commands == ["echo confirmed-1", "echo confirmed-2"]
         assert [execution.status for execution in executions] == [

@@ -3,6 +3,7 @@ import json
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit.visibility import obscure_audit_tool_result
 from app.core.constants import (
     CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
 )
@@ -140,6 +141,20 @@ class ContextManager:
         滑动删除历史消息或根据估算值触发压缩，以保持请求前缀稳定。
         """
         request_messages = [msg.model_copy(deep=True) for msg in messages]
+        for message in request_messages:
+            if message.role != MessageRole.TOOL or not isinstance(message.content, str):
+                continue
+            try:
+                payload = json.loads(message.content)
+            except json.JSONDecodeError:
+                continue
+            safe_payload = obscure_audit_tool_result(payload)
+            if safe_payload is not payload:
+                message.content = json.dumps(safe_payload, ensure_ascii=False)
+                message.reasoning_content = None
+                message.refusal = None
+                message.provider_metadata = None
+
         ensure_configured_request_capacity_available(
             context_window_k=context_window_k,
             max_tokens=max_tokens,

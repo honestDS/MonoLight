@@ -11,6 +11,7 @@ from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.core.audit.confirmation import ConfirmationDecision, is_confirmation_candidate, message_has_quote, parse_confirmation_decision
 from app.core.audit.context_budget import (
     AUDIT_READ_TEXT_FILE_TOOL_SCHEMA,
+    AUDIT_SHELL_TOOL_SCHEMA,
     build_read_tool_message,
     fit_file_tool_payload_to_context,
     fit_read_result_to_context,
@@ -1140,6 +1141,154 @@ def test_audit_read_result_fits_escaped_json_within_input_budget():
     assert fitted_result["size"] == read_result["size"]
 
 
+@pytest.mark.parametrize(
+    "tool_calls_state",
+    [
+        pytest.param("missing", id="missing-tool-calls"),
+        pytest.param("empty", id="empty-tool-calls"),
+        pytest.param("large_file_write", id="large-file-write"),
+    ],
+)
+def test_audit_summary_evidence_content_is_truncated_with_or_without_file_tool_calls(tool_calls_state):
+    file_content = '读取文件："配置内容" \\n C:\\audit\\配置.json\r\n' * 3000
+    short_content = '已保留的短证据："ok" \\n'
+    shell_content = '命令输出："中文状态" \\n escaped=\\\\ and C:\\audit\\日志\n' * 3000
+    write_content = '写入参数："新建配置" \\n body=\\payload\\\\\n' * 3000
+    short_bytes_read = len(short_content.encode("utf-8"))
+    file_bytes = file_content.encode("utf-8")
+    shell_bytes = shell_content.encode("utf-8")
+    payload = {
+        "working_directory": "C:/audit",
+        "server_confirmation_reasons": {},
+        "audit_results": [
+            {
+                "tool_call_id": "risk-call",
+                "score": 5,
+                "reason": "需要确认",
+                "deny": False,
+                "file_checks": [],
+            }
+        ],
+        "file_reads": [
+            {
+                "path": "配置/审计.json",
+                "tool_call_id": "risk-call",
+                "original_path": "配置/审计.json",
+                "absolute_path": "C:/audit/配置/审计.json",
+                "resolved_path": "C:/audit/配置/审计.json",
+                "exists": True,
+                "file_type": "regular_file",
+                "size": len(file_bytes),
+                "sha256": hashlib.sha256(file_bytes).hexdigest(),
+                "status": "ok",
+                "truncated": False,
+                "content": file_content,
+                "bytes_read": len(file_bytes),
+                "remaining_file_reads": 1,
+                "remaining_evidence_calls": 1,
+                "remaining_shell_calls": 1,
+            },
+            {
+                "path": "配置/历史.json",
+                "tool_call_id": "prior-call",
+                "original_path": "配置/历史.json",
+                "absolute_path": "C:/audit/配置/历史.json",
+                "resolved_path": "C:/audit/配置/历史.json",
+                "exists": True,
+                "file_type": "regular_file",
+                "size": short_bytes_read + 100,
+                "sha256": "b" * 64,
+                "status": "ok",
+                "truncated": True,
+                "content": short_content,
+                "bytes_read": short_bytes_read,
+                "remaining_file_reads": 1,
+                "remaining_evidence_calls": 1,
+                "remaining_shell_calls": 1,
+            },
+        ],
+        "shell_results": [
+            {
+                "tool_name": "execute_shell",
+                "tool_call_id": "risk-call",
+                "command": "Get-Content C:/audit/配置/审计.json",
+                "status": "ok",
+                "content": shell_content,
+                "size": len(shell_bytes),
+                "bytes_read": len(shell_bytes),
+                "truncated": False,
+                "remaining_file_reads": 1,
+                "remaining_evidence_calls": 1,
+                "remaining_shell_calls": 1,
+            }
+        ],
+    }
+    if tool_calls_state == "empty":
+        payload["tool_calls"] = []
+    elif tool_calls_state == "large_file_write":
+        payload["tool_calls"] = [
+            {
+                "id": "write-call",
+                "name": "file_tool",
+                "arguments": {"operation": "write", "path": "配置/输出.txt", "content": write_content},
+            }
+        ]
+
+    chat_params = {"context_window_k": 8, "max_tokens": 512}
+    tools = [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA]
+    system_prompt = "请依据审计数据总结待确认操作。"
+
+    def request_context_tokens(candidate_payload):
+        return estimate_request_context_tokens(
+            [
+                InternalMessage(role=MessageRole.SYSTEM, content=system_prompt),
+                InternalMessage(role=MessageRole.USER, content=json.dumps(candidate_payload, ensure_ascii=False)),
+            ],
+            tools,
+        )
+
+    metadata_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    for evidence_field in ("file_reads", "shell_results"):
+        for item in metadata_payload[evidence_field]:
+            item["content"] = ""
+    if tool_calls_state == "large_file_write":
+        metadata_payload["tool_calls"][0]["arguments"]["content"] = ""
+
+    input_limit = max_input_tokens(chat_params)
+    original_payload_json = json.dumps(payload, ensure_ascii=False)
+    assert request_context_tokens(metadata_payload) <= input_limit
+    assert request_context_tokens(payload) > input_limit
+
+    adapted_payload = fit_file_tool_payload_to_context(system_prompt, payload, chat_params)
+    assert adapted_payload is not payload
+    assert request_context_tokens(adapted_payload) <= input_limit
+    assert json.dumps(payload, ensure_ascii=False) == original_payload_json
+
+    for evidence_field in ("file_reads", "shell_results"):
+        original = payload[evidence_field][0]
+        adapted = adapted_payload[evidence_field][0]
+        assert original["content"].startswith(adapted["content"])
+        assert adapted["content"]
+        assert adapted["content"] != original["content"]
+        assert adapted["bytes_read"] == len(adapted["content"].encode("utf-8"))
+        assert adapted["truncated"] is True
+        assert {key: value for key, value in adapted.items() if key not in {"content", "bytes_read", "truncated"}} == {key: value for key, value in original.items() if key not in {"content", "bytes_read", "truncated"}}
+
+    assert adapted_payload["file_reads"][1] == payload["file_reads"][1]
+    if tool_calls_state == "large_file_write":
+        adapted_write = adapted_payload["tool_calls"][0]
+        adapted_write_content = adapted_write["arguments"]["content"]
+        assert write_content.startswith(adapted_write_content)
+        assert adapted_write_content != write_content
+        assert adapted_write["argument_evidence"]["content"] == {
+            "status": "ok",
+            "size": len(write_content.encode("utf-8")),
+            "sha256": hashlib.sha256(write_content.encode("utf-8")).hexdigest(),
+            "truncated": True,
+            "bytes_read": len(adapted_write_content.encode("utf-8")),
+        }
+
+
 def test_file_edit_and_patch_snapshots_record_mutation_targets_and_ignore_write_or_outside_paths(tmp_path):
     calls = [
         InternalToolCall(id="edit", name="file_tool", arguments={"operation": "edit", "path": "nested/new.txt", "old_text": "old", "new_text": "new"}),
@@ -1265,7 +1414,10 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
 
     assert len(calls) == 2
     assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
-    assert all(tool["function"]["name"] == "read_text_file" for tool in calls[1]["tools"])
+    assert [tool["function"]["name"] for tool in calls[1]["tools"]] == ["read_text_file", "execute_shell"]
+    shell_tool = calls[1]["tools"][1]["function"]["parameters"]
+    assert shell_tool["properties"]["execution_mode"]["enum"] == ["non_interactive"]
+    assert "tool_call_id" in shell_tool["required"]
     assert all(call["max_tokens"] == DEFAULT_CHAT_MAX_TOKENS for call in calls)
     assert all(isinstance(call["request_context_tokens"], int) and call["request_context_tokens"] >= 0 for call in calls)
     assert json.loads(calls[0]["messages"][1].content)["working_directory"] == str(tmp_path)

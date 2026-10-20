@@ -5,6 +5,7 @@ from typing import Any
 
 from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, FILE_TOOL_NAME
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA
+from app.core.tools.shell import SHELL_TOOL_SCHEMA
 from app.core.utils.tokenizer import estimate_tokens, truncate_text_to_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import estimate_request_context_tokens
@@ -18,6 +19,19 @@ AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tool_c
     "description": "The original tool_call_id whose assessment needs this file evidence.",
 }
 AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["parameters"]["required"].append("tool_call_id")
+AUDIT_SHELL_TOOL_SCHEMA = copy.deepcopy(SHELL_TOOL_SCHEMA)
+AUDIT_SHELL_TOOL_SCHEMA["function"]["description"] = (
+    "Use the general-purpose shell to verify environment variables, actual directories, symbolic links, and other environmental facts as audit evidence. "
+    "The pending business operation has not been executed. Use only a separate verification command; do not modify files or configuration, and do not execute the pending business command."
+)
+AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["command"]["description"] = "A separate shell command used only to verify environmental facts; do not provide or execute the pending business command."
+AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["execution_mode"]["enum"] = ["non_interactive"]
+AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["execution_mode"]["description"] = "For audit evidence, use only non_interactive and finish within the existing tool_timeout. Do not create terminals or background tasks, switch languages, or wrap the original business command to evade these restrictions."
+AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["tool_call_id"] = {
+    "type": "string",
+    "description": "The original tool_call_id of the pending business operation being assessed.",
+}
+AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["required"].append("tool_call_id")
 
 
 def max_input_tokens(chat_params: dict[str, Any]) -> int:
@@ -58,7 +72,7 @@ def fit_file_tool_payload_to_context(
         ]
         return estimate_request_context_tokens(
             messages,
-            [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
+            [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA],
             model_id=model_id,
             protocol=protocol,
         )
@@ -67,46 +81,53 @@ def fit_file_tool_payload_to_context(
         return adapted_payload
 
     tool_calls = adapted_payload.get("tool_calls")
-    if not isinstance(tool_calls, list):
-        return adapted_payload
     content_fields: list[tuple[int, str, str, int, str]] = []
-    for index, tool_call in enumerate(tool_calls):
-        if not isinstance(tool_call, dict) or tool_call.get("tool_name", tool_call.get("name")) != FILE_TOOL_NAME:
-            continue
-        arguments = tool_call.get("arguments")
-        if not isinstance(arguments, dict):
-            continue
-        operation = arguments.get("operation")
-        if operation == "write":
-            field_names = ("content",)
-        elif operation == "edit":
-            field_names = ("old_text", "new_text")
-        elif operation == "patch":
-            field_names = ("patch",)
-        elif operation == "grep":
-            field_names = ("pattern",)
-        else:
-            field_names = ()
-        for field_name in field_names:
-            field_value = arguments.get(field_name)
-            if not isinstance(field_value, str):
+    if isinstance(tool_calls, list):
+        for index, tool_call in enumerate(tool_calls):
+            if not isinstance(tool_call, dict) or tool_call.get("tool_name", tool_call.get("name")) != FILE_TOOL_NAME:
                 continue
-            content_bytes = field_value.encode("utf-8")
-            content_fields.append(
-                (
-                    index,
-                    field_name,
-                    field_value,
-                    len(content_bytes),
-                    hashlib.sha256(content_bytes).hexdigest(),
+            arguments = tool_call.get("arguments")
+            if not isinstance(arguments, dict):
+                continue
+            operation = arguments.get("operation")
+            if operation == "write":
+                field_names = ("content",)
+            elif operation == "edit":
+                field_names = ("old_text", "new_text")
+            elif operation == "patch":
+                field_names = ("patch",)
+            elif operation == "grep":
+                field_names = ("pattern",)
+            else:
+                field_names = ()
+            for field_name in field_names:
+                field_value = arguments.get(field_name)
+                if not isinstance(field_value, str):
+                    continue
+                content_bytes = field_value.encode("utf-8")
+                content_fields.append(
+                    (
+                        index,
+                        field_name,
+                        field_value,
+                        len(content_bytes),
+                        hashlib.sha256(content_bytes).hexdigest(),
+                    )
                 )
-            )
-    if not content_fields:
+    evidence_fields: list[tuple[str, int, str]] = []
+    for field_name in ("file_reads", "shell_results"):
+        field_items = adapted_payload.get(field_name)
+        if not isinstance(field_items, list):
+            continue
+        for index, item in enumerate(field_items):
+            if isinstance(item, dict) and isinstance(item.get("content"), str):
+                evidence_fields.append((field_name, index, item["content"]))
+    if not content_fields and not evidence_fields:
         return adapted_payload
 
     def payload_with_content_limit(content_limit: int) -> dict[str, Any]:
         candidate_payload = copy.deepcopy(adapted_payload)
-        candidate_calls = candidate_payload["tool_calls"]
+        candidate_calls = candidate_payload.get("tool_calls", [])
         for index, field_name, original_content, original_size, original_sha256 in content_fields:
             content_prefix, truncated = truncate_text_to_tokens(
                 original_content,
@@ -127,6 +148,17 @@ def fit_file_tool_payload_to_context(
                 "bytes_read": len(content_prefix.encode("utf-8")),
             }
             tool_call["argument_evidence"] = argument_evidence
+        for field_name, index, original_content in evidence_fields:
+            content_prefix, truncated = truncate_text_to_tokens(
+                original_content,
+                content_limit,
+                model_id=model_id,
+                protocol=protocol,
+            )
+            item = candidate_payload[field_name][index]
+            item["content"] = content_prefix
+            item["bytes_read"] = len(content_prefix.encode("utf-8"))
+            item["truncated"] = bool(item.get("truncated", False)) or truncated
         return candidate_payload
 
     empty_payload = payload_with_content_limit(0)
@@ -134,7 +166,9 @@ def fit_file_tool_payload_to_context(
         return empty_payload
 
     low = 0
-    high = max(max(estimate_tokens(content, model_id=model_id, protocol=protocol), 1) for _, _, content, _, _ in content_fields)
+    all_contents = [content for _, _, content, _, _ in content_fields]
+    all_contents.extend(content for _, _, content in evidence_fields)
+    high = max(max(estimate_tokens(content, model_id=model_id, protocol=protocol), 1) for content in all_contents)
     fitted_payload = empty_payload
     while low < high:
         candidate_limit = (low + high + 1) // 2
@@ -156,7 +190,7 @@ def read_token_budget(
 ) -> tuple[int, int]:
     request_context_tokens = estimate_request_context_tokens(
         messages,
-        [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
+        [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA],
         model_id=model_id,
         protocol=protocol,
     )
@@ -184,11 +218,11 @@ def fit_read_result_to_context(
     protocol: str = "openai",
 ) -> dict[str, Any]:
     content = read_result.get("content")
-    if read_result.get("status") != "ok" or not isinstance(content, str):
+    if not isinstance(content, str):
         return read_result
 
     input_limit = max_input_tokens(chat_params)
-    tools = [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA]
+    tools = [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA]
     if (
         estimate_request_context_tokens(
             [*messages, build_read_tool_message(tool_call_id, read_result)],

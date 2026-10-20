@@ -207,7 +207,8 @@ app/core/audit/
 ├── persistence.py          # 审计持久化协调
 ├── service.py              # 审计应用服务
 ├── startup.py              # 审计启动支持
-└── storage.py              # 审计文件存储
+├── storage.py              # 审计文件存储
+└── visibility.py           # 面向主模型对审计工具结果做安全可见性裁剪/隐藏
 ```
 
 ### 通用后台任务：`app/core/background_tasks/`
