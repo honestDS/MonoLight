@@ -20,7 +20,13 @@ FILE_TOOL_SCHEMA = {
                 },
                 "path": {
                     "type": "string",
-                    "description": ("Target UTF-8 file path. grep may also receive a directory. Relative paths stay inside the user workspace; absolute paths must be inside an allowed operation directory."),
+                    "description": (
+                        "Target UTF-8 file path; grep may also target a directory. "
+                        "Relative paths are resolved from the current user's working directory. "
+                        "read and grep are not restricted by the directory write allowlist. "
+                        "write, edit, and patch targets must be within the working directory or an explicitly allowed directory and are subject to system write protections. "
+                        "Paths are literal: environment variables and ~ are not expanded; provide the explicit resolved path."
+                    ),
                 },
                 "start_line": {
                     "type": "integer",

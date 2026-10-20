@@ -5,7 +5,9 @@ from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import context as context_module
+from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER
 from app.core.context import ContextManager
+from app.core.i18n import t
 from app.core.utils.dispatcher.helpers import reassemble_multimodal_messages
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -435,3 +437,266 @@ async def test_persisted_history_real_image_attachment_paths_keep_provider_image
     await db_session.refresh(persisted_user_message)
     assert persisted_user_message.content == "修改这张图片"
     assert persisted_user_message.attachments == attachment_paths
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_status", ["blocked", "audit_failed", "pending"])
+@pytest.mark.parametrize(
+    "transformer",
+    [OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer],
+)
+async def test_persisted_audit_tool_feedback_is_obscured_from_provider_request(
+    db_session: AsyncSession,
+    audit_status: str,
+    transformer,
+):
+    tool_call_id = "call-audit"
+    private_markers = [
+        "AUDIT_REASON_PRIVATE_MARKER",
+        "AUDIT_SCORE_PRIVATE_MARKER",
+        "AUDIT_DENY_PRIVATE_MARKER",
+        "AUDIT_FILE_CHECKS_PRIVATE_MARKER",
+        "AUDIT_REASONING_PRIVATE_MARKER",
+        "AUDIT_REFUSAL_PRIVATE_MARKER",
+        "AUDIT_PROVIDER_METADATA_PRIVATE_MARKER",
+        "AUDIT_CARD_REASON_PRIVATE_MARKER",
+        "AUDIT_CARD_SCORE_PRIVATE_MARKER",
+        "AUDIT_CARD_DENY_PRIVATE_MARKER",
+        "AUDIT_CARD_FILE_CHECKS_PRIVATE_MARKER",
+    ]
+    audit_payload = {
+        "status": audit_status,
+        "reason": private_markers[0],
+        "score": private_markers[1],
+        "deny": private_markers[2],
+        "file_checks": [private_markers[3]],
+        "reasoning": private_markers[4],
+        "refusal": private_markers[5],
+        "provider_metadata": {"private": private_markers[6]},
+    }
+    persisted_tool_result_content = json.dumps(
+        {
+            "tool_call_id": tool_call_id,
+            "content": json.dumps(audit_payload, ensure_ascii=False),
+            "refusal": private_markers[5],
+        },
+        ensure_ascii=False,
+    )
+    persisted_tool_result = _message(
+        3,
+        MessageRole.TOOL,
+        content=persisted_tool_result_content,
+        message_type=MessageType.TOOL_RESULT,
+    )
+    persisted_tool_result.reasoning_content = private_markers[4]
+    persisted_tool_result.provider_metadata = {"private": private_markers[6]}
+    confirmation_content = json.dumps(
+        {
+            "status": audit_status,
+            "reason": private_markers[7],
+            "score": private_markers[8],
+            "deny": private_markers[9],
+            "file_checks": [private_markers[10]],
+            "confirmation_decision": "approve",
+        },
+        ensure_ascii=False,
+    )
+    persisted_confirmation = _message(
+        4,
+        MessageRole.USER,
+        content=confirmation_content,
+        message_type=MessageType.AUDIT_CONFIRMATION,
+    )
+    db_session.add_all(
+        [
+            _message(1, MessageRole.USER, content="run audited tool"),
+            _message(
+                2,
+                MessageRole.ASSISTANT,
+                content=json.dumps(
+                    {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tool_call_id,
+                                "name": "execute_shell",
+                                "arguments": {"command": "audited operation"},
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                message_type=MessageType.TOOL_CALL,
+            ),
+            persisted_tool_result,
+            persisted_confirmation,
+            _message(5, MessageRole.USER, content="current input"),
+        ]
+    )
+    await db_session.commit()
+
+    messages = await ContextManager.get_messages(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile=_profile(),
+        current_message="current input",
+        before_id=5,
+    )
+    assert [message.id for message in messages] == [1, 2, 3]
+    messages.append(InternalMessage(id=5, role=MessageRole.USER, content="current input"))
+
+    tool_call = next(message for message in messages if message.tool_calls)
+    tool_result = next(message for message in messages if message.role == MessageRole.TOOL)
+    assert tool_call.tool_calls[0].id == tool_result.tool_call_id == tool_call_id
+
+    provider_messages = transformer.to_provider(messages)
+    provider_request = json.dumps(provider_messages, ensure_ascii=False)
+    assert "current input" in provider_request
+    assert provider_request.count(tool_call_id) == 2
+    for marker in private_markers:
+        assert marker not in provider_request
+
+    if transformer is OpenAIChatCompletionsTransformer:
+        provider_tool_result = next(item for item in provider_messages if item.get("role") == "tool")
+        provider_result_content = provider_tool_result["content"]
+    else:
+        provider_tool_result = next(item for item in provider_messages if item.get("type") == "function_call_output")
+        provider_result_content = provider_tool_result["output"]
+    provider_audit_payload = json.loads(provider_result_content)
+    assert set(provider_audit_payload) == {"status", "error"}
+    assert provider_audit_payload["status"] == audit_status
+    if audit_status == "audit_failed":
+        assert "不可用" in provider_audit_payload["error"]
+        assert "不可用" in provider_request
+
+    await db_session.refresh(persisted_tool_result)
+    await db_session.refresh(persisted_confirmation)
+    assert persisted_tool_result.content == persisted_tool_result_content
+    assert persisted_tool_result.reasoning_content == private_markers[4]
+    assert persisted_tool_result.provider_metadata == {"private": private_markers[6]}
+    assert persisted_confirmation.content == confirmation_content
+
+
+@pytest.mark.parametrize("include_rejection_source", [False, True])
+@pytest.mark.parametrize(
+    "transformer",
+    [OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer],
+)
+def test_prepare_messages_for_model_request_obscures_legacy_audit_checkpoint_copy_only(
+    include_rejection_source: bool,
+    transformer,
+):
+    audit_payload = {
+        "status": "rejected",
+        "reason": "AUDIT_PAYLOAD_REASON_PRIVATE_MARKER",
+        "reasoning": "AUDIT_PAYLOAD_REASONING_PRIVATE_MARKER",
+        "score": "AUDIT_PAYLOAD_SCORE_PRIVATE_MARKER",
+        "deny": "AUDIT_PAYLOAD_DENY_PRIVATE_MARKER",
+        "file_checks": ["AUDIT_PAYLOAD_FILE_CHECKS_PRIVATE_MARKER"],
+        "refusal": "AUDIT_PAYLOAD_REFUSAL_PRIVATE_MARKER",
+        "provider_metadata": {"private": "AUDIT_PAYLOAD_PROVIDER_METADATA_PRIVATE_MARKER"},
+        "confirmation_status": "reject",
+        "confirmation_decision": "拒绝",
+    }
+    if include_rejection_source:
+        audit_payload["rejection_source"] = "user"
+    messages = [
+        InternalMessage(role=MessageRole.USER, content="user checkpoint text"),
+        InternalMessage(role=MessageRole.ASSISTANT, content="assistant checkpoint text"),
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="call-audit",
+            content=json.dumps(audit_payload, ensure_ascii=False),
+            reasoning_content="AUDIT_MESSAGE_REASONING_PRIVATE_MARKER",
+            refusal="AUDIT_MESSAGE_REFUSAL_PRIVATE_MARKER",
+            provider_metadata={"private": "AUDIT_MESSAGE_PROVIDER_METADATA_PRIVATE_MARKER"},
+        ),
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="call-business-success",
+            content=json.dumps({"status": "succeeded", "result": "BUSINESS_SUCCESS_MARKER"}),
+        ),
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="call-business-failure",
+            content=json.dumps(
+                {
+                    "status": "failed",
+                    "error": "BUSINESS_FAILURE_MARKER",
+                    "reason": "BUSINESS_FAILURE_REASON_MARKER",
+                }
+            ),
+        ),
+    ]
+    originals = [message.model_copy(deep=True) for message in messages]
+
+    prepared = ContextManager.prepare_messages_for_model_request(
+        messages,
+        context_window_k=128,
+        max_tokens=1,
+        safety_margin_tokens=0,
+    )
+
+    assert messages == originals
+    assert all(prepared_message is not original for prepared_message, original in zip(prepared, messages))
+    assert prepared[0].content == "user checkpoint text"
+    assert prepared[1].content == "assistant checkpoint text"
+    assert prepared[3:] == originals[3:]
+
+    prepared_audit_payload = json.loads(prepared[2].content)
+    expected_audit_keys = {
+        "status",
+        "reason",
+        "confirmation_status",
+        "confirmation_decision",
+    }
+    if include_rejection_source:
+        expected_audit_keys.add("rejection_source")
+    assert set(prepared_audit_payload) == expected_audit_keys | {"error"}
+    assert prepared_audit_payload["status"] == "rejected"
+    rejection_message = prepared_audit_payload["reason"]
+    assert rejection_message == t(ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER)
+    assert prepared_audit_payload["error"] == rejection_message
+    assert prepared_audit_payload["confirmation_status"] == "reject"
+    assert prepared_audit_payload["confirmation_decision"] == "拒绝"
+    if include_rejection_source:
+        assert prepared_audit_payload["rejection_source"] == "user"
+    else:
+        assert "rejection_source" not in prepared_audit_payload
+    assert prepared[2].reasoning_content is None
+    assert prepared[2].refusal is None
+    assert prepared[2].provider_metadata is None
+
+    provider_messages = transformer.to_provider(prepared)
+    if transformer is OpenAIChatCompletionsTransformer:
+        provider_tool_result = next(item for item in provider_messages if item.get("role") == "tool")
+        provider_result_content = provider_tool_result["content"]
+    else:
+        provider_tool_result = next(item for item in provider_messages if item.get("type") == "function_call_output")
+        provider_result_content = provider_tool_result["output"]
+    provider_audit_payload = json.loads(provider_result_content)
+    assert provider_audit_payload == prepared_audit_payload
+
+    prepared_json = json.dumps([message.model_dump(mode="json") for message in prepared], ensure_ascii=False)
+    provider_json = json.dumps(provider_messages, ensure_ascii=False)
+    for marker in (
+        "AUDIT_PAYLOAD_REASON_PRIVATE_MARKER",
+        "AUDIT_PAYLOAD_REASONING_PRIVATE_MARKER",
+        "AUDIT_PAYLOAD_SCORE_PRIVATE_MARKER",
+        "AUDIT_PAYLOAD_DENY_PRIVATE_MARKER",
+        "AUDIT_PAYLOAD_FILE_CHECKS_PRIVATE_MARKER",
+        "AUDIT_PAYLOAD_REFUSAL_PRIVATE_MARKER",
+        "AUDIT_PAYLOAD_PROVIDER_METADATA_PRIVATE_MARKER",
+        "AUDIT_MESSAGE_REASONING_PRIVATE_MARKER",
+        "AUDIT_MESSAGE_REFUSAL_PRIVATE_MARKER",
+        "AUDIT_MESSAGE_PROVIDER_METADATA_PRIVATE_MARKER",
+    ):
+        assert marker not in prepared_json
+        assert marker not in provider_json
+    assert "BUSINESS_SUCCESS_MARKER" in prepared_json
+    assert "BUSINESS_FAILURE_MARKER" in prepared_json
+    assert "BUSINESS_FAILURE_REASON_MARKER" in prepared_json
+    assert "BUSINESS_SUCCESS_MARKER" in provider_json
+    assert "BUSINESS_FAILURE_MARKER" in provider_json
+    assert "BUSINESS_FAILURE_REASON_MARKER" in provider_json

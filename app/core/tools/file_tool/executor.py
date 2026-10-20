@@ -29,11 +29,12 @@ class FileToolExecutor(BaseExecutor):
         self.user_temp_dir = get_user_temp_dir(self.project_root, uid)
         self.user_temp_dir.mkdir(parents=True, exist_ok=True)
 
-    def _resolve_target_path(self, path: str):
+    def _resolve_target_path(self, path: str, *, enforce_allowed_dirs: bool = True):
         return resolve_file_tool_target_path(
             path,
             self.user_temp_dir,
             get_allowed_operation_dirs(self.cfg),
+            enforce_allowed_dirs=enforce_allowed_dirs,
         )
 
     @staticmethod
@@ -74,7 +75,11 @@ class FileToolExecutor(BaseExecutor):
             return self._failed(str(operation), t(ERR_FILE_TOOL_OPERATION_INVALID, operation=operation))
 
         try:
-            target = await self.run_sync(self._resolve_target_path, path)
+            target = await self.run_sync(
+                self._resolve_target_path,
+                path,
+                enforce_allowed_dirs=operation not in {"read", "grep"},
+            )
             if operation in {"write", "edit", "patch"} and getattr(getattr(self.cfg, "security", None), "protect_system_directories", True):
                 protection_path = Path(path)
                 if not protection_path.is_absolute():

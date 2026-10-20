@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 from app.core.constants import (
     ERR_TOOL_COMMAND_TIMEOUT,
@@ -45,9 +46,15 @@ class ShellExecutor(BaseExecutor):
                 return blacklisted
         return None
 
-    def __init__(self, project_root: str, uid: str = "default"):
+    def __init__(
+        self,
+        project_root: str,
+        uid: str = "default",
+        *,
+        working_directory: str | Path | None = None,
+    ):
         super().__init__(project_root, uid)
-        self.user_temp_dir = get_user_temp_dir(self.project_root, uid)
+        self.user_temp_dir = Path(working_directory) if working_directory is not None else get_user_temp_dir(self.project_root, uid)
         self._ensure_temp_dir()
 
     def _ensure_temp_dir(self):

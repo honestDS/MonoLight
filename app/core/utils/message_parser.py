@@ -1,5 +1,6 @@
 import json
 
+from app.core.audit.visibility import obscure_audit_tool_result
 from app.core.prompts import SCHEDULED_TASK_TRIGGER_PROMPT
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import (
@@ -40,6 +41,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             tool_call_id = None
             tool_execution_status = None
             refusal = None
+            suppress_tool_result_metadata = False
             provider_metadata = msg.provider_metadata if isinstance(msg.provider_metadata, dict) else None
 
             # 直接检测：仅在类型明确为 TOOL_CALL 或 TOOL_RESULT 时尝试解析 JSON
@@ -74,9 +76,21 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                     # 鲁棒性退避：解析失败按原样呈现
                     pass
                 if m_type == MessageType.TOOL_RESULT and isinstance(content, str):
-                    content = strip_session_todo_snapshot(content)
-                    if isinstance(msg.model_context_suffix, str) and msg.model_context_suffix:
-                        content = f"{content}\n\n{msg.model_context_suffix}"
+                    try:
+                        audit_payload = json.loads(content)
+                    except json.JSONDecodeError:
+                        audit_payload = None
+                    if audit_payload is not None:
+                        obscured_payload = obscure_audit_tool_result(audit_payload)
+                        if obscured_payload is not audit_payload:
+                            content = json.dumps(obscured_payload, ensure_ascii=False)
+                            refusal = None
+                            provider_metadata = None
+                            suppress_tool_result_metadata = True
+                    if not suppress_tool_result_metadata:
+                        content = strip_session_todo_snapshot(content)
+                        if isinstance(msg.model_context_suffix, str) and msg.model_context_suffix:
+                            content = f"{content}\n\n{msg.model_context_suffix}"
             elif m_type == MessageType.TEXT:
                 content = decode_message_content(msg.content or "", msg.content_format)
 
@@ -88,7 +102,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             message_kwargs = {
                 "id": msg.id,
                 "content": content,
-                "reasoning_content": msg.reasoning_content,
+                "reasoning_content": None if suppress_tool_result_metadata else msg.reasoning_content,
                 "refusal": refusal,
                 "provider_metadata": provider_metadata,
                 "environment_prompt": msg.environment_prompt,

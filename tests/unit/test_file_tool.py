@@ -499,6 +499,36 @@ async def test_file_tool_does_not_create_missing_protected_directory_for_write(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("directory_kind", "path_style"),
+    [
+        ("ordinary", "absolute"),
+        ("ordinary", "relative"),
+        ("protected", "absolute"),
+        ("protected", "relative"),
+    ],
+    ids=["ordinary-absolute", "ordinary-relative", "protected-absolute", "protected-relative"],
+)
+async def test_file_tool_read_and_grep_allow_outside_workspace_without_writing(tmp_path, directory_kind, path_style):
+    target_dir = paths.SKILLS_DIR if directory_kind == "protected" else tmp_path / "ordinary"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "source.txt"
+    original = "needle\n"
+    target.write_text(original, encoding="utf-8")
+    executor = _executor(tmp_path, allowed_operation_dirs=[])
+    target_path = str(target) if path_style == "absolute" else os.path.relpath(target, executor.user_temp_dir)
+
+    read_result = json.loads(await executor.execute(operation="read", path=target_path))
+    grep_result = json.loads(await executor.execute(operation="grep", path=target_path, pattern="needle"))
+
+    assert read_result["status"] == "success"
+    assert read_result["content"] == "1: needle"
+    assert grep_result["status"] == "success"
+    assert grep_result["match_count"] == 1
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
 async def test_file_tool_read_and_grep_allow_protected_directory(tmp_path):
     protected_dir = tmp_path / "data" / "skills"
     protected_dir.mkdir(parents=True)
@@ -571,7 +601,7 @@ async def test_file_tool_blocks_protected_symlink_to_external_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_file_tool_rejects_absolute_paths_outside_allowed_directories(tmp_path):
+async def test_file_tool_reads_absolute_paths_outside_allowed_directories(tmp_path):
     allowed = tmp_path / "allowed"
     outside = tmp_path / "outside.txt"
     allowed.mkdir()
@@ -580,8 +610,8 @@ async def test_file_tool_rejects_absolute_paths_outside_allowed_directories(tmp_
 
     result = json.loads(await executor.execute(operation="read", path=str(outside), start_line=1, end_line=1))
 
-    assert result["status"] == "failed"
-    assert "allowed" in result["error"].lower() or "允许" in result["error"]
+    assert result["status"] == "success"
+    assert result["content"] == "1: secret"
 
 
 @pytest.mark.asyncio
@@ -596,21 +626,26 @@ async def test_file_tool_rejects_paths_that_escape_relative_workspace(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_file_tool_rejects_relative_symlink_escape(tmp_path):
+async def test_file_tool_reads_relative_symlink_escape_but_write_remains_blocked(tmp_path):
     executor = _executor(tmp_path, allowed_operation_dirs=[])
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir()
     outside_file = outside_dir / "data.txt"
-    outside_file.write_text("blocked", encoding="utf-8")
+    outside_file.write_text("external content", encoding="utf-8")
     link_path = executor.user_temp_dir / "linked"
     try:
         os.symlink(outside_dir, link_path, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"当前系统不允许创建测试链接: {exc}")
 
-    result = json.loads(await executor.execute(operation="read", path="linked/data.txt", start_line=1, end_line=1))
+    path = "linked/data.txt"
+    read_result = json.loads(await executor.execute(operation="read", path=path, start_line=1, end_line=1))
+    write_result = json.loads(await executor.execute(operation="write", path=path, content="replacement"))
 
-    assert result["status"] == "failed"
+    assert read_result["status"] == "success"
+    assert read_result["content"] == "1: external content"
+    assert write_result["status"] == "failed"
+    assert outside_file.read_text(encoding="utf-8") == "external content"
 
 
 @pytest.mark.asyncio
