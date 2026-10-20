@@ -81,7 +81,7 @@ class SecurityConfig(BaseModel):
     audit_channel_id: int | None = PydanticField(None, gt=0, description="执行安全审计的渠道 ID")
     audit_model_id: str | None = PydanticField(None, description="用于审计的具体模型 ID")
     audit_threshold: int = PydanticField(5, ge=0, le=7, description="触发二次确认的风险评分阈值（1-7），0 表示关闭二次确认")
-    audit_depth: StrictInt = PydanticField(AUDIT_DEFAULT_DEPTH, ge=1, le=AUDIT_MAX_DEPTH, description="审计深度：单次审计与确认摘要合计允许的文件读取调用次数，失败和重复读取也计数，默认 3")
+    audit_depth: StrictInt = PydanticField(AUDIT_DEFAULT_DEPTH, ge=1, le=AUDIT_MAX_DEPTH, description="审计深度：单次审计、格式纠正重试与确认摘要共用的文件读取和 Shell 取证调用总次数，失败和重复调用也计数，默认 3")
     audit_confirmation_timeout_seconds: StrictInt = PydanticField(600, ge=1, le=86400, description="审计二次确认卡片有效期（秒）")
     audit_report_language: str = PydanticField(DEFAULT_LOCALE, description="审计报告摘要使用的语言")
     protect_system_directories: StrictBool = PydanticField(True, description="是否启用系统目录写保护")

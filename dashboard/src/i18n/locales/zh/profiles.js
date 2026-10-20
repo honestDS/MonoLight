@@ -183,7 +183,7 @@ export default {
   audit_threshold: '二次确认阈值 (1-7)',
   audit_threshold_hint: '审计分数达到该值时要求二次确认；分数越高，触发越宽松。',
   audit_depth: '审计深度',
-  audit_depth_hint: '单次审计最多读取文件的次数，默认 3，范围 1-100。重复读取和读取失败也计入，确认摘要共用此额度。',
+  audit_depth_hint: '单次审计的文件读取与 Shell 取证调用总次数上限，默认 3，范围 1-100。失败和重复调用也计入；审计评分、格式纠正重试与确认摘要共用此额度，不是递归深度。',
   audit_confirmation_timeout_seconds: '确认卡片有效期（秒）',
   audit_confirmation_timeout_seconds_hint: '二次确认卡片超过该时长后失效，范围为 1-86400 秒，默认 600 秒。',
   scheduling_control: '调度与并行控制',
