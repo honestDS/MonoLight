@@ -1536,7 +1536,7 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
         assert result.confirmation_payload["risk"] == audit_threshold
     expected_log_count = 3 if protocol_case == "invalid_id" else 2
     assert len(logs) == expected_log_count
-    assert "安全审计 LLM" in logs[0] or "Security audit LLM" in logs[0]
+    assert logs[0] == t("LOG_AUDIT_ROUND_STARTED", audit_record_id=123, model_id="audit-model", tool_count=2, source="web")
     assert "record_id=123" in logs[0]
     if protocol_case == "invalid_id":
         assert "tool=read_text_file" in logs[1]

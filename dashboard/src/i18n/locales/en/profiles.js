@@ -177,7 +177,7 @@ export default {
   audit_protection_notice: 'Selecting an audit model and enabling directory protection can protect MonoLight\'s own core directories from being modified. Without an audit model configured, this protection will not be active.',
   protect_system_directories: 'Protect System Directories',
   audit_depth: 'Audit Depth',
-  audit_depth_hint: 'Maximum file reads in a single audit round (default: 3; range: 1-100). Failed reads count toward the limit, and confirmation summaries share it. This is not a recursion-depth setting.',
+  audit_depth_hint: 'Total file-read and Shell evidence calls per audit round (default: 3; range: 1-100). Failed and repeated calls count. Scoring, format-correction retries, and confirmation summaries share this limit. This is not a recursion-depth setting.',
   audit_report_language: 'Audit Report Language',
   audit_report_language_hint: 'Controls the language used by the audit model when generating confirmation summaries.',
   secondary_confirmation: 'Secondary Confirmation',
