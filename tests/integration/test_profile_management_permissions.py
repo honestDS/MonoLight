@@ -753,7 +753,9 @@ async def test_security_defaults_and_superuser_security_create_are_persisted(
 
 
 @pytest.mark.asyncio
-async def test_regular_updates_preserve_existing_security_for_omitted_or_equal_values(
+@pytest.mark.parametrize("actor", ["admin", "user-a"])
+async def test_admin_and_regular_updates_preserve_existing_configs_for_omitted_or_equal_security(
+    actor: str,
     api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
 ) -> None:
     app, session_factory, profile_ids = api_context
@@ -772,6 +774,21 @@ async def test_regular_updates_preserve_existing_security_for_omitted_or_equal_v
     }
     admin_configs = deepcopy(target["configs"])
     admin_configs["security"] = security_values
+    admin_configs["channel"]["chat_channel"]["chat_timeout"] = 97.0
+    admin_configs["channel"]["context_summary_channel"]["chat_timeout"] = 43.0
+    admin_configs["tool"]["max_parallel_tools"] = 9
+    admin_configs["other"]["context_summary_threshold_percent"] = 80
+    admin_configs["memory"].update(
+        {
+            "precheck_enabled": False,
+            "top_k": 8,
+            "candidate_k": 20,
+            "result_max_chars": 6500,
+            "chat_history": {"top_k": 7, "candidate_k": 50, "result_max_chars": 7000},
+            "knowledge": {"top_k": 6, "candidate_k": 30, "result_max_chars": 8000},
+        }
+    )
+    expected_configs = deepcopy(admin_configs)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         admin_response = await _update_profile(
@@ -782,10 +799,11 @@ async def test_regular_updates_preserve_existing_security_for_omitted_or_equal_v
         )
         admin_data = _assert_profile_success(admin_response)
         assert admin_data["configs"]["security"] == security_values
+        assert admin_data["configs"] == expected_configs
         after_admin = await _profile_snapshot(session_factory)
         persisted_target = next(row for row in after_admin if row["id"] == target_id)
         assert persisted_target["configs"]["security"] == security_values
-        assert admin_data["configs"] == persisted_target["configs"]
+        assert persisted_target["configs"] == expected_configs
 
         unchanged_profiles = {row["id"]: row for row in after_admin if row["id"] != target_id}
         same_security_cases = [
@@ -798,39 +816,200 @@ async def test_regular_updates_preserve_existing_security_for_omitted_or_equal_v
                 {"configs": {"security": {"audit_confirmation_timeout_minutes": 7}, "tool": {"tool_timeout": 35.0}}},
             ),
             ("configs-null", {"configs": None}),
+            ("configs-empty", {"configs": {}}),
             ("configs-omitted", {}),
         ]
-        previous_tool_timeout = persisted_target["configs"]["tool"]["tool_timeout"]
         for case_name, body in same_security_cases:
-            body = {"name": f"user-a-{case_name}", **body}
+            body = {"name": f"{actor}-{case_name}", **body}
             submitted_configs = body.get("configs")
-            expected_tool_timeout = previous_tool_timeout
             if isinstance(submitted_configs, dict):
-                expected_tool_timeout = submitted_configs.get("tool", {}).get("tool_timeout", expected_tool_timeout)
+                submitted_tool = submitted_configs.get("tool")
+                if isinstance(submitted_tool, dict) and "tool_timeout" in submitted_tool:
+                    expected_configs["tool"]["tool_timeout"] = submitted_tool["tool_timeout"]
 
-            first_response = await _update_profile(client, _token("user-a"), target_id, body)
+            first_response = await _update_profile(client, _token(actor), target_id, body)
             first_data = _assert_profile_success(first_response)
             after_first = await _profile_snapshot(session_factory)
             first_target = next(row for row in after_first if row["id"] == target_id)
             assert first_target["configs"]["security"] == security_values
-            assert first_target["configs"]["tool"]["tool_timeout"] == expected_tool_timeout
             assert first_data["configs"]["security"] == security_values
-            assert first_data["configs"]["tool"]["tool_timeout"] == expected_tool_timeout
-            assert first_data["configs"] == first_target["configs"]
+            assert first_target["configs"] == expected_configs
+            assert first_data["configs"] == expected_configs
             assert first_target["name"] == body["name"]
             assert {row["id"]: row for row in after_first if row["id"] != target_id} == unchanged_profiles
 
-            second_response = await _update_profile(client, _token("user-a"), target_id, body)
+            second_response = await _update_profile(client, _token(actor), target_id, body)
             second_data = _assert_profile_success(second_response)
             after_second = await _profile_snapshot(session_factory)
             second_target = next(row for row in after_second if row["id"] == target_id)
             assert after_second == after_first
             assert second_target["configs"]["security"] == security_values
-            assert second_target["configs"]["tool"]["tool_timeout"] == expected_tool_timeout
-            assert second_data["configs"]["tool"]["tool_timeout"] == expected_tool_timeout
-            assert second_data["configs"] == second_target["configs"]
+            assert second_target["configs"] == expected_configs
+            assert second_data["configs"] == expected_configs
             assert {row["id"]: row for row in after_second if row["id"] != target_id} == unchanged_profiles
-            previous_tool_timeout = expected_tool_timeout
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("patch", "expected_changes"),
+    [
+        pytest.param(
+            {
+                "security": {"audit_threshold": 0, "protect_system_directories": False},
+                "memory": {"precheck_enabled": False},
+                "tool": {"enabled_tools": [], "firecrawl_api_key": None},
+            },
+            (
+                (("security", "audit_threshold"), 0),
+                (("security", "protect_system_directories"), False),
+                (("memory", "precheck_enabled"), False),
+                (("tool", "enabled_tools"), []),
+                (("tool", "firecrawl_api_key"), None),
+            ),
+            id="explicit-falsy-values",
+        ),
+        pytest.param(
+            {"channel": {"chat_channel": {"chat_timeout": 19.0}}},
+            ((("channel", "chat_channel", "chat_timeout"), 19.0),),
+            id="single-channel-leaf",
+        ),
+        pytest.param(
+            {
+                "memory": {
+                    "top_k": 25,
+                    "chat_history": {"top_k": 18},
+                    "knowledge": {"top_k": 24},
+                }
+            },
+            (
+                (("memory", "top_k"), 25),
+                (("memory", "chat_history", "top_k"), 18),
+                (("memory", "knowledge", "top_k"), 24),
+            ),
+            id="memory-top-k-leaves",
+        ),
+        pytest.param(
+            {"rerank_channel": {"kb_query_top_k": 26}},
+            ((("memory", "knowledge", "top_k"), 26),),
+            id="legacy-rerank-top-k",
+        ),
+        pytest.param(
+            {
+                "security": {"audit_channel_id": None, "audit_model_id": None},
+                "channel": {"context_summary_channel": {"rules": []}},
+            },
+            (
+                (("security", "audit_channel_id"), None),
+                (("security", "audit_model_id"), None),
+                (("channel", "context_summary_channel", "rules"), []),
+            ),
+            id="explicit-nulls-and-empty-list",
+        ),
+        pytest.param(
+            {
+                "security": {},
+                "memory": {"chat_history": {}, "knowledge": {}},
+                "channel": {"chat_channel": {}, "context_summary_channel": {}},
+                "tool": {},
+            },
+            (),
+            id="nested-empty-dictionaries",
+        ),
+        pytest.param(
+            {"audit_confirmation_timeout_minutes": 2, "memory_top_k": 27},
+            (
+                (("security", "audit_confirmation_timeout_seconds"), 120),
+                (("memory", "top_k"), 27),
+            ),
+            id="legacy-flat-fields",
+        ),
+    ],
+)
+async def test_admin_partial_update_replaces_only_explicit_config_leaves(
+    patch: dict[str, Any],
+    expected_changes: tuple[tuple[tuple[str, ...], Any], ...],
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, profile_ids = api_context
+    target_id = profile_ids["user-a"]["target"]
+    before_seed = await _profile_snapshot(session_factory)
+    target = next(row for row in before_seed if row["id"] == target_id)
+    channel_id = target["configs"]["channel"]["chat_channel"]["rules"][0]["channel_id"]
+
+    seed_configs = deepcopy(target["configs"])
+    seed_configs["security"].update(
+        {
+            "audit_channel_id": channel_id,
+            "audit_model_id": "chat-model",
+            "audit_threshold": 6,
+            "protect_system_directories": True,
+        }
+    )
+    seed_configs["channel"]["chat_channel"]["chat_timeout"] = 97.0
+    seed_configs["channel"]["context_summary_channel"]["chat_timeout"] = 43.0
+    seed_configs["channel"]["context_summary_channel"]["rules"] = deepcopy(seed_configs["channel"]["chat_channel"]["rules"])
+    seed_configs["tool"].update({"firecrawl_api_key": "seed-firecrawl-api-key", "enabled_tools": ["file_tool"]})
+    seed_configs["memory"].update(
+        {
+            "precheck_enabled": True,
+            "top_k": 8,
+            "candidate_k": 30,
+            "result_max_chars": 6500,
+            "chat_history": {"top_k": 7, "candidate_k": 80, "result_max_chars": 7000},
+            "knowledge": {"top_k": 6, "candidate_k": 31, "result_max_chars": 8000},
+        }
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        seed_response = await _update_profile(
+            client,
+            _token("admin"),
+            target_id,
+            {"configs": seed_configs},
+        )
+        seed_data = _assert_profile_success(seed_response)
+        assert seed_data["configs"] == seed_configs
+
+        after_seed = await _profile_snapshot(session_factory)
+        seeded_target = next(row for row in after_seed if row["id"] == target_id)
+        assert seeded_target["configs"] == seed_configs
+        unchanged_profiles = {row["id"]: row for row in after_seed if row["id"] != target_id}
+        assert {row["id"]: row for row in after_seed if row["id"] != target_id} == {row["id"]: row for row in before_seed if row["id"] != target_id}
+
+        expected_configs = deepcopy(seeded_target["configs"])
+        for path, value in expected_changes:
+            expected_parent = expected_configs
+            for key in path[:-1]:
+                expected_parent = expected_parent[key]
+            expected_parent[path[-1]] = deepcopy(value)
+
+        first_response = await _update_profile(
+            client,
+            _token("admin"),
+            target_id,
+            {"configs": deepcopy(patch)},
+        )
+        first_data = _assert_profile_success(first_response)
+        after_first = await _profile_snapshot(session_factory)
+        first_target = next(row for row in after_first if row["id"] == target_id)
+        assert first_data["configs"] == expected_configs
+        assert first_target["configs"] == expected_configs
+        assert {row["id"]: row for row in after_first if row["id"] != target_id} == unchanged_profiles
+
+        second_response = await _update_profile(
+            client,
+            _token("admin"),
+            target_id,
+            {"configs": deepcopy(patch)},
+        )
+        second_data = _assert_profile_success(second_response)
+        after_second = await _profile_snapshot(session_factory)
+        second_target = next(row for row in after_second if row["id"] == target_id)
+        assert second_data == first_data
+        assert after_second == after_first
+        assert second_data["configs"] == expected_configs
+        assert second_target["configs"] == expected_configs
+        assert {row["id"]: row for row in after_second if row["id"] != target_id} == unchanged_profiles
 
 
 @pytest.mark.asyncio
@@ -1004,3 +1183,87 @@ async def test_profile_delete_preview_and_confirmation_remove_only_target(
     assert confirmation_payload["data"] == {"requires_confirmation": False}
     after = await _profile_snapshot(session_factory)
     assert after == tuple(row for row in before if row["id"] != target_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("patch", "expected_location"),
+    [
+        pytest.param(
+            {"memory": {"candidate_k": 3}},
+            "configs.memory",
+            id="memory-candidate-below-top-k",
+        ),
+        pytest.param(
+            {"memory": {"chat_history": {"candidate_k": 3}}},
+            "configs.memory.chat_history",
+            id="chat-history-candidate-below-top-k",
+        ),
+        pytest.param(
+            {"memory": {"knowledge": {"candidate_k": 3}}},
+            "configs.memory.knowledge",
+            id="knowledge-candidate-below-top-k",
+        ),
+        pytest.param(
+            None,
+            "configs.memory",
+            id="embedding-channel-without-model",
+        ),
+        pytest.param(
+            {"memory": {"embedding_model_id": "unpaired-model"}},
+            "configs.memory",
+            id="embedding-model-without-channel",
+        ),
+        pytest.param(
+            {"security": {"audit_depth": True}},
+            "configs.security.audit_depth",
+            id="boolean-audit-depth",
+        ),
+    ],
+)
+async def test_admin_partial_update_rejects_invalid_merged_config_without_mutation(
+    patch: dict[str, Any] | None,
+    expected_location: str,
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, profile_ids = api_context
+    target_id = profile_ids["user-a"]["target"]
+    initial_snapshot = await _profile_snapshot(session_factory)
+    target = next(row for row in initial_snapshot if row["id"] == target_id)
+    channel_id = target["configs"]["channel"]["chat_channel"]["rules"][0]["channel_id"]
+
+    seed_configs = deepcopy(target["configs"])
+    seed_memory = seed_configs["memory"]
+    seed_memory.update({"top_k": 8, "candidate_k": 20})
+    seed_memory["chat_history"].update({"top_k": 7, "candidate_k": 50})
+    seed_memory["knowledge"].update({"top_k": 6, "candidate_k": 30})
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        seed_response = await _update_profile(
+            client,
+            _token("admin"),
+            target_id,
+            {"configs": seed_configs},
+        )
+        seed_data = _assert_profile_success(seed_response)
+        assert seed_data["configs"] == seed_configs
+
+        before = await _profile_snapshot(session_factory)
+        seeded_target = next(row for row in before if row["id"] == target_id)
+        assert seeded_target["configs"] == seed_configs
+        assert {row["id"]: row for row in before if row["id"] != target_id} == {row["id"]: row for row in initial_snapshot if row["id"] != target_id}
+
+        if patch is None:
+            invalid_patch = {"memory": {"embedding_channel_id": channel_id}}
+        else:
+            invalid_patch = deepcopy(patch)
+        response = await _update_profile(
+            client,
+            _token("admin"),
+            target_id,
+            {"name": "invalid-partial-update-must-not-rename", "configs": invalid_patch},
+        )
+
+    payload = _assert_standard(response, 422)
+    assert expected_location in payload["message"]
+    assert await _profile_snapshot(session_factory) == before

@@ -2,6 +2,8 @@
 
 **English** | [中文](./README_ZH.md)
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/honestDS/MonoLight)
+
 MonoLight is a general-purpose autonomous agent runtime focused on safe execution and human-AI collaboration.
 
 <p align="center">

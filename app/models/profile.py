@@ -13,6 +13,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -64,9 +65,9 @@ class ChannelGroupConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def fallback_context_summary_channel(cls, data: Any) -> Any:
+    def fallback_context_summary_channel(cls, data: Any, info: ValidationInfo) -> Any:
         """旧配置缺少总结渠道时，运行期使用对话渠道的独立副本。"""
-        if not isinstance(data, dict) or "context_summary_channel" in data:
+        if (info.context or {}).get("partial_update") or not isinstance(data, dict) or "context_summary_channel" in data:
             return data
 
         normalized = dict(data)
@@ -162,7 +163,9 @@ class ChatHistoryRecallConfig(BaseModel):
     result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="聊天记录结果最大字符数")
 
     @model_validator(mode="after")
-    def validate_candidate_k(self) -> "ChatHistoryRecallConfig":
+    def validate_candidate_k(self, info: ValidationInfo) -> "ChatHistoryRecallConfig":
+        if (info.context or {}).get("partial_update"):
+            return self
         if self.candidate_k < self.top_k:
             raise ValueError(t(ERR_PROFILE_CHAT_HISTORY_CANDIDATE_K_TOO_SMALL))
         return self
@@ -176,7 +179,9 @@ class KnowledgeRecallConfig(BaseModel):
     result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="知识结果最大字符数")
 
     @model_validator(mode="after")
-    def validate_candidate_k(self) -> "KnowledgeRecallConfig":
+    def validate_candidate_k(self, info: ValidationInfo) -> "KnowledgeRecallConfig":
+        if (info.context or {}).get("partial_update"):
+            return self
         if self.candidate_k < self.top_k:
             raise ValueError(t(ERR_PROFILE_KNOWLEDGE_CANDIDATE_K_TOO_SMALL))
         return self
@@ -208,13 +213,17 @@ class LongTermMemoryConfig(BaseModel):
         return normalized
 
     @model_validator(mode="after")
-    def validate_embedding_selection_pair(self) -> "LongTermMemoryConfig":
+    def validate_embedding_selection_pair(self, info: ValidationInfo) -> "LongTermMemoryConfig":
+        if (info.context or {}).get("partial_update"):
+            return self
         if (self.embedding_channel_id is None) != (self.embedding_model_id is None):
             raise ValueError(t(ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE))
         return self
 
     @model_validator(mode="after")
-    def validate_candidate_k(self) -> "LongTermMemoryConfig":
+    def validate_candidate_k(self, info: ValidationInfo) -> "LongTermMemoryConfig":
+        if (info.context or {}).get("partial_update"):
+            return self
         if self.candidate_k < self.top_k:
             raise ValueError(t(ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL))
         return self
@@ -245,7 +254,7 @@ class ProfileConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def data_pump(cls, data: Any) -> Any:
+    def data_pump(cls, data: Any, info: ValidationInfo) -> Any:
         """数据泵：将扁平或非标准的字典数据映射到结构化的嵌套配置模型中"""
         schema_map = {
             "channel": [
@@ -313,6 +322,20 @@ class ProfileConfig(BaseModel):
                 if normalized_name not in enabled_tools:
                     enabled_tools.append(normalized_name)
             tool["enabled_tools"] = enabled_tools
+
+        if (info.context or {}).get("partial_update"):
+            memory = normalized["memory"]
+            if not isinstance(memory.get("knowledge"), dict):
+                rerank_channel = normalized["channel"].get("rerank_channel")
+                if isinstance(rerank_channel, dict):
+                    knowledge = {}
+                    if "kb_query_top_k" in rerank_channel:
+                        knowledge["top_k"] = rerank_channel["kb_query_top_k"]
+                    if "rerank_candidate_k" in rerank_channel:
+                        knowledge["candidate_k"] = rerank_channel["rerank_candidate_k"]
+                    if knowledge:
+                        memory["knowledge"] = knowledge
+            return normalized
 
         memory = normalized.get("memory")
         if not isinstance(memory, dict):
@@ -473,7 +496,10 @@ class ProfileUpdate(SQLModel):
     def validate_configs(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is None:
             return None
-        return ProfileConfig.model_validate(value).model_dump(exclude_unset=True)
+        return ProfileConfig.model_validate(
+            copy.deepcopy(value),
+            context={"partial_update": True},
+        ).model_dump(exclude_unset=True)
 
     model_config = ConfigDict(json_schema_extra={"example": PROFILE_EXAMPLE})
 
