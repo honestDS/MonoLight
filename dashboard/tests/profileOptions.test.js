@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  filterWritableProfileConfigs,
   filterProfilesByUid,
   getNewSessionProfileOverrideId,
   resolveSessionProfileDisplayId,
@@ -100,4 +101,59 @@ test('returns null when no valid profile owner uid is available', () => {
   assert.equal(resolveProfileOwnerUid({ uid: '' }, null), null)
   assert.equal(resolveProfileOwnerUid({ uid: 1 }, false), null)
   assert.equal(resolveProfileOwnerUid(null, ''), null)
+})
+
+test('filters denied profile config paths while preserving allowed groups', () => {
+  const configs = {
+    security: { enabled: true, allowedOrigins: ['https://example.test'] },
+    tool: { max_parallel_tools: 8, timeout: 30 }
+  }
+
+  assert.deepEqual(
+    filterWritableProfileConfigs(configs, {
+      security: false,
+      'tool.max_parallel_tools': false
+    }),
+    { tool: { timeout: 30 } }
+  )
+  assert.deepEqual(
+    filterWritableProfileConfigs(configs, { security: true }),
+    configs
+  )
+})
+
+test('treats only true as writable and skips missing paths', () => {
+  const configs = {
+    tool: { keep: 1, falseValue: 2, zero: 3, nullValue: 4 },
+    security: { enabled: true }
+  }
+
+  assert.deepEqual(
+    filterWritableProfileConfigs(configs, {
+      'tool.keep': true,
+      'tool.falseValue': false,
+      'tool.zero': 0,
+      'tool.nullValue': null,
+      'missing.child': false
+    }),
+    { tool: { keep: 1 }, security: { enabled: true } }
+  )
+  assert.deepEqual(filterWritableProfileConfigs(configs, {}), configs)
+})
+
+test('does not mutate inputs and returns deeply independent, idempotent results', () => {
+  const configs = { tool: { nested: { value: 1 }, denied: true } }
+  const permissions = { 'tool.denied': false }
+  const originalConfigs = structuredClone(configs)
+  const originalPermissions = { ...permissions }
+
+  const result = filterWritableProfileConfigs(configs, permissions)
+  assert.deepEqual(filterWritableProfileConfigs(result, permissions), result)
+  assert.notEqual(result, configs)
+  assert.notEqual(result.tool, configs.tool)
+  assert.notEqual(result.tool.nested, configs.tool.nested)
+
+  result.tool.nested.value = 2
+  assert.deepEqual(configs, originalConfigs)
+  assert.deepEqual(permissions, originalPermissions)
 })

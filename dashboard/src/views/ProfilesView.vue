@@ -77,6 +77,7 @@
       v-model:file-send-blocked-extension-input="fileSendBlockedExtensionInput"
       :audit-model-options="auditModelOptions"
       :channels="channels"
+      :config-permissions="configPermissions"
       :context-summary-threshold-options="contextSummaryThresholdOptions"
       :dialog-type="dialogType"
       :form="form"
@@ -186,6 +187,7 @@ import { useProfilesView } from '../composables/profiles/useProfilesView.js'
 
 const {
   userPermissions,
+  configPermissions,
   filters,
   handleSearch,
   resetFilters,

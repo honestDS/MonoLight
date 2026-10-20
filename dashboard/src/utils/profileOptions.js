@@ -76,3 +76,18 @@ const getNonEmptyString = value => typeof value === 'string' && value.length > 0
 export const resolveProfileOwnerUid = (currentSession, currentUid) => (
   getNonEmptyString(currentSession?.uid) || getNonEmptyString(currentUid)
 )
+
+export const filterWritableProfileConfigs = (configs, permissions) => {
+  const filtered = JSON.parse(JSON.stringify(configs))
+
+  Object.entries(permissions || {}).forEach(([path, allowed]) => {
+    if (allowed === true) return
+
+    const parts = path.split('.')
+    const key = parts.pop()
+    const parent = parts.reduce((current, part) => current?.[part], filtered)
+    if (parent && typeof parent === 'object') delete parent[key]
+  })
+
+  return filtered
+}

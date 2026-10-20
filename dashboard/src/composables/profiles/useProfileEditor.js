@@ -8,6 +8,7 @@ import {
 } from '../../utils/memoryManagement.js'
 import {
   buildKnowledgeBaseBindingPayload,
+  filterWritableProfileConfigs,
   filterKnowledgeBaseIdsForOwner,
   filterUserKnowledgeBasesForOwner
 } from '../../utils/profileOptions.js'
@@ -15,6 +16,7 @@ import {
 export function useProfileEditor({
   t,
   userPermissions,
+  configPermissions,
   channels,
   users,
   knowledgeBases,
@@ -252,7 +254,7 @@ export function useProfileEditor({
         name: form.name,
         prompt_id: form.prompt_id,
         memory_organization: buildOrganizationSettingsPayload(form.memory_organization),
-        configs: memory.buildConfigsForSave()
+        configs: filterWritableProfileConfigs(memory.buildConfigsForSave(), configPermissions.value)
       }
       if (userPermissions.currentUser && knowledgeBasesReady.value) {
         const knowledgeBaseIds = buildKnowledgeBaseBindingPayload(form.knowledge_base_ids, knowledgeBasesReady.value)

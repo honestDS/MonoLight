@@ -111,10 +111,15 @@ const createHarness = async (t, options = {}) => {
   const profileApi = {
     list: params => {
       api.profileList.push(params)
+      if (options.profileListRequest) return options.profileListRequest(params)
       return Promise.resolve(pageResponse([], 0, {
         show_owner: false,
         current_uid: currentUid,
         tool_options: [],
+        config_permissions: {
+          security: options.superuser === true,
+          ...(options.configPermissions || {}),
+        },
       }))
     },
     create: payload => {
@@ -240,6 +245,8 @@ const createHarness = async (t, options = {}) => {
     disposed: false,
   }
   t.after(() => harness.dispose())
+  await harness.module.loadProfiles()
+  await flush()
   return harness
 }
 
@@ -860,8 +867,8 @@ test('clearing permissions removes default-profile permission', async t => {
   assert.equal(superuserHarness.module.canSetDefaultProfile(otherRow), false)
 })
 
-test('create form saves system-directory protection and audit depth without leaking between dialogs', async t => {
-  const harness = await createHarness(t)
+test('superuser create form saves system-directory protection and audit depth without leaking between dialogs', async t => {
+  const harness = await createHarness(t, { superuser: true })
 
   harness.module.showDialog('create')
   await flush()
@@ -897,8 +904,8 @@ test('create form saves system-directory protection and audit depth without leak
   assert.equal(harness.api.creates[1].configs.security.audit_depth, 3)
 })
 
-test('editing legacy security configs supplies defaults and converts timeout without mutating the row', async t => {
-  const harness = await createHarness(t)
+test('superuser editing legacy security configs supplies defaults and converts timeout without mutating the row', async t => {
+  const harness = await createHarness(t, { superuser: true })
   const row = {
     id: 81,
     uid: 'user-a',
@@ -1000,18 +1007,15 @@ test('editing and resaving configured audit and tool settings preserves boundary
 
       const expectedSecurity = normalize(editableRow.configs.security)
       const expectedTool = normalize(editableRow.configs.tool)
+      const formSecurity = normalize(harness.module.form.configs.security)
+      assert.deepEqual(formSecurity, expectedSecurity)
       await harness.module.submitForm()
       await flush()
 
       const update = harness.api.updates[iteration]
       assert.equal(update.id, scenario.id)
-      assert.deepEqual(normalize(update.payload.configs.security), expectedSecurity)
-      assert.equal(typeof update.payload.configs.security.protect_system_directories, 'boolean')
-      assert.equal(update.payload.configs.security.protect_system_directories, scenario.protectSystemDirectories)
-      assert.equal(update.payload.configs.security.audit_depth, scenario.auditDepth)
-      assert.equal(update.payload.configs.security.audit_threshold, scenario.auditThreshold)
-      assert.equal(update.payload.configs.security.audit_channel_id, modelOptionsItems[0].id)
-      assert.equal(update.payload.configs.security.audit_model_id, 'audit-model')
+      assert.equal(Object.prototype.hasOwnProperty.call(update.payload.configs, 'security'), false)
+      assert.deepEqual(normalize(harness.module.form.configs.security), formSecurity)
       assert.deepEqual(normalize(update.payload.configs.tool), expectedTool)
       assert.deepEqual(normalize(update.payload.configs.tool.enabled_tools), enabledTools)
       assert.deepEqual(normalize(update.payload.configs.tool.allowed_operation_dirs), allowedOperationDirs)
@@ -1019,8 +1023,183 @@ test('editing and resaving configured audit and tool settings preserves boundary
 
       editableRow = {
         ...editableRow,
-        configs: normalize(update.payload.configs),
+        configs: {
+          ...normalize(update.payload.configs),
+          security: expectedSecurity,
+        },
       }
     }
   }
+})
+
+test('unknown and ordinary saves omit directly edited security without mutating the form', async t => {
+  for (const identity of [
+    { name: 'unknown', options: {} },
+    { name: 'ordinary', options: { superuser: false, currentUid: 'user-a' } },
+  ]) {
+    for (const type of ['create', 'edit']) {
+      const harness = await createHarness(t, identity.options)
+      const configs = defaultProfileConfigs()
+      configs.security.audit_depth = 2
+      configs.tool.enabled_tools = ['file_tool']
+      configs.other.retained_value = 'keep'
+      const row = {
+        id: 111,
+        uid: 'user-a',
+        name: `${identity.name} ${type}`,
+        prompt_id: null,
+        knowledge_base_ids: [],
+        configs,
+      }
+      const originalRow = normalize(row)
+
+      if (type === 'edit') harness.module.showDialog('edit', row)
+      else harness.module.showDialog('create')
+      await flush()
+      harness.module.form.name = row.name
+      harness.module.form.configs.security.protect_system_directories = false
+      harness.module.form.configs.security.audit_depth = 11
+      harness.module.form.configs.tool.enabled_tools = ['file_tool', 'read_multimodal_file']
+      harness.module.form.configs.other.retained_value = 'keep'
+      const formSecurity = normalize(harness.module.form.configs.security)
+
+      await harness.module.submitForm()
+      await flush()
+
+      const payload = type === 'create'
+        ? harness.api.creates[0]
+        : harness.api.updates[0]?.payload
+      assert.ok(payload, `${identity.name} ${type}`)
+      assert.equal(Object.prototype.hasOwnProperty.call(payload.configs, 'security'), false)
+      assert.deepEqual(normalize(payload.configs.tool.enabled_tools), ['file_tool', 'read_multimodal_file'])
+      assert.equal(payload.configs.other.retained_value, 'keep')
+      assert.deepEqual(normalize(harness.module.form.configs.security), formSecurity)
+      if (type === 'edit') assert.deepEqual(normalize(row), originalRow)
+    }
+  }
+})
+
+test('profile config permissions default to false when unavailable', async t => {
+  const unknownHarness = await createHarness(t)
+  assert.deepEqual(normalize(unknownHarness.module.configPermissions.value), { security: false })
+
+  const missingMetadataHarness = await createHarness(t, {
+    superuser: true,
+    profileListRequest: () => Promise.resolve(pageResponse([], 0, {
+      show_owner: false,
+      current_uid: 'admin-user',
+      tool_options: [],
+    })),
+  })
+  assert.deepEqual(normalize(missingMetadataHarness.module.configPermissions.value), { security: false })
+})
+
+test('superuser can save security configs granted by profile metadata', async t => {
+  const harness = await createHarness(t, { superuser: true })
+  assert.equal(harness.module.configPermissions.value.security, true)
+  harness.module.showDialog('create')
+  await flush()
+  harness.module.form.name = 'permitted security profile'
+  harness.module.form.configs.security.audit_depth = 9
+  const formSecurity = normalize(harness.module.form.configs.security)
+
+  await harness.module.submitForm()
+  await flush()
+
+  assert.deepEqual(normalize(harness.api.creates[0].configs.security), formSecurity)
+})
+
+test('point config permissions omit only the denied tool field', async t => {
+  const harness = await createHarness(t, {
+    superuser: true,
+    configPermissions: { 'tool.max_parallel_tools': false },
+  })
+  harness.module.showDialog('create')
+  await flush()
+  harness.module.form.name = 'point permission profile'
+  harness.module.form.configs.tool.max_parallel_tools = 17
+  harness.module.form.configs.tool.enabled_tools = ['file_tool']
+  harness.module.form.configs.tool.allowed_operation_dirs = ['D:/workspace/allowed']
+  harness.module.form.configs.tool.file_send_blocked_extensions = ['.zip']
+
+  await harness.module.submitForm()
+  await flush()
+
+  const { tool } = harness.api.creates[0].configs
+  assert.equal(Object.prototype.hasOwnProperty.call(tool, 'max_parallel_tools'), false)
+  assert.deepEqual(normalize(tool.enabled_tools), ['file_tool'])
+  assert.deepEqual(normalize(tool.allowed_operation_dirs), ['D:/workspace/allowed'])
+  assert.deepEqual(normalize(tool.file_send_blocked_extensions), ['.zip'])
+})
+
+test('repeated profile submissions do not progressively mutate denied configs', async t => {
+  const harness = await createHarness(t, { superuser: false, currentUid: 'user-a' })
+  const row = {
+    id: 112,
+    uid: 'user-a',
+    name: 'repeated denied security profile',
+    prompt_id: null,
+    knowledge_base_ids: [],
+    configs: defaultProfileConfigs(),
+  }
+  row.configs.security.audit_depth = 4
+  row.configs.tool.enabled_tools = ['file_tool']
+  const originalRow = normalize(row)
+  harness.module.showDialog('edit', row)
+  await flush()
+  harness.module.form.configs.security.audit_depth = 12
+  const formConfigs = normalize(harness.module.form.configs)
+
+  await harness.module.submitForm()
+  await flush()
+  await harness.module.submitForm()
+  await flush()
+
+  assert.equal(harness.api.updates.length, 2)
+  assert.deepEqual(normalize(harness.api.updates[0].payload), normalize(harness.api.updates[1].payload))
+  assert.equal(Object.prototype.hasOwnProperty.call(harness.api.updates[0].payload.configs, 'security'), false)
+  assert.deepEqual(normalize(harness.module.form.configs), formConfigs)
+  assert.deepEqual(normalize(row), originalRow)
+})
+
+test('clearing permissions ignores late profile list permissions and rows', async t => {
+  let resolveLateList
+  let listRequestCount = 0
+  const harness = await createHarness(t, {
+    superuser: true,
+    profileListRequest: () => {
+      listRequestCount += 1
+      if (listRequestCount === 1) {
+        return Promise.resolve(pageResponse([], 0, {
+          show_owner: false,
+          current_uid: 'admin-user',
+          tool_options: [],
+          config_permissions: { security: true },
+        }))
+      }
+      return new Promise(resolve => {
+        resolveLateList = resolve
+      })
+    },
+  })
+  assert.equal(harness.module.configPermissions.value.security, true)
+
+  const loading = harness.module.loadProfiles()
+  assert.equal(harness.api.profileList.length, 2)
+  harness.permissionsStore.clear()
+  await flush()
+  assert.deepEqual(normalize(harness.module.configPermissions.value), { security: false })
+
+  resolveLateList(pageResponse([{ id: 999, name: 'stale admin profile' }], 1, {
+    show_owner: true,
+    current_uid: 'admin-user',
+    tool_options: [],
+    config_permissions: { security: true },
+  }))
+  await loading
+  await flush()
+
+  assert.deepEqual(normalize(harness.module.configPermissions.value), { security: false })
+  assert.deepEqual(normalize(harness.module.profiles.value), [])
+  assert.equal(harness.module.total.value, 0)
 })

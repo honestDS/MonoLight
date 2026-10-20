@@ -44,9 +44,12 @@ const createHarness = ({
   uid = 'user-a',
   promptId = 'prompt-a',
   prompts = [],
+  configPermissions = { security: true },
+  activeTab = 'base',
 } = {}) => {
   const form = reactive({ uid, prompt_id: promptId })
-  const props = reactive({ dialogType, dialogVisible, form, prompts })
+  const props = reactive({ dialogType, dialogVisible, form, prompts, configPermissions, activeTab })
+  const emittedEvents = []
   const context = vm.createContext({
     computed,
     reactive,
@@ -54,7 +57,7 @@ const createHarness = ({
     effectScope,
     nextTick,
     defineProps: () => props,
-    defineEmits: () => () => {},
+    defineEmits: () => (...args) => emittedEvents.push(args),
     console: { log() {}, warn() {}, error() {} },
   })
   const scope = effectScope()
@@ -74,6 +77,7 @@ globalThis.__module = { ownerPromptOptions, props }
   return {
     form,
     props,
+    emittedEvents,
     ownerPromptOptions: module.ownerPromptOptions,
     async flush() {
       await nextTick()
@@ -194,4 +198,51 @@ test('shows only unowned prompts for an edit with a null uid, including async id
   await edit.flush()
   assert.deepEqual(optionIds(edit), ['prompt-null'])
   assert.equal(edit.form.prompt_id, 'prompt-null')
+})
+
+test('returns to the base tab when security permission is revoked', async t => {
+  const harness = createHarness({ configPermissions: { security: true }, activeTab: 'security' })
+  t.after(() => harness.stop())
+
+  harness.props.configPermissions.security = false
+  await harness.flush()
+  assert.deepEqual(harness.emittedEvents, [['update:activeTab', 'base']])
+
+  harness.props.configPermissions.security = false
+  await harness.flush()
+  assert.deepEqual(harness.emittedEvents, [['update:activeTab', 'base']])
+
+  harness.props.configPermissions.security = true
+  await harness.flush()
+  assert.deepEqual(harness.emittedEvents, [['update:activeTab', 'base']])
+
+  harness.props.configPermissions = undefined
+  await harness.flush()
+  assert.deepEqual(harness.emittedEvents, [
+    ['update:activeTab', 'base'],
+    ['update:activeTab', 'base'],
+  ])
+
+  harness.props.configPermissions = { security: 'true' }
+  await harness.flush()
+  assert.deepEqual(harness.emittedEvents, [
+    ['update:activeTab', 'base'],
+    ['update:activeTab', 'base'],
+    ['update:activeTab', 'base'],
+  ])
+})
+
+test('does not change the base tab when security permission changes', async t => {
+  const harness = createHarness({ configPermissions: { security: false }, activeTab: 'base' })
+  t.after(() => harness.stop())
+
+  harness.props.configPermissions.security = true
+  await harness.flush()
+  assert.equal(harness.props.activeTab, 'base')
+  assert.deepEqual(harness.emittedEvents, [])
+
+  harness.props.configPermissions.security = false
+  await harness.flush()
+  assert.equal(harness.props.activeTab, 'base')
+  assert.deepEqual(harness.emittedEvents, [])
 })
