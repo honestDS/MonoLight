@@ -1,4 +1,4 @@
-import { h, onMounted, reactive, ref } from 'vue'
+import { h, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { profileApi, promptApi, systemApi, adminApi, knowledgeBaseApi } from '../../api/index.js'
@@ -12,6 +12,7 @@ export function useProfilesView() {
   const { t } = useI18n()
   const userPermissions = useUserPermissionsStore()
 
+  const configPermissions = ref({ security: false })
   const profiles = ref([])
   const users = ref([])
   const channels = ref([])
@@ -40,6 +41,10 @@ export function useProfilesView() {
   const fileSendBlockedExtensionInput = ref('')
   const localeOptions = SUPPORT_LOCALES
   const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
+
+  watch(() => userPermissions.currentUser, () => {
+    configPermissions.value = { security: false }
+  })
 
   const systemSettings = reactive({
     log_locale: 'zh',
@@ -81,12 +86,18 @@ export function useProfilesView() {
       if (userPermissions.isSuperuser && filters.ownerUsername.trim()) {
         params.owner_username = filters.ownerUsername.trim()
       }
+      const requestedUser = userPermissions.currentUser
       const res = await profileApi.list(params)
+      if (userPermissions.currentUser !== requestedUser) return
       profiles.value = res.data.data.items || []
       total.value = res.data.data.total || 0
       toolOptions.value = res.data.data.meta?.tool_options || []
       showOwnerColumn.value = Boolean(res.data.data.meta?.show_owner)
       currentUid.value = res.data.data.meta?.current_uid || null
+      configPermissions.value = {
+        security: false,
+        ...(res.data.data.meta?.config_permissions || {})
+      }
       if (showOwnerColumn.value) fetchUsers()
     } catch (err) {
       ElMessage.error(err.message || t('profiles.load_failed'))
@@ -304,6 +315,7 @@ export function useProfilesView() {
   const editor = useProfileEditor({
     t,
     userPermissions,
+    configPermissions,
     channels,
     users,
     knowledgeBases,
@@ -334,6 +346,7 @@ export function useProfilesView() {
 
   return {
     userPermissions,
+    configPermissions,
     profiles,
     users,
     channels,

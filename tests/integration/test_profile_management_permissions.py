@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 import app.core.crypto as crypto_module
+import app.core.profile_permissions as profile_permissions_module
 import app.core.security as security
 from app.api.v1.profile import router
 from app.core.crud.channel.channel import channel_crud
@@ -176,6 +177,28 @@ async def _set_default(
     )
 
 
+async def _create_profile(client: httpx.AsyncClient, token: str, body: dict[str, Any]) -> httpx.Response:
+    return await client.post(
+        "/api/v1/profiles/create",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+    )
+
+
+async def _update_profile(
+    client: httpx.AsyncClient,
+    token: str,
+    profile_id: int,
+    body: dict[str, Any],
+) -> httpx.Response:
+    return await client.post(
+        "/api/v1/profiles/update",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"profile_id": profile_id},
+        json=body,
+    )
+
+
 async def _profile_snapshot(session_factory: async_sessionmaker[AsyncSession]) -> tuple[dict[str, Any], ...]:
     async with session_factory() as session:
         profiles = (await session.execute(select(Profile).order_by(Profile.id))).scalars().all()
@@ -201,6 +224,17 @@ def _assert_standard(response: httpx.Response, code: int) -> dict[str, Any]:
     assert payload["message"]
     assert payload["data"] is None
     return payload
+
+
+def _assert_profile_success(response: httpx.Response) -> dict[str, Any]:
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"code", "message", "data"}
+    assert payload["code"] == 200
+    assert isinstance(payload["message"], str)
+    assert payload["message"]
+    assert isinstance(payload["data"], dict)
+    return payload["data"]
 
 
 def _assert_only_default_scope_changed(
@@ -400,6 +434,7 @@ async def test_profile_list_is_scoped_to_regular_user_across_pages_and_forged_id
         assert data["size"] == 10
         assert data["meta"]["show_owner"] is False
         assert data["meta"]["current_uid"] == "user-a"
+        assert data["meta"]["config_permissions"]["security"] is False
 
         page_responses = [
             await client.get(
@@ -480,6 +515,7 @@ async def test_profile_list_as_superuser_shows_all_profiles_and_real_owner_names
     assert data["size"] == 100
     assert data["meta"]["show_owner"] is True
     assert data["meta"]["current_uid"] == "admin"
+    assert data["meta"]["config_permissions"]["security"] is True
     for item in data["items"]:
         expected_username = item["uid"] if item["uid"] in {"admin", "user-a", "user-b"} else None
         assert item["username"] == expected_username
@@ -604,6 +640,259 @@ async def test_profile_list_rejects_missing_and_invalid_tokens_without_mutation(
         )
         _assert_standard(invalid_token_response, 401)
     assert await _profile_snapshot(session_factory) == before
+
+
+@pytest.mark.asyncio
+async def test_regular_user_cannot_change_security_config_on_create_or_update(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, profile_ids = api_context
+    target_id = profile_ids["user-a"]["target"]
+    initial_snapshot = await _profile_snapshot(session_factory)
+    target = next(row for row in initial_snapshot if row["id"] == target_id)
+    channel_id = target["configs"]["channel"]["chat_channel"]["rules"][0]["channel_id"]
+    security_values = [
+        ("audit_channel_id", channel_id),
+        ("audit_model_id", "chat-model"),
+        ("audit_threshold", 0),
+        ("audit_depth", 1),
+        ("audit_confirmation_timeout_seconds", 60),
+        ("audit_report_language", "en"),
+        ("protect_system_directories", False),
+    ]
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        forged_token = _token("user-a", is_superuser=True)
+        for index, (field, value) in enumerate(security_values):
+            nested = index % 2 == 0
+            configs = {"security": {field: value}} if nested else {field: value}
+            before_create = await _profile_snapshot(session_factory)
+            create_response = await _create_profile(
+                client,
+                forged_token,
+                {"name": f"forbidden-security-create-{index}", "configs": configs},
+            )
+            _assert_standard(create_response, 403)
+            assert await _profile_snapshot(session_factory) == before_create == initial_snapshot
+
+            nested = not nested
+            configs = {"security": {field: value}} if nested else {field: value}
+            before_update = await _profile_snapshot(session_factory)
+            update_response = await _update_profile(
+                client,
+                forged_token,
+                target_id,
+                {"configs": configs},
+            )
+            _assert_standard(update_response, 403)
+            assert await _profile_snapshot(session_factory) == before_update == initial_snapshot
+
+        legacy_nested = {"security": {"audit_confirmation_timeout_minutes": 1}}
+        legacy_flat = {"audit_confirmation_timeout_minutes": 1}
+        for endpoint, configs in (("create", legacy_nested), ("update", legacy_flat)):
+            before = await _profile_snapshot(session_factory)
+            if endpoint == "create":
+                response = await _create_profile(
+                    client,
+                    forged_token,
+                    {"name": "forbidden-security-create-legacy", "configs": configs},
+                )
+            else:
+                response = await _update_profile(client, forged_token, target_id, {"configs": configs})
+            _assert_standard(response, 403)
+            assert await _profile_snapshot(session_factory) == before == initial_snapshot
+
+
+@pytest.mark.asyncio
+async def test_security_defaults_and_superuser_security_create_are_persisted(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, profile_ids = api_context
+    default_security = ProfileConfig.model_validate({}).model_dump()["security"]
+    starting_snapshot = await _profile_snapshot(session_factory)
+    source_profile = next(row for row in starting_snapshot if row["id"] == profile_ids["user-a"]["target"])
+    channel_id = source_profile["configs"]["channel"]["chat_channel"]["rules"][0]["channel_id"]
+    non_default_security = {
+        "audit_channel_id": channel_id,
+        "audit_model_id": "chat-model",
+        "audit_threshold": 6,
+        "audit_depth": 7,
+        "audit_confirmation_timeout_seconds": 420,
+        "audit_report_language": "en",
+        "protect_system_directories": False,
+    }
+    created_ids = []
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        for token, body, expected_security in (
+            (
+                _token("user-a"),
+                {"name": "security-default-omitted", "configs": {}},
+                default_security,
+            ),
+            (
+                _token("user-a"),
+                {"name": "security-default-explicit", "configs": {"security": default_security}},
+                default_security,
+            ),
+            (
+                _token("admin"),
+                {"uid": "user-b", "name": "security-admin-created", "configs": {"security": non_default_security}},
+                non_default_security,
+            ),
+        ):
+            response_data = _assert_profile_success(await _create_profile(client, token, body))
+            created_ids.append(response_data["id"])
+            assert response_data["configs"]["security"] == expected_security
+
+            snapshot = await _profile_snapshot(session_factory)
+            created_profile = next(row for row in snapshot if row["id"] == response_data["id"])
+            assert created_profile["configs"]["security"] == expected_security
+            assert response_data["configs"] == created_profile["configs"]
+            assert {row["id"]: row for row in snapshot if row["id"] not in created_ids} == {row["id"]: row for row in starting_snapshot}
+
+
+@pytest.mark.asyncio
+async def test_regular_updates_preserve_existing_security_for_omitted_or_equal_values(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, profile_ids = api_context
+    target_id = profile_ids["user-a"]["target"]
+    initial_snapshot = await _profile_snapshot(session_factory)
+    target = next(row for row in initial_snapshot if row["id"] == target_id)
+    channel_id = target["configs"]["channel"]["chat_channel"]["rules"][0]["channel_id"]
+    security_values = {
+        "audit_channel_id": channel_id,
+        "audit_model_id": "chat-model",
+        "audit_threshold": 6,
+        "audit_depth": 7,
+        "audit_confirmation_timeout_seconds": 420,
+        "audit_report_language": "en",
+        "protect_system_directories": False,
+    }
+    admin_configs = deepcopy(target["configs"])
+    admin_configs["security"] = security_values
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        admin_response = await _update_profile(
+            client,
+            _token("admin"),
+            target_id,
+            {"configs": admin_configs},
+        )
+        admin_data = _assert_profile_success(admin_response)
+        assert admin_data["configs"]["security"] == security_values
+        after_admin = await _profile_snapshot(session_factory)
+        persisted_target = next(row for row in after_admin if row["id"] == target_id)
+        assert persisted_target["configs"]["security"] == security_values
+        assert admin_data["configs"] == persisted_target["configs"]
+
+        unchanged_profiles = {row["id"]: row for row in after_admin if row["id"] != target_id}
+        same_security_cases = [
+            ("security-omitted", {"configs": {"tool": {"tool_timeout": 31.0}}}),
+            ("security-empty", {"configs": {"security": {}, "tool": {"tool_timeout": 32.0}}}),
+            ("security-partial-same", {"configs": {"security": {"audit_threshold": 6}, "tool": {"tool_timeout": 33.0}}}),
+            ("security-complete-same", {"configs": {"security": security_values, "tool": {"tool_timeout": 34.0}}}),
+            (
+                "security-legacy-timeout-same",
+                {"configs": {"security": {"audit_confirmation_timeout_minutes": 7}, "tool": {"tool_timeout": 35.0}}},
+            ),
+            ("configs-null", {"configs": None}),
+            ("configs-omitted", {}),
+        ]
+        previous_tool_timeout = persisted_target["configs"]["tool"]["tool_timeout"]
+        for case_name, body in same_security_cases:
+            body = {"name": f"user-a-{case_name}", **body}
+            submitted_configs = body.get("configs")
+            expected_tool_timeout = previous_tool_timeout
+            if isinstance(submitted_configs, dict):
+                expected_tool_timeout = submitted_configs.get("tool", {}).get("tool_timeout", expected_tool_timeout)
+
+            first_response = await _update_profile(client, _token("user-a"), target_id, body)
+            first_data = _assert_profile_success(first_response)
+            after_first = await _profile_snapshot(session_factory)
+            first_target = next(row for row in after_first if row["id"] == target_id)
+            assert first_target["configs"]["security"] == security_values
+            assert first_target["configs"]["tool"]["tool_timeout"] == expected_tool_timeout
+            assert first_data["configs"]["security"] == security_values
+            assert first_data["configs"]["tool"]["tool_timeout"] == expected_tool_timeout
+            assert first_data["configs"] == first_target["configs"]
+            assert first_target["name"] == body["name"]
+            assert {row["id"]: row for row in after_first if row["id"] != target_id} == unchanged_profiles
+
+            second_response = await _update_profile(client, _token("user-a"), target_id, body)
+            second_data = _assert_profile_success(second_response)
+            after_second = await _profile_snapshot(session_factory)
+            second_target = next(row for row in after_second if row["id"] == target_id)
+            assert after_second == after_first
+            assert second_target["configs"]["security"] == security_values
+            assert second_target["configs"]["tool"]["tool_timeout"] == expected_tool_timeout
+            assert second_data["configs"]["tool"]["tool_timeout"] == expected_tool_timeout
+            assert second_data["configs"] == second_target["configs"]
+            assert {row["id"]: row for row in after_second if row["id"] != target_id} == unchanged_profiles
+            previous_tool_timeout = expected_tool_timeout
+
+
+@pytest.mark.asyncio
+async def test_profile_config_permissions_support_a_single_field_restriction(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, session_factory, profile_ids = api_context
+    monkeypatch.setattr(
+        profile_permissions_module,
+        "PROFILE_CONFIG_SUPERUSER_ONLY_PATHS",
+        ("security", "tool.max_parallel_tools"),
+    )
+    target_id = profile_ids["user-a"]["target"]
+    initial_snapshot = await _profile_snapshot(session_factory)
+    target = next(row for row in initial_snapshot if row["id"] == target_id)
+    admin_configs = deepcopy(target["configs"])
+    admin_configs["tool"]["max_parallel_tools"] = 9
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        admin_update = await _update_profile(client, _token("admin"), target_id, {"configs": admin_configs})
+        admin_data = _assert_profile_success(admin_update)
+        assert admin_data["configs"]["tool"]["max_parallel_tools"] == 9
+        after_admin = await _profile_snapshot(session_factory)
+        persisted_target = next(row for row in after_admin if row["id"] == target_id)
+        assert persisted_target["configs"]["tool"]["max_parallel_tools"] == 9
+        assert admin_data["configs"] == persisted_target["configs"]
+
+        for token, expected in (
+            (_token("user-a", is_superuser=True), {"security": False, "tool.max_parallel_tools": False}),
+            (_token("admin"), {"security": True, "tool.max_parallel_tools": True}),
+        ):
+            list_response = await client.get(
+                "/api/v1/profiles/list",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert list_response.status_code == 200
+            assert list_response.json()["data"]["meta"]["config_permissions"] == expected
+
+        allowed_response = await _update_profile(
+            client,
+            _token("user-a"),
+            target_id,
+            {"configs": {"tool": {"tool_timeout": 41.0}}},
+        )
+        allowed_data = _assert_profile_success(allowed_response)
+        after_allowed = await _profile_snapshot(session_factory)
+        allowed_target = next(row for row in after_allowed if row["id"] == target_id)
+        assert allowed_target["configs"]["tool"]["max_parallel_tools"] == 9
+        assert allowed_target["configs"]["tool"]["tool_timeout"] == 41.0
+        assert allowed_data["configs"] == allowed_target["configs"]
+        assert {row["id"]: row for row in after_allowed if row["id"] != target_id} == {row["id"]: row for row in after_admin if row["id"] != target_id}
+
+        before_forbidden = await _profile_snapshot(session_factory)
+        forbidden_response = await _update_profile(
+            client,
+            _token("user-a"),
+            target_id,
+            {"configs": {"tool": {"max_parallel_tools": 10, "tool_timeout": 55.0}}},
+        )
+        _assert_standard(forbidden_response, 403)
+        assert await _profile_snapshot(session_factory) == before_forbidden
 
 
 @pytest.mark.asyncio

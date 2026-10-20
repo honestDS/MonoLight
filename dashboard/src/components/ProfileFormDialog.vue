@@ -339,7 +339,7 @@
           </el-tab-pane>
 
           <!-- 安全设置 -->
-          <el-tab-pane :label="$t('profiles.security_settings')" name="security">
+          <el-tab-pane v-if="configPermissions.security === true" :label="$t('profiles.security_settings')" name="security">
             <div class="tab-pane-content">
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.security_settings') }}</div>
@@ -350,67 +350,73 @@
                   show-icon
                   class="mb-15"
                 ></el-alert>
-                <el-form-item :label="$t('profiles.audit_model_id')" label-width="auto">
-                  <el-select
-                    :model-value="auditModelKey" @update:model-value="$emit('update:auditModelKey', $event)"
-                    :placeholder="$t('profiles.audit_model_hint')"
-                    clearable
-                    filterable
-                    class="full-width-input"
-                  >
-                    <el-option
-                      v-for="item in auditModelOptions"
-                      :key="item.key"
-                      :label="item.label"
-                      :value="item.key"
-                    ></el-option>
-                  </el-select>
-                </el-form-item>
-                <el-form-item label-width="auto">
-                  <template #label>
-                    {{ $t('profiles.audit_report_language') }}
-                    <HelpTooltip :content="$t('profiles.audit_report_language_hint')" />
-                  </template>
-                  <el-select v-model="form.configs.security.audit_report_language" class="full-width-input">
-                    <el-option
-                      v-for="locale in localeOptions"
-                      :key="locale.value"
-                      :label="locale.label"
-                      :value="locale.value"
-                    ></el-option>
-                  </el-select>
-                </el-form-item>
-                <el-form-item label-width="auto">
-                  <template #label>
-                    {{ $t('profiles.audit_depth') }}
-                    <HelpTooltip :content="$t('profiles.audit_depth_hint')" />
-                  </template>
-                  <el-input-number
-                    v-model="form.configs.security.audit_depth"
-                    :min="1"
-                    :max="100"
-                    :step="1"
-                    step-strictly
-                    controls-position="right"
-                    class="full-width-input"
-                    :aria-label="$t('profiles.audit_depth')"
-                  />
-                </el-form-item>
-                <el-form-item label-width="auto">
-                  <template #label>
-                    {{ $t('profiles.protect_system_directories') }}
-                  </template>
-                  <div>
-                    <el-switch
-                      v-model="form.configs.security.protect_system_directories"
-                      :aria-label="$t('profiles.protect_system_directories')"
-                      aria-describedby="protect-system-directories-hint"
-                    ></el-switch>
-                    <div id="protect-system-directories-hint" class="help-text">
-                      {{ $t('profiles.protect_system_directories_hint') }}
-                    </div>
-                  </div>
-                </el-form-item>
+                <el-row :gutter="20">
+                  <el-col :span="16">
+                    <el-form-item :label="$t('profiles.audit_model_id')" label-width="auto">
+                      <el-select
+                        :model-value="auditModelKey" @update:model-value="$emit('update:auditModelKey', $event)"
+                        :placeholder="$t('profiles.audit_model_hint')"
+                        clearable
+                        filterable
+                        class="full-width-input"
+                      >
+                        <el-option
+                          v-for="item in auditModelOptions"
+                          :key="item.key"
+                          :label="item.label"
+                          :value="item.key"
+                        ></el-option>
+                      </el-select>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="8">
+                    <el-form-item label-width="auto">
+                      <template #label>
+                        {{ $t('profiles.protect_system_directories') }}
+                      </template>
+                      <el-switch
+                        v-model="form.configs.security.protect_system_directories"
+                        :aria-label="$t('profiles.protect_system_directories')"
+                      ></el-switch>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+                <el-row :gutter="20">
+                  <el-col :span="12">
+                    <el-form-item label-width="auto">
+                      <template #label>
+                        {{ $t('profiles.audit_report_language') }}
+                        <HelpTooltip :content="$t('profiles.audit_report_language_hint')" />
+                      </template>
+                      <el-select v-model="form.configs.security.audit_report_language" class="full-width-input">
+                        <el-option
+                          v-for="locale in localeOptions"
+                          :key="locale.value"
+                          :label="locale.label"
+                          :value="locale.value"
+                        ></el-option>
+                      </el-select>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="12">
+                    <el-form-item label-width="auto">
+                      <template #label>
+                        {{ $t('profiles.audit_depth') }}
+                        <HelpTooltip :content="$t('profiles.audit_depth_hint')" />
+                      </template>
+                      <el-input-number
+                        v-model="form.configs.security.audit_depth"
+                        :min="1"
+                        :max="100"
+                        :step="1"
+                        step-strictly
+                        controls-position="right"
+                        class="full-width-input"
+                        :aria-label="$t('profiles.audit_depth')"
+                      />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
                 <div class="secondary-confirmation-controls">
                   <el-form-item class="secondary-confirmation-toggle" label-width="auto">
                     <template #label>
@@ -637,6 +643,7 @@ const props = defineProps({
   auditModelKey: { type: String, default: null },
   auditModelOptions: { type: Array, required: true },
   channels: { type: Array, required: true },
+  configPermissions: { type: Object, default: () => ({}) },
   contextSummaryThresholdOptions: { type: Array, required: true },
   dialogType: { type: String, required: true },
   dialogVisible: { type: Boolean, required: true },
@@ -683,7 +690,7 @@ watch(() => props.form.uid, (newUid, oldUid) => {
   if (!promptBelongsToOwner) props.form.prompt_id = null
 })
 
-defineEmits([
+const emit = defineEmits([
   'add-allowed-operation-dir',
   'add-file-send-blocked-extension',
   'manage-memory-embedding',
@@ -698,4 +705,8 @@ defineEmits([
   'update:fileSendBlockedExtensionInput',
   'update:memoryOrganizationModelKey'
 ])
+
+watch(() => props.configPermissions?.security, allowed => {
+  if (allowed !== true && props.activeTab === 'security') emit('update:activeTab', 'base')
+})
 </script>

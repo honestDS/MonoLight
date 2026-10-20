@@ -454,7 +454,7 @@ class ProfileCreate(ProfileBase):
     @field_validator("configs")
     @classmethod
     def validate_configs(cls, value: dict[str, Any]) -> dict[str, Any]:
-        return ProfileConfig.model_validate(value).model_dump()
+        return ProfileConfig.model_validate(value).model_dump(exclude_unset=True)
 
 
 class ProfileUpdate(SQLModel):
@@ -473,7 +473,7 @@ class ProfileUpdate(SQLModel):
     def validate_configs(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is None:
             return None
-        return ProfileConfig.model_validate(value).model_dump()
+        return ProfileConfig.model_validate(value).model_dump(exclude_unset=True)
 
     model_config = ConfigDict(json_schema_extra={"example": PROFILE_EXAMPLE})
 

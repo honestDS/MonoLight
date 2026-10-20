@@ -64,6 +64,7 @@ from app.core.memory.embedding_config import (
     preview_embedding_selection,
 )
 from app.core.profile_deletion import build_profile_deletion_impact, execute_profile_deletion
+from app.core.profile_permissions import get_profile_config_permissions, prepare_profile_configs
 from app.core.profile_validation import (
     lock_profile_channel_references,
     validate_audit_model_config,
@@ -196,7 +197,7 @@ async def create_profile(
         raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
     else:
         profile_in.uid = current_user.uid
-    profile_in.configs = ProfileConfig.model_validate(profile_in.configs).model_dump()
+    profile_in.configs = prepare_profile_configs(profile_in.configs, current_user)
     if profile_in.confirm_memory_embedding_selection or profile_in.memory_embedding_selection_signature is not None:
         raise ParameterException(ERR_PROFILE_MEMORY_CREATE_CONFIRMATION_FORBIDDEN)
     profile_in.configs = normalize_profile_memory_for_create(
@@ -307,7 +308,12 @@ async def list_profiles(
         total=total,
         page=page,
         size=size,
-        meta={"tool_options": get_profile_tool_options(), "show_owner": is_admin, "current_uid": current_user.uid},
+        meta={
+            "tool_options": get_profile_tool_options(),
+            "show_owner": is_admin,
+            "current_uid": current_user.uid,
+            "config_permissions": get_profile_config_permissions(current_user),
+        },
     )
     return StandardResponse.success(data=page_data)
 
@@ -386,19 +392,8 @@ async def update_profile(
     if profile_in.confirm_memory_embedding_selection or profile_in.memory_embedding_selection_signature is not None:
         raise ParameterException(ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED)
 
-    if profile_in.configs is not None:
-        profile_in.configs = ProfileConfig.model_validate(profile_in.configs).model_dump()
-        profile_in.configs = normalize_profile_memory_for_update(
-            db_profile,
-            profile_in.configs,
-            await memory_store_crud.get_by_uid(db, uid=db_profile.uid),
-        )
-    else:
-        profile_in.configs = normalize_profile_memory_for_update(
-            db_profile,
-            db_profile.configs or {},
-            await memory_store_crud.get_snapshot_by_uid(db, uid=db_profile.uid),
-        )
+    submitted_configs = profile_in.configs
+    profile_in.configs = ProfileConfig.model_validate(submitted_configs if submitted_configs is not None else db_profile.configs or {}).model_dump()
     try:
         old_channel_ids = []
         old_cfg = ProfileConfig.model_validate(db_profile.configs or {})
@@ -435,6 +430,15 @@ async def update_profile(
             raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
         if not getattr(current_user, "is_superuser", False) and db_profile.uid != current_user.uid:
             raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
+        profile_in.configs = normalize_profile_memory_for_update(
+            db_profile,
+            prepare_profile_configs(
+                submitted_configs if submitted_configs is not None else db_profile.configs or {},
+                current_user,
+                existing_configs=db_profile.configs or {},
+            ),
+            await memory_store_crud.get_snapshot_by_uid(db, uid=db_profile.uid),
+        )
         await validate_channel_configs(
             db,
             profile_in.configs.get("channel", {}),
