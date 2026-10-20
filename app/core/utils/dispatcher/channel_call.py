@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.channel_router import select_channel
+from app.core.channel.router import select_channel
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CHAT_CHANNEL_NOT_FOUND,

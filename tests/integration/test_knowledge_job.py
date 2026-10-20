@@ -13,7 +13,6 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core import knowledge_base_collection_cleanup as collection_cleanup_service
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.knowledge.managed import managed_knowledge_item_crud
@@ -26,6 +25,7 @@ from app.core.knowledge.recall import (
     materialize_recallable_managed_hits,
 )
 from app.core.knowledge.results import ManagedKnowledgeMutationStatus
+from app.core.knowledge_jobs import collection_cleanup as collection_cleanup_service
 from app.core.knowledge_jobs.consumer import KnowledgeJobConsumer
 from app.core.knowledge_jobs.executor import (
     KnowledgeJobCancelledError,

@@ -10,7 +10,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
-import app.core.dispatcher as dispatcher_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.memory import request as memory_request_module
 from app.core.dispatchers.memory.recall import run_memory_recall_precheck

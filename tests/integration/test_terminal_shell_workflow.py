@@ -16,7 +16,7 @@ import app.core.terminal.session_runtime_core as terminal_runtime_core_module
 import app.core.terminal.session_runtime_state as terminal_runtime_state_module
 import app.core.terminal.worker_coordinator as terminal_worker_module
 from app.core.constants import ERR_TERMINAL_WORKER_STOPPED
-from app.core.dispatch_context import DispatchContext
+from app.core.dispatchers.context import DispatchContext
 from app.core.i18n import t
 from app.core.terminal import (
     ShellInteractiveHandoffResult,

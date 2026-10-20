@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.channel_router import select_channel
+from app.core.channel.router import select_channel
 from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND
 from app.core.context import ContextManager
 from app.core.exceptions import LLMException
@@ -26,7 +26,7 @@ class DispatcherValidationMixin:
         attachments: list[str] | None = None,
         additional_system_prompt: str | None = None,
     ) -> None:
-        dispatcher_module = import_module("app.core.dispatcher")
+        dispatcher_module = import_module("app.core.dispatchers.dispatcher")
         validate_profile = getattr(dispatcher_module, "validate_profile_and_cfg", validate_profile_and_cfg)
         select_chat_channel = getattr(dispatcher_module, "select_channel", select_channel)
         context_manager = getattr(dispatcher_module, "ContextManager", ContextManager)

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import StaticPool
 
 import app.api.v1.profile as profile_api
-import app.core.knowledge_base_collection_cleanup as collection_cleanup
+import app.core.knowledge_jobs.collection_cleanup as collection_cleanup
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
     KnowledgeBase,

@@ -7,7 +7,7 @@ from sqlmodel import select
 
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
-from app.core.session_cleanup import delete_session_data
+from app.core.session.cleanup import delete_session_data
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.models.audit import AuditConfirmationClaim, AuditRecord, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus

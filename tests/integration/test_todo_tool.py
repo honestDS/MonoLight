@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateTable
 
-from app.core.dispatch_context import DispatchContext
+from app.core.dispatchers.context import DispatchContext
 from app.core.prompts import SESSION_TODO_SYSTEM_PROMPT
 from app.core.tools import (
     MANAGE_TODO_TOOL_NAME,

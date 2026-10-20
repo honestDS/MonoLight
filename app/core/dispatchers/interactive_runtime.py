@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.channel_router import select_channel
+from app.core.channel.router import select_channel
 from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
@@ -27,7 +27,7 @@ from app.core.dispatchers.memory import MemoryRecallContext, run_memory_recall_p
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.profile_selection import resolve_profile_for_session
+from app.core.profile.selection import resolve_profile_for_session
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
 from app.core.tools.end_session import is_end_session_signal

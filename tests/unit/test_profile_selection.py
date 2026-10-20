@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import profile_selection
+from app.core.profile import selection as profile_selection
 
 
 @pytest.mark.asyncio

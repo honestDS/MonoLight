@@ -13,7 +13,7 @@ from app.adapters.chat_ws import ws_chat_adapter
 from app.api.v1 import chat as chat_api
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import LLMException
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module

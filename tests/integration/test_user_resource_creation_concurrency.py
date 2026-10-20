@@ -8,10 +8,11 @@ from fastapi import Depends, FastAPI
 from sqlmodel import select
 
 from app.api.v1 import knowledge_base, memories, message_platforms, scheduled_tasks, users
-from app.core import security, user_file_cleanup
+from app.core import security
 from app.core.constants import ERR_USER_NOT_FOUND
 from app.core.i18n import t
 from app.core.memory import memory_service, service_create
+from app.core.user import file_cleanup as user_file_cleanup
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseCollectionOwner

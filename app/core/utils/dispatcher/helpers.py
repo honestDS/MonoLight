@@ -3,7 +3,7 @@ from importlib import import_module
 from typing import Any
 
 from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, KNOWLEDGE_BASE_QUERY_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, SESSION_REPLY_WORK_CLAIM_INFO_KEY
-from app.core.dispatch_context import DispatchMode
+from app.core.dispatchers.context import DispatchMode
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -110,7 +110,7 @@ async def process_single_tool_with_isolated_db(
     dispatch_source: str = "interactive_tool",
     session_reply_work_claim: tuple[int, str] | None = None,
 ) -> InternalMessage:
-    dispatcher_module = import_module("app.core.dispatcher")
+    dispatcher_module = import_module("app.core.dispatchers.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
     process_tool = getattr(dispatcher_module, "process_single_tool")
     async with async_session_local() as tool_db:

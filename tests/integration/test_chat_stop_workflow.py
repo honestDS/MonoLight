@@ -13,7 +13,7 @@ from sqlmodel import select
 import app.providers.database as database_provider
 from app.api.v1 import chat as chat_api
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.security import get_current_user
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_audit as executor_audit_module

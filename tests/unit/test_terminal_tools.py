@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 import app.core.tools.terminal as terminal_module
-from app.core.dispatch_context import DispatchContext
+from app.core.dispatchers.context import DispatchContext
 from app.core.terminal import (
     ALL_TERMINAL_ACTIONS,
     TerminalAction,

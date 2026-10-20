@@ -1,6 +1,9 @@
-from app.core.channel_router import select_channel
+from app.core.channel.router import select_channel
 from app.core.context import ContextManager
-from app.core.dispatchers import ChatDispatcher
+from app.core.dispatchers.background import BackgroundDispatcherMixin
+from app.core.dispatchers.non_stream import NonStreamDispatcherMixin
+from app.core.dispatchers.shared import DispatcherValidationMixin
+from app.core.dispatchers.stream import StreamDispatcherMixin
 from app.core.tools import get_tools_for_profile
 from app.core.utils.dispatcher.helpers import (
     _filter_tool_output_messages,
@@ -22,6 +25,16 @@ from app.core.utils.dispatcher.markdown_instruction import build_user_runtime_in
 from app.core.utils.dispatcher.process_single_tool import process_single_tool
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.providers.database import AsyncSessionLocal
+
+
+class ChatDispatcher(
+    BackgroundDispatcherMixin,
+    DispatcherValidationMixin,
+    NonStreamDispatcherMixin,
+    StreamDispatcherMixin,
+):
+    pass
+
 
 __all__ = [
     "ChatDispatcher",

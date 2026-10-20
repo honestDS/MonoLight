@@ -262,7 +262,7 @@ async def _generate_refined_outbound_text(
                 refined_text = parse_assistant_files_content(persisted_assistant_message.content)
                 return refined_text, True
 
-            from app.core.dispatcher import ChatDispatcher
+            from app.core.dispatchers.dispatcher import ChatDispatcher
 
             ai_msg, _turn_messages, _files = await ChatDispatcher._generate_reply_from_history(
                 db,

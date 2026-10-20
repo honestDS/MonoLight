@@ -41,12 +41,12 @@ from app.core.constants import (
 )
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.session import session_crud
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.outbound_text import split_outbound_text_by_newline
-from app.core.profile_selection import resolve_profile_for_session
+from app.core.profile.selection import resolve_profile_for_session
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.session import generate_session_title_for_selected_profile

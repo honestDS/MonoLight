@@ -24,8 +24,8 @@ from app.core.constants import (
 )
 from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import ParameterException, ServerException
-from app.core.setup import complete_setup
-from app.core.setup_session import establish_setup_session, require_setup_session
+from app.core.setup.service import complete_setup
+from app.core.setup.session import establish_setup_session, require_setup_session
 from app.core.system_secrets import SystemSecretsError, load_system_secrets
 from app.providers.database import get_db
 from app.schemas.response import StandardResponse

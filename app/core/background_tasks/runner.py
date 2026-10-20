@@ -10,7 +10,7 @@ from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGR
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.task.background import background_task_crud
-from app.core.dispatch_context import build_background_dispatch_context
+from app.core.dispatchers.context import build_background_dispatch_context
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger

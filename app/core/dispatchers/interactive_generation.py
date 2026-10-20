@@ -4,7 +4,7 @@ from datetime import datetime
 from functools import partial
 from typing import Any
 
-from app.core.channel_router import select_channel
+from app.core.channel.router import select_channel
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_LLM_EMPTY_RESPONSE,

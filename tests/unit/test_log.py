@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.log import LogManager
-from app.core.log_redaction import redact_log_text
+from app.core.log.redaction import redact_log_text
 
 
 def _redact_and_assert_removed(text, *sensitive_values):

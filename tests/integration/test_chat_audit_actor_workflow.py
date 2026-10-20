@@ -21,7 +21,7 @@ import app.core.session_reply_queue.executor_metadata as executor_metadata_modul
 import app.providers.database as database_provider
 from app.api.v1 import chat as chat_api
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
-from app.core.session_notifier import SessionNotifier
+from app.core.session.notifier import SessionNotifier
 from app.models.audit import AuditExecutionRecord, AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail
 from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType

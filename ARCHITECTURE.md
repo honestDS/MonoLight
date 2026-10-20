@@ -117,48 +117,75 @@ app/api/v1/
 app/core/
 ├── audit/                  # 审计领域与审计持久化
 ├── background_tasks/       # 通用后台任务应用服务
+├── channel/                # 渠道与模型引用管理
 ├── crud/                   # 持久化数据访问
 ├── dispatchers/            # 对话分发应用服务
 ├── embedding/              # 知识库嵌入能力
 ├── i18n/                   # 后端多语言
 ├── knowledge/              # 知识主数据、绑定、迁移与统一召回领域服务
 ├── knowledge_jobs/         # 知识异步发布与清理作业组件
+├── log/                    # 日志服务与日志处理
 ├── memory/                 # 长期记忆领域与管理服务
 ├── memory_jobs/            # 长期记忆作业组件
 ├── message_platforms/      # 消息平台应用服务
+├── profile/                # Profile 配置与生命周期服务
 ├── rerank/                 # 知识库重排能力
 ├── retrieval/              # 知识库检索能力
+├── session/                # 会话支撑服务
 ├── session_reply_queue/    # 会话回复队列
+├── setup/                  # 系统初始化服务
 ├── terminal/               # 交互终端与 PTY 能力
 ├── tools/                  # 模型可调用工具
+├── user/                   # 用户生命周期服务
 ├── utils/                  # 通用辅助组件
-├── channel_model_protection.py # 渠道与模型引用管理
-├── channel_router.py       # 模型渠道路由
 ├── constants.py            # 核心常量
 ├── context.py              # 对话上下文
 ├── crypto.py               # 通用敏感数据处理
-├── dispatch_context.py     # 工具分发上下文
-├── dispatcher.py           # 对话分发入口
 ├── event_loop.py           # 平台事件循环支持
 ├── exceptions.py           # 应用异常类型
-├── log.py                  # 日志服务
-├── log_broadcaster.py      # 日志广播
-├── knowledge_base_collection_cleanup.py # 已删除知识库 collection owner 持久化清理处理服务
 ├── paths.py                # 数据和临时目录定义
-├── profile_deletion.py     # Profile 删除影响预览、确认与级联清理
-├── profile_permissions.py  # Profile 配置权限与受限字段合并
-├── profile_selection.py    # Profile 选择服务
-├── profile_validation.py   # Profile 配置检查
 ├── prompts.py              # 内置提示内容
 ├── security.py             # 认证与安全辅助
-├── session_cleanup.py      # 会话清理服务
-├── session_notifier.py     # 会话事件通知
-├── session_source.py       # 会话来源信息
-├── setup.py                # 系统初始化应用服务
-├── setup_session.py        # 初始化会话令牌签发与校验
 ├── skills.py               # 全局共享技能包发现与目录结构访问
 ├── system_secrets.py       # 系统密钥管理
 └── validation.py           # 通用输入校验
+```
+
+### 核心领域包
+
+```text
+app/core/channel/
+├── __init__.py             # 渠道领域包标识
+├── router.py               # 模型渠道路由
+└── model_protection.py     # 渠道与模型引用管理
+
+app/core/log/
+├── __init__.py             # 日志服务主实现
+├── broadcaster.py          # 日志广播
+└── redaction.py            # 日志敏感信息脱敏
+
+app/core/profile/
+├── __init__.py             # Profile 领域包标识
+├── deletion.py             # Profile 删除影响预览、确认与级联清理
+├── permissions.py          # Profile 配置权限与受限字段合并
+├── selection.py            # Profile 选择服务
+└── validation.py           # Profile 配置检查
+
+app/core/session/
+├── __init__.py             # 会话领域包标识
+├── cleanup.py              # 会话清理服务
+├── notifier.py             # 会话事件通知
+└── source.py               # 会话来源信息
+
+app/core/setup/
+├── __init__.py             # 系统初始化包标识
+├── service.py              # 系统初始化应用服务
+└── session.py              # 初始化会话令牌签发与校验
+
+app/core/user/
+├── __init__.py             # 用户领域包标识
+├── deletion.py             # 用户删除服务
+└── file_cleanup.py         # 用户文件清理
 ```
 
 ### 审计：`app/core/audit/`
@@ -236,6 +263,7 @@ app/core/knowledge_jobs/
 ├── executor.py             # 租约栅栏与处理器执行器
 ├── handlers.py             # 托管知识异步嵌入、发布和删除清理
 ├── maintenance.py          # 启动一致性巡检、过期整理历史和孤儿向量维护
+├── collection_cleanup.py   # 已删除知识库 collection owner 持久化清理处理服务
 ├── migration.py            # 知识库嵌入迁移兼容导出入口
 ├── migration_build.py      # 目标集合构建与增量追平
 ├── migration_common.py     # 迁移契约、载荷校验与向量计划
@@ -453,7 +481,9 @@ app/core/crud/
 
 ```text
 app/core/dispatchers/
-├── __init__.py             # 分发器导出
+├── __init__.py             # 分发包标识
+├── context.py              # 工具分发上下文
+├── dispatcher.py           # 对话分发入口
 ├── background.py           # 后台对话分发
 ├── interactive.py          # 交互式对话分发兼容导出入口
 ├── interactive_generation.py # 单轮模型生成与流输出
@@ -607,8 +637,22 @@ app/models/
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由模型
 ├── context_summary_stage.py # 上下文总结模型
-├── knowledge_base.py       # 知识库、用户文档、托管知识、迁移增量、版本历史与知识作业模型
-├── memory.py               # 长期记忆模型
+├── knowledge_base/
+│   ├── __init__.py         # 知识库模型及接口数据结构的稳定公开导入入口
+│   ├── base.py             # 知识库主体、嵌入运行状态与 Profile 绑定
+│   ├── collection_owner.py # 向量集合所有权模型与数据库触发器
+│   ├── document.py         # 用户知识库文档与分块元数据
+│   ├── managed.py          # 托管知识主记录与修订历史
+│   ├── migration.py        # 嵌入迁移增量记录
+│   ├── job.py              # 知识异步作业模型
+│   ├── organization.py     # 知识整理快照、阶段与片段
+│   └── schemas.py          # 知识库与托管知识请求响应结构
+├── memory/
+│   ├── __init__.py         # 长期记忆模型稳定公开导入入口
+│   ├── store.py            # 用户记忆仓库、容量和嵌入运行状态
+│   ├── embedding.py        # 嵌入选择凭证、版本及迁移增量
+│   ├── record.py           # 记忆主记录与修订历史
+│   └── job.py              # 长期记忆变更作业模型
 ├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息发件箱模型
@@ -629,6 +673,7 @@ app/models/
 ```
 
 `app/models/` 定义关系型持久化对象，由 `app/core/crud/` 提供访问，由 `app/providers/database/` 提供数据库连接和初始化能力。
+知识库接口数据结构位于 `app/models/knowledge_base/schemas.py`，仍由 `app.models.knowledge_base` 对外导出。
 
 ## 外部能力封装：`app/providers/`
 

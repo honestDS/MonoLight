@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.v1 import profile as profile_api
-from app.core import profile_validation as profile_validation_module
 from app.core.constants import ERR_CHANNEL_MODEL_NOT_FOUND, ERR_CHANNEL_USAGE_MISMATCH
 from app.core.exceptions import ParameterException
+from app.core.profile import validation as profile_validation_module
 from app.core.utils import channel_profile_sync as channel_profile_sync_module
 from app.core.utils.context_summary import service as summary_service_module
 from app.models.channel import ModelUsage

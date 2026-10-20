@@ -18,7 +18,7 @@ from sqlmodel import select
 
 import app.api.v1.setup as setup_api
 import app.core.crypto as crypto_module
-import app.core.setup as setup_service
+import app.core.setup.service as setup_service
 import app.providers.database.bootstrap as database_bootstrap
 from app.core.constants import (
     CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,

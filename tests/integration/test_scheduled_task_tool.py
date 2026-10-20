@@ -20,7 +20,7 @@ from app.core.constants import (
     MSG_SCHEDULED_TASK_DELETED,
     MSG_SCHEDULED_TASK_LIST_SUCCESS,
 )
-from app.core.dispatch_context import DispatchContext, DispatchMode
+from app.core.dispatchers.context import DispatchContext, DispatchMode
 from app.core.i18n import get_current_locale, set_current_locale, t
 from app.core.i18n.context import reset_current_locale
 from app.core.tools import get_tools_for_profile

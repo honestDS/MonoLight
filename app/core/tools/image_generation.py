@@ -13,7 +13,7 @@ from urllib.parse import quote
 import aiohttp
 from PIL import Image
 
-from app.core.channel_router import select_channel
+from app.core.channel.router import select_channel
 from app.core.constants import (
     ERR_FILE_EXTENSION_BLOCKED,
     ERR_FILE_NOT_FOUND,

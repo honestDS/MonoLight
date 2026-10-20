@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import log_broadcaster as broadcaster_module
+from app.core.log import broadcaster as broadcaster_module
 from app.core.log import build_process_log_path
-from app.core.log_broadcaster import LogBroadcaster
+from app.core.log.broadcaster import LogBroadcaster
 
 
 def test_process_log_paths_are_isolated_by_process_id():

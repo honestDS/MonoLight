@@ -3,7 +3,7 @@ from typing import Any
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.channel_router import select_channel
+from app.core.channel.router import select_channel
 from app.core.constants import FILE_TOOL_NAME, LEGACY_WRITE_FILE_TOOL_NAME
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.embedding.knowledge_base import build_knowledge_base_whitelist

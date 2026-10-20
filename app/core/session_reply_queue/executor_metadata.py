@@ -11,7 +11,7 @@ from app.core.constants import (
 )
 from app.core.crud.session.reply_provider_usage import session_reply_provider_usage_crud
 from app.core.crud.session.session import session_crud
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.i18n import t
 from app.core.session_reply_queue.executor_common import _metadata_with_work_order
 from app.core.utils.request_token_baseline import (

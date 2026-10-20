@@ -5,7 +5,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
-from app.core.dispatch_context import DispatchContext
+from app.core.dispatchers.context import DispatchContext
 from app.core.log import get_logger
 
 

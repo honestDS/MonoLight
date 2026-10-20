@@ -16,7 +16,7 @@ from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import TEMP_DIR
-from app.core.user_file_cleanup import recover_user_file_cleanup
+from app.core.user.file_cleanup import recover_user_file_cleanup
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)

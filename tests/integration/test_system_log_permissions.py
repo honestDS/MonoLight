@@ -16,7 +16,7 @@ import app.core.security as security
 from app.api.v1 import system
 from app.core.constants import ERR_ONLY_ADMIN_ALLOWED, ERR_UNAUTHORIZED, MSG_LOG_LIST_SUCCESS
 from app.core.i18n import t
-from app.core.log_broadcaster import LogBroadcaster
+from app.core.log.broadcaster import LogBroadcaster
 from app.handler import register_handlers
 from app.models.system_log import SystemLog
 from app.models.user import User

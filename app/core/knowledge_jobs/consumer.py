@@ -39,7 +39,7 @@ from app.core.crud.knowledge.job import (
 )
 from app.core.i18n import t
 from app.core.knowledge.organization_lifecycle import coordinate_organization_terminal
-from app.core.knowledge_base_collection_cleanup import process_pending_collection_cleanups
+from app.core.knowledge_jobs.collection_cleanup import process_pending_collection_cleanups
 from app.core.knowledge_jobs.executor import (
     KnowledgeJobCancelledError,
     KnowledgeJobDeterministicError,

@@ -18,7 +18,7 @@ from app.core.exceptions import ServerException
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import DEFAULT_LOCALE, get_available_locales, normalize_locale
 from app.core.log import get_logger
-from app.core.log_broadcaster import log_broadcaster
+from app.core.log.broadcaster import log_broadcaster
 from app.core.skills import delete_skill, list_skills
 from app.models.system_log import SystemLogResponse
 from app.models.system_setting import SystemRuntimeSettings

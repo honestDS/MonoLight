@@ -18,9 +18,9 @@ import app.providers.database as database_provider
 from app.api.v1 import chat as chat_api
 from app.core.constants import ERR_SESSION_NO_PERMISSION, ERR_SESSION_READ_ONLY
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.i18n import t
-from app.core.session_notifier import SessionNotifier
+from app.core.session.notifier import SessionNotifier
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.models.audit import AuditConfirmationClaim, AuditRecord
 from app.models.message import Message, MessageRole, MessageType

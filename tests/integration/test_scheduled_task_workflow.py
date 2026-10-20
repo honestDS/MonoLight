@@ -14,11 +14,11 @@ import app.core.audit.persistence as audit_persistence_module
 import app.core.audit.service as audit_service_module
 import app.core.background_tasks.scheduler as scheduler_module
 import app.core.crud.channel.cursor as channel_cursor_module
-import app.core.dispatcher as dispatcher_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_generation as interactive_generation_module
 from app.core.constants import MANAGE_SCHEDULED_TASKS_TOOL_NAME
 from app.core.crud.task.scheduled import scheduled_task_crud
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
 from app.core.utils.time import get_local_time

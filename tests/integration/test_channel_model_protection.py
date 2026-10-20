@@ -5,7 +5,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import channels
-from app.core.channel_model_protection import find_model_identity_update_conflict
+from app.core.channel.model_protection import find_model_identity_update_conflict
 from app.core.constants import ERR_KB_CHANNEL_IN_USE, ERR_KB_MODEL_IDENTITY_IN_USE, ERR_MEMORY_MODEL_IDENTITY_IN_USE
 from app.core.crud.channel.channel import channel_crud
 from app.core.exceptions import ParameterException

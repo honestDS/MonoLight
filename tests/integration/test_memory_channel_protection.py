@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import channels
 from app.core import crypto as crypto_module
-from app.core.channel_model_protection import (
+from app.core.channel.model_protection import (
     assert_channel_model_identity_update_allowed,
     assert_channel_not_referenced,
     finalize_pending_channel_model_deletions_for_organization_job,

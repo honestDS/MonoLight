@@ -27,8 +27,8 @@ from app.core.security import (
     get_current_user,
     get_password_hash,
 )
-from app.core.user_deletion import delete_user_data
-from app.core.user_file_cleanup import (
+from app.core.user.deletion import delete_user_data
+from app.core.user.file_cleanup import (
     cleanup_user_files,
     queue_user_file_cleanup,
 )
