@@ -26,8 +26,8 @@ import app.core.background_tasks.reply_trigger as reply_trigger_module
 import app.core.background_tasks.runner as runner_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.crud.session.reply_work_item as reply_work_item_module
-import app.core.dispatcher as dispatcher_module
 import app.core.dispatchers.background as background_dispatcher_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
@@ -35,7 +35,7 @@ import app.core.utils.llm_request_policy as llm_request_policy_module
 import app.tasks as tasks_module
 import app.transformers.openai.image_generation as image_generation_transformer_module
 from app.api.v1 import files as files_module
-from app.core.dispatchers import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.paths import get_user_temp_dir
 from app.core.security import get_current_user
 from app.core.tools import get_tools_for_profile

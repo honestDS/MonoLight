@@ -47,7 +47,7 @@ class MemoryJobControl:
                     status=LongTermMemoryMutationStatus.CANCELLED,
                 )
                 if cancellation.job.operation == LongTermMemoryMutationOperation.ORGANIZE:
-                    from app.core.channel_model_protection import finalize_pending_channel_model_deletions_for_organization_job
+                    from app.core.channel.model_protection import finalize_pending_channel_model_deletions_for_organization_job
 
                     await finalize_pending_channel_model_deletions_for_organization_job(
                         db,

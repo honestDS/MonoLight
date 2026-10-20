@@ -20,7 +20,7 @@ from app.core.crud.session.session import session_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.session_cleanup import delete_session_data
+from app.core.session.cleanup import delete_session_data
 from app.models.profile import Profile
 
 _PREVIEW_ITEM_LIMIT = 20

@@ -10,7 +10,7 @@ from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.constants import ERR_AUDIT_ROUND_BLOCKED, ERR_AUDIT_SERVICE_FAILED_STOP, MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel import cursor as channel_cursor_module
-from app.core.dispatchers import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.i18n import t
 from app.core.tools.shell import ShellExecutor
 from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request

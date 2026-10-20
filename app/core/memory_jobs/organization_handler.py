@@ -321,7 +321,7 @@ async def _submit_organization_plan(
                 if current.cancel_requested_at is not None:
                     raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
                 raise MemoryJobRetryableError(t(ERR_MEMORY_JOB_PUBLICATION_FAILED))
-            from app.core.channel_model_protection import finalize_pending_channel_model_deletions_for_organization_job
+            from app.core.channel.model_protection import finalize_pending_channel_model_deletions_for_organization_job
 
             await finalize_pending_channel_model_deletions_for_organization_job(db, job=parent_job)
             await db.commit()

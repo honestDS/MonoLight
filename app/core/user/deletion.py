@@ -12,7 +12,7 @@ from app.core.crud.system.log import system_log_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.crud.terminal.session import terminal_session_crud
-from app.core.session_cleanup import delete_session_data
+from app.core.session.cleanup import delete_session_data
 
 
 async def delete_user_data(db: AsyncSession, *, uid: str) -> list[str]:

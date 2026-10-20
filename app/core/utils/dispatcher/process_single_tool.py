@@ -28,7 +28,7 @@ from app.core.constants import (
     TOOL_TIMEOUT_EXCLUDED_TOOL_NAMES,
 )
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
-from app.core.dispatch_context import DispatchMode, build_dispatch_context
+from app.core.dispatchers.context import DispatchMode, build_dispatch_context
 from app.core.i18n import t
 from app.core.log import (
     LogManager,

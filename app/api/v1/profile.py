@@ -65,9 +65,9 @@ from app.core.memory.embedding_config import (
     normalize_profile_memory_for_update,
     preview_embedding_selection,
 )
-from app.core.profile_deletion import build_profile_deletion_impact, execute_profile_deletion
-from app.core.profile_permissions import get_profile_config_permissions, prepare_profile_configs
-from app.core.profile_validation import (
+from app.core.profile.deletion import build_profile_deletion_impact, execute_profile_deletion
+from app.core.profile.permissions import get_profile_config_permissions, prepare_profile_configs
+from app.core.profile.validation import (
     lock_profile_channel_references,
     validate_audit_model_config,
     validate_channel_configs,

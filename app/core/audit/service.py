@@ -18,7 +18,7 @@ from app.core.audit.context_budget import (
 )
 from app.core.audit.integrity import build_tool_round_integrity_snapshot, create_file_integrity_snapshot, serialize_tool_arguments
 from app.core.audit.persistence import persist_prepared_audit_round
-from app.core.channel_router import get_model_entry
+from app.core.channel.router import get_model_entry
 from app.core.constants import (
     AUDIT_HIGH_RISK_SCORE,
     ERR_AUDIT_CHANNEL_UNAVAILABLE,

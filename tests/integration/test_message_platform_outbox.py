@@ -223,7 +223,7 @@ async def test_outbound_text_event_skips_refinement_when_original_content_can_sp
     async def generate_reply(*args, **kwargs):
         raise AssertionError("refinement must not be called when the original text can split")
 
-    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
     event = {"type": "proactive_reply", "content": "a" * 6 + "\n" + "b" * 6}
 
     processed = await process_outbound_text_event(
@@ -273,7 +273,7 @@ async def test_outbound_text_refinement_stops_when_compressed_candidate_can_spli
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
 
     processed = await process_outbound_text_event(
         "uid",
@@ -342,7 +342,7 @@ async def test_outbound_text_refinement_uses_the_previous_round_result(monkeypat
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
 
     event = {"type": "proactive_reply", "content": "a" * 12}
     processed = await process_outbound_text_event(
@@ -391,7 +391,7 @@ async def test_outbound_text_refinement_keeps_candidate_after_unshortened_result
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
 
     processed = await process_outbound_text_event(
         "uid",
@@ -453,7 +453,7 @@ async def test_outbound_text_refinement_uses_fallback_after_three_oversized_roun
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
     monkeypatch.setattr(outbound_text_module, "_save_outbound_text_refinement_assistant_message", save_assistant_message)
 
     policy = OutboundTextPolicy(
@@ -504,7 +504,7 @@ async def test_outbound_text_refinement_reuses_persisted_assistant_result_for_sa
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
 
     event = {"event_id": "outbox:17", "type": "proactive_reply", "content": "a" * 20}
     policy = OutboundTextPolicy(

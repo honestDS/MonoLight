@@ -8,11 +8,11 @@ from app.adapters.base import BaseChatAdapter
 from app.core.audit.confirmation import build_confirmation_update_events
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_SESSION_ID_REQUIRED
 from app.core.crud.session.todo import session_todo_crud
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.profile_selection import resolve_profile_for_session
+from app.core.profile.selection import resolve_profile_for_session
 from app.core.session_reply_queue.manager import (
     build_session_reply_work_event_id,
     session_reply_queue_manager,

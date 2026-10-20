@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import _response_has_background_tasks, web_chat_adapter
 from app.core.audit.confirmation_lifecycle import stop_interactive_reply
-from app.core.channel_router import select_channel
+from app.core.channel.router import select_channel
 from app.core.constants import (
     DEFAULT_SESSION_GOAL_MODE,
     DEFAULT_SESSION_MAX_TURNS,
@@ -53,7 +53,7 @@ from app.core.crud.session.session import session_crud
 from app.core.crud.session.todo import session_todo_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.crud.task.background import background_task_crud
-from app.core.dispatcher import ChatDispatcher, format_exception_message
+from app.core.dispatchers.dispatcher import ChatDispatcher, format_exception_message
 from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException, ParameterException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
@@ -64,11 +64,12 @@ from app.core.log import (
     reset_system_log_locale,
     set_system_log_locale,
 )
-from app.core.profile_selection import resolve_profile_for_session
-from app.core.profile_validation import get_validated_profile_for_assignment
+from app.core.profile.selection import resolve_profile_for_session
+from app.core.profile.validation import get_validated_profile_for_assignment
 from app.core.security import get_current_user
-from app.core.session_cleanup import delete_session_data
-from app.core.session_notifier import session_notifier
+from app.core.session.cleanup import delete_session_data
+from app.core.session.notifier import session_notifier
+from app.core.session.source import default_show_tool_calls_for_source
 from app.core.session_reply_queue.manager import (
     build_input_accepted_event,
     build_input_queued_event,
@@ -76,7 +77,6 @@ from app.core.session_reply_queue.manager import (
     is_submission_queued,
     session_reply_queue_manager,
 )
-from app.core.session_source import default_show_tool_calls_for_source
 from app.core.utils.file_access import validate_web_message_files
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers

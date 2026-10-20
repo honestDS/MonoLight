@@ -11,9 +11,9 @@ from sqlalchemy import update
 from sqlmodel import select
 
 import app.core.crud.channel.cursor as channel_cursor_module
-import app.core.dispatcher as dispatcher_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.message_platforms.notifier as message_platform_notifier_module
-import app.core.session_notifier as session_notifier_module
+import app.core.session.notifier as session_notifier_module
 import app.core.session_reply_queue.consumer as consumer_module
 import app.core.session_reply_queue.executor_interactive as executor_interactive_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module

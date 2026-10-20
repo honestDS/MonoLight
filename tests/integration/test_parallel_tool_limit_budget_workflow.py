@@ -11,7 +11,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
-import app.core.dispatcher as dispatcher_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_tools as interactive_tools
 from app.core.constants import END_SESSION_TOOL_NAME
 from app.core.dispatchers import background as background_module

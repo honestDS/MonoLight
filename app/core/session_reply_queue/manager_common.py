@@ -11,7 +11,7 @@ from app.core.constants import (
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.session_source import default_show_tool_calls_for_source
+from app.core.session.source import default_show_tool_calls_for_source
 from app.core.utils.context_messages import to_jsonable
 from app.models.message import Message
 from app.models.session_reply_work_item import (

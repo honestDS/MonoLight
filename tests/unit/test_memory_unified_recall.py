@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.dispatch_context import build_dispatch_context
+from app.core.dispatchers.context import build_dispatch_context
 from app.core.knowledge import unified_recall
 from app.core.knowledge.results import (
     KnowledgeRecallItem,

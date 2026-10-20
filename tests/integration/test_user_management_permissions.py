@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 import app.core.security as security
-import app.core.user_file_cleanup as file_cleanup
+import app.core.user.file_cleanup as file_cleanup
 from app.api.v1 import auth, users
 from app.core.audit.startup import recover_and_cleanup_audit_data
 from app.core.audit.storage import write_audit_json
@@ -33,7 +33,7 @@ from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.knowledge_jobs.executor import KnowledgeJobExecutionContext, KnowledgeJobLeaseLostError
 from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobLeaseLostError
-from app.core.user_file_cleanup import cleanup_user_files, recover_user_file_cleanup
+from app.core.user.file_cleanup import cleanup_user_files, recover_user_file_cleanup
 from app.handler import register_handlers
 from app.models.audit import AuditRecord, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus

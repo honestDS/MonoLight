@@ -8,9 +8,9 @@ import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-import app.core.session_notifier as session_notifier_module
+import app.core.session.notifier as session_notifier_module
 from app.core.crud.session.event import session_event_crud
-from app.core.session_notifier import SessionNotifier
+from app.core.session.notifier import SessionNotifier
 from app.core.utils.time import get_local_time
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary

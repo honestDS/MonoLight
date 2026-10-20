@@ -14,7 +14,7 @@ from app.core.crud.profile.profile import profile_crud
 from app.core.crud.profile.prompt import prompt_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import ParameterException, ServerException
-from app.core.profile_validation import validate_channel_configs
+from app.core.profile.validation import validate_channel_configs
 from app.core.security import create_access_token, get_password_hash
 from app.models.channel import (
     ChannelCreate,

@@ -13,7 +13,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
-import app.core.dispatcher as dispatcher_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_generation as interactive_generation_module
 import app.core.dispatchers.interactive_runtime as interactive_runtime_module
 import app.core.dispatchers.memory.request as memory_request_module
@@ -30,7 +30,7 @@ from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.prompts import LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
 from app.core.security import get_current_user
-from app.core.session_notifier import SessionNotifier
+from app.core.session.notifier import SessionNotifier
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_audit as executor_audit_module
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module

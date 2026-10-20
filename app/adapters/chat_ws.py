@@ -6,12 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import BaseChatAdapter
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_SESSION_ID_REQUIRED
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.profile_selection import resolve_profile_for_session
-from app.core.session_notifier import session_notifier
+from app.core.profile.selection import resolve_profile_for_session
+from app.core.session.notifier import session_notifier
 from app.core.session_reply_queue.manager import (
     build_input_accepted_event,
     build_input_queued_event,

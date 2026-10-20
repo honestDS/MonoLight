@@ -10,16 +10,16 @@ import pytest_asyncio
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core import profile_deletion as profile_deletion_module
 from app.core.crud.profile.profile import profile_crud
-from app.core.dispatch_context import build_dispatch_context
+from app.core.dispatchers.context import build_dispatch_context
 from app.core.knowledge import deletion as deletion_module
 from app.core.knowledge.deletion import delete_owned_knowledge_base
 from app.core.knowledge.errors import ManagedKnowledgeContainerConflictError
 from app.core.knowledge.managed import managed_knowledge_service
 from app.core.knowledge.managed_container import get_or_create_managed_knowledge_base
 from app.core.knowledge_jobs import manager as knowledge_job_manager_module
-from app.core.profile_deletion import execute_profile_deletion
+from app.core.profile import deletion as profile_deletion_module
+from app.core.profile.deletion import execute_profile_deletion
 from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
     LongTermMemoryExecutor,

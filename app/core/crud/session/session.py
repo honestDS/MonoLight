@@ -7,7 +7,7 @@ from sqlmodel import select
 from app.core.crud.base import CRUDBase
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.profile.profile import profile_crud
-from app.core.session_source import default_show_tool_calls_for_source
+from app.core.session.source import default_show_tool_calls_for_source
 from app.core.utils.request_token_baseline import MAIN_DIALOGUE_REQUEST_PURPOSE
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus

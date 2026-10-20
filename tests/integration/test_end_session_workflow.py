@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import select
 
 import app.core.crud.channel.cursor as channel_cursor_module
-import app.core.dispatcher as dispatcher_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 from app.core.constants import (
     END_SESSION_TOOL_NAME,
     ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
@@ -19,8 +19,8 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASE_FINALIZING,
     MANAGE_TODO_TOOL_NAME,
 )
-from app.core.dispatcher import ChatDispatcher
 from app.core.dispatchers import interactive_generation as interactive_generation_module
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import LLMModelCapabilityException, ServerException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale

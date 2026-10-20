@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import channel_router
+from app.core.channel import router as channel_router
 from app.models.channel import ChannelConfig
 
 

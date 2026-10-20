@@ -12,8 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
-import app.core.dispatcher as dispatcher_module
 import app.core.dispatchers.background as background_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_tools as interactive_tools_module
 from app.core.audit.confirmation_persistence import persist_pending_confirmation_bundle
 from app.core.audit.integrity import build_tool_round_integrity_snapshot

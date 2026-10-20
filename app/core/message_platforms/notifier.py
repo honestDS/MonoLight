@@ -14,8 +14,8 @@ from app.core.message_platforms.outbound_text import (
     process_outbound_text_event,
 )
 from app.core.message_platforms.tool_output import combine_proactive_reply_tool_output
-from app.core.session_notifier import session_notifier
-from app.core.session_source import is_web_session_source
+from app.core.session.notifier import session_notifier
+from app.core.session.source import is_web_session_source
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)

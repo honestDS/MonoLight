@@ -16,7 +16,7 @@ from sqlmodel import select
 import app.adapters.weixin_openclaw.adapter as weixin_openclaw_adapter_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.crypto
-import app.core.dispatcher as dispatcher_module
+import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.message_platforms.manager as message_platform_manager_module
 import app.core.message_platforms.notifier as message_platform_notifier_module
 import app.core.message_platforms.weixin_openclaw as weixin_openclaw_platform_module
@@ -30,8 +30,8 @@ from app.core.constants import (
     ERR_SESSION_NO_PERMISSION,
 )
 from app.core.crud.message_platform.platform import message_platform_crud
-from app.core.dispatcher import ChatDispatcher
 from app.core.dispatchers import interactive_generation as interactive_generation_module
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.message_platforms.manager import MessagePlatformPollingManager

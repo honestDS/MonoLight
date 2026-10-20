@@ -14,7 +14,7 @@ from pydantic import BaseModel, field_validator
 from pydantic import Field as PydanticField
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.channel_model_protection import (
+from app.core.channel.model_protection import (
     MemoryOrganizationModelUpdateImpact,
     adapt_memory_organization_settings_for_channel_model_update,
     assert_channel_model_identity_update_allowed,

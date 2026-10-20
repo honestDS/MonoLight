@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 import app.core.crypto as crypto_module
-import app.core.profile_permissions as profile_permissions_module
+import app.core.profile.permissions as profile_permissions_module
 import app.core.security as security
 from app.api.v1.profile import router
 from app.core.crud.channel.channel import channel_crud

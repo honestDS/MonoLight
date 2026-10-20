@@ -7,7 +7,7 @@ import pytest
 
 import app.core.tools.shell as shell_module
 from app.core.constants import ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED
-from app.core.dispatch_context import DispatchContext
+from app.core.dispatchers.context import DispatchContext
 from app.core.i18n import t
 from app.core.terminal import (
     ALL_TERMINAL_ACTIONS,

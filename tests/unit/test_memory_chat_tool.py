@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.dispatch_context import build_dispatch_context
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
+from app.core.dispatchers.context import build_dispatch_context
 from app.core.exceptions import BaseBusinessException
 from app.core.memory import MemoryContentTooLongError, MemoryRecallItem, MemoryRecallResult, MemoryRecallStatus
 from app.core.prompts import LONGTERM_MEMORY_SYSTEM_PROMPT

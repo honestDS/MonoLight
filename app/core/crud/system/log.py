@@ -7,7 +7,7 @@ from sqlmodel import desc, select
 
 from app.core.crud.base import CRUDBase
 from app.core.crud.system.setting import system_setting_crud
-from app.core.log_redaction import redact_log_text
+from app.core.log.redaction import redact_log_text
 from app.core.utils.time import get_local_time
 from app.models.system_log import SystemLog, SystemLogCreate
 

@@ -5,9 +5,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlmodel import select
 
-import app.core.session_notifier as session_notifier_module
+import app.core.session.notifier as session_notifier_module
 from app.core.crud.session.event import session_event_crud
-from app.core.session_notifier import SessionNotifier, build_session_event_dedupe_key
+from app.core.session.notifier import SessionNotifier, build_session_event_dedupe_key
 from app.core.utils.time import get_local_time
 from app.models.session import ChatSession
 from app.models.session_event import SessionEvent

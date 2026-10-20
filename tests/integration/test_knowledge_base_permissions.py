@@ -15,7 +15,7 @@ from sqlmodel import select
 import app.core.security as security
 from app.api.v1 import auth, knowledge_base
 from app.core.constants import ERR_SESSION_NO_PERMISSION, ERR_UNAUTHORIZED, ERR_USER_NOT_FOUND
-from app.core.dispatch_context import build_dispatch_context
+from app.core.dispatchers.context import build_dispatch_context
 from app.core.i18n import t
 from app.core.knowledge.managed import build_managed_knowledge_snapshot
 from app.core.tools.longterm_memory import LongTermMemoryExecutor

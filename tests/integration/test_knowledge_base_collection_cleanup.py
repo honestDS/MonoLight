@@ -30,7 +30,7 @@ with (
     patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient),
     patch.object(app_paths, "ensure_data_dirs"),
 ):
-    cleanup_service = importlib.import_module("app.core.knowledge_base_collection_cleanup")
+    cleanup_service = importlib.import_module("app.core.knowledge_jobs.collection_cleanup")
     chroma_module = importlib.import_module("app.providers.vector.chroma")
 
 
