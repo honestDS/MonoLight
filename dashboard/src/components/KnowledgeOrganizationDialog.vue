@@ -69,6 +69,7 @@ defineExpose({ open: showOrganizationDialog })
     v-model="organizationDialogVisible"
     width="1020px"
     class="standard-dialog organization-dialog dialog-with-scroll-body"
+    center
     align-center
     @closed="stopOrganizationPolling"
   >
@@ -149,67 +150,73 @@ defineExpose({ open: showOrganizationDialog })
       :description="t('knowledgeBase.organization_no_jobs')"
     />
     <details v-if="organizationDialogVisible && organizationJobs.length > 1" class="organization-history">
-      <summary class="organization-history__summary">{{ t('knowledgeBase.organization_history') }}</summary>
-      <el-table
-        :data="organizationJobs.slice(1)"
-        :loading="organizationLoading"
-        :row-key="getOrganizationJobId"
-        max-height="240"
-        class="organization-job-table"
-      >
-        <el-table-column type="expand" width="76" :label="t('knowledgeBase.organization_details')">
-          <template #default="{ row }">
-            <div class="organization-history-details">
-              <div>{{ t('knowledgeBase.organization_snapshot') }}: {{ getOrganizationSnapshotId(row) }}</div>
-              <div>{{ t('knowledgeBase.organization_stage_progress') }}: {{ getOrganizationStageProgress(row) }}</div>
-              <div>{{ t('knowledgeBase.organization_fragment_progress') }}: {{ getOrganizationFragmentProgress(row) }}</div>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('knowledgeBase.organization_job_id')" width="90" align="center">
-          <template #default="{ row }">{{ getOrganizationJobId(row) || '-' }}</template>
-        </el-table-column>
-        <el-table-column :label="t('knowledgeBase.organization_status')" width="148" align="center">
-          <template #default="{ row }">
-            <el-tag :type="getOrganizationStatusType(row.status)">
-              {{ getOrganizationStatusLabel(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('knowledgeBase.organization_counts')" min-width="220">
-          <template #default="{ row }">
-            <div class="organization-history__result">
-              <div>{{ getOrganizationCountsText(row) }}</div>
-              <div v-if="row.status === 'failed'" class="organization-history__error">{{ row.error || t('knowledgeBase.organization_error') }}</div>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('knowledgeBase.actions')" width="200" align="center" fixed="right">
-          <template #default="{ row }">
-            <div class="action-buttons">
-              <el-button
-                v-if="canCancelOrganizationJob(row)"
-                type="warning"
-                size="small"
-                :loading="organizationActionJobId === getOrganizationJobId(row)"
-                @click="handleCancelOrganizationJob(row)"
-              >
-                {{ t('knowledgeBase.organization_cancel') }}
-              </el-button>
-              <el-button
-                v-if="canRetryOrganizationJob(row)"
-                type="primary"
-                size="small"
-                :loading="organizationActionJobId === getOrganizationJobId(row)"
-                @click="handleRetryOrganizationJob(row)"
-              >
-                {{ t('knowledgeBase.organization_retry') }}
-              </el-button>
-              <span v-if="!canCancelOrganizationJob(row) && !canRetryOrganizationJob(row)">-</span>
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
+      <summary class="organization-history__summary">
+        <span class="organization-history__title">{{ t('knowledgeBase.organization_history') }}</span>
+        <el-tag class="organization-history__count" size="small" type="info" effect="plain">{{ organizationJobs.length - 1 }}</el-tag>
+        <el-icon class="organization-history__icon" aria-hidden="true"><ArrowRight /></el-icon>
+      </summary>
+      <div class="organization-history__body">
+        <el-table
+          :data="organizationJobs.slice(1)"
+          :loading="organizationLoading"
+          :row-key="getOrganizationJobId"
+          max-height="240"
+          class="organization-job-table"
+        >
+          <el-table-column type="expand" width="76" :label="t('knowledgeBase.organization_details')">
+            <template #default="{ row }">
+              <div class="organization-history-details">
+                <div>{{ t('knowledgeBase.organization_snapshot') }}: {{ getOrganizationSnapshotId(row) }}</div>
+                <div>{{ t('knowledgeBase.organization_stage_progress') }}: {{ getOrganizationStageProgress(row) }}</div>
+                <div>{{ t('knowledgeBase.organization_fragment_progress') }}: {{ getOrganizationFragmentProgress(row) }}</div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column :label="t('knowledgeBase.organization_job_id')" width="90" align="center">
+            <template #default="{ row }">{{ getOrganizationJobId(row) || '-' }}</template>
+          </el-table-column>
+          <el-table-column :label="t('knowledgeBase.organization_status')" width="148" align="center">
+            <template #default="{ row }">
+              <el-tag :type="getOrganizationStatusType(row.status)">
+                {{ getOrganizationStatusLabel(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column :label="t('knowledgeBase.organization_counts')" min-width="220">
+            <template #default="{ row }">
+              <div class="organization-history__result">
+                <div>{{ getOrganizationCountsText(row) }}</div>
+                <div v-if="row.status === 'failed'" class="organization-history__error">{{ row.error || t('knowledgeBase.organization_error') }}</div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column :label="t('knowledgeBase.actions')" width="200" align="center" fixed="right">
+            <template #default="{ row }">
+              <div class="action-buttons">
+                <el-button
+                  v-if="canCancelOrganizationJob(row)"
+                  type="warning"
+                  size="small"
+                  :loading="organizationActionJobId === getOrganizationJobId(row)"
+                  @click="handleCancelOrganizationJob(row)"
+                >
+                  {{ t('knowledgeBase.organization_cancel') }}
+                </el-button>
+                <el-button
+                  v-if="canRetryOrganizationJob(row)"
+                  type="primary"
+                  size="small"
+                  :loading="organizationActionJobId === getOrganizationJobId(row)"
+                  @click="handleRetryOrganizationJob(row)"
+                >
+                  {{ t('knowledgeBase.organization_retry') }}
+                </el-button>
+                <span v-if="!canCancelOrganizationJob(row) && !canRetryOrganizationJob(row)">-</span>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
     </details>
   </el-dialog>
 </template>
