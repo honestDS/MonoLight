@@ -78,6 +78,7 @@ defineExpose({ openCreate, openEdit, canLeave, requestClose })
     class="standard-dialog dialog-with-scroll-body knowledge-entry-editor-dialog"
     modal-class="knowledge-entry-editor"
     width="840px"
+    center
     align-center
     :show-close="!submitting"
     :before-close="handleBeforeClose"

@@ -237,68 +237,15 @@
 
 .knowledge-entry-editor-dialog,
 .knowledge-entry-dialog {
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
   max-width: calc(100vw - 64px);
-  max-height: calc(100vh - 64px);
-  padding: 0;
-  color: var(--color-slate-900);
-  background: var(--color-white);
-  border-radius: var(--radius-12);
-
-  .el-dialog__header {
-    position: relative;
-    flex: 0 0 auto;
-    box-sizing: border-box;
-    margin: 0;
-    padding: 22px 68px 18px 28px;
-    border-bottom: 1px solid var(--color-border-light);
-  }
 
   .el-dialog__title {
-    display: block;
-    color: var(--color-slate-900);
-    font-size: 18px;
-    font-weight: 600;
-    line-height: 1.4;
     overflow-wrap: anywhere;
-  }
-
-  .el-dialog__headerbtn {
-    top: 16px;
-    right: 20px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius-6);
   }
 
   .el-dialog__headerbtn:focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
-  }
-
-  .el-dialog__close {
-    color: var(--color-slate-500);
-    font-size: 16px;
-  }
-
-  .el-dialog__body {
-    flex: 1 1 auto;
-    box-sizing: border-box;
-    min-height: 0;
-    padding: 20px 28px 24px;
-    overflow-y: auto;
-  }
-
-  .el-dialog__footer {
-    flex: 0 0 auto;
-    box-sizing: border-box;
-    padding: 16px 28px;
-    border-top: 1px solid var(--color-border-light);
   }
 }
 
@@ -641,32 +588,8 @@
     width: 100%;
   }
 
-  .knowledge-entry-editor-footer {
-    display: flex;
-    align-items: center;
-    gap: 24px;
-  }
-
   .knowledge-entry-editor-footer > .knowledge-entry-help {
-    flex: 1 1 auto;
-    width: auto;
-    margin: 0;
-    line-height: 1.5;
-  }
-
-  .knowledge-entry-editor-footer__actions {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 10px;
-    margin-left: auto;
-  }
-
-  .knowledge-entry-editor-footer__actions .el-button {
-    height: 40px;
-    margin: 0;
-    padding: 0 20px !important;
-    border-radius: var(--radius-8);
+    margin: 0 0 12px;
   }
 }
 

@@ -378,6 +378,7 @@ const updateHistoryVisibility = visible => {
       :title="detailTitle"
       width="800px"
       class="standard-dialog dialog-with-scroll-body knowledge-entry-dialog"
+      center
       align-center
       @update:model-value="updateDetailVisibility"
     >
@@ -398,6 +399,7 @@ const updateHistoryVisibility = visible => {
       :title="historyTitle"
       width="980px"
       class="standard-dialog dialog-with-scroll-body knowledge-entry-dialog"
+      center
       align-center
       @update:model-value="updateHistoryVisibility"
     >
