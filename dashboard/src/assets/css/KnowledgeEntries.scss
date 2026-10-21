@@ -1,0 +1,236 @@
+.knowledge-entries-view {
+  min-width: 0;
+}
+
+.knowledge-entries-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  min-width: 0;
+  margin-bottom: 16px;
+
+  h2 {
+    min-width: 0;
+    margin: 0;
+    color: var(--color-text-main);
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  .el-button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .knowledge-entries-meta {
+    flex: 1 1 260px;
+    min-width: 0;
+  }
+}
+
+.knowledge-entries-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  min-width: 0;
+  color: var(--color-text-regular);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.knowledge-entries-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  width: 100%;
+  min-width: 0;
+
+  > :first-child {
+    flex: 1 1 280px;
+    min-width: 0;
+  }
+
+  .el-input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .el-button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+}
+
+.knowledge-entries-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+
+  .el-input {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+
+  .el-button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+}
+
+.knowledge-entries-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .el-button {
+    margin-left: 0;
+  }
+}
+
+.knowledge-entry-name,
+.knowledge-entry-source {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.knowledge-entry-preview {
+  box-sizing: border-box;
+  max-height: 60vh;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  color: var(--color-text-regular);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--color-slate-50);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-6);
+}
+
+.knowledge-entry-editor {
+  .el-dialog {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    width: min(840px, calc(100vw - 64px)) !important;
+    max-height: calc(100vh - 64px);
+    margin: 32px auto !important;
+    color: var(--color-text-main);
+    background-color: var(--color-bg-base);
+  }
+
+  .el-dialog__header,
+  .el-dialog__footer {
+    flex: 0 0 auto;
+  }
+
+  .el-dialog__body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .el-form {
+    margin-top: 16px;
+  }
+
+  .el-alert {
+    margin-top: 12px;
+  }
+
+}
+
+.knowledge-entry-mode {
+  margin: 16px 0;
+}
+
+.knowledge-entry-target {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 12px 14px;
+  color: var(--color-text-regular);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  background: var(--color-slate-50);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-8);
+}
+
+.knowledge-entry-help {
+  min-width: 0;
+  color: var(--color-text-regular);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.knowledge-entry-file-action {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+  margin: 12px 0;
+  color: var(--color-text-regular);
+  overflow-wrap: anywhere;
+
+  .el-button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+}
+
+.knowledge-entry-advanced {
+  min-width: 0;
+  padding: 10px 14px;
+  color: var(--color-text-regular);
+  background: var(--color-slate-50);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-6);
+
+  summary {
+    display: list-item;
+    min-height: 24px;
+    color: var(--color-text-main);
+    font-weight: 600;
+    line-height: 1.5;
+    cursor: pointer;
+  }
+
+  summary:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 3px;
+    border-radius: var(--radius-6);
+  }
+
+  fieldset {
+    min-width: 0;
+    margin: 0;
+    padding: 12px 0 0;
+    border: 0;
+  }
+}
+
+.knowledge-entry-status-error {
+  max-height: 100px;
+  min-width: 0;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  color: var(--color-danger);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--color-danger-soft);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-6);
+}

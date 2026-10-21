@@ -9,7 +9,6 @@ import { createI18n } from 'vue-i18n'
 import { getKnowledgeBaseProfileLabel } from '../src/utils/knowledgeBaseManagement.js'
 import * as knowledgeBaseManagement from '../src/utils/knowledgeBaseManagement.js'
 import * as knowledgeBaseMigration from '../src/utils/knowledgeBaseMigration.js'
-import * as requestTaskManager from '../src/utils/requestTaskManager.js'
 import { createKnowledgeBaseScope } from '../src/utils/knowledgeBaseScope.js'
 import { useUserPermissionsStore } from '../src/composables/useUserPermissions.js'
 import zhCommon from '../src/i18n/locales/zh/common.js'
@@ -21,20 +20,8 @@ const useKnowledgeBaseViewSource = readFileSync(
   new URL('../src/composables/knowledgeBase/useKnowledgeBaseView.js', import.meta.url),
   'utf8',
 )
-const useKnowledgeBaseDocumentsSource = readFileSync(
-  new URL('../src/composables/knowledgeBase/useKnowledgeBaseDocuments.js', import.meta.url),
-  'utf8',
-)
 const useKnowledgeBaseQueryTestSource = readFileSync(
   new URL('../src/composables/knowledgeBase/useKnowledgeBaseQueryTest.js', import.meta.url),
-  'utf8',
-)
-const useManagedKnowledgeSource = readFileSync(
-  new URL('../src/composables/knowledgeBase/useManagedKnowledge.js', import.meta.url),
-  'utf8',
-)
-const useKnowledgeOrganizationSource = readFileSync(
-  new URL('../src/composables/knowledgeBase/useKnowledgeOrganization.js', import.meta.url),
   'utf8',
 )
 
@@ -59,10 +46,7 @@ const stripImports = sourceText => {
 
 const stripModuleSyntax = sourceText => stripImports(sourceText).replace(/\bexport\s+/g, '')
 const useKnowledgeBaseViewScript = stripModuleSyntax(useKnowledgeBaseViewSource)
-const useKnowledgeBaseDocumentsScript = stripModuleSyntax(useKnowledgeBaseDocumentsSource)
 const useKnowledgeBaseQueryTestScript = stripModuleSyntax(useKnowledgeBaseQueryTestSource)
-const useManagedKnowledgeScript = stripModuleSyntax(useManagedKnowledgeSource)
-const useKnowledgeOrganizationScript = stripModuleSyntax(useKnowledgeOrganizationSource)
 const dataResponse = data => ({ data: { data } })
 const normalize = value => JSON.parse(JSON.stringify(value))
 const deferred = () => {
@@ -110,22 +94,7 @@ const createHarness = async (t, options = {}) => {
     repairs: [],
     gets: [],
     migrations: [],
-    documents: [],
-    document: [],
-    importDocument: [],
-    deleteDocument: [],
-    managedItems: [],
-    managedItem: [],
-    managedHistory: [],
-    createManagedItem: [],
-    updateManagedItem: [],
-    deleteManagedItem: [],
-    retryManagedItem: [],
     queryTest: [],
-    organizationJobs: [],
-    organize: [],
-    cancelOrganizationJob: [],
-    retryOrganizationJob: [],
   }
   const createApiMethod = (method, getFields, defaultData) => (...args) => {
     const request = { method, ...getFields(...args) }
@@ -206,71 +175,10 @@ const createHarness = async (t, options = {}) => {
         target_embedding_model_id: payload.embedding_model_id,
       }))
     },
-    documents: createApiMethod('documents', (id, params) => ({ id, params: { ...params } }), {
-      items: [],
-      total: 0,
-    }),
-    document: createApiMethod('document', (id, docId) => ({ id, docId }), { content: '' }),
-    importDocument: createApiMethod('importDocument', (id, payload) => ({ id, payload }), {
-      status: 'accepted',
-    }),
-    deleteDocument: createApiMethod('deleteDocument', (id, docId) => ({ id, docId }), {
-      status: 'accepted',
-    }),
-    managedItems: createApiMethod('managedItems', (id, params, config) => ({
-      id,
-      params: { ...params },
-      config: config ? { ...config } : config,
-    }), {
-      items: [],
-      total: 0,
-    }),
-    managedItem: createApiMethod('managedItem', (id, itemId) => ({ id, itemId }), (id, itemId) => ({
-      id: itemId,
-      knowledge_key: 'key',
-      content: '',
-      version: 1,
-      llm_maintainable: false,
-    })),
-    managedHistory: createApiMethod('managedHistory', (id, itemId) => ({ id, itemId }), []),
-    createManagedItem: createApiMethod('createManagedItem', (id, payload) => ({ id, payload }), {
-      status: 'created',
-    }),
-    updateManagedItem: createApiMethod('updateManagedItem', (id, itemId, payload) => ({
-      id,
-      itemId,
-      payload,
-    }), { status: 'updated' }),
-    deleteManagedItem: createApiMethod('deleteManagedItem', (id, itemId, payload) => ({
-      id,
-      itemId,
-      payload,
-    }), { status: 'deleted' }),
-    retryManagedItem: createApiMethod('retryManagedItem', (id, itemId, payload) => ({
-      id,
-      itemId,
-      payload,
-    }), { status: 'retry_submitted' }),
     queryTest: createApiMethod('queryTest', (id, params) => ({ id, params: { ...params } }), {
       items: [],
       retrieval_mode: null,
       rerank_error: null,
-    }),
-    organizationJobs: createApiMethod('organizationJobs', (id, params) => ({
-      id,
-      params: { ...params },
-    }), {
-      items: [],
-      total: 0,
-    }),
-    organize: createApiMethod('organize', (id, payload) => ({ id, payload }), {
-      status: 'accepted',
-    }),
-    cancelOrganizationJob: createApiMethod('cancelOrganizationJob', (id, jobId) => ({ id, jobId }), {
-      status: 'accepted',
-    }),
-    retryOrganizationJob: createApiMethod('retryOrganizationJob', (id, jobId) => ({ id, jobId }), {
-      status: 'accepted',
     }),
   }
 
@@ -327,12 +235,9 @@ const createHarness = async (t, options = {}) => {
   })
   const scope = effectScope()
   const context = vm.createContext({
-    AbortController,
-    Blob,
     computed,
     ElMessage,
     ElMessageBox,
-    FormData,
     formatTime: value => value,
     adminApi,
     knowledgeBaseApi,
@@ -343,7 +248,6 @@ const createHarness = async (t, options = {}) => {
     onMounted: callback => mountedCallbacks.push(callback),
     reactive,
     ref,
-    ...requestTaskManager,
     watch,
     useI18n: () => ({
       t: (key, params) => i18n.global.t(
@@ -360,8 +264,7 @@ const createHarness = async (t, options = {}) => {
 
   scope.run(() => {
     vm.runInContext(
-      `${useKnowledgeBaseDocumentsScript}\n${useKnowledgeBaseQueryTestScript}\n` +
-      `${useManagedKnowledgeScript}\n${useKnowledgeOrganizationScript}\n` +
+      `${useKnowledgeBaseQueryTestScript}\n` +
       `${useKnowledgeBaseViewScript}\n` +
       'globalThis.__module = useKnowledgeBaseView()',
       context,
@@ -2012,37 +1915,19 @@ test('routes the more-menu repair action through confirmation and repairs only t
   assert.equal(repaired.module.selectedKb.value.id, row.id)
 })
 
-test('clears loaded knowledge-base state on identity changes and unmount', async t => {
+test('clears loaded list, owner, repair, migration, and query state on scope changes', async t => {
   const oldKb = {
     id: 'kb-old-owner-scope',
     uid: 'admin-user',
     username: 'Administrator',
     name: 'Old owner knowledge base',
     description: 'Old description',
-    knowledge_base_type: 'llm_managed',
+    knowledge_base_type: 'user',
     embedding_channel_id: 2,
     embedding_model_id: 'embedding-v2',
     migration_status: 'building',
     target_embedding_channel_id: 3,
     target_embedding_model_id: 'embedding-v3',
-  }
-  const documentKb = {
-    id: 'kb-old-document-scope',
-    uid: oldKb.uid,
-    username: oldKb.username,
-    name: 'Old document knowledge base',
-    knowledge_base_type: 'user',
-    embedding_channel_id: 2,
-    embedding_model_id: 'embedding-v2',
-  }
-  const document = { id: 'doc-secret', filename: 'secret-old-document.txt' }
-  const managedItem = {
-    id: 'managed-secret',
-    knowledge_key: 'secret-managed-key',
-    content: 'secret managed list content',
-    version: 3,
-    llm_maintainable: true,
-    pending_job_id: 'publication-job-3',
   }
   const users = [
     { uid: 'admin-user', username: 'Administrator' },
@@ -2051,11 +1936,13 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
 
   for (const action of ['uid', 'role', 'clear', 'unmount']) {
     let listCalls = 0
+    const confirmation = deferred()
     const harness = await createHarness(t, {
       superuser: true,
       currentUid: 'admin-user',
       currentUsername: 'Administrator',
       users,
+      confirm: () => confirmation.promise,
       list: () => {
         listCalls += 1
         const items = listCalls === 1 ? [oldKb] : []
@@ -2069,31 +1956,6 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
         }))
       },
       get: () => Promise.resolve(dataResponse(oldKb)),
-      documents: () => Promise.resolve(dataResponse({ items: [document], total: 1 })),
-      document: () => Promise.resolve(dataResponse({ content: 'secret original document text' })),
-      managedItems: () => Promise.resolve(dataResponse({ items: [managedItem], total: 1 })),
-      managedItem: () => Promise.resolve(dataResponse({
-        id: managedItem.id,
-        knowledge_key: 'secret-managed-key',
-        content: 'secret managed detail content',
-        version: 4,
-        llm_maintainable: true,
-      })),
-      managedHistory: () => Promise.resolve(dataResponse([{
-        id: 'managed-history-1',
-        knowledge_key: 'secret-managed-key',
-        content: 'secret managed history content',
-      }])),
-      organizationJobs: () => Promise.resolve(dataResponse({
-        items: [{
-          job_id: 'organization-job-1',
-          knowledge_base_id: oldKb.id,
-          status: 'running',
-          child_job_count: 1,
-          child_terminal_count: 0,
-        }],
-        total: 1,
-      })),
       queryTest: () => Promise.resolve(dataResponse({
         items: [{ id: 'query-result-1', content: 'secret query result' }],
         retrieval_mode: 'hybrid',
@@ -2101,25 +1963,11 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
       })),
     })
     const module = harness.module
-    module.formRef.value = {
-      resetFields() {},
-      clearValidate() {},
-      validate: async callback => {
-        if (callback) await callback(true)
-        return true
-      },
-    }
-    module.importFormRef.value = {
-      resetFields() {},
-      clearValidate() {},
-      validateField() {},
-    }
-    module.managedKnowledgeFormRef.value = { clearValidate() {} }
+    module.formRef.value = { resetFields() {}, clearValidate() {} }
     module.queryTestFormRef.value = {
       clearValidate() {},
       validate: async callback => {
         if (callback) await callback(true)
-        return true
       },
     }
 
@@ -2129,48 +1977,30 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
     module.showEditDialog(oldKb)
     await module.showRepairDialog()
     await module.showMigrationDialog(oldKb)
-    await module.showDocumentDialog(documentKb)
-    await module.showContentDialog(document)
-    module.showImportDialog(documentKb)
-    const rawFile = new Blob(['secret selected upload contents'], { type: 'text/plain' })
-    const uploadFile = { name: 'secret-upload.txt', raw: rawFile }
-    module.handleFileChange(uploadFile, [uploadFile])
-    await module.showManagedKnowledgeDialog(oldKb)
-    await module.showManagedKnowledgeEditDialog(managedItem)
-    await module.showManagedKnowledgeHistory(managedItem)
-    await module.showOrganizationDialog()
     module.showQueryTestDialog(oldKb)
     module.queryTestForm.query = 'secret query text'
     module.queryTestForm.top_k = 7
     await module.submitQueryTest()
+    const pendingDelete = module.handleDelete(oldKb)
+    await flushPromises()
 
     const dialogs = [
       module.dialogVisible,
       module.repairDialogVisible,
       module.migrationDialogVisible,
-      module.importDialogVisible,
-      module.documentDialogVisible,
-      module.contentDialogVisible,
-      module.managedKnowledgeDialogVisible,
-      module.managedKnowledgeEditDialogVisible,
-      module.managedKnowledgeHistoryDialogVisible,
-      module.organizationDialogVisible,
       module.queryTestDialogVisible,
     ]
-    assert.deepEqual(dialogs.map(dialog => dialog.value), Array(11).fill(true), action)
+    assert.deepEqual(dialogs.map(dialog => dialog.value), Array(4).fill(true), action)
+    assert.equal(harness.confirms.length, 1, action)
     assert.equal(module.selectedKb.value.id, oldKb.id)
     assert.equal(module.total.value, 1)
     assert.equal(module.repairRequiredCount.value, 5)
     assert.equal(module.form.name, oldKb.name)
     assert.equal(module.editingId.value, oldKb.id)
-    assert.deepEqual(normalize(module.documentList.value), [document])
-    assert.equal(module.documentContent.value, 'secret original document text')
-    assert.equal(module.uploadFileList.value[0].name, 'secret-upload.txt')
-    assert.equal(module.importForm.file, rawFile)
-    assert.equal(module.managedKnowledgeItems.value[0].content, managedItem.content)
-    assert.equal(module.managedKnowledgeForm.content, 'secret managed detail content')
-    assert.equal(module.managedKnowledgeHistory.value[0].content, 'secret managed history content')
-    assert.equal(module.organizationJobs.value[0].status, 'running')
+    assert.deepEqual(normalize(module.ownerUsers.value), [users[0]])
+    assert.deepEqual(normalize(module.repairOwners.value), users)
+    assert.equal(module.queryTestForm.query, 'secret query text')
+    assert.equal(module.queryTestForm.top_k, 7)
     assert.equal(module.queryTestResults.value[0].content, 'secret query result')
     assert.equal(module.retrievalMode.value, 'hybrid')
     assert.equal(module.rerankError.value, 'secret rerank diagnostic')
@@ -2178,7 +2008,7 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
     assert.ok(harness.activeTimers().length > 0, action)
 
     const assertCleared = () => {
-      assert.deepEqual(dialogs.map(dialog => dialog.value), Array(11).fill(false), action)
+      assert.deepEqual(dialogs.map(dialog => dialog.value), Array(4).fill(false), action)
       assert.equal(module.selectedKb.value, null, action)
       assert.deepEqual(normalize(module.tableData.value), [], action)
       assert.deepEqual(normalize(module.embeddingModels.value), [], action)
@@ -2192,6 +2022,7 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
       assert.equal(module.repairOwnersLoading.value, false, action)
       assert.equal(module.repairOwnersError.value, null, action)
       assert.equal(module.repairOwnerUid.value, null, action)
+      assert.equal(module.repairSubmitting.value, false, action)
       assert.equal(module.form.name, '', action)
       assert.equal(module.form.description, '', action)
       assert.equal(module.form.embedding_model_key, '', action)
@@ -2203,40 +2034,6 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
       assert.equal(module.migrationSubmitting.value, false, action)
       assert.equal(module.migrationStateLoading.value, false, action)
       assert.equal(module.migrationStateError.value, null, action)
-      assert.deepEqual(normalize(module.documentList.value), [], action)
-      assert.equal(module.documentTotal.value, 0, action)
-      assert.equal(module.documentPage.value, 1, action)
-      assert.equal(module.documentPageSize.value, 10, action)
-      assert.equal(module.documentContent.value, '', action)
-      assert.equal(module.contentTitle.value, '', action)
-      assert.deepEqual(normalize(module.uploadFileList.value), [], action)
-      assert.equal(module.importForm.file, null, action)
-      assert.equal(module.importForm.chunk_size, 1000, action)
-      assert.equal(module.importForm.chunk_overlap, 100, action)
-      assert.equal(module.importForm.batch_size, 16, action)
-      assert.equal(module.importing.value, false, action)
-      assert.deepEqual(normalize(module.managedKnowledgeItems.value), [], action)
-      assert.equal(module.managedKnowledgeTotal.value, 0, action)
-      assert.equal(module.managedKnowledgePage.value, 1, action)
-      assert.equal(module.managedKnowledgePageSize.value, 10, action)
-      assert.equal(module.managedKnowledgeQuery.value, '', action)
-      assert.equal(module.managedKnowledgeEditingId.value, null, action)
-      assert.deepEqual(normalize(module.managedKnowledgeForm), {
-        knowledge_key: '',
-        content: '',
-        expected_version: null,
-        llm_maintainable: false,
-      }, action)
-      assert.equal(module.managedKnowledgeLoading.value, false, action)
-      assert.equal(module.managedKnowledgeSubmitting.value, false, action)
-      assert.deepEqual(normalize(module.managedKnowledgeHistory.value), [], action)
-      assert.equal(module.managedKnowledgeHistoryKey.value, '', action)
-      assert.equal(module.managedKnowledgeHistoryLoading.value, false, action)
-      assert.deepEqual(normalize(module.organizationJobs.value), [], action)
-      assert.equal(module.organizationTotal.value, 0, action)
-      assert.equal(module.organizationActionJobId.value, null, action)
-      assert.equal(module.organizationLoading.value, false, action)
-      assert.equal(module.organizationSubmitting.value, false, action)
       assert.deepEqual(normalize(module.queryTestForm), { query: '', top_k: 5 }, action)
       assert.deepEqual(normalize(module.queryTestResults.value), [], action)
       assert.equal(module.retrievalMode.value, null, action)
@@ -2244,6 +2041,8 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
       assert.equal(module.queryTested.value, false, action)
       assert.equal(module.queryTesting.value, false, action)
       assert.equal(harness.activeTimers().length, 0, action)
+      assert.equal(harness.closedConfirmations, 1, action)
+      assert.equal(harness.api.deletes.length, 0, action)
     }
 
     if (action === 'uid') {
@@ -2265,6 +2064,10 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
     }
 
     assertCleared()
+    await pendingDelete
+    confirmation.resolve(true)
+    await flushPromises()
+    assert.equal(harness.api.deletes.length, 0, action)
     if (action === 'clear') {
       harness.permissionsStore.clear()
       assertCleared()
@@ -2289,273 +2092,95 @@ test('clears loaded knowledge-base state on identity changes and unmount', async
   }
 })
 
-test('ignores late read success or failure after role downgrade for every knowledge-base API', async t => {
-  const userKb = { id: 'kb-user-read', name: 'User KB', knowledge_base_type: 'user' }
-  const managedKb = { id: 'kb-managed-read', name: 'Managed KB', knowledge_base_type: 'llm_managed' }
-  const oldDocument = { id: 'old-document', filename: 'old-secret.txt' }
-  const freshDocument = { id: 'fresh-document', filename: 'fresh-document.txt' }
-  const oldItem = {
-    id: 'old-managed-item',
-    knowledge_key: 'old-secret-key',
-    content: 'old-secret managed content',
-    version: 1,
-    llm_maintainable: true,
-    pending_job_id: 'old-pending-job',
-  }
-  const freshItem = {
-    id: 'fresh-managed-item',
-    knowledge_key: 'fresh-managed-key',
-    content: 'fresh managed content',
-    version: 9,
-    llm_maintainable: true,
-  }
-  const cases = [
-    {
-      api: 'documents',
-      kb: userKb,
-      start: module => module.showDocumentDialog(userKb),
-      oldData: { items: [oldDocument], total: 91 },
-      freshData: { items: [freshDocument], total: 7 },
-      state: module => ({
-        dialog: module.documentDialogVisible.value,
-        loading: module.documentLoading.value,
-        items: module.documentList.value,
-        total: module.documentTotal.value,
-      }),
-      cleared: { kb: null, dialog: false, loading: false, items: [], total: 0 },
-      pending: { kb: userKb.id, dialog: true, loading: true, items: [], total: 0 },
-      loaded: { kb: userKb.id, dialog: true, loading: false, items: [freshDocument], total: 7 },
-    },
-    {
-      api: 'document',
-      kb: userKb,
-      oldInput: oldDocument,
-      freshInput: freshDocument,
-      start: (module, row) => {
-        module.selectedKb.value = userKb
-        return module.showContentDialog(row)
-      },
-      oldData: { content: 'old-secret original document text' },
-      freshData: { content: 'fresh original document text' },
-      state: module => ({
-        dialog: module.contentDialogVisible.value,
-        title: module.contentTitle.value,
-        content: module.documentContent.value,
-      }),
-      cleared: { kb: null, dialog: false, title: '', content: '' },
-      pending: { kb: userKb.id, dialog: false, title: '', content: '' },
-      loaded: {
-        kb: userKb.id,
-        dialog: true,
-        title: freshDocument.filename,
-        content: 'fresh original document text',
-      },
-    },
-    {
-      api: 'managedItems',
-      kb: managedKb,
-      start: module => module.showManagedKnowledgeDialog(managedKb),
-      oldData: { items: [oldItem], total: 91 },
-      freshData: { items: [freshItem], total: 8 },
-      state: module => ({
-        dialog: module.managedKnowledgeDialogVisible.value,
-        loading: module.managedKnowledgeLoading.value,
-        items: module.managedKnowledgeItems.value,
-        total: module.managedKnowledgeTotal.value,
-      }),
-      cleared: { kb: null, dialog: false, loading: false, items: [], total: 0 },
-      pending: { kb: managedKb.id, dialog: true, loading: true, items: [], total: 0 },
-      loaded: { kb: managedKb.id, dialog: true, loading: false, items: [freshItem], total: 8 },
-    },
-    {
-      api: 'managedItem',
-      kb: managedKb,
-      oldInput: oldItem,
-      freshInput: freshItem,
-      start: (module, row) => {
-        module.selectedKb.value = managedKb
-        return module.showManagedKnowledgeEditDialog(row)
-      },
-      oldData: {
-        id: oldItem.id,
-        knowledge_key: oldItem.knowledge_key,
-        content: oldItem.content,
-        version: oldItem.version,
-        llm_maintainable: true,
-      },
-      freshData: freshItem,
-      state: module => ({
-        dialog: module.managedKnowledgeEditDialogVisible.value,
-        id: module.managedKnowledgeEditingId.value,
-        key: module.managedKnowledgeForm.knowledge_key,
-        content: module.managedKnowledgeForm.content,
-        version: module.managedKnowledgeForm.expected_version,
-      }),
-      cleared: { kb: null, dialog: false, id: null, key: '', content: '', version: null },
-      pending: { kb: managedKb.id, dialog: false, id: null, key: '', content: '', version: null },
-      loaded: {
-        kb: managedKb.id,
-        dialog: true,
-        id: freshItem.id,
-        key: freshItem.knowledge_key,
-        content: freshItem.content,
-        version: freshItem.version,
-      },
-    },
-    {
-      api: 'managedHistory',
-      kb: managedKb,
-      oldInput: oldItem,
-      freshInput: freshItem,
-      start: (module, row) => {
-        module.selectedKb.value = managedKb
-        return module.showManagedKnowledgeHistory(row)
-      },
-      oldData: [{ id: 'old-history', knowledge_key: oldItem.knowledge_key, content: 'old-secret history' }],
-      freshData: [{
-        id: 'fresh-history',
-        knowledge_key: freshItem.knowledge_key,
-        content: 'fresh history content',
-        version: freshItem.version,
-      }],
-      state: module => ({
-        dialog: module.managedKnowledgeHistoryDialogVisible.value,
-        loading: module.managedKnowledgeHistoryLoading.value,
-        key: module.managedKnowledgeHistoryKey.value,
-        history: module.managedKnowledgeHistory.value,
-      }),
-      cleared: { kb: null, dialog: false, loading: false, key: '', history: [] },
-      pending: {
-        kb: managedKb.id,
-        dialog: true,
-        loading: true,
-        key: freshItem.knowledge_key,
-        history: [],
-      },
-      loaded: {
-        kb: managedKb.id,
-        dialog: true,
-        loading: false,
-        key: freshItem.knowledge_key,
-        history: [{
-          id: 'fresh-history',
-          knowledge_key: freshItem.knowledge_key,
-          content: 'fresh history content',
-          version: freshItem.version,
-        }],
-      },
-    },
-    {
-      api: 'organizationJobs',
-      kb: managedKb,
-      start: module => {
-        module.selectedKb.value = managedKb
-        return module.showOrganizationDialog()
-      },
-      oldData: {
-        items: [{
-          job_id: 'old-organization-job',
-          knowledge_base_id: managedKb.id,
-          status: 'running',
-          child_job_count: 1,
-          child_terminal_count: 0,
-        }],
-        total: 91,
-      },
-      freshData: {
-        items: [{
-          job_id: 'fresh-organization-job',
-          knowledge_base_id: managedKb.id,
-          status: 'succeeded',
-          child_job_count: 1,
-          child_terminal_count: 1,
-        }],
-        total: 6,
-      },
-      state: module => ({
-        dialog: module.organizationDialogVisible.value,
-        loading: module.organizationLoading.value,
-        jobs: module.organizationJobs.value,
-        total: module.organizationTotal.value,
-      }),
-      cleared: { kb: null, dialog: false, loading: false, jobs: [], total: 0 },
-      pending: { kb: managedKb.id, dialog: true, loading: true, jobs: [], total: 0 },
-      loaded: {
-        kb: managedKb.id,
-        dialog: true,
-        loading: false,
-        jobs: [{
-          job_id: 'fresh-organization-job',
-          knowledge_base_id: managedKb.id,
-          status: 'succeeded',
-          child_job_count: 1,
-          child_terminal_count: 1,
-        }],
-        total: 6,
-      },
-    },
-  ]
-  const snapshot = (scenario, module) => normalize({
-    kb: module.selectedKb.value?.id ?? null,
-    ...scenario.state(module),
-  })
-
-  for (const scenario of cases) {
-    for (const outcome of ['success', 'failure']) {
-      const oldRequest = deferred()
-      const freshRequest = deferred()
-      let requestCount = 0
-      const harness = await createHarness(t, {
-        superuser: true,
-        currentUid: 'admin-user',
-        [scenario.api]: () => {
-          requestCount += 1
-          return requestCount === 1 ? oldRequest.promise : freshRequest.promise
-        },
-      })
-      const oldLoad = scenario.start(harness.module, scenario.oldInput)
-      assert.equal(harness.api[scenario.api].length, 1, scenario.api)
-
-      harness.permissionsStore.currentUser = {
-        uid: 'admin-user',
-        username: 'Administrator',
-        is_superuser: false,
-      }
-      await flushPromises()
-      assert.deepEqual(snapshot(scenario, harness.module), scenario.cleared, `${scenario.api}:${outcome}:reset`)
-      assert.equal(harness.activeTimers().length, 0, `${scenario.api}:${outcome}:reset timers`)
-      if (scenario.api === 'managedItems') {
-        assert.equal(harness.api.managedItems[0].config.signal.aborted, true)
-      }
-
-      const freshLoad = scenario.start(harness.module, scenario.freshInput)
-      assert.equal(harness.api[scenario.api].length, 2, scenario.api)
-      assert.deepEqual(harness.api[scenario.api].map(request => request.id), [scenario.kb.id, scenario.kb.id])
-      assert.deepEqual(snapshot(scenario, harness.module), scenario.pending, `${scenario.api}:${outcome}:pending`)
-      const freshSnapshot = snapshot(scenario, harness.module)
-
-      if (outcome === 'success') oldRequest.resolve(dataResponse(scenario.oldData))
-      else oldRequest.reject(new Error(`old-secret ${scenario.api} failure`))
-      await oldLoad
-      await flushPromises()
-
-      assert.deepEqual(snapshot(scenario, harness.module), freshSnapshot, `${scenario.api}:${outcome}:late`)
-      assert.deepEqual(snapshot(scenario, harness.module), scenario.pending, `${scenario.api}:${outcome}:still pending`)
-      assert.deepEqual(harness.messages, [], `${scenario.api}:${outcome}:messages`)
-      assert.equal(harness.activeTimers().length, 0, `${scenario.api}:${outcome}:timers`)
-
-      freshRequest.resolve(dataResponse(scenario.freshData))
-      await freshLoad
-      assert.deepEqual(snapshot(scenario, harness.module), scenario.loaded, `${scenario.api}:${outcome}:fresh`)
-      assert.deepEqual(harness.messages, [], `${scenario.api}:${outcome}:fresh messages`)
-      assert.equal(harness.activeTimers().length, 0, `${scenario.api}:${outcome}:fresh timers`)
-      if (scenario.api === 'organizationJobs') {
-        assert.deepEqual(
-          harness.module.organizationJobs.value.map(job => job.knowledge_base_id),
-          [scenario.kb.id],
-        )
-      }
+test('ignores late query-test success or failure from the previous identity', async t => {
+  for (const outcome of ['success', 'failure']) {
+    const oldRequest = deferred()
+    const freshRequest = deferred()
+    const oldKb = { id: 'kb-query-old', name: 'Old query KB' }
+    const freshKb = { id: 'kb-query-new', name: 'New query KB' }
+    const harness = await createHarness(t, {
+      currentUid: 'user-a',
+      queryTest: () => harness.api.queryTest.length === 1
+        ? oldRequest.promise
+        : freshRequest.promise,
+    })
+    const module = harness.module
+    module.queryTestFormRef.value = {
+      clearValidate() {},
+      validate: async callback => callback(true),
     }
+    const startQuery = (kb, query) => {
+      module.showQueryTestDialog(kb)
+      module.queryTestForm.query = query
+      module.queryTestForm.top_k = 6
+      return module.submitQueryTest()
+    }
+
+    const oldQuery = startQuery(oldKb, 'old scope query')
+    await flushPromises()
+    assert.equal(harness.api.queryTest.length, 1)
+    assert.deepEqual(harness.api.queryTest.map(request => request.id), [oldKb.id])
+    assert.deepEqual(harness.api.queryTest[0].params, { query: 'old scope query', top_k: 6 })
+
+    harness.permissionsStore.currentUser = { uid: 'user-b', username: 'Bob', is_superuser: false }
+    await flushPromises()
+    assert.equal(module.selectedKb.value, null, `${outcome}: reset selection`)
+    assert.deepEqual(normalize(module.queryTestResults.value), [], `${outcome}: reset results`)
+    assert.equal(module.queryTested.value, false, `${outcome}: reset completion`)
+
+    const freshQuery = startQuery(freshKb, 'fresh scope query')
+    await flushPromises()
+    assert.equal(harness.api.queryTest.length, 2)
+    assert.deepEqual(harness.api.queryTest.map(request => request.id), [oldKb.id, freshKb.id])
+    assert.deepEqual(harness.api.queryTest[1].params, { query: 'fresh scope query', top_k: 6 })
+    const freshState = normalize({
+      selectedKb: module.selectedKb.value,
+      query: module.queryTestForm.query,
+      results: module.queryTestResults.value,
+      retrievalMode: module.retrievalMode.value,
+      rerankError: module.rerankError.value,
+      tested: module.queryTested.value,
+      testing: module.queryTesting.value,
+    })
+
+    if (outcome === 'success') {
+      oldRequest.resolve(dataResponse({
+        items: [{ id: 'old-result', content: 'old private result' }],
+        retrieval_mode: 'vector',
+        rerank_error: 'old diagnostic',
+      }))
+    } else {
+      oldRequest.reject(new Error('old scope query failed'))
+    }
+    await oldQuery
+    await flushPromises()
+
+    assert.deepEqual(normalize({
+      selectedKb: module.selectedKb.value,
+      query: module.queryTestForm.query,
+      results: module.queryTestResults.value,
+      retrievalMode: module.retrievalMode.value,
+      rerankError: module.rerankError.value,
+      tested: module.queryTested.value,
+      testing: module.queryTesting.value,
+    }), freshState, `${outcome}: old result leaves fresh query unchanged`)
+    assert.deepEqual(harness.messages, [], `${outcome}: stale message`)
+
+    freshRequest.resolve(dataResponse({
+      items: [{ id: 'fresh-result', content: 'fresh private result' }],
+      retrieval_mode: 'hybrid',
+      rerank_error: null,
+    }))
+    await freshQuery
+    assert.equal(module.selectedKb.value.id, freshKb.id, `${outcome}: selected KB`)
+    assert.deepEqual(normalize(module.queryTestResults.value), [
+      { id: 'fresh-result', content: 'fresh private result' },
+    ], `${outcome}: result`)
+    assert.equal(module.retrievalMode.value, 'hybrid', `${outcome}: retrieval mode`)
+    assert.equal(module.rerankError.value, null, `${outcome}: rerank error`)
+    assert.equal(module.queryTested.value, true, `${outcome}: completion`)
+    assert.equal(module.queryTesting.value, false, `${outcome}: loading state`)
+    assert.deepEqual(harness.messages, [], `${outcome}: final messages`)
   }
 })
 
@@ -2570,51 +2195,8 @@ test('closes and invalidates pending confirmations on identity changes', async t
     embedding_model_id: 'embedding-model',
     migration_status: 'succeeded',
   }
-  const managedKb = {
-    id: 'kb-confirm-managed',
-    name: 'Managed KB',
-    knowledge_base_type: 'llm_managed',
-  }
-  const document = { id: 'doc-confirm-delete', filename: 'document.txt' }
-  const managedItem = {
-    id: 'item-confirm-delete',
-    knowledge_key: 'key-to-delete',
-    content: 'managed content',
-    version: 3,
-  }
   const cases = [
     { api: 'deletes', kb: userKb, start: module => module.handleDelete(userKb) },
-    {
-      api: 'deleteDocument',
-      kb: userKb,
-      start: module => module.handleDeleteDocument(document),
-    },
-    {
-      api: 'deleteManagedItem',
-      kb: managedKb,
-      start: module => module.handleDeleteManagedKnowledge(managedItem),
-    },
-    {
-      api: 'cancelOrganizationJob',
-      kb: managedKb,
-      start: module => module.handleCancelOrganizationJob({
-        job_id: 'job-to-cancel',
-        knowledge_base_id: managedKb.id,
-        status: 'running',
-        child_job_count: 1,
-        child_terminal_count: 0,
-      }),
-    },
-    {
-      api: 'retryOrganizationJob',
-      kb: managedKb,
-      start: module => module.handleRetryOrganizationJob({
-        job_id: 'job-to-retry',
-        knowledge_base_id: managedKb.id,
-        status: 'failed',
-        can_retry: true,
-      }),
-    },
     { api: 'repairs', kb: userKb, start: module => module.repairKnowledgeBase(userKb) },
     {
       api: 'migrations',
@@ -2695,10 +2277,6 @@ test('ignores pending form validation after switching users', async t => {
     id: 'kb-user-b-validation', uid: 'user-b', name: 'Bob KB', description: 'Bob description',
     knowledge_base_type: 'user', embedding_channel_id: 1, embedding_model_id: 'embedding-model',
   }
-  const managedKbA = { id: 'kb-managed-a-validation', uid: 'user-a', name: 'Alice managed KB', knowledge_base_type: 'llm_managed' }
-  const managedKbB = { id: 'kb-managed-b-validation', uid: 'user-b', name: 'Bob managed KB', knowledge_base_type: 'llm_managed' }
-  const managedItemA = { id: 'managed-item-a', knowledge_key: 'old-key', content: 'old managed content', version: 2 }
-  const managedItemB = { id: 'managed-item-b', knowledge_key: 'fresh-key', content: 'existing managed content', version: 4 }
   const cases = [
     {
       api: 'creates', method: 'create', ref: 'formRef',
@@ -2730,66 +2308,6 @@ test('ignores pending form validation after switching users', async t => {
       },
       result: { id: userKbB.id },
     },
-    {
-      api: 'importDocument', method: 'importDocument', ref: 'importFormRef', oldTarget: userKbA, freshTarget: userKbB,
-      open: (module, kb) => module.showImportDialog(kb),
-      fill: (module, value) => {
-        const uploadFile = { name: `${value}.txt`, raw: new Blob([`${value} imported document`], { type: 'text/plain' }) }
-        module.handleFileChange(uploadFile, [uploadFile])
-      },
-      busy: module => module.importing.value,
-      dialogs: module => [module.importDialogVisible.value], completedDialogs: [false],
-      snapshot: module => ({ file: module.uploadFileList.value[0]?.name ?? '', size: module.importForm.file?.size ?? 0, dialog: module.importDialogVisible.value, busy: module.importing.value }),
-      assertRequest: async request => {
-        assert.equal(request.id, userKbB.id)
-        assert.equal(await request.payload.get('file').text(), 'fresh imported document')
-      },
-      result: { status: 'accepted' },
-    },
-    {
-      api: 'createManagedItem', method: 'createManagedItem', ref: 'managedKnowledgeFormRef', oldTarget: managedKbA, freshTarget: managedKbB,
-      open: async (module, kb) => {
-        await module.showManagedKnowledgeDialog(kb)
-        module.showManagedKnowledgeCreateDialog()
-      },
-      fill: (module, value) => {
-        module.managedKnowledgeForm.knowledge_key = `${value}-key`
-        module.managedKnowledgeForm.content = `${value} managed content`
-      },
-      busy: module => module.managedKnowledgeSubmitting.value,
-      dialogs: module => [module.managedKnowledgeDialogVisible.value, module.managedKnowledgeEditDialogVisible.value],
-      completedDialogs: [true, false],
-      snapshot: module => ({ key: module.managedKnowledgeForm.knowledge_key, content: module.managedKnowledgeForm.content, dialog: module.managedKnowledgeEditDialogVisible.value, busy: module.managedKnowledgeSubmitting.value }),
-      assertRequest: request => {
-        assert.equal(request.id, managedKbB.id)
-        assert.equal(normalize(request.payload).knowledge_key, 'fresh-key')
-        assert.equal(normalize(request.payload).content, 'fresh managed content')
-      },
-      result: { status: 'created' },
-    },
-    {
-      api: 'updateManagedItem', method: 'updateManagedItem', ref: 'managedKnowledgeFormRef', oldTarget: managedKbA, freshTarget: managedKbB,
-      oldItem: managedItemA, freshItem: managedItemB,
-      open: async (module, kb, item) => {
-        await module.showManagedKnowledgeDialog(kb)
-        await module.showManagedKnowledgeEditDialog(item)
-      },
-      fill: (module, value) => {
-        module.managedKnowledgeForm.knowledge_key = `${value}-key`
-        module.managedKnowledgeForm.content = `${value} managed content`
-      },
-      busy: module => module.managedKnowledgeSubmitting.value,
-      dialogs: module => [module.managedKnowledgeDialogVisible.value, module.managedKnowledgeEditDialogVisible.value],
-      completedDialogs: [true, false],
-      snapshot: module => ({ id: module.managedKnowledgeEditingId.value, key: module.managedKnowledgeForm.knowledge_key, content: module.managedKnowledgeForm.content, dialog: module.managedKnowledgeEditDialogVisible.value, busy: module.managedKnowledgeSubmitting.value }),
-      assertRequest: request => {
-        assert.equal(request.id, managedKbB.id)
-        assert.equal(request.itemId, managedItemB.id)
-        assert.equal(normalize(request.payload).knowledge_key, 'fresh-key')
-        assert.equal(normalize(request.payload).content, 'fresh managed content')
-      },
-      result: { status: 'updated' },
-    },
   ]
 
   const installValidationRef = (module, refName, validate) => {
@@ -2816,13 +2334,9 @@ test('ignores pending form validation after switching users', async t => {
       return oldValidation.promise
     })
 
-    await scenario.open(harness.module, scenario.oldTarget, scenario.oldItem)
+    await scenario.open(harness.module, scenario.oldTarget)
     scenario.fill(harness.module, 'old')
-    const oldSubmit = scenario.api === 'importDocument'
-      ? harness.module.submitImport()
-      : scenario.api === 'createManagedItem' || scenario.api === 'updateManagedItem'
-        ? harness.module.submitManagedKnowledge()
-        : harness.module.submitForm()
+    const oldSubmit = harness.module.submitForm()
     await flushPromises()
     assert.equal(validationCalls, 1, scenario.api)
     assert.equal(scenario.busy(harness.module), true, scenario.api)
@@ -2831,13 +2345,9 @@ test('ignores pending form validation after switching users', async t => {
     harness.permissionsStore.currentUser = { uid: 'user-b', username: 'Bob', is_superuser: false }
     await flushPromises()
     formRef.validate = () => Promise.resolve(true)
-    await scenario.open(harness.module, scenario.freshTarget, scenario.freshItem)
+    await scenario.open(harness.module, scenario.freshTarget)
     scenario.fill(harness.module, 'fresh')
-    const freshSubmit = scenario.api === 'importDocument'
-      ? harness.module.submitImport()
-      : scenario.api === 'createManagedItem' || scenario.api === 'updateManagedItem'
-        ? harness.module.submitManagedKnowledge()
-        : harness.module.submitForm()
+    const freshSubmit = harness.module.submitForm()
     await flushPromises()
 
     assert.equal(harness.api[scenario.api].length, 1, scenario.api)
@@ -2867,45 +2377,15 @@ test('ignores pending form validation after switching users', async t => {
 test('keeps new-identity mutations isolated from late old mutation results', async t => {
   const userKbA = { id: 'kb-user-a-mutation', uid: 'user-a', username: 'Alice', name: 'Alice KB', description: 'Alice description', knowledge_base_type: 'user', embedding_channel_id: 1, embedding_model_id: 'embedding-model' }
   const userKbB = { id: 'kb-user-b-mutation', uid: 'user-b', username: 'Bob', name: 'Bob KB', description: 'Bob description', knowledge_base_type: 'user', embedding_channel_id: 1, embedding_model_id: 'embedding-model' }
-  const managedKbA = { id: 'kb-managed-a-mutation', uid: 'user-a', name: 'Alice managed KB', knowledge_base_type: 'llm_managed' }
-  const managedKbB = { id: 'kb-managed-b-mutation', uid: 'user-b', name: 'Bob managed KB', knowledge_base_type: 'llm_managed' }
-  const documentA = { id: 'doc-a-mutation', filename: 'alice.txt' }
-  const documentB = { id: 'doc-b-mutation', filename: 'bob.txt' }
-  const managedItemA = { id: 'item-a-mutation', knowledge_key: 'alice-key', content: 'Alice managed content', version: 2, llm_maintainable: true }
-  const managedItemB = { id: 'item-b-mutation', knowledge_key: 'bob-key', content: 'Bob managed content', version: 5, llm_maintainable: true }
-  const retryItemA = { ...managedItemA, publication_job_status: 'failed', publication_job_id: 'publication-a' }
-  const retryItemB = { ...managedItemB, publication_job_status: 'failed', publication_job_id: 'publication-b' }
-  const jobA = { job_id: 'organization-a', knowledge_base_id: managedKbA.id, status: 'running', child_job_count: 1, child_terminal_count: 0 }
-  const jobB = { job_id: 'organization-b', knowledge_base_id: managedKbB.id, status: 'running', child_job_count: 1, child_terminal_count: 0 }
-  const retryJobA = { ...jobA, job_id: 'organization-retry-a', status: 'failed', child_terminal_count: 1, can_retry: true }
-  const retryJobB = { ...jobB, job_id: 'organization-retry-b', status: 'failed', child_terminal_count: 1, can_retry: true }
   const targets = {
     create: [{ label: 'old Alice' }, { label: 'fresh Bob' }],
     update: [{ kb: userKbA, label: 'old Alice' }, { kb: userKbB, label: 'fresh Bob' }],
     delete: [{ kb: userKbA }, { kb: userKbB }],
-    import: [{ kb: userKbA, document: documentA, label: 'old Alice' }, { kb: userKbB, document: documentB, label: 'fresh Bob' }],
-    deleteDocument: [{ kb: userKbA, document: documentA }, { kb: userKbB, document: documentB }],
-    createManaged: [{ kb: managedKbA, label: 'old Alice' }, { kb: managedKbB, label: 'fresh Bob' }],
-    updateManaged: [{ kb: managedKbA, item: managedItemA, label: 'old Alice' }, { kb: managedKbB, item: managedItemB, label: 'fresh Bob' }],
-    deleteManaged: [{ kb: managedKbA, item: managedItemA }, { kb: managedKbB, item: managedItemB }],
-    retryManaged: [{ kb: managedKbA, item: retryItemA }, { kb: managedKbB, item: retryItemB }],
-    organize: [{ kb: managedKbA }, { kb: managedKbB }],
-    cancelOrganization: [{ kb: managedKbA, job: jobA, settledJob: { ...jobA, status: 'cancelled', child_terminal_count: 1 } }, { kb: managedKbB, job: jobB, settledJob: { ...jobB, status: 'cancelled', child_terminal_count: 1 } }],
-    retryOrganization: [{ kb: managedKbA, job: retryJobA, settledJob: { ...retryJobA, status: 'succeeded', can_retry: false } }, { kb: managedKbB, job: retryJobB, settledJob: { ...retryJobB, status: 'succeeded', can_retry: false } }],
-  }
-  const managedDialog = async (module, target, itemDialog) => {
-    await module.showManagedKnowledgeDialog(target.kb)
-    if (itemDialog === 'create') module.showManagedKnowledgeCreateDialog()
-    if (itemDialog === 'edit') await module.showManagedKnowledgeEditDialog(target.item)
   }
   const rootForm = (module, target) => {
     module.form.name = `${target.label} knowledge`
     module.form.description = `${target.label} description`
     module.form.embedding_model_key = '1::embedding-model'
-  }
-  const managedForm = (module, target) => {
-    module.managedKnowledgeForm.knowledge_key = `${target.label}-key`
-    module.managedKnowledgeForm.content = `${target.label} managed content`
   }
   const cases = [
     {
@@ -2932,113 +2412,13 @@ test('keeps new-identity mutations isolated from late old mutation results', asy
       submit: (module, target) => module.handleDelete(target.kb), refresh: 'lists',
       assertRequest: (request, target) => assert.equal(request.id, target.kb.id), result: {},
     },
-    {
-      key: 'import', array: 'importDocument', method: 'importDocument', ref: 'importFormRef', busy: module => module.importing.value,
-      open: (module, target) => module.showImportDialog(target.kb),
-      fill: (module, target) => {
-        const uploadFile = { name: `${target.label}.txt`, raw: new Blob([`${target.label} document contents`], { type: 'text/plain' }) }
-        module.handleFileChange(uploadFile, [uploadFile])
-      },
-      submit: module => module.submitImport(),
-      assertRequest: async (request, target) => {
-        assert.equal(request.id, target.kb.id)
-        assert.equal(await request.payload.get('file').text(), `${target.label} document contents`)
-      }, result: { status: 'accepted' },
-    },
-    {
-      key: 'deleteDocument', array: 'deleteDocument', method: 'deleteDocument',
-      open: (module, target) => module.showDocumentDialog(target.kb),
-      submit: (module, target) => module.handleDeleteDocument(target.document), refresh: 'documents',
-      assertRequest: (request, target) => {
-        assert.equal(request.id, target.kb.id)
-        assert.equal(request.docId, target.document.id)
-      }, result: { status: 'accepted' },
-    },
-    {
-      key: 'createManaged', array: 'createManagedItem', method: 'createManagedItem', ref: 'managedKnowledgeFormRef', busy: module => module.managedKnowledgeSubmitting.value,
-      open: (module, target) => managedDialog(module, target, 'create'), fill: managedForm,
-      submit: module => module.submitManagedKnowledge(), refresh: 'managedItems',
-      assertRequest: (request, target) => {
-        assert.equal(request.id, target.kb.id)
-        assert.equal(normalize(request.payload).knowledge_key, `${target.label}-key`)
-        assert.equal(normalize(request.payload).content, `${target.label} managed content`)
-      }, result: { status: 'created' },
-    },
-    {
-      key: 'updateManaged', array: 'updateManagedItem', method: 'updateManagedItem', ref: 'managedKnowledgeFormRef', busy: module => module.managedKnowledgeSubmitting.value,
-      open: (module, target) => managedDialog(module, target, 'edit'), fill: managedForm,
-      submit: module => module.submitManagedKnowledge(), refresh: 'managedItems',
-      assertRequest: (request, target) => {
-        assert.equal(request.id, target.kb.id)
-        assert.equal(request.itemId, target.item.id)
-        assert.equal(normalize(request.payload).knowledge_key, `${target.label}-key`)
-        assert.equal(normalize(request.payload).content, `${target.label} managed content`)
-      }, result: { status: 'updated' },
-    },
-    {
-      key: 'deleteManaged', array: 'deleteManagedItem', method: 'deleteManagedItem',
-      open: (module, target) => managedDialog(module, target),
-      submit: (module, target) => module.handleDeleteManagedKnowledge(target.item), refresh: 'managedItems',
-      assertRequest: (request, target) => {
-        assert.equal(request.id, target.kb.id)
-        assert.equal(request.itemId, target.item.id)
-      }, result: { status: 'deleted' },
-    },
-    {
-      key: 'retryManaged', array: 'retryManagedItem', method: 'retryManagedItem',
-      open: (module, target) => managedDialog(module, target),
-      submit: (module, target) => module.retryManagedKnowledgePublication(target.item), refresh: 'managedItems',
-      assertRequest: (request, target) => {
-        assert.equal(request.id, target.kb.id)
-        assert.equal(request.itemId, target.item.id)
-        assert.equal(normalize(request.payload).failed_job_id, target.item.publication_job_id)
-      }, result: { status: 'retry_submitted' },
-    },
-    {
-      key: 'organize', array: 'organize', method: 'organize', busy: module => module.organizationSubmitting.value,
-      open: (module, target) => {
-        module.selectedKb.value = target.kb
-        return module.showOrganizationDialog()
-      },
-      submit: module => module.submitKnowledgeOrganization(), refresh: 'organizationJobs',
-      assertRequest: (request, target) => assert.equal(request.id, target.kb.id), result: { status: 'accepted' },
-    },
-    {
-      key: 'cancelOrganization', array: 'cancelOrganizationJob', method: 'cancelOrganizationJob',
-      busy: (module, target) => module.organizationActionJobId.value === target.job.job_id,
-      open: (module, target) => {
-        module.selectedKb.value = target.kb
-        return module.showOrganizationDialog()
-      },
-      submit: (module, target) => module.handleCancelOrganizationJob(target.job), refresh: 'organizationJobs',
-      assertRequest: (request, target) => {
-        assert.equal(request.id, target.kb.id)
-        assert.equal(request.jobId, target.job.job_id)
-      }, result: {},
-    },
-    {
-      key: 'retryOrganization', array: 'retryOrganizationJob', method: 'retryOrganizationJob',
-      busy: (module, target) => module.organizationActionJobId.value === target.job.job_id,
-      open: (module, target) => {
-        module.selectedKb.value = target.kb
-        return module.showOrganizationDialog()
-      },
-      submit: (module, target) => module.handleRetryOrganizationJob(target.job), refresh: 'organizationJobs',
-      assertRequest: (request, target) => {
-        assert.equal(request.id, target.kb.id)
-        assert.equal(request.jobId, target.job.job_id)
-      }, result: {},
-    },
   ]
   const snapshot = harness => {
     const module = harness.module
     return normalize({
       selectedKb: module.selectedKb.value,
-      dialogs: [module.dialogVisible.value, module.importDialogVisible.value, module.documentDialogVisible.value, module.contentDialogVisible.value, module.managedKnowledgeDialogVisible.value, module.managedKnowledgeEditDialogVisible.value, module.managedKnowledgeHistoryDialogVisible.value, module.organizationDialogVisible.value],
+      dialogs: [module.dialogVisible.value],
       root: { loading: module.loading.value, table: module.tableData.value, total: module.total.value, submitting: module.submitting.value, editing: module.editingId.value, form: { ...module.form } },
-      documents: { importing: module.importing.value, file: module.uploadFileList.value.map(item => item.name), fileSize: module.importForm.file?.size ?? 0, list: module.documentList.value, total: module.documentTotal.value },
-      managed: { loading: module.managedKnowledgeLoading.value, submitting: module.managedKnowledgeSubmitting.value, items: module.managedKnowledgeItems.value, total: module.managedKnowledgeTotal.value, editing: module.managedKnowledgeEditingId.value, form: { ...module.managedKnowledgeForm } },
-      organization: { loading: module.organizationLoading.value, submitting: module.organizationSubmitting.value, actionJob: module.organizationActionJobId.value, jobs: module.organizationJobs.value, total: module.organizationTotal.value },
       timers: harness.activeTimers().length,
     })
   }
@@ -3052,8 +2432,6 @@ test('keeps new-identity mutations isolated from late old mutation results', asy
       const oldMutation = deferred()
       const freshMutation = deferred()
       let mutationCalls = 0
-      const targetForKb = id => [oldTarget, freshTarget].find(target => target.kb?.id === id)
-      const organizationCalls = new Map()
       const harness = await createHarness(t, {
         currentUid: 'user-a',
         currentUsername: 'Alice',
@@ -3061,20 +2439,6 @@ test('keeps new-identity mutations isolated from late old mutation results', asy
         [scenario.method]: () => {
           mutationCalls += 1
           return mutationCalls === 1 ? oldMutation.promise : freshMutation.promise
-        },
-        managedItems: id => {
-          const items = targetForKb(id)?.item ? [targetForKb(id).item] : []
-          return Promise.resolve(dataResponse({ items, total: items.length }))
-        },
-        managedItem: (id, itemId) => Promise.resolve(dataResponse(
-          targetForKb(id)?.item?.id === itemId ? targetForKb(id).item : { id: itemId, knowledge_key: 'key', content: '', version: 1 },
-        )),
-        organizationJobs: id => {
-          const call = (organizationCalls.get(id) || 0) + 1
-          organizationCalls.set(id, call)
-          const target = targetForKb(id)
-          const jobs = call === 1 ? (target?.job ? [target.job] : []) : (target?.settledJob ? [target.settledJob] : [])
-          return Promise.resolve(dataResponse({ items: jobs, total: jobs.length }))
         },
       })
       if (scenario.ref) {

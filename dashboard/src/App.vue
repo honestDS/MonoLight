@@ -74,7 +74,7 @@
           </el-tooltip>
         </div>
         <el-menu
-          :default-active="$route.path"
+          :default-active="$route.meta?.menuPath || $route.path"
           :collapse="isSidebarCollapsed"
           :collapse-transition="false"
           :popper-offset="-4"
@@ -139,7 +139,7 @@
         </el-menu>
         <div class="sidebar-footer">
           <el-menu
-            :default-active="$route.path"
+            :default-active="$route.meta?.menuPath || $route.path"
             :collapse="isSidebarCollapsed"
             :collapse-transition="false"
             router
@@ -354,7 +354,7 @@ export default {
       return ['/login', '/setup', '/backend-unavailable'].includes(this.$route.path)
     },
     currentRouteName() {
-      const path = this.$route.path
+      const path = this.$route.meta?.menuPath || this.$route.path
       const key = routeNameMap[path]
       return key ? this.$t(key) : this.$t('common.menu.chat') // fallback 
     },

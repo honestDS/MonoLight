@@ -83,14 +83,12 @@
       <el-table-column :resizable="false" :label="$t('knowledgeBase.actions')" width="300" align="center" fixed="right">
         <template #default="{ row }">
           <div class="action-buttons knowledge-base-action-buttons">
-            <el-button v-if="canManageKnowledgeBaseDocuments(row)" type="success" size="small" @click="showDocumentDialog(row)">{{ $t('knowledgeBase.documents') }}</el-button>
-            <el-button v-if="canManageManagedKnowledge(row)" type="success" size="small" @click="showManagedKnowledgeDialog(row)">{{ $t('knowledgeBase.documents') }}</el-button>
+            <el-button type="success" size="small" @click="openEntries(row)">{{ $t('knowledgeBase.entries') }}</el-button>
             <el-button type="warning" size="small" @click="showQueryTestDialog(row)">{{ $t('knowledgeBase.test') }}</el-button>
             <el-dropdown trigger="click" popper-class="knowledge-base-more-dropdown" @command="handleKnowledgeBaseMoreAction($event, row)">
               <el-button size="small">{{ $t('knowledgeBase.more') }}</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item v-if="canManageKnowledgeBaseDocuments(row)" command="import_document">{{ $t('knowledgeBase.import_doc') }}</el-dropdown-item>
                   <el-dropdown-item command="embedding_status">{{ $t('knowledgeBase.embedding_status') }}</el-dropdown-item>
                   <el-dropdown-item command="repair" :disabled="repairSubmitting || migrationSubmitting || !canRepairKnowledgeBase(row)">
                     {{ $t('knowledgeBase.repair') }}
@@ -313,411 +311,6 @@
       </template>
     </el-dialog>
 
-    <!-- 导入文档弹窗 -->
-    <el-dialog
-      :title="$t('knowledgeBase.import_doc')"
-      v-model="importDialogVisible"
-      width="560px"
-      class="standard-dialog"
-      center
-      align-center
-    >
-      <el-alert
-        :title="$t('knowledgeBase.import_alert')"
-        type="info"
-        :closable="false"
-        class="mb-15"
-      />
-      <el-form :model="importForm" :rules="importRules" ref="importFormRef" label-width="120px" size="default">
-        <el-form-item :label="$t('knowledgeBase.target_kb')">
-          <el-input :model-value="selectedKb?.name || '-'" disabled />
-          <div class="help-text mt-5">{{ $t('knowledgeBase.target_kb_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('knowledgeBase.select_doc')" prop="file">
-          <el-upload
-            class="full-width-input"
-            action=""
-            :auto-upload="false"
-            :limit="1"
-            :file-list="uploadFileList"
-            :on-change="handleFileChange"
-            :on-remove="handleFileRemove"
-          >
-            <el-button type="primary">{{ $t('knowledgeBase.select_file') }}</el-button>
-          </el-upload>
-          <div class="help-text mt-5">{{ $t('knowledgeBase.select_doc_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('knowledgeBase.chunk_size')" prop="chunk_size">
-          <el-input-number v-model="importForm.chunk_size" :min="100" :max="20000" :step="100" class="full-width-input" />
-          <div class="help-text mt-5">{{ $t('knowledgeBase.chunk_size_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('knowledgeBase.chunk_overlap')" prop="chunk_overlap">
-          <el-input-number v-model="importForm.chunk_overlap" :min="0" :max="5000" :step="50" class="full-width-input" />
-          <div class="help-text mt-5">{{ $t('knowledgeBase.chunk_overlap_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('knowledgeBase.batch_size')" prop="batch_size">
-          <el-input-number v-model="importForm.batch_size" :min="1" :max="256" :step="1" class="full-width-input" />
-          <div class="help-text mt-5">{{ $t('knowledgeBase.batch_size_hint') }}</div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="importDialogVisible = false" size="default">{{ $t('knowledgeBase.cancel') }}</el-button>
-        <el-button type="primary" :loading="importing" @click="submitImport" size="default">{{ $t('knowledgeBase.start_import') }}</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 文档管理弹窗 -->
-    <el-dialog
-      :title="$t('knowledgeBase.doc_management', { name: selectedKb?.name || '' })"
-      v-model="documentDialogVisible"
-      width="1040px"
-      class="standard-dialog"
-      center
-      align-center
-    >
-      <el-table :data="documentList" :loading="documentLoading">
-        <el-table-column prop="filename" :label="$t('knowledgeBase.filename')" min-width="220" show-overflow-tooltip />
-        <el-table-column prop="chunk_count" :label="$t('knowledgeBase.chunk_count')" width="90" align="center" />
-        <el-table-column prop="chunk_size" :label="$t('knowledgeBase.chunk_size')" width="100" align="center" />
-        <el-table-column prop="chunk_overlap" :label="$t('knowledgeBase.overlap')" width="90" align="center" />
-        <el-table-column prop="batch_size" :label="$t('knowledgeBase.batch_size_col')" width="90" align="center" />
-        <el-table-column :label="$t('knowledgeBase.import_time')" width="170">
-          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.actions')" width="210" align="center" fixed="right">
-          <template #default="{ row }">
-            <div class="action-buttons document-action-buttons">
-              <el-button type="primary" size="small" @click="showContentDialog(row)">{{ $t('knowledgeBase.original_text') }}</el-button>
-              <el-button type="danger" size="small" @click="handleDeleteDocument(row)">{{ $t('knowledgeBase.delete') }}</el-button>
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
-      <div class="document-pagination">
-        <el-pagination
-          v-model:current-page="documentPage"
-          v-model:page-size="documentPageSize"
-          :total="documentTotal"
-          :page-sizes="[10, 20, 50]"
-          layout="total, sizes, prev, pager, next"
-          @current-change="fetchDocuments"
-          @size-change="handleDocumentSizeChange"
-        />
-      </div>
-    </el-dialog>
-
-    <!-- 原文查看弹窗 -->
-    <el-dialog
-      :title="$t('knowledgeBase.view_original', { title: contentTitle })"
-      v-model="contentDialogVisible"
-      width="760px"
-      class="standard-dialog"
-      center
-      align-center
-    >
-      <pre class="document-content">{{ documentContent }}</pre>
-    </el-dialog>
-
-    <el-dialog
-      :title="$t('knowledgeBase.managed_items_title', { name: selectedKb?.name || '' })"
-      v-model="managedKnowledgeDialogVisible"
-      width="1180px"
-      class="standard-dialog managed-knowledge-dialog"
-      center
-      align-center
-      @closed="stopManagedKnowledgePolling"
-    >
-      <div class="managed-knowledge-toolbar">
-        <el-input
-          v-model="managedKnowledgeQuery"
-          clearable
-          :placeholder="$t('knowledgeBase.managed_search_placeholder')"
-          @keyup.enter="handleManagedKnowledgeSearch"
-          @clear="handleManagedKnowledgeSearch"
-        />
-        <el-button type="primary" @click="handleManagedKnowledgeSearch">{{ $t('knowledgeBase.search') }}</el-button>
-        <el-button type="success" @click="showManagedKnowledgeCreateDialog">{{ $t('knowledgeBase.managed_add') }}</el-button>
-        <el-button type="warning" @click="showOrganizationDialog">{{ $t('knowledgeBase.organization') }}</el-button>
-      </div>
-      <el-table
-        :data="managedKnowledgeItems"
-        :loading="managedKnowledgeLoading"
-        row-key="id"
-        class="managed-knowledge-table"
-      >
-        <el-table-column prop="knowledge_key" :label="$t('knowledgeBase.managed_key')" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="content_preview" :label="$t('knowledgeBase.managed_content_preview')" min-width="280" show-overflow-tooltip />
-        <el-table-column prop="version" :label="$t('knowledgeBase.managed_version')" width="80" align="center" />
-        <el-table-column :label="$t('knowledgeBase.managed_source')" min-width="160" show-overflow-tooltip>
-          <template #default="{ row }">
-            <div>{{ getManagedSourceLabel(row.source_type) }}</div>
-            <div v-if="formatManagedSourceReference(row.source_reference) !== '-'" class="help-text">
-              {{ formatManagedSourceReference(row.source_reference) }}
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_created_by')" width="110" align="center">
-          <template #default="{ row }">{{ getManagedActorLabel(row.created_by) }}</template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_modified_by')" width="110" align="center">
-          <template #default="{ row }">{{ getManagedActorLabel(row.last_modified_by) }}</template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_llm_maintainable')" width="140" align="center">
-          <template #default="{ row }">
-            <el-tag :type="row.llm_maintainable ? 'success' : 'info'">
-              {{ row.llm_maintainable ? $t('knowledgeBase.yes') : $t('knowledgeBase.no') }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_status')" width="120" align="center">
-          <template #default="{ row }">
-            <el-tooltip
-              v-if="row.publication_job_status === 'failed' && row.publication_job_error"
-              :content="row.publication_job_error"
-              placement="top"
-            >
-              <span>{{ getManagedKnowledgeStatusLabel(row) }}</span>
-            </el-tooltip>
-            <span v-else>{{ getManagedKnowledgeStatusLabel(row) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_updated_at')" width="170">
-          <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.actions')" width="180" align="center" fixed="right">
-          <template #default="{ row }">
-            <div class="action-buttons managed-knowledge-action-buttons">
-              <el-button type="primary" size="small" @click="showManagedKnowledgeEditDialog(row)">{{ $t('knowledgeBase.edit') }}</el-button>
-              <el-dropdown trigger="click" popper-class="knowledge-base-more-dropdown" @command="handleManagedKnowledgeMoreAction($event, row)">
-                <el-button size="small">{{ $t('knowledgeBase.more') }}</el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item command="history">{{ $t('knowledgeBase.managed_history') }}</el-dropdown-item>
-                    <el-dropdown-item v-if="row.publication_job_status === 'failed'" command="retry">{{ $t('knowledgeBase.managed_retry') }}</el-dropdown-item>
-                    <el-dropdown-item command="delete" divided class="danger-dropdown-item">{{ $t('knowledgeBase.delete') }}</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
-      <div class="document-pagination">
-        <el-pagination
-          v-model:current-page="managedKnowledgePage"
-          v-model:page-size="managedKnowledgePageSize"
-          :total="managedKnowledgeTotal"
-          :page-sizes="[10, 20, 50]"
-          layout="total, sizes, prev, pager, next"
-          @current-change="handleManagedKnowledgePageChange"
-          @size-change="handleManagedKnowledgeSizeChange"
-        />
-      </div>
-    </el-dialog>
-
-    <el-dialog
-      :title="$t('knowledgeBase.organization_title', { name: selectedKb?.name || '' })"
-      v-model="organizationDialogVisible"
-      width="1020px"
-      class="standard-dialog organization-dialog dialog-with-scroll-body"
-      align-center
-      @closed="stopOrganizationPolling"
-    >
-      <div class="organization-toolbar">
-        <p class="organization-intro">{{ $t('knowledgeBase.organization_intro') }}</p>
-        <el-button
-          type="primary"
-          :loading="organizationSubmitting"
-          @click="submitKnowledgeOrganization"
-        >
-          {{ $t('knowledgeBase.organization_start') }}
-        </el-button>
-      </div>
-
-      <section v-if="latestOrganizationJob" class="organization-latest">
-        <div class="organization-latest__header">
-          <div class="organization-latest__heading">
-            <h3>{{ $t('knowledgeBase.organization_latest') }}</h3>
-            <div class="organization-latest__meta">
-              <span>{{ $t('knowledgeBase.organization_job_id') }}: {{ getOrganizationJobId(latestOrganizationJob) || '-' }}</span>
-              <span>{{ $t('knowledgeBase.organization_snapshot') }}: {{ getOrganizationSnapshotId(latestOrganizationJob) }}</span>
-            </div>
-          </div>
-          <div class="organization-latest__actions">
-            <el-tag :type="getOrganizationStatusType(latestOrganizationJob.status)">
-              {{ getOrganizationStatusLabel(latestOrganizationJob.status) }}
-            </el-tag>
-            <el-button
-              v-if="canCancelOrganizationJob(latestOrganizationJob)"
-              type="warning"
-              size="small"
-              :loading="organizationActionJobId === getOrganizationJobId(latestOrganizationJob)"
-              @click="handleCancelOrganizationJob(latestOrganizationJob)"
-            >
-              {{ $t('knowledgeBase.organization_cancel') }}
-            </el-button>
-            <el-button
-              v-if="canRetryOrganizationJob(latestOrganizationJob)"
-              type="primary"
-              size="small"
-              :loading="organizationActionJobId === getOrganizationJobId(latestOrganizationJob)"
-              @click="handleRetryOrganizationJob(latestOrganizationJob)"
-            >
-              {{ $t('knowledgeBase.organization_retry') }}
-            </el-button>
-          </div>
-        </div>
-
-        <div v-if="['pending', 'running', 'retry'].includes(latestOrganizationJob.status)" class="organization-progress-grid">
-          <div class="organization-progress-item">
-            <div class="organization-progress-label">
-              <span>{{ $t('knowledgeBase.organization_stage_progress') }}</span>
-              <span>{{ getOrganizationStageProgress(latestOrganizationJob) }}</span>
-            </div>
-            <el-progress :percentage="getOrganizationStageProgressPercentage(latestOrganizationJob)" :show-text="false" />
-          </div>
-          <div class="organization-progress-item">
-            <div class="organization-progress-label">
-              <span>{{ $t('knowledgeBase.organization_fragment_progress') }}</span>
-              <span>{{ getOrganizationFragmentProgress(latestOrganizationJob) }}</span>
-            </div>
-            <el-progress :percentage="getOrganizationFragmentProgressPercentage(latestOrganizationJob)" :show-text="false" />
-          </div>
-        </div>
-
-        <div class="organization-latest__counts">
-          <span>{{ $t('knowledgeBase.organization_counts') }}</span>
-          <span>{{ getOrganizationCountsText(latestOrganizationJob) }}</span>
-        </div>
-
-        <div v-if="latestOrganizationJob.status === 'failed'" class="organization-job-error" role="alert">
-          {{ latestOrganizationJob.error || $t('knowledgeBase.organization_error') }}
-        </div>
-      </section>
-
-      <el-empty
-        v-if="!organizationLoading && !organizationJobs.length"
-        :description="$t('knowledgeBase.organization_no_jobs')"
-      />
-      <details v-if="organizationDialogVisible && organizationJobs.length > 1" class="organization-history">
-        <summary class="organization-history__summary">{{ $t('knowledgeBase.organization_history') }}</summary>
-        <el-table
-          :data="organizationJobs.slice(1)"
-          :loading="organizationLoading"
-          :row-key="getOrganizationJobId"
-          max-height="240"
-          class="organization-job-table"
-        >
-          <el-table-column type="expand" width="76" :label="$t('knowledgeBase.organization_details')">
-            <template #default="{ row }">
-              <div class="organization-history-details">
-                <div>{{ $t('knowledgeBase.organization_snapshot') }}: {{ getOrganizationSnapshotId(row) }}</div>
-                <div>{{ $t('knowledgeBase.organization_stage_progress') }}: {{ getOrganizationStageProgress(row) }}</div>
-                <div>{{ $t('knowledgeBase.organization_fragment_progress') }}: {{ getOrganizationFragmentProgress(row) }}</div>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column :label="$t('knowledgeBase.organization_job_id')" width="90" align="center">
-            <template #default="{ row }">{{ getOrganizationJobId(row) || '-' }}</template>
-          </el-table-column>
-          <el-table-column :label="$t('knowledgeBase.organization_status')" width="148" align="center">
-            <template #default="{ row }">
-              <el-tag :type="getOrganizationStatusType(row.status)">
-                {{ getOrganizationStatusLabel(row.status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column :label="$t('knowledgeBase.organization_counts')" min-width="220">
-            <template #default="{ row }">
-              <div class="organization-history__result">
-                <div>{{ getOrganizationCountsText(row) }}</div>
-                <div v-if="row.status === 'failed'" class="organization-history__error">{{ row.error || $t('knowledgeBase.organization_error') }}</div>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column :label="$t('knowledgeBase.actions')" width="200" align="center" fixed="right">
-            <template #default="{ row }">
-              <div class="action-buttons">
-                <el-button
-                  v-if="canCancelOrganizationJob(row)"
-                  type="warning"
-                  size="small"
-                  :loading="organizationActionJobId === getOrganizationJobId(row)"
-                  @click="handleCancelOrganizationJob(row)"
-                >
-                  {{ $t('knowledgeBase.organization_cancel') }}
-                </el-button>
-                <el-button
-                  v-if="canRetryOrganizationJob(row)"
-                  type="primary"
-                  size="small"
-                  :loading="organizationActionJobId === getOrganizationJobId(row)"
-                  @click="handleRetryOrganizationJob(row)"
-                >
-                  {{ $t('knowledgeBase.organization_retry') }}
-                </el-button>
-                <span v-if="!canCancelOrganizationJob(row) && !canRetryOrganizationJob(row)">-</span>
-              </div>
-            </template>
-          </el-table-column>
-        </el-table>
-      </details>
-    </el-dialog>
-
-    <el-dialog
-      :title="managedKnowledgeEditingId ? $t('knowledgeBase.managed_edit_title') : $t('knowledgeBase.managed_create_title')"
-      v-model="managedKnowledgeEditDialogVisible"
-      width="720px"
-      class="standard-dialog"
-      center
-      align-center
-    >
-      <el-form :model="managedKnowledgeForm" :rules="managedKnowledgeRules" ref="managedKnowledgeFormRef" label-width="150px" size="default">
-        <el-form-item :label="$t('knowledgeBase.managed_key')" prop="knowledge_key">
-          <el-input v-model="managedKnowledgeForm.knowledge_key" maxlength="255" show-word-limit />
-        </el-form-item>
-        <el-form-item :label="$t('knowledgeBase.managed_content')" prop="content">
-          <el-input v-model="managedKnowledgeForm.content" type="textarea" :rows="10" />
-        </el-form-item>
-        <el-form-item :label="$t('knowledgeBase.managed_llm_maintainable')">
-          <el-switch v-model="managedKnowledgeForm.llm_maintainable" />
-          <div class="help-text managed-maintenance-hint">{{ $t('knowledgeBase.managed_llm_maintainable_hint') }}</div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="managedKnowledgeEditDialogVisible = false">{{ $t('knowledgeBase.cancel') }}</el-button>
-        <el-button type="primary" :loading="managedKnowledgeSubmitting" @click="submitManagedKnowledge">{{ $t('knowledgeBase.confirm') }}</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      :title="$t('knowledgeBase.managed_history_title', { key: managedKnowledgeHistoryKey })"
-      v-model="managedKnowledgeHistoryDialogVisible"
-      width="980px"
-      class="standard-dialog"
-      center
-      align-center
-    >
-      <el-table :data="managedKnowledgeHistory" :loading="managedKnowledgeHistoryLoading">
-        <el-table-column prop="version" :label="$t('knowledgeBase.managed_version')" width="80" align="center" />
-        <el-table-column :label="$t('knowledgeBase.managed_operation')" width="100" align="center">
-          <template #default="{ row }">{{ getManagedOperationLabel(row.operation) }}</template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_source')" width="120" align="center">
-          <template #default="{ row }">{{ getManagedSourceLabel(row.source_type) }}</template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_modified_by')" width="110" align="center">
-          <template #default="{ row }">{{ getManagedActorLabel(row.modified_by) }}</template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_snapshot')" min-width="360" show-overflow-tooltip>
-          <template #default="{ row }">{{ formatManagedSnapshot(row.after_snapshot) }}</template>
-        </el-table-column>
-        <el-table-column :label="$t('knowledgeBase.managed_updated_at')" width="170">
-          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-        </el-table-column>
-      </el-table>
-    </el-dialog>
-
     <!-- 检索测试弹窗 -->
     <el-dialog
       :title="$t('knowledgeBase.query_test', { name: selectedKb?.name || '' })"
@@ -791,6 +384,13 @@
 import BaseDataTable from '@/components/BaseDataTable.vue'
 import KnowledgeBaseRepairDialog from '@/components/KnowledgeBaseRepairDialog.vue'
 import { useKnowledgeBaseView } from '@/composables/knowledgeBase/useKnowledgeBaseView.js'
+import { useRoute, useRouter } from 'vue-router'
+
+const route = useRoute()
+const router = useRouter()
+
+const routePage = typeof route.query.page === 'string' ? Number(route.query.page) : NaN
+const routeSize = typeof route.query.size === 'string' ? Number(route.query.size) : NaN
 
 const {
   tableData,
@@ -822,9 +422,6 @@ const {
   getMigrationStatusLabel,
   getCleanupStatusLabel,
   formatTime,
-  canManageKnowledgeBaseDocuments,
-  showDocumentDialog,
-  showManagedKnowledgeDialog,
   showQueryTestDialog,
   handleKnowledgeBaseMoreAction,
   dialogVisible,
@@ -851,81 +448,6 @@ const {
   migrationProgress,
   migrationSubmitting,
   submitEmbeddingMigration,
-  importDialogVisible,
-  importForm,
-  importRules,
-  importFormRef,
-  uploadFileList,
-  handleFileChange,
-  handleFileRemove,
-  importing,
-  submitImport,
-  documentDialogVisible,
-  documentList,
-  documentLoading,
-  documentPage,
-  documentPageSize,
-  documentTotal,
-  fetchDocuments,
-  handleDocumentSizeChange,
-  contentDialogVisible,
-  contentTitle,
-  documentContent,
-  showContentDialog,
-  handleDeleteDocument,
-  managedKnowledgeDialogVisible,
-  stopManagedKnowledgePolling,
-  managedKnowledgeQuery,
-  handleManagedKnowledgeSearch,
-  showManagedKnowledgeCreateDialog,
-  showOrganizationDialog,
-  managedKnowledgeItems,
-  managedKnowledgeLoading,
-  getManagedSourceLabel,
-  formatManagedSourceReference,
-  getManagedActorLabel,
-  getManagedKnowledgeStatusLabel,
-  showManagedKnowledgeEditDialog,
-  handleManagedKnowledgeMoreAction,
-  managedKnowledgePage,
-  managedKnowledgePageSize,
-  managedKnowledgeTotal,
-  handleManagedKnowledgePageChange,
-  handleManagedKnowledgeSizeChange,
-  organizationDialogVisible,
-  stopOrganizationPolling,
-  organizationSubmitting,
-  submitKnowledgeOrganization,
-  latestOrganizationJob,
-  getOrganizationJobId,
-  getOrganizationStatusType,
-  getOrganizationStatusLabel,
-  getOrganizationSnapshotId,
-  getOrganizationStageProgress,
-  getOrganizationStageProgressPercentage,
-  getOrganizationFragmentProgress,
-  getOrganizationFragmentProgressPercentage,
-  getOrganizationCountsText,
-  organizationLoading,
-  organizationJobs,
-  canCancelOrganizationJob,
-  organizationActionJobId,
-  handleCancelOrganizationJob,
-  canRetryOrganizationJob,
-  handleRetryOrganizationJob,
-  managedKnowledgeEditDialogVisible,
-  managedKnowledgeForm,
-  managedKnowledgeRules,
-  managedKnowledgeFormRef,
-  managedKnowledgeEditingId,
-  managedKnowledgeSubmitting,
-  submitManagedKnowledge,
-  managedKnowledgeHistoryDialogVisible,
-  managedKnowledgeHistoryKey,
-  managedKnowledgeHistory,
-  managedKnowledgeHistoryLoading,
-  getManagedOperationLabel,
-  formatManagedSnapshot,
   queryTestDialogVisible,
   queryTestForm,
   queryTestRules,
@@ -939,6 +461,14 @@ const {
   formatScore,
   formatDistance
 } = useKnowledgeBaseView()
+
+currentPage.value = Number.isSafeInteger(routePage) && routePage > 0 ? routePage : 1
+pageSize.value = [10, 20, 50, 100].includes(routeSize) ? routeSize : 20
+
+const openEntries = (row) => router.push({
+  path: `/knowledge-base/${row.id}`,
+  query: { page: currentPage.value, size: pageSize.value }
+})
 </script>
 
 <style lang="scss">

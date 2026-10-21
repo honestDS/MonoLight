@@ -5,20 +5,15 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.constants import (
-    ERR_KB_CHUNK_OVERLAP_ERROR,
     ERR_KB_COLLECTION_CREATE_FAILED,
     ERR_KB_CREATE_FAILED_WITH_ROLLBACK,
     ERR_KB_DELETE_FAILED,
     ERR_KB_DOC_DELETE_FAILED,
     ERR_KB_DOC_NOT_FOUND,
-    ERR_KB_DOC_SAVE_FAILED,
     ERR_KB_EMBEDDING_CONFIG_CHANGED,
     ERR_KB_EMBEDDING_PROBE_FAILED,
-    ERR_KB_FILE_EMPTY,
-    ERR_KB_FILE_ENCODING_ERROR,
     ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN,
     ERR_KB_NOT_FOUND,
-    ERR_KB_VECTOR_WRITE_FAILED,
     ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED,
     ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND,
     ERR_PROFILE_NOT_FOUND,
@@ -44,12 +39,7 @@ from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, build_embedding_signature, detect_embedding_dimensions, load_embedding_runtime_config
-
-# Re-use the refactored embedding and knowledge base query core functions
-from app.core.embedding.knowledge_base import (
-    embed_chunks_with_knowledge_base_config,
-    query_knowledge_base,
-)
+from app.core.embedding.knowledge_base import query_knowledge_base
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
@@ -58,6 +48,7 @@ from app.core.knowledge.bindings import (
     replace_user_knowledge_base_bindings,
 )
 from app.core.knowledge.deletion import delete_owned_knowledge_base
+from app.core.knowledge.documents import create_user_knowledge_document, decode_knowledge_document
 from app.core.knowledge.embedding_migration import (
     submit_knowledge_base_repairs,
     submit_user_knowledge_base_embedding_migration,
@@ -74,7 +65,6 @@ from app.core.knowledge.organization_run import (
 )
 from app.core.knowledge_jobs.manager import knowledge_job_manager
 from app.core.security import get_current_user
-from app.core.utils.text_splitter import TextSplitter
 from app.models.channel import ModelUsage
 from app.models.knowledge_base import (
     KnowledgeBase,
@@ -96,6 +86,9 @@ from app.models.knowledge_base import (
     KnowledgeBaseResponse,
     KnowledgeBaseType,
     KnowledgeBaseUpdate,
+    KnowledgeEntryCreateRequest,
+    KnowledgeEntryFilePreviewResponse,
+    KnowledgeEntryMutationResponse,
     KnowledgeJob,
     KnowledgeJobOperation,
     KnowledgeJobStatus,
@@ -118,8 +111,6 @@ from app.providers.vector import (
     async_create_collection,
     async_delete_collection,
     async_delete_collection_items,
-    async_get_or_create_collection,
-    async_upsert_collection_items,
 )
 from app.schemas.response import StandardResponse
 
@@ -274,39 +265,6 @@ async def load_embedding_model(
         lock_for_reference_write=lock_for_reference_write,
     )
     return config, {"model_id": config.model_id, "embedding_dimensions": config.declared_dimensions}
-
-
-async def embed_document_with_stable_knowledge_base_config(
-    db: AsyncSession,
-    *,
-    knowledge_base: KnowledgeBase,
-    chunks: list[str],
-    batch_size: int,
-) -> tuple[KnowledgeBase, list[list[float]]]:
-    candidate = knowledge_base
-    for _attempt in range(2):
-        expected_embedding = resolve_active_knowledge_base_embedding(candidate)
-        embeddings = await embed_chunks_with_knowledge_base_config(
-            db,
-            candidate,
-            chunks,
-            batch_size,
-            release_connection=True,
-        )
-        locked = await knowledge_base_crud.lock_owned_by_id(
-            db,
-            uid=knowledge_base.uid,
-            knowledge_base_id=knowledge_base.id,
-        )
-        if locked is None:
-            raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
-        if resolve_active_knowledge_base_embedding(locked) == expected_embedding:
-            return locked, embeddings
-        await db.rollback()
-        candidate = await knowledge_base_crud.get(db, knowledge_base.id)
-        if candidate is None:
-            raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
-    raise HTTPException(status_code=409, detail=t(ERR_KB_EMBEDDING_CONFIG_CHANGED))
 
 
 async def list_embedding_model_options(db: AsyncSession) -> list[dict[str, Any]]:
@@ -914,94 +872,79 @@ async def import_document(
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
     if kb.knowledge_base_type != KnowledgeBaseType.USER:
         raise HTTPException(status_code=409, detail=t(ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN))
-    if chunk_overlap >= chunk_size:
-        raise HTTPException(status_code=400, detail=ERR_KB_CHUNK_OVERLAP_ERROR)
-
-    raw_content = await file.read()
-    try:
-        content = raw_content.decode("utf-8")
-    except UnicodeDecodeError:
-        try:
-            content = raw_content.decode("gbk")
-        except UnicodeDecodeError:
-            raise HTTPException(status_code=400, detail=ERR_KB_FILE_ENCODING_ERROR)
-
-    chunks = TextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap).split(content)
-    if not chunks:
-        raise HTTPException(status_code=400, detail=ERR_KB_FILE_EMPTY)
-
-    locked_kb, embeddings = await embed_document_with_stable_knowledge_base_config(
+    content = decode_knowledge_document(await file.read())
+    db_document = await create_user_knowledge_document(
         db,
         knowledge_base=kb,
-        chunks=chunks,
+        filename=file.filename or t(MSG_KB_UNNAMED_DOCUMENT),
+        content=content,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         batch_size=batch_size,
+        metadata={"content_type": file.content_type or ""},
     )
-    active_embedding = resolve_active_knowledge_base_embedding(locked_kb)
-    document_uuid = uuid.uuid4().hex
-    document_filename = file.filename or t(MSG_KB_UNNAMED_DOCUMENT)
-    chunk_ids = []
-    metadatas = []
-    for chunk_index in range(len(chunks)):
-        chunk_ids.append(f"kb_{kb.id}_doc_{document_uuid}_chunk_{chunk_index}")
-        metadatas.append(
-            {
-                "knowledge_base_id": kb.id,
-                "document_uuid": document_uuid,
-                "filename": document_filename,
-                "chunk_index": chunk_index,
-            }
-        )
-
-    try:
-        await async_get_or_create_collection(active_embedding.collection_name)
-        await async_upsert_collection_items(
-            active_embedding.collection_name,
-            chunk_ids,
-            chunks,
-            embeddings,
-            metadatas,
-            batch_size=batch_size,
-        )
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=t(ERR_KB_VECTOR_WRITE_FAILED, message=str(e)))
-
-    try:
-        db_document = await knowledge_base_document_crud.create(
-            db,
-            values={
-                "knowledge_base_id": locked_kb.id,
-                "filename": document_filename,
-                "content": content,
-                "chunk_size": chunk_size,
-                "chunk_overlap": chunk_overlap,
-                "batch_size": batch_size,
-                "chunk_count": len(chunks),
-                "chunk_ids": chunk_ids,
-                "metadata_": {
-                    "document_uuid": document_uuid,
-                    "content_type": file.content_type or "",
-                },
-            },
-            commit=False,
-        )
-        await record_knowledge_base_migration_change(
-            db,
-            knowledge_base=locked_kb,
-            source_type=KnowledgeBaseMigrationSourceType.USER_DOCUMENT,
-            source_id=db_document.id,
-            action=KnowledgeBaseMigrationDeltaAction.UPSERT,
-        )
-        await db.commit()
-    except Exception as e:
-        await db.rollback()
-        try:
-            await async_delete_collection_items(active_embedding.collection_name, chunk_ids)
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=t(ERR_KB_DOC_SAVE_FAILED, message=str(e)))
 
     return StandardResponse.success(data=KnowledgeBaseDocumentResponse.model_validate(db_document), message=MSG_KB_DOC_CREATED)
+
+
+@router.post("/entries/preview-file", response_model=StandardResponse[KnowledgeEntryFilePreviewResponse])
+async def preview_knowledge_entry_file(
+    kb_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    await load_owned_knowledge_base(db, kb_id, current_user)
+    content = decode_knowledge_document(await file.read())
+    return StandardResponse.success(
+        data=KnowledgeEntryFilePreviewResponse(
+            filename=file.filename or t(MSG_KB_UNNAMED_DOCUMENT),
+            content=content,
+        )
+    )
+
+
+@router.post("/entries/create", response_model=StandardResponse[KnowledgeEntryMutationResponse])
+async def create_knowledge_entry(
+    kb_id: int,
+    item_in: KnowledgeEntryCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_knowledge_base(db, kb_id, current_user)
+    if knowledge_base.knowledge_base_type == KnowledgeBaseType.USER:
+        document = await create_user_knowledge_document(
+            db,
+            knowledge_base=knowledge_base,
+            filename=item_in.name,
+            content=item_in.content,
+            chunk_size=item_in.chunk_size,
+            chunk_overlap=item_in.chunk_overlap,
+            batch_size=item_in.batch_size,
+            metadata={"source_filename": item_in.source_filename} if item_in.source_filename else None,
+        )
+        return StandardResponse.success(data=KnowledgeEntryMutationResponse(status="ready", item_id=document.id))
+
+    result = await knowledge_job_manager.submit_create(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        knowledge_key=item_in.name,
+        content=item_in.content,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        actor=ManagedKnowledgeActorType.USER,
+        dedupe_key=managed_user_dedupe_key("knowledge-entry-create", item_in.dedupe_key),
+        source_reference={"filename": item_in.source_filename} if item_in.source_filename else None,
+        llm_maintainable=item_in.llm_maintainable,
+        source_profile_id=knowledge_base.managed_profile_id,
+    )
+    return StandardResponse.success(
+        data=KnowledgeEntryMutationResponse(
+            status=result.status.value,
+            item_id=result.item.id if result.item is not None else None,
+            job_id=result.job.id if result.job is not None else None,
+        )
+    )
 
 
 @router.get("/documents/list", response_model=StandardResponse[KnowledgeBaseDocumentListResponse])

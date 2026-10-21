@@ -260,6 +260,8 @@ export const knowledgeBaseApi = {
   list: (params) => request.get('/knowledge-base/list', { params }),
   get: (id) => request.get('/knowledge-base/get', { params: { kb_id: id } }),
   create: (data) => request.post('/knowledge-base/create', data),
+  createEntry: (id, data) => request.post(`/knowledge-base/entries/create?kb_id=${id}`, data),
+  previewEntryFile: (id, formData, config = {}) => request.post(`/knowledge-base/entries/preview-file?kb_id=${id}`, formData, config),
   migrateEmbedding: (id, data) => request.post(`/knowledge-base/embedding-migration?kb_id=${id}`, data),
   update: (id, data) => request.post(`/knowledge-base/update?kb_id=${id}`, data),
   repair: (data, params = {}) => request.post('/knowledge-base/repair', data, { params }),

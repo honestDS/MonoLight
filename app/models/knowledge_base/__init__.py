@@ -40,6 +40,9 @@ from .schemas import KnowledgeBaseRepairRequest as KnowledgeBaseRepairRequest
 from .schemas import KnowledgeBaseRepairResponse as KnowledgeBaseRepairResponse
 from .schemas import KnowledgeBaseResponse as KnowledgeBaseResponse
 from .schemas import KnowledgeBaseUpdate as KnowledgeBaseUpdate
+from .schemas import KnowledgeEntryCreateRequest as KnowledgeEntryCreateRequest
+from .schemas import KnowledgeEntryFilePreviewResponse as KnowledgeEntryFilePreviewResponse
+from .schemas import KnowledgeEntryMutationResponse as KnowledgeEntryMutationResponse
 from .schemas import KnowledgeOrganizationRequest as KnowledgeOrganizationRequest
 from .schemas import ManagedKnowledgeCreateRequest as ManagedKnowledgeCreateRequest
 from .schemas import ManagedKnowledgeDeleteRequest as ManagedKnowledgeDeleteRequest
