@@ -23,6 +23,7 @@ from app.models.message import (
     InternalToolCall,
     MessageRole,
     TextPart,
+    VoiceTextPart,
 )
 from app.models.profile import LongTermMemoryConfig
 
@@ -211,7 +212,7 @@ def test_precheck_request_extracts_assistant_files_text_without_files_or_credent
     assert result[-1].content == "More Magic9 colors"
 
 
-def test_precheck_request_reduces_history_multimodal_content_but_deep_copies_current_content():
+def test_precheck_request_projects_only_text_from_history_and_current_multimodal_content():
     history_content = [
         TextPart(text="searchable history text"),
         ImagePart(image_url={"url": "data:image/png;base64,HISTORY_SECRET"}),
@@ -223,28 +224,166 @@ def test_precheck_request_reduces_history_multimodal_content_but_deep_copies_cur
         content=[
             TextPart(text="current text"),
             ImagePart(image_url={"url": "data:image/png;base64,CURRENT_SECRET"}),
+            AudioPart(format="wav", path="/private/current.wav", data="CURRENT_AUDIO_SECRET"),
+            FilePart(path="current.pdf"),
         ],
     )
-    original_current_content = current.content
+    messages = [
+        InternalMessage(role=MessageRole.USER, content=history_content),
+        InternalMessage(role=MessageRole.ASSISTANT, content="history answer"),
+        current,
+    ]
+    original_messages = [message.model_dump(mode="json") for message in messages]
 
-    result = build_precheck_request_messages(
-        [
-            InternalMessage(role=MessageRole.USER, content=history_content),
-            InternalMessage(role=MessageRole.ASSISTANT, content="history answer"),
-            current,
-        ]
+    result = build_precheck_request_messages(messages)
+
+    assert [(message.role, message.content) for message in result] == [
+        (MessageRole.USER, "searchable history text"),
+        (MessageRole.ASSISTANT, "history answer"),
+        (MessageRole.USER, "current text"),
+    ]
+    assert [message.model_dump(mode="json") for message in messages] == original_messages
+    assert history_content[1].image_url == {"url": "data:image/png;base64,HISTORY_SECRET"}
+    assert current.content[1].image_url == {"url": "data:image/png;base64,CURRENT_SECRET"}
+
+
+@pytest.mark.parametrize(
+    "current_content",
+    [
+        None,
+        "",
+        " \t\n",
+        [],
+        [ImagePart(image_url={"url": "data:image/png;base64,ONLY_IMAGE"})],
+        [TextPart(text=" \t "), ImagePart(image_url={"url": "data:image/png;base64,WHITESPACE_IMAGE"})],
+    ],
+    ids=["none", "empty", "whitespace", "empty-list", "image-only", "whitespace-text-and-image"],
+)
+@pytest.mark.parametrize(
+    "todo_snapshot",
+    [None, _todo_snapshot(8, "parameter todo task", "pending")],
+    ids=["tool-embedded-todo", "todo-snapshot-parameter"],
+)
+def test_precheck_request_returns_empty_when_current_user_has_no_real_text(current_content, todo_snapshot):
+    embedded_todo = _todo_snapshot(7, "tool todo task", "in_progress")
+    messages = [
+        InternalMessage(
+            role=MessageRole.USER,
+            content='<conversation_summary through_message_id="42">summary with useful text</conversation_summary>',
+        ),
+        InternalMessage(role=MessageRole.USER, content="older user text must not replace current input"),
+        InternalMessage(role=MessageRole.ASSISTANT, content="older assistant text"),
+        InternalMessage(role=MessageRole.TOOL, content=f"tool result\n\n{embedded_todo}"),
+        InternalMessage(
+            role=MessageRole.USER,
+            content=current_content,
+            environment_prompt="environment text must not become user input",
+            guidance_prompt="guidance text must not become user input",
+        ),
+    ]
+
+    result = build_precheck_request_messages(messages, todo_snapshot=todo_snapshot)
+
+    assert result == []
+
+
+@pytest.mark.parametrize(
+    ("user_parts", "expected_text"),
+    [
+        (
+            [
+                TextPart(text="real user text"),
+                ImagePart(image_url={"url": "data:image/png;base64,USER_IMAGE"}),
+            ],
+            "real user text",
+        ),
+        ([], None),
+    ],
+    ids=["retains-user-text", "attachments-only"],
+)
+def test_precheck_request_omits_assembled_attachment_tail(user_parts, expected_text):
+    attachment_tail = [
+        TextPart(text="generated attachment details"),
+        ImagePart(image_url={"url": "data:image/png;base64,GENERATED_IMAGE"}),
+    ]
+    current = InternalMessage(
+        role=MessageRole.USER,
+        content=[*user_parts, *attachment_tail],
+        attachments=["generated-image", "generated-file"],
+        assembled_attachment_part_count=len(attachment_tail),
     )
+    original_current = current.model_dump(mode="json")
 
-    assert result[0].content == "searchable history text\n[图片]\n[音频]\n[文件:history.pdf]"
-    assert "HISTORY_SECRET" not in str(result[0].content)
-    assert "HISTORY_AUDIO_SECRET" not in str(result[0].content)
-    assert result[-1].content == original_current_content
-    assert result[-1].content is not original_current_content
-    assert result[-1].content[0] is not original_current_content[0]
-    assert result[-1].content[1].image_url["url"] == "data:image/png;base64,CURRENT_SECRET"
+    result = build_precheck_request_messages([current])
 
-    result[-1].content[0].text = "changed in precheck copy"
-    assert original_current_content[0].text == "current text"
+    if expected_text is None:
+        assert result == []
+    else:
+        assert [(message.role, message.content) for message in result] == [(MessageRole.USER, expected_text)]
+    assert current.model_dump(mode="json") == original_current
+
+
+def test_precheck_request_keeps_original_content_when_attachment_part_count_is_zero():
+    current = InternalMessage(
+        role=MessageRole.USER,
+        content=[
+            ImagePart(image_url={"url": "data:image/png;base64,ORIGINAL_IMAGE"}),
+            TextPart(text="original user text"),
+        ],
+        attachments=["external-attachment.pdf"],
+        assembled_attachment_part_count=0,
+    )
+    original_current = current.model_dump(mode="json")
+
+    result = build_precheck_request_messages([current])
+
+    assert [(message.role, message.content) for message in result] == [(MessageRole.USER, "original user text")]
+    assert current.model_dump(mode="json") == original_current
+
+
+def test_precheck_request_uses_attachment_count_for_legacy_messages_without_part_count():
+    current = InternalMessage(
+        role=MessageRole.USER,
+        content=[
+            TextPart(text="user-authored text"),
+            TextPart(text="arbitrary generated file text"),
+            ImagePart(image_url={"url": "data:image/png;base64,LEGACY_ATTACHMENT"}),
+        ],
+        attachments=["legacy-text-file", "legacy-image-file"],
+        assembled_attachment_part_count=None,
+    )
+    original_current = current.model_dump(mode="json")
+
+    result = build_precheck_request_messages([current])
+
+    assert [(message.role, message.content) for message in result] == [(MessageRole.USER, "user-authored text")]
+    assert current.model_dump(mode="json") == original_current
+
+
+@pytest.mark.parametrize("text", ["[图片]", "[系统提示,此处不是用户说的话]", "未开启图像理解无法解析图片"])
+@pytest.mark.parametrize("as_text_part", [False, True], ids=["string", "text-part"])
+def test_precheck_request_preserves_user_text_that_looks_like_a_placeholder(text, as_text_part):
+    content = [TextPart(text=text)] if as_text_part else text
+    current = InternalMessage(role=MessageRole.USER, content=content)
+    original_current = current.model_dump(mode="json")
+
+    result = build_precheck_request_messages([current])
+
+    assert [(message.role, message.content) for message in result] == [(MessageRole.USER, text)]
+    assert current.model_dump(mode="json") == original_current
+
+
+def test_precheck_request_preserves_transcribed_voice_text():
+    current = InternalMessage(
+        role=MessageRole.USER,
+        content=[VoiceTextPart(text="transcribed voice text", input_source="voice")],
+    )
+    original_current = current.model_dump(mode="json")
+
+    result = build_precheck_request_messages([current])
+
+    assert [(message.role, message.content) for message in result] == [(MessageRole.USER, "transcribed voice text")]
+    assert current.model_dump(mode="json") == original_current
 
 
 def test_precheck_request_extracts_todo_from_window_outside_tools_and_deduplicates_snapshots():

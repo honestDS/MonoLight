@@ -22,7 +22,7 @@ from app.core.tools.longterm_memory import (
     validate_longterm_memory_arguments,
 )
 from app.core.utils.assistant_files import parse_assistant_files_content
-from app.core.utils.context_messages import is_context_summary_message, message_token_text
+from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
@@ -39,7 +39,7 @@ from app.core.utils.request_token_baseline import (
     merge_session_cache_token_totals,
 )
 from app.models.channel import resolve_model_protocol
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, TextPart
 from app.providers.llm.client import LLMClient
 
 from .types import MemoryRecallContext
@@ -67,14 +67,41 @@ def _extract_precheck_todo(content: Any) -> tuple[dict[str, object] | None, str 
     return payload, stripped
 
 
+def _precheck_message_text(message: InternalMessage) -> str:
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    attachment_part_count = message.assembled_attachment_part_count
+    if attachment_part_count is None:
+        attachment_part_count = len(message.attachments or [])
+    original_count = max(0, len(content) - attachment_part_count)
+    return "\n".join(part.text for part in content[:original_count] if isinstance(part, TextPart))
+
+
+def get_precheck_user_input(messages: list[InternalMessage]) -> tuple[int, str] | None:
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.role != MessageRole.USER or is_context_summary_message(message):
+            continue
+        text = _precheck_message_text(message)
+        if not text.strip():
+            return None
+        return index, text
+    return None
+
+
 def build_precheck_request_messages(
     messages: list[InternalMessage],
     *,
     todo_snapshot: str | None = None,
 ) -> list[InternalMessage]:
-    current_index = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].role == MessageRole.USER and not is_context_summary_message(messages[index])), None)
-    if current_index is None:
+    precheck_user_input = get_precheck_user_input(messages)
+    if precheck_user_input is None:
         return []
+    current_index, current_user_text = precheck_user_input
 
     latest_summary_content: str | None = None
     latest_embedded_todo: dict[str, object] | None = None
@@ -98,7 +125,7 @@ def build_precheck_request_messages(
 
     current_message = InternalMessage(
         role=MessageRole.USER,
-        content=deepcopy(messages[current_index].content),
+        content=current_user_text,
     )
     summary_message = InternalMessage(role=MessageRole.USER, content=latest_summary_content) if latest_summary_content is not None else None
     todo_message = (
@@ -115,13 +142,9 @@ def build_precheck_request_messages(
     )
 
     def build_history_message(message: InternalMessage) -> InternalMessage | None:
-        content = message.content
-        if message.role == MessageRole.ASSISTANT and isinstance(content, str):
-            content = parse_assistant_files_content(content)
-        else:
-            content = deepcopy(content)
-        plain_message = InternalMessage(role=message.role, content=content)
-        text = message_token_text(plain_message)
+        text = _precheck_message_text(message)
+        if message.role == MessageRole.ASSISTANT and isinstance(message.content, str):
+            text = parse_assistant_files_content(text)
         if not text.strip():
             return None
         if message.role == MessageRole.ASSISTANT:
@@ -383,6 +406,7 @@ __all__ = [
     "build_correction_messages",
     "fallback_channel",
     "generate",
+    "get_precheck_user_input",
     "prepare_request_messages",
     "response_is_valid",
     "select_initial_channel",

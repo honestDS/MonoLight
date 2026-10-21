@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from PIL import Image
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
@@ -27,6 +28,7 @@ from app.core.retrieval.schemas import RetrievalHit
 from app.core.tools import longterm_memory as longterm_memory_module
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.assistant_files import build_assistant_files_content
+from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
 from app.models.channel_cursor import ChannelCursor
@@ -45,7 +47,17 @@ from app.models.memory import (
     LongTermMemoryStore,
     LongTermMemoryType,
 )
-from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
+from app.models.message import (
+    ImagePart,
+    InternalMessage,
+    InternalResponse,
+    InternalToolCall,
+    Message,
+    MessageContentFormat,
+    MessageRole,
+    MessageType,
+    TextPart,
+)
 from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
@@ -268,10 +280,13 @@ async def _seed_memory_recall_workflow(session_factory, *, chat_protocol: str = 
         return profile, cfg, current_user.id, record.id, record.vector_item_id
 
 
+@pytest.mark.parametrize("input_kind", ["text", "inline_image", "image_attachment"])
 @pytest.mark.asyncio
 async def test_memory_recall_precheck_persists_executes_and_recovers_idempotently(
     memory_recall_session_factory,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    input_kind: str,
 ) -> None:
     profile, cfg, current_user_id, memory_id, vector_item_id = await _seed_memory_recall_workflow(memory_recall_session_factory)
     assert current_user_id is not None
@@ -383,6 +398,11 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     preserved_provider_metadata = {"source": {"marker": "PRESERVED_PROVIDER_METADATA"}}
     summary_content = '<conversation_summary through_message_id="41">\nEarlier background: The user is working on Python projects.\n</conversation_summary>'
     todo_snapshot = '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"STALE_TODO_MUST_NOT_LEAK","status":"pending"}]}</current_session_todo_snapshot>'
+    current_user_content = "Which editor do I prefer?"
+    current_attachment_path = None
+    if input_kind == "image_attachment":
+        current_attachment_path = tmp_path / "current-user-image.png"
+        Image.new("RGB", (2, 2), color="red").save(current_attachment_path)
 
     def build_context(db: AsyncSession) -> MemoryRecallContext:
         async def capture_event(event_payload: dict[str, Any]) -> None:
@@ -436,8 +456,30 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
                 tool_call_id="private-tool-call-id",
                 content=f'{{"status":"ok","result":"PRIVATE_TOOL_RESULT_MUST_NOT_LEAK","download_url":"https://download.invalid/tool-result"}}\n\n{todo_snapshot}',
             ),
-            InternalMessage(role=MessageRole.USER, content="Which editor do I prefer?"),
         ]
+        if input_kind == "inline_image":
+            context_messages.append(
+                InternalMessage.from_user_input(
+                    content=[
+                        TextPart(text=current_user_content),
+                        ImagePart(image_url={"url": "data:image/png;base64,CURRENT_IMAGE_MUST_NOT_LEAK"}),
+                    ]
+                )
+            )
+        elif input_kind == "image_attachment":
+            current_user_message = InternalMessage.from_user_input(
+                content=[TextPart(text=current_user_content)],
+                attachments=[str(current_attachment_path)],
+            )
+            context_messages.append(
+                MessageAssembler.assemble(
+                    current_user_message,
+                    image_understanding=True,
+                    is_history=False,
+                )
+            )
+        else:
+            context_messages.append(InternalMessage(role=MessageRole.USER, content=current_user_content))
         return MemoryRecallContext(
             db=db,
             uid="owner",
@@ -460,6 +502,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
 
     async with memory_recall_session_factory() as db:
         first_context = build_context(db)
+        source_current_message = first_context.messages[-1]
         first_context_messages_before = [message.model_dump(mode="json") for message in first_context.messages]
         first = await run_memory_recall_precheck(first_context)
         assert first.status == "completed"
@@ -505,7 +548,9 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         }
     }
     assert precheck_messages[-1].role == MessageRole.USER
-    assert precheck_messages[-1].content == "Which editor do I prefer?"
+    assert all(isinstance(message.content, str) for message in precheck_messages)
+    assert all(not message.attachments for message in precheck_messages)
+    assert precheck_messages[-1].content == current_user_content
     precheck_dump = "\n".join(message.model_dump_json(exclude_none=False) for message in precheck_messages)
     for forbidden in (
         "private-file-token-must-not-leak",
@@ -519,8 +564,20 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         "PRIVATE_TOOL_RESULT_MUST_NOT_LEAK",
         "https://download.invalid/tool-result",
         "STALE_TODO_MUST_NOT_LEAK",
+        "CURRENT_IMAGE_MUST_NOT_LEAK",
+        "data:image/",
+        "image_url",
+        "[系统提示,此处不是用户说的话]",
+        "[系统提示结束]",
     ):
         assert forbidden not in precheck_dump
+    if current_attachment_path is not None:
+        assert str(current_attachment_path) not in precheck_dump
+    if input_kind in {"inline_image", "image_attachment"}:
+        assert isinstance(source_current_message.content, list)
+        assert any(isinstance(part, ImagePart) for part in source_current_message.content)
+        provider_current_message = OpenAIChatCompletionsTransformer.to_provider([source_current_message])[0]
+        assert any(part.get("type") == "image_url" for part in provider_current_message["content"])
     original_message_count = len(first_context_messages_before)
     first_context_messages_after = [message.model_dump(mode="json") for message in first_context.messages[:original_message_count]]
     assert first_context_messages_after == first_context_messages_before
@@ -1408,3 +1465,204 @@ async def test_memory_recall_output_budget_falls_back_without_mutating_main_cont
             assert json.loads(persisted_result.content)["items"][0]["content"] == large_memory_content
             assert len(rows) == len(original_messages_before) + 2
             assert stored_record.last_recalled_at is not None
+
+
+@pytest.mark.parametrize("input_kind", ["inline_image", "image_attachment_enabled", "image_attachment_disabled"])
+@pytest.mark.parametrize("dispatcher_mode", ["non_stream", "stream"])
+@pytest.mark.asyncio
+async def test_memory_recall_precheck_skips_image_only_input(
+    memory_recall_session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    input_kind: str,
+    dispatcher_mode: str,
+) -> None:
+    profile, cfg, current_user_id, memory_id, _vector_item_id = await _seed_memory_recall_workflow(memory_recall_session_factory)
+    assert current_user_id is not None
+    assert memory_id is not None
+
+    current_user_content = " \t\n"
+    environment_prompt = "SOURCE_IMAGE_ENVIRONMENT_PROMPT"
+    guidance_prompt = "SOURCE_IMAGE_GUIDANCE_PROMPT"
+    image_attachment_path = None
+    if input_kind == "inline_image":
+        source_current_message = InternalMessage.from_user_input(
+            content=[
+                TextPart(text=current_user_content),
+                ImagePart(image_url={"url": "data:image/png;base64,CURRENT_IMAGE_ONLY_MUST_NOT_TRIGGER"}),
+            ],
+            environment_prompt=environment_prompt,
+            guidance_prompt=guidance_prompt,
+        )
+    else:
+        image_attachment_path = tmp_path / "image-only-input.png"
+        Image.new("RGB", (2, 2), color="red").save(image_attachment_path)
+        source_current_message = InternalMessage.from_user_input(
+            content=current_user_content,
+            attachments=[str(image_attachment_path)],
+            environment_prompt=environment_prompt,
+            guidance_prompt=guidance_prompt,
+        )
+        source_current_message = MessageAssembler.assemble(
+            source_current_message,
+            image_understanding=input_kind == "image_attachment_enabled",
+            is_history=False,
+        )
+
+    with_todo_snapshot = '<current_session_todo_snapshot>{"revision":8,"todos":[{"content":"Confirm VS Code preference","status":"pending"},{"content":"Review editor note","status":"completed"}]}</current_session_todo_snapshot>'
+    context_messages = [
+        InternalMessage(
+            role=MessageRole.USER,
+            content='<conversation_summary through_message_id="41">\nEarlier background: The user is working on Python projects.\n</conversation_summary>',
+        ),
+        InternalMessage(role=MessageRole.USER, content="I prefer VS Code as my editor for Python projects."),
+        InternalMessage(role=MessageRole.ASSISTANT, content="Noted your VS Code editor preference."),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id="existing-todo-tool-call", content=with_todo_snapshot),
+        source_current_message,
+    ]
+
+    llm_requests: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def unexpected_llm_request(*args, **kwargs):
+        llm_requests.append((args, kwargs))
+        raise AssertionError("image-only input must skip the recall precheck request")
+
+    monkeypatch.setattr(memory_request_module.LLMClient, "generate", unexpected_llm_request)
+    monkeypatch.setattr(memory_request_module.LLMClient, "generate_with_stream_callback", unexpected_llm_request)
+
+    events: list[dict[str, Any]] = []
+
+    async def capture_event(event_payload: dict[str, Any]) -> None:
+        events.append(deepcopy(event_payload))
+
+    main_channel_obj = SimpleNamespace(
+        id=1,
+        base_url="https://chat.invalid",
+        http_proxy=None,
+        get_decrypted_api_key=lambda: "chat-key",
+    )
+    main_model_entry = {
+        "model_id": "chat-model",
+        "usage": "CHAT",
+        "protocol": "OPENAI",
+        "is_enabled": True,
+        "context_window_k": 32,
+        "max_tokens": 1024,
+    }
+    main_channel_rule = SimpleNamespace(priority=1)
+    main_chat_params = {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 1024,
+        "chat_timeout": 60,
+        "context_window_k": 32,
+    }
+    main_model_entry_before = deepcopy(main_model_entry)
+    main_chat_params_before = deepcopy(main_chat_params)
+    total_output_tokens = 12
+    session_total_output_tokens = 200
+    session_total_input_tokens = 1000
+    session_total_cached_tokens = 250
+
+    async with memory_recall_session_factory() as db:
+        current_user_row = await db.get(Message, current_user_id)
+        assert current_user_row is not None
+        if input_kind == "inline_image":
+            assert isinstance(source_current_message.content, list)
+            current_user_row.content = json.dumps(
+                [part.model_dump(mode="json") for part in source_current_message.content],
+                ensure_ascii=False,
+            )
+            current_user_row.content_format = MessageContentFormat.PARTS
+            current_user_row.attachments = None
+        else:
+            current_user_row.content = current_user_content
+            current_user_row.content_format = MessageContentFormat.TEXT
+            current_user_row.attachments = [str(image_attachment_path)]
+        current_user_row.environment_prompt = environment_prompt
+        current_user_row.guidance_prompt = guidance_prompt
+        await db.commit()
+
+        message_snapshot_query = select(Message.__table__).where(Message.session_id == "session-recall").order_by(Message.id)
+        database_messages_before = (await db.execute(message_snapshot_query)).mappings().all()
+        session_before = await db.get(ChatSession, "session-recall")
+        assert session_before is not None
+        session_metadata_before = deepcopy(session_before.llm_request_metadata)
+        todo_plan_before = (await db.execute(select(SessionTodoPlan).where(SessionTodoPlan.session_id == "session-recall"))).scalar_one()
+        assert todo_plan_before.todos
+        session_todos_before = deepcopy(todo_plan_before.todos)
+        cursor_rows_before = list((await db.execute(select(ChannelCursor))).scalars().all())
+        assert cursor_rows_before == []
+        memory_before = await db.get(LongTermMemoryRecord, memory_id)
+        assert memory_before is not None and memory_before.last_recalled_at is None
+
+        messages_before = [message.model_dump(mode="json") for message in context_messages]
+        provider_messages_before = OpenAIChatCompletionsTransformer.to_provider([source_current_message])
+        expected_input_image = input_kind in {"inline_image", "image_attachment_enabled"}
+        if expected_input_image:
+            assert any(part.get("type") == "image_url" for part in provider_messages_before[0]["content"])
+
+        context = MemoryRecallContext(
+            db=db,
+            uid="owner",
+            session_id="session-recall",
+            profile=profile,
+            cfg=cfg,
+            username="owner",
+            messages=context_messages,
+            turn_messages=[],
+            current_user_boundary_message_id=current_user_id,
+            upper_message_id=current_user_id,
+            chat_channel=cfg.channel.chat_channel,
+            chat_cursor_key="1:CHAT",
+            chat_channel_obj=main_channel_obj,
+            model_entry=main_model_entry,
+            channel_rule=main_channel_rule,
+            chat_params=main_chat_params,
+            dispatcher_mode=dispatcher_mode,
+            stream_event_callback=capture_event,
+            total_output_tokens=total_output_tokens,
+            session_total_output_tokens=session_total_output_tokens,
+            session_total_input_tokens=session_total_input_tokens,
+            session_total_cached_tokens=session_total_cached_tokens,
+        )
+        results = [await run_memory_recall_precheck(context) for _ in range(2)]
+
+        for result in results:
+            assert result.status == "completed"
+            assert result.error_type is None
+            assert result.turn_messages == []
+            assert result.chat_channel is cfg.channel.chat_channel
+            assert result.chat_channel_obj is main_channel_obj
+            assert result.model_entry == main_model_entry_before
+            assert result.channel_rule is main_channel_rule
+            assert result.chat_params == main_chat_params_before
+            assert result.total_output_tokens == total_output_tokens
+            assert result.session_total_output_tokens == session_total_output_tokens
+            assert result.session_total_input_tokens == session_total_input_tokens
+            assert result.session_total_cached_tokens == session_total_cached_tokens
+
+        assert llm_requests == []
+        assert events == []
+        assert context.turn_messages == []
+        assert context.latest_precheck_request_metadata is None
+        assert [message.model_dump(mode="json") for message in context.messages] == messages_before
+        provider_messages_after = OpenAIChatCompletionsTransformer.to_provider([source_current_message])
+        assert provider_messages_after == provider_messages_before
+        if expected_input_image:
+            assert any(part.get("type") == "image_url" for part in provider_messages_after[0]["content"])
+
+    async with memory_recall_session_factory() as db:
+        database_messages_after = (await db.execute(message_snapshot_query)).mappings().all()
+        session_after = await db.get(ChatSession, "session-recall")
+        assert session_after is not None
+        todo_plan_after = (await db.execute(select(SessionTodoPlan).where(SessionTodoPlan.session_id == "session-recall"))).scalar_one()
+        cursor_rows_after = list((await db.execute(select(ChannelCursor))).scalars().all())
+        memory_after = await db.get(LongTermMemoryRecord, memory_id)
+        assert memory_after is not None
+
+    assert database_messages_after == database_messages_before
+    assert session_after.llm_request_metadata == session_metadata_before
+    assert todo_plan_after.todos == session_todos_before
+    assert cursor_rows_after == []
+    assert memory_after.last_recalled_at is None
