@@ -28,12 +28,14 @@ from app.core.utils.context_summary.cleanup import (
     cleanup_context_summary_work_safely,
 )
 from app.core.utils.context_summary.common import (
+    ContextSummaryOutputBudgetError,
     ContextSummaryState,
     ContextSummaryWorkInvalidError,
     ContextSummaryWorkValidityChecker,
     calc_token_usage,
     contains_context_summary_work_invalid,
     ensure_context_summary_work_valid,
+    find_context_summary_output_budget_error,
 )
 from app.core.utils.context_summary.history import (
     measure_complete_replacement_input,
@@ -151,7 +153,7 @@ async def generate_summary_text(
 ) -> str | None:
     excluded_priorities: set[int] = set()
     call_context = "context_summary"
-    last_rejection: LLMRequestRejectedException | None = None
+    last_model_error: LLMRequestRejectedException | ContextSummaryOutputBudgetError | None = None
 
     while True:
         await ensure_context_summary_work_valid(work_validity_checker)
@@ -165,8 +167,8 @@ async def generate_summary_text(
         )
         if model is None:
             await release_db_session(db)
-            if last_rejection is not None:
-                raise last_rejection
+            if last_model_error is not None:
+                raise last_model_error
             return None
 
         prompt_tokens = estimate_context_summary_prompt_tokens(model, prompt)
@@ -192,7 +194,11 @@ async def generate_summary_text(
             if rejection is not None:
                 if not rejection.allow_channel_fallback:
                     raise rejection
-                last_rejection = rejection
+                last_model_error = rejection
+            else:
+                budget_error = find_context_summary_output_budget_error(exc)
+                if budget_error is not None:
+                    last_model_error = budget_error
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
             logger.bind(
@@ -561,6 +567,10 @@ async def _ensure_context_summary(
                 if rejection is not None:
                     await release_db_session(db)
                     raise rejection
+                budget_error = find_context_summary_output_budget_error(exc)
+                if budget_error is not None:
+                    await release_db_session(db)
+                    raise budget_error
                 logger.bind(
                     uid=uid,
                     session_id=session_id,

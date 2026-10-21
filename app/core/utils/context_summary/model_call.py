@@ -1,3 +1,4 @@
+from app.core.utils.context_summary.common import ContextSummaryOutputBudgetError
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
@@ -51,5 +52,13 @@ async def call_context_summary_model(
         http_proxy=model.http_proxy,
         custom_headers=model.custom_headers,
     )
+    finish_reason = response.finish_reason
+    if finish_reason == "length":
+        raise ContextSummaryOutputBudgetError()
+
+    completion_tokens = (response.usage or {}).get("completion_tokens")
+    if finish_reason in {None, "incomplete"} and model.max_output_tokens > 0 and isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool) and completion_tokens >= model.max_output_tokens:
+        raise ContextSummaryOutputBudgetError()
+
     summary = (response.message.content or "").strip()
     return summary or None

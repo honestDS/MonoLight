@@ -499,7 +499,7 @@ def test_precheck_generation_params_force_small_output_and_clean_optional_fields
     }
 
 
-def test_internal_task_generation_params_never_set_reasoning_effort():
+def test_session_title_and_memory_precheck_generation_params_never_set_reasoning_effort():
     title_params = build_session_title_generation_params(
         model_entry={"reasoning_effort": "max", "max_tokens": 128},
         protocol="openai_responses",
@@ -517,17 +517,11 @@ def test_internal_task_generation_params_never_set_reasoning_effort():
         "max_tokens": SESSION_TITLE_MAX_OUTPUT_TOKENS,
     }
 
-    summary_params = build_context_summary_generation_params(
-        model_entry={"reasoning_effort": None, "temperature": 0.8, "max_tokens": 4096},
-        protocol="openai_responses",
-        max_output_tokens=1024,
-    )
-    assert summary_params == {
-        "temperature": 0.8,
-        "max_tokens": 1024,
-    }
-
     disabled_reasoning_params = [
+        build_memory_recall_precheck_generation_params(
+            model_entry={"reasoning_effort": "low", "temperature": 0.8},
+            protocol="openai",
+        ),
         build_memory_recall_precheck_generation_params(
             model_entry={"reasoning_effort": "none", "temperature": 0.8},
             protocol="openai",
@@ -536,15 +530,36 @@ def test_internal_task_generation_params_never_set_reasoning_effort():
             model_entry={"reasoning_effort": " NONE ", "temperature": 0.35},
             protocol="openai_responses",
         ),
-        build_context_summary_generation_params(
-            model_entry={"reasoning_effort": "none", "temperature": 0.8},
-            protocol="openai_responses",
-            max_output_tokens=1024,
-        ),
     ]
     assert disabled_reasoning_params == [
         {"max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS},
+        {"max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS},
         {"max_tokens": SESSION_TITLE_MAX_OUTPUT_TOKENS},
-        {"max_tokens": 1024},
     ]
     assert all("reasoning_effort" not in params for params in disabled_reasoning_params)
+
+
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses", "deepseek", "deepseek_responses"])
+@pytest.mark.parametrize("reasoning_effort", ["low", "none", None], ids=["low", "none", "unset"])
+def test_context_summary_generation_params_preserve_configured_reasoning_effort(protocol, reasoning_effort):
+    params = build_context_summary_generation_params(
+        model_entry={
+            "reasoning_effort": reasoning_effort,
+            "temperature": 0.8,
+            "max_tokens": 20480,
+        },
+        protocol=protocol,
+        max_output_tokens=20480,
+    )
+
+    assert params["max_tokens"] == 20480
+    assert "top_p" not in params
+    if reasoning_effort is None:
+        assert "reasoning_effort" not in params
+    else:
+        assert params["reasoning_effort"] == reasoning_effort
+
+    if protocol in {"openai", "openai_responses"} and reasoning_effort is not None:
+        assert "temperature" not in params
+    else:
+        assert params["temperature"] == 0.8

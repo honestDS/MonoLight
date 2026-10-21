@@ -300,6 +300,7 @@ MESSAGES = {
     "ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED": "The current conversation context is too long, and automatic compression could not reduce it enough to continue. Try again.",
     "ERR_CONTEXT_SUMMARY_REFINEMENT_LOWER_INVALID": "Context summary refinement requires one completed lower fragment",
     "ERR_CONTEXT_SUMMARY_MODEL_RESULT_EMPTY": "Context summary model returned an empty result",
+    "ERR_CONTEXT_SUMMARY_OUTPUT_BUDGET_EXHAUSTED": "The context summary output budget was exhausted before the summary was complete",
     "ERR_CONTEXT_SUMMARY_MODEL_NOT_REDUCED": "Context summary model did not reduce its input: output_tokens={output_tokens}, replacement_input_tokens={input_tokens}",
     "ERR_CONTEXT_SUMMARY_MODEL_RETRIES_EXHAUSTED": "Context summary model failed after fixed-model retries: {detail}",
     "ERR_CONTEXT_SUMMARY_FRAGMENT_WRITE_ORDER_FAILED": "Context summary fragment could not be written in order",
