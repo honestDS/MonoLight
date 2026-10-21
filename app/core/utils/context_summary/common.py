@@ -2,7 +2,12 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_CONTEXT_SUMMARY_WORK_INVALID
+from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    ERR_CONTEXT_SUMMARY_OUTPUT_BUDGET_EXHAUSTED,
+    ERR_CONTEXT_SUMMARY_WORK_INVALID,
+)
+from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.tokenizer import estimate_tokens
@@ -13,6 +18,11 @@ ContextSummaryWorkValidityChecker = Callable[[], Awaitable[bool]]
 
 class ContextSummaryWorkInvalidError(RuntimeError):
     pass
+
+
+class ContextSummaryOutputBudgetError(LLMException):
+    def __init__(self) -> None:
+        super().__init__(message=ERR_CONTEXT_SUMMARY_OUTPUT_BUDGET_EXHAUSTED)
 
 
 async def ensure_context_summary_work_valid(
@@ -28,6 +38,21 @@ def contains_context_summary_work_invalid(exc: BaseException) -> bool:
     if isinstance(exc, BaseExceptionGroup):
         return any(contains_context_summary_work_invalid(nested) for nested in exc.exceptions)
     return False
+
+
+def find_context_summary_output_budget_error(
+    exc: BaseException,
+) -> ContextSummaryOutputBudgetError | None:
+    if isinstance(exc, ContextSummaryOutputBudgetError):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for nested in exc.exceptions:
+            error = find_context_summary_output_budget_error(nested)
+            if error is not None:
+                return error
+    if exc.__cause__ is not None:
+        return find_context_summary_output_budget_error(exc.__cause__)
+    return None
 
 
 @dataclass(frozen=True)

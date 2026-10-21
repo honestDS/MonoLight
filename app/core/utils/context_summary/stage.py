@@ -30,10 +30,12 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT
 from app.core.utils.context_summary.common import (
+    ContextSummaryOutputBudgetError,
     ContextSummaryWorkInvalidError,
     ContextSummaryWorkValidityChecker,
     contains_context_summary_work_invalid,
     ensure_context_summary_work_valid,
+    find_context_summary_output_budget_error,
 )
 from app.core.utils.context_summary.history import (
     build_summary_fragment_plan,
@@ -149,7 +151,7 @@ async def call_fixed_summary_model(
                     )
                 )
             return generated
-        except LLMRequestRejectedException:
+        except (LLMRequestRejectedException, ContextSummaryOutputBudgetError):
             raise
         except Exception as exc:
             last_error = exc
@@ -555,6 +557,9 @@ async def generate_snapshot_summary_with_model(
         rejection = find_llm_request_rejection(exc)
         if rejection is not None:
             raise rejection
+        budget_error = find_context_summary_output_budget_error(exc)
+        if budget_error is not None:
+            raise budget_error
         raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_LAYER_FAILED, error=error)) from exc
 
     logger.bind(
@@ -603,7 +608,7 @@ async def generate_snapshot_summary_result(
 ) -> GeneratedSummaryResult:
     excluded_priorities: set[int] = set()
     call_context = "context_summary"
-    last_rejection: LLMRequestRejectedException | None = None
+    last_model_error: LLMRequestRejectedException | ContextSummaryOutputBudgetError | None = None
 
     while True:
         await ensure_context_summary_work_valid(work_validity_checker)
@@ -623,8 +628,8 @@ async def generate_snapshot_summary_result(
                 snapshot=snapshot,
             )
             await release_db_session(db)
-            if last_rejection is not None:
-                raise last_rejection
+            if last_model_error is not None:
+                raise last_model_error
             return GeneratedSummaryResult(
                 content=None,
                 message_count=summarized_message_count,
@@ -649,7 +654,7 @@ async def generate_snapshot_summary_result(
         except LLMRequestRejectedException as exc:
             if not exc.allow_channel_fallback:
                 raise
-            last_rejection = exc
+            last_model_error = exc
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
             logger.bind(
@@ -663,7 +668,9 @@ async def generate_snapshot_summary_result(
                 "Context summary request rejected before model fallback: {error}",
                 error=str(exc),
             )
-        except ContextSummaryLayerError as exc:
+        except (ContextSummaryLayerError, ContextSummaryOutputBudgetError) as exc:
+            if isinstance(exc, ContextSummaryOutputBudgetError):
+                last_model_error = exc
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
             logger.bind(

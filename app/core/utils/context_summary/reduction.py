@@ -26,10 +26,12 @@ from app.core.exceptions import LLMRequestRejectedException, find_llm_request_re
 from app.core.i18n import t
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT, CONTEXT_SUMMARY_PROMPT
 from app.core.utils.context_summary.common import (
+    ContextSummaryOutputBudgetError,
     ContextSummaryWorkInvalidError,
     ContextSummaryWorkValidityChecker,
     contains_context_summary_work_invalid,
     ensure_context_summary_work_valid,
+    find_context_summary_output_budget_error,
 )
 from app.core.utils.context_summary.merge import (
     count_lower_stage_merge_groups,
@@ -308,13 +310,19 @@ async def execute_reduction_stage(
         if not await mark_summary_stage_completed(stage=stage):
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_COMPLETION_FAILED, stage="reduction"))
     except Exception as exc:
+        budget_error = find_context_summary_output_budget_error(exc)
         await mark_summary_stage_failed(
             stage=stage,
-            error=format_exception_message(exc),
+            error=format_exception_message(budget_error or exc),
         )
         await invalidate_summary_stage(stage=stage)
         if contains_context_summary_work_invalid(exc):
             raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="reduction")) from exc
+        rejection = find_llm_request_rejection(exc)
+        if rejection is not None:
+            raise rejection
+        if budget_error is not None:
+            raise budget_error
         raise
 
     return stage
@@ -341,7 +349,7 @@ async def reduce_completed_summary_stage_result(
             )
 
         excluded_priorities: set[int] = set()
-        last_rejection: LLMRequestRejectedException | None = None
+        last_model_error: LLMRequestRejectedException | ContextSummaryOutputBudgetError | None = None
         while True:
             await ensure_context_summary_work_valid(work_validity_checker)
             model = await select_context_summary_model(
@@ -353,8 +361,8 @@ async def reduce_completed_summary_stage_result(
                 call_context=("context_summary" if not excluded_priorities else "context_summary_retry"),
             )
             if model is None or model.priority in excluded_priorities:
-                if last_rejection is not None:
-                    raise last_rejection
+                if last_model_error is not None:
+                    raise last_model_error
                 raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODELS_EXHAUSTED, stage="reduction"))
             try:
                 next_stage = await execute_reduction_stage(
@@ -371,7 +379,11 @@ async def reduce_completed_summary_stage_result(
                 if rejection is not None:
                     if not rejection.allow_channel_fallback:
                         raise rejection
-                    last_rejection = rejection
+                    last_model_error = rejection
+                else:
+                    budget_error = find_context_summary_output_budget_error(exc)
+                    if budget_error is not None:
+                        last_model_error = budget_error
                 excluded_priorities.add(model.priority)
 
         lower_stage = next_stage
@@ -477,7 +489,7 @@ async def refine_completed_summary_stage(
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> CompletedSummaryResult:
     excluded_priorities: set[int] = set()
-    last_rejection: LLMRequestRejectedException | None = None
+    last_model_error: LLMRequestRejectedException | ContextSummaryOutputBudgetError | None = None
     while True:
         await ensure_context_summary_work_valid(work_validity_checker)
         model = await select_context_summary_model(
@@ -489,8 +501,8 @@ async def refine_completed_summary_stage(
             call_context=("context_summary" if not excluded_priorities else "context_summary_retry"),
         )
         if model is None or model.priority in excluded_priorities:
-            if last_rejection is not None:
-                raise last_rejection
+            if last_model_error is not None:
+                raise last_model_error
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODELS_EXHAUSTED, stage="refinement"))
         try:
             stage = await execute_refinement_stage(
@@ -510,7 +522,11 @@ async def refine_completed_summary_stage(
             if rejection is not None:
                 if not rejection.allow_channel_fallback:
                     raise rejection
-                last_rejection = rejection
+                last_model_error = rejection
+            else:
+                budget_error = find_context_summary_output_budget_error(exc)
+                if budget_error is not None:
+                    last_model_error = budget_error
             excluded_priorities.add(model.priority)
 
 

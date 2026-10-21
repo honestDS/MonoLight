@@ -16,7 +16,7 @@ def clean_generation_params(
     model_entry: dict[str, Any] | None,
     protocol: str,
 ) -> dict[str, Any]:
-    """清理内部任务生成参数，内部任务不主动设置思考等级。"""
+    """清理内部任务生成参数；思考等级由具体任务策略控制。"""
     cleaned = {key: value for key, value in params.items() if value is not None and key != "reasoning_effort"}
     normalized_protocol = protocol.strip().lower()
     configured_reasoning = (model_entry or {}).get("reasoning_effort")
@@ -86,13 +86,17 @@ def build_context_summary_generation_params(
     protocol: str,
     max_output_tokens: int,
 ) -> dict[str, Any]:
-    return build_internal_task_generation_params(
+    params = build_internal_task_generation_params(
         model_entry=model_entry,
         protocol=protocol,
         temperature=(model_entry or {}).get("temperature"),
         top_p=CONTEXT_SUMMARY_TOP_P,
         max_tokens=max_output_tokens,
     )
+    configured_reasoning = (model_entry or {}).get("reasoning_effort")
+    if configured_reasoning is not None:
+        params["reasoning_effort"] = configured_reasoning
+    return params
 
 
 __all__ = [

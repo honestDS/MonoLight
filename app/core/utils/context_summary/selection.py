@@ -58,11 +58,10 @@ async def select_context_summary_model(
     chat_params = resolve_chat_params(model_entry, channel_config)
     protocol = resolve_model_protocol(model_entry)
     context_window_tokens = chat_params["context_window_k"] * CONTEXT_WINDOW_TOKENS_PER_K
-    task_max_output_tokens = min(1024, max(256, context_window_tokens // 16))
     generation_params = build_context_summary_generation_params(
         model_entry=model_entry,
         protocol=protocol,
-        max_output_tokens=task_max_output_tokens,
+        max_output_tokens=chat_params["max_tokens"],
     )
     max_output_tokens = generation_params["max_tokens"]
     normalized_safety_margin = max(safety_margin_tokens, 0)
@@ -81,10 +80,7 @@ async def select_context_summary_model(
         top_p=generation_params.get("top_p"),
         reasoning_effort=generation_params.get("reasoning_effort"),
         safety_margin_tokens=normalized_safety_margin,
-        input_budget_tokens=max(
-            1,
-            context_window_tokens - max_output_tokens - normalized_safety_margin,
-        ),
+        input_budget_tokens=context_window_tokens - max_output_tokens - normalized_safety_margin,
         http_proxy=get_channel_http_proxy(channel),
         custom_headers=get_model_custom_headers(model_entry),
     )
