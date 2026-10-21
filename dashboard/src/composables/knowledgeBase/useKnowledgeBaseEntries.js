@@ -20,7 +20,6 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
   const selectedKb = ref(null)
   const isManaged = computed(() => selectedKb.value?.knowledge_base_type === 'llm_managed')
   const loading = ref(false)
-  const error = ref(null)
   const items = ref([])
   const total = ref(0)
   const page = ref(1)
@@ -111,7 +110,6 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
     actionGeneration += 1
     selectedKb.value = null
     loading.value = false
-    error.value = null
     items.value = []
     total.value = 0
     page.value = 1
@@ -137,7 +135,6 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
       isCurrentSession(guard, kbId, uid, role, false)
     )
     loading.value = true
-    error.value = null
 
     try {
       const res = await knowledgeBaseApi.get(kbId)
@@ -145,11 +142,10 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
       selectedKb.value = res.data.data
     } catch (requestError) {
       if (isCurrent()) {
-        error.value = t('knowledgeBase.entries_load_failed', {
+        ElMessage.error(t('knowledgeBase.entries_load_failed', {
           message: requestError?.message || ''
-        })
+        }))
         loading.value = false
-        ElMessage.error(error.value)
       }
       return
     }
@@ -212,7 +208,6 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
       isCurrentSession(guard, kbId, uid, role)
     )
     loading.value = true
-    error.value = null
 
     try {
       const res = isManaged.value
@@ -231,10 +226,9 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
       total.value = data.total || 0
     } catch (requestError) {
       if (isCurrent() && !token.signal.aborted) {
-        error.value = t('knowledgeBase.entries_load_failed', {
+        if (notifyError) ElMessage.error(t('knowledgeBase.entries_load_failed', {
           message: requestError?.message || ''
-        })
-        if (notifyError) ElMessage.error(error.value)
+        }))
       }
     } finally {
       if (isCurrent()) {
@@ -265,7 +259,6 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
     listTaskManager.cancel(LIST_TASK_KEY)
     listRequestTracker.invalidate()
     loading.value = true
-    error.value = null
 
     try {
       const res = await knowledgeBaseApi.get(kbId)
@@ -273,11 +266,10 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
       selectedKb.value = res.data.data
     } catch (requestError) {
       if (isCurrent()) {
-        error.value = t('knowledgeBase.entries_load_failed', {
-          message: requestError?.message || ''
-        })
         loading.value = false
-        if (notifyError) ElMessage.error(error.value)
+        if (notifyError) ElMessage.error(t('knowledgeBase.entries_load_failed', {
+          message: requestError?.message || ''
+        }))
       }
       return
     }
@@ -530,7 +522,6 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
     selectedKb,
     isManaged,
     loading,
-    error,
     items,
     total,
     page,

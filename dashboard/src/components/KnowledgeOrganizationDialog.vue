@@ -30,7 +30,11 @@ const {
   organizationLoading,
   organizationSubmitting,
   organizationActionJobId,
-  organizationJobs,
+  organizationTotal,
+  organizationJobPage,
+  organizationJobPageSize,
+  organizationHistoryJobs,
+  organizationHistoryTotal,
   latestOrganizationJob,
   getOrganizationJobId,
   getOrganizationStatusLabel,
@@ -44,6 +48,7 @@ const {
   canCancelOrganizationJob,
   canRetryOrganizationJob,
   showOrganizationDialog,
+  handleOrganizationPageChange,
   submitKnowledgeOrganization,
   handleCancelOrganizationJob,
   handleRetryOrganizationJob,
@@ -146,19 +151,19 @@ defineExpose({ open: showOrganizationDialog })
     </section>
 
     <el-empty
-      v-if="!organizationLoading && !organizationJobs.length"
+      v-if="!organizationLoading && !latestOrganizationJob"
       :description="t('knowledgeBase.organization_no_jobs')"
     />
-    <details v-if="organizationDialogVisible && organizationJobs.length > 1" class="organization-history">
+    <details v-if="organizationDialogVisible && organizationHistoryTotal > 0" class="organization-history">
       <summary class="organization-history__summary">
         <span class="organization-history__title">{{ t('knowledgeBase.organization_history') }}</span>
-        <el-tag class="organization-history__count" size="small" type="info" effect="plain">{{ organizationJobs.length - 1 }}</el-tag>
+        <el-tag class="organization-history__count" size="small" type="info" effect="plain">{{ organizationHistoryTotal }}</el-tag>
         <el-icon class="organization-history__icon" aria-hidden="true"><ArrowRight /></el-icon>
       </summary>
       <div class="organization-history__body">
         <el-table
-          :data="organizationJobs.slice(1)"
-          :loading="organizationLoading"
+          :data="organizationHistoryJobs"
+          v-loading="organizationLoading"
           :row-key="getOrganizationJobId"
           max-height="240"
           class="organization-job-table"
@@ -216,6 +221,16 @@ defineExpose({ open: showOrganizationDialog })
             </template>
           </el-table-column>
         </el-table>
+        <div v-if="organizationTotal > organizationJobPageSize" class="organization-history__pagination">
+          <el-pagination
+            :current-page="organizationJobPage"
+            :page-size="organizationJobPageSize"
+            :total="organizationTotal"
+            layout="prev, pager, next"
+            :disabled="organizationLoading"
+            @current-change="handleOrganizationPageChange"
+          />
+        </div>
       </div>
     </details>
   </el-dialog>

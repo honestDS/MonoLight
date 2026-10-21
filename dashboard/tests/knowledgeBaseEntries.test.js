@@ -198,7 +198,6 @@ const assertPrivateStateCleared = (module, { loading = false } = {}) => {
   assert.equal(module.selectedKb.value, null)
   assert.equal(module.isManaged.value, false)
   assert.equal(module.loading.value, loading)
-  assert.equal(module.error.value, null)
   assert.deepEqual(normalize(module.items.value), [])
   assert.equal(module.total.value, 0)
   assert.equal(module.page.value, 1)
@@ -272,13 +271,20 @@ test('keeps selectedKb empty after get failure and lets refresh retry', async t 
   await flushPromises()
   assert.equal(harness.module.selectedKb.value, null)
   assert.equal(harness.module.loading.value, false)
-  assert.equal(harness.module.error.value, 'knowledgeBase.entries_load_failed')
+  assert.deepEqual(harness.messages, [{
+    type: 'error',
+    args: ['knowledgeBase.entries_load_failed'],
+  }])
   assert.equal(harness.api.documents.length, 0)
 
   await harness.module.refresh()
   assert.equal(harness.module.selectedKb.value.id, 1)
   assert.equal(harness.api.get.length, 2)
   assert.equal(harness.api.documents.length, 1)
+  assert.deepEqual(harness.messages, [{
+    type: 'error',
+    args: ['knowledgeBase.entries_load_failed'],
+  }])
 })
 
 test('latest list request wins and a failed page request releases loading', async t => {
@@ -326,8 +332,195 @@ test('latest list request wins and a failed page request releases loading', asyn
 
   await harness.module.handlePageChange()
   assert.equal(harness.module.loading.value, false)
-  assert.equal(harness.module.error.value, 'knowledgeBase.entries_load_failed')
-  assert.equal(harness.messages.at(-1).type, 'error')
+  assert.deepEqual(harness.module.items.value.map(item => item.knowledge_key), ['current'])
+  assert.equal(harness.module.total.value, 1)
+  assert.deepEqual(harness.messages, [{
+    type: 'error',
+    args: ['knowledgeBase.entries_load_failed'],
+  }])
+})
+
+test('refresh failures report once and preserve entries for both knowledge base types', async t => {
+  const failures = [
+    Object.assign(new Error('server error'), { response: { status: 500 } }),
+    new Error('network unavailable'),
+  ]
+
+  for (const type of ['user', 'llm_managed']) {
+    for (const failedStage of ['metadata', 'list']) {
+      for (const failure of failures) {
+        let getCount = 0
+        let listCount = 0
+        const listMethod = type === 'user' ? 'documents' : 'managedItems'
+        const oldItem = type === 'user'
+          ? { id: 31, filename: 'before.md' }
+          : { id: 31, knowledge_key: 'before.key' }
+        const newItem = type === 'user'
+          ? { id: 32, filename: 'after.md' }
+          : { id: 32, knowledge_key: 'after.key' }
+        const harness = createHarness(t, {
+          get: id => {
+            getCount += 1
+            if (failedStage === 'metadata' && getCount === 2) return Promise.reject(failure)
+            return Promise.resolve(dataResponse({
+              id,
+              knowledge_base_type: type,
+              index_status: 'ready',
+              name: `knowledge base ${getCount}`,
+            }))
+          },
+          [listMethod]: () => {
+            listCount += 1
+            if (failedStage === 'list' && listCount === 2) return Promise.reject(failure)
+            return Promise.resolve(dataResponse({
+              items: listCount === 1 ? [oldItem] : [newItem],
+              total: listCount === 1 ? 4 : 8,
+            }))
+          },
+        })
+        await flushPromises()
+
+        harness.module.page.value = 3
+        harness.module.pageSize.value = 25
+        harness.module.query.value = 'preserved query'
+        await harness.module.refresh()
+
+        assert.equal(harness.module.loading.value, false)
+        assert.deepEqual(normalize(harness.module.selectedKb.value), {
+          id: 1,
+          knowledge_base_type: type,
+          index_status: 'ready',
+          name: failedStage === 'metadata' ? 'knowledge base 1' : 'knowledge base 2',
+        })
+        assert.deepEqual(normalize(harness.module.items.value), [oldItem])
+        assert.equal(harness.module.total.value, 4)
+        assert.equal(harness.module.page.value, 3)
+        assert.equal(harness.module.pageSize.value, 25)
+        assert.equal(harness.module.query.value, 'preserved query')
+        assert.deepEqual(harness.messages, [{
+          type: 'error',
+          args: ['knowledgeBase.entries_load_failed'],
+        }])
+
+        await harness.module.refresh()
+        assert.equal(harness.module.loading.value, false)
+        assert.deepEqual(normalize(harness.module.selectedKb.value), {
+          id: 1,
+          knowledge_base_type: type,
+          index_status: 'ready',
+          name: `knowledge base ${getCount}`,
+        })
+        assert.deepEqual(normalize(harness.module.items.value), [newItem])
+        assert.equal(harness.module.total.value, 8)
+        assert.equal(harness.module.page.value, 3)
+        assert.equal(harness.module.pageSize.value, 25)
+        assert.equal(harness.module.query.value, 'preserved query')
+        assert.equal(harness.messages.length, 1)
+      }
+    }
+  }
+})
+
+test('silent refresh and list failures preserve entries while explicit refresh reports them', async t => {
+  let getCount = 0
+  let listCount = 0
+  let failNextGet = false
+  let failNextList = false
+  const harness = createHarness(t, {
+    get: id => {
+      getCount += 1
+      if (failNextGet) {
+        failNextGet = false
+        return Promise.reject(new Error('metadata unavailable'))
+      }
+      return Promise.resolve(dataResponse({
+        id,
+        knowledge_base_type: 'llm_managed',
+        index_status: 'ready',
+        name: `knowledge base ${getCount}`,
+      }))
+    },
+    managedItems: () => {
+      listCount += 1
+      if (failNextList) {
+        failNextList = false
+        return Promise.reject(new Error('list unavailable'))
+      }
+      return Promise.resolve(dataResponse({
+        items: [{ id: 41, knowledge_key: `entry-${listCount}` }],
+        total: listCount,
+      }))
+    },
+  })
+  await flushPromises()
+
+  harness.module.page.value = 2
+  harness.module.pageSize.value = 25
+  harness.module.query.value = 'saved query'
+  const savedEntries = {
+    items: normalize(harness.module.items.value),
+    total: harness.module.total.value,
+    page: harness.module.page.value,
+    pageSize: harness.module.pageSize.value,
+    query: harness.module.query.value,
+  }
+  const assertEntriesPreserved = () => {
+    assert.deepEqual(normalize(harness.module.items.value), savedEntries.items)
+    assert.equal(harness.module.total.value, savedEntries.total)
+    assert.equal(harness.module.page.value, savedEntries.page)
+    assert.equal(harness.module.pageSize.value, savedEntries.pageSize)
+    assert.equal(harness.module.query.value, savedEntries.query)
+  }
+
+  failNextGet = true
+  await harness.module.refresh(false)
+  assert.equal(harness.module.loading.value, false)
+  assertEntriesPreserved()
+  assert.equal(harness.module.selectedKb.value.name, 'knowledge base 1')
+  assert.equal(harness.messages.length, 0)
+
+  failNextGet = true
+  await harness.module.refresh()
+  assert.equal(harness.module.loading.value, false)
+  assertEntriesPreserved()
+  assert.equal(harness.messages.length, 1)
+  assert.deepEqual(harness.messages[0], {
+    type: 'error',
+    args: ['knowledgeBase.entries_load_failed'],
+  })
+
+  failNextList = true
+  await harness.module.refresh(false)
+  assert.equal(harness.module.loading.value, false)
+  assertEntriesPreserved()
+  assert.equal(harness.module.selectedKb.value.name, 'knowledge base 4')
+  assert.equal(harness.messages.length, 1)
+
+  failNextList = true
+  await harness.module.refresh()
+  assert.equal(harness.module.loading.value, false)
+  assertEntriesPreserved()
+  assert.equal(harness.messages.length, 2)
+  assert.deepEqual(harness.messages[1], {
+    type: 'error',
+    args: ['knowledgeBase.entries_load_failed'],
+  })
+
+  failNextList = true
+  await harness.module.fetchEntries(false)
+  assert.equal(harness.module.loading.value, false)
+  assertEntriesPreserved()
+  assert.equal(harness.messages.length, 2)
+
+  failNextList = true
+  await harness.module.refresh()
+  assert.equal(harness.module.loading.value, false)
+  assertEntriesPreserved()
+  assert.equal(harness.messages.length, 3)
+  assert.deepEqual(harness.messages[2], {
+    type: 'error',
+    args: ['knowledgeBase.entries_load_failed'],
+  })
 })
 
 test('prioritizes index and publication statuses and requires an indexed version match', async t => {

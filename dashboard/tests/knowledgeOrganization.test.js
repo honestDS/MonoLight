@@ -48,6 +48,22 @@ const deferred = () => {
   })
   return { promise, resolve, reject }
 }
+const createOrganizationJob = (knowledgeBaseId, id, status = 'succeeded', extra = {}) => ({
+  id: `${knowledgeBaseId}-job-${id}`,
+  knowledge_base_id: knowledgeBaseId,
+  status,
+  ...extra,
+})
+const createOrganizationJobs = (knowledgeBaseId, total, statusForId = () => 'succeeded') => (
+  Array.from({ length: total }, (_, index) => {
+    const id = total - index
+    return createOrganizationJob(knowledgeBaseId, id, statusForId(id))
+  })
+)
+const pagedOrganizationResponse = (jobs, { page, size }) => dataResponse({
+  items: jobs.slice((page - 1) * size, page * size),
+  total: jobs.length,
+})
 
 const createKnowledgeOrganizationHarness = async (t, options = {}) => {
   const selectedKb = ref(options.selectedKb ?? null)
@@ -430,5 +446,270 @@ test('ignores late organization submissions after a new session starts', async t
     assert.deepEqual(harness.refreshed, [[true, true]])
     assert.deepEqual(harness.scheduled, [[]])
     assert.equal(harness.module.organizationSubmitting.value, false)
+  }
+})
+
+test('paginates organization history without losing or duplicating jobs', async t => {
+  const selectedKb = { id: 'managed-paged-kb', knowledge_base_type: 'llm_managed' }
+  const jobs = createOrganizationJobs(selectedKb.id, 45)
+  const harness = await createKnowledgeOrganizationHarness(t, {
+    selectedKb,
+    organizationJobs: ({ params }) => pagedOrganizationResponse(jobs, params),
+  })
+
+  await harness.module.showOrganizationDialog()
+  const latestJobId = jobs[0].id
+  const firstPageHistoryIds = harness.module.organizationHistoryJobs.value.map(job => job.id)
+  assert.equal(harness.module.organizationJobPage.value, 1)
+  assert.equal(harness.module.organizationTotal.value, 45)
+  assert.equal(harness.module.organizationHistoryTotal.value, 44)
+  assert.equal(harness.module.organizationJobs.value.length, 20)
+  assert.equal(harness.module.latestOrganizationJob.value.id, latestJobId)
+  assert.equal(firstPageHistoryIds.length, 19)
+
+  await harness.module.handleOrganizationPageChange(1)
+  assert.equal(harness.api.organizationJobs.length, 1)
+
+  await harness.module.handleOrganizationPageChange(2)
+  const secondPageHistoryIds = harness.module.organizationHistoryJobs.value.map(job => job.id)
+  assert.equal(harness.module.organizationJobPage.value, 2)
+  assert.equal(harness.module.organizationJobs.value.length, 20)
+  assert.equal(harness.module.organizationJobs.value[0].id, jobs[20].id)
+  assert.equal(harness.module.latestOrganizationJob.value.id, latestJobId)
+  assert.equal(secondPageHistoryIds.length, 20)
+
+  await harness.module.handleOrganizationPageChange(2)
+  assert.equal(harness.api.organizationJobs.length, 3)
+
+  await harness.module.handleOrganizationPageChange(3)
+  const thirdPageHistoryIds = harness.module.organizationHistoryJobs.value.map(job => job.id)
+  assert.equal(harness.module.organizationJobPage.value, 3)
+  assert.equal(harness.module.organizationJobs.value.length, 5)
+  assert.equal(harness.module.latestOrganizationJob.value.id, latestJobId)
+  assert.equal(thirdPageHistoryIds.length, 5)
+
+  const visitedHistoryIds = [...firstPageHistoryIds, ...secondPageHistoryIds, ...thirdPageHistoryIds]
+  assert.equal(visitedHistoryIds.length, 44)
+  assert.equal(new Set(visitedHistoryIds).size, 44)
+  assert.deepEqual(visitedHistoryIds.sort(), jobs.slice(1).map(job => job.id).sort())
+
+  await harness.module.handleOrganizationPageChange(1)
+  await harness.module.fetchOrganizationJobs()
+  await harness.module.fetchOrganizationJobs()
+  assert.deepEqual(harness.module.organizationHistoryJobs.value.map(job => job.id), firstPageHistoryIds)
+  assert.equal(harness.module.organizationHistoryJobs.value.length, 19)
+  assert.equal(harness.module.latestOrganizationJob.value.id, latestJobId)
+  assert.deepEqual(
+    harness.api.organizationJobs.map(({ selectedId, params }) => [selectedId, params.page, params.size]),
+    [
+      [selectedKb.id, 1, 20],
+      [selectedKb.id, 2, 20],
+      [selectedKb.id, 1, 1],
+      [selectedKb.id, 3, 20],
+      [selectedKb.id, 1, 1],
+      [selectedKb.id, 1, 20],
+      [selectedKb.id, 1, 20],
+      [selectedKb.id, 1, 20],
+    ],
+  )
+})
+
+test('handles organization history total and page boundaries', async t => {
+  for (const total of [0, 1, 20, 21]) {
+    const selectedKb = { id: `managed-boundary-${total}`, knowledge_base_type: 'llm_managed' }
+    const jobs = createOrganizationJobs(selectedKb.id, total)
+    const harness = await createKnowledgeOrganizationHarness(t, {
+      selectedKb,
+      organizationJobs: ({ params }) => pagedOrganizationResponse(jobs, params),
+    })
+
+    await harness.module.showOrganizationDialog()
+    const maxPage = Math.max(1, Math.ceil(total / 20))
+    assert.equal(harness.module.organizationTotal.value, total)
+    assert.equal(harness.module.organizationHistoryTotal.value, Math.max(total - 1, 0))
+    assert.equal(harness.module.organizationHistoryJobs.value.length, Math.min(Math.max(total - 1, 0), 19))
+    assert.equal(harness.module.latestOrganizationJob.value?.id ?? null, jobs[0]?.id ?? null)
+
+    for (const invalidPage of [0, -1, 1.5, '2', Number.NaN, maxPage + 1]) {
+      await harness.module.handleOrganizationPageChange(invalidPage)
+    }
+    await harness.module.handleOrganizationPageChange(1)
+    assert.equal(harness.api.organizationJobs.length, 1)
+    assert.equal(harness.module.organizationJobPage.value, 1)
+
+    if (total === 21) {
+      await harness.module.handleOrganizationPageChange(2)
+      assert.equal(harness.module.organizationJobPage.value, 2)
+      assert.equal(harness.module.organizationJobs.value.length, 1)
+      assert.equal(harness.module.organizationJobs.value[0].id, `${selectedKb.id}-job-1`)
+      assert.equal(harness.module.organizationHistoryJobs.value[0].id, `${selectedKb.id}-job-1`)
+      assert.equal(harness.module.latestOrganizationJob.value.id, `${selectedKb.id}-job-21`)
+    }
+  }
+})
+
+test('keeps the displayed organization page intact when either page request fails', async t => {
+  for (const failedRequest of ['page', 'latest']) {
+    const selectedKb = { id: `managed-failure-${failedRequest}`, knowledge_base_type: 'llm_managed' }
+    const jobs = createOrganizationJobs(selectedKb.id, 45)
+    let failure = failedRequest
+    const harness = await createKnowledgeOrganizationHarness(t, {
+      selectedKb,
+      organizationJobs: ({ params }) => {
+        const failsCurrentPage = failure === 'page' && params.page === 2 && params.size === 20
+        const failsLatestJob = failure === 'latest' && params.page === 1 && params.size === 1
+        if (failsCurrentPage || failsLatestJob) return Promise.reject(new Error(`${failure} request unavailable`))
+        return pagedOrganizationResponse(jobs, params)
+      },
+    })
+
+    await harness.module.showOrganizationDialog()
+    const previousLatest = normalize(harness.module.latestOrganizationJob.value)
+    const previousJobIds = harness.module.organizationJobs.value.map(job => job.id)
+    const previousHistoryIds = harness.module.organizationHistoryJobs.value.map(job => job.id)
+    const previousTotal = harness.module.organizationTotal.value
+
+    await harness.module.handleOrganizationPageChange(2)
+    assert.equal(harness.module.organizationJobPage.value, 1)
+    assert.deepEqual(normalize(harness.module.latestOrganizationJob.value), previousLatest)
+    assert.deepEqual(harness.module.organizationJobs.value.map(job => job.id), previousJobIds)
+    assert.deepEqual(harness.module.organizationHistoryJobs.value.map(job => job.id), previousHistoryIds)
+    assert.equal(harness.module.organizationTotal.value, previousTotal)
+    assert.equal(harness.module.organizationHistoryTotal.value, previousTotal - 1)
+    assert.equal(harness.module.organizationLoading.value, false)
+    assert.deepEqual(harness.messages.map(message => message.args[0]), [
+      `${zhKnowledgeBase.organization_fetch_failed}${failedRequest} request unavailable`,
+    ])
+
+    failure = null
+    await harness.module.handleOrganizationPageChange(2)
+    assert.equal(harness.module.organizationJobPage.value, 2)
+    assert.equal(harness.module.organizationJobs.value.length, 20)
+    assert.equal(harness.module.organizationJobs.value[0].id, jobs[20].id)
+    assert.equal(harness.module.latestOrganizationJob.value.id, jobs[0].id)
+    assert.equal(harness.module.organizationTotal.value, 45)
+    assert.equal(harness.module.organizationLoading.value, false)
+  }
+})
+
+test('keeps polling the latest organization job while viewing terminal history', async t => {
+  const selectedKb = { id: 'managed-polling-kb', knowledge_base_type: 'llm_managed' }
+  const jobs = createOrganizationJobs(selectedKb.id, 25, id => id === 25 ? 'running' : 'succeeded')
+  const setLatest = (status, completedStageCount) => {
+    jobs[0] = {
+      ...jobs[0],
+      status,
+      organization_progress: { completed_stage_count: completedStageCount, stage_count: 4 },
+    }
+  }
+  setLatest('running', 1)
+  const harness = await createKnowledgeOrganizationHarness(t, {
+    selectedKb,
+    organizationJobs: ({ params }) => pagedOrganizationResponse(jobs, params),
+  })
+
+  await harness.module.showOrganizationDialog()
+  await harness.module.handleOrganizationPageChange(2)
+  const pageTwoIds = harness.module.organizationJobs.value.map(job => job.id)
+  assert.equal(harness.module.organizationJobs.value.every(job => job.status === 'succeeded'), true)
+  assert.equal(harness.module.latestOrganizationJob.value.status, 'running')
+
+  setLatest('running', 2)
+  const timerCountBeforeRunningRefresh = harness.timers.length
+  await harness.timers.at(-1)[0]()
+  assert.equal(harness.module.organizationJobPage.value, 2)
+  assert.deepEqual(harness.module.organizationJobs.value.map(job => job.id), pageTwoIds)
+  assert.equal(harness.module.latestOrganizationJob.value.organization_progress.completed_stage_count, 2)
+  assert.equal(harness.timers.length, timerCountBeforeRunningRefresh + 1)
+
+  setLatest('succeeded', 4)
+  const timerCountBeforeTerminalRefresh = harness.timers.length
+  await harness.timers.at(-1)[0]()
+  assert.equal(harness.module.latestOrganizationJob.value.status, 'succeeded')
+  assert.equal(harness.module.organizationJobPage.value, 2)
+  assert.deepEqual(harness.module.organizationJobs.value.map(job => job.id), pageTwoIds)
+  assert.equal(harness.timers.length, timerCountBeforeTerminalRefresh)
+})
+
+test('ignores stale first-page responses after navigating to another organization page', async t => {
+  for (const outcome of ['success', 'failure']) {
+    const selectedKb = { id: `managed-stale-poll-${outcome}`, knowledge_base_type: 'llm_managed' }
+    const jobs = createOrganizationJobs(selectedKb.id, 45)
+    const pendingPoll = deferred()
+    let delayPoll = false
+    const harness = await createKnowledgeOrganizationHarness(t, {
+      selectedKb,
+      organizationJobs: ({ params }) => {
+        if (delayPoll && params.page === 1 && params.size === 20) {
+          delayPoll = false
+          return pendingPoll.promise
+        }
+        return pagedOrganizationResponse(jobs, params)
+      },
+    })
+
+    await harness.module.showOrganizationDialog()
+    delayPoll = true
+    const stalePoll = harness.module.fetchOrganizationJobs()
+    await harness.module.handleOrganizationPageChange(2)
+    const pageTwoIds = harness.module.organizationJobs.value.map(job => job.id)
+
+    if (outcome === 'success') {
+      pendingPoll.resolve(dataResponse({ items: [createOrganizationJob(selectedKb.id, 'stale')], total: 99 }))
+    } else {
+      pendingPoll.reject(new Error('late first-page failure'))
+    }
+    await stalePoll
+
+    assert.equal(harness.module.organizationJobPage.value, 2)
+    assert.deepEqual(harness.module.organizationJobs.value.map(job => job.id), pageTwoIds)
+    assert.equal(harness.module.organizationTotal.value, 45)
+    assert.equal(harness.module.latestOrganizationJob.value.id, jobs[0].id)
+    assert.deepEqual(harness.messages, [])
+  }
+})
+
+test('ignores stale organization page responses after resetting and reopening another knowledge base', async t => {
+  for (const outcome of ['success', 'failure']) {
+    const oldKb = { id: `managed-old-kb-${outcome}`, knowledge_base_type: 'llm_managed' }
+    const newKb = { id: `managed-new-kb-${outcome}`, knowledge_base_type: 'llm_managed' }
+    const oldJobs = createOrganizationJobs(oldKb.id, 45)
+    const newJobs = createOrganizationJobs(newKb.id, 3)
+    const pendingOldPage = deferred()
+    let delayOldPage = true
+    const harness = await createKnowledgeOrganizationHarness(t, {
+      selectedKb: oldKb,
+      organizationJobs: ({ selectedId, params }) => {
+        if (selectedId === oldKb.id && delayOldPage && params.page === 2 && params.size === 20) {
+          delayOldPage = false
+          return pendingOldPage.promise
+        }
+        const jobs = selectedId === oldKb.id ? oldJobs : newJobs
+        return pagedOrganizationResponse(jobs, params)
+      },
+    })
+
+    await harness.module.showOrganizationDialog()
+    const stalePageChange = harness.module.handleOrganizationPageChange(2)
+    assert.equal(harness.module.organizationJobPage.value, 1)
+
+    harness.scope.invalidate()
+    harness.selectedKb.value = newKb
+    harness.module.resetOrganizationState()
+    await harness.module.showOrganizationDialog()
+
+    if (outcome === 'success') {
+      pendingOldPage.resolve(dataResponse({ items: oldJobs.slice(20, 40), total: oldJobs.length }))
+    } else {
+      pendingOldPage.reject(new Error('late old knowledge-base failure'))
+    }
+    await stalePageChange
+
+    assert.equal(harness.module.organizationJobPage.value, 1)
+    assert.deepEqual(harness.module.organizationJobs.value.map(job => job.id), newJobs.map(job => job.id))
+    assert.equal(harness.module.organizationTotal.value, newJobs.length)
+    assert.equal(harness.module.organizationHistoryTotal.value, 2)
+    assert.equal(harness.module.latestOrganizationJob.value.id, newJobs[0].id)
+    assert.deepEqual(harness.messages, [])
   }
 })
