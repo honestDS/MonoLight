@@ -20,7 +20,6 @@ const {
   selectedKb,
   isManaged,
   loading,
-  error,
   items,
   total,
   page,
@@ -140,21 +139,6 @@ const updateHistoryVisibility = visible => {
         {{ t('knowledgeBase.entries_add') }}
       </el-button>
     </header>
-
-    <el-alert
-      v-if="error"
-      :title="error"
-      type="error"
-      show-icon
-      :closable="false"
-      role="alert"
-    >
-      <template #default>
-        <el-button link type="primary" :disabled="loading" @click="refresh">
-          {{ t('knowledgeBase.refresh') }}
-        </el-button>
-      </template>
-    </el-alert>
 
     <BaseDataTable
       v-model:current-page="page"

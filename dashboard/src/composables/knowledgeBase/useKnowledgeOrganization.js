@@ -20,6 +20,7 @@ export function useKnowledgeOrganization ({
   const organizationActionJobId = ref(null)
   const organizationJobs = ref([])
   const organizationTotal = ref(0)
+  const organizationJobPage = ref(1)
   const organizationJobPageSize = 20
   let organizationPollTimer = null
   let organizationPollingSession = 0
@@ -28,7 +29,13 @@ export function useKnowledgeOrganization ({
   const organizationTaskManager = createAbortableTaskManager()
   const organizationRequestTracker = createLatestRequestTracker()
 
-  const latestOrganizationJob = computed(() => organizationJobs.value[0] || null)
+  const latestOrganizationJob = ref(null)
+  const organizationHistoryTotal = computed(() => Math.max(0, organizationTotal.value - 1))
+  const organizationHistoryJobs = computed(() => {
+    if (!latestOrganizationJob.value) return organizationJobs.value
+    const latestJobId = getOrganizationJobId(latestOrganizationJob.value)
+    return organizationJobs.value.filter(job => getOrganizationJobId(job) !== latestJobId)
+  })
 
   const organizationTerminalStatuses = ['succeeded', 'failed', 'cancelled']
 
@@ -167,7 +174,11 @@ export function useKnowledgeOrganization ({
     && job?.can_retry === true
   )
 
-  const fetchOrganizationJobs = async (notifyError = true, session = organizationPollingSession) => {
+  const fetchOrganizationJobs = async (
+    notifyError = true,
+    session = organizationPollingSession,
+    page = organizationJobPage.value
+  ) => {
     const scopeGuard = scope.capture()
     const selectedId = selectedKb.value?.id
     if (
@@ -185,14 +196,26 @@ export function useKnowledgeOrganization ({
     if (organizationTaskManager.isCurrent(token)) organizationLoading.value = true
 
     try {
-      const res = await knowledgeBaseApi.organizationJobs(selectedId, {
-        page: 1,
+      const requests = [knowledgeBaseApi.organizationJobs(selectedId, {
+        page,
         size: organizationJobPageSize
-      })
-      const data = res.data.data || {}
+      })]
+      if (page > 1) {
+        requests.push(knowledgeBaseApi.organizationJobs(selectedId, {
+          page: 1,
+          size: 1
+        }))
+      }
+      const responses = await Promise.all(requests)
+      const data = responses[0].data.data || {}
       const items = Array.isArray(data.items)
         ? data.items.filter(item => item?.knowledge_base_id === selectedId)
         : []
+      const latestData = page === 1 ? data : responses[1].data.data || {}
+      const latestItems = Array.isArray(latestData.items)
+        ? latestData.items.filter(item => item?.knowledge_base_id === selectedId)
+        : []
+      const latestJob = latestItems[0] || null
       if (
         !organizationTaskManager.isCurrent(token)
         || !organizationRequestTracker.isCurrent(requestSeq)
@@ -200,8 +223,10 @@ export function useKnowledgeOrganization ({
         || !organizationDialogVisible.value
         || session !== organizationPollingSession
       ) return
+      organizationJobPage.value = page
       organizationJobs.value = items
       organizationTotal.value = getOrganizationNumber(data.total) ?? items.length
+      latestOrganizationJob.value = latestJob
     } catch (error) {
       if (
         notifyError
@@ -250,7 +275,9 @@ export function useKnowledgeOrganization ({
     if (
       !isOrganizationScopeCurrent(scopeGuard, selectedId)
       || !organizationDialogVisible.value
-      || !organizationJobs.value.some(job => !isOrganizationJobTerminal(job))
+      || ![latestOrganizationJob.value, ...organizationJobs.value]
+        .filter(Boolean)
+        .some(job => !isOrganizationJobTerminal(job))
     ) return
 
     const timer = setTimeout(async () => {
@@ -282,6 +309,8 @@ export function useKnowledgeOrganization ({
     stopOrganizationPolling()
     organizationJobs.value = []
     organizationTotal.value = 0
+    latestOrganizationJob.value = null
+    organizationJobPage.value = 1
     organizationDialogVisible.value = true
     const session = organizationPollingSession
     await fetchOrganizationJobs(true, session)
@@ -304,6 +333,15 @@ export function useKnowledgeOrganization ({
       organizationDialogVisible.value
       && session === organizationPollingSession
     ) scheduleOrganizationPolling(session)
+  }
+
+  const handleOrganizationPageChange = async (page) => {
+    const maxPage = Math.max(1, Math.ceil(organizationTotal.value / organizationJobPageSize))
+    if (!Number.isInteger(page) || page < 1 || page > maxPage || page === organizationJobPage.value) return
+
+    const session = beginOrganizationPollingSession()
+    await fetchOrganizationJobs(true, session, page)
+    if (session === organizationPollingSession) scheduleOrganizationPolling(session)
   }
 
   const submitKnowledgeOrganization = async () => {
@@ -415,6 +453,8 @@ export function useKnowledgeOrganization ({
     organizationDialogVisible.value = false
     organizationJobs.value = []
     organizationTotal.value = 0
+    latestOrganizationJob.value = null
+    organizationJobPage.value = 1
     organizationLoading.value = false
     organizationSubmitting.value = false
     organizationActionJobId.value = null
@@ -427,6 +467,10 @@ export function useKnowledgeOrganization ({
     organizationActionJobId,
     organizationJobs,
     organizationTotal,
+    organizationJobPage,
+    organizationJobPageSize,
+    organizationHistoryJobs,
+    organizationHistoryTotal,
     latestOrganizationJob,
     getOrganizationJobId,
     getOrganizationStatusLabel,
@@ -440,6 +484,7 @@ export function useKnowledgeOrganization ({
     canCancelOrganizationJob,
     canRetryOrganizationJob,
     showOrganizationDialog,
+    handleOrganizationPageChange,
     submitKnowledgeOrganization,
     handleCancelOrganizationJob,
     handleRetryOrganizationJob,
