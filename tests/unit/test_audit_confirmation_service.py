@@ -357,8 +357,8 @@ async def test_configured_audit_skips_safe_tool_round_without_side_effects(monke
         FakeDb(),
         cfg=_profile_config(),
         tool_calls=[
-            InternalToolCall(id="call-1", name="list_background_tasks", arguments={}),
-            InternalToolCall(id="call-2", name="firecrawl_search", arguments={"query": "Monoligh"}),
+            InternalToolCall(id="call-1", name="manage_background_tasks", arguments={"operation": "list"}),
+            InternalToolCall(id="call-2", name="web_tool", arguments={"operation": "search", "query": "Monoligh"}),
         ],
         source_assistant_message_id=1,
         uid="u1",
@@ -506,7 +506,7 @@ async def test_mixed_tool_round_audits_only_declared_calls_and_persists_full_rou
         FakeDb(),
         cfg=cfg,
         tool_calls=[
-            InternalToolCall(id="safe-call", name="list_background_tasks", arguments={}),
+            InternalToolCall(id="safe-call", name="manage_background_tasks", arguments={"operation": "list"}),
             InternalToolCall(id="risk-call", name="execute_shell", arguments={"command": "echo ok"}),
         ],
         source_assistant_message_id=1,
@@ -526,7 +526,7 @@ async def test_mixed_tool_round_audits_only_declared_calls_and_persists_full_rou
     assert captured["tool_details"][0]["conclusion"] == "passed"
     assert captured["tool_details"][0]["score"] == 0
     assert captured["tool_details"][0]["reason"] == t(MSG_AUDIT_ROUND_SKIPPED)
-    assert [item["name"] for item in captured["context_payload"]["tool_calls"]] == ["list_background_tasks", "execute_shell"]
+    assert [item["name"] for item in captured["context_payload"]["tool_calls"]] == ["manage_background_tasks", "execute_shell"]
     assert captured["context_payload"]["audited_tool_call_ids"] == ["risk-call"]
 
 

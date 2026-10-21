@@ -45,10 +45,10 @@ def test_file_tool_schema_exposes_general_file_operations():
     assert "unified-diff" in function["parameters"]["properties"]["patch"]["description"].lower()
 
 
-def test_profile_config_migrates_legacy_write_file_enablement():
+def test_profile_config_does_not_alias_legacy_write_file_enablement():
     cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell", "write_file", "file_tool"]}})
 
-    assert cfg.tool.enabled_tools == ["execute_shell", "file_tool"]
+    assert cfg.tool.enabled_tools == ["execute_shell", "write_file", "file_tool"]
 
 
 @pytest.mark.asyncio

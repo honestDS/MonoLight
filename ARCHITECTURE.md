@@ -532,7 +532,7 @@ app/core/retrieval/
 app/core/tools/
 ├── __init__.py             # 工具注册入口
 ├── base.py                 # 工具抽象
-├── cancel_background_task.py # 后台任务工具
+├── background_tasks.py      # 后台任务查询与取消工具
 ├── file_tool/              # 通用文本文件操作工具
 │   ├── __init__.py         # 工具能力导出
 │   ├── executor.py         # 单一 file_tool 执行入口
@@ -544,11 +544,9 @@ app/core/tools/
 │   ├── edit.py             # 字面文本精确编辑
 │   ├── patch.py            # 多 hunk 补丁解析与原子应用
 │   └── grep.py             # 文件或目录正则搜索
-├── firecrawl_scrape.py     # 网页抓取工具
-├── firecrawl_search.py     # 网页搜索工具
+├── web_tool.py             # 统一网页搜索与抓取工具
 ├── image_generation.py     # 图像生成工具
 ├── knowledge_base_query.py # 知识库查询与托管知识可信元数据
-├── list_background_tasks.py # 后台任务查询工具
 ├── longterm_memory.py      # 统一记忆工具：个人记忆与托管知识维护
 ├── read_text_file.py       # 文本文件读取工具
 ├── read_multimodal_file.py # 多模态文件读取工具
@@ -699,12 +697,13 @@ app/providers/
 ├── rerank/
 │   ├── __init__.py         # 重排能力导出
 │   └── client.py           # 重排模型客户端
-└── vector/
-    ├── __init__.py         # 向量存储能力导出
-    └── chroma.py           # Chroma 向量存储适配
+├── vector/
+│   ├── __init__.py         # 向量存储能力导出
+│   └── chroma.py           # Chroma 向量存储适配
+└── web.py                  # 网页服务选择与 Firecrawl 适配
 ```
 
-Provider 层隔离数据库、向量存储、语言模型、嵌入、重排和图像生成等外部依赖。
+Provider 层隔离数据库、向量存储、语言模型、嵌入、重排、图像生成和网页服务等外部依赖。
 
 ### 模型输入 Token 计量
 

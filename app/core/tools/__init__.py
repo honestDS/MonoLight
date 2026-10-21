@@ -4,7 +4,6 @@ from typing import Any
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.channel.router import select_channel
-from app.core.constants import FILE_TOOL_NAME, LEGACY_WRITE_FILE_TOOL_NAME
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.embedding.knowledge_base import build_knowledge_base_whitelist
 from app.core.log import get_logger
@@ -12,14 +11,12 @@ from app.models.channel import ChannelConfig
 from app.models.knowledge_base import KnowledgeBaseType
 from app.models.profile import Profile
 
-from .cancel_background_task import CANCEL_BACKGROUND_TASK_TOOL_SCHEMA, CancelBackgroundTaskExecutor
+from .background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA, ManageBackgroundTasksExecutor
 from .end_session import (
     END_SESSION_TOOL_NAME as END_SESSION_TOOL_NAME,
 )
 from .end_session import END_SESSION_TOOL_SCHEMA
 from .file_tool import FILE_TOOL_SCHEMA, FileToolExecutor
-from .firecrawl_scrape import FIRECRAWL_SCRAPE_TOOL_SCHEMA, FirecrawlScrapeExecutor
-from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecutor
 from .image_generation import IMAGE_GENERATION_TOOL_SCHEMA, ImageGenerationExecutor
 from .knowledge_base_query import (
     KNOWLEDGE_BASE_QUERY_TOOL_NAME as KNOWLEDGE_BASE_QUERY_TOOL_NAME,
@@ -28,7 +25,6 @@ from .knowledge_base_query import (
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA,
     KnowledgeBaseQueryExecutor,
 )
-from .list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA, ListBackgroundTasksExecutor
 from .longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
@@ -60,6 +56,7 @@ from .terminal import (
     TerminalWriteExecutor,
 )
 from .todo import MANAGE_TODO_TOOL_NAME, MANAGE_TODO_TOOL_SCHEMA, ManageTodoExecutor
+from .web_tool import WEB_TOOL_SCHEMA, WebToolExecutor
 
 logger = get_logger(__name__)
 
@@ -75,11 +72,9 @@ SYSTEM_BUILTIN_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in S
 CONFIGURABLE_TOOL_SCHEMAS = [
     SHELL_TOOL_SCHEMA,
     FILE_TOOL_SCHEMA,
-    FIRECRAWL_SEARCH_TOOL_SCHEMA,
-    FIRECRAWL_SCRAPE_TOOL_SCHEMA,
+    WEB_TOOL_SCHEMA,
     SEND_FILE_TO_USER_TOOL_SCHEMA,
-    LIST_BACKGROUND_TASKS_TOOL_SCHEMA,
-    CANCEL_BACKGROUND_TASK_TOOL_SCHEMA,
+    MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA,
     MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA,
     READ_MULTIMODAL_FILE_TOOL_SCHEMA,
 ]
@@ -114,11 +109,9 @@ ALL_TOOLS_SCHEMAS = CONFIGURABLE_TOOL_SCHEMAS
 TOOL_EXECUTOR_MAP = {
     SHELL_TOOL_SCHEMA["function"]["name"]: ShellExecutor,
     FILE_TOOL_SCHEMA["function"]["name"]: FileToolExecutor,
-    FIRECRAWL_SEARCH_TOOL_SCHEMA["function"]["name"]: FirecrawlSearchExecutor,
-    FIRECRAWL_SCRAPE_TOOL_SCHEMA["function"]["name"]: FirecrawlScrapeExecutor,
+    WEB_TOOL_SCHEMA["function"]["name"]: WebToolExecutor,
     SEND_FILE_TO_USER_TOOL_SCHEMA["function"]["name"]: SendFileToUserExecutor,
-    LIST_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"]: ListBackgroundTasksExecutor,
-    CANCEL_BACKGROUND_TASK_TOOL_SCHEMA["function"]["name"]: CancelBackgroundTaskExecutor,
+    MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"]: ManageBackgroundTasksExecutor,
     MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA["function"]["name"]: ManageScheduledTasksExecutor,
     READ_MULTIMODAL_FILE_TOOL_SCHEMA["function"]["name"]: ReadMultimodalFileExecutor,
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
@@ -246,7 +239,7 @@ def _get_enabled_tool_names(profile: Profile) -> set[str]:
     for name in enabled_tools:
         if not isinstance(name, str):
             continue
-        normalized_names.add(FILE_TOOL_NAME if name == LEGACY_WRITE_FILE_TOOL_NAME else name)
+        normalized_names.add(name)
     return normalized_names
 
 

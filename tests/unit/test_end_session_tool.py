@@ -5,8 +5,8 @@ import pytest
 
 from app.core.log import LogManager
 from app.core.tools import END_SESSION_TOOL_NAME, get_tools_for_profile
+from app.core.tools.background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA
 from app.core.tools.end_session import END_SESSION_TOOL_SCHEMA, is_end_session_signal
-from app.core.tools.list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA
 from app.core.utils.dispatcher.process_single_tool import (
     prevalidate_tool_round,
     prevalidate_tool_round_protocol,
@@ -47,8 +47,8 @@ def _end_session_call(call_id: str = "end-session-call", arguments: dict[str, ob
 def _ordinary_call(call_id: str = "ordinary-call") -> InternalToolCall:
     return InternalToolCall(
         id=call_id,
-        name=LIST_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"],
-        arguments={},
+        name=MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"],
+        arguments={"operation": "list"},
     )
 
 

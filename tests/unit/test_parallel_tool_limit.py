@@ -6,7 +6,7 @@ import pytest
 
 import app.core.dispatchers.interactive_tools as interactive_tools
 from app.core.prompts import ERR_PARALLEL_LIMIT_EXCEEDED
-from app.core.tools.list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA
+from app.core.tools.background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA
 from app.core.tools.todo import MANAGE_TODO_TOOL_NAME, MANAGE_TODO_TOOL_SCHEMA, ManageTodoExecutor
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
@@ -190,8 +190,8 @@ async def test_interactive_round_persists_rejected_calls_and_executes_prefix(mon
 async def test_exclusive_round_policy_rejects_mixed_round_atomically(monkeypatch) -> None:
     ordinary_call = InternalToolCall(
         id="ordinary-call",
-        name=LIST_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"],
-        arguments={},
+        name=MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"],
+        arguments={"operation": "list"},
     )
     exclusive_call = InternalToolCall(
         id="exclusive-call",
@@ -201,7 +201,7 @@ async def test_exclusive_round_policy_rejects_mixed_round_atomically(monkeypatch
     calls = [ordinary_call, exclusive_call]
     state = _state(
         tool_limit=1,
-        tools=[LIST_BACKGROUND_TASKS_TOOL_SCHEMA, MANAGE_TODO_TOOL_SCHEMA],
+        tools=[MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA, MANAGE_TODO_TOOL_SCHEMA],
     )
     state.cfg.tool.enabled_tools = [ordinary_call.name]
     ai_msg = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=calls)

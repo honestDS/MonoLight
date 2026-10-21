@@ -280,8 +280,8 @@ async def test_model_denial_blocks_entire_tool_round_and_cannot_be_claimed(
     audited_call = InternalToolCall(id="audited-call", name=tool_name, arguments=arguments)
     background_call = InternalToolCall(
         id="background-list-call",
-        name="list_background_tasks",
-        arguments={},
+        name="manage_background_tasks",
+        arguments={"operation": "list"},
     )
     tool_calls = [audited_call, background_call]
     generate_calls: list[dict[str, Any]] = []
@@ -439,7 +439,7 @@ async def test_invalid_audit_batch_retries_once_then_fails_closed_without_leakin
             name="execute_shell",
             arguments={"command": "echo second command must not execute", "execution_mode": "non_interactive"},
         ),
-        InternalToolCall(id="batch-background-list-call", name="list_background_tasks", arguments={}),
+        InternalToolCall(id="batch-background-list-call", name="manage_background_tasks", arguments={"operation": "list"}),
     ]
     audited_call_ids = [tool_calls[0].id, tool_calls[1].id]
     shell_executions: list[tuple[str, str]] = []

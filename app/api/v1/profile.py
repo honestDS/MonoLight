@@ -13,7 +13,6 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
-    CANCEL_BACKGROUND_TASK_TOOL_NAME,
     ERR_DELETE_DEFAULT_PROFILE,
     ERR_DELETE_LAST_PROFILE,
     ERR_ONLY_ADMIN_ALLOWED,
@@ -25,10 +24,8 @@ from app.core.constants import (
     ERR_SESSION_NO_PERMISSION,
     ERR_USER_NOT_FOUND,
     FILE_TOOL_NAME,
-    FIRECRAWL_SCRAPE_TOOL_NAME,
-    FIRECRAWL_SEARCH_TOOL_NAME,
     IMAGE_GENERATION_TOOL_NAME,
-    LIST_BACKGROUND_TASKS_TOOL_NAME,
+    MANAGE_BACKGROUND_TASKS_TOOL_NAME,
     MANAGE_SCHEDULED_TASKS_TOOL_NAME,
     MSG_MEMORY_SETTINGS_SUCCESS,
     MSG_PROFILE_CREATED,
@@ -41,6 +38,7 @@ from app.core.constants import (
     READ_MULTIMODAL_FILE_TOOL_NAME,
     SEND_FILE_TO_USER_TOOL_NAME,
     SHELL_TOOL_NAME,
+    WEB_TOOL_NAME,
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.channel.channel import channel_crud
@@ -103,11 +101,9 @@ _MEMORY_STORE_UNSET = object()
 PROFILE_TOOL_OPTIONS = [
     {"value": SHELL_TOOL_NAME, "label_key": "TOOL_EXECUTE_SHELL_LABEL"},
     {"value": FILE_TOOL_NAME, "label_key": "TOOL_FILE_TOOL_LABEL"},
-    {"value": FIRECRAWL_SEARCH_TOOL_NAME, "label_key": "TOOL_FIRECRAWL_SEARCH_LABEL"},
-    {"value": FIRECRAWL_SCRAPE_TOOL_NAME, "label_key": "TOOL_FIRECRAWL_SCRAPE_LABEL"},
+    {"value": WEB_TOOL_NAME, "label_key": "TOOL_WEB_LABEL"},
     {"value": SEND_FILE_TO_USER_TOOL_NAME, "label_key": "TOOL_SEND_FILE_TO_USER_LABEL"},
-    {"value": LIST_BACKGROUND_TASKS_TOOL_NAME, "label_key": "TOOL_LIST_BACKGROUND_TASKS_LABEL"},
-    {"value": CANCEL_BACKGROUND_TASK_TOOL_NAME, "label_key": "TOOL_CANCEL_BACKGROUND_TASK_LABEL"},
+    {"value": MANAGE_BACKGROUND_TASKS_TOOL_NAME, "label_key": "TOOL_MANAGE_BACKGROUND_TASKS_LABEL"},
     {"value": MANAGE_SCHEDULED_TASKS_TOOL_NAME, "label_key": "TOOL_MANAGE_SCHEDULED_TASKS_LABEL"},
     {"value": IMAGE_GENERATION_TOOL_NAME, "label_key": "TOOL_GENERATE_IMAGE_LABEL"},
     {"value": READ_MULTIMODAL_FILE_TOOL_NAME, "label_key": "TOOL_READ_MULTIMODAL_FILE_LABEL"},

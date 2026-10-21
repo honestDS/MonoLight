@@ -31,7 +31,6 @@ from sqlmodel import (
 from app.core.constants import (
     AUDIT_DEFAULT_DEPTH,
     AUDIT_MAX_DEPTH,
-    CANCEL_BACKGROUND_TASK_TOOL_NAME,
     ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED,
     ERR_PROFILE_CHAT_HISTORY_CANDIDATE_K_TOO_SMALL,
@@ -39,15 +38,13 @@ from app.core.constants import (
     ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL,
     ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE,
     FILE_TOOL_NAME,
-    FIRECRAWL_SCRAPE_TOOL_NAME,
-    FIRECRAWL_SEARCH_TOOL_NAME,
     IMAGE_GENERATION_TOOL_NAME,
-    LEGACY_WRITE_FILE_TOOL_NAME,
-    LIST_BACKGROUND_TASKS_TOOL_NAME,
+    MANAGE_BACKGROUND_TASKS_TOOL_NAME,
     MANAGE_SCHEDULED_TASKS_TOOL_NAME,
     READ_MULTIMODAL_FILE_TOOL_NAME,
     SEND_FILE_TO_USER_TOOL_NAME,
     SHELL_TOOL_NAME,
+    WEB_TOOL_NAME,
 )
 from app.core.i18n import t
 from app.core.i18n.locale import DEFAULT_LOCALE, SUPPORTED_LOCALES
@@ -122,11 +119,9 @@ class ToolConfig(BaseModel):
         default_factory=lambda: [
             SHELL_TOOL_NAME,
             FILE_TOOL_NAME,
-            FIRECRAWL_SEARCH_TOOL_NAME,
-            FIRECRAWL_SCRAPE_TOOL_NAME,
+            WEB_TOOL_NAME,
             SEND_FILE_TO_USER_TOOL_NAME,
-            LIST_BACKGROUND_TASKS_TOOL_NAME,
-            CANCEL_BACKGROUND_TASK_TOOL_NAME,
+            MANAGE_BACKGROUND_TASKS_TOOL_NAME,
             MANAGE_SCHEDULED_TASKS_TOOL_NAME,
             IMAGE_GENERATION_TOOL_NAME,
             READ_MULTIMODAL_FILE_TOOL_NAME,
@@ -318,9 +313,8 @@ class ProfileConfig(BaseModel):
             for tool_name in tool["enabled_tools"]:
                 if not isinstance(tool_name, str):
                     continue
-                normalized_name = FILE_TOOL_NAME if tool_name == LEGACY_WRITE_FILE_TOOL_NAME else tool_name
-                if normalized_name not in enabled_tools:
-                    enabled_tools.append(normalized_name)
+                if tool_name not in enabled_tools:
+                    enabled_tools.append(tool_name)
             tool["enabled_tools"] = enabled_tools
 
         if (info.context or {}).get("partial_update"):
@@ -409,7 +403,7 @@ PROFILE_EXAMPLE = {
             "background_task_max_concurrency": 2,
             "scheduled_task_max_concurrency": 4,
             "firecrawl_api_key": "",
-            "enabled_tools": [SHELL_TOOL_NAME, FILE_TOOL_NAME, FIRECRAWL_SEARCH_TOOL_NAME, FIRECRAWL_SCRAPE_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, LIST_BACKGROUND_TASKS_TOOL_NAME, CANCEL_BACKGROUND_TASK_TOOL_NAME, MANAGE_SCHEDULED_TASKS_TOOL_NAME, IMAGE_GENERATION_TOOL_NAME, READ_MULTIMODAL_FILE_TOOL_NAME],
+            "enabled_tools": [SHELL_TOOL_NAME, FILE_TOOL_NAME, WEB_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, MANAGE_BACKGROUND_TASKS_TOOL_NAME, MANAGE_SCHEDULED_TASKS_TOOL_NAME, IMAGE_GENERATION_TOOL_NAME, READ_MULTIMODAL_FILE_TOOL_NAME],
             "allowed_operation_dirs": [],
             "file_send_max_count": 10,
             "file_send_max_single_size_mb": 50,
