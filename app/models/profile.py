@@ -57,8 +57,13 @@ class ChannelGroupConfig(BaseModel):
 
     chat_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="对话渠道配置")
     context_summary_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="上下文总结渠道配置")
+    auxiliary_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="标题生成及前置召回预检辅助渠道配置")
     rerank_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="重排渠道配置")
     image_generation_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="图像生成渠道配置")
+
+    def resolve_auxiliary_channel(self) -> ChannelConfig:
+        """辅助渠道未配置规则时动态回退到对话渠道。"""
+        return self.auxiliary_channel if self.auxiliary_channel.rules else self.chat_channel
 
     @model_validator(mode="before")
     @classmethod
@@ -255,6 +260,7 @@ class ProfileConfig(BaseModel):
             "channel": [
                 "chat_channel",
                 "context_summary_channel",
+                "auxiliary_channel",
                 "rerank_channel",
                 "image_generation_channel",
             ],
@@ -371,6 +377,11 @@ PROFILE_EXAMPLE = {
                 ],
             },
             "context_summary_channel": {
+                "rules": [
+                    {"channel_id": 1, "model_id": "gpt-4o-mini", "priority": 1, "weight": 100},
+                ],
+            },
+            "auxiliary_channel": {
                 "rules": [
                     {"channel_id": 1, "model_id": "gpt-4o-mini", "priority": 1, "weight": 100},
                 ],

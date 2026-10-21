@@ -284,6 +284,19 @@
               </div>
 
               <div class="settings-section">
+                <div class="settings-section-title">
+                  {{ $t('profiles.auxiliary_channel') }}
+                  <HelpTooltip :content="$t('profiles.auxiliary_channel_hint')" />
+                </div>
+                <ChannelEditor
+                  :channel="form.configs.channel.auxiliary_channel"
+                  :channels="channels"
+                  usage="CHAT"
+                  :label="$t('profiles.auxiliary_model')"
+                />
+              </div>
+
+              <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.rerank_channel') }}</div>
                 <ChannelEditor
                   :channel="form.configs.channel.rerank_channel"

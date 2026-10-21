@@ -11,7 +11,8 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.exceptions import LLMException
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
-from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
+from app.models.profile import ProfileConfig
 
 
 class _FakeDb:
@@ -59,11 +60,34 @@ def _assistant(
 
 
 def _response(message):
-    return SimpleNamespace(message=message, usage={})
+    return InternalResponse(
+        message=message,
+        model="model-1",
+        usage={},
+        finish_reason="tool_calls" if message.tool_calls else "stop",
+    )
 
 
 def _context(*, messages=None, turn_messages=None, boundary=42):
+    channel_config = ProfileConfig.model_validate(
+        {
+            "channel": {
+                "chat_channel": {"rules": [{"channel_id": 11, "model_id": "model-1", "priority": 1, "weight": 1}]},
+                "auxiliary_channel": {"rules": [{"channel_id": 11, "model_id": "model-1", "priority": 1, "weight": 1}]},
+            },
+            "security": {},
+            "tool": {},
+            "other": {},
+        }
+    )
     channel = SimpleNamespace(
+        id=11,
+        name="primary",
+        base_url="https://example.invalid",
+        chat_timeout=60,
+        get_decrypted_api_key=lambda: "api-key",
+    )
+    auxiliary_channel = SimpleNamespace(
         id=11,
         name="primary",
         base_url="https://example.invalid",
@@ -75,7 +99,7 @@ def _context(*, messages=None, turn_messages=None, boundary=42):
         uid="uid-1",
         session_id="session-1",
         profile=SimpleNamespace(id=7),
-        cfg=SimpleNamespace(memory=SimpleNamespace()),
+        cfg=channel_config,
         username="tester",
         messages=messages or [InternalMessage(id=1, role=MessageRole.USER, content="request")],
         turn_messages=turn_messages or [],
@@ -87,6 +111,24 @@ def _context(*, messages=None, turn_messages=None, boundary=42):
         model_entry={"model_id": "model-1", "protocol": "OPENAI", "max_tokens": 128},
         channel_rule=SimpleNamespace(priority=1),
         chat_params={
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "max_tokens": 128,
+            "chat_timeout": 60,
+            "context_window_k": 4,
+        },
+        auxiliary_channel=channel_config.channel.resolve_auxiliary_channel(),
+        auxiliary_channel_obj=auxiliary_channel,
+        auxiliary_model_entry={
+            "model_id": "model-1",
+            "protocol": "OPENAI",
+            "max_tokens": 128,
+            "context_window_k": 4,
+            "temperature": 0.2,
+            "top_p": 0.9,
+        },
+        auxiliary_channel_rule=SimpleNamespace(priority=1),
+        auxiliary_params={
             "temperature": 0.2,
             "top_p": 0.9,
             "max_tokens": 128,
@@ -339,6 +381,13 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
     async def get_session(_db, _session_id):
         return SimpleNamespace(llm_request_metadata={})
 
+    async def select_channel(*_args, **_kwargs):
+        return (
+            context.auxiliary_channel_obj,
+            context.auxiliary_model_entry,
+            context.auxiliary_channel_rule,
+        )
+
     async def generate(**kwargs):
         model_requests.append([message.model_copy(deep=True) for message in kwargs["messages"]])
         return [_response(invalid), _response(valid)][len(model_requests) - 1]
@@ -348,6 +397,7 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
 
     monkeypatch.setattr(precheck_module, "load_dedupe_messages", load)
     monkeypatch.setattr(request_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(request_module, "select_channel", select_channel)
     monkeypatch.setattr(request_module.LLMClient, "generate", generate)
     monkeypatch.setattr(precheck_module, "save_and_execute_recall", save)
 
@@ -464,9 +514,9 @@ async def test_precheck_llm_exception_falls_back_by_priority(monkeypatch):
 
     async def fallback(context_arg, excluded):
         assert len(warnings) == 1
-        assert warnings[0][0]["priority"] == context_arg.channel_rule.priority == 1
+        assert warnings[0][0]["priority"] == context_arg.auxiliary_channel_rule.priority == 1
         fallback_calls.append(set(excluded))
-        context_arg.channel_rule = SimpleNamespace(priority=2)
+        context_arg.auxiliary_channel_rule = SimpleNamespace(priority=2)
         return True
 
     async def update(_context, _response):
@@ -499,10 +549,10 @@ async def test_precheck_llm_exception_falls_back_by_priority(monkeypatch):
     assert warning_fields["session_id"] == "session-1"
     assert warning_fields["priority"] == 1
     assert warning_fields["call_context"] == "chat_dispatch_non_stream_memory_recall"
-    assert warning_fields["channel_id"] == 11
-    assert warning_fields["channel_name"] == "primary / model-1"
-    assert warning_fields["model_id"] == "model-1"
-    assert warning_fields["model_name"] == "model-1"
+    assert warning_fields["channel_id"] == context.auxiliary_channel_obj.id
+    assert warning_fields["channel_name"] == f"{context.auxiliary_channel_obj.name} / {context.auxiliary_model_entry['model_id']}"
+    assert warning_fields["model_id"] == context.auxiliary_model_entry["model_id"]
+    assert warning_fields["model_name"] == context.auxiliary_model_entry["model_id"]
 
 
 @pytest.mark.asyncio
@@ -528,7 +578,7 @@ async def test_precheck_all_llm_channels_failed_returns_failed(monkeypatch):
     async def fallback(context_arg, excluded):
         fallback_calls.append(set(excluded))
         if len(fallback_calls) == 1:
-            context_arg.channel_rule = SimpleNamespace(priority=2)
+            context_arg.auxiliary_channel_rule = SimpleNamespace(priority=2)
             return True
         return False
 

@@ -4,10 +4,12 @@ from app.core.constants import LOG_MEMORY_RECALL_CHANNEL_FAILED
 from app.core.exceptions import LLMException, LLMRequestRejectedException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
+from app.core.utils.auxiliary_request import (
+    AuxiliaryRequestOutputBudgetError,
+    ensure_auxiliary_output_budget,
+)
 from app.core.utils.dispatcher.helpers import (
     format_exception_message,
-    get_multimodal_from_entry,
-    reassemble_multimodal_messages,
     resolve_chat_params,
 )
 from app.models.message import InternalMessage
@@ -93,6 +95,7 @@ async def run_memory_recall_precheck(
         base_messages = context.messages
         correction_messages: list[InternalMessage] | None = None
         excluded_priorities: set[int] = set()
+        output_budget_exhausted = False
         for attempt in range(2):
             working_messages = base_messages if correction_messages is None else correction_messages
             while True:
@@ -104,11 +107,17 @@ async def run_memory_recall_precheck(
                     )
                     response = await generate(context, request_messages, metadata)
                     await update_output_metadata(context, response)
+                    ensure_auxiliary_output_budget(
+                        response,
+                        max_output_tokens=context.auxiliary_params["max_tokens"],
+                    )
                     break
                 except LLMException as exc:
                     if isinstance(exc, LLMRequestRejectedException) and not exc.allow_channel_fallback:
                         raise
-                    priority = getattr(context.channel_rule, "priority", None)
+                    if isinstance(exc, AuxiliaryRequestOutputBudgetError):
+                        output_budget_exhausted = True
+                    priority = getattr(context.auxiliary_channel_rule, "priority", None)
                     if isinstance(priority, int) and not isinstance(priority, bool):
                         excluded_priorities.add(priority)
                     logger.bind(
@@ -116,7 +125,10 @@ async def run_memory_recall_precheck(
                         session_id=context.session_id,
                         priority=priority,
                         call_context=f"chat_dispatch_{context.dispatcher_mode}_memory_recall",
-                        **channel_log_extra(context.chat_channel_obj, context.model_entry or {}),
+                        **channel_log_extra(
+                            context.auxiliary_channel_obj,
+                            context.auxiliary_model_entry or {},
+                        ),
                     ).warning(
                         t(
                             LOG_MEMORY_RECALL_CHANNEL_FAILED,
@@ -126,13 +138,9 @@ async def run_memory_recall_precheck(
                     if not await fallback_channel(context, excluded_priorities):
                         if isinstance(exc, LLMRequestRejectedException):
                             raise
-                        _log_failure(context, "llm_exception")
-                        return build_result(context, "failed", "llm_exception")
-                    if correction_messages is not None:
-                        reassemble_multimodal_messages(
-                            correction_messages,
-                            *get_multimodal_from_entry(context.model_entry),
-                        )
+                        error_type = "output_budget_exhausted" if output_budget_exhausted else "llm_exception"
+                        _log_failure(context, error_type)
+                        return build_result(context, "failed", error_type)
             if response_is_valid(response):
                 await save_and_execute_recall(
                     context,

@@ -32,6 +32,7 @@ async def lock_profile_channel_references(
     for channel_config in (
         cfg.channel.chat_channel,
         cfg.channel.context_summary_channel,
+        cfg.channel.auxiliary_channel,
         cfg.channel.rerank_channel,
         cfg.channel.image_generation_channel,
     ):
@@ -126,6 +127,7 @@ async def validate_channel_configs(
 
     - chat_channel：至少需要一条启用规则
     - context_summary_channel：可选，有配置则按 CHAT 用途校验
+    - auxiliary_channel：可选，有配置则按 CHAT 用途校验
     - rerank_channel：可选，有配置则校验
     - image_generation_channel：可选，有配置则校验
     - 每条规则必须引用对应用途的模型条目
@@ -133,6 +135,7 @@ async def validate_channel_configs(
     channel_usage_map = {
         "chat_channel": ModelUsage.CHAT,
         "context_summary_channel": ModelUsage.CHAT,
+        "auxiliary_channel": ModelUsage.CHAT,
         "rerank_channel": ModelUsage.RERANK,
         "image_generation_channel": ModelUsage.IMAGE_GENERATION,
     }

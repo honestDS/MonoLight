@@ -301,6 +301,7 @@ MESSAGES = {
     "ERR_CONTEXT_SUMMARY_REFINEMENT_LOWER_INVALID": "总结精炼要求下层阶段恰好包含一个已完成分片",
     "ERR_CONTEXT_SUMMARY_MODEL_RESULT_EMPTY": "总结模型返回了空结果",
     "ERR_CONTEXT_SUMMARY_OUTPUT_BUDGET_EXHAUSTED": "总结输出预算不足，摘要生成未完成",
+    "ERR_AUXILIARY_REQUEST_OUTPUT_BUDGET_EXHAUSTED": "辅助请求输出预算不足，标题或召回预检生成未完成",
     "ERR_CONTEXT_SUMMARY_MODEL_NOT_REDUCED": "总结模型未缩短输入：输出令牌数={output_tokens}，替换输入令牌数={input_tokens}",
     "ERR_CONTEXT_SUMMARY_MODEL_RETRIES_EXHAUSTED": "总结模型在固定模型重试后仍失败：{detail}",
     "ERR_CONTEXT_SUMMARY_FRAGMENT_WRITE_ORDER_FAILED": "总结分片无法按顺序写入",

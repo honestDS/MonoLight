@@ -1162,6 +1162,156 @@ test('repeated profile submissions do not progressively mutate denied configs', 
   assert.deepEqual(normalize(row), originalRow)
 })
 
+test('new and legacy profiles keep missing auxiliary channel rules empty and independent', async t => {
+  const chatConfig = {
+    ...defaultProfileConfigs().channel.chat_channel,
+    chat_timeout: 111,
+    rules: [{ channel_id: 41, model_id: 'chat-model', reasoning_effort: 'low', priority: 1, weight: 2 }],
+  }
+  const summaryConfig = {
+    ...defaultProfileConfigs().channel.context_summary_channel,
+    chat_timeout: 222,
+    rules: [{ channel_id: 42, model_id: 'summary-model', reasoning_effort: 'medium', priority: 1, weight: 2 }],
+  }
+  const expectedAuxiliary = normalize(defaultProfileConfigs().channel.auxiliary_channel)
+  const legacyRow = {
+    id: 113,
+    uid: 'user-a',
+    name: 'legacy profile without auxiliary channel',
+    prompt_id: null,
+    knowledge_base_ids: [],
+    configs: {
+      channel: {
+        chat_channel: normalize(chatConfig),
+        context_summary_channel: normalize(summaryConfig),
+      },
+    },
+  }
+  const originalLegacyRow = normalize(legacyRow)
+
+  for (const scenario of [
+    { type: 'create', name: 'new profile' },
+    { type: 'edit', name: 'legacy profile', row: legacyRow },
+  ]) {
+    const harness = await createHarness(t)
+    if (scenario.type === 'create') harness.module.showDialog('create')
+    else harness.module.showDialog('edit', scenario.row)
+    await flush()
+
+    if (scenario.type === 'create') {
+      harness.module.form.configs.channel.chat_channel = normalize(chatConfig)
+      harness.module.form.configs.channel.context_summary_channel = normalize(summaryConfig)
+    }
+
+    const auxiliary = harness.module.form.configs.channel.auxiliary_channel
+    assert.deepEqual(normalize(auxiliary), expectedAuxiliary, scenario.type)
+    assert.deepEqual(normalize(auxiliary.rules), [], scenario.type)
+    assert.notEqual(auxiliary, harness.module.form.configs.channel.chat_channel, scenario.type)
+    assert.notEqual(auxiliary, harness.module.form.configs.channel.context_summary_channel, scenario.type)
+
+    harness.module.form.name = scenario.name
+    await harness.module.submitForm()
+    await flush()
+
+    const payload = scenario.type === 'create'
+      ? harness.api.creates[0]
+      : harness.api.updates[0]?.payload
+    assert.ok(payload, scenario.type)
+    assert.deepEqual(normalize(payload.configs.channel.auxiliary_channel), expectedAuxiliary, scenario.type)
+    assert.deepEqual(normalize(payload.configs.channel.chat_channel), chatConfig, scenario.type)
+    assert.deepEqual(normalize(payload.configs.channel.context_summary_channel), summaryConfig, scenario.type)
+    if (scenario.type === 'edit') assert.deepEqual(normalize(legacyRow), originalLegacyRow)
+  }
+})
+
+test('configured auxiliary channel rules survive cleanup, save, reopen, and clearing', async t => {
+  const chatConfig = {
+    ...defaultProfileConfigs().channel.chat_channel,
+    chat_timeout: 111,
+    rules: [{ channel_id: 41, model_id: 'chat-model', reasoning_effort: 'low', priority: 1, weight: 2 }],
+  }
+  const summaryConfig = {
+    ...defaultProfileConfigs().channel.context_summary_channel,
+    chat_timeout: 222,
+    rules: [{ channel_id: 42, model_id: 'summary-model', reasoning_effort: 'medium', priority: 1, weight: 2 }],
+  }
+  const expectedRules = [
+    { channel_id: 12, model_id: 'aux-first', priority: 10, weight: 0, reasoning_effort: 'none' },
+    { channel_id: 11, model_id: 'aux-later', priority: 20, weight: 2, reasoning_effort: 'high' },
+  ]
+  const expectedAuxiliary = {
+    ...defaultProfileConfigs().channel.auxiliary_channel,
+    chat_timeout: 73,
+    rules: expectedRules,
+  }
+  const row = {
+    id: 114,
+    uid: 'user-a',
+    name: 'configured auxiliary channel profile',
+    prompt_id: null,
+    knowledge_base_ids: [],
+    configs: {
+      channel: {
+        chat_channel: normalize(chatConfig),
+        context_summary_channel: normalize(summaryConfig),
+        auxiliary_channel: {
+          chat_timeout: 73,
+          rules: [
+            { channel_id: 11, model_id: 'aux-later', reasoning_effort: ' high ', priority: 20, weight: 2 },
+            { channel_id: 13, model_id: '', reasoning_effort: 'low', priority: 5, weight: 1 },
+            { channel_id: 12, model_id: 'aux-first', reasoning_effort: ' none ', priority: 10, weight: 0 },
+            { channel_id: null, model_id: 'orphan-model', reasoning_effort: 'medium', priority: 3, weight: 1 },
+          ],
+        },
+      },
+    },
+  }
+  const originalRow = normalize(row)
+  const harness = await createHarness(t)
+
+  harness.module.showDialog('edit', row)
+  await flush()
+  assert.equal(harness.module.form.configs.channel.auxiliary_channel.chat_timeout, 73)
+  assert.equal(harness.module.form.configs.channel.auxiliary_channel.rerank_timeout, expectedAuxiliary.rerank_timeout)
+  assert.equal(harness.module.form.configs.channel.auxiliary_channel.rules.length, 4)
+
+  await harness.module.submitForm()
+  await flush()
+
+  const firstPayload = harness.api.updates[0].payload
+  assert.deepEqual(normalize(firstPayload.configs.channel.auxiliary_channel), expectedAuxiliary)
+  assert.deepEqual(normalize(harness.module.form.configs.channel.auxiliary_channel), expectedAuxiliary)
+  assert.deepEqual(normalize(firstPayload.configs.channel.chat_channel), chatConfig)
+  assert.deepEqual(normalize(firstPayload.configs.channel.context_summary_channel), summaryConfig)
+  assert.deepEqual(normalize(row), originalRow)
+
+  let savedRow = { ...row, configs: normalize(firstPayload.configs) }
+  harness.module.showDialog('edit', savedRow)
+  await flush()
+  assert.deepEqual(normalize(harness.module.form.configs.channel.auxiliary_channel), expectedAuxiliary)
+
+  await harness.module.submitForm()
+  await flush()
+
+  const secondPayload = harness.api.updates[1].payload
+  assert.deepEqual(normalize(secondPayload.configs.channel), normalize(firstPayload.configs.channel))
+  assert.deepEqual(normalize(harness.module.form.configs.channel.auxiliary_channel), expectedAuxiliary)
+  assert.deepEqual(normalize(row), originalRow)
+
+  const clearedAuxiliary = { ...expectedAuxiliary, rules: [] }
+  harness.module.form.configs.channel.auxiliary_channel.rules = []
+  await harness.module.submitForm()
+  await flush()
+
+  const clearedPayload = harness.api.updates[2].payload
+  assert.deepEqual(normalize(clearedPayload.configs.channel.auxiliary_channel), clearedAuxiliary)
+  savedRow = { ...row, configs: normalize(clearedPayload.configs) }
+  harness.module.showDialog('edit', savedRow)
+  await flush()
+  assert.deepEqual(normalize(harness.module.form.configs.channel.auxiliary_channel), clearedAuxiliary)
+  assert.deepEqual(normalize(row), originalRow)
+})
+
 test('clearing permissions ignores late profile list permissions and rows', async t => {
   let resolveLateList
   let listRequestCount = 0

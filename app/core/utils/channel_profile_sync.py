@@ -12,6 +12,7 @@ from app.models.channel import ChannelModelItem, ModelUsage
 CHANNEL_USAGE_MAP = {
     "chat_channel": ModelUsage.CHAT.value,
     "context_summary_channel": ModelUsage.CHAT.value,
+    "auxiliary_channel": ModelUsage.CHAT.value,
     "rerank_channel": ModelUsage.RERANK.value,
     "image_generation_channel": ModelUsage.IMAGE_GENERATION.value,
 }

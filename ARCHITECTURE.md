@@ -137,7 +137,7 @@ app/core/
 ├── terminal/               # 交互终端与 PTY 能力
 ├── tools/                  # 模型可调用工具
 ├── user/                   # 用户生命周期服务
-├── utils/                  # 通用辅助组件
+├── utils/                  # 通用辅助组件与内部任务模型请求策略
 ├── constants.py            # 核心常量
 ├── context.py              # 对话上下文
 ├── crypto.py               # 通用敏感数据处理
@@ -496,8 +496,8 @@ app/core/dispatchers/
 │   ├── __init__.py         # 记忆召回公开导出
 │   ├── persistence.py      # 记忆召回持久化组件
 │   ├── recall.py           # 对话记忆召回集成
-│   ├── request.py          # 记忆召回请求组件
-│   └── types.py            # 记忆召回数据结构
+│   ├── request.py          # 前置记忆召回的独立辅助请求与用量
+│   └── types.py            # 记忆召回数据结构与隔离的辅助运行态
 ├── non_stream.py           # 非流式对话分发
 ├── shared.py               # 分发器共用组件
 └── stream.py               # 流式对话分发
@@ -596,6 +596,7 @@ app/core/utils/
 │   ├── stage.py            # 总结阶段生成与状态管理
 │   └── user_message_block.py # 被总结覆盖的用户消息块处理
 ├── assistant_files.py      # 助手文件辅助
+├── auxiliary_request.py    # 辅助请求输出完整性预算校验与业务异常
 ├── background_task_result.py # 后台任务结果辅助
 ├── channel_profile_sync.py # 渠道与 Profile 同步辅助
 ├── config.py               # 配置读取辅助
@@ -606,6 +607,7 @@ app/core/utils/
 ├── message_assembler.py    # 消息组装辅助
 ├── message_parser.py       # 消息解析辅助
 ├── model_request_headers.py # 模型请求头辅助
+├── llm_request_params.py   # 内部任务模型请求参数策略
 ├── operation_directories.py # 文件系统目录辅助
 ├── request_token_baseline.py # 请求令牌统计辅助
 ├── session.py              # 会话辅助
@@ -614,6 +616,8 @@ app/core/utils/
 ├── time.py                 # 时间辅助
 └── tokenizer.py            # 按模型标识选择编码的令牌统计辅助
 ```
+
+标题生成与前置记忆召回复用辅助请求配置边界，相关运行态与主对话分离。
 
 ### 多语言：`app/core/i18n/`
 
@@ -655,7 +659,7 @@ app/models/
 ├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息发件箱模型
-├── profile.py              # Profile 模型
+├── profile.py              # Profile 模型及独立的对话、总结与辅助渠道配置
 ├── prompt.py               # Prompt 模型
 ├── scheduled_task.py       # 定时任务模型
 ├── session.py              # 会话模型

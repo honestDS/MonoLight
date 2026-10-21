@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel.router import select_channel
@@ -9,12 +11,14 @@ from app.core.log import channel_log_extra, get_logger
 from app.core.profile.selection import resolve_profile_for_session
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.core.session.source import is_web_session_source
+from app.core.utils.auxiliary_request import AuxiliaryRequestOutputBudgetError, ensure_auxiliary_output_budget
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.llm_request_params import build_session_title_generation_params
 from app.core.utils.model_request_headers import get_model_custom_headers
-from app.models.channel import ChannelConfig, resolve_model_protocol
+from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
+from app.models.profile import ProfileConfig
 from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import LLMClient
@@ -67,6 +71,7 @@ async def generate_session_title(
     raise_on_error: bool = False,
     http_proxy: str | None = None,
     custom_headers: dict[str, str] | None = None,
+    timeout: float = 60.0,
 ) -> str | None:
     """
     异步生成会话标题并保存到数据库
@@ -97,7 +102,9 @@ async def generate_session_title(
             protocol=protocol,
             http_proxy=http_proxy,
             custom_headers=custom_headers,
+            timeout=timeout,
         )
+        ensure_auxiliary_output_budget(response, max_output_tokens=generation_params["max_tokens"])
 
         title = (response.message.content or "").strip()
         logger.bind(uid=uid, session_id=session_id).info(t("LOG_SESSION_TITLE_GENERATED", title=title))
@@ -148,20 +155,16 @@ async def generate_session_title_for_selected_profile(
             logger.bind(uid=uid, session_id=session_id).warning(t("LOG_TITLE_CHANNEL_FAILED", error=t(ERR_NO_VALID_CHANNEL)))
             return None
 
-        channel_cfg = (profile.configs or {}).get("channel", {})
-        chat_channel_raw = channel_cfg.get("chat_channel")
-        if not chat_channel_raw:
-            logger.bind(uid=uid, session_id=session_id).warning(t("LOG_TITLE_CHANNEL_FAILED", error=t(ERR_NO_VALID_CHANNEL)))
-            return None
-
         try:
-            chat_channel = ChannelConfig.model_validate(chat_channel_raw)
+            auxiliary_channel = ProfileConfig.model_validate(deepcopy(profile.configs or {})).channel.resolve_auxiliary_channel()
         except Exception as exc:
             logger.bind(uid=uid, session_id=session_id).warning(t("LOG_TITLE_CHANNEL_FAILED", error=format_exception_message(exc)))
             return None
 
         excluded_priorities: set[int] = set()
-        selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=None)
+        cursor_key = f"{profile.id}:CHAT:AUXILIARY"
+        budget_error: AuxiliaryRequestOutputBudgetError | None = None
+        selection = await select_channel(db, auxiliary_channel, "CHAT", call_context="session_title_generation", cursor_key=cursor_key)
         while selection:
             channel, model_entry, rule = selection
             try:
@@ -177,18 +180,22 @@ async def generate_session_title_for_selected_profile(
                     raise_on_error=True,
                     http_proxy=get_channel_http_proxy(channel),
                     custom_headers=get_model_custom_headers(model_entry),
+                    timeout=auxiliary_channel.chat_timeout,
                 )
             except Exception as exc:
                 excluded_priorities.add(rule.priority)
+                if isinstance(exc, AuxiliaryRequestOutputBudgetError):
+                    budget_error = exc
                 logger.bind(
                     uid=uid,
                     session_id=session_id,
                     **channel_log_extra(channel, model_entry),
                 ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=format_exception_message(exc)))
 
-            selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=None)
+            selection = await select_channel(db, auxiliary_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=cursor_key)
 
-        logger.bind(uid=uid, session_id=session_id).warning(t("LOG_TITLE_CHANNEL_FAILED", error=t(ERR_NO_VALID_CHANNEL)))
+        final_error = format_exception_message(budget_error) if budget_error else t(ERR_NO_VALID_CHANNEL)
+        logger.bind(uid=uid, session_id=session_id).warning(t("LOG_TITLE_CHANNEL_FAILED", error=final_error))
     except Exception as exc:
         logger.bind(uid=uid, session_id=session_id).warning(t("LOG_TITLE_CHANNEL_FAILED", error=format_exception_message(exc)), exc_info=True)
 

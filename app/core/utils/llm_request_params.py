@@ -2,10 +2,9 @@ from typing import Any
 
 from app.core.constants import (
     CONTEXT_SUMMARY_TOP_P,
-    MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
+    DEFAULT_CHAT_MAX_TOKENS,
     MEMORY_RECALL_PRECHECK_TEMPERATURE,
     MEMORY_RECALL_PRECHECK_TOP_P,
-    SESSION_TITLE_MAX_OUTPUT_TOKENS,
     SESSION_TITLE_TOP_P,
 )
 
@@ -52,17 +51,39 @@ def build_internal_task_generation_params(
     return params
 
 
+def _build_model_generation_params(
+    *,
+    model_entry: dict[str, Any] | None,
+    protocol: str,
+    temperature: float | None,
+    top_p: float | None,
+) -> dict[str, Any]:
+    configured_max_tokens = (model_entry or {}).get("max_tokens")
+    params = clean_generation_params(
+        {
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": DEFAULT_CHAT_MAX_TOKENS if configured_max_tokens is None else configured_max_tokens,
+        },
+        model_entry=model_entry,
+        protocol=protocol,
+    )
+    configured_reasoning = (model_entry or {}).get("reasoning_effort")
+    if configured_reasoning is not None:
+        params["reasoning_effort"] = configured_reasoning
+    return params
+
+
 def build_memory_recall_precheck_generation_params(
     *,
     model_entry: dict[str, Any] | None,
     protocol: str,
 ) -> dict[str, Any]:
-    return build_internal_task_generation_params(
+    return _build_model_generation_params(
         model_entry=model_entry,
         protocol=protocol,
         temperature=MEMORY_RECALL_PRECHECK_TEMPERATURE,
         top_p=MEMORY_RECALL_PRECHECK_TOP_P,
-        max_tokens=MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
     )
 
 
@@ -71,12 +92,11 @@ def build_session_title_generation_params(
     model_entry: dict[str, Any] | None,
     protocol: str,
 ) -> dict[str, Any]:
-    return build_internal_task_generation_params(
+    return _build_model_generation_params(
         model_entry=model_entry,
         protocol=protocol,
         temperature=(model_entry or {}).get("temperature"),
         top_p=SESSION_TITLE_TOP_P,
-        max_tokens=SESSION_TITLE_MAX_OUTPUT_TOKENS,
     )
 
 

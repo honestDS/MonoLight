@@ -10,6 +10,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
+import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.memory import request as memory_request_module
@@ -27,7 +28,8 @@ from app.core.tools import longterm_memory as longterm_memory_module
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.assistant_files import build_assistant_files_content
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.channel import ModelChannel
+from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
+from app.models.channel_cursor import ChannelCursor
 from app.models.knowledge_base import (
     KnowledgeBase,
     KnowledgeBaseCollectionOwner,
@@ -54,7 +56,7 @@ from tests.database_support import clone_sqlite_schema
 
 
 @pytest_asyncio.fixture
-async def memory_recall_session_factory(tmp_path):
+async def memory_recall_session_factory(tmp_path, monkeypatch: pytest.MonkeyPatch):
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path / 'memory-recall-workflow.db'}",
         connect_args={"timeout": 30},
@@ -71,6 +73,7 @@ async def memory_recall_session_factory(tmp_path):
 
     tables = [
         ModelChannel.__table__,
+        ChannelCursor.__table__,
         PromptLibrary.__table__,
         Profile.__table__,
         ChatSession.__table__,
@@ -87,6 +90,7 @@ async def memory_recall_session_factory(tmp_path):
     await clone_sqlite_schema(tmp_path / "memory-recall-workflow.db", tables=tables)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", session_factory)
     try:
         yield session_factory
     finally:
@@ -96,7 +100,13 @@ async def memory_recall_session_factory(tmp_path):
 def _profile_config() -> ProfileConfig:
     return ProfileConfig.model_validate(
         {
-            "channel": {},
+            "channel": {
+                "chat_channel": {
+                    "rules": [
+                        {"channel_id": 1, "model_id": "chat-model", "priority": 1, "weight": 1},
+                    ],
+                },
+            },
             "security": {},
             "tool": {},
             "other": {},
@@ -117,9 +127,27 @@ def _profile_config() -> ProfileConfig:
     )
 
 
-async def _seed_memory_recall_workflow(session_factory):
+async def _seed_memory_recall_workflow(session_factory, *, chat_protocol: str = "OPENAI"):
     cfg = _profile_config()
     async with session_factory() as db:
+        db.add(
+            ModelChannel(
+                id=1,
+                name="memory-chat",
+                api_key="enc:v1:test-key",
+                base_url="https://chat.invalid",
+                model_ids=[
+                    {
+                        "model_id": "chat-model",
+                        "usage": "CHAT",
+                        "protocol": chat_protocol,
+                        "is_enabled": True,
+                        "context_window_k": 32,
+                        "max_tokens": 1024,
+                    }
+                ],
+            )
+        )
         db.add(
             ModelChannel(
                 id=7,
@@ -252,6 +280,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
 
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", memory_recall_session_factory)
     monkeypatch.setattr(longterm_memory_module, "AsyncSessionLocal", memory_recall_session_factory)
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "chat-key")
 
     embedding_calls = 0
     vector_query_calls = 0
@@ -299,7 +328,7 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         llm_calls += 1
         captured_precheck_messages.append([message.model_copy(deep=True) for message in kwargs["messages"]])
         assert [tool["function"]["name"] for tool in kwargs["tools"]] == [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME]
-        assert kwargs["max_tokens"] == 256
+        assert kwargs["max_tokens"] == 1024
         assert kwargs["temperature"] == 0.0
         assert "top_p" not in kwargs
         assert "reasoning_effort" not in kwargs
@@ -575,13 +604,17 @@ async def test_memory_recall_retries_empty_response_before_recall_and_persistenc
     dispatcher_mode: str,
     first_response_kind: str,
 ) -> None:
-    profile, cfg, current_user_id, memory_id, vector_item_id = await _seed_memory_recall_workflow(memory_recall_session_factory)
+    profile, cfg, current_user_id, memory_id, vector_item_id = await _seed_memory_recall_workflow(
+        memory_recall_session_factory,
+        chat_protocol=protocol.upper(),
+    )
     assert current_user_id is not None
     assert memory_id is not None
     assert vector_item_id is not None
 
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", memory_recall_session_factory)
     monkeypatch.setattr(longterm_memory_module, "AsyncSessionLocal", memory_recall_session_factory)
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "chat-key")
 
     async def fake_embedding_runtime(*_args, **_kwargs):
         return object()
@@ -918,6 +951,29 @@ async def test_memory_request_replays_only_recoverable_provider_reasoning(
                 "chat_timeout": 60,
                 "context_window_k": 32,
             },
+            auxiliary_channel=cfg.channel.resolve_auxiliary_channel(),
+            auxiliary_channel_obj=SimpleNamespace(
+                id=1,
+                base_url="https://chat.invalid",
+                http_proxy=None,
+                get_decrypted_api_key=lambda: "chat-key",
+            ),
+            auxiliary_model_entry={
+                "model_id": "chat-model",
+                "usage": "CHAT",
+                "protocol": target_protocol.upper(),
+                "is_enabled": True,
+                "context_window_k": 32,
+                "max_tokens": 1024,
+            },
+            auxiliary_channel_rule=SimpleNamespace(priority=1),
+            auxiliary_params={
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "max_tokens": 1024,
+                "chat_timeout": 60,
+                "context_window_k": 32,
+            },
         )
         context_messages_before = [message.model_dump(mode="json") for message in context.messages]
 
@@ -960,8 +1016,8 @@ async def test_memory_request_replays_only_recoverable_provider_reasoning(
 
         request_sources = [(1, "chat-model"), (2, "chat-model"), (1, "other-model"), (1, "chat-model")]
         for channel_id, model_id in request_sources:
-            context.chat_channel_obj.id = channel_id
-            context.model_entry["model_id"] = model_id
+            context.auxiliary_channel_obj.id = channel_id
+            context.auxiliary_model_entry["model_id"] = model_id
             request_messages, metadata, _response_id = await memory_request_module.prepare_request_messages(
                 context,
                 context.messages,
@@ -1006,3 +1062,349 @@ async def test_memory_request_replays_only_recoverable_provider_reasoning(
         assert persisted_assistant.reasoning_content == stored_reasoning
         assert persisted_assistant.provider_metadata == source_metadata
         assert [message.model_dump(mode="json") for message in context.messages] == context_messages_before
+
+
+@pytest.mark.parametrize("dispatcher_mode", ["non_stream", "stream"])
+@pytest.mark.parametrize("failure_finish_reason", ["length", None, "incomplete"])
+@pytest.mark.parametrize("fallback_exhausted", [False, True])
+@pytest.mark.asyncio
+async def test_memory_recall_output_budget_falls_back_without_mutating_main_context(
+    memory_recall_session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    dispatcher_mode: str,
+    failure_finish_reason: str | None,
+    fallback_exhausted: bool,
+) -> None:
+    profile, cfg, current_user_id, memory_id, vector_item_id = await _seed_memory_recall_workflow(memory_recall_session_factory)
+    assert current_user_id is not None
+    assert memory_id is not None
+    assert vector_item_id is not None
+
+    monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", memory_recall_session_factory)
+    monkeypatch.setattr(longterm_memory_module, "AsyncSessionLocal", memory_recall_session_factory)
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "chat-key")
+
+    cfg.channel.auxiliary_channel = ChannelConfig(
+        chat_timeout=17,
+        rules=[
+            ChannelRule(
+                channel_id=2,
+                model_id="aux-primary-model",
+                priority=1,
+                weight=1,
+                reasoning_effort="high",
+            ),
+            ChannelRule(
+                channel_id=3,
+                model_id="aux-fallback-model",
+                priority=2,
+                weight=1,
+                reasoning_effort=None,
+            ),
+        ],
+    )
+    cfg.memory.result_max_chars = 10000
+    profile.configs = cfg.model_dump(mode="json")
+    large_memory_content = "VS Code is the preferred Python editor. " * 90
+
+    async with memory_recall_session_factory() as db:
+        for channel_id, name, model_id, context_window_k, max_tokens in (
+            (2, "memory-aux-primary", "aux-primary-model", 4, 2048),
+            (3, "memory-aux-fallback", "aux-fallback-model", 6, 4096),
+        ):
+            db.add(
+                ModelChannel(
+                    id=channel_id,
+                    name=name,
+                    api_key="enc:v1:test-key",
+                    base_url=f"https://{name}.invalid",
+                    model_ids=[
+                        {
+                            "model_id": model_id,
+                            "usage": "CHAT",
+                            "protocol": "OPENAI",
+                            "is_enabled": True,
+                            "context_window_k": context_window_k,
+                            "max_tokens": max_tokens,
+                        }
+                    ],
+                )
+            )
+        stored_profile = await db.get(Profile, profile.id)
+        stored_record = await db.get(LongTermMemoryRecord, memory_id)
+        assert stored_profile is not None
+        assert stored_record is not None
+        stored_profile.configs = profile.configs
+        stored_record.content = large_memory_content
+        stored_record.content_token_count = estimate_tokens(large_memory_content)
+        stored_record.content_hash = build_memory_content_hash(large_memory_content)
+        await db.commit()
+
+    embedded_texts: list[str] = []
+    vector_queries: list[str] = []
+
+    async def fake_embedding_runtime(*_args, **_kwargs):
+        return object()
+
+    async def fake_embed(_config, texts, **kwargs):
+        embedded_texts.extend(texts)
+        assert kwargs["dimensions"] == 2
+        return [[0.2, 0.8]]
+
+    async def fake_hybrid_query(collection_name, vector, query, limit):
+        vector_queries.append(query)
+        assert collection_name == "memory-owner-active"
+        assert vector == [0.2, 0.8]
+        assert query == "VS Code editor preference"
+        assert limit == 4
+        return [
+            RetrievalHit(
+                id=vector_item_id,
+                content="ignored vector payload",
+                metadata={
+                    "uid": "owner",
+                    "memory_id": memory_id,
+                    "version": 1,
+                    "embedding_revision": 1,
+                },
+                fusion_score=0.95,
+            )
+        ]
+
+    monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", fake_embedding_runtime)
+    monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", fake_embed)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", fake_hybrid_query)
+
+    primary_arguments = {
+        "operation": "recall",
+        "query": "PRIMARY_OVER_BUDGET_CALL_MUST_NOT_EXECUTE",
+        "knowledge_query": "PRIMARY_OVER_BUDGET_CALL_MUST_NOT_EXECUTE",
+        "top_k": 2,
+    }
+    accepted_arguments = {
+        "operation": "recall",
+        "query": "VS Code editor preference",
+        "knowledge_query": "VS Code editor preference",
+        "top_k": 2,
+    }
+    captured_requests: list[dict[str, Any]] = []
+
+    async def fake_generate(**kwargs):
+        request_index = len(captured_requests)
+        captured_requests.append(
+            {
+                "channel_id": kwargs["channel_id"],
+                "model_id": kwargs["model_id"],
+                "max_tokens": kwargs["max_tokens"],
+                "timeout": kwargs["timeout"],
+                "reasoning_effort": kwargs.get("reasoning_effort"),
+                "has_reasoning_effort": "reasoning_effort" in kwargs,
+                "messages": [message.model_copy(deep=True) for message in kwargs["messages"]],
+            }
+        )
+        if request_index == 0:
+            finish_reason = failure_finish_reason
+            completion_tokens = kwargs["max_tokens"] if finish_reason in {None, "incomplete"} else 8
+            arguments = primary_arguments
+            call_id = "over-budget-primary-call"
+        elif fallback_exhausted:
+            finish_reason = "incomplete"
+            completion_tokens = kwargs["max_tokens"]
+            arguments = accepted_arguments
+            call_id = "over-budget-fallback-call"
+        else:
+            finish_reason = "tool_calls"
+            completion_tokens = 12
+            arguments = accepted_arguments
+            call_id = "accepted-fallback-call"
+
+        return InternalResponse(
+            model=kwargs["model_id"],
+            message=InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    InternalToolCall(
+                        id=call_id,
+                        name=MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+                        arguments=arguments,
+                    )
+                ],
+            ),
+            usage={
+                "prompt_tokens": 120,
+                "completion_tokens": completion_tokens,
+                "total_tokens": 120 + completion_tokens,
+            },
+            finish_reason=finish_reason,
+        )
+
+    monkeypatch.setattr(memory_request_module.LLMClient, "generate", fake_generate)
+    monkeypatch.setattr(memory_request_module.LLMClient, "generate_with_stream_callback", fake_generate)
+
+    main_channel_obj = SimpleNamespace(
+        id=1,
+        base_url="https://chat.invalid",
+        http_proxy=None,
+        get_decrypted_api_key=lambda: "chat-key",
+    )
+    main_model_entry = {
+        "model_id": "chat-model",
+        "usage": "CHAT",
+        "protocol": "OPENAI",
+        "is_enabled": True,
+        "context_window_k": 32,
+        "max_tokens": 1024,
+    }
+    main_channel_rule = SimpleNamespace(priority=1)
+    main_chat_params = {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 1024,
+        "chat_timeout": 60,
+        "context_window_k": 32,
+    }
+    original_messages = [
+        InternalMessage(
+            role=MessageRole.USER,
+            content="I prefer VS Code as my editor for Python projects.",
+            environment_prompt="MAIN_HISTORY_ENVIRONMENT_MUST_REMAIN",
+        ),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content="Noted your VS Code editor preference.",
+            guidance_prompt="MAIN_HISTORY_GUIDANCE_MUST_REMAIN",
+        ),
+        InternalMessage(
+            role=MessageRole.USER,
+            content="Which editor do I prefer?",
+            environment_prompt="MAIN_REQUEST_ENVIRONMENT_MUST_REMAIN",
+        ),
+    ]
+    original_messages_before = [message.model_dump(mode="json") for message in original_messages]
+    main_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "main-chat-tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    events: list[dict[str, Any]] = []
+
+    async with memory_recall_session_factory() as db:
+
+        async def capture_event(event_payload: dict[str, Any]) -> None:
+            events.append(deepcopy(event_payload))
+            if event_payload.get("type") == "llm_request_metadata":
+                updated = await session_crud.update_llm_request_metadata(
+                    db,
+                    session_id="session-recall",
+                    uid="owner",
+                    metadata=event_payload,
+                    commit=False,
+                )
+                assert updated is True
+
+        context = MemoryRecallContext(
+            db=db,
+            uid="owner",
+            session_id="session-recall",
+            profile=profile,
+            cfg=cfg,
+            username="owner",
+            messages=original_messages,
+            turn_messages=[],
+            current_user_boundary_message_id=current_user_id,
+            upper_message_id=current_user_id,
+            chat_channel=cfg.channel.chat_channel,
+            chat_cursor_key="1:CHAT",
+            chat_channel_obj=main_channel_obj,
+            model_entry=main_model_entry,
+            channel_rule=main_channel_rule,
+            chat_params=dict(main_chat_params),
+            auxiliary_channel=cfg.channel.auxiliary_channel,
+            dispatcher_mode=dispatcher_mode,
+            stream_event_callback=capture_event,
+            main_tools=main_tools,
+        )
+        result = await run_memory_recall_precheck(context)
+        await db.commit()
+
+        assert len(captured_requests) == 2
+        assert [(request["channel_id"], request["model_id"], request["max_tokens"], request["timeout"]) for request in captured_requests] == [
+            (2, "aux-primary-model", 2048, 17),
+            (3, "aux-fallback-model", 4096, 17),
+        ]
+        assert captured_requests[0]["reasoning_effort"] == "high"
+        assert captured_requests[0]["has_reasoning_effort"] is True
+        assert captured_requests[1]["reasoning_effort"] is None
+        assert captured_requests[1]["has_reasoning_effort"] is False
+        assert all(not any(message.role == MessageRole.USER and message.content == LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT for message in request["messages"]) for request in captured_requests)
+
+        assert context.chat_channel is cfg.channel.chat_channel
+        assert context.chat_channel_obj is main_channel_obj
+        assert context.model_entry == main_model_entry
+        assert context.channel_rule is main_channel_rule
+        assert context.chat_params == main_chat_params
+        assert context.main_tools == main_tools
+        assert [message.model_dump(mode="json") for message in context.messages[: len(original_messages_before)]] == original_messages_before
+
+        if fallback_exhausted:
+            assert result.status == "failed"
+            assert result.error_type == "output_budget_exhausted"
+            assert result.turn_messages == []
+            assert embedded_texts == []
+            assert vector_queries == []
+        else:
+            assert result.status == "completed"
+            assert [message.role for message in result.turn_messages] == [MessageRole.ASSISTANT, MessageRole.TOOL]
+            assert result.turn_messages[0].tool_calls[0].id == "accepted-fallback-call"
+            tool_payload = json.loads(result.turn_messages[-1].content)
+            assert tool_payload["items"][0]["memory_id"] == memory_id
+            assert tool_payload["items"][0]["content"] == large_memory_content
+            assert embedded_texts == ["VS Code editor preference"]
+            assert vector_queries == ["VS Code editor preference"]
+
+    request_metadata = [event_payload for event_payload in events if event_payload.get("type") == "llm_request_metadata" and event_payload.get("input_tokens_source") == "estimated"]
+    assert [(item["channel_id"], item["model_id"], item["context_window_tokens"], item["max_output_tokens"]) for item in request_metadata] == [
+        (2, "aux-primary-model", 4000, 2048),
+        (3, "aux-fallback-model", 6000, 4096),
+    ]
+
+    async with memory_recall_session_factory() as db:
+        rows = list((await db.execute(select(Message).where(Message.session_id == "session-recall").order_by(Message.id))).scalars().all())
+        recall_rows = [row for row in rows if row.dedupe_key and row.dedupe_key.startswith("memory-recall-")]
+        stored_record = await db.get(LongTermMemoryRecord, memory_id)
+        session = await db.get(ChatSession, "session-recall")
+        cursor_rows = list((await db.execute(select(ChannelCursor))).scalars().all())
+        assert stored_record is not None
+        assert session is not None and session.llm_request_metadata is not None
+        assert session.llm_request_metadata["input_tokens"] == 100
+        assert session.llm_request_metadata["input_tokens_source"] == "provider"
+        assert session.llm_request_metadata["cached_tokens"] == 25
+        assert session.llm_request_metadata["output_tokens"] == 10
+        assert session.llm_request_metadata["total_input_tokens"] == 1000
+        assert session.llm_request_metadata["total_cached_tokens"] == 250
+        assert session.llm_request_metadata["total_output_tokens"] == 200
+        assert session.llm_request_metadata["cache_hit_rate"] == 0.25
+        assert {row.cursor_key for row in cursor_rows} == {
+            "1:CHAT:AUXILIARY:1",
+            "1:CHAT:AUXILIARY:2",
+        }
+        assert not any(row.cursor_key == "1:CHAT:1" for row in cursor_rows)
+
+        persisted_content = "\n".join(row.content or "" for row in rows)
+        assert "PRIMARY_OVER_BUDGET_CALL_MUST_NOT_EXECUTE" not in persisted_content
+        if fallback_exhausted:
+            assert recall_rows == []
+            assert len(rows) == len(original_messages_before)
+            assert stored_record.last_recalled_at is None
+        else:
+            assert [row.type for row in recall_rows] == [MessageType.TOOL_CALL, MessageType.TOOL_RESULT]
+            persisted_call = InternalMessage.model_validate_json(recall_rows[0].content)
+            persisted_result = InternalMessage.model_validate_json(recall_rows[1].content)
+            assert persisted_call.tool_calls[0].id == "accepted-fallback-call"
+            assert json.loads(persisted_result.content)["items"][0]["content"] == large_memory_content
+            assert len(rows) == len(original_messages_before) + 2
+            assert stored_record.last_recalled_at is not None

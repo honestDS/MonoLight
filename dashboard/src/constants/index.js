@@ -51,6 +51,7 @@ export const defaultProfileConfigs = () => ({
   channel: {
     chat_channel: defaultChannelConfig(),
     context_summary_channel: defaultChannelConfig(),
+    auxiliary_channel: defaultChannelConfig(),
     rerank_channel: defaultChannelConfig(),
     image_generation_channel: defaultChannelConfig(),
   },
