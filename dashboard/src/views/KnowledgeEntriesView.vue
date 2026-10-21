@@ -114,15 +114,31 @@ const updateHistoryVisibility = visible => {
 <template>
   <div class="view-container knowledge-entries-view">
     <header class="knowledge-entries-header">
-      <el-button @click="goBack">{{ t('knowledgeBase.entries_back') }}</el-button>
-      <h2>{{ selectedKb?.name || t('knowledgeBase.entries') }}</h2>
-      <el-tag v-if="selectedKb" :type="isManaged ? 'warning' : 'info'">
-        {{ t(isManaged ? 'knowledgeBase.type_managed' : 'knowledgeBase.type_user') }}
-      </el-tag>
-      <div class="knowledge-entries-meta">
-        <span>{{ t('knowledgeBase.owner_username') }}: {{ selectedKb?.username || t('knowledgeBase.owner_unknown') }}</span>
-        <span>{{ t('knowledgeBase.owner_profiles') }}: {{ getKnowledgeBaseProfileLabel(selectedKb) }}</span>
+      <div class="knowledge-entries-heading">
+        <el-button class="knowledge-entries-back" text @click="goBack">
+          <el-icon aria-hidden="true"><ArrowLeft /></el-icon>
+          {{ t('knowledgeBase.entries_back') }}
+        </el-button>
+        <div class="knowledge-entries-title-row">
+          <h1>{{ selectedKb?.name || t('knowledgeBase.entries') }}</h1>
+          <el-tag v-if="selectedKb" type="info" effect="plain">
+            {{ t(isManaged ? 'knowledgeBase.type_managed' : 'knowledgeBase.type_user') }}
+          </el-tag>
+        </div>
+        <div class="knowledge-entries-meta">
+          <span>{{ t('knowledgeBase.owner_username') }}: <strong>{{ selectedKb?.username || t('knowledgeBase.owner_unknown') }}</strong></span>
+          <span>{{ t('knowledgeBase.owner_profiles') }}: <strong>{{ getKnowledgeBaseProfileLabel(selectedKb) }}</strong></span>
+        </div>
       </div>
+      <el-button
+        class="knowledge-entries-add"
+        type="primary"
+        :disabled="loading || entryActionId !== null || !selectedKb"
+        @click="editorRef?.openCreate()"
+      >
+        <el-icon aria-hidden="true"><Plus /></el-icon>
+        {{ t('knowledgeBase.entries_add') }}
+      </el-button>
     </header>
 
     <el-alert
@@ -143,6 +159,7 @@ const updateHistoryVisibility = visible => {
     <BaseDataTable
       v-model:current-page="page"
       v-model:page-size="pageSize"
+      class="knowledge-entries-table"
       :data="items"
       :loading="loading"
       :total="total"
@@ -153,80 +170,91 @@ const updateHistoryVisibility = visible => {
     >
       <template #actions>
         <div class="knowledge-entries-toolbar">
-          <div v-if="isManaged" class="knowledge-entries-search">
-            <el-input
-              v-model="query"
-              :placeholder="t('knowledgeBase.managed_search_placeholder')"
-              :aria-label="t('knowledgeBase.managed_search_placeholder')"
-              clearable
-              :disabled="loading || !selectedKb"
-              @keyup.enter="handleSearch"
-            />
-            <el-button :disabled="loading || !selectedKb" @click="handleSearch">
-              {{ t('knowledgeBase.search') }}
-            </el-button>
-          </div>
-          <div v-else class="knowledge-entries-search"></div>
+          <div class="knowledge-entries-controls">
+            <div v-if="isManaged" class="knowledge-entries-search">
+              <el-input
+                v-model="query"
+                :placeholder="t('knowledgeBase.managed_search_placeholder')"
+                :aria-label="t('knowledgeBase.managed_search_placeholder')"
+                clearable
+                :disabled="loading || !selectedKb"
+                @keyup.enter="handleSearch"
+              >
+                <template #prefix>
+                  <el-icon aria-hidden="true"><Search /></el-icon>
+                </template>
+              </el-input>
+              <el-button :disabled="loading || !selectedKb" @click="handleSearch">
+                {{ t('knowledgeBase.search') }}
+              </el-button>
+            </div>
 
-          <div class="knowledge-entries-actions">
-            <el-button :disabled="loading" @click="refresh">
-              {{ t('knowledgeBase.refresh') }}
-            </el-button>
-            <el-button
-              v-if="isManaged"
-              :disabled="loading || entryActionId !== null || !selectedKb"
-              @click="orgRef?.open()"
-            >
-              {{ t('knowledgeBase.organization') }}
-            </el-button>
-            <el-button
-              type="primary"
-              :disabled="loading || entryActionId !== null || !selectedKb"
-              @click="editorRef?.openCreate()"
-            >
-              {{ t('knowledgeBase.entries_add') }}
-            </el-button>
+            <div class="knowledge-entries-actions">
+              <el-button :disabled="loading" @click="refresh">
+                <el-icon aria-hidden="true"><Refresh /></el-icon>
+                {{ t('knowledgeBase.refresh') }}
+              </el-button>
+              <el-button
+                v-if="isManaged"
+                :disabled="loading || entryActionId !== null || !selectedKb"
+                @click="orgRef?.open()"
+              >
+                <el-icon aria-hidden="true"><MagicStick /></el-icon>
+                {{ t('knowledgeBase.organization') }}
+              </el-button>
+            </div>
           </div>
         </div>
       </template>
 
       <el-table-column
         :label="t('knowledgeBase.entries_name')"
-        min-width="260"
-        show-overflow-tooltip
+        min-width="280"
         :resizable="false"
       >
         <template #default="{ row }">
-          <el-tooltip :content="getEntryName(row)" placement="top" :disabled="!getEntryName(row)">
-            <div class="knowledge-entry-name">
-              <strong>{{ getEntryName(row) || '-' }}</strong>
-              <div v-if="isManaged">
-                {{ t('knowledgeBase.managed_version') }} {{ row.version ?? '-' }}
-                · {{ t('knowledgeBase.entries_maintainable') }}:
+          <div class="knowledge-entry-name">
+            <strong v-if="isManaged" class="knowledge-entry-name__title">
+              {{ getEntryName(row) || '-' }}
+            </strong>
+            <el-tooltip
+              v-else
+              :content="getEntryName(row)"
+              placement="top"
+              :disabled="!getEntryName(row)"
+            >
+              <strong class="knowledge-entry-name__title">{{ getEntryName(row) || '-' }}</strong>
+            </el-tooltip>
+            <div v-if="isManaged" class="knowledge-entry-name__meta">
+              <span>{{ t('knowledgeBase.managed_version') }} {{ row.version ?? '-' }}</span>
+              <span>
+                {{ t('knowledgeBase.managed_llm_maintainable') }}:
                 {{ t(row.llm_maintainable ? 'knowledgeBase.yes' : 'knowledgeBase.no') }}
-              </div>
+              </span>
             </div>
-          </el-tooltip>
+          </div>
         </template>
       </el-table-column>
 
       <el-table-column
         :label="t('knowledgeBase.source')"
-        min-width="160"
-        show-overflow-tooltip
+        min-width="140"
+        :show-overflow-tooltip="!isManaged"
         :resizable="false"
       >
         <template #default="{ row }">
           <div class="knowledge-entry-source">
             <el-tooltip
-              v-if="hasOtherSourceReference(row)"
+              v-if="!isManaged && hasOtherSourceReference(row)"
               :content="sourceReferenceJson(row)"
               placement="top"
             >
               <span>{{ getEntrySourceLabel(row) }}</span>
             </el-tooltip>
             <span v-else>{{ getEntrySourceLabel(row) }}</span>
-            <div v-if="sourceReferenceFilename(row)">{{ sourceReferenceFilename(row) }}</div>
+            <div v-if="sourceReferenceFilename(row)" class="knowledge-entry-source__file">
+              {{ sourceReferenceFilename(row) }}
+            </div>
           </div>
         </template>
       </el-table-column>
@@ -237,7 +265,7 @@ const updateHistoryVisibility = visible => {
         :resizable="false"
       >
         <template #default="{ row }">
-          <div>{{ getEntryStatus(row) }}</div>
+          <span>{{ getEntryStatus(row) }}</span>
           <el-tooltip
             v-if="isManaged && row.publication_job_error"
             :content="row.publication_job_error"
@@ -259,66 +287,72 @@ const updateHistoryVisibility = visible => {
 
       <el-table-column
         :label="t('knowledgeBase.entries_update_time')"
-        width="170"
+        width="176"
         :resizable="false"
       >
-        <template #default="{ row }">{{ formatEntryTime(row) }}</template>
+        <template #default="{ row }">
+          <span class="knowledge-entry-time">{{ formatEntryTime(row) }}</span>
+        </template>
       </el-table-column>
 
       <el-table-column
         :label="t('knowledgeBase.actions')"
-        width="240"
+        :width="isManaged ? 272 : 168"
         align="center"
         fixed="right"
         :resizable="false"
       >
         <template #default="{ row }">
-          <el-button size="small" @click="viewEntry(row)">
-            {{ t('knowledgeBase.entries_view') }}
-          </el-button>
-          <el-button
-            v-if="isManaged"
-            size="small"
-            :disabled="entryActionId !== null"
-            @click="editorRef?.openEdit(row)"
-          >
-            {{ t('knowledgeBase.entries_edit') }}
-          </el-button>
-          <el-dropdown
-            trigger="click"
-            :disabled="entryActionId !== null"
-            @command="handleEntryAction($event, row)"
-          >
-            <el-button size="small" :disabled="entryActionId !== null">
-              {{ t('knowledgeBase.more') }}
+          <div class="knowledge-entry-row-actions">
+            <el-button text size="small" @click="viewEntry(row)">
+              {{ t('knowledgeBase.entries_view') }}
             </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item
-                  v-if="isManaged"
-                  command="history"
-                  :disabled="entryActionId !== null"
-                >
-                  {{ t('knowledgeBase.managed_history') }}
-                </el-dropdown-item>
-                <el-dropdown-item
-                  v-if="isManaged && row.publication_job_status === 'failed' && row.publication_job_id != null"
-                  command="retry"
-                  :disabled="entryActionId !== null"
-                >
-                  {{ t('knowledgeBase.managed_retry') }}
-                </el-dropdown-item>
-                <el-dropdown-item
-                  command="delete"
-                  divided
-                  class="danger-dropdown-item"
-                  :disabled="entryActionId !== null"
-                >
-                  {{ t('common.delete') }}
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+            <el-button
+              v-if="isManaged"
+              text
+              size="small"
+              :disabled="entryActionId !== null"
+              @click="editorRef?.openEdit(row)"
+            >
+              {{ t('knowledgeBase.entries_edit') }}
+            </el-button>
+            <el-dropdown
+              trigger="click"
+              :disabled="entryActionId !== null"
+              @command="handleEntryAction($event, row)"
+            >
+              <el-button text size="small" :disabled="entryActionId !== null">
+                {{ t('knowledgeBase.more') }}
+                <el-icon aria-hidden="true"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-if="isManaged"
+                    command="history"
+                    :disabled="entryActionId !== null"
+                  >
+                    {{ t('knowledgeBase.managed_history') }}
+                  </el-dropdown-item>
+                  <el-dropdown-item
+                    v-if="isManaged && row.publication_job_status === 'failed' && row.publication_job_id != null"
+                    command="retry"
+                    :disabled="entryActionId !== null"
+                  >
+                    {{ t('knowledgeBase.managed_retry') }}
+                  </el-dropdown-item>
+                  <el-dropdown-item
+                    command="delete"
+                    divided
+                    class="danger-dropdown-item"
+                    :disabled="entryActionId !== null"
+                  >
+                    {{ t('common.delete') }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </template>
       </el-table-column>
     </BaseDataTable>
@@ -343,7 +377,7 @@ const updateHistoryVisibility = visible => {
       :model-value="detailVisible"
       :title="detailTitle"
       width="800px"
-      class="standard-dialog dialog-with-scroll-body"
+      class="standard-dialog dialog-with-scroll-body knowledge-entry-dialog"
       align-center
       @update:model-value="updateDetailVisibility"
     >
@@ -363,7 +397,7 @@ const updateHistoryVisibility = visible => {
       :model-value="historyVisible"
       :title="historyTitle"
       width="980px"
-      class="standard-dialog dialog-with-scroll-body"
+      class="standard-dialog dialog-with-scroll-body knowledge-entry-dialog"
       align-center
       @update:model-value="updateHistoryVisibility"
     >
