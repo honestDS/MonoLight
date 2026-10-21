@@ -607,8 +607,8 @@ async def test_format_correction_preserves_evidence_budget_and_result_id_mapping
     )
     background_call = InternalToolCall(
         id="format-correction-background-call",
-        name="list_background_tasks",
-        arguments={},
+        name="manage_background_tasks",
+        arguments={"operation": "list"},
     )
     tool_calls = [call_one, call_two, background_call]
     query_command = _environment_query_command()

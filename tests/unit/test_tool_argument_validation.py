@@ -10,7 +10,7 @@ from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_TOOL_NOT_ENABLED
 from app.core.i18n import t
 from app.core.tools import (
     IMAGE_GENERATION_TOOL_SCHEMA,
-    LIST_BACKGROUND_TASKS_TOOL_SCHEMA,
+    MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA,
     SEND_FILE_TO_USER_TOOL_SCHEMA,
     SHELL_COMPANION_TOOL_SCHEMAS,
     SHELL_TOOL_SCHEMA,
@@ -255,8 +255,8 @@ async def test_process_single_tool_returns_failure_for_missing_required_argument
 @pytest.mark.parametrize(
     ("tool_name", "arguments", "schema", "expected_detail"),
     [
-        ("list_background_tasks", {"page": "1"}, LIST_BACKGROUND_TASKS_TOOL_SCHEMA, "must be integer"),
-        ("list_background_tasks", {"size": 101}, LIST_BACKGROUND_TASKS_TOOL_SCHEMA, "must be at most 100"),
+        ("manage_background_tasks", {"operation": "list", "page": "1"}, MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA, "must be integer"),
+        ("manage_background_tasks", {"operation": "list", "size": 101}, MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA, "must be at most 100"),
         ("generate_image", {"prompt": "image", "quality": "ultra"}, IMAGE_GENERATION_TOOL_SCHEMA, "must be one of"),
         ("send_file_to_user", {"files": [{"display_name": "x"}]}, SEND_FILE_TO_USER_TOOL_SCHEMA, "arguments.files[0].path is required"),
     ],

@@ -206,7 +206,7 @@ export default {
   common_tool_config: '公共设置',
   allowed_operation_dirs: '允许操作的目录',
   allowed_operation_dirs_placeholder: '输入绝对路径后按回车添加',
-  allowed_operation_dirs_hint: '发送文件给用户和读取多模态文件都只允许操作这些目录。请填写绝对路径；留空时调用会失败。',
+  allowed_operation_dirs_hint: '用于限制文件的创建、修改、发送，以及图片、音频和视频的读取范围，请填写完整路径。查看和搜索文本文件、修改用户临时目录中的文件不受此限制；留空时无法发送文件或读取图片、音频和视频。',
   file_send_config: '文件发送配置',
   file_send_max_count: '单次文件数量',
   file_send_max_single_size_mb: '单文件大小(MB)',

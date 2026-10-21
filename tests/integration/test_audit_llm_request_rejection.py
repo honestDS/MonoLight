@@ -657,8 +657,8 @@ async def test_shell_blacklist_feedback_survives_history_reload_and_locale_switc
         )
         background_call = InternalToolCall(
             id="background-call",
-            name="list_background_tasks",
-            arguments={},
+            name="manage_background_tasks",
+            arguments={"operation": "list"},
         )
 
         llm_calls: list[dict[str, Any]] = []

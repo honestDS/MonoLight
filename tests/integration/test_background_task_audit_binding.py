@@ -14,6 +14,7 @@ from app.core.crud.audit.audit import audit_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
+from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
 from app.models.audit import AuditExecutionRecord, AuditExecutionStatus, AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail
 from app.models.background_task import BackgroundTask, BackgroundTaskResponse, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
@@ -372,11 +373,14 @@ async def test_pending_bound_task_cancellation_closes_audit_as_cancelled(audit_t
     async with audit_task_database() as db:
         await db.execute(update(BackgroundTask).where(BackgroundTask.id == tasks[0].id).values(status=BackgroundTaskStatus.PENDING, locked_by=None, lock_until=None))
         await db.commit()
-        cancelled = await background_task_crud.cancel_user_task(db, task_id=tasks[0].id, uid="user-1")
+        executor = ManageBackgroundTasksExecutor(project_root=".", uid="user-1")
+        executor.set_runtime_context(db=db, session_id="session-1")
+        cancelled = json.loads(await executor.execute(operation="cancel", task_id=tasks[0].id))
         stored_execution = await db.get(AuditExecutionRecord, executions[0].id)
         stored_record = await db.get(AuditRecord, record_id)
 
-    assert cancelled.status == BackgroundTaskStatus.CANCELLED
+    assert cancelled["status"] == "success"
+    assert cancelled["task"]["status"] == BackgroundTaskStatus.CANCELLED
     assert stored_execution.status == AuditExecutionStatus.CANCELLED
     assert stored_record.status == AuditRecordStatus.CANCELLED
 
@@ -518,11 +522,14 @@ async def test_cancelled_execution_cannot_make_a_round_succeed(audit_task_databa
 async def test_user_cancellation_marks_bound_execution_unknown(audit_task_database):
     record_id, tasks, executions = await _seed_bound_tasks(audit_task_database)
     async with audit_task_database() as db:
-        cancelled = await background_task_crud.cancel_user_task(db, task_id=tasks[0].id, uid="user-1")
+        executor = ManageBackgroundTasksExecutor(project_root=".", uid="user-1")
+        executor.set_runtime_context(db=db, session_id="session-1")
+        cancelled = json.loads(await executor.execute(operation="cancel", task_id=tasks[0].id))
         stored_execution = await db.get(AuditExecutionRecord, executions[0].id)
         stored_record = await db.get(AuditRecord, record_id)
 
-    assert cancelled.status == BackgroundTaskStatus.CANCELLED
+    assert cancelled["status"] == "success"
+    assert cancelled["task"]["status"] == BackgroundTaskStatus.CANCELLED
     assert stored_execution.status == AuditExecutionStatus.EXECUTION_UNKNOWN
     assert stored_record.status == AuditRecordStatus.EXECUTION_UNKNOWN
 

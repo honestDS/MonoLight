@@ -206,7 +206,7 @@ export default {
   common_tool_config: 'Common Settings',
   allowed_operation_dirs: 'Allowed Operation Directories',
   allowed_operation_dirs_placeholder: 'Enter an absolute path and press Enter',
-  allowed_operation_dirs_hint: 'The Send File to User and Read Multimodal File tools can only operate within these directories. Use absolute paths. If empty, tool calls fail.',
+  allowed_operation_dirs_hint: 'Set the folders allowed for creating, changing, and sending files, and for reading images, audio, and video. Enter full paths. Viewing or searching text files and changing files in your temporary folder are not restricted by this setting. If left empty, sending files and reading images, audio, or video are unavailable.',
   file_send_config: 'File Sending Config',
   file_send_max_count: 'Files Per Call',
   file_send_max_single_size_mb: 'Single File Size (MB)',
