@@ -2,10 +2,7 @@ import json
 
 import pytest
 
-from app.core.constants import (
-    MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
-    SESSION_TITLE_MAX_OUTPUT_TOKENS,
-)
+from app.core.constants import DEFAULT_CHAT_MAX_TOKENS
 from app.core.dispatchers.memory.request import (
     build_correction_messages,
     build_precheck_request_messages,
@@ -471,72 +468,65 @@ def test_memory_precheck_setting_defaults_on_and_can_be_disabled():
     assert LongTermMemoryConfig(precheck_enabled=False).precheck_enabled is False
 
 
-def test_precheck_generation_params_force_small_output_and_clean_optional_fields():
-    params = build_memory_recall_precheck_generation_params(
-        model_entry={"temperature": 0.8, "reasoning_effort": None},
-        protocol="openai",
-    )
+@pytest.mark.parametrize(
+    ("builder", "temperature"),
+    [
+        (build_session_title_generation_params, 0.35),
+        (build_memory_recall_precheck_generation_params, 0.0),
+    ],
+    ids=["session-title", "memory-precheck"],
+)
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses", "deepseek", "deepseek_responses"])
+@pytest.mark.parametrize(
+    ("include_max_tokens", "configured_max_tokens", "expected_max_tokens"),
+    [
+        (True, 1024, 1024),
+        (True, 128, 128),
+        (True, 0, 0),
+        (True, None, DEFAULT_CHAT_MAX_TOKENS),
+        (False, None, DEFAULT_CHAT_MAX_TOKENS),
+    ],
+    ids=["above-legacy-limits", "configured-small", "explicit-zero", "none-fallback", "missing-fallback"],
+)
+def test_title_and_precheck_generation_params_respect_model_token_budget(builder, temperature, protocol, include_max_tokens, configured_max_tokens, expected_max_tokens):
+    model_entry = {"temperature": 0.35, "reasoning_effort": None}
+    if include_max_tokens:
+        model_entry["max_tokens"] = configured_max_tokens
+    original_model_entry = model_entry.copy()
 
-    assert params == {
-        "temperature": 0.0,
-        "max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
-    }
+    params = builder(model_entry=model_entry, protocol=protocol)
 
-    reasoning_params = build_memory_recall_precheck_generation_params(
-        model_entry={"temperature": 0.8, "reasoning_effort": "high", "max_tokens": 128},
-        protocol="openai_responses",
-    )
-    assert reasoning_params == {
-        "max_tokens": 128,
-    }
-
-    chat_completions_params = build_memory_recall_precheck_generation_params(
-        model_entry={"temperature": 0.8, "reasoning_effort": "high"},
-        protocol="openai",
-    )
-    assert chat_completions_params == {
-        "max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS,
-    }
+    assert params == {"temperature": temperature, "max_tokens": expected_max_tokens}
+    assert model_entry == original_model_entry
 
 
-def test_session_title_and_memory_precheck_generation_params_never_set_reasoning_effort():
-    title_params = build_session_title_generation_params(
-        model_entry={"reasoning_effort": "max", "max_tokens": 128},
-        protocol="openai_responses",
-    )
-    assert title_params == {
-        "max_tokens": 128,
-    }
-
-    plain_title_params = build_session_title_generation_params(
-        model_entry={"reasoning_effort": None, "temperature": 0.35, "max_tokens": 20480},
-        protocol="openai",
-    )
-    assert plain_title_params == {
+@pytest.mark.parametrize(
+    ("builder", "temperature"),
+    [
+        (build_session_title_generation_params, 0.35),
+        (build_memory_recall_precheck_generation_params, 0.0),
+    ],
+    ids=["session-title", "memory-precheck"],
+)
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses", "deepseek", "deepseek_responses"])
+@pytest.mark.parametrize("reasoning_effort", [None, "none", "low", "max"], ids=["unset", "none", "low", "max"])
+def test_title_and_precheck_generation_params_preserve_configured_reasoning_effort(builder, temperature, protocol, reasoning_effort):
+    model_entry = {
+        "reasoning_effort": reasoning_effort,
         "temperature": 0.35,
-        "max_tokens": SESSION_TITLE_MAX_OUTPUT_TOKENS,
+        "max_tokens": 1024,
     }
+    original_model_entry = model_entry.copy()
 
-    disabled_reasoning_params = [
-        build_memory_recall_precheck_generation_params(
-            model_entry={"reasoning_effort": "low", "temperature": 0.8},
-            protocol="openai",
-        ),
-        build_memory_recall_precheck_generation_params(
-            model_entry={"reasoning_effort": "none", "temperature": 0.8},
-            protocol="openai",
-        ),
-        build_session_title_generation_params(
-            model_entry={"reasoning_effort": " NONE ", "temperature": 0.35},
-            protocol="openai_responses",
-        ),
-    ]
-    assert disabled_reasoning_params == [
-        {"max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS},
-        {"max_tokens": MEMORY_RECALL_PRECHECK_MAX_OUTPUT_TOKENS},
-        {"max_tokens": SESSION_TITLE_MAX_OUTPUT_TOKENS},
-    ]
-    assert all("reasoning_effort" not in params for params in disabled_reasoning_params)
+    params = builder(model_entry=model_entry, protocol=protocol)
+
+    expected_params = {"max_tokens": 1024}
+    if reasoning_effort is not None:
+        expected_params["reasoning_effort"] = reasoning_effort
+    if reasoning_effort is None or protocol not in {"openai", "openai_responses"}:
+        expected_params["temperature"] = temperature
+    assert params == expected_params
+    assert model_entry == original_model_entry
 
 
 @pytest.mark.parametrize("protocol", ["openai", "openai_responses", "deepseek", "deepseek_responses"])

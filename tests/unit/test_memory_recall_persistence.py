@@ -9,6 +9,7 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
 )
+from app.models.channel import ChannelConfig
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
 
 
@@ -48,6 +49,19 @@ def _context(*, messages=None, turn_messages=None, main_tools=None):
         chat_timeout=60,
         get_decrypted_api_key=lambda: "api-key",
     )
+    auxiliary_channel = SimpleNamespace(
+        id=2,
+        base_url="https://example.invalid",
+        chat_timeout=60,
+        get_decrypted_api_key=lambda: "api-key",
+    )
+    chat_params = {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 128,
+        "chat_timeout": 60,
+        "context_window_k": 4,
+    }
     return MemoryRecallContext(
         db=_FakeDb(),
         uid="uid-1",
@@ -64,13 +78,11 @@ def _context(*, messages=None, turn_messages=None, main_tools=None):
         chat_channel_obj=channel,
         model_entry={"model_id": "model-1", "protocol": "OPENAI", "max_tokens": 128},
         channel_rule=SimpleNamespace(priority=1),
-        chat_params={
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "max_tokens": 128,
-            "chat_timeout": 60,
-            "context_window_k": 4,
-        },
+        chat_params=chat_params,
+        auxiliary_channel=ChannelConfig(chat_timeout=60),
+        auxiliary_channel_obj=auxiliary_channel,
+        auxiliary_model_entry={"model_id": "model-1", "protocol": "OPENAI", "max_tokens": 128},
+        auxiliary_params=dict(chat_params),
         main_tools=main_tools or [],
     )
 

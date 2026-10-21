@@ -402,6 +402,7 @@ async def update_profile(
         for old_channel_config in (
             old_cfg.channel.chat_channel,
             old_cfg.channel.context_summary_channel,
+            old_cfg.channel.auxiliary_channel,
             old_cfg.channel.rerank_channel,
             old_cfg.channel.image_generation_channel,
         ):

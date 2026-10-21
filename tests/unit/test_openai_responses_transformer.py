@@ -382,7 +382,7 @@ async def test_chat_completions_generate_passes_reasoning_effort(monkeypatch) ->
     )
 
     payload = json.loads(sessions[0].post_calls[0]["kwargs"]["data"])
-    assert "reasoning_effort" not in payload
+    assert payload["reasoning_effort"] == "high"
     assert "temperature" not in payload
     assert "top_p" not in payload
     assert payload["max_tokens"] == generation_params["max_tokens"]
@@ -696,10 +696,10 @@ async def test_memory_recall_precheck_stream_does_not_backfill_sampling_params(m
     assert "temperature" not in payload
     assert "top_p" not in payload
     if protocol == "openai":
-        assert "reasoning_effort" not in payload
+        assert payload["reasoning_effort"] == "high"
         assert payload["max_tokens"] == generation_params["max_tokens"] > 0
     else:
-        assert "reasoning" not in payload
+        assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
         assert payload["max_output_tokens"] == generation_params["max_tokens"] > 0
 
 

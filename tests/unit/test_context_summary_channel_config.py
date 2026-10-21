@@ -10,7 +10,7 @@ from app.core.profile import validation as profile_validation_module
 from app.core.utils import channel_profile_sync as channel_profile_sync_module
 from app.core.utils.context_summary import service as summary_service_module
 from app.models.channel import ModelUsage
-from app.models.profile import ProfileConfig
+from app.models.profile import ProfileConfig, ProfileUpdate
 
 
 def _rule(channel_id: int, model_id: str) -> dict:
@@ -75,6 +75,94 @@ def test_flat_old_profile_context_summary_channel_falls_back_to_chat_channel():
     assert cfg.channel.context_summary_channel.rules[0].model_id == "flat-chat-model"
 
 
+@pytest.mark.parametrize("auxiliary_config", [None, {}], ids=["missing", "explicit-empty"])
+def test_auxiliary_channel_without_rules_dynamically_falls_back_to_chat(auxiliary_config):
+    channel_config = {
+        "chat_channel": {
+            "chat_timeout": 45,
+            "rules": [_rule(1, "chat-model")],
+        }
+    }
+    if auxiliary_config is not None:
+        channel_config["auxiliary_channel"] = auxiliary_config
+
+    cfg = ProfileConfig.model_validate({"channel": channel_config})
+    auxiliary_channel = cfg.channel.auxiliary_channel
+
+    assert auxiliary_channel.rules == []
+    assert cfg.channel.resolve_auxiliary_channel() is cfg.channel.chat_channel
+
+    cfg.channel.chat_channel.rules.append(_rule(2, "updated-chat-model"))
+
+    assert cfg.channel.resolve_auxiliary_channel() is cfg.channel.chat_channel
+    assert [rule.model_id for rule in auxiliary_channel.rules] == []
+
+
+def test_configured_auxiliary_channel_is_independent_and_selected_with_disabled_rules():
+    cfg = ProfileConfig.model_validate(
+        {
+            "channel": {
+                "chat_channel": {
+                    "chat_timeout": 45,
+                    "rules": [_rule(1, "chat-model")],
+                },
+                "auxiliary_channel": {
+                    "chat_timeout": 12,
+                    "rules": [
+                        {
+                            **_rule(2, "auxiliary-model"),
+                            "reasoning_effort": "high",
+                            "is_enabled": False,
+                        }
+                    ],
+                },
+            }
+        }
+    )
+
+    auxiliary_channel = cfg.channel.resolve_auxiliary_channel()
+
+    assert auxiliary_channel is cfg.channel.auxiliary_channel
+    assert auxiliary_channel is not cfg.channel.chat_channel
+    assert auxiliary_channel.chat_timeout == 12
+    assert cfg.channel.chat_channel.chat_timeout == 45
+    assert auxiliary_channel.rules[0].reasoning_effort == "high"
+    assert all(not rule.is_enabled for rule in auxiliary_channel.rules)
+
+
+def test_flat_auxiliary_channel_config_is_normalized():
+    cfg = ProfileConfig.model_validate(
+        {
+            "auxiliary_channel": {
+                "chat_timeout": 18,
+                "rules": [
+                    {
+                        **_rule(3, "flat-auxiliary-model"),
+                        "reasoning_effort": "medium",
+                    }
+                ],
+            }
+        }
+    )
+
+    assert cfg.channel.auxiliary_channel.chat_timeout == 18
+    assert cfg.channel.auxiliary_channel.rules[0].model_id == "flat-auxiliary-model"
+    assert cfg.channel.auxiliary_channel.rules[0].reasoning_effort == "medium"
+
+
+def test_profile_update_chat_timeout_does_not_include_auxiliary_channel():
+    update = ProfileUpdate(
+        configs={
+            "chat_channel": {
+                "chat_timeout": 30,
+            }
+        }
+    )
+
+    assert update.configs["channel"]["chat_channel"]["chat_timeout"] == 30
+    assert "auxiliary_channel" not in update.configs["channel"]
+
+
 @pytest.mark.asyncio
 async def test_context_summary_generation_selects_independent_summary_channel(monkeypatch):
     chat_channel = object()
@@ -107,7 +195,8 @@ async def test_context_summary_generation_selects_independent_summary_channel(mo
 
 
 @pytest.mark.asyncio
-async def test_context_summary_channel_rules_are_validated_as_chat_models(monkeypatch):
+@pytest.mark.parametrize("channel_key", ["context_summary_channel", "auxiliary_channel"])
+async def test_summary_and_auxiliary_channel_rules_are_validated_as_chat_models(monkeypatch, channel_key):
     channel = SimpleNamespace(
         model_ids=[
             {
@@ -127,7 +216,7 @@ async def test_context_summary_channel_rules_are_validated_as_chat_models(monkey
     await profile_api.validate_channel_configs(
         object(),
         {
-            "context_summary_channel": {
+            channel_key: {
                 "rules": [_rule(7, "summary-model")],
             }
         },
@@ -135,7 +224,8 @@ async def test_context_summary_channel_rules_are_validated_as_chat_models(monkey
 
 
 @pytest.mark.asyncio
-async def test_context_summary_channel_rejects_non_chat_model(monkeypatch):
+@pytest.mark.parametrize("channel_key", ["context_summary_channel", "auxiliary_channel"])
+async def test_summary_and_auxiliary_channels_reject_non_chat_models(monkeypatch, channel_key):
     channel = SimpleNamespace(
         model_ids=[
             {
@@ -156,7 +246,7 @@ async def test_context_summary_channel_rejects_non_chat_model(monkeypatch):
         await profile_api.validate_channel_configs(
             object(),
             {
-                "context_summary_channel": {
+                channel_key: {
                     "rules": [_rule(7, "rerank-model")],
                 }
             },
@@ -238,13 +328,14 @@ async def test_rerank_channel_rejects_pending_exact_usage_with_same_id_chat_mode
     assert exc_info.value.message == ERR_CHANNEL_MODEL_NOT_FOUND
 
 
-def test_channel_model_cleanup_includes_context_summary_rules():
+@pytest.mark.parametrize("channel_key", ["context_summary_channel", "auxiliary_channel"])
+def test_channel_model_cleanup_includes_summary_and_auxiliary_rules(channel_key):
     configs = {
         "channel": {
             "chat_channel": {
                 "rules": [_rule(7, "chat-model")],
             },
-            "context_summary_channel": {
+            channel_key: {
                 "rules": [
                     _rule(7, "removed-summary-model"),
                     _rule(8, "other-summary-model"),
@@ -267,13 +358,14 @@ def test_channel_model_cleanup_includes_context_summary_rules():
 
     assert removed_count == 1
     assert configs["channel"]["chat_channel"]["rules"][0]["model_id"] == "chat-model"
-    assert [rule["model_id"] for rule in configs["channel"]["context_summary_channel"]["rules"]] == ["other-summary-model"]
+    assert [rule["model_id"] for rule in configs["channel"][channel_key]["rules"]] == ["other-summary-model"]
 
 
-def test_channel_model_rename_includes_context_summary_rules():
+@pytest.mark.parametrize("channel_key", ["context_summary_channel", "auxiliary_channel"])
+def test_channel_model_rename_includes_summary_and_auxiliary_rules(channel_key):
     configs = {
         "channel": {
-            "context_summary_channel": {
+            channel_key: {
                 "rules": [_rule(7, "old-summary-model")],
             }
         }
@@ -292,7 +384,7 @@ def test_channel_model_rename_includes_context_summary_rules():
 
     assert referenced[ModelUsage.CHAT.value] == {"old-summary-model"}
     assert updated_count == 1
-    assert configs["channel"]["context_summary_channel"]["rules"][0]["model_id"] == "new-summary-model"
+    assert configs["channel"][channel_key]["rules"][0]["model_id"] == "new-summary-model"
 
 
 @pytest.mark.asyncio

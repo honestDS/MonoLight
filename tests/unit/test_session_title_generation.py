@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.core.utils.session as session_module
+from app.core.utils.auxiliary_request import AuxiliaryRequestOutputBudgetError
 from app.models.message import InternalMessage, InternalResponse, MessageRole
 
 
@@ -19,7 +20,7 @@ class AsyncSessionContext:
 
 
 @pytest.mark.asyncio
-async def test_generate_session_title_uses_internal_task_generation_params(monkeypatch):
+async def test_generate_session_title_uses_configured_reasoning_effort(monkeypatch):
     db = SimpleNamespace()
     generate = AsyncMock(
         return_value=InternalResponse(
@@ -46,7 +47,7 @@ async def test_generate_session_title_uses_internal_task_generation_params(monke
 
     assert title == "\u6807\u9898"
     kwargs = generate.await_args.kwargs
-    assert "reasoning_effort" not in kwargs
+    assert kwargs["reasoning_effort"] == "max"
     assert "temperature" not in kwargs
     assert "top_p" not in kwargs
     assert kwargs["max_tokens"] == 128
@@ -61,6 +62,70 @@ async def test_generate_session_title_uses_internal_task_generation_params(monke
         uid="user-1",
         title="\u6807\u9898",
     )
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "completion_tokens", "max_tokens", "should_reject"),
+    [
+        pytest.param("length", 1, 32, True, id="length-despite-content-and-low-usage"),
+        pytest.param(None, 32, 32, True, id="missing-finish-at-budget"),
+        pytest.param("incomplete", 32, 32, True, id="incomplete-at-budget"),
+        pytest.param("stop", 32, 32, False, id="stop-at-budget"),
+        pytest.param("tool_calls", 32, 32, False, id="tool-calls-at-budget"),
+        pytest.param("stop", None, 32, False, id="missing-usage"),
+        pytest.param("stop", 1, 32, False, id="usage-below-budget"),
+        pytest.param("stop", 0, 0, False, id="zero-budget-without-known-threshold"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_generate_session_title_enforces_output_budget(
+    monkeypatch,
+    finish_reason,
+    completion_tokens,
+    max_tokens,
+    should_reject,
+):
+    db = SimpleNamespace()
+    generate = AsyncMock(
+        return_value=InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="\u6807\u9898"),
+            model="kimi-k2.6",
+            finish_reason=finish_reason,
+            usage={"completion_tokens": completion_tokens} if completion_tokens is not None else {},
+        )
+    )
+    create_or_update_title = AsyncMock()
+
+    monkeypatch.setattr(session_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(session_module, "AsyncSessionLocal", lambda: AsyncSessionContext(db))
+    monkeypatch.setattr(session_module.session_crud, "create_or_update_title", create_or_update_title)
+
+    generate_title = session_module.generate_session_title
+    kwargs = {
+        "uid": "user-1",
+        "session_id": "session-1",
+        "first_message": "A first message",
+        "api_key": "api-key",
+        "base_url": "https://example.invalid",
+        "model_id": "kimi-k2.6",
+        "protocol": "openai_responses",
+        "model_entry": {"max_tokens": max_tokens},
+        "raise_on_error": True,
+    }
+
+    if should_reject:
+        with pytest.raises(AuxiliaryRequestOutputBudgetError):
+            await generate_title(**kwargs)
+        create_or_update_title.assert_not_awaited()
+    else:
+        title = await generate_title(**kwargs)
+        assert title == "\u6807\u9898"
+        create_or_update_title.assert_awaited_once_with(
+            db=db,
+            session_id="session-1",
+            uid="user-1",
+            title="\u6807\u9898",
+        )
 
 
 @pytest.mark.asyncio
@@ -88,6 +153,7 @@ async def test_selected_profile_title_passes_model_capability_to_task_generation
         "resolve_profile_for_session",
         AsyncMock(
             return_value=SimpleNamespace(
+                id=7,
                 configs={
                     "channel": {
                         "chat_channel": {
@@ -101,7 +167,7 @@ async def test_selected_profile_title_passes_model_capability_to_task_generation
                             ]
                         }
                     }
-                }
+                },
             )
         ),
     )

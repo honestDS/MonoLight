@@ -23,12 +23,7 @@ from app.core.tools.longterm_memory import (
 )
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.context_messages import is_context_summary_message, message_token_text
-from app.core.utils.dispatcher.helpers import (
-    get_multimodal_from_entry,
-    reassemble_multimodal_messages,
-    resolve_chat_params,
-)
-from app.core.utils.dispatcher.markdown_instruction import refresh_latest_user_max_output_tokens_instruction
+from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
     parse_session_todo_snapshot,
@@ -157,25 +152,24 @@ def build_precheck_request_messages(
 
 
 async def select_initial_channel(context: MemoryRecallContext) -> bool:
-    channel_ready = context.chat_channel_obj is not None and isinstance(context.model_entry, dict) and context.channel_rule is not None
-    if channel_ready:
-        if not context.chat_params:
-            context.chat_params = resolve_chat_params(
-                context.model_entry or {},
-                context.chat_channel,
-            )
-        return True
+    auxiliary_channel = context.auxiliary_channel
+    if auxiliary_channel is None:
+        auxiliary_channel = context.cfg.channel.resolve_auxiliary_channel()
+        context.auxiliary_channel = auxiliary_channel
     selection = await select_channel(
         context.db,
-        context.chat_channel,
+        auxiliary_channel,
         "CHAT",
         call_context=f"chat_dispatch_{context.dispatcher_mode}_memory_recall",
-        cursor_key=context.chat_cursor_key,
+        cursor_key=f"{context.profile.id}:CHAT:AUXILIARY",
     )
     if not selection:
         return False
-    context.chat_channel_obj, context.model_entry, context.channel_rule = selection
-    context.chat_params = resolve_chat_params(context.model_entry, context.chat_channel)
+    context.auxiliary_channel_obj, context.auxiliary_model_entry, context.auxiliary_channel_rule = selection
+    context.auxiliary_params = resolve_chat_params(
+        context.auxiliary_model_entry,
+        auxiliary_channel,
+    )
     return True
 
 
@@ -183,28 +177,21 @@ async def fallback_channel(
     context: MemoryRecallContext,
     excluded_priorities: set[int],
 ) -> bool:
+    auxiliary_channel = context.auxiliary_channel
     selection = await select_channel(
         context.db,
-        context.chat_channel,
+        auxiliary_channel,
         "CHAT",
         call_context=f"chat_dispatch_{context.dispatcher_mode}_memory_recall_retry",
         excluded_priorities=excluded_priorities,
-        cursor_key=context.chat_cursor_key,
+        cursor_key=f"{context.profile.id}:CHAT:AUXILIARY",
     )
     if not selection:
         return False
-    previous_max_tokens = context.chat_params.get("max_tokens")
-    context.chat_channel_obj, context.model_entry, context.channel_rule = selection
-    context.chat_params = resolve_chat_params(context.model_entry, context.chat_channel)
-    if previous_max_tokens is not None and context.chat_params["max_tokens"] != previous_max_tokens:
-        await refresh_latest_user_max_output_tokens_instruction(
-            context.db,
-            context.messages,
-            context.chat_params["max_tokens"],
-        )
-    reassemble_multimodal_messages(
-        context.messages,
-        *get_multimodal_from_entry(context.model_entry),
+    context.auxiliary_channel_obj, context.auxiliary_model_entry, context.auxiliary_channel_rule = selection
+    context.auxiliary_params = resolve_chat_params(
+        context.auxiliary_model_entry,
+        auxiliary_channel,
     )
     return True
 
@@ -229,14 +216,16 @@ async def prepare_request_messages(
             *precheck_messages,
         ]
     request_messages = [message.model_copy(deep=True) for message in precheck_messages]
-    protocol = resolve_model_protocol(context.model_entry)
+    model_entry = context.auxiliary_model_entry
+    auxiliary_params = context.auxiliary_params
+    protocol = resolve_model_protocol(model_entry)
     precheck_generation_params = build_memory_recall_precheck_generation_params(
-        model_entry=context.model_entry,
+        model_entry=model_entry,
         protocol=protocol,
     )
     request_messages = ContextManager.prepare_messages_for_model_request(
         messages=request_messages,
-        context_window_k=context.chat_params["context_window_k"],
+        context_window_k=auxiliary_params["context_window_k"],
         max_tokens=precheck_generation_params["max_tokens"],
     )
     session = await session_crud.get_by_session_id(context.db, context.session_id)
@@ -258,20 +247,21 @@ async def prepare_request_messages(
             persisted_total,
         )
 
-    model_id = context.model_entry["model_id"]
-    protocol = resolve_model_protocol(context.model_entry)
+    model_id = model_entry["model_id"]
+    protocol = resolve_model_protocol(model_entry)
     response_id = str(uuid.uuid4())
     metadata = {
         "type": "llm_request_metadata",
         "turn": 0,
         "response_id": response_id,
         "request_purpose": MEMORY_RECALL_REQUEST_PURPOSE,
+        "channel_id": context.auxiliary_channel_obj.id,
         "input_tokens": 0,
         "input_tokens_source": "estimated",
         "total_output_tokens": context.session_total_output_tokens,
         "context_window_tokens": max(
             1,
-            int(context.chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K,
+            int(auxiliary_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K,
         ),
         "max_output_tokens": max(0, int(precheck_generation_params["max_tokens"])),
         "model_id": model_id,
@@ -293,8 +283,8 @@ async def generate(
     metadata: dict[str, Any],
 ) -> Any:
     await context.db.commit()
-    channel = context.chat_channel_obj
-    model_entry = context.model_entry or {}
+    channel = context.auxiliary_channel_obj
+    model_entry = context.auxiliary_model_entry
     protocol = resolve_model_protocol(model_entry)
     generation_kwargs = {
         "api_key": channel.get_decrypted_api_key(),
@@ -308,7 +298,7 @@ async def generate(
         ),
         "tools": [MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA],
         "protocol": protocol,
-        "timeout": context.chat_params["chat_timeout"],
+        "timeout": context.auxiliary_params["chat_timeout"],
         "http_proxy": get_channel_http_proxy(channel),
         "custom_headers": get_model_custom_headers(model_entry),
     }

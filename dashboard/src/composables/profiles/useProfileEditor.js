@@ -174,6 +174,9 @@ export function useProfileEditor({
           } else {
             base.channel.context_summary_channel = JSON.parse(JSON.stringify(base.channel.chat_channel))
           }
+          if (p.auxiliary_channel) {
+            Object.assign(base.channel.auxiliary_channel, JSON.parse(JSON.stringify(p.auxiliary_channel)))
+          }
           if (p.rerank_channel) Object.assign(base.channel.rerank_channel, JSON.parse(JSON.stringify(p.rerank_channel)))
           if (p.image_generation_channel) Object.assign(base.channel.image_generation_channel, JSON.parse(JSON.stringify(p.image_generation_channel)))
         }
@@ -241,6 +244,7 @@ export function useProfileEditor({
     }
     cleanChannel(form.configs.channel.chat_channel)
     cleanChannel(form.configs.channel.context_summary_channel)
+    cleanChannel(form.configs.channel.auxiliary_channel)
     cleanChannel(form.configs.channel.rerank_channel)
     cleanChannel(form.configs.channel.image_generation_channel)
     addAllowedOperationDir()

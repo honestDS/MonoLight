@@ -28,6 +28,11 @@ class MemoryRecallContext:
     model_entry: dict[str, Any] | None = None
     channel_rule: Any | None = None
     chat_params: dict[str, Any] = field(default_factory=dict)
+    auxiliary_channel: Any | None = None
+    auxiliary_channel_obj: Any | None = None
+    auxiliary_model_entry: dict[str, Any] | None = None
+    auxiliary_channel_rule: Any | None = None
+    auxiliary_params: dict[str, Any] = field(default_factory=dict)
     dispatcher_mode: Literal["non_stream", "stream"] = "non_stream"
     stream_event_callback: StreamEventCallback | None = None
     show_tool_calls: bool = True
