@@ -75,36 +75,54 @@ defineExpose({ openCreate, openEdit, canLeave, requestClose })
   <el-dialog
     v-model="visible"
     :title="t(editingId === null ? 'knowledgeBase.entries_add' : 'knowledgeBase.entries_edit')"
-    class="standard-dialog dialog-with-scroll-body"
+    class="standard-dialog dialog-with-scroll-body knowledge-entry-editor-dialog"
     modal-class="knowledge-entry-editor"
     width="840px"
     align-center
-    :close-on-click-modal="false"
     :show-close="!submitting"
     :before-close="handleBeforeClose"
   >
     <section class="knowledge-entry-target" :aria-label="t('knowledgeBase.target_kb')">
-      <div>{{ t('knowledgeBase.kb_name') }}: {{ selectedKb?.name || '-' }}</div>
-      <div>
-        {{ t('knowledgeBase.knowledge_base_type') }}:
-        {{ t(selectedKb?.knowledge_base_type === 'llm_managed' ? 'knowledgeBase.type_managed' : 'knowledgeBase.type_user') }}
+      <div class="knowledge-entry-target__identity">
+        <el-icon aria-hidden="true"><Collection /></el-icon>
+        <div class="knowledge-entry-target__copy">
+          <span class="knowledge-entry-target__label">{{ t('knowledgeBase.target_kb') }}</span>
+          <strong class="knowledge-entry-target__name">{{ selectedKb?.name || '-' }}</strong>
+        </div>
       </div>
-      <div>{{ t('knowledgeBase.owner_username') }}: {{ selectedKb?.username || t('knowledgeBase.owner_unknown') }}</div>
-      <div>{{ t('knowledgeBase.owner_profiles') }}: {{ getKnowledgeBaseProfileLabel(selectedKb) }}</div>
+      <div class="knowledge-entry-target__details">
+        <el-tag type="info" effect="plain">
+          {{ t(selectedKb?.knowledge_base_type === 'llm_managed' ? 'knowledgeBase.type_managed' : 'knowledgeBase.type_user') }}
+        </el-tag>
+        <div class="knowledge-entry-target__meta">
+          <span>{{ t('knowledgeBase.owner_username') }}: {{ selectedKb?.username || t('knowledgeBase.owner_unknown') }}</span>
+          <span>{{ t('knowledgeBase.owner_profiles') }}: {{ getKnowledgeBaseProfileLabel(selectedKb) }}</span>
+        </div>
+      </div>
     </section>
 
     <el-radio-group
       v-if="editingId === null"
       v-model="mode"
       :disabled="busy"
+      :aria-label="t('knowledgeBase.entries_add')"
       class="knowledge-entry-mode"
     >
-      <el-radio-button label="manual">{{ t('knowledgeBase.entries_manual') }}</el-radio-button>
-      <el-radio-button label="file">{{ t('knowledgeBase.entries_file') }}</el-radio-button>
+      <el-radio-button label="manual">
+        <el-icon aria-hidden="true"><EditPen /></el-icon>
+        {{ t('knowledgeBase.entries_manual') }}
+      </el-radio-button>
+      <el-radio-button label="file">
+        <el-icon aria-hidden="true"><DocumentAdd /></el-icon>
+        {{ t('knowledgeBase.entries_file') }}
+      </el-radio-button>
     </el-radio-group>
 
     <div v-if="editingId === null && mode === 'file'" class="knowledge-entry-file-action">
-      <span class="knowledge-entry-help">{{ t('knowledgeBase.entries_file_hint') }}</span>
+      <div class="knowledge-entry-file-action__copy">
+        <el-icon aria-hidden="true"><DocumentAdd /></el-icon>
+        <p class="knowledge-entry-help">{{ t('knowledgeBase.entries_file_hint') }}</p>
+      </div>
       <el-upload
         ref="uploadRef"
         :auto-upload="false"
@@ -114,7 +132,10 @@ defineExpose({ openCreate, openEdit, canLeave, requestClose })
         :disabled="busy"
         @change="handleFileChange"
       >
-        <el-button type="primary" :disabled="busy">{{ t('knowledgeBase.select_file') }}</el-button>
+        <el-button :disabled="busy">
+          <el-icon aria-hidden="true"><FolderOpened /></el-icon>
+          {{ t('knowledgeBase.select_file') }}
+        </el-button>
       </el-upload>
     </div>
 
@@ -122,7 +143,7 @@ defineExpose({ openCreate, openEdit, canLeave, requestClose })
       {{ t('knowledgeBase.entries_previewing') }}
     </div>
 
-    <div v-if="sourceFilename" class="knowledge-entry-source">
+    <div v-if="sourceFilename" class="knowledge-entry-source knowledge-entry-file-name">
       {{ t('knowledgeBase.entries_source_file', { name: sourceFilename }) }}
     </div>
 
@@ -137,6 +158,7 @@ defineExpose({ openCreate, openEdit, canLeave, requestClose })
 
     <el-form
       ref="formRef"
+      class="knowledge-entry-form"
       :model="form"
       :rules="rules"
       label-position="top"
@@ -150,8 +172,10 @@ defineExpose({ openCreate, openEdit, canLeave, requestClose })
           maxlength="255"
           show-word-limit
           :disabled="busy"
+          :placeholder="t('knowledgeBase.entries_name_required')"
+          :aria-describedby="isManaged ? 'knowledge-entry-name-hint' : undefined"
         />
-        <div v-if="isManaged" class="knowledge-entry-help">
+        <div v-if="isManaged" id="knowledge-entry-name-hint" class="knowledge-entry-help">
           {{ t('knowledgeBase.entries_name_hint_managed') }}
         </div>
       </el-form-item>
@@ -161,22 +185,29 @@ defineExpose({ openCreate, openEdit, canLeave, requestClose })
           id="knowledge-entry-content"
           v-model="form.content"
           type="textarea"
-          :rows="9"
-          :autosize="{ minRows: 9, maxRows: 18 }"
+          :rows="8"
+          :autosize="{ minRows: 8, maxRows: 16 }"
           :disabled="busy"
+          :placeholder="t('knowledgeBase.entries_content_required')"
         />
       </el-form-item>
 
-      <el-form-item v-if="isManaged">
-        <span>{{ t('knowledgeBase.entries_maintainable') }}</span>
+      <el-form-item v-if="isManaged" class="knowledge-entry-maintenance">
+        <div class="knowledge-entry-maintenance__copy">
+          <label for="knowledge-entry-maintainable" class="knowledge-entry-maintenance__label">
+            {{ t('knowledgeBase.entries_maintainable') }}
+          </label>
+          <p id="knowledge-entry-maintainable-hint" class="knowledge-entry-help">
+            {{ t('knowledgeBase.managed_llm_maintainable_hint') }}
+          </p>
+        </div>
         <el-switch
+          id="knowledge-entry-maintainable"
           v-model="form.llm_maintainable"
           :disabled="busy"
           :aria-label="t('knowledgeBase.entries_maintainable')"
+          aria-describedby="knowledge-entry-maintainable-hint"
         />
-        <div class="knowledge-entry-help">
-          {{ t('knowledgeBase.managed_llm_maintainable_hint') }}
-        </div>
       </el-form-item>
 
       <details v-if="!isManaged" class="knowledge-entry-advanced">
@@ -198,22 +229,25 @@ defineExpose({ openCreate, openEdit, canLeave, requestClose })
       </details>
     </el-form>
 
-    <div v-if="submitting" class="knowledge-entry-help" role="status" aria-live="polite">
-      {{ t('knowledgeBase.entries_submitting') }}
-    </div>
-
     <template #footer>
-      <el-button :disabled="submitting" @click="requestClose">
-        {{ t('knowledgeBase.cancel') }}
-      </el-button>
-      <el-button
-        type="primary"
-        :loading="submitting"
-        :disabled="loading || previewing"
-        @click="submit"
-      >
-        {{ t('knowledgeBase.entries_save') }}
-      </el-button>
+      <div class="knowledge-entry-editor-footer">
+        <p v-if="submitting" class="knowledge-entry-help" role="status" aria-live="polite">
+          {{ t('knowledgeBase.entries_submitting') }}
+        </p>
+        <div class="knowledge-entry-editor-footer__actions">
+          <el-button :disabled="submitting" @click="requestClose">
+            {{ t('knowledgeBase.cancel') }}
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="submitting"
+            :disabled="loading || previewing"
+            @click="submit"
+          >
+            {{ t('knowledgeBase.entries_save') }}
+          </el-button>
+        </div>
+      </div>
     </template>
   </el-dialog>
 </template>
