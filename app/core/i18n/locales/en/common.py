@@ -37,7 +37,7 @@ MESSAGES = {
     "ERR_MANAGED_KNOWLEDGE_FIELD_TYPE_INVALID": "Managed knowledge field {field} has an invalid type",
     "ERR_MANAGED_KNOWLEDGE_FIELD_LENGTH_EXCEEDED": "Managed knowledge field {field} must not exceed {maximum} characters",
     "ERR_MANAGED_KNOWLEDGE_ENUM_INVALID": "Managed knowledge field {field} has an invalid enum value",
-    "ERR_MANAGED_KNOWLEDGE_CONTENT_TOO_LONG": "Managed knowledge content is too long: about {actual_tokens} tokens, maximum {max_tokens}",
+    "ERR_MANAGED_KNOWLEDGE_CONTENT_TOO_LONG": "Managed knowledge content is too long: about {actual_tokens} tokens, maximum {max_tokens}. Split the content into separate topic-based entries and retry; the original text will not be truncated automatically.",
     "ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND": "Managed knowledge base not found",
     "ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED": "This knowledge base is not LLM-managed and cannot accept managed knowledge mutations",
     "ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND": "Managed knowledge item not found",

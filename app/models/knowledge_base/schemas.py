@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import ConfigDict, StrictStr, model_validator
+from pydantic import ConfigDict, StrictStr, StringConstraints, model_validator
 from sqlmodel import Field, SQLModel
 
 from .base import KnowledgeBaseCore, KnowledgeBaseIndexStatus
@@ -201,3 +201,27 @@ class KnowledgeBaseDocumentListResponse(SQLModel):
 
 class KnowledgeBaseDocumentContentResponse(KnowledgeBaseDocumentResponse):
     content: str
+
+
+class KnowledgeEntryCreateRequest(SQLModel):
+    name: Annotated[StrictStr, StringConstraints(pattern=r"\S")] = Field(..., min_length=1, max_length=255)
+    content: StrictStr = Field(..., min_length=1)
+    source_filename: Annotated[StrictStr, StringConstraints(pattern=r"\S")] | None = Field(default=None, min_length=1, max_length=255)
+    llm_maintainable: bool = False
+    chunk_size: int = Field(default=1000, ge=100, le=20000)
+    chunk_overlap: int = Field(default=100, ge=0, le=5000)
+    batch_size: int = Field(default=16, ge=1, le=256)
+    dedupe_key: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class KnowledgeEntryFilePreviewResponse(SQLModel):
+    filename: str
+    content: str
+
+
+class KnowledgeEntryMutationResponse(SQLModel):
+    status: str
+    item_id: int | None = None
+    job_id: int | None = None

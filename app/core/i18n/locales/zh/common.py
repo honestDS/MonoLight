@@ -37,7 +37,7 @@ MESSAGES = {
     "ERR_MANAGED_KNOWLEDGE_FIELD_TYPE_INVALID": "托管知识字段 {field} 类型无效",
     "ERR_MANAGED_KNOWLEDGE_FIELD_LENGTH_EXCEEDED": "托管知识字段 {field} 长度不能超过 {maximum}",
     "ERR_MANAGED_KNOWLEDGE_ENUM_INVALID": "托管知识字段 {field} 的枚举值无效",
-    "ERR_MANAGED_KNOWLEDGE_CONTENT_TOO_LONG": "托管知识内容过长：当前约 {actual_tokens} Token，上限为 {max_tokens} Token",
+    "ERR_MANAGED_KNOWLEDGE_CONTENT_TOO_LONG": "托管知识内容过长：当前约 {actual_tokens} Token，上限为 {max_tokens} Token，请按独立主题拆分为多个条目后重试，系统不会自动截断正文",
     "ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND": "托管知识库不存在",
     "ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED": "该知识库不是 LLM 托管知识库，不能执行托管知识变更",
     "ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND": "托管知识条目不存在",

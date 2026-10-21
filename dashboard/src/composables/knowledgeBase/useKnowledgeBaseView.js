@@ -10,17 +10,13 @@ import {
   isKnowledgeBaseMigrationActive
 } from '../../utils/knowledgeBaseMigration.js'
 import {
-  canManageKnowledgeBaseDocuments,
   canManageManagedKnowledge,
   getKnowledgeBaseProfileLabel,
   normalizeKnowledgeBase
 } from '../../utils/knowledgeBaseManagement.js'
 import { createKnowledgeBaseScope } from '../../utils/knowledgeBaseScope.js'
 import { useUserPermissionsStore } from '../useUserPermissions.js'
-import { useKnowledgeBaseDocuments } from './useKnowledgeBaseDocuments.js'
 import { useKnowledgeBaseQueryTest } from './useKnowledgeBaseQueryTest.js'
-import { useManagedKnowledge } from './useManagedKnowledge.js'
-import { useKnowledgeOrganization } from './useKnowledgeOrganization.js'
 
 export function useKnowledgeBaseView() {
   const { t } = useI18n()
@@ -98,16 +94,7 @@ export function useKnowledgeBaseView() {
   const migrationProgress = computed(() => getKnowledgeBaseMigrationProgress(selectedKb.value))
   const managedMigrationTerminalHintKey = computed(() => getManagedKnowledgeBaseMigrationTerminalHintKey(selectedKb.value))
 
-  const documents = useKnowledgeBaseDocuments({ t, selectedKb, scope })
   const queryTest = useKnowledgeBaseQueryTest({ t, selectedKb, scope })
-  const managedKnowledge = useManagedKnowledge({ t, selectedKb, scope })
-  const organization = useKnowledgeOrganization({
-    t,
-    selectedKb,
-    scope,
-    fetchManagedKnowledgeItems: managedKnowledge.fetchManagedKnowledgeItems,
-    scheduleManagedKnowledgePolling: managedKnowledge.scheduleManagedKnowledgePolling
-  })
 
   const fetchData = async () => {
     const scopeGuard = scope.capture()
@@ -609,10 +596,6 @@ export function useKnowledgeBaseView() {
 
   const handleKnowledgeBaseMoreAction = (command, row) => {
     if (!scope.capture()()) return
-    if (command === 'import_document') {
-      documents.showImportDialog(row)
-      return
-    }
     if (command === 'repair') return repairKnowledgeBase(row)
     if (command === 'embedding_status') {
       showMigrationDialog(row)
@@ -742,9 +725,6 @@ export function useKnowledgeBaseView() {
     closeMigrationDialog()
     migrationTargetKey.value = ''
 
-    documents.resetDocumentsState()
-    managedKnowledge.resetManagedKnowledgeState()
-    organization.resetOrganizationState()
     queryTest.resetQueryTestState()
   }
 
@@ -941,10 +921,6 @@ export function useKnowledgeBaseView() {
     isSuperuser,
     formatTime,
     canStartKnowledgeBaseMigration,
-    canManageKnowledgeBaseDocuments,
     canManageManagedKnowledge,
-    ...documents,
-    ...managedKnowledge,
-    ...organization
   }
 }
