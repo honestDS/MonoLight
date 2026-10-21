@@ -23,6 +23,7 @@ from .request import (
     build_correction_messages,
     fallback_channel,
     generate,
+    get_precheck_user_input,
     prepare_request_messages,
     response_is_valid,
     select_initial_channel,
@@ -87,6 +88,10 @@ async def run_memory_recall_precheck(
         if tool_message is not None:
             _log_failure(context, "orphan_tool_dedupe_record")
             return build_result(context, "failed", "orphan_tool_dedupe_record")
+
+        # 无有效用户文字属于正常完成，避免重复预检。
+        if get_precheck_user_input(context.messages) is None:
+            return build_result(context, "completed")
 
         if not await select_initial_channel(context):
             _log_failure(context, "channel_unavailable")

@@ -11,7 +11,7 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.exceptions import LLMException
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
-from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
+from app.models.message import ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
 
 
@@ -193,8 +193,15 @@ def test_recall_validators_reject_invalid_explicit_top_k(top_k):
 
 
 @pytest.mark.asyncio
-async def test_precheck_assistant_dedupe_reuses_saved_call_without_model_request(monkeypatch):
-    context = _context()
+@pytest.mark.parametrize(
+    "current_content",
+    [
+        "request",
+        [ImagePart(image_url={"url": "https://example.invalid/image.png"})],
+    ],
+)
+async def test_precheck_assistant_dedupe_reuses_saved_call_without_model_request(monkeypatch, current_content):
+    context = _context(messages=[InternalMessage(id=1, role=MessageRole.USER, content=current_content)])
     assistant = _assistant(message_id=101)
     executed = []
 
