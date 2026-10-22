@@ -21,6 +21,7 @@ from app.models.message import (
     TextPart,
     VoiceTextPart,
 )
+from tests.memory_recall_support import memory_recall_payload
 
 
 def test_message_token_text_replaces_audio_payload_with_placeholder():
@@ -179,41 +180,15 @@ def test_summary_threshold_and_hard_window_share_one_required_input_value():
 
 
 def test_final_request_budget_preserves_longterm_memory_recall_json():
-    recall_payload = json.dumps(
-        {
-            "memories": [
-                {
-                    "memory_id": 1,
-                    "expected_version": 2,
-                    "memory_key": "project",
-                    "memory_type": "project",
-                    "content": "memory content " * 220,
-                }
-            ],
-            "knowledge_base": [
-                {
-                    "knowledge_base_id": 10,
-                    "knowledge_base_name": "Docs",
-                    "source_type": "user_knowledge",
-                    "source": "guide.md",
-                    "content": "knowledge content " * 180,
-                    "truncated": False,
-                    "llm_maintainable": False,
-                }
-            ],
-            "chat_history": [
-                {
-                    "role": "user",
-                    "content": "historical content " * 160,
-                    "session_id": "older-session",
-                    "created_at": "2026-09-01 10:00:00",
-                }
-            ],
-            "current_session_id": "session-1",
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+    payload = memory_recall_payload()
+    payload["memories"][0]["content"] = "memory content " * 220
+    payload["knowledge_base"] = [payload["knowledge_base"][1]]
+    payload["knowledge_base"][0]["knowledge_base_id"] = 10
+    payload["knowledge_base"][0]["content"] = "knowledge content " * 180
+    payload["chat_history"] = [payload["chat_history"][0]]
+    payload["chat_history"][0]["content"] = "historical content " * 160
+    payload["chat_history"][0]["created_at"] = "2026-09-01 10:00:00"
+    recall_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="system prompt"),
         InternalMessage(id=1, role=MessageRole.USER, content="current question"),
