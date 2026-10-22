@@ -276,7 +276,8 @@ async def test_recall_runs_three_sources_concurrently_with_independent_queries_a
     }
     assert calls["knowledge"]["profile"] is context.profile
     assert calls["knowledge"]["query"] == "How does the project architecture work?"
-    assert payload["items"][0]["content"] == "memory body"
+    assert "items" not in payload
+    assert payload["memories"][0]["content"] == "memory body"
     assert payload["chat_history"][0]["content"] == "chat body"
     assert payload["knowledge_base"] == [
         {
@@ -366,6 +367,7 @@ async def test_recall_source_failures_are_isolated(monkeypatch, failed_source):
         )
     )
 
-    assert bool(payload["items"]) is (failed_source != "memory")
+    assert "items" not in payload
+    assert bool(payload["memories"]) is (failed_source != "memory")
     assert bool(payload.get("chat_history")) is (failed_source != "chat")
     assert bool(payload.get("knowledge_base")) is (failed_source != "knowledge")

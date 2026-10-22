@@ -81,7 +81,7 @@ def _recall_messages(boundary: int) -> tuple[InternalMessage, InternalMessage]:
             id=2000 + boundary,
             role=MessageRole.TOOL,
             tool_call_id=tool_call.id,
-            content='{"operation":"recall","status":"success","items":[]}',
+            content='{"operation":"recall","status":"success","memories":[]}',
         ),
     )
 

@@ -102,7 +102,7 @@ async def test_save_and_execute_recall_orders_persistence_events_commit_and_isol
     tool_result = InternalMessage(
         role=MessageRole.TOOL,
         tool_call_id="recall-call",
-        content=json.dumps({"items": []}),
+        content=json.dumps({"memories": []}),
     )
     saved_assistant_kwargs = []
     saved_tool_kwargs = []
@@ -204,7 +204,7 @@ async def test_save_and_execute_recall_uses_main_context_remaining_budget(monkey
         return InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id="recall-call",
-            content=json.dumps({"items": []}),
+            content=json.dumps({"memories": []}),
         )
 
     async def save_tool(*args, **_kwargs):

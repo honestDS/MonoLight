@@ -428,15 +428,17 @@ async def _process_fake_executor_result(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tool_name", "arguments"),
+    ("tool_name", "arguments", "result_field"),
     [
         (
             process_single_tool_module.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
             {"operation": "recall", "query": "topic"},
+            "memories",
         ),
         (
             process_single_tool_module.KNOWLEDGE_BASE_QUERY_TOOL_NAME,
             {"knowledge_base_id": 1, "query": "topic"},
+            "items",
         ),
     ],
     ids=["managed-memory-recall", "query-knowledge-base"],
@@ -446,6 +448,7 @@ async def test_process_single_tool_preserves_recall_results_outside_tiny_result_
     tmp_path,
     tool_name,
     arguments,
+    result_field,
 ):
     items = [
         {"source": "memory", "content": "memory-result-" * 400 + "UNIQUE-ITEMS-END"},
@@ -470,7 +473,7 @@ async def test_process_single_tool_preserves_recall_results_outside_tiny_result_
         {"role": "assistant", "content": "assistant-history-" * 400 + "UNIQUE-ASSISTANT-HISTORY-END"},
     ]
     payload = {
-        "items": items,
+        result_field: items,
         "current_session_id": "session-1",
         "knowledge_base": knowledge_base,
         "chat_history": chat_history,
@@ -488,7 +491,7 @@ async def test_process_single_tool_preserves_recall_results_outside_tiny_result_
     result = json.loads(content)
 
     assert content == original_content
-    assert result["items"] == items
+    assert result[result_field] == items
     assert result["knowledge_base"] == knowledge_base
     assert result["chat_history"] == chat_history
 
@@ -509,7 +512,7 @@ async def test_process_single_tool_preserves_managed_knowledge_order_and_full_te
         {"source": "user-after", "content": "Last user result."},
     ]
     payload = {
-        "items": [],
+        "memories": [],
         "current_session_id": "session-1",
         "knowledge_base": knowledge_base,
         "chat_history": [],

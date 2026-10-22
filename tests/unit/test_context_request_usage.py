@@ -181,7 +181,7 @@ def test_summary_threshold_and_hard_window_share_one_required_input_value():
 def test_final_request_budget_preserves_longterm_memory_recall_json():
     recall_payload = json.dumps(
         {
-            "items": [
+            "memories": [
                 {
                     "memory_id": 1,
                     "expected_version": 2,

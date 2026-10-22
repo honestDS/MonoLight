@@ -410,7 +410,7 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
         "before_message_id": context.source_message_id,
     }
     assert json.loads(result) == {
-        "items": [
+        "memories": [
             {
                 "memory_id": 12,
                 "expected_version": 2,
@@ -467,7 +467,7 @@ async def test_executor_recall_returns_chat_for_non_ok_status(monkeypatch, statu
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
 
-    expected_result = '{"items":[],"current_session_id":"session-1","chat_history":[{"role":"user","content":"old user text","session_id":null,"created_at":null}]}'
+    expected_result = '{"memories":[],"current_session_id":"session-1","chat_history":[{"role":"user","content":"old user text","session_id":null,"created_at":null}]}'
     result = await executor.execute(operation="recall", query="private query", top_k=3)
 
     assert result == expected_result
@@ -496,7 +496,7 @@ async def test_executor_recall_argument_errors_return_empty_items(monkeypatch, a
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
 
-    assert await executor.execute(**arguments) == '{"items":[],"current_session_id":"session-1"}'
+    assert await executor.execute(**arguments) == '{"memories":[],"current_session_id":"session-1"}'
 
 
 @pytest.mark.asyncio
@@ -510,7 +510,7 @@ async def test_executor_recall_missing_runtime_context_returns_empty_items(monke
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
 
-    assert await executor.execute(operation="recall", query="private query", top_k=3) == '{"items":[],"current_session_id":null}'
+    assert await executor.execute(operation="recall", query="private query", top_k=3) == '{"memories":[],"current_session_id":null}'
 
 
 @pytest.mark.asyncio
@@ -529,7 +529,7 @@ async def test_executor_recall_memory_exceptions_still_return_chat(monkeypatch, 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
 
-    expected_result = '{"items":[],"current_session_id":"session-1","chat_history":[{"role":"assistant","content":"old assistant text","session_id":null,"created_at":null}]}'
+    expected_result = '{"memories":[],"current_session_id":"session-1","chat_history":[{"role":"assistant","content":"old assistant text","session_id":null,"created_at":null}]}'
     result = await executor.execute(operation="recall", query="private query", top_k=3)
 
     assert result == expected_result
@@ -562,7 +562,7 @@ async def test_executor_recall_does_not_query_chat_when_active_content_consumes_
 
     payload = json.loads(await executor.execute(operation="recall", query="private query", top_k=3))
 
-    assert payload["items"][0]["content"] == "x" * 1234
+    assert payload["memories"][0]["content"] == "x" * 1234
     assert payload["current_session_id"] == "session-1"
     assert "chat_history" not in payload
 
@@ -592,7 +592,7 @@ async def test_executor_recall_keeps_active_items_when_chat_history_fails(monkey
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
 
-    assert await executor.execute(operation="recall", query="private query", top_k=3) == ('{"items":[{"memory_id":12,"expected_version":2,"memory_key":"stable-fact","memory_type":"fact","content":"private recalled content","updated_at":"2026-08-04 12:30:00"}],"current_session_id":"session-1"}')
+    assert await executor.execute(operation="recall", query="private query", top_k=3) == ('{"memories":[{"memory_id":12,"expected_version":2,"memory_key":"stable-fact","memory_type":"fact","content":"private recalled content","updated_at":"2026-08-04 12:30:00"}],"current_session_id":"session-1"}')
 
 
 @pytest.mark.asyncio
@@ -610,7 +610,7 @@ async def test_executor_recall_without_any_result_returns_empty_items(monkeypatc
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
 
-    assert await executor.execute(operation="recall", query="private query", top_k=3) == '{"items":[],"current_session_id":"session-1"}'
+    assert await executor.execute(operation="recall", query="private query", top_k=3) == '{"memories":[],"current_session_id":"session-1"}'
 
 
 class _MutationMemoryService:
@@ -730,8 +730,8 @@ async def test_build_system_prompt_includes_memory_rules_only_when_both_switches
     if expected_in_prompt:
         prompt_text = prompt.lower()
         assert "compact json object" in prompt_text
-        assert "items array ordered by final ranking" in prompt_text
-        assert "items array is always the priority result" in prompt_text
+        assert "memories array ordered by final ranking" in prompt_text
+        assert "memories array is always the priority result" in prompt_text
         assert "before any optional chat_history" in prompt_text
         assert "memory_id, expected_version, memory_key, memory_type, content, and updated_at" in prompt_text
         assert "truncated:true" in prompt_text
