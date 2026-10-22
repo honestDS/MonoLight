@@ -374,6 +374,7 @@ MESSAGES = {
     "ERR_FILE_SINGLE_SIZE_LIMIT_EXCEEDED": "File exceeds the single file size limit",
     "ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED": "Files exceed the total size limit",
     "ERR_LLM_UNSUPPORTED_PROTOCOL": "Unsupported protocol: {protocol}",
+    "ERR_LLM_IMAGE_INPUT_INVALID": "The inline image data is invalid or cannot be decoded. Check the image content and encoding.",
     "ERR_LLM_IMAGE_OUTPUT_INVALID": "The model returned invalid image data, an unsupported image format, or an image that failed integrity verification",
     "ERR_LLM_IMAGE_OUTPUT_SAVE_FAILED": "The generated image could not be saved; no image file was returned.",
     "ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS": "The identity boundary of streamed tool calls is ambiguous",

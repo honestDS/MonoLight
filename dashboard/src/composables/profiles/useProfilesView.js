@@ -13,6 +13,7 @@ export function useProfilesView() {
   const userPermissions = useUserPermissionsStore()
 
   const configPermissions = ref({ security: false })
+  const configDefaults = ref({})
   const profiles = ref([])
   const users = ref([])
   const channels = ref([])
@@ -89,6 +90,7 @@ export function useProfilesView() {
       const requestedUser = userPermissions.currentUser
       const res = await profileApi.list(params)
       if (userPermissions.currentUser !== requestedUser) return
+      configDefaults.value = res.data.data.meta?.config_defaults || {}
       profiles.value = res.data.data.items || []
       total.value = res.data.data.total || 0
       toolOptions.value = res.data.data.meta?.tool_options || []
@@ -316,6 +318,7 @@ export function useProfilesView() {
     t,
     userPermissions,
     configPermissions,
+    configDefaults,
     channels,
     users,
     knowledgeBases,

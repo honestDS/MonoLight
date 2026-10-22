@@ -5,12 +5,15 @@ import io
 import logging
 import os
 from pathlib import Path
+from urllib.parse import unquote_to_bytes
 
 from PIL import Image
 
+from app.core.constants import ERR_LLM_IMAGE_INPUT_INVALID
+from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.models.message import AudioPart, FilePart, ImagePart, InternalMessage, TextPart
+from app.models.message import AudioPart, FilePart, ImagePart, InternalMessage, MessageRole, TextPart
 from app.models.profile import ToolConfig
 
 # 屏蔽 Pillow 库的 DEBUG 日志输出，防止刷屏
@@ -24,6 +27,11 @@ class MessageAssembler:
     def _image_to_data_url(path: str, tool_config: ToolConfig) -> str:
         """Read an image and compress it when enabled and above the configured threshold."""
         image_bytes = Path(path).read_bytes()
+        return MessageAssembler._image_bytes_to_data_url(image_bytes, tool_config, source=path)
+
+    @staticmethod
+    def _image_bytes_to_data_url(image_bytes: bytes, tool_config: ToolConfig, *, source: str) -> str:
+        """Compress image bytes when enabled and above the configured threshold."""
         file_size_kb = len(image_bytes) / 1024
 
         with Image.open(io.BytesIO(image_bytes)) as img:
@@ -33,7 +41,7 @@ class MessageAssembler:
                 encoded_string = base64.b64encode(image_bytes).decode("utf-8")
                 return f"data:{mime_type};base64,{encoded_string}"
 
-            logger.bind().info(t("LOG_IMAGE_COMPRESSING", path=path, file_size_kb=file_size_kb))
+            logger.bind().info(t("LOG_IMAGE_COMPRESSING", path=source, file_size_kb=file_size_kb))
 
             scale_factor = (tool_config.image_compression_threshold_kb / file_size_kb) ** 0.5
             scale_factor = max(0.3, scale_factor)
@@ -52,6 +60,54 @@ class MessageAssembler:
 
             encoded_string = base64.b64encode(buffer.getvalue()).decode("utf-8")
             return f"data:image/jpeg;base64,{encoded_string}"
+
+    @staticmethod
+    def prepare_inline_images(message: InternalMessage, tool_config: ToolConfig) -> InternalMessage:
+        """Compress oversized inline image data URLs in the original user content."""
+        if message.role != MessageRole.USER or not isinstance(message.content, list) or not tool_config.image_compression_enabled:
+            return message
+
+        attachment_part_count = message.assembled_attachment_part_count
+        if attachment_part_count is None:
+            attachment_part_count = len(message.attachments or [])
+        original_count = max(0, len(message.content) - attachment_part_count)
+        content_parts = list(message.content)
+        changed = False
+        threshold_bytes = tool_config.image_compression_threshold_kb * 1024
+
+        for index, part in enumerate(message.content[:original_count]):
+            if not isinstance(part, ImagePart):
+                continue
+
+            image_url = part.image_url
+            url = image_url.get("url")
+            if not isinstance(url, str) or not url.lower().startswith("data:image/"):
+                continue
+
+            try:
+                header, separator, encoded_data = url.partition(",")
+                if not separator:
+                    raise ValueError
+
+                is_base64 = any(parameter.strip().lower() == "base64" for parameter in header.split(";")[1:])
+                image_bytes = unquote_to_bytes(encoded_data)
+                if is_base64:
+                    image_bytes = base64.b64decode(image_bytes, validate=True)
+                if len(image_bytes) <= threshold_bytes:
+                    continue
+
+                compressed_url = MessageAssembler._image_bytes_to_data_url(image_bytes, tool_config, source="image_url")
+            except (ValueError, OSError, Image.DecompressionBombError) as exc:
+                raise ParameterException(message=ERR_LLM_IMAGE_INPUT_INVALID, cause=str(exc)) from exc
+
+            if compressed_url != url:
+                content_parts[index] = part.model_copy(update={"image_url": {**image_url, "url": compressed_url}})
+                changed = True
+
+        if not changed:
+            return message
+
+        return message.model_copy(update={"content": content_parts})
 
     @staticmethod
     def assemble(

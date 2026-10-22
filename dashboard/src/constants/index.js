@@ -47,7 +47,7 @@ const defaultChannelConfig = () => ({
 })
 
 // 默认配置结构（用于 ProfilesView.vue）—— 渠道管理架构
-export const defaultProfileConfigs = () => ({
+export const defaultProfileConfigs = (defaults = {}) => ({
   channel: {
     chat_channel: defaultChannelConfig(),
     context_summary_channel: defaultChannelConfig(),
@@ -60,7 +60,7 @@ export const defaultProfileConfigs = () => ({
     tool_timeout: 30,
     image_generation_timeout: 60,
     image_compression_enabled: true,
-    image_compression_threshold_kb: 500,
+    image_compression_threshold_kb: defaults.tool?.image_compression_threshold_kb,
     max_parallel_tools: 5,
     executor_max_workers: 10,
     background_task_max_concurrency: 2,

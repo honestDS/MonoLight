@@ -16,7 +16,7 @@ from app.api.v1.profile import router
 from app.core.crud.channel.channel import channel_crud
 from app.handler import register_handlers
 from app.models.channel import ChannelCreate
-from app.models.profile import Profile, ProfileConfig
+from app.models.profile import Profile, ProfileConfig, ToolConfig
 from app.models.user import User
 from app.providers.database import get_db
 
@@ -435,6 +435,7 @@ async def test_profile_list_is_scoped_to_regular_user_across_pages_and_forged_id
         assert data["meta"]["show_owner"] is False
         assert data["meta"]["current_uid"] == "user-a"
         assert data["meta"]["config_permissions"]["security"] is False
+        assert data["meta"]["config_defaults"] == {"tool": {"image_compression_threshold_kb": ToolConfig().image_compression_threshold_kb}}
 
         page_responses = [
             await client.get(
@@ -516,6 +517,7 @@ async def test_profile_list_as_superuser_shows_all_profiles_and_real_owner_names
     assert data["meta"]["show_owner"] is True
     assert data["meta"]["current_uid"] == "admin"
     assert data["meta"]["config_permissions"]["security"] is True
+    assert data["meta"]["config_defaults"] == {"tool": {"image_compression_threshold_kb": ToolConfig().image_compression_threshold_kb}}
     for item in data["items"]:
         expected_username = item["uid"] if item["uid"] in {"admin", "user-a", "user-b"} else None
         assert item["username"] == expected_username
@@ -621,6 +623,7 @@ async def test_profile_list_for_user_without_profiles_is_empty(
     assert data["size"] == 10
     assert data["meta"]["show_owner"] is False
     assert data["meta"]["current_uid"] == "user-empty"
+    assert data["meta"]["config_defaults"] == {"tool": {"image_compression_threshold_kb": ToolConfig().image_compression_threshold_kb}}
 
 
 @pytest.mark.asyncio
@@ -1360,6 +1363,14 @@ async def test_image_compression_defaults_apply_to_config_without_new_fields_and
     before = await _profile_snapshot(session_factory)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        defaults_response = await client.get(
+            "/api/v1/profiles/list",
+            headers={"Authorization": f"Bearer {_token('user-a')}"},
+        )
+        assert defaults_response.status_code == 200
+        default_threshold_kb = defaults_response.json()["data"]["meta"]["config_defaults"]["tool"]["image_compression_threshold_kb"]
+        assert default_threshold_kb == ToolConfig().image_compression_threshold_kb
+
         default_response = await _create_profile(
             client,
             _token("user-a"),
@@ -1368,12 +1379,12 @@ async def test_image_compression_defaults_apply_to_config_without_new_fields_and
         default_data = _assert_profile_success(default_response)
         default_id = default_data["id"]
         assert default_data["configs"]["tool"]["image_compression_enabled"] is True
-        assert default_data["configs"]["tool"]["image_compression_threshold_kb"] == 500
+        assert default_data["configs"]["tool"]["image_compression_threshold_kb"] == default_threshold_kb
         after_default = await _profile_snapshot(session_factory)
         persisted_default = next(row for row in after_default if row["id"] == default_id)
         assert persisted_default["configs"] == default_data["configs"]
         assert persisted_default["configs"]["tool"]["image_compression_enabled"] is True
-        assert persisted_default["configs"]["tool"]["image_compression_threshold_kb"] == 500
+        assert persisted_default["configs"]["tool"]["image_compression_threshold_kb"] == default_threshold_kb
         assert tuple(row for row in after_default if row["id"] != default_id) == before
 
         flat_response = await _create_profile(
