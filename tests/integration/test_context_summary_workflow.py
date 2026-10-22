@@ -402,7 +402,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
         role=MessageRole.TOOL,
         content=json.dumps(
             {
-                "items": [{"content": items_body}],
+                "memories": [{"content": items_body}],
                 "current_session_id": "recovery-session",
                 "knowledge_base": [
                     {"source_type": "managed_knowledge", "content": managed_body},
@@ -570,7 +570,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
     def assert_recall_payload(content: str | None) -> None:
         assert content is not None
         payload = json.loads(content)
-        assert [item["content"] for item in payload["items"]] == [items_body]
+        assert [item["content"] for item in payload["memories"]] == [items_body]
         assert payload["current_session_id"] == "recovery-session"
         assert [(item["source_type"], item["content"]) for item in payload["knowledge_base"]] == [("managed_knowledge", managed_body), ("user_knowledge", user_body)]
         assert [item["content"] for item in payload["chat_history"]] == [chat_history_body]

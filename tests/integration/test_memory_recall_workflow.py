@@ -509,9 +509,10 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         assert first.session_total_cached_tokens == 250
         assert [message.role for message in first.turn_messages] == [MessageRole.ASSISTANT, MessageRole.TOOL]
         tool_payload = json.loads(first.turn_messages[-1].content)
-        assert tool_payload["items"][0]["memory_id"] == memory_id
-        assert tool_payload["items"][0]["content"] == "The user's preferred Python editor is VS Code."
-        assert tool_payload["items"][0]["updated_at"] == "2026-08-04 12:30:00"
+        assert "items" not in tool_payload
+        assert tool_payload["memories"][0]["memory_id"] == memory_id
+        assert tool_payload["memories"][0]["content"] == "The user's preferred Python editor is VS Code."
+        assert tool_payload["memories"][0]["updated_at"] == "2026-08-04 12:30:00"
         assert any("VS Code" in item["content"] for item in tool_payload["chat_history"])
         chat_history_by_content = {item["content"]: item for item in tool_payload["chat_history"]}
         assert chat_history_by_content[history_user_content]["role"] == MessageRole.USER.value
@@ -836,8 +837,8 @@ async def test_memory_recall_retries_empty_response_before_recall_and_persistenc
         assert len(result.turn_messages[0].tool_calls) == 1
         assert result.turn_messages[0].tool_calls[0].arguments == recall_arguments
         tool_payload = json.loads(result.turn_messages[-1].content)
-        assert tool_payload["items"][0]["memory_id"] == memory_id
-        assert tool_payload["items"][0]["content"] == "The user's preferred Python editor is VS Code."
+        assert tool_payload["memories"][0]["memory_id"] == memory_id
+        assert tool_payload["memories"][0]["content"] == "The user's preferred Python editor is VS Code."
 
         assert [message.model_dump(mode="json") for message in original_messages[: len(original_messages_before)]] == original_messages_before
         appended_messages = original_messages[len(original_messages_before) :]
@@ -1416,8 +1417,8 @@ async def test_memory_recall_output_budget_falls_back_without_mutating_main_cont
             assert [message.role for message in result.turn_messages] == [MessageRole.ASSISTANT, MessageRole.TOOL]
             assert result.turn_messages[0].tool_calls[0].id == "accepted-fallback-call"
             tool_payload = json.loads(result.turn_messages[-1].content)
-            assert tool_payload["items"][0]["memory_id"] == memory_id
-            assert tool_payload["items"][0]["content"] == large_memory_content
+            assert tool_payload["memories"][0]["memory_id"] == memory_id
+            assert tool_payload["memories"][0]["content"] == large_memory_content
             assert embedded_texts == ["VS Code editor preference"]
             assert vector_queries == ["VS Code editor preference"]
 
@@ -1460,7 +1461,7 @@ async def test_memory_recall_output_budget_falls_back_without_mutating_main_cont
             persisted_call = InternalMessage.model_validate_json(recall_rows[0].content)
             persisted_result = InternalMessage.model_validate_json(recall_rows[1].content)
             assert persisted_call.tool_calls[0].id == "accepted-fallback-call"
-            assert json.loads(persisted_result.content)["items"][0]["content"] == large_memory_content
+            assert json.loads(persisted_result.content)["memories"][0]["content"] == large_memory_content
             assert len(rows) == len(original_messages_before) + 2
             assert stored_record.last_recalled_at is not None
 

@@ -55,7 +55,7 @@ MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA = {
             "independently maintainable concrete topic and property. "
             "Use separate create calls for different entities, topics, or unrelated facts. "
             "Recall returns a compact JSON object with top-level current_session_id for the current conversation, "
-            "whose items always contain all published long-term memory results first, in final ranking order, with "
+            "whose memories array always contains all published long-term memory results first, in final ranking order, with "
             "only the exact memory identifiers, memory key, type, content, and updated_at. knowledge_base contains globally reranked "
             "managed-knowledge and user-knowledge-base results using the independent knowledge retrieval configuration. "
             "When available, chat_history follows "
@@ -69,7 +69,7 @@ MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA = {
             "or chronology solely by timestamps or ordering, or assume timezone-less timestamps are directly comparable. "
             "Chat history is cross-session historical context: always use session_id to distinguish its source, and "
             "never treat a historical session_id as the current session. Chat history is context only and must never be used for "
-            "update or delete, and it never replaces or displaces an items result in retrieval output; "
+            "update or delete, and it never replaces or displaces a result in memories in retrieval output; "
             "this is not an absolute factual-priority rule for published memories. Assistant-role content is "
             "not a user fact; historical user content may be stale and cannot alone trigger a memory mutation. "
             "Use new information for the answer separately from any persistent write. An explicit current statement or correction "
@@ -295,7 +295,7 @@ def _empty_recall_result(current_session_id: str | None = None) -> str:
     if not isinstance(current_session_id, str) or not current_session_id.strip():
         current_session_id = None
     return json.dumps(
-        {"items": [], "current_session_id": current_session_id},
+        {"memories": [], "current_session_id": current_session_id},
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -348,7 +348,7 @@ def _format_recall_items(items: Any, knowledge_items: Any, chat_items: Any, curr
         if item.truncated:
             formatted_item["truncated"] = True
         formatted_chat_items.append(formatted_item)
-    payload = {"items": formatted_items, "current_session_id": current_session_id}
+    payload = {"memories": formatted_items, "current_session_id": current_session_id}
     if formatted_knowledge_items:
         payload["knowledge_base"] = formatted_knowledge_items
     if formatted_chat_items:
