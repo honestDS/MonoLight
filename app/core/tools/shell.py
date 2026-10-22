@@ -46,6 +46,10 @@ class ShellExecutor(BaseExecutor):
                 return blacklisted
         return None
 
+    @classmethod
+    def get_blacklist_description(cls) -> str:
+        return f"Shell command blacklist (case-insensitive substring matching): {json.dumps(cls.COMMAND_BLACKLIST, ensure_ascii=False)}. Commands containing any listed substring are rejected before execution; do not attempt them."
+
     def __init__(
         self,
         project_root: str,
@@ -352,7 +356,9 @@ SHELL_TOOL_SCHEMA = {
     "function": {
         "name": SHELL_TOOL_NAME,
         "description": (
-            "Execute the original command and return its result. The required execution_mode describes the input/output and lifecycle of the same command process, not a programming language; this mode is independent of programming language. "
+            "Execute the original command and return its result. "
+            f"{ShellExecutor.get_blacklist_description()} "
+            "The required execution_mode describes the input/output and lifecycle of the same command process, not a programming language; this mode is independent of programming language. "
             "Both modes run the same original command unchanged; never replace or wrap the command in Python, a Python REPL, or another executable to satisfy this choice. "
             "Prefer non_interactive when the command needs no later stdin and should exit within tool_timeout. Continuous or streaming output, or a command that is merely slow, is not by itself a reason to choose interactive. "
             "Choose interactive only when the same original command process needs later terminal input, depends on TTY behavior, or must keep running after this tool call returns. REPLs, debuggers, TUIs, interactive prompts, and persistent services are categories that may meet these conditions. "

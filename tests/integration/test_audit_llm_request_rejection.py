@@ -468,6 +468,7 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
                 "model_id": kwargs["model_id"],
                 "base_url": kwargs["base_url"],
                 "messages": [message.model_copy(deep=True) for message in kwargs["messages"]],
+                "tools": kwargs["tools"],
             }
         )
         if kwargs["model_id"] == AUDIT_MODEL_ID:
@@ -568,6 +569,13 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
     assert [call["model_id"] for call in calls] == [CHAT_MODEL_ID, AUDIT_MODEL_ID, CHAT_MODEL_ID]
     assert [call["base_url"] for call in calls] == [CHAT_PRIMARY_URL, "https://llm.invalid", CHAT_PRIMARY_URL]
     assert all(call["base_url"] != CHAT_FALLBACK_URL for call in calls)
+    for call in calls:
+        shell_description = next(tool["function"]["description"] for tool in call["tools"] if tool["function"]["name"] == "execute_shell")
+        assert "case-insensitive substring matching" in shell_description
+        assert "rejected before execution" in shell_description
+        assert "do not attempt them" in shell_description
+        for blacklisted_command in ShellExecutor.COMMAND_BLACKLIST:
+            assert blacklisted_command in shell_description
     if stream_callback:
         assert not any(event.get("type") == "error" for event in events)
         assert any(event.get("type") == "content" and event.get("content") == FINAL_CHAT_CONTENT for event in events)

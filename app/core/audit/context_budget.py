@@ -5,7 +5,7 @@ from typing import Any
 
 from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, FILE_TOOL_NAME
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA
-from app.core.tools.shell import SHELL_TOOL_SCHEMA
+from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
 from app.core.utils.tokenizer import estimate_tokens, truncate_text_to_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import estimate_request_context_tokens
@@ -22,7 +22,8 @@ AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["parameters"]["required"].append("t
 AUDIT_SHELL_TOOL_SCHEMA = copy.deepcopy(SHELL_TOOL_SCHEMA)
 AUDIT_SHELL_TOOL_SCHEMA["function"]["description"] = (
     "Use the general-purpose shell to verify environment variables, actual directories, symbolic links, and other environmental facts as audit evidence. "
-    "The pending business operation has not been executed. Use only a separate verification command; do not modify files or configuration, and do not execute the pending business command."
+    "The pending business operation has not been executed. Use only a separate verification command; do not modify files or configuration, and do not execute the pending business command. "
+    f"{ShellExecutor.get_blacklist_description()}"
 )
 AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["command"]["description"] = "A separate shell command used only to verify environmental facts; do not provide or execute the pending business command."
 AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["execution_mode"]["enum"] = ["non_interactive"]
