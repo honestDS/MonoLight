@@ -469,39 +469,35 @@
 
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.image_compression_config') }}</div>
-                <el-row :gutter="20">
-                  <el-col :xs="24" :sm="12">
-                    <el-form-item>
-                      <template #label>
-                        {{ $t('profiles.image_compression_enabled') }}
-                        <HelpTooltip :content="$t('profiles.image_compression_enabled_hint')" />
-                      </template>
-                      <el-switch
-                        v-model="form.configs.tool.image_compression_enabled"
-                        :aria-label="$t('profiles.image_compression_enabled')"
-                      />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :xs="24" :sm="12">
-                    <el-form-item>
-                      <template #label>
-                        {{ $t('profiles.image_compression_threshold_kb') }}
-                        <HelpTooltip :content="$t('profiles.image_compression_threshold_kb_hint')" />
-                      </template>
-                      <el-input-number
-                        v-model="form.configs.tool.image_compression_threshold_kb"
-                        :min="1"
-                        :precision="0"
-                        :step="1"
-                        step-strictly
-                        class="full-width-input"
-                        controls-position="right"
-                        :aria-label="$t('profiles.image_compression_threshold_kb')"
-                        :disabled="!form.configs.tool.image_compression_enabled"
-                      />
-                    </el-form-item>
-                  </el-col>
-                </el-row>
+                <div class="image-compression-controls">
+                  <el-form-item class="image-compression-threshold">
+                    <template #label>
+                      {{ $t('profiles.image_compression_threshold_kb') }}
+                      <HelpTooltip :content="$t('profiles.image_compression_threshold_kb_hint')" />
+                    </template>
+                    <el-input-number
+                      v-model="form.configs.tool.image_compression_threshold_kb"
+                      :min="1"
+                      :precision="0"
+                      :step="1"
+                      step-strictly
+                      class="full-width-input"
+                      controls-position="right"
+                      :aria-label="$t('profiles.image_compression_threshold_kb')"
+                      :disabled="!form.configs.tool.image_compression_enabled"
+                    />
+                  </el-form-item>
+                  <el-form-item class="image-compression-toggle">
+                    <template #label>
+                      {{ $t('profiles.image_compression_enabled') }}
+                      <HelpTooltip :content="$t('profiles.image_compression_enabled_hint')" />
+                    </template>
+                    <el-switch
+                      v-model="form.configs.tool.image_compression_enabled"
+                      :aria-label="$t('profiles.image_compression_enabled')"
+                    />
+                  </el-form-item>
+                </div>
               </div>
 
               <div class="settings-section">

@@ -95,13 +95,17 @@
             <el-icon><Collection /></el-icon>
             <template #title><span>{{ $t('common.menu.memories') }}</span></template>
           </el-menu-item>
+          <el-menu-item index="/knowledge-base">
+            <el-icon><Reading /></el-icon>
+            <template #title><span>{{ $t('common.menu.knowledge_base') }}</span></template>
+          </el-menu-item>
           <el-menu-item index="/scheduled-tasks">
             <el-icon><Clock /></el-icon>
             <template #title><span>{{ $t('common.menu.scheduled_tasks') }}</span></template>
           </el-menu-item>
-          <el-menu-item index="/knowledge-base">
-            <el-icon><Reading /></el-icon>
-            <template #title><span>{{ $t('common.menu.knowledge_base') }}</span></template>
+          <el-menu-item v-if="userPermissions.isSuperuser" index="/skills">
+            <el-icon><MagicStick /></el-icon>
+            <template #title><span>{{ $t('common.menu.skills') }}</span></template>
           </el-menu-item>
           <el-sub-menu index="/system" popper-class="sidebar-submenu-popper">
             <template #title>
@@ -119,9 +123,6 @@
             </el-menu-item>
             <el-menu-item index="/prompts">
               <span>{{ $t('common.menu.prompts') }}</span>
-            </el-menu-item>
-            <el-menu-item v-if="userPermissions.isSuperuser" index="/skills">
-              <span>{{ $t('common.menu.skills') }}</span>
             </el-menu-item>
           </el-sub-menu>
           <el-sub-menu v-if="userPermissions.isSuperuser" index="/logs" popper-class="sidebar-submenu-popper">
