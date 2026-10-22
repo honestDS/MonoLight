@@ -11,6 +11,7 @@ from app.core.tools.longterm_memory import (
 )
 from app.models.channel import ChannelConfig
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
+from tests.memory_recall_support import memory_recall_payload
 
 
 class _FakeDb:
@@ -102,7 +103,7 @@ async def test_save_and_execute_recall_orders_persistence_events_commit_and_isol
     tool_result = InternalMessage(
         role=MessageRole.TOOL,
         tool_call_id="recall-call",
-        content=json.dumps({"memories": []}),
+        content=json.dumps(memory_recall_payload(empty=True)),
     )
     saved_assistant_kwargs = []
     saved_tool_kwargs = []
@@ -204,7 +205,7 @@ async def test_save_and_execute_recall_uses_main_context_remaining_budget(monkey
         return InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id="recall-call",
-            content=json.dumps({"memories": []}),
+            content=json.dumps(memory_recall_payload(empty=True)),
         )
 
     async def save_tool(*args, **_kwargs):

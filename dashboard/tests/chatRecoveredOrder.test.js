@@ -227,7 +227,12 @@ for (const scenario of [
       name: MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
       arguments: { operation: 'recall', query: 'fixture' }
     }
-    const memoryResult = 'fixture memory'
+    const memoryPayload = JSON.parse(readFileSync(
+      new URL('../../tests/memory_recall_fixture.json', import.meta.url),
+      'utf8'
+    ))
+    memoryPayload.current_session_id = 'A'
+    const memoryResult = JSON.stringify(memoryPayload)
     await receiveWs(streamEvent('agent_loop_start', 'response-memory', 0))
     commitAssistantCall(202, memoryCall, '')
     await receiveWs(streamEvent('turn_end', 'response-memory', null, {
@@ -341,6 +346,18 @@ for (const scenario of [
     const cachedSummary = summarizeDisplay(displayedMessages)
     const freshPresentation = useChatMessagePresentation({ props: presentationProps, t: key => key })
     const freshSummary = summarizeDisplay(freshPresentation.displayMessages.value)
+    const memoryToolPair = cachedSummary
+      .filter(message => message.type === 'tool_group')
+      .flatMap(message => message.pairs)
+      .find(pair => pair.toolCall?.id === memoryCall.id)
+    assert.ok(memoryToolPair, '恢复展示应保留记忆工具调用与结果配对')
+    const displayedMemoryResult = normalizeContent(memoryToolPair.resultMessage?.content)
+    const displayedMemoryPayload = normalizeContent(displayedMemoryResult?.content)
+    assert.deepEqual(displayedMemoryPayload, memoryPayload, '恢复展示应完整保留记忆响应内容')
+    assert.equal(Object.hasOwn(displayedMemoryPayload, 'items'), false, '记忆响应不应包含 items')
+    assert.equal(displayedMemoryPayload.current_session_id, 'A', '记忆响应应保留当前会话标识')
+    assert.ok(Array.isArray(displayedMemoryPayload.memories), '记忆响应应保留 memories 数组')
+    assert.equal(displayedMemoryPayload.memories[0]?.content, 'fixture memory', '记忆响应应保留首条记忆内容')
     const finalAnswers = rawMessages.filter(message => (
       message.role === 'assistant' && message.content === '最终答复'
     ))

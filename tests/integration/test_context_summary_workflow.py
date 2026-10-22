@@ -36,6 +36,7 @@ from app.models.session_todo import SessionTodoPlan
 from app.providers.llm.client import LLMClient
 from app.transformers.openai.base import BaseOpenAITransformer
 from tests.database_support import clone_sqlite_schema
+from tests.memory_recall_support import memory_recall_payload
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
 channel_router_module = import_module("app.core.channel.router")
@@ -398,20 +399,15 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             )
         ],
     )
+    recall_payload = memory_recall_payload(current_session_id="recovery-session")
+    recall_payload["memories"][0]["content"] = items_body
+    recall_payload["knowledge_base"][0]["content"] = managed_body
+    recall_payload["knowledge_base"][1]["content"] = user_body
+    recall_payload["chat_history"] = recall_payload["chat_history"][:1]
+    recall_payload["chat_history"][0]["content"] = chat_history_body
     managed_tool_result = InternalMessage(
         role=MessageRole.TOOL,
-        content=json.dumps(
-            {
-                "memories": [{"content": items_body}],
-                "current_session_id": "recovery-session",
-                "knowledge_base": [
-                    {"source_type": "managed_knowledge", "content": managed_body},
-                    {"source_type": "user_knowledge", "content": user_body},
-                ],
-                "chat_history": [{"content": chat_history_body}],
-            },
-            ensure_ascii=False,
-        ),
+        content=json.dumps(recall_payload, ensure_ascii=False),
         tool_call_id=tool_call_id,
         tool_execution_status="succeeded",
     )
@@ -571,6 +567,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
         assert content is not None
         payload = json.loads(content)
         assert [item["content"] for item in payload["memories"]] == [items_body]
+        assert "items" not in payload
         assert payload["current_session_id"] == "recovery-session"
         assert [(item["source_type"], item["content"]) for item in payload["knowledge_base"]] == [("managed_knowledge", managed_body), ("user_knowledge", user_body)]
         assert [item["content"] for item in payload["chat_history"]] == [chat_history_body]

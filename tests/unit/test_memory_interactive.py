@@ -16,6 +16,7 @@ from app.core.tools import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
+from tests.memory_recall_support import memory_recall_payload
 
 
 class _Session:
@@ -81,7 +82,7 @@ def _recall_messages(boundary: int) -> tuple[InternalMessage, InternalMessage]:
             id=2000 + boundary,
             role=MessageRole.TOOL,
             tool_call_id=tool_call.id,
-            content='{"operation":"recall","status":"success","memories":[]}',
+            content=json.dumps(memory_recall_payload(empty=True), ensure_ascii=False, separators=(",", ":")),
         ),
     )
 

@@ -1,0 +1,50 @@
+{
+  "memories": [
+    {
+      "memory_id": 1,
+      "expected_version": 2,
+      "memory_key": "project",
+      "memory_type": "project",
+      "content": "fixture memory",
+      "updated_at": "2026-09-01 10:00:00"
+    }
+  ],
+  "current_session_id": "session-1",
+  "knowledge_base": [
+    {
+      "knowledge_base_id": 10,
+      "knowledge_base_name": "Managed",
+      "source_type": "managed_knowledge",
+      "source": "project.architecture",
+      "content": "fixture managed knowledge",
+      "truncated": false,
+      "llm_maintainable": true,
+      "knowledge_id": 20,
+      "knowledge_key": "project.architecture",
+      "knowledge_expected_version": 3
+    },
+    {
+      "knowledge_base_id": 11,
+      "knowledge_base_name": "Docs",
+      "source_type": "user_knowledge",
+      "source": "guide.md",
+      "content": "fixture user knowledge",
+      "truncated": false,
+      "llm_maintainable": false
+    }
+  ],
+  "chat_history": [
+    {
+      "role": "user",
+      "content": "fixture user history",
+      "session_id": "older-session",
+      "created_at": "2026-09-01 09:00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "fixture assistant history",
+      "session_id": "older-session",
+      "created_at": null
+    }
+  ]
+}

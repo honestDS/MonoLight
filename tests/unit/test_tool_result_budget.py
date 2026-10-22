@@ -11,6 +11,7 @@ from app.core.utils.dispatcher import process_single_tool as process_single_tool
 from app.core.utils.dispatcher import truncate_tool_result as truncate_tool_result_module
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import Profile, ProfileConfig
+from tests.memory_recall_support import memory_recall_payload
 
 
 def test_tool_result_round_budget_uses_half_of_remaining_request_input(monkeypatch):
@@ -428,17 +429,15 @@ async def _process_fake_executor_result(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tool_name", "arguments", "result_field"),
+    ("tool_name", "arguments"),
     [
         (
             process_single_tool_module.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
             {"operation": "recall", "query": "topic"},
-            "memories",
         ),
         (
             process_single_tool_module.KNOWLEDGE_BASE_QUERY_TOOL_NAME,
             {"knowledge_base_id": 1, "query": "topic"},
-            "items",
         ),
     ],
     ids=["managed-memory-recall", "query-knowledge-base"],
@@ -448,36 +447,39 @@ async def test_process_single_tool_preserves_recall_results_outside_tiny_result_
     tmp_path,
     tool_name,
     arguments,
-    result_field,
 ):
-    items = [
-        {"source": "memory", "content": "memory-result-" * 400 + "UNIQUE-ITEMS-END"},
-        {"source": "memory", "content": "second-memory-" * 400 + "UNIQUE-SECOND-ITEM-END"},
-    ]
-    managed_text = "managed-policy-" * 400 + "UNIQUE-MANAGED-END"
-    user_text = "user-knowledge-" * 400 + "UNIQUE-USER-KNOWLEDGE-END"
-    history_text = "conversation-history-" * 400 + "UNIQUE-CHAT-HISTORY-END"
-    knowledge_base = [
-        {
-            "knowledge_id": 101,
-            "knowledge_expected_version": 3,
-            "knowledge_key": "customer-preference",
-            "llm_maintainable": True,
-            "source_type": "managed_knowledge",
-            "content": managed_text,
-        },
-        {"source": "user_knowledge", "content": user_text},
-    ]
-    chat_history = [
-        {"role": "user", "content": history_text},
-        {"role": "assistant", "content": "assistant-history-" * 400 + "UNIQUE-ASSISTANT-HISTORY-END"},
-    ]
-    payload = {
-        result_field: items,
-        "current_session_id": "session-1",
-        "knowledge_base": knowledge_base,
-        "chat_history": chat_history,
-    }
+    first_text = "memory-result-" * 400 + "UNIQUE-ITEMS-END"
+    second_text = "second-memory-" * 400 + "UNIQUE-SECOND-ITEM-END"
+    if tool_name == process_single_tool_module.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
+        payload = memory_recall_payload()
+        payload["memories"][0]["content"] = first_text
+        payload["memories"].append(
+            {
+                **payload["memories"][0],
+                "memory_id": 2,
+                "memory_key": "project.second",
+                "content": second_text,
+            }
+        )
+
+        managed_text = "managed-policy-" * 400 + "UNIQUE-MANAGED-END"
+        user_text = "user-knowledge-" * 400 + "UNIQUE-USER-KNOWLEDGE-END"
+        history_text = "conversation-history-" * 400 + "UNIQUE-CHAT-HISTORY-END"
+        managed_knowledge = payload["knowledge_base"][0]
+        managed_knowledge["knowledge_id"] = 101
+        managed_knowledge["knowledge_key"] = "customer-preference"
+        managed_knowledge["knowledge_expected_version"] = 3
+        managed_knowledge["content"] = managed_text
+        payload["knowledge_base"][1]["content"] = user_text
+        payload["chat_history"][0]["content"] = history_text
+        payload["chat_history"][1]["content"] = "assistant-history-" * 400 + "UNIQUE-ASSISTANT-HISTORY-END"
+    else:
+        payload = {
+            "items": [
+                {"source": "guide.md", "content": first_text},
+                {"source": "other.md", "content": second_text},
+            ]
+        }
     original_content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     content = await _process_fake_executor_result(
@@ -488,35 +490,32 @@ async def test_process_single_tool_preserves_recall_results_outside_tiny_result_
         payload=payload,
         budget_tokens=1,
     )
-    result = json.loads(content)
 
     assert content == original_content
-    assert result[result_field] == items
-    assert result["knowledge_base"] == knowledge_base
-    assert result["chat_history"] == chat_history
+    assert json.loads(content) == payload
 
 
 @pytest.mark.asyncio
 async def test_process_single_tool_preserves_managed_knowledge_order_and_full_text(monkeypatch, tmp_path):
     managed_text = "durable-memory-" * 400 + "UNIQUE-MIXED-MANAGED-END"
-    knowledge_base = [
-        {"source": "user-before", "content": "First user result."},
-        {
-            "knowledge_id": 201,
-            "knowledge_expected_version": 12,
-            "knowledge_key": "long-policy",
-            "llm_maintainable": True,
-            "source_type": "managed_knowledge",
-            "content": managed_text,
-        },
-        {"source": "user-after", "content": "Last user result."},
-    ]
-    payload = {
-        "memories": [],
-        "current_session_id": "session-1",
-        "knowledge_base": knowledge_base,
-        "chat_history": [],
+    payload = memory_recall_payload()
+    payload["memories"] = []
+    payload.pop("chat_history")
+
+    user_knowledge_template = payload["knowledge_base"][1]
+    managed_knowledge_template = payload["knowledge_base"][0]
+    user_before = {**user_knowledge_template, "source": "user-before", "content": "First user result."}
+    managed_knowledge = {
+        **managed_knowledge_template,
+        "source": "long-policy",
+        "content": managed_text,
+        "knowledge_id": 201,
+        "knowledge_key": "long-policy",
+        "knowledge_expected_version": 12,
     }
+    user_after = {**user_knowledge_template, "source": "user-after", "content": "Last user result."}
+    knowledge_base = [user_before, managed_knowledge, user_after]
+    payload["knowledge_base"] = knowledge_base
 
     content = await _process_fake_executor_result(
         monkeypatch,

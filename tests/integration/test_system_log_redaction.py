@@ -33,6 +33,7 @@ from app.models.system_log import SystemLog, SystemLogCreate
 from app.models.system_setting import SystemSetting
 from app.models.user import User
 from app.providers.database import get_db
+from tests.memory_recall_support import memory_recall_payload
 
 TEST_JWT_SECRET = "system-log-redaction-integration-jwt-secret"
 SETTINGS_PATH = "/api/v1/system/settings"
@@ -326,21 +327,6 @@ async def test_admin_toggle_redacts_only_new_logs_and_get_returns_stored_values(
         assert final_by_module[module]["session_id"] == stored["session_id"]
 
 
-TOOL_RESULT = {
-    "items": [{"content": "result-items-content", "source": "result-items-source"}],
-    "chat_history": [{"content": "result-chat-history-content"}],
-    "knowledge_base": [{"content": "result-knowledge-base-content", "source": "result-knowledge-base-source"}],
-    "error": "result-error-body",
-}
-TOOL_RESULT_JSON = json.dumps(TOOL_RESULT, ensure_ascii=False)
-TOOL_RESULT_SECRETS = [
-    "result-items-content",
-    "result-items-source",
-    "result-chat-history-content",
-    "result-knowledge-base-content",
-    "result-knowledge-base-source",
-    "result-error-body",
-]
 TOOL_CASES = (
     {
         "id": "manage-memory-and-knowledge",
@@ -363,14 +349,15 @@ TOOL_CASES = (
         "arguments": {"knowledge_base_id": 17, "query": "call-query-secret"},
         "metadata": {"knowledge_base_id": 17},
     },
+    {
+        "id": "query-knowledge-base-error",
+        "name": KNOWLEDGE_BASE_QUERY_TOOL_NAME,
+        "memory_enabled": False,
+        "arguments": {"knowledge_base_id": 17, "query": "call-query-secret"},
+        "metadata": {"knowledge_base_id": 17},
+        "result_error": True,
+    },
 )
-
-
-class FixedResultExecutor(BaseExecutor):
-    requires_audit = False
-
-    async def execute(self, **kwargs: Any) -> str:
-        return TOOL_RESULT_JSON
 
 
 def _system_log_from_record(record: dict[str, Any]) -> SystemLogCreate:
@@ -401,6 +388,40 @@ async def test_process_single_tool_logs_original_data_and_crud_applies_setting(
     enabled: bool,
 ) -> None:
     tool_name = tool_case["name"]
+
+    if tool_case.get("result_error"):
+        result_payload = {"error": "result-error-body"}
+        result_secrets = ["result-error-body"]
+    elif tool_case["memory_enabled"]:
+        result_payload = memory_recall_payload(current_session_id="tool-session")
+        result_payload["memories"][0]["content"] = "result-memory-content"
+        result_payload["knowledge_base"][0]["content"] = "result-managed-content"
+        result_payload["knowledge_base"][0]["source"] = "result-managed-source"
+        result_payload["knowledge_base"][1]["content"] = "result-user-knowledge-content"
+        result_payload["knowledge_base"][1]["source"] = "result-user-knowledge-source"
+        result_payload["chat_history"][0]["content"] = "result-chat-history-content"
+        result_payload["chat_history"][1]["content"] = "result-assistant-history-content"
+        result_secrets = [
+            "result-memory-content",
+            "result-managed-content",
+            "result-managed-source",
+            "result-user-knowledge-content",
+            "result-user-knowledge-source",
+            "result-chat-history-content",
+            "result-assistant-history-content",
+        ]
+    else:
+        result_payload = {"items": [{"content": "result-items-content", "source": "result-items-source"}]}
+        result_secrets = ["result-items-content", "result-items-source"]
+
+    result_json = json.dumps(result_payload, ensure_ascii=False)
+
+    class FixedResultExecutor(BaseExecutor):
+        requires_audit = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            return result_json
+
     monkeypatch.setitem(TOOL_EXECUTOR_MAP, tool_name, FixedResultExecutor)
     cfg = ProfileConfig.model_validate(
         {
@@ -450,7 +471,7 @@ async def test_process_single_tool_logs_original_data_and_crud_applies_setting(
                 uid="tool-user",
                 allowed_knowledge_base_ids=[17],
             )
-            assert result.content == TOOL_RESULT_JSON
+            assert result.content == result_json
             assert len(captured) == 2
 
             call_record = next(record for record in captured if "tool_call" in record["extra"])
@@ -459,8 +480,8 @@ async def test_process_single_tool_logs_original_data_and_crud_applies_setting(
             assert all(secret in call_record["message"] for secret in call_secrets)
             call_payload = _tool_log_payload(call_record["message"])
             assert {key: call_payload[key] for key in tool_case["metadata"]} == tool_case["metadata"]
-            assert all(secret in result_record["message"] for secret in TOOL_RESULT_SECRETS)
-            assert all(key in result_record["message"] for key in ("items", "chat_history", "knowledge_base", "error"))
+            assert all(secret in result_record["message"] for secret in result_secrets)
+            assert _tool_log_payload(result_record["message"]) == result_payload
 
             stored_logs = [await system_log_crud.create(session, obj_in=_system_log_from_record(record)) for record in captured]
     finally:
@@ -475,7 +496,7 @@ async def test_process_single_tool_logs_original_data_and_crud_applies_setting(
 
     for log, record, secrets in (
         (call_log, call_record, call_secrets),
-        (result_log, result_record, TOOL_RESULT_SECRETS),
+        (result_log, result_record, result_secrets),
     ):
         if enabled:
             assert LOG_REDACTION_PLACEHOLDER in log.message
