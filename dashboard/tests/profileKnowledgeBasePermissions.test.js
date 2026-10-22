@@ -56,6 +56,7 @@ const profilesScript = [profileMemorySource, profileEditorSource, profilesViewSo
 const dataResponse = data => ({ data: { data } })
 const normalize = value => JSON.parse(JSON.stringify(value))
 const pageResponse = (items, total, meta) => dataResponse({ items, total, meta })
+const IMAGE_COMPRESSION_DEFAULT_KB = 768
 const flush = async () => {
   for (let index = 0; index < 6; index += 1) {
     await nextTick()
@@ -116,6 +117,9 @@ const createHarness = async (t, options = {}) => {
         show_owner: false,
         current_uid: currentUid,
         tool_options: [],
+        config_defaults: {
+          tool: { image_compression_threshold_kb: IMAGE_COMPRESSION_DEFAULT_KB },
+        },
         config_permissions: {
           security: options.superuser === true,
           ...(options.configPermissions || {}),
@@ -968,7 +972,9 @@ test('editing and resaving configured audit and tool settings preserves boundary
     for (const callback of harness.mountedCallbacks) callback()
     await flush()
 
-    const configs = defaultProfileConfigs()
+    const configs = defaultProfileConfigs({
+      tool: { image_compression_threshold_kb: IMAGE_COMPRESSION_DEFAULT_KB },
+    })
     configs.security = {
       ...configs.security,
       audit_channel_id: modelOptionsItems[0].id,
@@ -1038,7 +1044,7 @@ test('ordinary create dialog defaults image compression and keeps submitted valu
   harness.module.showDialog('create')
   await flush()
   assert.equal(harness.module.form.configs.tool.image_compression_enabled, true)
-  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 500)
+  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, IMAGE_COMPRESSION_DEFAULT_KB)
 
   harness.module.form.name = 'custom image compression profile'
   harness.module.form.configs.tool.image_compression_enabled = false
@@ -1053,7 +1059,7 @@ test('ordinary create dialog defaults image compression and keeps submitted valu
   harness.module.showDialog('create')
   await flush()
   assert.equal(harness.module.form.configs.tool.image_compression_enabled, true)
-  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 500)
+  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, IMAGE_COMPRESSION_DEFAULT_KB)
   assert.equal(firstPayload.configs.tool.image_compression_enabled, false)
   assert.equal(firstPayload.configs.tool.image_compression_threshold_kb, 1234)
 
@@ -1063,7 +1069,7 @@ test('ordinary create dialog defaults image compression and keeps submitted valu
 
   assert.equal(harness.api.creates.length, 2)
   assert.equal(harness.api.creates[1].configs.tool.image_compression_enabled, true)
-  assert.equal(harness.api.creates[1].configs.tool.image_compression_threshold_kb, 500)
+  assert.equal(harness.api.creates[1].configs.tool.image_compression_threshold_kb, IMAGE_COMPRESSION_DEFAULT_KB)
   assert.equal(firstPayload.configs.tool.image_compression_enabled, false)
   assert.equal(firstPayload.configs.tool.image_compression_threshold_kb, 1234)
 })
@@ -1083,7 +1089,7 @@ test('ordinary edit supplies image compression defaults for legacy tool configs'
   harness.module.showDialog('edit', row)
   await flush()
   assert.equal(harness.module.form.configs.tool.image_compression_enabled, true)
-  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 500)
+  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, IMAGE_COMPRESSION_DEFAULT_KB)
 
   await harness.module.submitForm()
   await flush()
@@ -1091,8 +1097,147 @@ test('ordinary edit supplies image compression defaults for legacy tool configs'
   const update = harness.api.updates[0]
   assert.equal(update.id, row.id)
   assert.equal(update.payload.configs.tool.image_compression_enabled, true)
-  assert.equal(update.payload.configs.tool.image_compression_threshold_kb, 500)
+  assert.equal(update.payload.configs.tool.image_compression_threshold_kb, IMAGE_COMPRESSION_DEFAULT_KB)
   assert.deepEqual(normalize(row), originalRow)
+})
+
+test('profile default refresh preserves open values and updates later image compression defaults', async t => {
+  let listRequestCount = 0
+  const harness = await createHarness(t, {
+    superuser: false,
+    currentUid: 'user-a',
+    profileListRequest: () => {
+      listRequestCount += 1
+      const threshold = listRequestCount === 1 ? IMAGE_COMPRESSION_DEFAULT_KB : 1024
+      return Promise.resolve(pageResponse([], 0, {
+        show_owner: false,
+        current_uid: 'user-a',
+        tool_options: [],
+        config_defaults: { tool: { image_compression_threshold_kb: threshold } },
+        config_permissions: { security: false },
+      }))
+    },
+  })
+
+  harness.module.showDialog('create')
+  await flush()
+  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, IMAGE_COMPRESSION_DEFAULT_KB)
+  harness.module.form.name = 'profile with an open custom threshold'
+  harness.module.form.configs.tool.image_compression_threshold_kb = 1234
+
+  harness.module.handleRefresh()
+  await flush()
+
+  assert.equal(listRequestCount, 2)
+  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 1234)
+  await harness.module.submitForm()
+  await flush()
+
+  const firstPayload = harness.api.creates[0]
+  const firstPayloadSnapshot = normalize(firstPayload)
+  assert.equal(firstPayload.configs.tool.image_compression_threshold_kb, 1234)
+
+  harness.module.showDialog('create')
+  await flush()
+  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 1024)
+  assert.deepEqual(normalize(firstPayload), firstPayloadSnapshot)
+  harness.module.form.name = 'new profile with refreshed defaults'
+  await harness.module.submitForm()
+  await flush()
+
+  const refreshedCreatePayload = harness.api.creates[1]
+  const refreshedCreatePayloadSnapshot = normalize(refreshedCreatePayload)
+  assert.equal(refreshedCreatePayload.configs.tool.image_compression_threshold_kb, 1024)
+
+  const legacyRow = {
+    id: 124,
+    uid: 'user-a',
+    name: 'legacy profile without an image compression threshold',
+    prompt_id: null,
+    knowledge_base_ids: [],
+    configs: { tool: { tool_timeout: 45 } },
+  }
+  const originalLegacyRow = normalize(legacyRow)
+  harness.module.showDialog('edit', legacyRow)
+  await flush()
+  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 1024)
+  harness.module.form.name = legacyRow.name
+  await harness.module.submitForm()
+  await flush()
+
+  const update = harness.api.updates[0]
+  assert.equal(update.payload.configs.tool.image_compression_threshold_kb, 1024)
+  assert.deepEqual(normalize(legacyRow), originalLegacyRow)
+  assert.deepEqual(normalize(firstPayload), firstPayloadSnapshot)
+  assert.deepEqual(normalize(refreshedCreatePayload), refreshedCreatePayloadSnapshot)
+})
+
+test('missing profile config defaults do not invent image compression thresholds', async t => {
+  const scenarios = [
+    { type: 'create', name: 'new profile without defaults', hasThreshold: false },
+    {
+      type: 'edit',
+      name: 'legacy profile without a threshold',
+      hasThreshold: false,
+      row: {
+        id: 125,
+        uid: 'user-a',
+        name: 'legacy profile without a threshold',
+        prompt_id: null,
+        knowledge_base_ids: [],
+        configs: { tool: { tool_timeout: 45 } },
+      },
+    },
+    {
+      type: 'edit',
+      name: 'explicit threshold without defaults',
+      hasThreshold: true,
+      threshold: 1536,
+      row: {
+        id: 126,
+        uid: 'user-a',
+        name: 'explicit threshold without defaults',
+        prompt_id: null,
+        knowledge_base_ids: [],
+        configs: { tool: { image_compression_threshold_kb: 1536 } },
+      },
+    },
+  ]
+
+  for (const scenario of scenarios) {
+    const harness = await createHarness(t, {
+      superuser: false,
+      currentUid: 'user-a',
+      profileListRequest: () => Promise.resolve(pageResponse([], 0, {
+        show_owner: false,
+        current_uid: 'user-a',
+        tool_options: [],
+        config_permissions: { security: false },
+      })),
+    })
+    const originalRow = scenario.row ? normalize(scenario.row) : null
+    if (scenario.type === 'create') harness.module.showDialog('create')
+    else harness.module.showDialog('edit', scenario.row)
+    await flush()
+    harness.module.form.name = scenario.name
+
+    await harness.module.submitForm()
+    await flush()
+
+    const payload = scenario.type === 'create'
+      ? harness.api.creates[0]
+      : harness.api.updates[0]?.payload
+    assert.ok(payload, scenario.name)
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(payload.configs.tool, 'image_compression_threshold_kb'),
+      scenario.hasThreshold,
+      scenario.name,
+    )
+    if (scenario.hasThreshold) {
+      assert.equal(payload.configs.tool.image_compression_threshold_kb, scenario.threshold, scenario.name)
+    }
+    if (scenario.row) assert.deepEqual(normalize(scenario.row), originalRow, scenario.name)
+  }
 })
 
 test('ordinary edits preserve image compression values through save, reopen, and toggle changes', async t => {

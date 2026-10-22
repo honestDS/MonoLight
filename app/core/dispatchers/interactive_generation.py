@@ -40,6 +40,7 @@ from app.core.utils.dispatcher.helpers import (
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
     MAIN_DIALOGUE_REQUEST_PURPOSE,
@@ -147,7 +148,7 @@ async def generate_interactive_turn(
             pending_modalities = {item["modality"] for item in pending_file_inputs}
             if ("image" in pending_modalities and not state.img_understanding) or ("audio" in pending_modalities and not state.audio_understanding) or ("video" in pending_modalities and not state.video_understanding):
                 raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
-            request_messages = materialize_user_environment_prompts([*state.messages, *tool_call_correction_messages])
+            request_messages = materialize_user_environment_prompts([MessageAssembler.prepare_inline_images(message, state.cfg.tool) for message in [*state.messages, *tool_call_correction_messages]])
             pending_multimodal_message = build_pending_multimodal_input_message(
                 pending_file_inputs,
                 image_understanding=state.img_understanding,

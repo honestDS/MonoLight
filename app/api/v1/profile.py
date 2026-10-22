@@ -80,6 +80,7 @@ from app.models.profile import (
     ProfileMemoryEmbeddingPreviewRequest,
     ProfileResponse,
     ProfileUpdate,
+    ToolConfig,
 )
 from app.providers.database import get_db
 from app.schemas.memory import MemorySettingsResponse
@@ -308,6 +309,11 @@ async def list_profiles(
         size=size,
         meta={
             "tool_options": get_profile_tool_options(),
+            "config_defaults": {
+                "tool": {
+                    "image_compression_threshold_kb": ToolConfig().image_compression_threshold_kb,
+                },
+            },
             "show_owner": is_admin,
             "current_uid": current_user.uid,
             "config_permissions": get_profile_config_permissions(current_user),

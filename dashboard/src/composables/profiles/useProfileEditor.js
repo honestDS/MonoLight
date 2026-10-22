@@ -17,6 +17,7 @@ export function useProfileEditor({
   t,
   userPermissions,
   configPermissions,
+  configDefaults,
   channels,
   users,
   knowledgeBases,
@@ -162,7 +163,7 @@ export function useProfileEditor({
         organization_channel_id: row.memory_organization?.organization_channel_id ?? null,
         organization_model_id: row.memory_organization?.organization_model_id ?? null
       }
-      const base = defaultProfileConfigs()
+      const base = defaultProfileConfigs(configDefaults.value)
       if (row.configs) {
         if (row.configs.tool) migrateToolConfig(row.configs.tool)
         if (row.configs.channel) {
@@ -198,7 +199,7 @@ export function useProfileEditor({
         organization_channel_id: null,
         organization_model_id: null
       }
-      form.configs = defaultProfileConfigs()
+      form.configs = defaultProfileConfigs(configDefaults.value)
       memory.initializeMemoryState(form.configs.memory, {})
     }
     dialogVisible.value = true

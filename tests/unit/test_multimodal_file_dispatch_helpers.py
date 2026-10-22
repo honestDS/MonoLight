@@ -1,12 +1,17 @@
+import base64
+import io
 import json
+from urllib.parse import quote_from_bytes, unquote_to_bytes
 
 import pytest
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
+from app.core.constants import ERR_LLM_IMAGE_INPUT_INVALID
 from app.core.dispatchers.interactive_helpers import (
     build_pending_multimodal_input_message,
     collect_pending_multimodal_file_inputs,
 )
+from app.core.exceptions import ParameterException
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import (
     AudioPart,
@@ -18,6 +23,7 @@ from app.models.message import (
     TextPart,
     VoiceTextPart,
 )
+from app.models.profile import ToolConfig
 
 
 def _success_result(path, message="不是用户的新输入", modality="image"):
@@ -31,6 +37,52 @@ def _success_result(path, message="不是用户的新输入", modality="image"):
         },
         ensure_ascii=False,
     )
+
+
+@pytest.fixture
+def inline_png_bytes():
+    buffer = io.BytesIO()
+    Image.new("RGBA", (32, 24), color=(20, 80, 140, 180)).save(
+        buffer,
+        format="PNG",
+        compress_level=0,
+    )
+    return buffer.getvalue()
+
+
+def _png_with_exact_size(image_bytes, size):
+    padding_length = size - len(image_bytes) - 20
+    assert padding_length > 0
+
+    png_info = PngImagePlugin.PngInfo()
+    png_info.add_text("padding", "x" * padding_length)
+    buffer = io.BytesIO()
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image.save(buffer, format="PNG", compress_level=0, pnginfo=png_info)
+
+    result = buffer.getvalue()
+    assert len(result) == size
+    return result
+
+
+def _inline_data_url(image_bytes, encoding, header="data:image/png"):
+    if encoding == "base64":
+        return f"{header};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    return f"{header},{quote_from_bytes(image_bytes, safe='')}"
+
+
+def _decode_inline_data_url(url):
+    header, separator, encoded_data = url.partition(",")
+    assert separator
+    if any(parameter.strip().lower() == "base64" for parameter in header.split(";")[1:]):
+        return base64.b64decode(encoded_data)
+    return unquote_to_bytes(encoded_data)
+
+
+def _image_format_and_size(image_bytes):
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image.load()
+        return image.format, image.size
 
 
 def test_collect_pending_multimodal_file_inputs_uses_tool_call_order_and_skips_failures(tmp_path):
@@ -482,3 +534,173 @@ def test_message_assembler_wraps_image_processing_results(corrupt, expected_text
         ("text", "图片正文"),
         ("text", f"[系统提示,此处不是用户说的话]{image_result}[系统提示结束]"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("encoding", "header"),
+    [
+        ("base64", "DATA:IMAGE/PNG"),
+        ("percent", "dAtA:ImAgE/PnG"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("enabled", "threshold_kb", "target_size", "expected"),
+    [
+        (False, 1, None, "original"),
+        (True, 4, None, "original"),
+        (True, 4, 4096, "original"),
+        (True, 4, 4097, "jpeg"),
+        (True, 1, None, "jpeg"),
+    ],
+    ids=["disabled", "below-threshold", "at-threshold", "above-threshold", "one-kb-threshold"],
+)
+def test_prepare_inline_images_decodes_data_urls_and_compresses_only_above_threshold(
+    inline_png_bytes,
+    encoding,
+    header,
+    enabled,
+    threshold_kb,
+    target_size,
+    expected,
+):
+    image_bytes = inline_png_bytes if target_size is None else _png_with_exact_size(inline_png_bytes, target_size)
+    if expected == "jpeg":
+        assert len(image_bytes) > threshold_kb * 1024
+    elif enabled:
+        assert len(image_bytes) <= threshold_kb * 1024
+
+    source_url = _inline_data_url(image_bytes, encoding, header=header)
+    source_part = ImagePart(image_url={"url": source_url, "detail": "high"})
+    message = InternalMessage(role=MessageRole.USER, content=[source_part])
+    source_message_snapshot = message.model_dump(mode="json")
+    source_part_snapshot = source_part.model_dump(mode="json")
+    tool_config = ToolConfig(
+        image_compression_enabled=enabled,
+        image_compression_threshold_kb=threshold_kb,
+    )
+
+    first_result = MessageAssembler.prepare_inline_images(message, tool_config)
+    second_result = MessageAssembler.prepare_inline_images(message, tool_config)
+
+    assert first_result.model_dump(mode="json") == second_result.model_dump(mode="json")
+    assert message.model_dump(mode="json") == source_message_snapshot
+    assert source_part.model_dump(mode="json") == source_part_snapshot
+    output_part = first_result.content[0]
+    assert output_part.image_url["detail"] == "high"
+
+    output_url = output_part.image_url["url"]
+    output_bytes = _decode_inline_data_url(output_url)
+    if expected == "original":
+        assert output_url == source_url
+        assert output_bytes == image_bytes
+        assert _image_format_and_size(output_bytes) == ("PNG", (32, 24))
+    else:
+        assert output_url.startswith("data:image/jpeg;base64,")
+        image_format, image_size = _image_format_and_size(output_bytes)
+        assert image_format == "JPEG"
+        assert image_size[0] < 32
+        assert image_size[1] < 24
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://images.example.test/photo.png?token=exact",
+        "https://images.example.test/photo.png?token=exact",
+    ],
+)
+def test_prepare_inline_images_preserves_remote_urls_without_opening_them(monkeypatch, url):
+    def fail_image_open(*args, **kwargs):
+        raise AssertionError("remote image URLs must not be opened locally")
+
+    monkeypatch.setattr("app.core.utils.message_assembler.Image.open", fail_image_open)
+    source_part = ImagePart(image_url={"url": url, "detail": "low"})
+    message = InternalMessage(role=MessageRole.USER, content=[source_part])
+    source_snapshot = message.model_dump(mode="json")
+
+    result = MessageAssembler.prepare_inline_images(
+        message,
+        ToolConfig(image_compression_enabled=True, image_compression_threshold_kb=1),
+    )
+
+    assert result.content[0].image_url == {"url": url, "detail": "low"}
+    assert result.content[0].image_url["url"] == url
+    assert message.model_dump(mode="json") == source_snapshot
+
+
+def test_prepare_inline_images_only_compresses_original_user_prefix(inline_png_bytes):
+    source_url = _inline_data_url(inline_png_bytes, "percent")
+    generated_attachment_url = _inline_data_url(inline_png_bytes, "base64")
+    message = InternalMessage(
+        role=MessageRole.USER,
+        content=[
+            ImagePart(image_url={"url": source_url, "detail": "original"}),
+            TextPart(text="正文"),
+            ImagePart(image_url={"url": generated_attachment_url, "detail": "generated"}),
+        ],
+        attachments=["assembled.png"],
+        assembled_attachment_part_count=1,
+    )
+    source_snapshot = message.model_dump(mode="json")
+    generated_part_snapshot = message.content[-1].model_dump(mode="json")
+
+    prepared = MessageAssembler.prepare_inline_images(
+        message,
+        ToolConfig(image_compression_enabled=True, image_compression_threshold_kb=1),
+    )
+
+    assert message.model_dump(mode="json") == source_snapshot
+    assert prepared is not message
+    assert prepared.content[1].text == "正文"
+    assert prepared.content[2].model_dump(mode="json") == generated_part_snapshot
+    assert prepared.content[2].image_url["detail"] == "generated"
+    generated_bytes = _decode_inline_data_url(prepared.content[2].image_url["url"])
+    assert generated_bytes == inline_png_bytes
+    assert _image_format_and_size(generated_bytes) == ("PNG", (32, 24))
+
+    compressed_url = prepared.content[0].image_url["url"]
+    assert compressed_url.startswith("data:image/jpeg;base64,")
+    compressed_format, compressed_size = _image_format_and_size(_decode_inline_data_url(compressed_url))
+    assert compressed_format == "JPEG"
+    assert compressed_size[0] < 32
+    assert compressed_size[1] < 24
+    assert prepared.content[0].image_url["detail"] == "original"
+
+    assistant_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content=[ImagePart(image_url={"url": source_url, "detail": "assistant"})],
+    )
+    assistant_snapshot = assistant_message.model_dump(mode="json")
+    assistant_result = MessageAssembler.prepare_inline_images(
+        assistant_message,
+        ToolConfig(image_compression_enabled=True, image_compression_threshold_kb=1),
+    )
+    assert assistant_result is assistant_message
+    assert assistant_message.model_dump(mode="json") == assistant_snapshot
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "data:image/png;base64",
+        "data:image/png;base64,%%%",
+        f"data:image/png;base64,{base64.b64encode(b'not-image' * 300).decode('ascii')}",
+    ],
+    ids=["missing-comma", "invalid-base64", "non-image-bytes"],
+)
+def test_prepare_inline_images_raises_business_error_without_mutating_invalid_input(url):
+    source_part = ImagePart(image_url={"url": url, "detail": "high"})
+    message = InternalMessage(role=MessageRole.USER, content=[source_part])
+    source_snapshot = message.model_dump(mode="json")
+    source_part_snapshot = source_part.model_dump(mode="json")
+
+    with pytest.raises(ParameterException) as error:
+        MessageAssembler.prepare_inline_images(
+            message,
+            ToolConfig(image_compression_enabled=True, image_compression_threshold_kb=1),
+        )
+
+    assert error.value.message == ERR_LLM_IMAGE_INPUT_INVALID
+    assert error.value.code == 400
+    assert message.model_dump(mode="json") == source_snapshot
+    assert source_part.model_dump(mode="json") == source_part_snapshot

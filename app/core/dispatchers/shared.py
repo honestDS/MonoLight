@@ -55,6 +55,7 @@ class DispatcherValidationMixin:
                 tool_config=cfg.tool,
                 is_history=False,
             )
+            MessageAssembler.prepare_inline_images(validation_msg, cfg.tool)
 
         context_manager.validate_request_capacity(
             context_window_k=chat_params["context_window_k"],
