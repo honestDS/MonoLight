@@ -15,6 +15,7 @@ from app.core.knowledge.results import (
 )
 from app.core.memory import MemoryRecallItem, MemoryRecallResult, MemoryRecallStatus
 from app.core.memory import chat_history as chat_history_module
+from app.core.memory.chat_history import ChatHistoryRecallItem, ChatHistoryRecallResult
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT, LONGTERM_MEMORY_SYSTEM_PROMPT
 from app.core.tools import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA,
@@ -197,9 +198,9 @@ async def test_recall_runs_three_sources_concurrently_with_independent_queries_a
         async def recall(self, **kwargs):
             calls["chat"] = kwargs
             await rendezvous("chat")
-            return SimpleNamespace(
+            return ChatHistoryRecallResult(
                 items=(
-                    SimpleNamespace(
+                    ChatHistoryRecallItem(
                         role="user",
                         content="chat body",
                         session_id="older-session",
@@ -332,7 +333,7 @@ async def test_recall_source_failures_are_isolated(monkeypatch, failed_source):
         async def recall(self, **_kwargs):
             if failed_source == "chat":
                 raise RuntimeError("chat failed")
-            return SimpleNamespace(items=(SimpleNamespace(role="user", content="chat", truncated=False),))
+            return ChatHistoryRecallResult(items=(ChatHistoryRecallItem(role="user", content="chat", truncated=False),))
 
     class KnowledgeService:
         async def recall(self, *_args, **_kwargs):

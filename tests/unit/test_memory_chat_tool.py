@@ -11,6 +11,8 @@ from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.dispatchers.context import build_dispatch_context
 from app.core.exceptions import BaseBusinessException
 from app.core.memory import MemoryContentTooLongError, MemoryRecallItem, MemoryRecallResult, MemoryRecallStatus
+from app.core.memory.chat_history import ChatHistoryRecallItem, ChatHistoryRecallResult
+from app.core.memory.results import MemoryMutationResult, MemoryMutationStatus
 from app.core.prompts import LONGTERM_MEMORY_SYSTEM_PROMPT
 from app.core.tools import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
@@ -24,8 +26,10 @@ from app.core.utils.dispatcher import inject_system_prompt as inject_system_prom
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.models.knowledge_base import KnowledgeBaseType, KnowledgeJobStatus
 from app.models.memory import LongTermMemorySource
+from app.models.memory.job import LongTermMemoryMutationJob, LongTermMemoryMutationOperation
 from app.models.message import InternalMessage, InternalResponse, MessageRole
 from app.models.profile import Profile, ProfileConfig
+from tests.unit.response_test_support import memory_content_too_long_payload, memory_mutation_payload
 
 
 def _profile(*, memory_enabled: bool, enabled_tools: list[str] | None = None) -> Profile:
@@ -365,21 +369,20 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
             captured.update(kwargs)
             return MemoryRecallResult(status=MemoryRecallStatus.OK, items=(first_item, second_item))
 
-    first_chat_item = SimpleNamespace(
+    first_chat_item = ChatHistoryRecallItem(
         role="user",
         content="historical user text",
         truncated=False,
         message_id=501,
-        score=0.7,
+        sparse_score=0.7,
         session_id="old-session",
         created_at=saved_time,
     )
-    second_chat_item = SimpleNamespace(
+    second_chat_item = ChatHistoryRecallItem(
         role="assistant",
         content="historical assistant text",
         truncated=True,
         message_id=502,
-        updated_at=datetime(2026, 8, 4, 12, 32, tzinfo=UTC),
         session_id="another-session",
         created_at=datetime(2026, 8, 4, 12, 32, tzinfo=UTC),
     )
@@ -387,7 +390,7 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
     class FakeChatHistoryRecallService:
         async def recall(self, **kwargs):
             chat_captured.update(kwargs)
-            return SimpleNamespace(items=(first_chat_item, second_chat_item))
+            return ChatHistoryRecallResult(items=(first_chat_item, second_chat_item))
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
@@ -462,7 +465,7 @@ async def test_executor_recall_returns_chat_for_non_ok_status(monkeypatch, statu
 
     class FakeChatHistoryRecallService:
         async def recall(self, **_kwargs):
-            return SimpleNamespace(items=(SimpleNamespace(role="user", content="old user text", truncated=False),))
+            return ChatHistoryRecallResult(items=(ChatHistoryRecallItem(role="user", content="old user text", truncated=False),))
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
@@ -524,7 +527,7 @@ async def test_executor_recall_memory_exceptions_still_return_chat(monkeypatch, 
 
     class FakeChatHistoryRecallService:
         async def recall(self, **_kwargs):
-            return SimpleNamespace(items=(SimpleNamespace(role="assistant", content="old assistant text", truncated=False),))
+            return ChatHistoryRecallResult(items=(ChatHistoryRecallItem(role="assistant", content="old assistant text", truncated=False),))
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
@@ -605,7 +608,7 @@ async def test_executor_recall_without_any_result_returns_empty_items(monkeypatc
 
     class FakeChatHistoryRecallService:
         async def recall(self, **_kwargs):
-            return SimpleNamespace(items=())
+            return ChatHistoryRecallResult()
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
@@ -619,13 +622,15 @@ class _MutationMemoryService:
 
     async def _submit(self, operation, **kwargs):
         self.calls.append((operation, kwargs))
-        return SimpleNamespace(
-            status="accepted",
-            job_id=91,
+        job = LongTermMemoryMutationJob(
+            id=91,
+            uid=kwargs["uid"],
+            operation=(LongTermMemoryMutationOperation.DELETE_CLEANUP if operation == "delete" else LongTermMemoryMutationOperation(operation)),
+            dedupe_key=kwargs["dedupe_key"],
             memory_id=kwargs.get("memory_id"),
-            record=None,
-            job=SimpleNamespace(expected_version=kwargs.get("expected_version")),
+            expected_version=kwargs.get("expected_version"),
         )
+        return MemoryMutationResult(status=MemoryMutationStatus.ACCEPTED, job=job)
 
     async def create(self, **kwargs):
         return await self._submit("create", **kwargs)
@@ -648,9 +653,24 @@ async def test_executor_mutations_derive_dispatch_context_and_return_submission_
     first = json.loads(await executor.execute(**arguments))
     second = json.loads(await executor.execute(**arguments))
 
-    assert first["status"] == "accepted"
-    assert second["status"] == "accepted"
-    assert first["status"] not in {"succeeded", "completed"}
+    expected = {
+        "operation": operation,
+        "status": "accepted",
+        "job_id": 91,
+        "memory_id": None if operation == "create" else 12,
+        "current_version": None if operation == "create" else 2,
+    }
+    assert first == expected
+    assert second == expected
+    assert (
+        memory_mutation_payload(
+            operation,
+            job_id=91,
+            memory_id=None if operation == "create" else 12,
+            current_version=None if operation == "create" else 2,
+        )
+        == expected
+    )
     assert [call[0] for call in service.calls] == [operation, operation]
     first_context = service.calls[0][1]
     second_context = service.calls[1][1]
@@ -680,13 +700,15 @@ async def test_executor_mutation_content_too_long_result_is_compact_and_retryabl
 
     payload = json.loads(await executor.execute(**_valid_arguments(operation)))
 
-    assert payload == {
+    expected = {
         "operation": operation,
         "status": "content_too_long",
         "actual_tokens": 161,
         "max_tokens": 160,
         "retryable": True,
     }
+    assert payload == expected
+    assert memory_content_too_long_payload(operation, actual_tokens=161) == expected
     assert "error" not in payload
 
 

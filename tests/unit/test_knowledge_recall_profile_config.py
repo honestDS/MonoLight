@@ -244,9 +244,6 @@ async def test_query_reranks_managed_chunks_before_materializing_full_content(mo
             )
         ]
 
-    def fake_build_response(hits, **_kwargs):
-        return SimpleNamespace(items=hits)
-
     monkeypatch.setattr(
         embedding_knowledge_base,
         "embed_chunks_with_knowledge_base_config",
@@ -271,11 +268,6 @@ async def test_query_reranks_managed_chunks_before_materializing_full_content(mo
         embedding_knowledge_base,
         "materialize_recallable_managed_hits",
         fake_materialize,
-    )
-    monkeypatch.setattr(
-        embedding_knowledge_base,
-        "build_query_test_response",
-        fake_build_response,
     )
 
     result = await embedding_knowledge_base.query_knowledge_base(
@@ -306,18 +298,10 @@ async def test_final_query_response_materializes_before_top_k(monkeypatch) -> No
         ]
         return hits[1:]
 
-    def fake_build_response(hits, **_kwargs):
-        return SimpleNamespace(items=hits)
-
     monkeypatch.setattr(
         embedding_knowledge_base,
         "materialize_recallable_managed_hits",
         fake_materialize,
-    )
-    monkeypatch.setattr(
-        embedding_knowledge_base,
-        "build_query_test_response",
-        fake_build_response,
     )
 
     result = await embedding_knowledge_base._build_final_query_response(

@@ -4,10 +4,16 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from fastapi import WebSocketDisconnect
 
+from app.api.v1 import system as system_api
 from app.core.log import broadcaster as broadcaster_module
 from app.core.log import build_process_log_path
 from app.core.log.broadcaster import LogBroadcaster
+
+
+def _history_snapshot(after_id=0):
+    return after_id, {"type": "history", "logs": []}
 
 
 def test_process_log_paths_are_isolated_by_process_id():
@@ -133,7 +139,7 @@ async def test_connect_snapshot_cursor_prevents_duplicate_and_missing_logs():
 
     async def initialize():
         initialization_order.append("history")
-        return 11, {"type": "history", "logs": []}
+        return _history_snapshot(11)
 
     await broadcaster.connect(websocket, initialize)
     try:
@@ -155,7 +161,7 @@ async def test_failed_websocket_is_removed_immediately():
     websocket = FailingWebSocket()
 
     async def initialize():
-        return 0, {"type": "history", "logs": []}
+        return _history_snapshot()
 
     await broadcaster.connect(websocket, initialize)
     await broadcaster.broadcast({"message": "test"}, log_id=1)
@@ -171,7 +177,7 @@ async def test_slow_websocket_does_not_block_other_connections():
     fast_websocket = RecordingWebSocket()
 
     async def initialize():
-        return 0, {"type": "history", "logs": []}
+        return _history_snapshot()
 
     await broadcaster.connect(slow_websocket, initialize)
     await broadcaster.connect(fast_websocket, initialize)
@@ -190,12 +196,50 @@ async def test_slow_websocket_does_not_block_other_connections():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("after_id", [0, 11])
+async def test_system_logs_websocket_history_matches_snapshot_fixture(monkeypatch, after_id):
+    actual_snapshots = []
+
+    async def fake_get_latest_id(_db):
+        return after_id
+
+    async def fake_get_recent_through_id(_db, *, through_id, limit):
+        assert through_id == after_id
+        assert limit == 100
+        return []
+
+    async def fake_connect(_websocket, initialize):
+        actual_snapshots.append(await initialize())
+
+    async def fake_disconnect(_websocket):
+        return None
+
+    class DisconnectingWebSocket:
+        query_params = {}
+
+        async def receive_text(self):
+            raise WebSocketDisconnect()
+
+    monkeypatch.setattr(system_api.log_broadcaster, "connect", fake_connect)
+    monkeypatch.setattr(system_api.log_broadcaster, "disconnect", fake_disconnect)
+    monkeypatch.setattr(system_api.system_log_crud, "get_latest_id", fake_get_latest_id)
+    monkeypatch.setattr(system_api.system_log_crud, "get_recent_through_id", fake_get_recent_through_id)
+
+    await system_api.system_logs_websocket(DisconnectingWebSocket(), db=object())
+
+    expected = (after_id, {"type": "history", "logs": []})
+    actual = actual_snapshots[0]
+    assert actual == expected
+    assert _history_snapshot(after_id) == expected
+
+
+@pytest.mark.asyncio
 async def test_messages_are_sent_in_order_per_connection():
     broadcaster = LogBroadcaster()
     websocket = RecordingWebSocket()
 
     async def initialize():
-        return 0, {"type": "history", "logs": []}
+        return _history_snapshot()
 
     await broadcaster.connect(websocket, initialize)
     try:

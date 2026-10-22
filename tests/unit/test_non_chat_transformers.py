@@ -23,6 +23,7 @@ from app.transformers.openai import (
 from app.transformers.openai import (
     image_generation as image_generation_module,
 )
+from tests.unit.response_test_support import image_generation_payload
 
 
 class _FakeAiohttpResponse:
@@ -268,6 +269,34 @@ async def test_openai_image_references_select_json_or_multipart_transport(
         assert part.get_filename() == filename
         assert part.get_content_type() == mime_type
         assert part.get_payload(decode=True) == data
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("url", "https://example.invalid/apple.png"),
+        ("b64_json", "aGVsbG8="),
+    ],
+)
+@pytest.mark.asyncio
+async def test_openai_image_client_preserves_response_payload(
+    monkeypatch,
+    field: str,
+    value: str,
+) -> None:
+    expected = {"model": "image-model", "data": [{field: value}]}
+    _patch_fake_image_http(monkeypatch, response_text=json.dumps(expected))
+
+    actual = await ImageGenerationClient.generate_image(
+        api_key="key",
+        base_url="https://example.invalid/v1",
+        model_id="image-model",
+        protocol="openai_image",
+        prompt="a cat",
+    )
+
+    assert actual == expected
+    assert image_generation_payload("image-model", **{field: value}) == expected
 
 
 @pytest.mark.parametrize(

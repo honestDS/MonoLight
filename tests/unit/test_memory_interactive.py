@@ -17,6 +17,7 @@ from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
 from tests.memory_recall_support import memory_recall_payload
+from tests.unit.response_test_support import memory_content_too_long_payload, memory_mutation_payload
 
 
 class _Session:
@@ -547,7 +548,7 @@ async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_sourc
         return InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id=tool_call.id,
-            content='{"operation":"create","status":"accepted"}',
+            content=json.dumps(memory_mutation_payload("create", job_id=91), ensure_ascii=False, separators=(",", ":")),
         )
 
     _install_dispatcher_stubs(
@@ -612,9 +613,9 @@ async def test_formal_non_stream_memory_content_too_long_retries_same_fact_witho
         event_log.append(f"tool:{tool_call.id}")
         try:
             if tool_call.id == first_call.id:
-                content = '{"operation":"create","status":"content_too_long","actual_tokens":161,"max_tokens":160,"retryable":true}'
+                content = json.dumps(memory_content_too_long_payload("create", actual_tokens=161), ensure_ascii=False, separators=(",", ":"))
             elif tool_call.id == second_call.id:
-                content = '{"operation":"create","status":"accepted","job_id":91}'
+                content = json.dumps(memory_mutation_payload("create", job_id=91), ensure_ascii=False, separators=(",", ":"))
             else:
                 raise AssertionError(f"unexpected memory tool call: {tool_call.id}")
             return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=content)
@@ -651,7 +652,13 @@ async def test_formal_non_stream_memory_content_too_long_retries_same_fact_witho
     }
     third_request_messages = request_log[2]["messages"]
     second_tool_result = next(message for message in third_request_messages if message.tool_call_id == second_call.id)
-    assert json.loads(second_tool_result.content) == {"operation": "create", "status": "accepted", "job_id": 91}
+    assert json.loads(second_tool_result.content) == {
+        "operation": "create",
+        "status": "accepted",
+        "job_id": 91,
+        "memory_id": None,
+        "current_version": None,
+    }
     assert [tool_call.id for tool_call in execution_calls] == [first_call.id, second_call.id]
     assert [tool_call.arguments["content"] for tool_call in execution_calls] == [long_content, factual_content]
     assert len(factual_content) < len(long_content)
@@ -704,7 +711,7 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
         return InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id=tool_call.id,
-            content='{"operation":"create","status":"content_too_long","actual_tokens":161,"max_tokens":160,"retryable":true}',
+            content=json.dumps(memory_content_too_long_payload("create", actual_tokens=161), ensure_ascii=False, separators=(",", ":")),
         )
 
     _install_dispatcher_stubs(

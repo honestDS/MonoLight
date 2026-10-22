@@ -5,6 +5,7 @@ from app.api.v1 import channels
 from app.core.constants import ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID
 from app.models.channel import ModelProtocol
 from app.models.message import InternalMessage, InternalResponse, MessageRole
+from tests.unit.response_test_support import image_generation_payload
 
 
 def test_channel_chat_request_defaults_to_non_stream() -> None:
@@ -172,10 +173,7 @@ async def test_channel_image_generation_returns_latency(monkeypatch) -> None:
 
     async def generate_image(**kwargs):
         calls.update(kwargs)
-        return {
-            "model": "image-model",
-            "data": [{"url": "https://example.invalid/apple.png"}],
-        }
+        return image_generation_payload("image-model", url="https://example.invalid/apple.png")
 
     monkeypatch.setattr(channels.ImageGenerationClient, "generate_image", generate_image)
     clock = iter((30.0, 30.4567))

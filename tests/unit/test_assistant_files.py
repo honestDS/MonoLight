@@ -26,6 +26,7 @@ from app.core.utils.assistant_files import (
 )
 from app.core.utils.dispatcher.process_markdown_response import process_markdown_response
 from app.models.message import InternalGeneratedImage, InternalMessage, MessageRole
+from tests.unit.response_test_support import llm_response_payload
 
 
 def _encoded_image(image_format: str) -> tuple[str, bytes]:
@@ -157,18 +158,19 @@ def test_weixin_event_rejects_files_from_legacy_content():
 
 
 def test_weixin_llm_response_only_trusts_top_level_files():
-    top_level_file = {"id": "file-1", "name": "new.png"}
-    legacy_file = {"id": "file-2", "name": "legacy.png"}
-    response = {
-        "files": [top_level_file],
-        "choices": [
-            {
-                "message": {
-                    "content": build_assistant_files_content("回复文本", [top_level_file, legacy_file]),
-                }
-            }
-        ],
+    top_level_file = {
+        "id": "file-1",
+        "name": "new.png",
+        "mime_type": "image/png",
+        "size": 1,
+        "download_url": "/files/file-1",
+        "previewable": False,
     }
+    legacy_file = {"id": "file-2", "name": "legacy.png"}
+    response = llm_response_payload(
+        build_assistant_files_content("回复文本", [top_level_file, legacy_file]),
+        files=[top_level_file],
+    )
 
     assert extract_reply_text(response) == "回复文本"
     assert extract_reply_files(response) == [top_level_file]
