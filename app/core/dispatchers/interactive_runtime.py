@@ -238,6 +238,7 @@ async def dispatch_interactive(
                             audio_understanding=state.audio_understanding,
                             video_understanding=state.video_understanding,
                             is_history=is_history,
+                            tool_config=state.cfg.tool,
                         )
 
                 max_turns = state.max_turns

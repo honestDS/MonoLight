@@ -15,7 +15,7 @@ from app.core.utils.dispatcher.save_assistant_message import save_assistant_mess
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalResponse, Message, MessageResponse, MessageRole, MessageType
-from app.models.profile import Profile
+from app.models.profile import Profile, ToolConfig
 from app.models.session import ChatSession
 from app.providers.llm.client import LLMClient
 from app.transformers.openai.base import BaseOpenAITransformer
@@ -721,7 +721,7 @@ async def test_real_channel_fallback_preserves_persisted_provider_state(
             uid=UID,
             session_id=SESSION_ID,
             profile=profile,
-            cfg=SimpleNamespace(),
+            cfg=SimpleNamespace(tool=ToolConfig()),
             messages=history,
             checkpoint_state=SimpleNamespace(
                 upper_message_id=None,
@@ -861,7 +861,7 @@ def _build_reasoning_effort_state(
         uid=uid,
         session_id=session_id,
         profile=profile,
-        cfg=SimpleNamespace(),
+        cfg=SimpleNamespace(tool=ToolConfig()),
         messages=messages,
         checkpoint_state=SimpleNamespace(
             upper_message_id=None,

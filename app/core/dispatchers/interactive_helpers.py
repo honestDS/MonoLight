@@ -23,6 +23,7 @@ from app.core.utils.dispatcher.markdown_instruction import ensure_user_runtime_i
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, MessageRole
+from app.models.profile import ToolConfig
 
 
 def collect_pending_multimodal_file_inputs(messages: list[InternalMessage]) -> list[dict[str, str]]:
@@ -60,6 +61,7 @@ def build_pending_multimodal_input_message(
     image_understanding: bool,
     audio_understanding: bool,
     video_understanding: bool,
+    tool_config: ToolConfig | None = None,
 ) -> InternalMessage | None:
     if not pending_inputs:
         return None
@@ -73,6 +75,7 @@ def build_pending_multimodal_input_message(
         image_understanding=image_understanding,
         audio_understanding=audio_understanding,
         video_understanding=video_understanding,
+        tool_config=tool_config,
         is_history=False,
     )
 

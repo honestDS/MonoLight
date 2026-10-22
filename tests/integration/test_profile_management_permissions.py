@@ -1265,3 +1265,168 @@ async def test_admin_partial_update_rejects_invalid_merged_config_without_mutati
     payload = _assert_standard(response, 422)
     assert expected_location in payload["message"]
     assert await _profile_snapshot(session_factory) == before
+
+
+@pytest.mark.asyncio
+async def test_regular_user_image_compression_config_is_persisted_across_partial_updates(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, _profile_ids = api_context
+    before = await _profile_snapshot(session_factory)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await _create_profile(
+            client,
+            _token("user-a"),
+            {
+                "name": "image-compression-persistence",
+                "configs": {"tool": {"image_compression_enabled": False, "image_compression_threshold_kb": 1}},
+            },
+        )
+        created = _assert_profile_success(create_response)
+        profile_id = created["id"]
+        assert created["configs"]["tool"]["image_compression_enabled"] is False
+        assert created["configs"]["tool"]["image_compression_threshold_kb"] == 1
+
+        after_create = await _profile_snapshot(session_factory)
+        persisted = next(row for row in after_create if row["id"] == profile_id)
+        assert persisted["configs"] == created["configs"]
+        assert persisted["configs"]["tool"]["image_compression_enabled"] is False
+        assert persisted["configs"]["tool"]["image_compression_threshold_kb"] == 1
+        assert tuple(row for row in after_create if row["id"] != profile_id) == before
+
+        threshold_response = await _update_profile(
+            client,
+            _token("user-a"),
+            profile_id,
+            {"configs": {"tool": {"image_compression_threshold_kb": 2048}}},
+        )
+        threshold_data = _assert_profile_success(threshold_response)
+        assert threshold_data["configs"]["tool"]["image_compression_enabled"] is False
+        assert threshold_data["configs"]["tool"]["image_compression_threshold_kb"] == 2048
+        after_threshold = await _profile_snapshot(session_factory)
+        persisted = next(row for row in after_threshold if row["id"] == profile_id)
+        assert persisted["configs"] == threshold_data["configs"]
+        assert persisted["configs"]["tool"]["image_compression_enabled"] is False
+        assert persisted["configs"]["tool"]["image_compression_threshold_kb"] == 2048
+        assert tuple(row for row in after_threshold if row["id"] != profile_id) == before
+
+        timeout_response = await _update_profile(
+            client,
+            _token("user-a"),
+            profile_id,
+            {"configs": {"tool": {"tool_timeout": 31.0}}},
+        )
+        timeout_data = _assert_profile_success(timeout_response)
+        assert timeout_data["configs"]["tool"]["image_compression_enabled"] is False
+        assert timeout_data["configs"]["tool"]["image_compression_threshold_kb"] == 2048
+        assert timeout_data["configs"]["tool"]["tool_timeout"] == 31.0
+        after_timeout = await _profile_snapshot(session_factory)
+        persisted = next(row for row in after_timeout if row["id"] == profile_id)
+        assert persisted["configs"] == timeout_data["configs"]
+        assert tuple(row for row in after_timeout if row["id"] != profile_id) == before
+
+        enable_response = await _update_profile(
+            client,
+            _token("user-a"),
+            profile_id,
+            {"configs": {"tool": {"image_compression_enabled": True}}},
+        )
+        enable_data = _assert_profile_success(enable_response)
+        assert enable_data["configs"]["tool"]["image_compression_enabled"] is True
+        assert enable_data["configs"]["tool"]["image_compression_threshold_kb"] == 2048
+        after_enable = await _profile_snapshot(session_factory)
+        persisted = next(row for row in after_enable if row["id"] == profile_id)
+        assert persisted["configs"] == enable_data["configs"]
+        assert tuple(row for row in after_enable if row["id"] != profile_id) == before
+
+        list_response = await client.get(
+            "/api/v1/profiles/list",
+            headers={"Authorization": f"Bearer {_token('user-a')}"},
+        )
+
+    assert list_response.status_code == 200
+    listed = next(item for item in list_response.json()["data"]["items"] if item["id"] == profile_id)
+    assert listed["configs"]["tool"]["image_compression_enabled"] is True
+    assert listed["configs"]["tool"]["image_compression_threshold_kb"] == 2048
+    assert next(row for row in await _profile_snapshot(session_factory) if row["id"] == profile_id)["configs"] == listed["configs"]
+
+
+@pytest.mark.asyncio
+async def test_image_compression_defaults_apply_to_config_without_new_fields_and_flat_input_persists(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, _profile_ids = api_context
+    before = await _profile_snapshot(session_factory)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        default_response = await _create_profile(
+            client,
+            _token("user-a"),
+            {"name": "image-compression-defaults", "configs": {}},
+        )
+        default_data = _assert_profile_success(default_response)
+        default_id = default_data["id"]
+        assert default_data["configs"]["tool"]["image_compression_enabled"] is True
+        assert default_data["configs"]["tool"]["image_compression_threshold_kb"] == 500
+        after_default = await _profile_snapshot(session_factory)
+        persisted_default = next(row for row in after_default if row["id"] == default_id)
+        assert persisted_default["configs"] == default_data["configs"]
+        assert persisted_default["configs"]["tool"]["image_compression_enabled"] is True
+        assert persisted_default["configs"]["tool"]["image_compression_threshold_kb"] == 500
+        assert tuple(row for row in after_default if row["id"] != default_id) == before
+
+        flat_response = await _create_profile(
+            client,
+            _token("user-a"),
+            {
+                "name": "image-compression-flat-input",
+                "configs": {"image_compression_enabled": False, "image_compression_threshold_kb": 256},
+            },
+        )
+        flat_data = _assert_profile_success(flat_response)
+        flat_id = flat_data["id"]
+        assert flat_data["configs"]["tool"]["image_compression_enabled"] is False
+        assert flat_data["configs"]["tool"]["image_compression_threshold_kb"] == 256
+        after_flat = await _profile_snapshot(session_factory)
+        persisted_flat = next(row for row in after_flat if row["id"] == flat_id)
+        assert persisted_flat["configs"] == flat_data["configs"]
+        assert persisted_flat["configs"]["tool"]["image_compression_enabled"] is False
+        assert persisted_flat["configs"]["tool"]["image_compression_threshold_kb"] == 256
+        assert tuple(row for row in after_flat if row["id"] not in {default_id, flat_id}) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("image_compression_enabled", "false", id="enabled-string-false"),
+        pytest.param("image_compression_enabled", 0, id="enabled-zero"),
+        pytest.param("image_compression_enabled", None, id="enabled-null"),
+        pytest.param("image_compression_threshold_kb", 0, id="threshold-zero"),
+        pytest.param("image_compression_threshold_kb", -1, id="threshold-negative"),
+        pytest.param("image_compression_threshold_kb", True, id="threshold-boolean"),
+        pytest.param("image_compression_threshold_kb", 1.5, id="threshold-float"),
+        pytest.param("image_compression_threshold_kb", "500", id="threshold-string"),
+        pytest.param("image_compression_threshold_kb", None, id="threshold-null"),
+    ],
+)
+async def test_regular_user_image_compression_invalid_values_return_422_without_mutation(
+    field: str,
+    value: Any,
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, profile_ids = api_context
+    target_id = profile_ids["user-a"]["target"]
+    before = await _profile_snapshot(session_factory)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await _update_profile(
+            client,
+            _token("user-a"),
+            target_id,
+            {"configs": {"tool": {field: value}}},
+        )
+
+    _assert_standard(response, 422)
+    assert await _profile_snapshot(session_factory) == before

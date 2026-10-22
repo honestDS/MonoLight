@@ -31,6 +31,7 @@ from sqlmodel import (
 from app.core.constants import (
     AUDIT_DEFAULT_DEPTH,
     AUDIT_MAX_DEPTH,
+    DEFAULT_IMAGE_COMPRESSION_THRESHOLD_KB,
     ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED,
     ERR_PROFILE_CHAT_HISTORY_CANDIDATE_K_TOO_SMALL,
@@ -116,6 +117,12 @@ class ToolConfig(BaseModel):
 
     tool_timeout: float = PydanticField(30.0, gt=0, description="工具执行超时时间（秒）")
     image_generation_timeout: float = PydanticField(60.0, gt=0, le=600, description="图像生成工具执行超时时间（秒）")
+    image_compression_enabled: StrictBool = PydanticField(True, description="是否压缩发送给模型的图片附件")
+    image_compression_threshold_kb: StrictInt = PydanticField(
+        DEFAULT_IMAGE_COMPRESSION_THRESHOLD_KB,
+        ge=1,
+        description="图片压缩触发阈值（KB，1 KB = 1024 字节），仅原文件超过阈值时压缩，不保证输出大小",
+    )
     max_parallel_tools: int = PydanticField(5, ge=1, le=20, description="允许的最大并行工具调用数量")
     background_task_max_concurrency: int = PydanticField(2, ge=1, le=20, description="允许的最大后台任务并发数量")
     scheduled_task_max_concurrency: int = PydanticField(4, ge=1, le=20, description="允许的最大计划任务回复并发数量")
@@ -274,6 +281,8 @@ class ProfileConfig(BaseModel):
             "tool": [
                 "tool_timeout",
                 "image_generation_timeout",
+                "image_compression_enabled",
+                "image_compression_threshold_kb",
                 "max_parallel_tools",
                 "background_task_max_concurrency",
                 "scheduled_task_max_concurrency",
@@ -401,6 +410,8 @@ PROFILE_EXAMPLE = {
         "tool": {
             "tool_timeout": 30,
             "image_generation_timeout": 60,
+            "image_compression_enabled": True,
+            "image_compression_threshold_kb": DEFAULT_IMAGE_COMPRESSION_THRESHOLD_KB,
             "max_parallel_tools": 5,
             "background_task_max_concurrency": 2,
             "scheduled_task_max_concurrency": 4,
