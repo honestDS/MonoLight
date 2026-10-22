@@ -10,7 +10,7 @@ from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
 )
 from app.models.channel import ChannelConfig
-from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
 from tests.memory_recall_support import memory_recall_payload
 
 
@@ -434,7 +434,9 @@ async def test_update_output_metadata_preserves_session_cache_metrics_and_accumu
         events.append(event)
 
     context.stream_event_callback = stream_event_callback
-    response = SimpleNamespace(
+    response = InternalResponse(
+        message=InternalMessage(role=MessageRole.ASSISTANT, content=""),
+        model="model-1",
         usage={
             "prompt_tokens": 500,
             "cached_tokens": 300,

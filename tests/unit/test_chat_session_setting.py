@@ -14,6 +14,7 @@ from app.core.exceptions import ForbiddenException
 from app.core.utils import session as session_utils
 from app.models.message import ChatCompletionRequest
 from app.models.session import ChatSession
+from tests.unit.response_test_support import llm_response_payload
 
 
 class FakeDb:
@@ -190,7 +191,7 @@ async def test_http_non_stream_response_includes_latest_session_todo(monkeypatch
 
     async def wait_for_result(work_id):
         assert work_id == 7
-        return {"choices": []}
+        return llm_response_payload("reply")
 
     async def get_plan(db, *, uid, session_id):
         assert uid == "user-1"

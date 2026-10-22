@@ -17,6 +17,8 @@ from app.core.terminal import (
     TerminalSessionStatus,
     TerminalWriteResult,
 )
+from app.core.terminal.pty_base import PtyResourceSnapshot
+from app.core.terminal.session_runtime_commands import TerminalSessionRuntimeCommands
 from app.core.tools import (
     SHELL_COMPANION_TOOL_SCHEMAS,
     SHELL_TOOL_SCHEMA,
@@ -33,6 +35,7 @@ from app.core.tools.terminal import (
 )
 from app.core.utils.dispatcher.process_single_tool import get_handed_off_terminal_session_id
 from app.models.profile import Profile, ProfileConfig
+from app.models.terminal_session import TerminalControlCommand
 
 TERMINAL_SESSION_ID = "t" * 32
 _VALID_HANDOFF_PAYLOAD = {
@@ -78,6 +81,60 @@ def _snapshot(*, next_offset: int = 0, status: TerminalSessionStatus = TerminalS
             next_sequence=1 if next_offset == 0 else 2,
         ),
     )
+
+
+def _write_command_result(*, bytes_written: int, output_offset_before_write: int) -> dict[str, int]:
+    return {
+        "bytes_written": bytes_written,
+        "output_offset_before_write": output_offset_before_write,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("data", "bytes_written", "output_offset_before_write", "expected"),
+    [
+        ("abcde", 5, 8, {"bytes_written": 5, "output_offset_before_write": 8}),
+        ("wxyz", 4, 7, {"bytes_written": 4, "output_offset_before_write": 7}),
+    ],
+)
+async def test_terminal_write_command_result_matches_runtime(data, bytes_written, output_offset_before_write, expected):
+    class FakeDriver:
+        def resource_snapshot(self):
+            return PtyResourceSnapshot(
+                pid=123,
+                running=True,
+                eof=False,
+                exit_code=None,
+                output_buffer=_snapshot(next_offset=output_offset_before_write).output_buffer,
+                retained_bytes=output_offset_before_write,
+                dropped_bytes=0,
+            )
+
+        async def write(self, received_data):
+            self.received_data = received_data
+            return len(received_data)
+
+    driver = FakeDriver()
+    runtime = TerminalSessionRuntimeCommands()
+    runtime._driver = driver
+    command = TerminalControlCommand(
+        terminal_session_id=TERMINAL_SESSION_ID,
+        request_id="write-result-test",
+        action=TerminalAction.WRITE,
+        payload={"data": data},
+        payload_hash="0" * 64,
+    )
+
+    actual = await runtime._execute_command(command)
+    helper_result = _write_command_result(
+        bytes_written=bytes_written,
+        output_offset_before_write=output_offset_before_write,
+    )
+
+    assert driver.received_data == data
+    assert actual == expected
+    assert helper_result == expected
 
 
 def test_get_handed_off_terminal_session_id_accepts_complete_handoff_result():
@@ -210,7 +267,7 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     command_results = {}
     command_kinds = {}
     wait_timeouts = []
-    write_result_payload = {"bytes_written": 5, "output_offset_before_write": 8}
+    write_result_payload = _write_command_result(bytes_written=5, output_offset_before_write=8)
 
     class FakeLoop:
         def time(self):
@@ -389,7 +446,7 @@ async def test_terminal_write_times_out_without_read_or_close(monkeypatch):
 
     async def wait_for_command_result(*args, **kwargs):
         clock[0] += 0.02
-        return {"bytes_written": 4, "output_offset_before_write": 7}
+        return _write_command_result(bytes_written=4, output_offset_before_write=7)
 
     monkeypatch.setattr(terminal_module.asyncio, "get_running_loop", lambda: FakeLoop())
     monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)

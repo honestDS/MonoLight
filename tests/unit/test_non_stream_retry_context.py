@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+from app.core.audit.service import AuditRoundResult
 from app.core.constants import ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, GOAL_EXECUTION_PHASE_RUNNING, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.dispatchers import interactive_helpers as interactive_helpers_module
@@ -19,11 +20,15 @@ from app.core.terminal.schemas import (
     TerminalOutputBufferState,
     TerminalSessionStatus,
 )
+from app.core.tools import todo as todo_module
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
+from app.models.audit import AuditRecordStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.models.profile import ToolConfig
+from app.models.session_todo import SessionTodoPlan
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
+from tests.unit.response_test_support import audit_confirmation_payload, multimodal_read_payload, pending_audit_tool_result
 
 
 class _Session:
@@ -1223,10 +1228,10 @@ async def _run_audited_interactive_dispatch(
             except StopIteration:
                 pass
         if selected_audit_result is _DEFAULT_AUDIT_RESULT:
-            selected_audit_result = SimpleNamespace(
-                may_execute=True,
+            selected_audit_result = AuditRoundResult(
                 audit_record_id=audit_record_id,
-                tool_results=[],
+                status=AuditRecordStatus.PASSED,
+                tool_results=(),
                 confirmation_payload=None,
             )
         if selected_audit_result is not None:
@@ -1461,6 +1466,18 @@ async def test_stream_emits_todo_update_even_when_tool_output_is_hidden(monkeypa
         name="manage_todo",
         arguments={"operation": "read"},
     )
+    executor = todo_module.ManageTodoExecutor(project_root=".", uid="user-1")
+    executor.set_runtime_context(db=object(), session_id="session-1")
+
+    async def read_session_todo(*_args, **_kwargs):
+        return True, SessionTodoPlan(
+            session_id="session-1",
+            uid="user-1",
+            revision=2,
+            todos=[{"content": "verify", "status": "in_progress"}],
+        )
+
+    monkeypatch.setattr(todo_module.session_todo_crud, "read", read_session_todo)
 
     async def save_checkpoint(_checkpoint):
         return None
@@ -1469,7 +1486,7 @@ async def test_stream_emits_todo_update_even_when_tool_output_is_hidden(monkeypa
         return InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id=current_tool_call.id,
-            content='{"status":"success","operation":"read","revision":2,"todos":[{"content":"verify","status":"in_progress"}]}',
+            content=await executor.execute(**current_tool_call.arguments),
         )
 
     async def persist_todo_snapshot(_db, *, uid, session_id, tool_results):
@@ -1889,13 +1906,7 @@ async def test_interactive_injects_read_multimodal_result_only_into_next_model_r
             role=MessageRole.TOOL,
             tool_call_id=current_tool_call.id,
             content=json.dumps(
-                {
-                    "type": "multimodal_file_read",
-                    "status": "success",
-                    "modality": "image",
-                    "path": str(image_path.resolve()),
-                    "message": tool_message,
-                },
+                multimodal_read_payload(image_path, message=tool_message),
                 ensure_ascii=False,
             ),
         )
@@ -1948,13 +1959,11 @@ async def test_interactive_injects_read_audio_result_only_when_audio_understandi
             role=MessageRole.TOOL,
             tool_call_id=current_tool_call.id,
             content=json.dumps(
-                {
-                    "type": "multimodal_file_read",
-                    "status": "success",
-                    "modality": "audio",
-                    "path": str(audio_path.resolve()),
-                    "message": "下一条 role=user 消息不是用户新输入",
-                },
+                multimodal_read_payload(
+                    audio_path,
+                    modality="audio",
+                    message="下一条 role=user 消息不是用户新输入",
+                ),
                 ensure_ascii=False,
             ),
         )
@@ -1997,13 +2006,10 @@ async def test_interactive_resume_reinjects_multimodal_image_from_messages_with_
         role=MessageRole.TOOL,
         tool_call_id=tool_call.id,
         content=json.dumps(
-            {
-                "type": "multimodal_file_read",
-                "status": "success",
-                "modality": "image",
-                "path": str(image_path.resolve()),
-                "message": "下一条 role=user 消息不是用户新输入",
-            },
+            multimodal_read_payload(
+                image_path,
+                message="下一条 role=user 消息不是用户新输入",
+            ),
             ensure_ascii=False,
         ),
     )
@@ -2180,23 +2186,11 @@ async def test_interactive_keeps_active_binding_when_audit_round_finish_fails(mo
 
 @pytest.mark.asyncio
 async def test_streamed_pending_audit_publishes_tool_events_before_confirmation(monkeypatch):
-    confirmation_payload = {
-        "type": "audit_confirmation",
-        "audit_record_id": 42,
-        "summary": "Confirm command",
-        "risk": 8,
-        "status": "pending",
-    }
-    audit_result = SimpleNamespace(
-        may_execute=False,
+    confirmation_payload = audit_confirmation_payload(42, risk=8, confirmation_mode="high_risk_override")
+    audit_result = AuditRoundResult(
         audit_record_id=42,
-        tool_results=[
-            InternalMessage(
-                role=MessageRole.TOOL,
-                tool_call_id="call-1",
-                content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
-            )
-        ],
+        status=AuditRecordStatus.PENDING,
+        tool_results=(pending_audit_tool_result("call-1"),),
         confirmation_payload=confirmation_payload,
     )
 
@@ -2291,17 +2285,11 @@ async def test_pending_audit_cancels_unpersisted_confirmation_when_batch_arrives
         ),
         source_message_ids=(32, 30, 31),
     )
-    audit_result = SimpleNamespace(
-        may_execute=False,
+    audit_result = AuditRoundResult(
         audit_record_id=42,
-        tool_results=[
-            InternalMessage(
-                role=MessageRole.TOOL,
-                tool_call_id="call-1",
-                content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
-            )
-        ],
-        confirmation_payload={"type": "audit_confirmation", "audit_record_id": 42, "status": "pending"},
+        status=AuditRecordStatus.PENDING,
+        tool_results=(pending_audit_tool_result("call-1"),),
+        confirmation_payload=audit_confirmation_payload(42),
     )
     checkpoints = []
     generated_calls = []
@@ -2475,23 +2463,11 @@ async def test_allowed_tool_executes_once_before_appended_batch_reaches_next_mod
 
 @pytest.mark.asyncio
 async def test_streamed_pending_audit_bundle_is_superseded_when_batch_arrives_during_persistence(monkeypatch):
-    confirmation_payload = {
-        "type": "audit_confirmation",
-        "audit_record_id": 42,
-        "summary": "Confirm command",
-        "risk": 8,
-        "status": "pending",
-    }
-    audit_result = SimpleNamespace(
-        may_execute=False,
+    confirmation_payload = audit_confirmation_payload(42, risk=8, confirmation_mode="high_risk_override")
+    audit_result = AuditRoundResult(
         audit_record_id=42,
-        tool_results=[
-            InternalMessage(
-                role=MessageRole.TOOL,
-                tool_call_id="call-1",
-                content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
-            )
-        ],
+        status=AuditRecordStatus.PENDING,
+        tool_results=(pending_audit_tool_result("call-1"),),
         confirmation_payload=confirmation_payload,
     )
     persistence_started = asyncio.Event()
@@ -2627,17 +2603,11 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
     audit_started = asyncio.Event()
     release_audit = asyncio.Event()
     published_events = []
-    audit_result = SimpleNamespace(
-        may_execute=False,
+    audit_result = AuditRoundResult(
         audit_record_id=42,
-        tool_results=[
-            InternalMessage(
-                role=MessageRole.TOOL,
-                tool_call_id="call-1",
-                content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
-            )
-        ],
-        confirmation_payload={"type": "audit_confirmation", "audit_record_id": 42, "status": "pending"},
+        status=AuditRecordStatus.PENDING,
+        tool_results=(pending_audit_tool_result("call-1"),),
+        confirmation_payload=audit_confirmation_payload(42),
     )
 
     async def wait_during_audit():
@@ -2758,34 +2728,22 @@ async def test_interactive_batches_advance_confirmation_and_summary_boundaries_w
         source_message_ids=(122, 120),
     )
     pending_results = [
-        SimpleNamespace(
-            may_execute=False,
+        AuditRoundResult(
             audit_record_id=42,
-            tool_results=[
-                InternalMessage(
-                    role=MessageRole.TOOL,
-                    tool_call_id="call-pending-a",
-                    content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
-                )
-            ],
-            confirmation_payload={"type": "audit_confirmation", "audit_record_id": 42, "status": "pending"},
+            status=AuditRecordStatus.PENDING,
+            tool_results=(pending_audit_tool_result("call-pending-a"),),
+            confirmation_payload=audit_confirmation_payload(42),
         ),
-        SimpleNamespace(
-            may_execute=False,
+        AuditRoundResult(
             audit_record_id=43,
-            tool_results=[
-                InternalMessage(
-                    role=MessageRole.TOOL,
-                    tool_call_id="call-pending-b",
-                    content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
-                )
-            ],
-            confirmation_payload={"type": "audit_confirmation", "audit_record_id": 43, "status": "pending"},
+            status=AuditRecordStatus.PENDING,
+            tool_results=(pending_audit_tool_result("call-pending-b"),),
+            confirmation_payload=audit_confirmation_payload(43),
         ),
-        SimpleNamespace(
-            may_execute=True,
+        AuditRoundResult(
             audit_record_id=44,
-            tool_results=[],
+            status=AuditRecordStatus.PASSED,
+            tool_results=(),
             confirmation_payload=None,
         ),
     ]

@@ -37,6 +37,7 @@ from app.core.utils.dispatcher import (
     process_single_tool as process_single_tool_module,
 )
 from app.models.profile import Profile, ProfileConfig
+from tests.unit.response_test_support import image_generation_payload
 
 
 def _image_bytes(image_format: str) -> bytes:
@@ -155,10 +156,10 @@ def image_generation_executor(tmp_path, monkeypatch):
 
     async def fake_generate_image(**kwargs):
         remote_calls.append(kwargs)
-        return {
-            "model": "image-model",
-            "data": [{"b64_json": base64.b64encode(generated_bytes).decode("ascii")}],
-        }
+        return image_generation_payload(
+            "image-model",
+            b64_json=base64.b64encode(generated_bytes).decode("ascii"),
+        )
 
     async def commit():
         return None
@@ -282,10 +283,7 @@ async def test_image_generation_releases_database_connection_before_remote_call(
     async def generate_image(**kwargs):
         generate_calls.append(list(commits))
         generated_protocols.append(kwargs["protocol"])
-        return {
-            "model": "image-model",
-            "data": [{"b64_json": "aGVsbG8="}],
-        }
+        return image_generation_payload("image-model", b64_json="aGVsbG8=")
 
     async def save_base64_image(_payload):
         return {
@@ -682,10 +680,10 @@ async def test_image_generation_falls_back_after_primary_failure(
         }
 
     def secondary_action(_kwargs):
-        return {
-            "model": "secondary-model",
-            "data": [{"b64_json": base64.b64encode(generated_bytes).decode("ascii")}],
-        }
+        return image_generation_payload(
+            "secondary-model",
+            b64_json=base64.b64encode(generated_bytes).decode("ascii"),
+        )
 
     def rewrite_sources():
         first_path.write_bytes(_image_bytes("WEBP"))
@@ -871,10 +869,7 @@ async def test_image_generation_downloads_url_with_channel_proxy(
 
     async def fake_generate_image(**kwargs):
         generation_calls.append(kwargs)
-        return {
-            "model": "image-model",
-            "data": [{"url": image_url}],
-        }
+        return image_generation_payload("image-model", url=image_url)
 
     class FakeSession:
         def __init__(self, **kwargs):
@@ -1046,10 +1041,7 @@ async def test_image_generation_fallback_download_uses_secondary_channel_proxy(
             "primary-model": primary_url,
             "secondary-model": secondary_url,
         }[kwargs["model_id"]]
-        return {
-            "model": kwargs["model_id"],
-            "data": [{"url": image_url}],
-        }
+        return image_generation_payload(kwargs["model_id"], url=image_url)
 
     class FakeSession:
         def __init__(self, **_kwargs):

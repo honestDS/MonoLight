@@ -1,6 +1,5 @@
 import hashlib
 from collections.abc import Sequence
-from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -9,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.crud.memory.job import memory_job_crud
 from app.core.crud.memory.store import memory_record_crud, memory_store_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
+from app.core.retrieval.schemas import RetrievalHit
 from app.core.utils.time import get_local_time
 from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
@@ -25,6 +25,7 @@ from app.models.memory import (
 )
 from app.models.profile import Profile
 from app.providers.database.time import get_database_time
+from app.providers.vector.chroma import CollectionValidationResult
 
 MEMORY_TABLES = (
     Profile.__table__,
@@ -89,10 +90,10 @@ class MemoryVectorBackend:
         expected_dimension: int | None = None,
         sample_size: int = 1,
         **_kwargs: Any,
-    ) -> SimpleNamespace:
+    ) -> CollectionValidationResult:
         collection = self.collections.get(collection_name)
         if collection is None:
-            return SimpleNamespace(
+            return CollectionValidationResult(
                 exists=False,
                 valid=False,
                 count=None,
@@ -141,7 +142,7 @@ class MemoryVectorBackend:
         elif expected_dimension is not None:
             errors.append("sample_dimension_missing")
 
-        return SimpleNamespace(
+        return CollectionValidationResult(
             exists=True,
             valid=not errors,
             count=count,
@@ -301,8 +302,8 @@ class MemoryVectorBackend:
         _query: str,
         limit: int,
         **_kwargs: Any,
-    ) -> list[SimpleNamespace]:
-        hits: list[SimpleNamespace] = []
+    ) -> list[RetrievalHit]:
+        hits: list[RetrievalHit] = []
         if limit <= 0:
             return hits
         collection = self.collections.get(collection_name)
@@ -310,7 +311,7 @@ class MemoryVectorBackend:
             return hits
         for item_id, item in collection["items"].items():
             hits.append(
-                SimpleNamespace(
+                RetrievalHit(
                     id=item_id,
                     content=item["document"],
                     metadata=dict(item["metadata"]),

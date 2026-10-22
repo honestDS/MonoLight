@@ -12,6 +12,7 @@ from app.core.utils.dispatcher import truncate_tool_result as truncate_tool_resu
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import Profile, ProfileConfig
 from tests.memory_recall_support import memory_recall_payload
+from tests.unit.response_test_support import knowledge_query_payload
 
 
 def test_tool_result_round_budget_uses_half_of_remaining_request_input(monkeypatch):
@@ -474,12 +475,7 @@ async def test_process_single_tool_preserves_recall_results_outside_tiny_result_
         payload["chat_history"][0]["content"] = history_text
         payload["chat_history"][1]["content"] = "assistant-history-" * 400 + "UNIQUE-ASSISTANT-HISTORY-END"
     else:
-        payload = {
-            "items": [
-                {"source": "guide.md", "content": first_text},
-                {"source": "other.md", "content": second_text},
-            ]
-        }
+        payload = knowledge_query_payload([("guide.md", first_text), ("other.md", second_text)])
     original_content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     content = await _process_fake_executor_result(

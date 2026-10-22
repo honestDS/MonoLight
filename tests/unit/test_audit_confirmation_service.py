@@ -33,7 +33,13 @@ from app.core.audit.service import (
     classify_audit_score,
     is_audit_configured,
 )
-from app.core.constants import DEFAULT_CHAT_MAX_TOKENS, MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_ROUND_SKIPPED
+from app.core.constants import (
+    DEFAULT_CHAT_MAX_TOKENS,
+    MSG_AUDIT_CONFIRMATION_IM,
+    MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM,
+    MSG_AUDIT_ROUND_SKIPPED,
+    MSG_AUDIT_WAITING_CONFIRMATION,
+)
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
 from app.core.prompts import AUDIT_SUMMARY_PROMPT
@@ -44,6 +50,7 @@ from app.models.audit import AuditToolConclusion
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
 from app.providers.llm.client import estimate_request_context_tokens
+from tests.unit.response_test_support import audit_confirmation_payload, pending_audit_tool_result
 
 
 def _profile_config() -> ProfileConfig:
@@ -60,6 +67,15 @@ def _profile_config() -> ProfileConfig:
             "other": {},
         }
     )
+
+
+def _auditor_response_context(results, *, file_reads=()):
+    return {"messages": []}, {
+        "content": json.dumps({"results": results}, ensure_ascii=False),
+        "file_reads": list(file_reads),
+        "shell_results": [],
+        "parsed": {"results": results},
+    }
 
 
 @pytest.mark.parametrize(
@@ -235,7 +251,7 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
         return SimpleNamespace(id=123)
 
     async def call_auditor(*_args, **_kwargs):
-        return {"messages": []}, {"parsed": {"results": [{"tool_call_id": "call-1", "score": 5, "reason": "confirm", "deny": False, "file_checks": []}]}}
+        return _auditor_response_context([{"tool_call_id": "call-1", "score": 5, "reason": "confirm", "deny": False, "file_checks": []}])
 
     async def summarize_pending(*_args, **_kwargs):
         return "Confirm command", {}
@@ -265,10 +281,37 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
     )
 
     assert result.status.value == "pending"
+    assert len(result.tool_results) == 1
+    expected_tool_result = {"status": "pending", "error": t(MSG_AUDIT_WAITING_CONFIRMATION)}
+    actual_tool_result = result.tool_results[0]
+    assert actual_tool_result.role == MessageRole.TOOL
+    assert actual_tool_result.tool_call_id == "call-1"
+    assert json.loads(actual_tool_result.content) == expected_tool_result
+    expected_tool_result_message = pending_audit_tool_result("call-1")
+    assert expected_tool_result_message.role == MessageRole.TOOL
+    assert expected_tool_result_message.tool_call_id == "call-1"
+    assert json.loads(expected_tool_result_message.content) == expected_tool_result
+
     expected_expires_at = fixed_now + timedelta(seconds=25)
+    expected = {
+        "type": "audit_confirmation",
+        "audit_record_id": 123,
+        "summary": "Confirm command",
+        "risk": 5,
+        "status": "pending",
+        "confirmation_mode": "standard",
+        "expires_at": expected_expires_at.isoformat(),
+        "plain_text": t(
+            MSG_AUDIT_CONFIRMATION_IM,
+            locale="zh",
+            summary="Confirm command",
+            score=5,
+            expires_in_seconds=25,
+        ),
+    }
     assert captured["expires_at"] == expected_expires_at
-    assert result.confirmation_payload["expires_at"] == expected_expires_at.isoformat()
-    assert result.confirmation_payload["confirmation_mode"] == "standard"
+    assert result.confirmation_payload == expected
+    assert audit_confirmation_payload(123, expires_at=expected_expires_at.isoformat()) == expected
     assert "25 秒后失效" in result.confirmation_payload["plain_text"]
     assert expected_expires_at.isoformat() not in result.confirmation_payload["plain_text"]
 
@@ -491,7 +534,7 @@ async def test_mixed_tool_round_audits_only_declared_calls_and_persists_full_rou
 
     async def call_auditor(*args, **_kwargs):
         captured["request_payload"] = args[2]
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "risk-call", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]}}
+        return _auditor_response_context([{"tool_call_id": "risk-call", "score": 0, "reason": "safe", "deny": False, "file_checks": []}])
 
     async def persist(*_args, **kwargs):
         captured.update(kwargs)
@@ -628,7 +671,7 @@ async def test_persistence_failure_does_not_reaccess_expired_record(monkeypatch,
         return record
 
     async def call_auditor(*_args, **_kwargs):
-        return {"messages": []}, {"parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]}}
+        return _auditor_response_context([{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}])
 
     async def fail_persistence(*_args, **_kwargs):
         record.expired = True
@@ -1039,7 +1082,21 @@ async def test_call_auditor_sends_adapted_file_tool_payload(monkeypatch, tmp_pat
             }
         ],
     }
-    await _call_auditor(FakeDb(), cfg, request_payload, tmp_path)
+    request_context, response_context = await _call_auditor(FakeDb(), cfg, request_payload, tmp_path)
+
+    expected_results = [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]
+    expected_response_context = {
+        "content": {"results": expected_results},
+        "file_reads": [],
+        "shell_results": [],
+        "parsed": {"results": expected_results},
+    }
+    assert {**response_context, "content": json.loads(response_context["content"])} == expected_response_context
+    _, constructed_response_context = _auditor_response_context(expected_results)
+    assert {**constructed_response_context, "content": json.loads(constructed_response_context["content"])} == expected_response_context
+    messages = request_context["messages"]
+    assert isinstance(messages, list)
+    assert [message["role"] for message in messages[:2]] == ["system", "user"]
 
     sent_payload = json.loads(calls[0]["messages"][1].content)
     sent_call = sent_payload["tool_calls"][0]
@@ -1422,9 +1479,22 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
     assert all(isinstance(call["request_context_tokens"], int) and call["request_context_tokens"] >= 0 for call in calls)
     assert json.loads(calls[0]["messages"][1].content)["working_directory"] == str(tmp_path)
     assert json.loads(calls[0]["messages"][1].content)["tool_calls"][0]["arguments"] == {"command": "python dynamic_target"}
+    expected_results = [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]
+    expected_response_context = {
+        "content": {"results": expected_results},
+        "file_reads": response_context["file_reads"],
+        "shell_results": [],
+        "parsed": {"results": expected_results},
+    }
+    assert {**response_context, "content": json.loads(response_context["content"])} == expected_response_context
+    _, constructed_response_context = _auditor_response_context(expected_results, file_reads=response_context["file_reads"])
+    assert {**constructed_response_context, "content": json.loads(constructed_response_context["content"])} == expected_response_context
     assert response_context["file_reads"][0]["content"] == "server evidence"
     assert response_context["file_reads"][0]["tool_call_id"] == "call-1"
-    assert any(message["role"] == "tool" for message in request_context["messages"])
+    messages = request_context["messages"]
+    assert isinstance(messages, list)
+    assert [message["role"] for message in messages[:2]] == ["system", "user"]
+    assert any(message["role"] == "tool" for message in messages)
 
 
 @pytest.mark.asyncio
@@ -1693,15 +1763,13 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
 
     async def call_auditor(*args, **_kwargs):
         captured["request_payload"] = args[2]
-        return {"messages": []}, {
-            "file_reads": [read],
-            "parsed": {
-                "results": [
-                    {"tool_call_id": "call-1", "score": 0, "reason": "review me", "deny": False, "file_checks": []},
-                    {"tool_call_id": "call-2", "score": 0, "reason": "safe", "deny": False, "file_checks": []},
-                ]
-            },
-        }
+        return _auditor_response_context(
+            [
+                {"tool_call_id": "call-1", "score": 0, "reason": "review me", "deny": False, "file_checks": []},
+                {"tool_call_id": "call-2", "score": 0, "reason": "safe", "deny": False, "file_checks": []},
+            ],
+            file_reads=[read],
+        )
 
     async def summarize_pending(*_args, **_kwargs):
         return "Confirm command", {}
@@ -1769,7 +1837,7 @@ async def test_service_does_not_classify_dynamic_script_command_or_change_model_
 
     async def call_auditor(*args, **_kwargs):
         captured["request_payload"] = args[2]
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": model_score, "reason": "model assessed command", "deny": False, "file_checks": []}]}}
+        return _auditor_response_context([{"tool_call_id": "call-1", "score": model_score, "reason": "model assessed command", "deny": False, "file_checks": []}])
 
     async def summarize_pending(*_args, **_kwargs):
         return "Model-selected confirmation summary", {}
@@ -1808,7 +1876,38 @@ async def test_service_does_not_classify_dynamic_script_command_or_change_model_
     assert captured["tool_details"][0]["conclusion"] == expected_status
     if expected_status == "pending":
         expected_mode = "high_risk_override" if model_score == 8 else "standard"
-        assert result.confirmation_payload["confirmation_mode"] == expected_mode
+        summary = "Model-selected confirmation summary"
+        expires_at = captured["expires_at"].isoformat()
+        timeout_seconds = cfg.security.audit_confirmation_timeout_seconds
+        expected = {
+            "type": "audit_confirmation",
+            "audit_record_id": 123,
+            "summary": summary,
+            "risk": model_score,
+            "status": "pending",
+            "confirmation_mode": expected_mode,
+            "expires_at": expires_at,
+            "plain_text": t(
+                MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM if expected_mode == "high_risk_override" else MSG_AUDIT_CONFIRMATION_IM,
+                locale="en",
+                summary=summary,
+                score=model_score,
+                expires_in_seconds=timeout_seconds,
+            ),
+        }
+        assert result.confirmation_payload == expected
+        assert (
+            audit_confirmation_payload(
+                123,
+                summary=summary,
+                risk=model_score,
+                confirmation_mode=expected_mode,
+                expires_at=expires_at,
+                timeout_seconds=timeout_seconds,
+                locale="en",
+            )
+            == expected
+        )
     if model_score == 8:
         plain_text = result.confirmation_payload["plain_text"].lower()
         assert "high-risk" in plain_text or "high risk" in plain_text or "高危" in plain_text
@@ -1836,7 +1935,7 @@ async def test_service_does_not_infer_missing_script_evidence_from_command_text(
 
     async def call_auditor(*args, **_kwargs):
         captured["request_payload"] = args[2]
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]}}
+        return _auditor_response_context([{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}])
 
     async def persist(*_args, **kwargs):
         captured.update(kwargs)
@@ -1885,7 +1984,7 @@ async def test_zero_score_for_ordinary_command_stays_zero_without_summary_or_con
         return SimpleNamespace(id=125)
 
     async def call_auditor(*_args, **_kwargs):
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "read only", "deny": False, "file_checks": []}]}}
+        return _auditor_response_context([{"tool_call_id": "call-1", "score": 0, "reason": "read only", "deny": False, "file_checks": []}])
 
     async def summarize_pending(*_args, **_kwargs):
         raise AssertionError("ordinary low-risk commands must not be summarized")

@@ -6,12 +6,18 @@ from urllib.parse import quote_from_bytes, unquote_to_bytes
 import pytest
 from PIL import Image, PngImagePlugin
 
-from app.core.constants import ERR_LLM_IMAGE_INPUT_INVALID
+from app.core.constants import (
+    ERR_LLM_IMAGE_INPUT_INVALID,
+    ERR_TOOL_MULTIMODAL_FILE_NOT_FOUND,
+    MSG_TOOL_MULTIMODAL_FILE_READ_SUCCESS,
+)
 from app.core.dispatchers.interactive_helpers import (
     build_pending_multimodal_input_message,
     collect_pending_multimodal_file_inputs,
 )
 from app.core.exceptions import ParameterException
+from app.core.i18n import t
+from app.core.tools.read_multimodal_file import ReadMultimodalFileExecutor
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import (
     AudioPart,
@@ -23,20 +29,54 @@ from app.models.message import (
     TextPart,
     VoiceTextPart,
 )
-from app.models.profile import ToolConfig
+from app.models.profile import ProfileConfig, ToolConfig
+from tests.unit.response_test_support import multimodal_read_payload
 
 
 def _success_result(path, message="不是用户的新输入", modality="image"):
     return json.dumps(
-        {
-            "type": "multimodal_file_read",
-            "status": "success",
-            "modality": modality,
-            "path": str(path.resolve()),
-            "message": message,
-        },
+        multimodal_read_payload(path, message=message, modality=modality),
         ensure_ascii=False,
     )
+
+
+@pytest.mark.parametrize("modality", ["image", "audio", "missing"])
+@pytest.mark.asyncio
+async def test_read_multimodal_file_executor_response_contract(tmp_path, modality):
+    suffix = {"image": ".png", "audio": ".mp3", "missing": ".png"}[modality]
+    path = tmp_path / f"{modality}{suffix}"
+    if modality == "image":
+        Image.new("RGB", (2, 2), color=(10, 20, 30)).save(path, format="PNG")
+    elif modality == "audio":
+        path.write_bytes(b"audio-bytes")
+
+    executor = ReadMultimodalFileExecutor(project_root=str(tmp_path), uid="user-1")
+    profile = ProfileConfig.model_validate({"tool": {"allowed_operation_dirs": [str(tmp_path)]}})
+    executor.set_config(profile)
+    actual = json.loads(await executor.execute(path=str(path)))
+
+    if modality == "missing":
+        error = t(ERR_TOOL_MULTIMODAL_FILE_NOT_FOUND)
+        expected = {
+            "type": "multimodal_file_read",
+            "status": "failed",
+            "error": error,
+            "path": str(path.resolve()),
+        }
+        assert actual == expected
+        assert multimodal_read_payload(path, error=error) == expected
+        return
+
+    message = t(MSG_TOOL_MULTIMODAL_FILE_READ_SUCCESS)
+    expected = {
+        "type": "multimodal_file_read",
+        "status": "success",
+        "modality": modality,
+        "path": str(path.resolve()),
+        "message": message,
+    }
+    assert actual == expected
+    assert multimodal_read_payload(path, message=message, modality=modality) == expected
 
 
 @pytest.fixture
@@ -103,7 +143,10 @@ def test_collect_pending_multimodal_file_inputs_uses_tool_call_order_and_skips_f
         InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id=failed_call.id,
-            content=json.dumps({"type": "multimodal_file_read", "status": "failed", "error": "failed"}),
+            content=json.dumps(
+                multimodal_read_payload(tmp_path / "failed.png", error="failed"),
+                ensure_ascii=False,
+            ),
         ),
         InternalMessage(role=MessageRole.TOOL, tool_call_id=first_call.id, content=_success_result(first_path)),
     ]

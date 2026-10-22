@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.audit.service import AuditRoundResult
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.session_reply_queue import (
     executor as executor_module,
@@ -44,6 +45,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from tests.unit.response_test_support import audit_confirmation_payload, llm_response_payload, pending_audit_tool_result
 
 
 @pytest.fixture(autouse=True)
@@ -140,7 +142,7 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
                 "memory_recall_status": "completed",
             }
         )
-        return {"choices": []}
+        return llm_response_payload()
 
     async def get_active_claims(db, claims):
         assert isinstance(db, EventDb)
@@ -181,7 +183,7 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
 
     response = await executor_replies_module._execute_foreground(FakeDb(), work, "worker-1")
 
-    assert response == {"choices": []}
+    assert response == llm_response_payload()
     assert dispatch_kwargs["execution_resume_state"] is checkpoint
     assert dispatch_kwargs["message"] == "original"
     assert dispatch_kwargs["additional_system_prompt"] == "channel instruction"
@@ -245,7 +247,7 @@ async def test_non_streaming_interactive_work_delegates_provider_usage_persisten
     async def dispatch(**kwargs):
         dispatch_kwargs.update(kwargs)
         await kwargs["request_metadata_callback"](request_metadata)
-        return {"choices": []}
+        return llm_response_payload()
 
     async def persist_provider_usage(metadata, *, work, request_purpose):
         persistence_calls.append((dict(metadata), work, request_purpose))
@@ -273,7 +275,7 @@ async def test_non_streaming_interactive_work_delegates_provider_usage_persisten
         execution_resume_state=None,
     )
 
-    assert response == {"choices": []}
+    assert response == llm_response_payload()
     assert callable(dispatch_kwargs["request_metadata_callback"])
     assert len(persistence_calls) == 1
     metadata, persisted_work, request_purpose = persistence_calls[0]
@@ -415,7 +417,7 @@ async def test_foreground_executor_checkpoint_preserves_and_clears_active_audit_
                 SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: None,
             }
         )
-        return {"choices": []}
+        return llm_response_payload()
 
     async def update_claimed(db, **kwargs):
         state = kwargs["values"]["execution_state"]
@@ -717,14 +719,7 @@ async def test_executor_does_not_query_legacy_result_prefix(monkeypatch):
 
     async def execute_foreground(db, current_work, worker_id: str):
         llm_calls.append((current_work.id, worker_id))
-        return {
-            "choices": [
-                {
-                    "message": {"role": "assistant", "content": "current response"},
-                    "finish_reason": True,
-                }
-            ]
-        }
+        return llm_response_payload("current response")
 
     async def update_claimed(db, **kwargs):
         update_calls.append(kwargs)
@@ -837,10 +832,19 @@ def test_event_for_work_normalizes_large_assistant_files_content_without_mutatin
         },
         ensure_ascii=False,
     )
-    response = {
-        "choices": [{"message": {"content": assistant_files_content}}],
-        "files": [{"path": "fresh.txt", "content": "structured"}],
-    }
+    response = llm_response_payload(
+        assistant_files_content,
+        files=[
+            {
+                "id": "fresh-file-id",
+                "name": "fresh.txt",
+                "mime_type": "text/plain",
+                "size": 10,
+                "download_url": "/files/fresh-file-id/download",
+                "previewable": True,
+            }
+        ],
+    )
 
     event = executor_common_module._event_for_work(work, response)
 
@@ -1493,7 +1497,11 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         return SimpleNamespace(security=SimpleNamespace(audit_channel_id=1, audit_model_id="audit-model"))
 
     async def audit_round(*args, **kwargs):
-        return SimpleNamespace(may_execute=True, audit_record_id=99)
+        return AuditRoundResult(
+            audit_record_id=99,
+            status=AuditRecordStatus.PASSED,
+            tool_results=(),
+        )
 
     async def claim_passed(db, *, audit_record_id):
         assert audit_record_id == 99
@@ -1515,11 +1523,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         return True
 
     async def dispatch_interactive_work(*args, **kwargs):
-        return {
-            "choices": [{"message": {"content": "重审完成"}}],
-            "history": [],
-            "files": [],
-        }
+        return llm_response_payload("重审完成", history=[], files=[])
 
     async def cancel_reaudit(*args, **kwargs):
         return True
@@ -1607,6 +1611,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     notified_audit_record_ids = []
     memory_chains = []
     event_order = []
+    confirmation_payload = audit_confirmation_payload(99)
 
     class FakeDb:
         async def get(self, model, item_id):
@@ -1634,17 +1639,11 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         return True
 
     async def audit_round(*args, **kwargs):
-        return SimpleNamespace(
-            may_execute=False,
+        return AuditRoundResult(
             audit_record_id=99,
-            tool_results=(
-                InternalMessage(
-                    role=MessageRole.TOOL,
-                    tool_call_id="original-1",
-                    content=json.dumps({"status": "pending", "reason": "changed"}),
-                ),
-            ),
-            confirmation_payload={"audit_record_id": 99, "status": "pending"},
+            status=AuditRecordStatus.PENDING,
+            tool_results=(pending_audit_tool_result("original-1"),),
+            confirmation_payload=confirmation_payload,
         )
 
     async def replace_result(db, **kwargs):
@@ -1686,7 +1685,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
 
     response = await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work)
 
-    assert json.loads(response["content"]) == {"audit_record_id": 99, "status": "pending"}
+    assert json.loads(response["content"]) == confirmation_payload
     assert len(replaced_results) == 1
     assert replaced_results[0]["pending_message"].id == 2
     assert replaced_results[0]["original_tool_call_id"] == "original-1"
@@ -1829,9 +1828,11 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
     async def dispatch_interactive_work(*args, **kwargs):
         event_order.append("dispatch")
         return {
-            "choices": [{"message": {"content": "完成"}}],
-            "history": [{"role": "assistant", "content": "完成"}],
-            "files": [],
+            **llm_response_payload(
+                "完成",
+                history=[{"role": "assistant", "content": "完成"}],
+                files=[],
+            ),
             "response_id": "response-final",
         }
 
@@ -2113,11 +2114,7 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
         raise AssertionError("precheck failure must close the round as failed directly")
 
     async def dispatch_interactive_work(*args, **kwargs):
-        return {
-            "choices": [{"message": {"content": "工具预检失败"}}],
-            "history": [],
-            "files": [],
-        }
+        return llm_response_payload("工具预检失败", history=[], files=[])
 
     def prevalidate(calls, *args, **kwargs):
         return {calls[0].id: json.dumps({"status": "failed", "tool_name": calls[0].name, "error": "bad args"})}
@@ -2257,11 +2254,7 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
         raise AssertionError("partial attempt creation must not use normal round completion")
 
     async def dispatch_interactive_work(*args, **kwargs):
-        return {
-            "choices": [{"message": {"content": "工具执行未完成"}}],
-            "history": [],
-            "files": [],
-        }
+        return llm_response_payload("工具执行未完成", history=[], files=[])
 
     async def update_confirmation(db, *, audit_record_id):
         return None

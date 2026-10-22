@@ -8,8 +8,14 @@ import pytest
 from app.core.embedding.knowledge_base import build_knowledge_base_prompt_items
 from app.core.tools import knowledge_base_query as knowledge_base_query_module
 from app.core.tools.knowledge_base_query import KnowledgeBaseQueryExecutor
-from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseType
+from app.models.knowledge_base import (
+    KnowledgeBase,
+    KnowledgeBaseQueryTestItem,
+    KnowledgeBaseQueryTestResponse,
+    KnowledgeBaseType,
+)
 from app.models.profile import Profile
+from tests.unit.response_test_support import knowledge_query_payload
 
 
 def _profile() -> Profile:
@@ -30,9 +36,10 @@ def _executor() -> KnowledgeBaseQueryExecutor:
 @pytest.mark.asyncio
 async def test_managed_query_result_exposes_only_trusted_managed_identity(monkeypatch):
     async def fake_query_knowledge_base(**_kwargs):
-        return SimpleNamespace(
+        return KnowledgeBaseQueryTestResponse(
             items=[
-                SimpleNamespace(
+                KnowledgeBaseQueryTestItem(
+                    id="稳定测试id",
                     content="Managed knowledge body",
                     metadata_={
                         "knowledge_type": "managed",
@@ -85,9 +92,10 @@ async def test_managed_query_result_exposes_only_trusted_managed_identity(monkey
 @pytest.mark.asyncio
 async def test_managed_query_result_uses_knowledge_key_when_source_reference_has_no_display_name(monkeypatch):
     async def fake_query_knowledge_base(**_kwargs):
-        return SimpleNamespace(
+        return KnowledgeBaseQueryTestResponse(
             items=[
-                SimpleNamespace(
+                KnowledgeBaseQueryTestItem(
+                    id="稳定测试id",
                     content="Managed knowledge body",
                     metadata_={
                         "knowledge_type": "managed",
@@ -115,9 +123,10 @@ async def test_managed_query_result_uses_knowledge_key_when_source_reference_has
 @pytest.mark.asyncio
 async def test_user_knowledge_base_result_never_exposes_managed_write_identity(monkeypatch):
     async def fake_query_knowledge_base(**_kwargs):
-        return SimpleNamespace(
+        return KnowledgeBaseQueryTestResponse(
             items=[
-                SimpleNamespace(
+                KnowledgeBaseQueryTestItem(
+                    id="稳定测试id",
                     content="User document body",
                     metadata_={
                         "filename": "manual.md",
@@ -141,7 +150,7 @@ async def test_user_knowledge_base_result_never_exposes_managed_write_identity(m
         )
     )
 
-    assert payload == {
+    expected = {
         "items": [
             {
                 "source": "manual.md",
@@ -149,6 +158,30 @@ async def test_user_knowledge_base_result_never_exposes_managed_write_identity(m
             }
         ]
     }
+    assert payload == expected
+    assert knowledge_query_payload([("manual.md", "User document body")]) == expected
+
+
+@pytest.mark.asyncio
+async def test_empty_knowledge_base_query_result_matches_expected_payload(monkeypatch):
+    async def fake_query_knowledge_base(**_kwargs):
+        return KnowledgeBaseQueryTestResponse(items=[])
+
+    monkeypatch.setattr(
+        knowledge_base_query_module,
+        "query_knowledge_base",
+        fake_query_knowledge_base,
+    )
+
+    payload = json.loads(
+        await _executor().execute(
+            knowledge_base_id=10,
+            query="no matches",
+        )
+    )
+
+    assert payload == {"items": []}
+    assert knowledge_query_payload([]) == {"items": []}
 
 
 def test_knowledge_base_prompt_items_identify_managed_and_user_stores():
