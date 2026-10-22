@@ -11,6 +11,7 @@ from app.core.tools import TOOL_EXECUTOR_MAP
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.profile import ToolConfig
 from app.providers.database import AsyncSessionLocal
 
 BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {SEND_FILE_TO_USER_TOOL_NAME, KNOWLEDGE_BASE_QUERY_TOOL_NAME}
@@ -188,6 +189,8 @@ def reassemble_multimodal_messages(
     image_understanding: bool,
     audio_understanding: bool,
     video_understanding: bool,
+    *,
+    tool_config: ToolConfig | None = None,
 ) -> None:
     for idx, m in enumerate(messages):
         if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
@@ -197,5 +200,6 @@ def reassemble_multimodal_messages(
                 image_understanding=image_understanding,
                 audio_understanding=audio_understanding,
                 video_understanding=video_understanding,
+                tool_config=tool_config,
                 is_history=is_history,
             )

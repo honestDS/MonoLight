@@ -30,7 +30,7 @@ from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_s
 from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage, ContextSummaryStageStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
-from app.models.profile import ProfileConfig
+from app.models.profile import ProfileConfig, ToolConfig
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
 from app.providers.llm.client import LLMClient
@@ -522,7 +522,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             uid="recovery-user",
             session_id="recovery-session",
             profile=SimpleNamespace(id=1),
-            cfg=SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90)),
+            cfg=SimpleNamespace(tool=ToolConfig(), other=SimpleNamespace(context_summary_threshold_percent=90)),
             messages=messages,
             checkpoint_state=SimpleNamespace(
                 upper_message_id=3,

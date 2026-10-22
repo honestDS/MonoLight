@@ -59,6 +59,8 @@ export const defaultProfileConfigs = () => ({
   tool: {
     tool_timeout: 30,
     image_generation_timeout: 60,
+    image_compression_enabled: true,
+    image_compression_threshold_kb: 500,
     max_parallel_tools: 5,
     executor_max_workers: 10,
     background_task_max_concurrency: 2,

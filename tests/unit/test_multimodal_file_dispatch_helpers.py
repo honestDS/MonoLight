@@ -283,7 +283,7 @@ def test_message_assembler_keeps_mixed_attachment_contract_stable_across_capabil
     assert sum(part.type == "text" and part.text == "[系统提示结束]" for part in assembled.content) == 1
     image_parts = [part for part in assembled.content if part.type == "image_url"]
     assert len(image_parts) == 2
-    assert all(part.image_url["url"].startswith("data:image/jpeg;base64,") for part in image_parts)
+    assert all(part.image_url["url"].startswith("data:image/png;base64,") for part in image_parts)
     audio_parts = [part for part in assembled.content if part.type == "audio"]
     assert len(audio_parts) == 1
     assert audio_parts[0].path == str(audio_path)

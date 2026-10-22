@@ -52,6 +52,7 @@ class DispatcherValidationMixin:
                 image_understanding=img_understanding,
                 audio_understanding=audio_understanding,
                 video_understanding=video_understanding,
+                tool_config=cfg.tool,
                 is_history=False,
             )
 

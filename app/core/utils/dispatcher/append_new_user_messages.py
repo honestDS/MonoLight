@@ -22,6 +22,7 @@ def append_new_user_messages(
         if nm.attachments or isinstance(nm.content, list):
             assembled_nm = MessageAssembler.assemble(
                 nm,
+                tool_config=cfg.tool,
                 image_understanding=image_understanding,
                 audio_understanding=audio_understanding,
                 video_understanding=video_understanding,

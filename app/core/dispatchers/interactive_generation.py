@@ -153,6 +153,7 @@ async def generate_interactive_turn(
                 image_understanding=state.img_understanding,
                 audio_understanding=state.audio_understanding,
                 video_understanding=state.video_understanding,
+                tool_config=state.cfg.tool,
             )
             if pending_multimodal_message is not None:
                 request_messages.append(materialize_user_environment_prompts([pending_multimodal_message])[0])
@@ -431,4 +432,5 @@ async def generate_interactive_turn(
                 state.img_understanding,
                 state.audio_understanding,
                 state.video_understanding,
+                tool_config=state.cfg.tool,
             )

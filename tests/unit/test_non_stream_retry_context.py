@@ -22,6 +22,7 @@ from app.core.terminal.schemas import (
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
+from app.models.profile import ToolConfig
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 
@@ -123,7 +124,7 @@ def _context_length_generation_state(*, stream_event_callback=None):
         session_id="session-1",
         goal_mode=False,
         profile=SimpleNamespace(id=1),
-        cfg=SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90)),
+        cfg=SimpleNamespace(tool=ToolConfig(), other=SimpleNamespace(context_summary_threshold_percent=90)),
         messages=[InternalMessage(id=1, role=MessageRole.USER, content="request")],
         checkpoint_state=SimpleNamespace(
             upper_message_id=1,
@@ -1121,11 +1122,7 @@ async def _run_audited_interactive_dispatch(
             audit_channel_id=1 if audit_configured else None,
             audit_model_id="audit-model" if audit_configured else None,
         ),
-        tool=SimpleNamespace(
-            max_turns=5,
-            max_parallel_tools=5,
-            executor_max_workers=1,
-        ),
+        tool=ToolConfig(max_parallel_tools=5, executor_max_workers=1),
     )
     tool_call = tool_call or InternalToolCall(
         id="call-1",

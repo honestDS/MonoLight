@@ -4,12 +4,14 @@ import base64
 import io
 import logging
 import os
+from pathlib import Path
 
 from PIL import Image
 
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import AudioPart, FilePart, ImagePart, InternalMessage, TextPart
+from app.models.profile import ToolConfig
 
 # 屏蔽 Pillow 库的 DEBUG 日志输出，防止刷屏
 logging.getLogger("PIL").setLevel(logging.WARNING)
@@ -19,32 +21,27 @@ logger = get_logger(__name__)
 
 class MessageAssembler:
     @staticmethod
-    def _compress_image_to_base64(path: str, max_size_kb: int = 500) -> str:
-        """
-        读取图片，如果大小超过阈值则进行压缩（降质或缩放），返回 base64 字符串
-        """
-        file_size_kb = os.path.getsize(path) / 1024
+    def _image_to_data_url(path: str, tool_config: ToolConfig) -> str:
+        """Read an image and compress it when enabled and above the configured threshold."""
+        image_bytes = Path(path).read_bytes()
+        file_size_kb = len(image_bytes) / 1024
 
-        with Image.open(path) as img:
-            # 统一转为 RGB 以兼容 jpeg 压缩，丢弃 alpha 通道
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            if not tool_config.image_compression_enabled or len(image_bytes) <= tool_config.image_compression_threshold_kb * 1024:
+                mime_type = Image.MIME[img.format]
+                img.verify()
+                encoded_string = base64.b64encode(image_bytes).decode("utf-8")
+                return f"data:{mime_type};base64,{encoded_string}"
 
-            if file_size_kb <= max_size_kb:
-                # 够小直接读
-                buffer = io.BytesIO()
-                img.save(buffer, format="JPEG", quality=95)
-                return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-            # 否则进行尺寸和质量压缩
             logger.bind().info(t("LOG_IMAGE_COMPRESSING", path=path, file_size_kb=file_size_kb))
 
-            scale_factor = (max_size_kb / file_size_kb) ** 0.5
+            scale_factor = (tool_config.image_compression_threshold_kb / file_size_kb) ** 0.5
             scale_factor = max(0.3, scale_factor)
 
-            new_width = int(img.width * scale_factor)
-            new_height = int(img.height * scale_factor)
-
+            new_width = max(1, int(img.width * scale_factor))
+            new_height = max(1, int(img.height * scale_factor))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
             img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
             buffer = io.BytesIO()
@@ -53,7 +50,8 @@ class MessageAssembler:
             final_size = len(buffer.getvalue()) / 1024
             logger.bind().info(t("LOG_IMAGE_COMPRESSED", width=new_width, height=new_height, size_kb=final_size))
 
-            return base64.b64encode(buffer.getvalue()).decode("utf-8")
+            encoded_string = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            return f"data:image/jpeg;base64,{encoded_string}"
 
     @staticmethod
     def assemble(
@@ -62,6 +60,7 @@ class MessageAssembler:
         audio_understanding: bool = False,
         video_understanding: bool = False,
         is_history: bool = False,
+        tool_config: ToolConfig | None = None,
     ) -> InternalMessage:
         """按细分模态能力处理附件。
 
@@ -71,6 +70,7 @@ class MessageAssembler:
             audio_understanding: 是否支持音频理解
             video_understanding: 是否支持视频理解
             is_history: 是否为历史消息
+            tool_config: 图片压缩配置
         """
         if not message.attachments and isinstance(message.content, str):
             message.assembled_attachment_part_count = 0
@@ -104,9 +104,11 @@ class MessageAssembler:
                             if path.startswith("file:///"):
                                 path = path[8:]
                             if os.path.exists(path):
-                                encoded_string = MessageAssembler._compress_image_to_base64(path, max_size_kb=500)
-                                mime_type = "image/jpeg"
-                                attachment_parts.append(ImagePart(image_url={"url": f"data:{mime_type};base64,{encoded_string}"}))
+                                image_data_url = MessageAssembler._image_to_data_url(
+                                    path,
+                                    tool_config if tool_config is not None else ToolConfig(),
+                                )
+                                attachment_parts.append(ImagePart(image_url={"url": image_data_url}))
                             else:
                                 attachment_parts.append(TextPart(text=f"[图片丢失: {attachment}]"))
                         except Exception as e:

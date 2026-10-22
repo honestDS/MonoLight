@@ -1,3 +1,4 @@
+import base64
 import json
 
 import pytest
@@ -431,7 +432,8 @@ async def test_persisted_history_real_image_attachment_paths_keep_provider_image
         assert provider_content[1]["type"] == "input_image"
         provider_image_url = provider_content[1]["image_url"]
     assert provider_image_url == assembled_image_url
-    assert provider_image_url.startswith("data:image/jpeg;base64,")
+    assert provider_image_url.startswith("data:image/png;base64,")
+    assert base64.b64decode(provider_image_url.split(",", 1)[1]) == image_path.read_bytes()
     assert str(image_path) not in provider_image_url
 
     await db_session.refresh(persisted_user_message)
