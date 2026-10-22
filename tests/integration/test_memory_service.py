@@ -1276,14 +1276,27 @@ async def test_pin_and_unpin_are_uid_scoped_idempotent_and_do_not_change_publica
 
 
 @pytest.mark.asyncio
-async def test_recall_applies_top_k_and_total_character_budget_by_truncating_last_item(
+@pytest.mark.parametrize("top_k", [1, 12])
+async def test_recall_returns_complete_memories_and_respects_top_k(
     memory_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    top_k: int,
 ) -> None:
     uid = "recall-budget-user"
+    contents = ["a" * 400 + f" tail-marker-{index:02d}" for index in range(12)]
+    assert sum(map(len, contents)) > 4000
+
     async with memory_database() as db:
-        first = await _configure_recall_user(db, uid=uid, content="a" * 200)
-        second = await _create_record(db, uid=uid, memory_key="budget-second", content="b" * 200)
+        records = [await _configure_recall_user(db, uid=uid, content=contents[0])]
+        for index, content in enumerate(contents[1:], start=1):
+            records.append(
+                await _create_record(
+                    db,
+                    uid=uid,
+                    memory_key=f"budget-{index}",
+                    content=content,
+                )
+            )
         await db.commit()
 
     async def fake_loader(*_args: Any, **_kwargs: Any) -> object:
@@ -1292,8 +1305,14 @@ async def test_recall_applies_top_k_and_total_character_budget_by_truncating_las
     async def fake_embed(*_args: Any, **_kwargs: Any) -> list[list[float]]:
         return [[0.1, 0.2]]
 
-    async def fake_query(*_args: Any, **_kwargs: Any) -> list[_RecallHit]:
-        return [_hit(first.id, uid=uid), _hit(second.id, uid=uid)]
+    async def fake_query(
+        _collection_name: str,
+        _vector: list[float],
+        _query: str,
+        limit: int,
+    ) -> list[_RecallHit]:
+        assert limit == 12
+        return [_hit(record.id, uid=uid) for record in records]
 
     monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", fake_loader)
     monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", fake_embed)
@@ -1304,17 +1323,16 @@ async def test_recall_applies_top_k_and_total_character_budget_by_truncating_las
             db,
             uid=uid,
             query="budget",
-            top_k=2,
-            candidate_k=2,
-            result_max_chars=256,
+            top_k=top_k,
+            candidate_k=12,
         )
 
     assert result.status == MemoryRecallStatus.OK
-    assert len(result.items) == 2
-    assert len(result.items[0].content) == 200
-    assert len(result.items[1].content) == 56
-    assert result.items[0].truncated is False
-    assert result.items[1].truncated is True
+    assert len(result.items) == top_k
+    assert [item.memory_id for item in result.items] == [record.id for record in records[:top_k]]
+    assert [item.content for item in result.items] == contents[:top_k]
+    assert all(item.content.endswith(f"tail-marker-{index:02d}") for index, item in enumerate(result.items))
+    assert [item.truncated for item in result.items] == [False] * top_k
 
 
 @pytest.mark.asyncio

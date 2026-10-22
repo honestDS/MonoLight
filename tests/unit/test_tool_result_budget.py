@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -374,6 +375,222 @@ async def test_process_single_tool_truncation_log_uses_localized_per_tool_budget
     assert "{tool_name}" not in warning
     assert "{budget_tokens}" not in warning
     assert "{context_window_k}" not in warning
+
+
+async def _process_fake_executor_result(
+    monkeypatch,
+    tmp_path,
+    *,
+    tool_name,
+    arguments,
+    payload,
+    budget_tokens,
+):
+    server_result = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    received_arguments = []
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def execute(self, **kwargs):
+            received_arguments.append(kwargs)
+            return server_result
+
+    monkeypatch.setitem(process_single_tool_module.TOOL_EXECUTOR_MAP, tool_name, FakeExecutor)
+    monkeypatch.setattr(process_single_tool_module, "ensure_session_reply_work_claim", AsyncMock())
+    monkeypatch.setattr(process_single_tool_module, "get_user_temp_dir", lambda _root, _uid: tmp_path)
+
+    cfg = ProfileConfig.model_validate(
+        {
+            "memory": {"enabled": tool_name != process_single_tool_module.KNOWLEDGE_BASE_QUERY_TOOL_NAME},
+            "tool": {"enabled_tools": [tool_name]},
+        }
+    )
+    profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
+    tool_call = SimpleNamespace(id="call-test", name=tool_name, arguments=arguments)
+    tool_result = await process_single_tool_module.process_single_tool(
+        tool_call,
+        db=SimpleNamespace(),
+        profile=profile,
+        cfg=cfg,
+        messages=[],
+        username="user",
+        session_id="session-1",
+        turn=1,
+        uid="user-1",
+        context_window_k=700,
+        tool_result_round_budget_tokens=budget_tokens,
+    )
+    assert received_arguments == [arguments]
+    return tool_result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (
+            process_single_tool_module.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+            {"operation": "recall", "query": "topic"},
+        ),
+        (
+            process_single_tool_module.KNOWLEDGE_BASE_QUERY_TOOL_NAME,
+            {"knowledge_base_id": 1, "query": "topic"},
+        ),
+    ],
+    ids=["managed-memory-recall", "query-knowledge-base"],
+)
+async def test_process_single_tool_preserves_recall_results_outside_tiny_result_budget(
+    monkeypatch,
+    tmp_path,
+    tool_name,
+    arguments,
+):
+    items = [
+        {"source": "memory", "content": "memory-result-" * 400 + "UNIQUE-ITEMS-END"},
+        {"source": "memory", "content": "second-memory-" * 400 + "UNIQUE-SECOND-ITEM-END"},
+    ]
+    managed_text = "managed-policy-" * 400 + "UNIQUE-MANAGED-END"
+    user_text = "user-knowledge-" * 400 + "UNIQUE-USER-KNOWLEDGE-END"
+    history_text = "conversation-history-" * 400 + "UNIQUE-CHAT-HISTORY-END"
+    knowledge_base = [
+        {
+            "knowledge_id": 101,
+            "knowledge_expected_version": 3,
+            "knowledge_key": "customer-preference",
+            "llm_maintainable": True,
+            "source_type": "managed_knowledge",
+            "content": managed_text,
+        },
+        {"source": "user_knowledge", "content": user_text},
+    ]
+    chat_history = [
+        {"role": "user", "content": history_text},
+        {"role": "assistant", "content": "assistant-history-" * 400 + "UNIQUE-ASSISTANT-HISTORY-END"},
+    ]
+    payload = {
+        "items": items,
+        "current_session_id": "session-1",
+        "knowledge_base": knowledge_base,
+        "chat_history": chat_history,
+    }
+    original_content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    content = await _process_fake_executor_result(
+        monkeypatch,
+        tmp_path,
+        tool_name=tool_name,
+        arguments=arguments,
+        payload=payload,
+        budget_tokens=1,
+    )
+    result = json.loads(content)
+
+    assert content == original_content
+    assert result["items"] == items
+    assert result["knowledge_base"] == knowledge_base
+    assert result["chat_history"] == chat_history
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_preserves_managed_knowledge_order_and_full_text(monkeypatch, tmp_path):
+    managed_text = "durable-memory-" * 400 + "UNIQUE-MIXED-MANAGED-END"
+    knowledge_base = [
+        {"source": "user-before", "content": "First user result."},
+        {
+            "knowledge_id": 201,
+            "knowledge_expected_version": 12,
+            "knowledge_key": "long-policy",
+            "llm_maintainable": True,
+            "source_type": "managed_knowledge",
+            "content": managed_text,
+        },
+        {"source": "user-after", "content": "Last user result."},
+    ]
+    payload = {
+        "items": [],
+        "current_session_id": "session-1",
+        "knowledge_base": knowledge_base,
+        "chat_history": [],
+    }
+
+    content = await _process_fake_executor_result(
+        monkeypatch,
+        tmp_path,
+        tool_name=process_single_tool_module.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+        arguments={"operation": "recall", "query": "topic"},
+        payload=payload,
+        budget_tokens=300,
+    )
+    result = json.loads(content)
+
+    assert result["knowledge_base"] == knowledge_base
+    assert result["knowledge_base"][1]["content"] == managed_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "source_type"),
+    [
+        (
+            process_single_tool_module.SHELL_TOOL_NAME,
+            {"command": "echo test", "execution_mode": "non_interactive"},
+            "managed_knowledge",
+        ),
+        (
+            process_single_tool_module.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+            {
+                "operation": "create",
+                "content": "Remember this personal preference.",
+                "memory_key": "preference",
+                "memory_type": "preference",
+            },
+            "user_memory",
+        ),
+        (
+            process_single_tool_module.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+            {
+                "operation": "knowledge_create",
+                "knowledge_key": "deployment-policy",
+                "knowledge_content": "Deploy only after approval.",
+            },
+            "managed_knowledge",
+        ),
+    ],
+    ids=["managed-label-from-shell", "personal-memory-create", "managed-knowledge-create"],
+)
+async def test_process_single_tool_truncates_non_exempt_knowledge_results(
+    monkeypatch,
+    tmp_path,
+    tool_name,
+    arguments,
+    source_type,
+):
+    long_text = "large-ordinary-result-" * 2_000
+    payload = {
+        "items": [{"source": "knowledge_base", "content": long_text}],
+        "current_session_id": "session-1",
+        "knowledge_base": [
+            ({"source": "user_knowledge", "content": long_text} if source_type == "user_knowledge" else {"source_type": source_type, "content": long_text}),
+        ],
+        "chat_history": [{"role": "user", "content": long_text}],
+    }
+    original_content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    content = await _process_fake_executor_result(
+        monkeypatch,
+        tmp_path,
+        tool_name=tool_name,
+        arguments=arguments,
+        payload=payload,
+        budget_tokens=1,
+    )
+
+    json.loads(content)
+    assert content != original_content
+    assert long_text not in content
+    assert len(content) < len(original_content)
 
 
 def test_interactive_tool_budget_uses_provider_payload_local_fallback_without_provider_usage(monkeypatch):

@@ -128,11 +128,9 @@ def _profile_config() -> ProfileConfig:
                 "embedding_model_id": "memory-embedding-model",
                 "top_k": 2,
                 "candidate_k": 4,
-                "result_max_chars": 4000,
                 "chat_history": {
                     "top_k": 2,
                     "candidate_k": 20,
-                    "result_max_chars": 4000,
                 },
             },
         }
@@ -1160,9 +1158,9 @@ async def test_memory_recall_output_budget_falls_back_without_mutating_main_cont
             ),
         ],
     )
-    cfg.memory.result_max_chars = 10000
     profile.configs = cfg.model_dump(mode="json")
-    large_memory_content = "VS Code is the preferred Python editor. " * 90
+    large_memory_content = "VS Code is the preferred Python editor. " * 120 + "\nMEMORY_CONTENT_TAIL_MARKER"
+    assert len(large_memory_content) > 4000
 
     async with memory_recall_session_factory() as db:
         for channel_id, name, model_id, context_window_k, max_tokens in (

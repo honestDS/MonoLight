@@ -10,8 +10,10 @@ import pytest_asyncio
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.constants import ERR_KB_CONTENT_TOO_LONG, KNOWLEDGE_CONTENT_MAX_CHARS
 from app.core.crud.profile.profile import profile_crud
 from app.core.dispatchers.context import build_dispatch_context
+from app.core.i18n import t
 from app.core.knowledge import deletion as deletion_module
 from app.core.knowledge.deletion import delete_owned_knowledge_base
 from app.core.knowledge.errors import ManagedKnowledgeContainerConflictError
@@ -254,6 +256,41 @@ async def test_managed_knowledge_tool_first_knowledge_create_lazily_creates_mana
             "content_hash",
             "knowledge_key_hash",
         }
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_tool_first_knowledge_create_rejects_overlong_content_without_records(
+    managed_knowledge_tool_database: async_sessionmaker[AsyncSession],
+) -> None:
+    profile, _channel = await _create_runtime(managed_knowledge_tool_database)
+    knowledge_content = "x" * (KNOWLEDGE_CONTENT_MAX_CHARS + 1)
+
+    async with managed_knowledge_tool_database() as db:
+        executor = _executor(db, profile, tool_call_id="call-overlong-knowledge-create")
+        payload = json.loads(
+            await executor.execute(
+                operation="knowledge_create",
+                knowledge_key="billing.overlong",
+                knowledge_content=knowledge_content,
+            )
+        )
+
+    assert payload["status"] == "failed"
+    assert payload["error"] == t(
+        ERR_KB_CONTENT_TOO_LONG,
+        max_chars=KNOWLEDGE_CONTENT_MAX_CHARS,
+    )
+
+    async with managed_knowledge_tool_database() as db:
+        for model in (
+            KnowledgeBase,
+            KnowledgeBaseCollectionOwner,
+            KnowledgeBaseProfileBinding,
+            ManagedKnowledgeItem,
+            ManagedKnowledgeRevision,
+            KnowledgeJob,
+        ):
+            assert await db.scalar(select(func.count()).select_from(model)) == 0
 
 
 @pytest.mark.asyncio

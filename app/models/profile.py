@@ -160,7 +160,6 @@ class ChatHistoryRecallConfig(BaseModel):
 
     top_k: int = PydanticField(5, ge=1, le=50, description="聊天记录最终返回数量")
     candidate_k: int = PydanticField(500, ge=1, le=500, description="聊天记录候选数量")
-    result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="聊天记录结果最大字符数")
 
     @model_validator(mode="after")
     def validate_candidate_k(self, info: ValidationInfo) -> "ChatHistoryRecallConfig":
@@ -176,7 +175,6 @@ class KnowledgeRecallConfig(BaseModel):
 
     top_k: int = PydanticField(5, ge=1, le=50, description="知识最终返回数量")
     candidate_k: int = PydanticField(20, ge=1, le=50, description="知识候选数量")
-    result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="知识结果最大字符数")
 
     @model_validator(mode="after")
     def validate_candidate_k(self, info: ValidationInfo) -> "KnowledgeRecallConfig":
@@ -196,7 +194,6 @@ class LongTermMemoryConfig(BaseModel):
     embedding_model_id: str | None = PydanticField(None, min_length=1, description="长期记忆嵌入模型 ID")
     top_k: int = PydanticField(5, ge=1, le=50, description="长期记忆最终返回数量")
     candidate_k: int = PydanticField(10, ge=1, le=100, description="长期记忆候选数量")
-    result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="长期记忆结果最大字符数")
     chat_history: ChatHistoryRecallConfig = PydanticField(default_factory=ChatHistoryRecallConfig, description="聊天记录召回参数")
     knowledge: KnowledgeRecallConfig = PydanticField(default_factory=KnowledgeRecallConfig, description="知识库召回参数")
 
@@ -206,7 +203,7 @@ class LongTermMemoryConfig(BaseModel):
         if not isinstance(data, dict):
             return data
         normalized = dict(data)
-        for field in ("enabled", "precheck_enabled", "embedding_channel_id", "embedding_model_id", "top_k", "candidate_k", "result_max_chars"):
+        for field in ("enabled", "precheck_enabled", "embedding_channel_id", "embedding_model_id", "top_k", "candidate_k"):
             prefixed_name = f"memory_{field}"
             if field not in normalized and prefixed_name in normalized:
                 normalized[field] = normalized[prefixed_name]
@@ -297,7 +294,6 @@ class ProfileConfig(BaseModel):
                 "embedding_model_id",
                 "top_k",
                 "candidate_k",
-                "result_max_chars",
                 "chat_history",
                 "knowledge",
                 "memory_enabled",
@@ -306,7 +302,6 @@ class ProfileConfig(BaseModel):
                 "memory_embedding_model_id",
                 "memory_top_k",
                 "memory_candidate_k",
-                "memory_result_max_chars",
             ],
         }
         normalized = standardize_config(data, schema_map)
@@ -347,10 +342,6 @@ class ProfileConfig(BaseModel):
                 chat_history["top_k"] = memory["top_k"]
             elif "memory_top_k" in memory:
                 chat_history["top_k"] = memory["memory_top_k"]
-            if "result_max_chars" in memory:
-                chat_history["result_max_chars"] = memory["result_max_chars"]
-            elif "memory_result_max_chars" in memory:
-                chat_history["result_max_chars"] = memory["memory_result_max_chars"]
             memory["chat_history"] = chat_history
         if not isinstance(memory.get("knowledge"), dict):
             channel = normalized.get("channel")
@@ -431,16 +422,13 @@ PROFILE_EXAMPLE = {
             "embedding_model_id": None,
             "top_k": 5,
             "candidate_k": 10,
-            "result_max_chars": 4000,
             "chat_history": {
                 "top_k": 5,
                 "candidate_k": 500,
-                "result_max_chars": 4000,
             },
             "knowledge": {
                 "top_k": 5,
                 "candidate_k": 20,
-                "result_max_chars": 4000,
             },
         },
     },

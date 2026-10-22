@@ -4,6 +4,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.api.knowledge_input import KnowledgeInputRoute, read_knowledge_file
 from app.core.constants import (
     ERR_KB_COLLECTION_CREATE_FAILED,
     ERR_KB_CREATE_FAILED_WITH_ROLLBACK,
@@ -114,7 +115,7 @@ from app.providers.vector import (
 )
 from app.schemas.response import StandardResponse
 
-router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"], dependencies=[Depends(get_current_user)], route_class=KnowledgeInputRoute)
 
 
 async def load_owned_knowledge_base(db: AsyncSession, kb_id: int, current_user: Any) -> KnowledgeBase:
@@ -872,7 +873,7 @@ async def import_document(
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
     if kb.knowledge_base_type != KnowledgeBaseType.USER:
         raise HTTPException(status_code=409, detail=t(ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN))
-    content = decode_knowledge_document(await file.read())
+    content = decode_knowledge_document(await read_knowledge_file(file))
     db_document = await create_user_knowledge_document(
         db,
         knowledge_base=kb,
@@ -895,7 +896,7 @@ async def preview_knowledge_entry_file(
     current_user: Any = Depends(get_current_user),
 ):
     await load_owned_knowledge_base(db, kb_id, current_user)
-    content = decode_knowledge_document(await file.read())
+    content = decode_knowledge_document(await read_knowledge_file(file))
     return StandardResponse.success(
         data=KnowledgeEntryFilePreviewResponse(
             filename=file.filename or t(MSG_KB_UNNAMED_DOCUMENT),

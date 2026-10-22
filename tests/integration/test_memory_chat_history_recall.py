@@ -165,30 +165,28 @@ async def test_chat_history_recall_ranks_relevant_messages_and_prefers_newer_tie
 
 
 @pytest.mark.asyncio
-async def test_chat_history_recall_applies_top_k_and_character_budget(db_session: AsyncSession):
+@pytest.mark.parametrize("top_k", [1, 3])
+async def test_chat_history_recall_returns_full_messages(db_session: AsyncSession, top_k: int):
+    original_contents = {message_id: f"{'token ' * 670}TAIL-{message_id}" for message_id in range(1, 4)}
     await _commit(
         db_session,
-        _message(1, content="token-aaa"),
-        _message(2, content="token-bbb"),
-        _message(3, content="token-ccc"),
+        *[_message(message_id, content=content) for message_id, content in original_contents.items()],
     )
 
-    top_k_result = await chat_history_module.chat_history_recall_service.recall(db_session, "user-1", "token", top_k=1)
-    budget_result = await chat_history_module.chat_history_recall_service.recall(
+    result = await chat_history_module.chat_history_recall_service.recall(
         db_session,
         "user-1",
         "token",
-        top_k=3,
-        result_max_chars=13,
+        top_k=top_k,
     )
 
-    assert len(top_k_result.items) == 1
-    assert [item.message_id for item in budget_result.items] == [3, 2]
-    assert budget_result.items[0].content == "token-ccc"
-    assert budget_result.items[0].truncated is False
-    assert budget_result.items[1].content == "toke"
-    assert budget_result.items[1].truncated is True
-    assert sum(len(item.content) for item in budget_result.items) == 13
+    expected_message_ids = [3, 2, 1][:top_k]
+    assert len(result.items) == top_k
+    assert [item.message_id for item in result.items] == expected_message_ids
+    for item in result.items:
+        assert item.content == original_contents[item.message_id]
+        assert item.content.endswith(f"TAIL-{item.message_id}")
+        assert item.truncated is False
 
 
 @pytest.mark.asyncio

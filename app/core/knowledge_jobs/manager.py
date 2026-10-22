@@ -28,6 +28,7 @@ from app.core.knowledge.errors import (
     ManagedKnowledgeContainerConflictError,
     ManagedKnowledgeNotFoundError,
 )
+from app.core.knowledge.input_limits import validate_knowledge_content
 from app.core.knowledge.managed import managed_knowledge_service, normalize_managed_knowledge_key
 from app.core.knowledge.managed_container import get_or_create_managed_knowledge_base
 from app.core.knowledge.results import ManagedKnowledgeMutationStatus
@@ -549,6 +550,7 @@ class KnowledgeJobManager:
         knowledge_key = normalize_managed_knowledge_key(_require_string(knowledge_key, field="knowledge_key"))
         dedupe_key = _require_string(dedupe_key, field="dedupe_key")
         _positive_int(max_attempts, field="max_attempts")
+        validate_knowledge_content(content)
         operation = KnowledgeJobOperation.MANAGED_CREATE
         request_hash = _request_hash(
             operation,
@@ -653,6 +655,7 @@ class KnowledgeJobManager:
         knowledge_key = normalize_managed_knowledge_key(_require_string(knowledge_key, field="knowledge_key"))
         dedupe_key = _require_string(dedupe_key, field="dedupe_key")
         _positive_int(max_attempts, field="max_attempts")
+        validate_knowledge_content(content)
         operation = KnowledgeJobOperation.MANAGED_UPDATE
         request_hash = _request_hash(
             operation,

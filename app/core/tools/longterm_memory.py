@@ -55,13 +55,13 @@ MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA = {
             "independently maintainable concrete topic and property. "
             "Use separate create calls for different entities, topics, or unrelated facts. "
             "Recall returns a compact JSON object with top-level current_session_id for the current conversation, "
-            "whose items always contain all published long-term memory results first, with only the exact memory "
-            "identifiers, memory key, type, content, updated_at, and optional truncated:true in final ranking order. knowledge_base contains globally reranked "
+            "whose items always contain all published long-term memory results first, in final ranking order, with "
+            "only the exact memory identifiers, memory key, type, content, and updated_at. knowledge_base contains globally reranked "
             "managed-knowledge and user-knowledge-base results using the independent knowledge retrieval configuration. "
             "When available, chat_history follows "
             "as secondary BM25 matches from the current user's ordinary USER/ASSISTANT TEXT records; each item "
             "contains role, content, session_id for the session owning that historical message, and created_at for "
-            "the server-saved message time in yyyy-mm-dd HH:mm:ss format, with optional truncated:true. "
+            "the server-saved message time in yyyy-mm-dd HH:mm:ss format. "
             "updated_at and chat_history created_at use yyyy-mm-dd HH:mm:ss with no timezone offset and are null when unavailable; "
             "use only these server-saved values and never infer a timezone. updated_at is a record-maintenance time and may refresh "
             "when a pending change is submitted or organization claims the item, even if published content is unchanged; it is not "
@@ -519,7 +519,6 @@ class LongTermMemoryExecutor(BaseExecutor):
                         query=arguments["query"],
                         top_k=effective_top_k,
                         candidate_k=effective_candidate_k,
-                        result_max_chars=memory_config.result_max_chars,
                     )
 
                 result = await with_recall_db(run)
@@ -539,7 +538,6 @@ class LongTermMemoryExecutor(BaseExecutor):
                         query=arguments["query"],
                         top_k=chat_config.top_k,
                         candidate_k=chat_config.candidate_k,
-                        result_max_chars=chat_config.result_max_chars,
                         before_message_id=self._runtime_source_message_id(),
                     )
 

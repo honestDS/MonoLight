@@ -81,16 +81,13 @@ export const defaultProfileConfigs = () => ({
     embedding_model_id: null,
     top_k: 5,
     candidate_k: 10,
-    result_max_chars: 4000,
     chat_history: {
       top_k: 5,
-      candidate_k: 500,
-      result_max_chars: 4000
+      candidate_k: 500
     },
     knowledge: {
       top_k: 5,
-      candidate_k: 20,
-      result_max_chars: 4000
+      candidate_k: 20
     }
   }
 })

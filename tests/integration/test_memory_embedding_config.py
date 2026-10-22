@@ -71,7 +71,6 @@ def _memory_config(**overrides: object) -> LongTermMemoryConfig:
         "embedding_model_id": None,
         "top_k": 5,
         "candidate_k": 10,
-        "result_max_chars": 4000,
     }
     values.update(overrides)
     return LongTermMemoryConfig.model_validate(values)
@@ -154,16 +153,13 @@ def test_profile_config_memory_defaults_and_legacy_flat_fields() -> None:
     assert old_config.memory.embedding_model_id is None
     assert old_config.memory.top_k == 5
     assert old_config.memory.candidate_k == 10
-    assert old_config.memory.result_max_chars == 4000
     assert old_config.memory.chat_history.model_dump() == {
         "top_k": 5,
         "candidate_k": 500,
-        "result_max_chars": 4000,
     }
     assert old_config.memory.knowledge.model_dump() == {
         "top_k": 5,
         "candidate_k": 20,
-        "result_max_chars": 4000,
     }
 
     flat_config = ProfileConfig.model_validate(
@@ -185,18 +181,43 @@ def test_profile_config_memory_defaults_and_legacy_flat_fields() -> None:
         "embedding_model_id": "embed-v2",
         "top_k": 7,
         "candidate_k": 12,
-        "result_max_chars": 8192,
         "chat_history": {
             "top_k": 7,
             "candidate_k": 500,
-            "result_max_chars": 8192,
         },
         "knowledge": {
             "top_k": 5,
             "candidate_k": 20,
-            "result_max_chars": 4000,
         },
     }
+
+
+@pytest.mark.parametrize("model", [ProfileConfig, ProfileCreate, ProfileUpdate])
+def test_profile_roundtrip_discards_legacy_memory_result_max_chars(model) -> None:
+    memory = {"top_k": 7, "candidate_k": 12, "result_max_chars": 8192}
+    clean_memory = {"top_k": 7, "candidate_k": 12}
+    if model is ProfileConfig:
+        outer_values = {}
+        legacy_config = {"memory": memory}
+        clean_config = {"memory": clean_memory}
+    else:
+        outer_values = {"name": "legacy-profile"}
+        if model is ProfileCreate:
+            outer_values["uid"] = "user-a"
+        legacy_config = {"configs": {"memory": memory}}
+        clean_config = {"configs": {"memory": clean_memory}}
+
+    legacy = model.model_validate({**outer_values, **legacy_config})
+    clean = model.model_validate({**outer_values, **clean_config})
+    exclude_unset = model is not ProfileConfig
+    legacy_dump = legacy.model_dump(exclude_unset=exclude_unset)
+    clean_dump = clean.model_dump(exclude_unset=exclude_unset)
+
+    assert legacy_dump == clean_dump
+    config_dump = legacy_dump["memory"] if model is ProfileConfig else legacy_dump["configs"]["memory"]
+    assert config_dump["top_k"] == 7
+    assert config_dump["candidate_k"] == 12
+    assert "result_max_chars" not in config_dump
 
 
 def test_memory_organization_contract_uses_canonical_fields_and_defaults() -> None:
@@ -278,7 +299,6 @@ def test_profile_config_migrates_legacy_knowledge_recall_fields_and_preserves_ex
     assert legacy_config.memory.knowledge.model_dump() == {
         "top_k": 9,
         "candidate_k": 12,
-        "result_max_chars": 4000,
     }
     assert "kb_query_top_k" not in legacy_config.channel.rerank_channel.model_dump()
     assert "rerank_candidate_k" not in legacy_config.channel.rerank_channel.model_dump()
@@ -344,7 +364,6 @@ def test_profile_config_migrates_legacy_knowledge_recall_fields_and_preserves_ex
     assert explicit_config.memory.knowledge.model_dump() == {
         "top_k": 11,
         "candidate_k": 12,
-        "result_max_chars": 5000,
     }
 
 
@@ -362,12 +381,9 @@ def test_profile_config_rejects_candidate_budget_below_top_k(model) -> None:
         (LongTermMemoryConfig, {"top_k": 0}, False),
         (ChatHistoryRecallConfig, {"top_k": 0}, False),
         (KnowledgeRecallConfig, {"top_k": 0}, False),
-        (LongTermMemoryConfig, {"result_max_chars": 255}, False),
-        (ChatHistoryRecallConfig, {"result_max_chars": 255}, False),
-        (KnowledgeRecallConfig, {"result_max_chars": 255}, False),
-        (LongTermMemoryConfig, {"top_k": 50, "candidate_k": 100, "result_max_chars": 50000}, True),
-        (ChatHistoryRecallConfig, {"top_k": 50, "candidate_k": 500, "result_max_chars": 50000}, True),
-        (KnowledgeRecallConfig, {"top_k": 50, "candidate_k": 50, "result_max_chars": 50000}, True),
+        (LongTermMemoryConfig, {"top_k": 50, "candidate_k": 100}, True),
+        (ChatHistoryRecallConfig, {"top_k": 50, "candidate_k": 500}, True),
+        (KnowledgeRecallConfig, {"top_k": 50, "candidate_k": 50}, True),
     ],
 )
 def test_recall_config_boundaries(model, values: dict, is_valid: bool) -> None:
@@ -376,6 +392,17 @@ def test_recall_config_boundaries(model, values: dict, is_valid: bool) -> None:
     else:
         with pytest.raises(ValueError):
             model.model_validate(values)
+
+
+@pytest.mark.parametrize("model", [LongTermMemoryConfig, ChatHistoryRecallConfig, KnowledgeRecallConfig])
+@pytest.mark.parametrize("legacy_value", [255, None, "legacy"])
+def test_recall_config_ignores_legacy_result_max_chars(model, legacy_value) -> None:
+    quantities = {"top_k": 8, "candidate_k": 12}
+
+    old = model.model_validate({**quantities, "result_max_chars": legacy_value})
+    default_dump = model.model_validate(quantities).model_dump()
+
+    assert old.model_dump() == default_dump
 
 
 @pytest.mark.asyncio
@@ -438,14 +465,14 @@ async def test_initial_confirm_updates_all_same_uid_profiles_atomically_and_keep
         db_session,
         uid="user-a",
         name="profile-a",
-        memory=_memory_config(enabled=False, top_k=7, candidate_k=11, result_max_chars=5000),
+        memory=_memory_config(enabled=False, top_k=7, candidate_k=11),
     )
     second_profile_id = (
         await _create_profile(
             db_session,
             uid="user-a",
             name="profile-b",
-            memory=_memory_config(enabled=True, top_k=3, candidate_k=4, result_max_chars=2500),
+            memory=_memory_config(enabled=True, top_k=3, candidate_k=4),
         )
     ).id
     calls = _patch_embedding_probe(monkeypatch, dimensions=3)
@@ -462,7 +489,7 @@ async def test_initial_confirm_updates_all_same_uid_profiles_atomically_and_keep
         db_session,
         uid="user-a",
         profile_id=first_profile.id,
-        memory=_memory_config(enabled=True, top_k=7, candidate_k=11, result_max_chars=5000),
+        memory=_memory_config(enabled=True, top_k=7, candidate_k=11),
         embedding_selection_signature=token,
     )
 
@@ -503,11 +530,9 @@ async def test_initial_confirm_updates_all_same_uid_profiles_atomically_and_keep
     assert first_memory.enabled is True
     assert first_memory.top_k == 7
     assert first_memory.candidate_k == 11
-    assert first_memory.result_max_chars == 5000
     assert second_memory.enabled is True
     assert second_memory.top_k == 3
     assert second_memory.candidate_k == 4
-    assert second_memory.result_max_chars == 2500
     assert {first_memory.embedding_channel_id, second_memory.embedding_channel_id} == {7}
     assert {first_memory.embedding_model_id, second_memory.embedding_model_id} == {"embed-v1"}
     assert profiles[1].id == second_profile_id

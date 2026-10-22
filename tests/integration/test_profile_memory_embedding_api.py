@@ -121,7 +121,6 @@ def _memory_config(**overrides: object) -> LongTermMemoryConfig:
         "embedding_model_id": None,
         "top_k": 5,
         "candidate_k": 10,
-        "result_max_chars": 4000,
     }
     values.update(overrides)
     return LongTermMemoryConfig.model_validate(values)
@@ -718,14 +717,16 @@ async def test_admin_can_preview_and_confirm_other_user_profile_embedding(
     confirm_payload = _assert_standard(confirm_response, 200)
     assert confirm_payload["data"]["uid"] == "user-b"
     memory_config = confirm_payload["data"]["configs"]["memory"]
-    assert memory_config["enabled"] is True
-    assert memory_config["embedding_channel_id"] == 7
-    assert memory_config["embedding_model_id"] == "embed-v1"
-    assert memory_config["top_k"] == 9
-    assert memory_config["candidate_k"] == 19
-    assert memory_config["result_max_chars"] == 9000
-    assert memory_config["chat_history"] == {"top_k": 8, "candidate_k": 80, "result_max_chars": 8000}
-    assert memory_config["knowledge"] == {"top_k": 7, "candidate_k": 17, "result_max_chars": 7000}
+    assert memory_config == {
+        "enabled": True,
+        "precheck_enabled": True,
+        "embedding_channel_id": 7,
+        "embedding_model_id": "embed-v1",
+        "top_k": 9,
+        "candidate_k": 19,
+        "chat_history": {"top_k": 8, "candidate_k": 80},
+        "knowledge": {"top_k": 7, "candidate_k": 17},
+    }
     store = await memory_store_crud.get_snapshot_by_uid(db_session, uid="user-b")
     assert store is not None
     assert store.active_embedding_channel_id == 7

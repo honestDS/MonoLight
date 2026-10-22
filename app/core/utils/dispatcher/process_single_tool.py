@@ -498,35 +498,39 @@ async def process_single_tool(
         content=tool_result,
     )
     tool_msg.tool_execution_status = get_tool_execution_status(tool_msg)
-    if tool_result_round_budget_tokens is None:
-        tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
-    else:
-        tool_result_round_budget_tokens = max(1, tool_result_round_budget_tokens)
-    tool_result_budget_tokens = max(1, tool_result_round_budget_tokens // max(1, tool_call_count))
-    truncation_stats = await asyncio.to_thread(
-        truncate_tool_messages_for_budget,
-        tool_msgs=[tool_msg],
-        context_window_k=context_window_k,
-        budget_tokens=tool_result_budget_tokens,
-        uid=uid,
-        session_id=session_id,
-        model_id=model_id,
-        protocol=protocol,
-        spill_dir=get_user_temp_dir(os.getcwd(), uid) / "tool_results",
-    )
-    if truncation_stats.truncated_count:
-        get_logger("dispatcher").bind(
+    is_recall_tool = tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME or (tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME and args.get("operation") == "recall")
+    if not is_recall_tool:
+        if tool_result_round_budget_tokens is None:
+            tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
+        else:
+            tool_result_round_budget_tokens = max(1, tool_result_round_budget_tokens)
+        tool_result_budget_tokens = max(1, tool_result_round_budget_tokens // max(1, tool_call_count))
+
+        truncation_stats = await asyncio.to_thread(
+            truncate_tool_messages_for_budget,
+            tool_msgs=[tool_msg],
+            context_window_k=context_window_k,
+            budget_tokens=tool_result_budget_tokens,
             uid=uid,
             session_id=session_id,
-            tool_name=tool_name,
-        ).warning(
-            t(
-                "LOG_TOOL_RESULT_TRUNCATED",
-                tool_name=tool_name,
-                context_window_k=context_window_k,
-                budget_tokens=tool_result_budget_tokens,
-            )
+            model_id=model_id,
+            protocol=protocol,
+            spill_dir=get_user_temp_dir(os.getcwd(), uid) / "tool_results",
         )
+
+        if truncation_stats.truncated_count:
+            get_logger("dispatcher").bind(
+                uid=uid,
+                session_id=session_id,
+                tool_name=tool_name,
+            ).warning(
+                t(
+                    "LOG_TOOL_RESULT_TRUNCATED",
+                    tool_name=tool_name,
+                    context_window_k=context_window_k,
+                    budget_tokens=tool_result_budget_tokens,
+                )
+            )
 
     processed_result = tool_msg.content or ""
     LogManager.log_tool_result(turn, processed_result, session_id, uid)

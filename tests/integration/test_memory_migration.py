@@ -288,7 +288,6 @@ async def test_embedding_migration_switches_and_applies_snapshot_delta(
                     "embedding_model_id": source["model_id"],
                     "top_k": 3,
                     "candidate_k": 7,
-                    "result_max_chars": 2000,
                 }
             }
         ).model_dump(),
@@ -304,7 +303,6 @@ async def test_embedding_migration_switches_and_applies_snapshot_delta(
                     "embedding_model_id": source["model_id"],
                     "top_k": 8,
                     "candidate_k": 12,
-                    "result_max_chars": 4000,
                 }
             }
         ).model_dump(),
@@ -471,13 +469,11 @@ async def test_embedding_migration_switches_and_applies_snapshot_delta(
     assert profile_a_memory.enabled is True
     assert profile_a_memory.top_k == 3
     assert profile_a_memory.candidate_k == 7
-    assert profile_a_memory.result_max_chars == 2000
     assert profile_b_memory.embedding_channel_id == target["channel_id"]
     assert profile_b_memory.embedding_model_id == target["model_id"]
     assert profile_b_memory.enabled is False
     assert profile_b_memory.top_k == 8
     assert profile_b_memory.candidate_k == 12
-    assert profile_b_memory.result_max_chars == 4000
 
     target_items = vector_backend.collections[target_collection]["items"]
     item_ids: list[str] = []

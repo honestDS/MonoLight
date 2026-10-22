@@ -4,6 +4,8 @@ from typing import Annotated, Any
 from pydantic import ConfigDict, StrictStr, StringConstraints, model_validator
 from sqlmodel import Field, SQLModel
 
+from app.core.constants import KNOWLEDGE_CONTENT_MAX_CHARS
+
 from .base import KnowledgeBaseCore, KnowledgeBaseIndexStatus
 from .job import KnowledgeJobStatus
 from .managed import (
@@ -81,7 +83,7 @@ class KnowledgeOrganizationRequest(SQLModel):
 
 class ManagedKnowledgeCreateRequest(SQLModel):
     knowledge_key: str = Field(..., min_length=1, max_length=255)
-    content: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1, max_length=KNOWLEDGE_CONTENT_MAX_CHARS)
     llm_maintainable: bool = False
     dedupe_key: str | None = Field(default=None, min_length=1, max_length=255)
 
@@ -205,7 +207,7 @@ class KnowledgeBaseDocumentContentResponse(KnowledgeBaseDocumentResponse):
 
 class KnowledgeEntryCreateRequest(SQLModel):
     name: Annotated[StrictStr, StringConstraints(pattern=r"\S")] = Field(..., min_length=1, max_length=255)
-    content: StrictStr = Field(..., min_length=1)
+    content: StrictStr = Field(..., min_length=1, max_length=KNOWLEDGE_CONTENT_MAX_CHARS)
     source_filename: Annotated[StrictStr, StringConstraints(pattern=r"\S")] | None = Field(default=None, min_length=1, max_length=255)
     llm_maintainable: bool = False
     chunk_size: int = Field(default=1000, ge=100, le=20000)

@@ -11,11 +11,14 @@ from app.core.constants import (
     ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN,
     ERR_KB_NOT_FOUND,
     ERR_KB_VECTOR_WRITE_FAILED,
+    KNOWLEDGE_DOCUMENT_MAX_CHUNKS,
+    KNOWLEDGE_DOCUMENT_MAX_TOTAL_CHARS,
 )
 from app.core.crud.knowledge.base import knowledge_base_crud, knowledge_base_document_crud
 from app.core.embedding.knowledge_base import embed_chunks_with_knowledge_base_config
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.exceptions import ParameterException, ResourceNotFoundException, ServerException
+from app.core.knowledge.input_limits import validate_knowledge_content
 from app.core.knowledge.migration import record_knowledge_base_migration_change
 from app.core.utils.text_splitter import TextSplitter
 from app.models.knowledge_base import (
@@ -41,6 +44,7 @@ def decode_knowledge_document(raw_content: bytes) -> str:
         except UnicodeDecodeError as exc:
             raise ParameterException(ERR_KB_FILE_ENCODING_ERROR) from exc
 
+    validate_knowledge_content(content)
     if not content.strip():
         raise ParameterException(ERR_KB_FILE_EMPTY)
     return content
@@ -109,7 +113,12 @@ async def create_user_knowledge_document(
     if chunk_overlap >= chunk_size:
         raise ParameterException(ERR_KB_CHUNK_OVERLAP_ERROR)
 
-    chunks = TextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap).split(content)
+    validate_knowledge_content(content)
+    chunks = TextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap).split(
+        content,
+        max_chunks=KNOWLEDGE_DOCUMENT_MAX_CHUNKS,
+        max_total_chars=KNOWLEDGE_DOCUMENT_MAX_TOTAL_CHARS,
+    )
     if not chunks:
         raise ParameterException(ERR_KB_FILE_EMPTY)
 

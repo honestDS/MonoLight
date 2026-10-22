@@ -783,9 +783,8 @@ async def test_admin_and_regular_updates_preserve_existing_configs_for_omitted_o
             "precheck_enabled": False,
             "top_k": 8,
             "candidate_k": 20,
-            "result_max_chars": 6500,
-            "chat_history": {"top_k": 7, "candidate_k": 50, "result_max_chars": 7000},
-            "knowledge": {"top_k": 6, "candidate_k": 30, "result_max_chars": 8000},
+            "chat_history": {"top_k": 7, "candidate_k": 50},
+            "knowledge": {"top_k": 6, "candidate_k": 30},
         }
     )
     expected_configs = deepcopy(admin_configs)
@@ -954,9 +953,8 @@ async def test_admin_partial_update_replaces_only_explicit_config_leaves(
             "precheck_enabled": True,
             "top_k": 8,
             "candidate_k": 30,
-            "result_max_chars": 6500,
-            "chat_history": {"top_k": 7, "candidate_k": 80, "result_max_chars": 7000},
-            "knowledge": {"top_k": 6, "candidate_k": 31, "result_max_chars": 8000},
+            "chat_history": {"top_k": 7, "candidate_k": 80},
+            "knowledge": {"top_k": 6, "candidate_k": 31},
         }
     )
 
