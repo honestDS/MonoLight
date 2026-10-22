@@ -1,7 +1,12 @@
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
-from app.core.constants import ERR_KB_CHUNK_OVERLAP_ERROR
+from app.core.constants import (
+    ERR_KB_CHUNK_COUNT_EXCEEDED,
+    ERR_KB_CHUNK_OVERLAP_ERROR,
+    ERR_KB_CHUNK_TOTAL_CHARS_EXCEEDED,
+)
 from app.core.exceptions import ParameterException
 
 
@@ -19,8 +24,14 @@ class TextSplitter:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-    def split(self, text: str) -> list[str]:
-        _, chunks = self._split_with_spans(text)
+    def split(
+        self,
+        text: str,
+        *,
+        max_chunks: int | None = None,
+        max_total_chars: int | None = None,
+    ) -> list[str]:
+        _, chunks = self._split_with_spans(text, max_chunks, max_total_chars)
         return [chunk.content for chunk in chunks]
 
     def reconstruct_chunk_range(self, text: str, start_index: int, end_index: int) -> str | None:
@@ -29,7 +40,12 @@ class TextSplitter:
             return None
         return normalized_text[chunks[start_index].start : chunks[end_index].end]
 
-    def _split_with_spans(self, text: str) -> tuple[str, list[_SplitChunk]]:
+    def _split_with_spans(
+        self,
+        text: str,
+        max_chunks: int | None = None,
+        max_total_chars: int | None = None,
+    ) -> tuple[str, list[_SplitChunk]]:
         normalized_text = text.replace("\r\n", "\n").strip()
         if not normalized_text:
             return "", []
@@ -50,6 +66,23 @@ class TextSplitter:
             cursor = end + 2
 
         chunks: list[_SplitChunk] = []
+        total_chars = 0
+
+        def add_chunk(chunk: _SplitChunk) -> None:
+            nonlocal total_chars
+            if not chunk.content:
+                return
+            if max_chunks is not None and len(chunks) >= max_chunks:
+                raise ParameterException(ERR_KB_CHUNK_COUNT_EXCEEDED, max_chunks=max_chunks)
+            next_total_chars = total_chars + len(chunk.content)
+            if max_total_chars is not None and next_total_chars > max_total_chars:
+                raise ParameterException(
+                    ERR_KB_CHUNK_TOTAL_CHARS_EXCEEDED,
+                    max_chars=max_total_chars,
+                )
+            chunks.append(chunk)
+            total_chars = next_total_chars
+
         current = ""
         current_start: int | None = None
         current_end: int | None = None
@@ -57,11 +90,12 @@ class TextSplitter:
         for paragraph, paragraph_start, paragraph_end in paragraph_spans:
             if len(paragraph) > self.chunk_size:
                 if current:
-                    chunks.append(_SplitChunk(content=current.strip(), start=current_start or 0, end=current_end or 0))
+                    add_chunk(_SplitChunk(content=current.strip(), start=current_start or 0, end=current_end or 0))
                     current = ""
                     current_start = None
                     current_end = None
-                chunks.extend(self._split_long_text_with_spans(paragraph, paragraph_start))
+                for chunk in self._split_long_text_with_spans(paragraph, paragraph_start):
+                    add_chunk(chunk)
                 continue
 
             candidate = f"{current}\n\n{paragraph}" if current else paragraph
@@ -72,22 +106,17 @@ class TextSplitter:
                 current_end = paragraph_end
             else:
                 if current:
-                    chunks.append(_SplitChunk(content=current.strip(), start=current_start or 0, end=current_end or 0))
+                    add_chunk(_SplitChunk(content=current.strip(), start=current_start or 0, end=current_end or 0))
                 current = paragraph
                 current_start = paragraph_start
                 current_end = paragraph_end
 
         if current:
-            chunks.append(_SplitChunk(content=current.strip(), start=current_start or 0, end=current_end or 0))
+            add_chunk(_SplitChunk(content=current.strip(), start=current_start or 0, end=current_end or 0))
 
-        non_empty_chunks: list[_SplitChunk] = []
-        for chunk in chunks:
-            if chunk.content:
-                non_empty_chunks.append(chunk)
-        return normalized_text, non_empty_chunks
+        return normalized_text, chunks
 
-    def _split_long_text_with_spans(self, text: str, base_start: int) -> list[_SplitChunk]:
-        chunks: list[_SplitChunk] = []
+    def _split_long_text_with_spans(self, text: str, base_start: int) -> Iterator[_SplitChunk]:
         start = 0
         text_length = len(text)
         step = self.chunk_size - self.chunk_overlap
@@ -102,13 +131,11 @@ class TextSplitter:
                 trailing_trim = len(raw_chunk) - len(raw_chunk.rstrip())
                 chunk_start = base_start + start + leading_trim
                 chunk_end = base_start + end - trailing_trim
-                chunks.append(_SplitChunk(content=chunk, start=chunk_start, end=chunk_end))
+                yield _SplitChunk(content=chunk, start=chunk_start, end=chunk_end)
             if end >= text_length:
                 break
             next_start = end - self.chunk_overlap
             start = next_start if next_start > start else start + step
-
-        return chunks
 
     def _split_long_text(self, text: str) -> list[str]:
         return [chunk.content for chunk in self._split_long_text_with_spans(text, 0)]

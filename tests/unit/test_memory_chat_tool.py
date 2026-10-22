@@ -48,7 +48,6 @@ def _config(*, memory_enabled: bool, enabled_tools: list[str] | None = None) -> 
                 "enabled": memory_enabled,
                 "top_k": 5,
                 "candidate_k": 8,
-                "result_max_chars": 1234,
             },
         }
     )
@@ -401,7 +400,6 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
         "query": "private query",
         "top_k": 3,
         "candidate_k": 8,
-        "result_max_chars": 1234,
     }
     assert chat_captured == {
         "db": context.db,
@@ -409,7 +407,6 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
         "query": "private query",
         "top_k": 5,
         "candidate_k": 500,
-        "result_max_chars": 1234,
         "before_message_id": context.source_message_id,
     }
     assert json.loads(result) == {

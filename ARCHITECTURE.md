@@ -90,6 +90,15 @@ app/adapters/
     └── schemas.py          # 平台内部数据结构
 ```
 
+### 接口层共享组件：`app/api/`
+
+```text
+app/api/
+└── knowledge_input.py       # 知识录入请求体限制与上传文件的有界流式读取
+```
+
+该层只承载跨知识库接口复用的输入边界处理；具体业务校验和持久化仍由 `app/core/` 与 `app/models/` 负责。
+
 ### 接口层：`app/api/v1/`
 
 ```text
@@ -233,6 +242,7 @@ app/core/knowledge/
 ├── deletion.py             # 用户知识库与托管知识库删除权限及生命周期边界
 ├── embedding_migration.py  # 用户知识库手动迁移与托管知识随长期记忆修订自动迁移
 ├── errors.py               # 托管知识领域异常
+├── input_limits.py         # 知识正文字符、字节与输入边界校验
 ├── managed.py              # 托管知识条目、版本与维护边界领域服务
 ├── managed_container.py    # 按 Profile 懒创建/复用托管知识库并复制长期记忆当前嵌入运行态
 ├── migration.py            # 知识库迁移期间的增量变更记录边界
@@ -251,8 +261,10 @@ app/core/knowledge/
 ├── organization_types.py   # 整理计划、范围与执行结果契约
 ├── recall.py               # 托管知识候选校验、去重与最终主数据还原
 ├── results.py              # 托管知识操作及统一知识召回结果模型
-└── unified_recall.py       # 托管知识与用户知识库候选合并、全局重排和结果裁剪
+└── unified_recall.py       # 托管知识与用户知识库候选合并、全局重排和结果组装
 ```
+
+知识正文的录入边界由 `app/core/constants.py` 统一定义，入口层负责限制实际接收量，知识领域负责校验解码后的正文，文档切分负责限制分块资源消耗。统一召回保留命中知识的完整正文；模型上下文容量与超限恢复由 Dispatcher 和上下文总结组件负责，不由知识领域截断正文。
 
 ### 知识作业：`app/core/knowledge_jobs/`
 

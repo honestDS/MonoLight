@@ -6,14 +6,20 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.core.constants import MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
+from app.core.constants import (
+    ERR_KB_CONTENT_ENCODING_ERROR,
+    ERR_KB_CONTENT_TOO_LONG,
+    KNOWLEDGE_CONTENT_MAX_CHARS,
+    MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS,
+)
 from app.core.crud.knowledge.managed import managed_knowledge_item_crud
+from app.core.exceptions import ParameterException
 from app.core.knowledge.managed import (
     ManagedKnowledgeConflictError,
     ManagedKnowledgeContentTooLongError,
@@ -21,6 +27,7 @@ from app.core.knowledge.managed import (
     managed_knowledge_service,
 )
 from app.core.knowledge.results import ManagedKnowledgeMutationStatus
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
     KnowledgeBase,
@@ -283,25 +290,115 @@ async def test_managed_knowledge_content_limit_is_independent_and_retryable(db_s
 
 
 @pytest.mark.asyncio
-async def test_managed_knowledge_has_no_character_count_limit(db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch):
-    knowledge_base = await _create_container(db_session, name="long-text")
-    content = "x" * 120_000
-    monkeypatch.setattr("app.core.knowledge.managed.estimate_tokens", lambda _content: 1000)
+@pytest.mark.parametrize(
+    "content_length",
+    [
+        KNOWLEDGE_CONTENT_MAX_CHARS - 1,
+        KNOWLEDGE_CONTENT_MAX_CHARS,
+        KNOWLEDGE_CONTENT_MAX_CHARS + 1,
+    ],
+)
+async def test_managed_knowledge_content_character_limit_boundaries(db_session: AsyncSession, content_length: int):
+    knowledge_base = await _create_container(db_session, name="character-limit")
+    content = " " * (content_length - 1) + "x"
+    actual_tokens = estimate_tokens(content)
+    assert actual_tokens <= MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
 
-    result = await managed_knowledge_service.create(
+    item_count_before = (await db_session.execute(select(func.count()).select_from(ManagedKnowledgeItem))).scalar_one()
+    revision_count_before = (await db_session.execute(select(func.count()).select_from(ManagedKnowledgeRevision))).scalar_one()
+
+    if content_length <= KNOWLEDGE_CONTENT_MAX_CHARS:
+        result = await managed_knowledge_service.create(
+            db_session,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            knowledge_key=f"content-{content_length}",
+            content=content,
+            source_type=ManagedKnowledgeSourceType.LLM_TOOL,
+            actor=ManagedKnowledgeActorType.LLM,
+        )
+
+        assert result.status == ManagedKnowledgeMutationStatus.CREATED
+        assert result.item.content == content
+        assert result.item.content_token_count == actual_tokens
+    else:
+        with pytest.raises(ParameterException) as exc_info:
+            await managed_knowledge_service.create(
+                db_session,
+                uid="user-1",
+                knowledge_base_id=knowledge_base.id,
+                knowledge_key=f"content-{content_length}",
+                content=content,
+                source_type=ManagedKnowledgeSourceType.LLM_TOOL,
+                actor=ManagedKnowledgeActorType.LLM,
+            )
+
+        assert exc_info.value.message == ERR_KB_CONTENT_TOO_LONG
+        assert exc_info.value.code == 400
+        item_count_after = (await db_session.execute(select(func.count()).select_from(ManagedKnowledgeItem))).scalar_one()
+        revision_count_after = (await db_session.execute(select(func.count()).select_from(ManagedKnowledgeRevision))).scalar_one()
+        assert item_count_after == item_count_before
+        assert revision_count_after == revision_count_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invalid_content", "expected_message"),
+    [
+        pytest.param("x" * (KNOWLEDGE_CONTENT_MAX_CHARS + 1), ERR_KB_CONTENT_TOO_LONG, id="too-many-characters"),
+        pytest.param("invalid\ud800", ERR_KB_CONTENT_ENCODING_ERROR, id="invalid-encoding"),
+    ],
+)
+async def test_managed_knowledge_update_rejects_invalid_content_without_mutating_state(
+    db_session: AsyncSession,
+    invalid_content: str,
+    expected_message: str,
+):
+    knowledge_base = await _create_container(db_session, name="invalid-update")
+    kb_id: int = int(knowledge_base.id)
+    created = await managed_knowledge_service.create(
         db_session,
         uid="user-1",
-        knowledge_base_id=knowledge_base.id,
-        knowledge_key="long-text",
-        content=content,
-        source_type=ManagedKnowledgeSourceType.LLM_TOOL,
-        actor=ManagedKnowledgeActorType.LLM,
+        knowledge_base_id=kb_id,
+        knowledge_key="invalid-content-update",
+        content="Original managed content",
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        actor=ManagedKnowledgeActorType.USER,
     )
+    assert created.item is not None and created.item.id is not None
+    item_id: int = int(created.item.id)
+    original_content = created.item.content
+    original_version = created.item.version
 
-    assert result.status == ManagedKnowledgeMutationStatus.CREATED
-    assert result.item.content == content
-    assert len(result.item.content) == 120_000
-    assert result.item.content_token_count == 1000
+    with pytest.raises(ParameterException) as exc_info:
+        await managed_knowledge_service.update(
+            db_session,
+            uid="user-1",
+            knowledge_base_id=kb_id,
+            knowledge_id=item_id,
+            expected_version=1,
+            knowledge_key="invalid-content-update",
+            content=invalid_content,
+            source_type=ManagedKnowledgeSourceType.USER_API,
+            actor=ManagedKnowledgeActorType.USER,
+        )
+
+    assert exc_info.value.code == 400
+    assert exc_info.value.message == expected_message
+
+    current = await db_session.get(ManagedKnowledgeItem, item_id, populate_existing=True)
+    assert current is not None
+    assert current.content == original_content
+    assert current.version == original_version
+
+    revisions = list((await db_session.execute(select(ManagedKnowledgeRevision).where(ManagedKnowledgeRevision.knowledge_id == item_id).order_by(ManagedKnowledgeRevision.version.asc()))).scalars().all())
+    assert len(revisions) == 1
+    assert revisions[0].version == original_version
+    assert revisions[0].before_snapshot is None
+    assert revisions[0].after_snapshot["content"] == original_content
+
+    item_count = (await db_session.execute(select(func.count()).select_from(ManagedKnowledgeItem))).scalar_one()
+    assert item_count == 1
 
 
 @pytest.mark.asyncio

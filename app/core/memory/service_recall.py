@@ -12,7 +12,6 @@ from app.core.constants import (
     ERR_MEMORY_RECALL_UNAVAILABLE,
     ERR_VALUE_MUST_BE_BETWEEN,
     LOG_MEMORY_RECALL_TOUCH_FAILED,
-    MEMORY_CONTENT_MAX_CHARS,
 )
 from app.core.crud.memory.store import (
     memory_record_crud,
@@ -52,7 +51,6 @@ class LongTermMemoryRecall:
         query: str,
         top_k: int = 5,
         candidate_k: int = 10,
-        result_max_chars: int = 4000,
     ) -> MemoryRecallResult:
         normalized_uid = _normalize_uid(uid)
         normalized_query = normalize_memory_content(query)
@@ -67,13 +65,6 @@ class LongTermMemoryRecall:
                 ERR_VALUE_MUST_BE_BETWEEN,
                 params={"field": "candidate_k", "minimum": normalized_top_k, "maximum": 100},
             )
-        normalized_result_max_chars = _require_positive(result_max_chars, field="result_max_chars")
-        if not 256 <= normalized_result_max_chars <= MEMORY_CONTENT_MAX_CHARS:
-            raise MemoryValidationError(
-                ERR_VALUE_MUST_BE_BETWEEN,
-                params={"field": "result_max_chars", "minimum": 256, "maximum": MEMORY_CONTENT_MAX_CHARS},
-            )
-
         store = await memory_store_crud.get_snapshot_by_uid(db, uid=normalized_uid)
         if store is None:
             return MemoryRecallResult(status=MemoryRecallStatus.NOT_CONFIGURED, error_key=ERR_MEMORY_NOT_CONFIGURED)
@@ -163,23 +154,17 @@ class LongTermMemoryRecall:
         records = await memory_record_crud.list_recallable_by_ids(db, uid=normalized_uid, memory_ids=set(candidate_ids))
         records_by_id = {record.id: record for record in records}
         items: list[MemoryRecallItem] = []
-        remaining = normalized_result_max_chars
         for hit, hit_memory_id, hit_version in valid_hits:
             if len(items) >= normalized_top_k:
                 break
             record = records_by_id.get(hit_memory_id)
             if record is None or record.version != hit_version or record.vector_item_id != hit.id or not isinstance(record.content, str):
                 continue
-            if remaining <= 0:
-                break
-            content = record.content
-            truncated = len(content) > remaining
-            output_content = content[:remaining] if truncated else content
             items.append(
                 MemoryRecallItem(
                     memory_id=record.id,
                     memory_key=record.memory_key or "",
-                    content=output_content,
+                    content=record.content,
                     memory_type=_enum_value(record.memory_type),
                     version=record.version,
                     updated_at=record.updated_at,
@@ -189,12 +174,8 @@ class LongTermMemoryRecall:
                     sparse_score=getattr(hit, "sparse_score", None),
                     sparse_rank=getattr(hit, "sparse_rank", None),
                     fusion_score=getattr(hit, "fusion_score", None),
-                    truncated=truncated,
                 )
             )
-            remaining -= len(output_content)
-            if truncated:
-                break
         if not items:
             return MemoryRecallResult(status=MemoryRecallStatus.EMPTY)
         recall_result = MemoryRecallResult(status=MemoryRecallStatus.OK, items=tuple(items))

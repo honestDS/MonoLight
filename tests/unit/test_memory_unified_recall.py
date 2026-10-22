@@ -31,16 +31,13 @@ def _profile_and_config():
             "enabled": True,
             "top_k": 3,
             "candidate_k": 7,
-            "result_max_chars": 700,
             "chat_history": {
                 "top_k": 4,
                 "candidate_k": 9,
-                "result_max_chars": 600,
             },
             "knowledge": {
                 "top_k": 2,
                 "candidate_k": 6,
-                "result_max_chars": 500,
             },
         }
     }
@@ -268,7 +265,6 @@ async def test_recall_runs_three_sources_concurrently_with_independent_queries_a
         "query": "stable project background",
         "top_k": 3,
         "candidate_k": 7,
-        "result_max_chars": 700,
     }
     assert calls["chat"] == {
         "db": calls["chat"]["db"],
@@ -276,7 +272,6 @@ async def test_recall_runs_three_sources_concurrently_with_independent_queries_a
         "query": "stable project background",
         "top_k": 4,
         "candidate_k": 9,
-        "result_max_chars": 600,
         "before_message_id": context.source_message_id,
     }
     assert calls["knowledge"]["profile"] is context.profile

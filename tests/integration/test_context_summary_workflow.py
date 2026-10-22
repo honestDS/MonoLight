@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from importlib import import_module
@@ -13,7 +14,7 @@ from sqlmodel import select
 from app.core.constants import ERR_CONTEXT_SUMMARY_OUTPUT_BUDGET_EXHAUSTED, GOAL_EXECUTION_PHASE_RUNNING
 from app.core.crud.context_summary.fragment import build_context_summary_fragment_dedupe_key
 from app.core.dispatchers import interactive_generation as interactive_generation_module
-from app.core.exceptions import LLMContextLengthException, LLMRequestRejectedException
+from app.core.exceptions import LLMContextLengthException, LLMException, LLMRequestRejectedException
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_summary import cleanup as context_summary_cleanup
 from app.core.utils.context_summary import merge as context_summary_merge
@@ -28,7 +29,7 @@ from app.core.utils.context_summary.snapshot import build_context_summary_snapsh
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage, ContextSummaryStageStatus
-from app.models.message import InternalMessage, InternalResponse, Message, MessageRole
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
@@ -366,10 +367,55 @@ async def test_checkpoint_summary_threshold_uses_persisted_provider_usage_not_lo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_summary_failure", "provider_keeps_overflowing"),
+    [(False, False), (True, False), (False, True)],
+    ids=["summary-succeeds", "user-retry-after-summary-failure", "summary-succeeds-provider-still-overflows"],
+)
 async def test_provider_overflow_persists_summary_before_same_channel_retry(
     context_summary_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    first_summary_failure: bool,
+    provider_keeps_overflowing: bool,
 ) -> None:
+    items_tail_marker = "RECALL_ITEMS_TAIL_MARKER_9C15D2"
+    items_body = ("unified recall item with archived engineering details. " * 120) + items_tail_marker
+    managed_tail_marker = "MANAGED_KNOWLEDGE_MAINTENANCE_MARKER_7F3A91"
+    managed_body = ("managed knowledge recall record with durable facts. " * 120) + managed_tail_marker
+    user_tail_marker = "USER_KNOWLEDGE_TAIL_MARKER_4B82E6"
+    user_body = ("user knowledge recall record with personal preferences. " * 120) + user_tail_marker
+    chat_history_tail_marker = "CHAT_HISTORY_TAIL_MARKER_6D03AF"
+    chat_history_body = ("recalled chat history record with prior decisions. " * 120) + chat_history_tail_marker
+    assert all(len(body) > 4000 for body in (items_body, managed_body, user_body, chat_history_body))
+    tool_call_id = "managed-recall-call-1"
+    managed_tool_call = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[
+            InternalToolCall(
+                id=tool_call_id,
+                name="manage_memory_and_knowledge",
+                arguments={"operation": "recall", "query": "durable project facts"},
+            )
+        ],
+    )
+    managed_tool_result = InternalMessage(
+        role=MessageRole.TOOL,
+        content=json.dumps(
+            {
+                "items": [{"content": items_body}],
+                "current_session_id": "recovery-session",
+                "knowledge_base": [
+                    {"source_type": "managed_knowledge", "content": managed_body},
+                    {"source_type": "user_knowledge", "content": user_body},
+                ],
+                "chat_history": [{"content": chat_history_body}],
+            },
+            ensure_ascii=False,
+        ),
+        tool_call_id=tool_call_id,
+        tool_execution_status="succeeded",
+    )
+
     async with context_summary_database() as db:
         db.add(ChatSession(session_id="recovery-session", uid="recovery-user"))
         db.add_all(
@@ -377,11 +423,35 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
                 Message(id=1, session_id="recovery-session", uid="recovery-user", profile_id=1, role=MessageRole.USER, content="old question"),
                 Message(id=2, session_id="recovery-session", uid="recovery-user", profile_id=1, role=MessageRole.ASSISTANT, content="old answer"),
                 Message(id=3, session_id="recovery-session", uid="recovery-user", profile_id=1, role=MessageRole.USER, content="current question"),
+                Message(
+                    id=4,
+                    session_id="recovery-session",
+                    uid="recovery-user",
+                    profile_id=1,
+                    role=MessageRole.ASSISTANT,
+                    type=MessageType.TOOL_CALL,
+                    content=managed_tool_call.model_dump_json(),
+                ),
+                Message(
+                    id=5,
+                    session_id="recovery-session",
+                    uid="recovery-user",
+                    profile_id=1,
+                    role=MessageRole.TOOL,
+                    type=MessageType.TOOL_RESULT,
+                    content=managed_tool_result.model_dump_json(),
+                ),
             ]
         )
         await db.commit()
 
+    summary_calls = 0
+
     async def generate_summary(*_args, **_kwargs):
+        nonlocal summary_calls
+        summary_calls += 1
+        if first_summary_failure and summary_calls == 1:
+            raise LLMException("summary model unavailable")
         return context_summary_stage.GeneratedSummaryResult(
             content="overflow recovery summary",
             message_count=2,
@@ -410,11 +480,11 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
         def warning(self, *_args, **_kwargs):
             return None
 
-    attempts = []
+    attempts: list[list[InternalMessage]] = []
 
     async def generate_response(**kwargs):
-        attempts.append([message.content for message in kwargs["messages"]])
-        if len(attempts) == 1:
+        attempts.append([message.model_copy(deep=True) for message in kwargs["messages"]])
+        if provider_keeps_overflowing or len(attempts) == 1 or (first_summary_failure and len(attempts) == 2):
             raise LLMContextLengthException(provider_message="maximum context length exceeded")
         return InternalResponse(
             message=InternalMessage(role=MessageRole.ASSISTANT, content="recovered"),
@@ -422,25 +492,38 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             usage={"prompt_tokens": 120, "completion_tokens": 8, "cached_tokens": 20},
         )
 
+    fallback_calls = 0
+
     async def unexpected_channel_fallback(*_args, **_kwargs):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        if first_summary_failure or provider_keeps_overflowing:
+            return None
         raise AssertionError("same-channel summary recovery must run before channel fallback")
 
     monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
     monkeypatch.setattr(interactive_generation_module, "select_channel", unexpected_channel_fallback)
 
-    async with context_summary_database() as db:
-        state = SimpleNamespace(
+    async def build_state(db):
+        messages = await prepare_module.prepare_messages(
+            db,
+            "recovery-session",
+            "recovery-user",
+            SimpleNamespace(id=1),
+            SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90)),
+            None,
+            "",
+            False,
+            context_window_k=64,
+            max_tokens=512,
+        )
+        return SimpleNamespace(
             db=db,
             uid="recovery-user",
             session_id="recovery-session",
             profile=SimpleNamespace(id=1),
             cfg=SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90)),
-            messages=[
-                InternalMessage(role=MessageRole.SYSTEM, content="stable system prompt"),
-                InternalMessage(id=1, role=MessageRole.USER, content="old question"),
-                InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
-                InternalMessage(id=3, role=MessageRole.USER, content="current question"),
-            ],
+            messages=messages,
             checkpoint_state=SimpleNamespace(
                 upper_message_id=3,
                 total_output_tokens=0,
@@ -479,20 +562,123 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             video_understanding=False,
         )
 
-        result = await interactive_generation_module.generate_interactive_turn(
-            state,
-            current_tools=[],
-            response_id="response-1",
-        )
-        await db.refresh((await db.execute(select(ChatSession).where(ChatSession.session_id == "recovery-session"))).scalar_one())
-        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "recovery-session"))).scalar_one()
+    async def build_system_prompt(_db, _profile, **_kwargs):
+        return "stable system prompt"
 
-    assert result.message.content == "recovered"
-    assert len(attempts) == 2
-    assert all("overflow recovery summary" not in str(content) for content in attempts[0])
-    assert any("overflow recovery summary" in str(content) for content in attempts[1])
+    monkeypatch.setattr(prepare_module, "build_system_prompt", build_system_prompt)
+
+    def assert_recall_payload(content: str | None) -> None:
+        assert content is not None
+        payload = json.loads(content)
+        assert [item["content"] for item in payload["items"]] == [items_body]
+        assert payload["current_session_id"] == "recovery-session"
+        assert [(item["source_type"], item["content"]) for item in payload["knowledge_base"]] == [("managed_knowledge", managed_body), ("user_knowledge", user_body)]
+        assert [item["content"] for item in payload["chat_history"]] == [chat_history_body]
+
+    def assert_tool_context(requests: list[list[InternalMessage]]) -> None:
+        assert requests
+        for request in requests:
+            tool_call_message = next(message for message in request if message.tool_calls and any(call.id == tool_call_id for call in message.tool_calls))
+            tool_result_message = next(message for message in request if message.tool_call_id == tool_call_id)
+            tool_call = next(call for call in tool_call_message.tool_calls if call.id == tool_call_id)
+            assert tool_call.name == "manage_memory_and_knowledge"
+            assert tool_call.arguments["operation"] == "recall"
+            assert_recall_payload(tool_result_message.content)
+
+    result = None
+    state = None
+    if first_summary_failure:
+        async with context_summary_database() as db:
+            state = await build_state(db)
+            with pytest.raises(LLMContextLengthException):
+                await interactive_generation_module.generate_interactive_turn(
+                    state,
+                    current_tools=[],
+                    response_id="response-1",
+                )
+
+        assert fallback_calls == 1
+        assert summary_calls == 1
+        assert len(attempts) == 1
+        assert_tool_context(attempts)
+
+        async with context_summary_database() as db:
+            session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "recovery-session"))).scalar_one()
+            original_messages = list((await db.execute(select(Message).where(Message.session_id == "recovery-session").order_by(Message.id))).scalars())
+
+        assert session.context_summary is None
+        assert session.context_summary_message_id is None
+        assert [message.id for message in original_messages] == [1, 2, 3, 4, 5]
+        assert original_messages[3].role == MessageRole.ASSISTANT
+        assert original_messages[3].type == MessageType.TOOL_CALL
+        assert original_messages[4].role == MessageRole.TOOL
+        assert original_messages[4].type == MessageType.TOOL_RESULT
+        assert original_messages[3].content == managed_tool_call.model_dump_json()
+        assert original_messages[4].content == managed_tool_result.model_dump_json()
+
+        async with context_summary_database() as db:
+            state = await build_state(db)
+            result = await interactive_generation_module.generate_interactive_turn(
+                state,
+                current_tools=[],
+                response_id="response-2",
+            )
+            session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "recovery-session"))).scalar_one()
+    elif provider_keeps_overflowing:
+        async with context_summary_database() as db:
+            state = await build_state(db)
+            with pytest.raises(LLMContextLengthException):
+                await interactive_generation_module.generate_interactive_turn(
+                    state,
+                    current_tools=[],
+                    response_id="response-1",
+                )
+            session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "recovery-session"))).scalar_one()
+    else:
+        async with context_summary_database() as db:
+            state = await build_state(db)
+            result = await interactive_generation_module.generate_interactive_turn(
+                state,
+                current_tools=[],
+                response_id="response-1",
+            )
+            session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "recovery-session"))).scalar_one()
+
+    if provider_keeps_overflowing:
+        assert result is None
+        assert len(attempts) == 2
+        assert summary_calls == 1
+        assert fallback_calls == 1
+    else:
+        assert result.message.content == "recovered"
+        assert len(attempts) == (3 if first_summary_failure else 2)
+        assert summary_calls == (2 if first_summary_failure else 1)
+        assert fallback_calls == (1 if first_summary_failure else 0)
+    assert_tool_context(attempts)
+    assert all(not any("overflow recovery summary" in (message.content or "") for message in request) for request in attempts[:-1])
+    assert any("overflow recovery summary" in (message.content or "") for message in attempts[-1])
+    assert state is not None
+    assert state.checkpoint_state.upper_message_id == 3
+    assert state.messages[1].content == CONTEXT_SUMMARY_WRAPPER.format(
+        through_message_id=2,
+        content="overflow recovery summary",
+    )
+    assert [message.id for message in state.messages[2:]] == [3, 4, 5]
+    assert state.messages[3].tool_calls[0].id == tool_call_id
+    assert state.messages[4].tool_call_id == tool_call_id
     assert session.context_summary == "overflow recovery summary"
     assert session.context_summary_message_id == 2
+
+    async with context_summary_database() as db:
+        persisted_messages = list((await db.execute(select(Message).where(Message.session_id == "recovery-session").order_by(Message.id))).scalars())
+    assert [message.id for message in persisted_messages if message.id in {4, 5}] == [4, 5]
+    assert persisted_messages[3].type == MessageType.TOOL_CALL
+    assert persisted_messages[4].type == MessageType.TOOL_RESULT
+    persisted_tool_call = InternalMessage.model_validate_json(persisted_messages[3].content)
+    persisted_tool_result = InternalMessage.model_validate_json(persisted_messages[4].content)
+    assert persisted_tool_call.tool_calls[0].id == persisted_tool_result.tool_call_id == tool_call_id
+    assert persisted_tool_call.tool_calls[0].arguments["operation"] == "recall"
+    assert_recall_payload(persisted_tool_result.content)
 
 
 def _summary_rejection_models() -> dict[int, ContextSummaryModelSnapshot]:

@@ -43,7 +43,6 @@ class ChatHistoryRecallService:
         query: str,
         top_k: int = 5,
         candidate_k: int | None = None,
-        result_max_chars: int = 4000,
         before_message_id: int | None = None,
     ) -> ChatHistoryRecallResult:
         normalized_uid = uid.strip() if isinstance(uid, str) else ""
@@ -64,8 +63,6 @@ class ChatHistoryRecallService:
                     maximum=MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT,
                 )
             )
-        if isinstance(result_max_chars, bool) or not isinstance(result_max_chars, int) or not 1 <= result_max_chars <= 50000:
-            raise ValueError(t(ERR_VALUE_MUST_BE_BETWEEN, field="result_max_chars", minimum=1, maximum=50000))
         if before_message_id is not None and (isinstance(before_message_id, bool) or not isinstance(before_message_id, int) or before_message_id <= 0):
             raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="before_message_id"))
 
@@ -114,34 +111,17 @@ class ChatHistoryRecallService:
             for message_id, role, content, created_at, session_id in candidates
         ]
         hits = await asyncio.to_thread(bm25_search, normalized_query, chunks, top_k)
-        return ChatHistoryRecallResult(items=self._build_items(hits, result_max_chars))
+        return ChatHistoryRecallResult(items=self._build_items(hits))
 
     @staticmethod
-    def _build_items(hits: list[RetrievalHit], result_max_chars: int) -> tuple[ChatHistoryRecallItem, ...]:
+    def _build_items(hits: list[RetrievalHit]) -> tuple[ChatHistoryRecallItem, ...]:
         items: list[ChatHistoryRecallItem] = []
-        remaining_chars = result_max_chars
         for hit in hits:
-            if remaining_chars <= 0:
-                break
             metadata = hit.metadata or {}
             message_id = metadata.get("message_id")
             role = metadata.get("role", "")
             created_at = metadata.get("created_at")
             session_id = metadata.get("session_id")
-            if len(hit.content) > remaining_chars:
-                items.append(
-                    ChatHistoryRecallItem(
-                        role=role,
-                        content=hit.content[:remaining_chars],
-                        truncated=True,
-                        message_id=message_id,
-                        created_at=created_at,
-                        session_id=session_id,
-                        sparse_score=hit.sparse_score,
-                        sparse_rank=hit.sparse_rank,
-                    )
-                )
-                break
             items.append(
                 ChatHistoryRecallItem(
                     role=role,
@@ -153,7 +133,6 @@ class ChatHistoryRecallService:
                     sparse_rank=hit.sparse_rank,
                 )
             )
-            remaining_chars -= len(hit.content)
         return tuple(items)
 
 

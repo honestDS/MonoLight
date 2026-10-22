@@ -501,41 +501,33 @@ def _build_recall_items(
     ordered_hits: list[tuple[KnowledgeBase, RetrievalHit]],
     *,
     top_k: int,
-    result_max_chars: int,
 ) -> tuple[KnowledgeRecallItem, ...]:
     items: list[KnowledgeRecallItem] = []
-    remaining_chars = result_max_chars
     for knowledge_base, hit in ordered_hits:
-        if len(items) >= top_k or remaining_chars <= 0:
+        if len(items) >= top_k:
             break
         content = hit.content or ""
         if not content:
             continue
 
-        truncated = len(content) > remaining_chars
-        output_content = content[:remaining_chars] if truncated else content
         metadata = hit.metadata or {}
         knowledge_base_id = _positive_int(knowledge_base.id)
         if knowledge_base_id is None:
             continue
 
-        if _is_managed_knowledge_base(knowledge_base):
+        is_managed = _is_managed_knowledge_base(knowledge_base)
+        if is_managed:
             knowledge_id = _positive_int(metadata.get("managed_knowledge_id"))
             expected_version = _positive_int(metadata.get("managed_knowledge_version"))
             raw_key = metadata.get("managed_knowledge_key")
             knowledge_key = raw_key.strip() if isinstance(raw_key, str) and raw_key.strip() else None
-            maintainable = metadata.get("managed_knowledge_llm_maintainable") is True and knowledge_id is not None and expected_version is not None and knowledge_key is not None and not truncated
-            if truncated:
-                knowledge_id = None
-                expected_version = None
-                knowledge_key = None
+            maintainable = metadata.get("managed_knowledge_llm_maintainable") is True and knowledge_id is not None and expected_version is not None and knowledge_key is not None
             item = KnowledgeRecallItem(
                 knowledge_base_id=knowledge_base_id,
                 knowledge_base_name=knowledge_base.name,
                 source_type=KnowledgeRecallSourceType.MANAGED_KNOWLEDGE,
                 source=knowledge_key or "managed_knowledge",
-                content=output_content,
-                truncated=truncated,
+                content=content,
                 llm_maintainable=maintainable,
                 knowledge_id=knowledge_id,
                 knowledge_key=knowledge_key,
@@ -555,16 +547,12 @@ def _build_recall_items(
                 knowledge_base_name=knowledge_base.name,
                 source_type=KnowledgeRecallSourceType.USER_KNOWLEDGE,
                 source=source,
-                content=output_content,
-                truncated=truncated,
+                content=content,
                 llm_maintainable=False,
                 document_id=_positive_int(metadata.get("document_id")),
             )
 
         items.append(item)
-        remaining_chars -= len(output_content)
-        if truncated:
-            break
     return tuple(items)
 
 
@@ -649,7 +637,6 @@ class UnifiedKnowledgeRecallService:
         items = _build_recall_items(
             [(candidate.source.knowledge_base, candidate.hit) for candidate in materialized_candidates],
             top_k=config.top_k,
-            result_max_chars=config.result_max_chars,
         )
         return KnowledgeRecallResult(items=items)
 

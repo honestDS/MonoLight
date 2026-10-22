@@ -47,7 +47,7 @@ def _knowledge_base(
     )
 
 
-def _profile(*, top_k: int = 5, candidate_k: int = 20, result_max_chars: int = 4000):
+def _profile(*, top_k: int = 5, candidate_k: int = 20):
     return SimpleNamespace(
         id=9,
         uid="user-1",
@@ -56,7 +56,6 @@ def _profile(*, top_k: int = 5, candidate_k: int = 20, result_max_chars: int = 4
                 "knowledge": {
                     "top_k": top_k,
                     "candidate_k": candidate_k,
-                    "result_max_chars": result_max_chars,
                 }
             }
         },
@@ -428,7 +427,7 @@ async def test_unified_recall_does_not_expand_for_adjacent_user_chunks(monkeypat
     assert [item.content for item in result.items] == ["abcdefghi"]
 
 
-def test_truncated_managed_result_drops_writable_identifiers() -> None:
+def test_managed_result_preserves_full_content_and_writable_identifiers() -> None:
     knowledge_base = _knowledge_base(1, name="Managed", collection="managed", signature="m", knowledge_base_type=KnowledgeBaseType.LLM_MANAGED)
     hit = RetrievalHit(
         id="managed-1",
@@ -442,15 +441,225 @@ def test_truncated_managed_result_drops_writable_identifiers() -> None:
         },
     )
 
-    items = unified_recall._build_recall_items([(knowledge_base, hit)], top_k=1, result_max_chars=4)
+    items = unified_recall._build_recall_items([(knowledge_base, hit)], top_k=1)
 
     assert len(items) == 1
-    assert items[0].content == "abcd"
-    assert items[0].truncated is True
-    assert items[0].knowledge_id is None
-    assert items[0].knowledge_key is None
-    assert items[0].knowledge_expected_version is None
-    assert items[0].llm_maintainable is False
+    assert items[0].content == "abcdefgh"
+    assert items[0].truncated is False
+    assert items[0].knowledge_id == 11
+    assert items[0].knowledge_key == "key-1"
+    assert items[0].knowledge_expected_version == 2
+    assert items[0].llm_maintainable is True
+
+
+@pytest.mark.parametrize(
+    ("source_order", "top_k", "expected"),
+    [
+        (
+            ("managed-before", "user", "managed-after"),
+            3,
+            [
+                ("managed-before", "managed full before", False),
+                ("guide.md", "abcdefgh", False),
+                ("managed-after", "managed full after", False),
+            ],
+        ),
+        (
+            ("user", "managed-before"),
+            3,
+            [("guide.md", "abcdefgh", False), ("managed-before", "managed full before", False)],
+        ),
+        (
+            ("managed-before", "user", "managed-after"),
+            2,
+            [("managed-before", "managed full before", False), ("guide.md", "abcdefgh", False)],
+        ),
+    ],
+)
+def test_mixed_source_results_preserve_full_content_and_respect_top_k(source_order, top_k, expected) -> None:
+    managed = _knowledge_base(1, name="Managed", collection="managed", signature="m", knowledge_base_type=KnowledgeBaseType.LLM_MANAGED)
+    user = _knowledge_base(2, name="User", collection="user", signature="u")
+
+    def managed_hit(knowledge_id: int, key: str, content: str) -> RetrievalHit:
+        return RetrievalHit(
+            id=f"managed-{knowledge_id}",
+            content=content,
+            metadata={
+                "knowledge_type": "managed",
+                "managed_knowledge_id": knowledge_id,
+                "managed_knowledge_version": 2,
+                "managed_knowledge_key": key,
+                "managed_knowledge_llm_maintainable": True,
+            },
+        )
+
+    sources = {
+        "managed-before": (managed, managed_hit(11, "managed-before", "managed full before")),
+        "user": (
+            user,
+            RetrievalHit(
+                id="user-1",
+                content="abcdefgh",
+                metadata={"knowledge_type": "user_document", "filename": "guide.md", "document_id": 21},
+            ),
+        ),
+        "managed-after": (managed, managed_hit(12, "managed-after", "managed full after")),
+    }
+
+    items = unified_recall._build_recall_items(
+        [sources[name] for name in source_order],
+        top_k=top_k,
+    )
+
+    assert [(item.source, item.content, item.truncated) for item in items] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "knowledge_base_type",
+    [KnowledgeBaseType.LLM_MANAGED, KnowledgeBaseType.USER],
+    ids=["managed", "user"],
+)
+async def test_unified_recall_returns_full_selected_content_from_database(knowledge_base_type, database_factory, monkeypatch) -> None:
+    async with database_factory(
+        tables=(
+            KnowledgeBase.__table__,
+            KnowledgeBaseCollectionOwner.__table__,
+            KnowledgeBaseProfileBinding.__table__,
+            KnowledgeBaseDocument.__table__,
+            ManagedKnowledgeItem.__table__,
+        ),
+        poolclass=StaticPool,
+    ) as session_factory:
+        async with session_factory() as session:
+            is_managed = knowledge_base_type == KnowledgeBaseType.LLM_MANAGED
+            knowledge_base = KnowledgeBase(
+                uid="user-1",
+                name="managed-kb" if is_managed else "user-kb",
+                embedding_channel_id=1,
+                embedding_model_id="embedding-model",
+                embedding_dimensions=3,
+                collection_name="managed-kb" if is_managed else "user-kb",
+                knowledge_base_type=knowledge_base_type,
+                managed_profile_id=9 if is_managed else None,
+                active_embedding_channel_id=1,
+                active_embedding_model_id="embedding-model",
+                active_embedding_dimensions=3,
+                active_embedding_signature="sig-managed" if is_managed else "sig-user",
+                active_embedding_revision=1,
+                active_collection_name="managed-kb-active" if is_managed else "user-kb-active",
+                index_status=KnowledgeBaseIndexStatus.READY,
+            )
+            session.add(knowledge_base)
+            await session.flush()
+            knowledge_base_id = knowledge_base.id
+
+            tail_marker = "UNIQUE_MANAGED_RECALL_TAIL_9f17c2" if is_managed else "UNIQUE_USER_RECALL_TAIL_9f17c2"
+            document_content = None
+            nonmatching_tail_marker = None
+            if is_managed:
+                content = ("Full managed knowledge body. " * 180) + tail_marker
+                session.add(
+                    ManagedKnowledgeItem(
+                        id=91,
+                        uid="user-1",
+                        knowledge_base_id=knowledge_base.id,
+                        knowledge_key="integration-managed-key",
+                        content=content,
+                        content_token_count=1800,
+                        content_hash="c" * 64,
+                        version=4,
+                        indexed_version=4,
+                        vector_item_ids=["managed-hit-91"],
+                        is_recallable=True,
+                        llm_maintainable=True,
+                    )
+                )
+                hit = RetrievalHit(
+                    id="managed-hit-91",
+                    content="vector chunk only",
+                    metadata={
+                        "knowledge_type": "managed",
+                        "managed_knowledge_id": 91,
+                        "managed_knowledge_version": 4,
+                    },
+                )
+            else:
+                content = ("Selected matching user retrieval chunk. " * 150) + tail_marker
+                nonmatching_tail_marker = "UNIQUE_USER_DOCUMENT_ONLY_TAIL_9f17c2"
+                document_content = ("Full user document body not selected by retrieval. " * 100) + nonmatching_tail_marker
+                filename = "integration-user.md"
+                document = KnowledgeBaseDocument(
+                    knowledge_base_id=knowledge_base.id,
+                    filename=filename,
+                    content=document_content,
+                    chunk_size=6000,
+                    chunk_overlap=100,
+                    batch_size=16,
+                    chunk_count=2,
+                    chunk_ids=["user-hit-91", "user-nonmatching-92"],
+                    metadata_={"document_uuid": "integration-user-document"},
+                )
+                session.add(document)
+                await session.flush()
+                session.add(
+                    KnowledgeBaseProfileBinding(
+                        uid="user-1",
+                        knowledge_base_id=knowledge_base.id,
+                        profile_id=9,
+                    )
+                )
+                hit = RetrievalHit(
+                    id="user-hit-91",
+                    content=content,
+                    metadata={
+                        "knowledge_type": "user_document",
+                        "document_id": document.id,
+                        "filename": filename,
+                        "chunk_index": 0,
+                    },
+                )
+            await session.commit()
+
+            async def fake_embed(*_args, **_kwargs):
+                return [[0.1, 0.2, 0.3]]
+
+            async def fake_query(_collection, _embedding, _query, limit, **_kwargs):
+                return [hit][:limit]
+
+            async def no_rerank(*_args, **_kwargs):
+                return None
+
+            monkeypatch.setattr(unified_recall, "embed_chunks_with_knowledge_base_config", fake_embed)
+            monkeypatch.setattr(unified_recall, "hybrid_query_collection", fake_query)
+            monkeypatch.setattr(unified_recall, "get_profile_rerank_config", no_rerank)
+
+            profile = _profile(top_k=1, candidate_k=1)
+            profile.configs["memory"]["knowledge"]["result_max_chars"] = 256
+            result = await unified_recall.knowledge_recall_service.recall(session, profile, "topic")
+
+    assert len(content) > 4000
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.content == content
+    assert item.content.endswith(tail_marker)
+    assert item.knowledge_base_id == knowledge_base_id
+    assert item.truncated is False
+    if knowledge_base_type == KnowledgeBaseType.LLM_MANAGED:
+        assert item.source_type == KnowledgeRecallSourceType.MANAGED_KNOWLEDGE
+        assert item.knowledge_id == 91
+        assert item.knowledge_key == "integration-managed-key"
+        assert item.source == "integration-managed-key"
+        assert item.knowledge_expected_version == 4
+        assert item.llm_maintainable is True
+    else:
+        assert item.source_type == KnowledgeRecallSourceType.USER_KNOWLEDGE
+        assert item.source == "integration-user.md"
+        assert item.knowledge_id is None
+        assert item.knowledge_expected_version is None
+        assert item.llm_maintainable is False
+        assert item.content != document_content
+        assert nonmatching_tail_marker not in item.content
 
 
 @pytest.mark.asyncio

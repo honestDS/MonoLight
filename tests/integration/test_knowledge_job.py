@@ -13,11 +13,16 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.constants import (
+    ERR_KB_CONTENT_ENCODING_ERROR,
+    ERR_KB_CONTENT_TOO_LONG,
+    KNOWLEDGE_CONTENT_MAX_CHARS,
+)
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
-from app.core.exceptions import BaseBusinessException
+from app.core.exceptions import BaseBusinessException, ParameterException
 from app.core.knowledge.managed import managed_knowledge_service
 from app.core.knowledge.organization import create_knowledge_organization_snapshot
 from app.core.knowledge.recall import (
@@ -178,6 +183,101 @@ async def _claim(
             owner=owner,
             lease_seconds=lease_seconds,
         )
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_message"),
+    [
+        ("x" * (KNOWLEDGE_CONTENT_MAX_CHARS + 1), ERR_KB_CONTENT_TOO_LONG),
+        ("invalid\ud800", ERR_KB_CONTENT_ENCODING_ERROR),
+    ],
+    ids=["too-many-characters", "invalid-encoding"],
+)
+@pytest.mark.asyncio
+async def test_managed_create_submission_rejects_invalid_content_without_persistence(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+    content: str,
+    expected_message: str,
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+
+    with pytest.raises(ParameterException) as exc_info:
+        async with knowledge_job_database() as db:
+            await knowledge_job_manager.submit_create(
+                db,
+                uid="user-1",
+                knowledge_base_id=knowledge_base.id,
+                knowledge_key="project.architecture",
+                content=content,
+                source_type=ManagedKnowledgeSourceType.LLM_TOOL,
+                actor=ManagedKnowledgeActorType.LLM,
+                dedupe_key="invalid-content-create",
+            )
+
+    assert exc_info.value.code == 400
+    assert exc_info.value.message == expected_message
+
+    async with knowledge_job_database() as db:
+        job_count = await db.scalar(select(func.count()).select_from(KnowledgeJob))
+        item_count = await db.scalar(select(func.count()).select_from(ManagedKnowledgeItem))
+        revision_count = await db.scalar(select(func.count()).select_from(ManagedKnowledgeRevision))
+
+    assert job_count == 0
+    assert item_count == 0
+    assert revision_count == 0
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_message"),
+    [
+        ("x" * (KNOWLEDGE_CONTENT_MAX_CHARS + 1), ERR_KB_CONTENT_TOO_LONG),
+        ("invalid\ud800", ERR_KB_CONTENT_ENCODING_ERROR),
+    ],
+    ids=["too-many-characters", "invalid-encoding"],
+)
+@pytest.mark.asyncio
+async def test_managed_update_submission_rejects_invalid_content_without_mutation(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+    content: str,
+    expected_message: str,
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+    original_content = "Original content"
+    item = await _create_unpublished_item(
+        knowledge_job_database,
+        knowledge_base.id,
+        knowledge_key="update.rejected",
+        content=original_content,
+    )
+
+    with pytest.raises(ParameterException) as exc_info:
+        async with knowledge_job_database() as db:
+            await knowledge_job_manager.submit_update(
+                db,
+                uid="user-1",
+                knowledge_base_id=knowledge_base.id,
+                knowledge_id=item.id,
+                expected_version=1,
+                knowledge_key=item.knowledge_key,
+                content=content,
+                source_type=ManagedKnowledgeSourceType.USER_API,
+                actor=ManagedKnowledgeActorType.USER,
+                dedupe_key="invalid-content-update",
+            )
+
+    assert exc_info.value.code == 400
+    assert exc_info.value.message == expected_message
+
+    async with knowledge_job_database() as db:
+        persisted_item = await db.get(ManagedKnowledgeItem, item.id)
+        job_count = await db.scalar(select(func.count()).select_from(KnowledgeJob))
+        revision_count = await db.scalar(select(func.count()).select_from(ManagedKnowledgeRevision))
+
+    assert persisted_item is not None
+    assert persisted_item.content == original_content
+    assert persisted_item.version == 1
+    assert job_count == 0
+    assert revision_count == 1
 
 
 def test_knowledge_job_business_errors_follow_project_exception_contract() -> None:

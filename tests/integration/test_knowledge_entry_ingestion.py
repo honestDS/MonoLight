@@ -1,5 +1,7 @@
+import json
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -11,7 +13,23 @@ from sqlmodel import select
 
 import app.core.knowledge.documents as knowledge_documents
 from app.api.v1 import knowledge_base as knowledge_base_api
+from app.core.constants import (
+    ERR_KB_CHUNK_COUNT_EXCEEDED,
+    ERR_KB_CHUNK_TOTAL_CHARS_EXCEEDED,
+    ERR_KB_CONTENT_TOO_LONG,
+    ERR_KB_FILE_TOO_LARGE,
+    ERR_KB_REQUEST_TOO_LARGE,
+    KNOWLEDGE_CONTENT_MAX_BYTES,
+    KNOWLEDGE_CONTENT_MAX_CHARS,
+    KNOWLEDGE_DOCUMENT_MAX_CHUNKS,
+    KNOWLEDGE_DOCUMENT_MAX_TOTAL_CHARS,
+    KNOWLEDGE_FILE_MAX_BYTES,
+    KNOWLEDGE_REQUEST_MAX_BYTES,
+    MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS,
+)
+from app.core.i18n import t
 from app.core.security import get_current_user
+from app.core.utils.tokenizer import estimate_tokens
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
@@ -246,6 +264,400 @@ async def _row_counts(db_session: AsyncSession) -> dict[str, int]:
     for name, model in models.items():
         counts[name] = int(await db_session.scalar(select(func.count()).select_from(model)) or 0)
     return counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body_size", "expected_status"),
+    [
+        pytest.param(KNOWLEDGE_REQUEST_MAX_BYTES - 1, 200, id="one-byte-under-limit"),
+        pytest.param(KNOWLEDGE_REQUEST_MAX_BYTES, 200, id="at-limit"),
+        pytest.param(KNOWLEDGE_REQUEST_MAX_BYTES + 1, 413, id="one-byte-over-limit"),
+    ],
+)
+@pytest.mark.parametrize(
+    "declared_content_length",
+    [None, "1", str(KNOWLEDGE_REQUEST_MAX_BYTES + 100)],
+    ids=["missing-content-length", "declared-too-small", "declared-too-large"],
+)
+async def test_entry_request_limit_uses_received_body_bytes(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    knowledge_data: dict[str, Any],
+    vector_backend: dict[str, dict[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    body_size: int,
+    expected_status: int,
+    declared_content_length: str | None,
+) -> None:
+    knowledge_base = knowledge_data["user_base"]
+    original_content = "complete original"
+    request_body = json.dumps(
+        {"name": "request-boundary", "content": original_content},
+        separators=(",", ":"),
+    ).encode("ascii")
+    request_body += b" " * (body_size - len(request_body))
+    assert len(request_body) == body_size
+
+    async def body_chunks() -> AsyncIterator[bytes]:
+        for offset in range(0, len(request_body), 64 * 1024):
+            yield request_body[offset : offset + 64 * 1024]
+
+    embed_entry = AsyncMock(wraps=knowledge_documents.embed_chunks_with_knowledge_base_config)
+    monkeypatch.setattr(knowledge_documents, "embed_chunks_with_knowledge_base_config", embed_entry)
+    before = await _row_counts(db_session)
+    request = api_client.build_request(
+        "POST",
+        _ENTRY_CREATE_PATH,
+        params={"kb_id": knowledge_base.id},
+        content=body_chunks(),
+        headers={"content-type": "application/json"},
+    )
+    if declared_content_length is None:
+        request.headers.pop("content-length", None)
+    else:
+        request.headers["content-length"] = declared_content_length
+
+    response = await api_client.send(request)
+
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        created = response.json()["data"]
+        document = await db_session.get(KnowledgeBaseDocument, created["item_id"])
+        assert document is not None
+        assert document.content == original_content
+        collection = vector_backend[knowledge_base.collection_name]
+        assert set(collection) == set(document.chunk_ids)
+        assert len(collection) == document.chunk_count > 0
+        embed_entry.assert_awaited_once()
+    else:
+        assert response.json()["message"] == t(ERR_KB_REQUEST_TOO_LARGE, max_bytes=KNOWLEDGE_REQUEST_MAX_BYTES)
+        assert await _row_counts(db_session) == before
+        assert vector_backend == {}
+        embed_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "legacy_import",
+    [False, True],
+    ids=["entries-create-json", "documents-import-multipart"],
+)
+@pytest.mark.parametrize(
+    ("content_length", "chunk_overlap", "expected_status"),
+    [
+        pytest.param(KNOWLEDGE_DOCUMENT_MAX_CHUNKS * 100, 0, 200, id="exact-chunk-limit"),
+        pytest.param((KNOWLEDGE_DOCUMENT_MAX_CHUNKS + 1) * 100, 0, 400, id="one-chunk-over-limit"),
+        pytest.param(700, 99, 400, id="over-limit-from-overlap"),
+    ],
+)
+async def test_user_document_chunk_count_limit_applies_to_both_ingestion_routes(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    knowledge_data: dict[str, Any],
+    vector_backend: dict[str, dict[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_import: bool,
+    content_length: int,
+    chunk_overlap: int,
+    expected_status: int,
+) -> None:
+    knowledge_base = knowledge_data["user_base"]
+    original_content = "a" * content_length
+    embed_entry = AsyncMock(wraps=knowledge_documents.embed_chunks_with_knowledge_base_config)
+    monkeypatch.setattr(knowledge_documents, "embed_chunks_with_knowledge_base_config", embed_entry)
+    before = await _row_counts(db_session)
+
+    if legacy_import:
+        response = await api_client.post(
+            "/api/v1/knowledge-base/documents/import",
+            params={"kb_id": knowledge_base.id},
+            data={"chunk_size": "100", "chunk_overlap": str(chunk_overlap), "batch_size": "16"},
+            files={"file": ("chunk-limit.txt", original_content.encode("ascii"), "text/plain")},
+        )
+    else:
+        response = await api_client.post(
+            _ENTRY_CREATE_PATH,
+            params={"kb_id": knowledge_base.id},
+            json={
+                "name": "chunk-limit.txt",
+                "content": original_content,
+                "chunk_size": 100,
+                "chunk_overlap": chunk_overlap,
+            },
+        )
+
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        document_id = response.json()["data"]["id" if legacy_import else "item_id"]
+        document = await db_session.get(KnowledgeBaseDocument, document_id)
+        assert document is not None
+        assert document.content == original_content
+        assert document.chunk_count == KNOWLEDGE_DOCUMENT_MAX_CHUNKS
+        collection = vector_backend[knowledge_base.collection_name]
+        assert len(collection) == KNOWLEDGE_DOCUMENT_MAX_CHUNKS
+        assert set(collection) == set(document.chunk_ids)
+    else:
+        assert response.json()["message"] == t(ERR_KB_CHUNK_COUNT_EXCEEDED, max_chunks=KNOWLEDGE_DOCUMENT_MAX_CHUNKS)
+        assert await _row_counts(db_session) == before
+        assert vector_backend == {}
+        embed_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "legacy_import",
+    [False, True],
+    ids=["entries-create-json", "documents-import-multipart"],
+)
+@pytest.mark.parametrize(
+    "delta",
+    [-1, 0, 1],
+    ids=["one-character-under-limit", "at-limit", "one-character-over-limit"],
+)
+async def test_user_document_chunk_total_chars_limit_applies_to_both_ingestion_routes(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    knowledge_data: dict[str, Any],
+    vector_backend: dict[str, dict[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_import: bool,
+    delta: int,
+) -> None:
+    knowledge_base = knowledge_data["user_base"]
+    chunk_size = 1001
+    chunk_overlap = 550
+    expected_chunk_count = (KNOWLEDGE_DOCUMENT_MAX_TOTAL_CHARS + chunk_size - 1) // chunk_size
+    exact_content_length = KNOWLEDGE_DOCUMENT_MAX_TOTAL_CHARS - (expected_chunk_count - 1) * chunk_overlap
+    original_content = "a" * (exact_content_length + delta)
+    embed_entry = AsyncMock(wraps=knowledge_documents.embed_chunks_with_knowledge_base_config)
+    monkeypatch.setattr(knowledge_documents, "embed_chunks_with_knowledge_base_config", embed_entry)
+    before = await _row_counts(db_session)
+
+    if legacy_import:
+        response = await api_client.post(
+            "/api/v1/knowledge-base/documents/import",
+            params={"kb_id": knowledge_base.id},
+            data={"chunk_size": str(chunk_size), "chunk_overlap": str(chunk_overlap), "batch_size": "16"},
+            files={"file": ("chunk-char-limit.txt", original_content.encode("ascii"), "text/plain")},
+        )
+    else:
+        response = await api_client.post(
+            _ENTRY_CREATE_PATH,
+            params={"kb_id": knowledge_base.id},
+            json={
+                "name": "chunk-char-limit.txt",
+                "content": original_content,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+            },
+        )
+
+    expected_status = 400 if delta > 0 else 200
+    assert response.status_code == expected_status
+    if delta <= 0:
+        document_id = response.json()["data"]["id" if legacy_import else "item_id"]
+        document = await db_session.get(KnowledgeBaseDocument, document_id)
+        assert document is not None
+        assert document.content == original_content
+        assert document.chunk_count == expected_chunk_count
+        collection = vector_backend[knowledge_base.collection_name]
+        assert len(collection) == expected_chunk_count
+        assert set(collection) == set(document.chunk_ids)
+        assert sum(len(item["document"]) for item in collection.values()) == KNOWLEDGE_DOCUMENT_MAX_TOTAL_CHARS + delta
+    else:
+        assert response.json()["message"] == t(
+            ERR_KB_CHUNK_TOTAL_CHARS_EXCEEDED,
+            max_chars=KNOWLEDGE_DOCUMENT_MAX_TOTAL_CHARS,
+        )
+        assert await _row_counts(db_session) == before
+        assert vector_backend == {}
+        embed_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_key", "legacy_import"),
+    [
+        pytest.param("user_base", False, id="user-entry-preview"),
+        pytest.param("managed_base", False, id="managed-entry-preview"),
+        pytest.param("user_base", True, id="user-legacy-import"),
+    ],
+)
+async def test_uploaded_file_over_limit_is_rejected_across_ingestion_routes(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    knowledge_data: dict[str, Any],
+    vector_backend: dict[str, dict[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    base_key: str,
+    legacy_import: bool,
+) -> None:
+    knowledge_base = knowledge_data[base_key]
+    oversized_file = b"a" * (KNOWLEDGE_FILE_MAX_BYTES + 1)
+    embed_entry = AsyncMock(wraps=knowledge_documents.embed_chunks_with_knowledge_base_config)
+    monkeypatch.setattr(knowledge_documents, "embed_chunks_with_knowledge_base_config", embed_entry)
+    before = await _row_counts(db_session)
+
+    if legacy_import:
+        response = await api_client.post(
+            "/api/v1/knowledge-base/documents/import",
+            params={"kb_id": knowledge_base.id},
+            data={"chunk_size": "1000", "chunk_overlap": "100", "batch_size": "16"},
+            files={"file": ("oversized.txt", oversized_file, "text/plain")},
+        )
+    else:
+        response = await api_client.post(
+            _ENTRY_PREVIEW_PATH,
+            params={"kb_id": knowledge_base.id},
+            files={"file": ("oversized.txt", oversized_file, "text/plain")},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["message"] == t(ERR_KB_FILE_TOO_LARGE, max_bytes=KNOWLEDGE_FILE_MAX_BYTES)
+    assert await _row_counts(db_session) == before
+    assert vector_backend == {}
+    embed_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base_key", ["user_base", "managed_base"], ids=["user", "managed"])
+@pytest.mark.parametrize(
+    ("content_length", "expected_status"),
+    [
+        pytest.param(KNOWLEDGE_CONTENT_MAX_CHARS - 1, 200, id="below"),
+        pytest.param(KNOWLEDGE_CONTENT_MAX_CHARS, 200, id="exact"),
+        pytest.param(KNOWLEDGE_CONTENT_MAX_CHARS + 1, 422, id="above"),
+    ],
+)
+async def test_entry_content_character_limit(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    knowledge_data: dict[str, Any],
+    vector_backend: dict[str, dict[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    base_key: str,
+    content_length: int,
+    expected_status: int,
+) -> None:
+    knowledge_base = knowledge_data[base_key]
+    original_content = " " * (content_length - 1) + "x"
+    embed_entry = AsyncMock(wraps=knowledge_documents.embed_chunks_with_knowledge_base_config)
+    monkeypatch.setattr(knowledge_documents, "embed_chunks_with_knowledge_base_config", embed_entry)
+    before = await _row_counts(db_session)
+
+    response = await api_client.post(
+        _ENTRY_CREATE_PATH,
+        params={"kb_id": knowledge_base.id},
+        json={"name": "content-character-limit", "content": original_content},
+    )
+
+    assert response.status_code == expected_status
+    if expected_status == 422:
+        assert await _row_counts(db_session) == before
+        assert vector_backend == {}
+        embed_entry.assert_not_awaited()
+    elif base_key == "user_base":
+        created = response.json()["data"]
+        assert created["status"] == "ready"
+        assert created["item_id"] is not None
+        document = await db_session.get(KnowledgeBaseDocument, created["item_id"])
+        assert document is not None
+        assert document.content == original_content
+        collection = vector_backend[knowledge_base.collection_name]
+        assert set(collection) == set(document.chunk_ids)
+        assert len(collection) == document.chunk_count == 1
+        assert [item["document"] for item in collection.values()] == ["x"]
+    else:
+        created = response.json()["data"]
+        assert created["status"] == "created"
+        assert created["item_id"] is not None
+        assert created["job_id"] is not None
+        item = await db_session.get(ManagedKnowledgeItem, created["item_id"])
+        job = await db_session.get(KnowledgeJob, created["job_id"])
+        assert item is not None and job is not None
+        assert item.content == original_content
+        assert item.pending_job_id == job.id
+        assert job.status == KnowledgeJobStatus.PENDING
+        assert vector_backend == {}
+        embed_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_key", "legacy_import"),
+    [
+        pytest.param("user_base", False, id="user-preview"),
+        pytest.param("managed_base", False, id="managed-preview"),
+        pytest.param("user_base", True, id="user-import"),
+    ],
+)
+@pytest.mark.parametrize("encoding", ["utf-8", "gbk"], ids=["utf8", "gbk"])
+@pytest.mark.parametrize(
+    ("content_length", "expected_status"),
+    [
+        pytest.param(KNOWLEDGE_CONTENT_MAX_CHARS, 200, id="exact"),
+        pytest.param(KNOWLEDGE_CONTENT_MAX_CHARS + 1, 400, id="over"),
+    ],
+)
+async def test_decoded_file_content_character_limit(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    knowledge_data: dict[str, Any],
+    vector_backend: dict[str, dict[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    base_key: str,
+    legacy_import: bool,
+    encoding: str,
+    content_length: int,
+    expected_status: int,
+) -> None:
+    knowledge_base = knowledge_data[base_key]
+    original_content = "中" * content_length
+    file_content = original_content.encode(encoding)
+    assert len(file_content) < KNOWLEDGE_FILE_MAX_BYTES
+    assert len(original_content.encode("utf-8")) < KNOWLEDGE_CONTENT_MAX_BYTES
+    embed_entry = AsyncMock(wraps=knowledge_documents.embed_chunks_with_knowledge_base_config)
+    monkeypatch.setattr(knowledge_documents, "embed_chunks_with_knowledge_base_config", embed_entry)
+    before = await _row_counts(db_session)
+
+    if legacy_import:
+        response = await api_client.post(
+            "/api/v1/knowledge-base/documents/import",
+            params={"kb_id": knowledge_base.id},
+            data={"chunk_size": "1000", "chunk_overlap": "100", "batch_size": "16"},
+            files={"file": ("character-limit.txt", file_content, "text/plain")},
+        )
+    else:
+        response = await api_client.post(
+            _ENTRY_PREVIEW_PATH,
+            params={"kb_id": knowledge_base.id},
+            files={"file": ("character-limit.txt", file_content, "text/plain")},
+        )
+
+    assert response.status_code == expected_status
+    if expected_status == 400:
+        assert response.json()["message"] == t(ERR_KB_CONTENT_TOO_LONG, max_chars=KNOWLEDGE_CONTENT_MAX_CHARS)
+        assert await _row_counts(db_session) == before
+        assert vector_backend == {}
+        embed_entry.assert_not_awaited()
+    elif legacy_import:
+        document = await db_session.get(KnowledgeBaseDocument, response.json()["data"]["id"])
+        assert document is not None
+        assert len(document.content) == content_length
+        assert document.content == original_content
+        collection = vector_backend[knowledge_base.collection_name]
+        assert collection
+        assert len(collection) == document.chunk_count
+        assert set(collection) == set(document.chunk_ids)
+        embed_entry.assert_awaited_once()
+    else:
+        preview_content = response.json()["data"]["content"]
+        assert len(preview_content) == content_length
+        assert preview_content == original_content
+        assert await _row_counts(db_session) == before
+        assert vector_backend == {}
+        embed_entry.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -493,7 +905,11 @@ async def test_managed_entry_over_token_limit_returns_400_without_truncation_or_
     assert existing_response.status_code == 200
     existing_id = existing_response.json()["data"]["item_id"]
     before = await _row_counts(db_session)
-    oversized_content = "This is a complete token sequence. " * 20_000
+    oversized_content = "This is a complete token sequence. " * 3_000
+    estimated_tokens = estimate_tokens(oversized_content)
+    assert len(oversized_content) <= KNOWLEDGE_CONTENT_MAX_CHARS
+    assert len(oversized_content.encode("utf-8")) <= KNOWLEDGE_CONTENT_MAX_BYTES
+    assert estimated_tokens > MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
 
     response = await api_client.post(
         _ENTRY_CREATE_PATH,
@@ -502,6 +918,9 @@ async def test_managed_entry_over_token_limit_returns_400_without_truncation_or_
     )
 
     assert response.status_code == 400
+    error_data = response.json()["data"]
+    assert error_data["status"] == "content_too_long"
+    assert error_data["actual_tokens"] > error_data["max_tokens"] == MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
     assert await _row_counts(db_session) == before
     assert await db_session.scalar(select(ManagedKnowledgeItem).where(ManagedKnowledgeItem.knowledge_key == "oversized content")) is None
     existing = await db_session.get(ManagedKnowledgeItem, existing_id)

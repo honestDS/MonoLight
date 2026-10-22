@@ -28,6 +28,7 @@ from app.core.constants import (
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.crud.knowledge.managed import managed_knowledge_item_crud, managed_knowledge_revision_crud
 from app.core.knowledge.errors import ManagedKnowledgeConflictError, ManagedKnowledgeContentTooLongError, ManagedKnowledgeNotFoundError, ManagedKnowledgeValidationError
+from app.core.knowledge.input_limits import validate_knowledge_content
 from app.core.knowledge.migration import record_knowledge_base_migration_change
 from app.core.knowledge.results import ManagedKnowledgeMutationResult, ManagedKnowledgeMutationStatus
 from app.core.utils.time import get_local_time
@@ -76,9 +77,9 @@ def normalize_managed_knowledge_key(value: Any) -> str:
 def _normalize_content(value: Any) -> tuple[str, int, str]:
     if not isinstance(value, str):
         raise ManagedKnowledgeValidationError(ERR_MANAGED_KNOWLEDGE_FIELD_TYPE_INVALID, field="content")
+    validate_knowledge_content(value)
     if not value.strip():
         raise ManagedKnowledgeValidationError(ERR_MANAGED_KNOWLEDGE_FIELD_REQUIRED, field="content")
-    # Managed knowledge deliberately has no character-count ceiling. The complete original text is the relational source of truth.
     token_count = estimate_tokens(value)
     if token_count > MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS:
         raise ManagedKnowledgeContentTooLongError(token_count)
