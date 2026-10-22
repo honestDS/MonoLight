@@ -114,6 +114,26 @@
     }
   }
 
+  .image-compression-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0 16px;
+
+    > .image-compression-threshold {
+      flex: 0 1 240px;
+      min-width: 0;
+    }
+
+    > .image-compression-toggle {
+      flex: 0 0 auto;
+
+      .el-form-item__content {
+        justify-content: flex-start;
+      }
+    }
+  }
+
   .secondary-confirmation-controls {
     display: flex;
     flex-wrap: wrap;
