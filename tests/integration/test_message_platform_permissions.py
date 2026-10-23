@@ -146,6 +146,7 @@ async def api_context(
                 "token": "mock-login-token",
                 "account_id": "mock-login-account",
                 "base_url": "https://weixin.example",
+                "user_id": "",
             }
 
         async def close(_adapter) -> None:
@@ -1394,6 +1395,7 @@ async def test_old_owner_cannot_write_platform_after_transfer_during_login_exter
             "token": new_token,
             "account_id": new_account_id,
             "base_url": "https://weixin.example",
+            "user_id": "",
         }
 
     if operation == "login-start":

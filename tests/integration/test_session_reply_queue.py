@@ -16,6 +16,7 @@ from app.core.session_reply_queue import executor_interactive as executor_intera
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue import executor_replies as executor_replies_module
 from app.core.session_reply_queue.manager import SessionReplyQueueManager
+from app.core.terminal.schemas import ShellNonInteractiveCompletedResult
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
@@ -34,6 +35,8 @@ from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransf
 from tests.integration.session_reply_queue_fixture import concurrent_session_factory as _concurrent_session_factory
 from tests.integration.session_reply_queue_fixture import db_session as _db_session
 from tests.integration.session_reply_queue_test_support import AsyncBarrier, enqueue
+from tests.integration.stream_event_test_support import dispatcher_stream_event
+from tests.unit.response_test_support import llm_response_payload
 
 db_session = _db_session
 concurrent_session_factory = _concurrent_session_factory
@@ -546,6 +549,8 @@ async def test_stream_events_publish_while_generation_transaction_is_committing(
         release_commit = asyncio.Event()
         commit_task: asyncio.Task[None] | None = None
         commit_listener = None
+        expected_response = llm_response_payload("stream completed", history=[])
+        expected_response["choices"][0]["finish_reason"] = "stop"
 
         async def controlled_dispatch_stream(**kwargs):
             nonlocal commit_task, commit_listener
@@ -561,23 +566,26 @@ async def test_stream_events_publish_while_generation_transaction_is_committing(
             commit_listener = pause_generation_commit
             commit_task = asyncio.create_task(kwargs["db"].commit())
             await asyncio.wait_for(commit_prepared.wait(), timeout=5)
-            yield {
-                "type": "agent_loop_start",
-                "turn": 0,
-                "response_id": "response-recall",
-            }
+            yield dispatcher_stream_event(
+                "agent_loop_start",
+                turn=0,
+                response_id="response-recall",
+                session_id=kwargs["session_id"],
+            )
             release_commit.set()
             await asyncio.wait_for(asyncio.shield(commit_task), timeout=5)
-            yield {
-                "type": "agent_loop_start",
-                "turn": 1,
-                "response_id": "response-main",
-            }
-            yield {
-                "type": "done",
-                "response": {"history": [], "files": None},
-                "response_id": "response-main",
-            }
+            yield dispatcher_stream_event(
+                "agent_loop_start",
+                turn=1,
+                response_id="response-main",
+                session_id=kwargs["session_id"],
+            )
+            yield dispatcher_stream_event(
+                "done",
+                response_id="response-main",
+                session_id=kwargs["session_id"],
+                response=expected_response,
+            )
 
         monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch_stream", controlled_dispatch_stream)
         try:
@@ -602,7 +610,7 @@ async def test_stream_events_publish_while_generation_transaction_is_committing(
                 if commit_listener is not None:
                     event.remove(engine.sync_engine, "commit", commit_listener)
 
-    assert response == {"history": [], "files": None, "response_id": "response-main"}
+    assert response == {**expected_response, "response_id": "response-main"}
     assert generation_work.execution_state["request_ids"] == ["request-1"]
 
     async with session_factory() as verify_db:
@@ -771,7 +779,12 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
         "parallel": ["call-1", "call-2", "call-3"],
         "complete_checkpoint": ["call-1", "call-2", "call-3"],
     }[scenario]
-    real_content = '{"status":"success","value":"真实结果"}'
+    real_content = ShellNonInteractiveCompletedResult(
+        stdout="真实结果",
+        stderr="",
+        exit_code=0,
+        system_info="test-system",
+    ).model_dump_json()
 
     def serialize(message: InternalMessage) -> dict:
         return message.model_dump(mode="json", exclude_none=True)
@@ -879,6 +892,7 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
     dispatched_checkpoints = []
     test_session_factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
     monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", test_session_factory)
+    expected_response = llm_response_payload("recovered reply", history=[])
 
     async def dispatch(**kwargs):
         resume_state = kwargs["execution_resume_state"]
@@ -891,7 +905,7 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
         provider_messages = OpenAIChatCompletionsTransformer.to_provider(materialized_messages)
         check_protocol(provider_messages)
         dispatched_checkpoints.append(copy.deepcopy(resume_state))
-        return {"choices": []}
+        return expected_response
 
     monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
     initial_message_count = len(await load_messages())
@@ -899,7 +913,7 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
     result_snapshots, message_counts, checkpoint_snapshots = [], [], []
 
     for _ in range(2):
-        assert await executor_replies_module._execute_foreground(db_session, work, worker_id) == {"choices": []}
+        assert await executor_replies_module._execute_foreground(db_session, work, worker_id) == expected_response
         await db_session.refresh(work)
         saved_work_result = await db_session.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work.id).execution_options(populate_existing=True))
         saved_work = saved_work_result.scalar_one()
@@ -982,7 +996,13 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
     session_id, uid, worker_id, profile_id, call_id = "session-1", "user-1", "worker-1", 1, "reused-call"
 
     def result(row_id: int, label: str) -> tuple[int, str]:
-        return row_id, json.dumps({"result": label})
+        body = ShellNonInteractiveCompletedResult(
+            stdout=label,
+            stderr="",
+            exit_code=0,
+            system_info="test-system",
+        ).model_dump_json()
+        return row_id, body
 
     def turn(assistant_id: int, calls: list[str], checkpoint=(), database=(), expected=()) -> dict:
         return dict(assistant_id=assistant_id, calls=calls, checkpoint=checkpoint, database=database, expected=expected)
@@ -1110,6 +1130,7 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
 
     test_session_factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
     monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", test_session_factory)
+    expected_response = llm_response_payload("reused-call reply", history=[])
 
     async def dispatch(**kwargs):
         resume = kwargs["execution_resume_state"]
@@ -1118,7 +1139,7 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
             assert saved is not None and saved.execution_state["dispatcher_checkpoint"] == resume
         assert_provider(resume["messages"], rounds)
         assert_provider(resume["turn_messages"], [current])
-        return {"choices": []}
+        return expected_response
 
     monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
     initial_rows, initial_messages = await tool_rows(), await load_messages()
@@ -1127,7 +1148,7 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
     checkpoints, results_snapshots, message_counts = [], [], []
     for _ in range(2):
         unknown_checkpoint_ids = []
-        assert await executor_replies_module._execute_foreground(db_session, work, worker_id) == {"choices": []}
+        assert await executor_replies_module._execute_foreground(db_session, work, worker_id) == expected_response
         await db_session.refresh(work)
         saved = await db_session.get(SessionReplyWorkItem, work.id)
         checkpoint = saved.execution_state["dispatcher_checkpoint"]

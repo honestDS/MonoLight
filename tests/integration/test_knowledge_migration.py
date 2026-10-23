@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import timedelta
-from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -17,6 +16,7 @@ import app.core.knowledge_jobs.migration_prepare as migration_prepare_module
 import app.core.knowledge_jobs.migration_switch as migration_switch_module
 from app.core.constants import ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND
 from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.exceptions import ParameterException
 from app.core.knowledge.embedding_migration import submit_managed_knowledge_base_migrations_for_memory_revision
@@ -52,6 +52,7 @@ from app.models.knowledge_base import (
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.providers.database.time import get_database_time
+from app.providers.vector.chroma import CollectionValidationResult
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -65,6 +66,24 @@ _TABLES = (
     KnowledgeJob.__table__,
     KnowledgeBaseEmbeddingDelta.__table__,
 )
+
+
+def _embedding_config(
+    channel_id: int,
+    model_id: str,
+    *,
+    declared_dimensions: int | None = 3,
+) -> EmbeddingRuntimeConfig:
+    return EmbeddingRuntimeConfig(
+        channel_id=channel_id,
+        channel_name="migration-embedding",
+        model_id=model_id,
+        declared_dimensions=declared_dimensions,
+        protocol="openai_embedding",
+        timeout=30.0,
+        base_url="https://embedding.invalid/v1",
+        api_key="test-key",
+    )
 
 
 @pytest_asyncio.fixture
@@ -149,11 +168,11 @@ class _VectorBackend:
         expected_metadata=None,
         expected_dimension=None,
         sample_size=1,
-    ):
+    ) -> CollectionValidationResult:
         del sample_size
         collection = self.collections.get(name)
         if collection is None:
-            return SimpleNamespace(
+            return CollectionValidationResult(
                 exists=False,
                 valid=False,
                 count=None,
@@ -178,7 +197,7 @@ class _VectorBackend:
                 errors.append("dimension_mismatch")
         elif expected_dimension is not None and expected_count:
             errors.append("sample_dimension_missing")
-        return SimpleNamespace(
+        return CollectionValidationResult(
             exists=True,
             valid=not errors,
             count=len(items),
@@ -277,12 +296,8 @@ async def _claim(
 
 
 def _patch_migration_backend(monkeypatch, backend: _VectorBackend) -> None:
-    async def _load_config(_db, channel_id, model_id):
-        return SimpleNamespace(
-            channel_id=channel_id,
-            model_id=model_id,
-            declared_dimensions=3,
-        )
+    async def _load_config(_db, channel_id, model_id, **_kwargs):
+        return _embedding_config(channel_id, model_id)
 
     async def _embed(_config, texts, batch_size=16, dimensions=None, **_kwargs):
         del batch_size
@@ -1272,9 +1287,9 @@ async def test_validation_failure_never_switches_active_collection(
 
     original_validate = backend.validate
 
-    async def _invalid_validate(*args, **kwargs):
+    async def _invalid_validate(*args, **kwargs) -> CollectionValidationResult:
         result = await original_validate(*args, **kwargs)
-        return SimpleNamespace(
+        return CollectionValidationResult(
             exists=result.exists,
             valid=False,
             count=result.count,
@@ -1620,8 +1635,8 @@ async def test_user_migration_probe_failure_keeps_target_and_job_unset(
     assert knowledge_base.id is not None
     assert knowledge_base.active_embedding_channel_id is not None
 
-    async def fake_load_runtime_config(*_args, **_kwargs):
-        return SimpleNamespace(declared_dimensions=3)
+    async def fake_load_runtime_config(_db, channel_id, model_id, **_kwargs):
+        return _embedding_config(channel_id, model_id)
 
     async def failed_detect_dimensions(_config):
         raise RuntimeError("probe failed")
@@ -1658,10 +1673,14 @@ async def test_user_migration_rejects_embedding_config_change_during_probe_witho
     assert knowledge_base.active_embedding_channel_id is not None
     load_count = 0
 
-    async def changing_load_runtime_config(*_args, **_kwargs):
+    async def changing_load_runtime_config(_db, channel_id, model_id, **_kwargs):
         nonlocal load_count
         load_count += 1
-        return SimpleNamespace(declared_dimensions=3 if load_count == 1 else 4)
+        return _embedding_config(
+            channel_id,
+            model_id,
+            declared_dimensions=3 if load_count == 1 else 4,
+        )
 
     async def fake_detect_dimensions(_config):
         return 3
@@ -1697,8 +1716,8 @@ async def test_user_migration_cleanup_failure_blocks_new_submission_without_job(
     assert knowledge_base.id is not None
     assert knowledge_base.active_embedding_channel_id is not None
 
-    async def fake_load_runtime_config(*_args, **_kwargs):
-        return SimpleNamespace(declared_dimensions=3)
+    async def fake_load_runtime_config(_db, channel_id, model_id, **_kwargs):
+        return _embedding_config(channel_id, model_id)
 
     async def fake_detect_dimensions(_config):
         return 3

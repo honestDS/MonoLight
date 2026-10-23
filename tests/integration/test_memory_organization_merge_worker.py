@@ -4,7 +4,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -75,6 +74,7 @@ from app.models.memory import (
     LongTermMemoryType,
 )
 from app.providers.database.time import get_database_time
+from app.providers.vector.chroma import CollectionValidationResult
 
 
 class _ImportSafePersistentClient:
@@ -185,8 +185,14 @@ class _FakeVectorBackend:
             await self.upsert_hook(collection_name, list(item_ids))
         return len(item_ids)
 
-    async def validate(self, collection_name: str) -> SimpleNamespace:
-        return SimpleNamespace(exists=collection_name in self.collections)
+    async def validate(self, collection_name: str) -> CollectionValidationResult:
+        if collection_name in self.collections:
+            return CollectionValidationResult(
+                exists=True,
+                valid=True,
+                count=len(self.collections[collection_name]["items"]),
+            )
+        return CollectionValidationResult(exists=False, valid=False, errors=("collection_not_found",))
 
     async def delete(self, collection_name: str, item_ids: list[str], **_kwargs: Any) -> int:
         self.delete_calls.append((collection_name, list(item_ids)))

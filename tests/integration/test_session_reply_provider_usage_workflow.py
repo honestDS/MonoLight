@@ -27,6 +27,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkType,
 )
 from tests.database_support import clone_sqlite_schema
+from tests.unit.response_test_support import llm_response_payload
 
 SESSION_ID = "session-provider-usage"
 UID = "user-1"
@@ -238,7 +239,7 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
                 output_tokens=11,
             )
         )
-        return {"choices": []}
+        return llm_response_payload("foreground reply")
 
     monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
 
@@ -257,7 +258,9 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
             allow_additional_user_messages=False,
             execution_resume_state=None,
         )
-    assert response == {"choices": []}
+    assert response["choices"][0]["message"]["content"] == "foreground reply"
+    assert response["choices"][0]["message"]["role"] == "assistant"
+    assert response["choices"][0]["finish_reason"] is True
 
     async with session_factory() as db:
         session = (await db.execute(select(ChatSession).where(ChatSession.session_id == SESSION_ID))).scalar_one()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -9,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
+from app.core.crud.knowledge.job import KnowledgeJobRecoveryResult
 from app.core.knowledge_jobs import maintenance as maintenance_module
 from app.core.knowledge_jobs.consumer import KnowledgeJobConsumer
 from app.core.knowledge_jobs.executor import (
@@ -39,6 +39,7 @@ from app.models.knowledge_base import (
 )
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
+from app.providers.vector.chroma import CollectionValidationResult
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -197,8 +198,8 @@ async def test_consumer_submits_maintenance_only_once_per_worker_start() -> None
         return {}
 
     class StartupMaintenanceConsumer(KnowledgeJobConsumer):
-        async def _recover_expired(self):
-            return SimpleNamespace(retried=0, failed=0, cancelled=0)
+        async def _recover_expired(self) -> KnowledgeJobRecoveryResult:
+            return KnowledgeJobRecoveryResult()
 
         async def _submit_startup_maintenance_jobs(self) -> bool:
             nonlocal startup_submissions
@@ -236,8 +237,8 @@ async def test_consumer_retries_only_failed_startup_maintenance_submission() -> 
         return {}
 
     class StartupMaintenanceRetryConsumer(KnowledgeJobConsumer):
-        async def _recover_expired(self):
-            return SimpleNamespace(retried=0, failed=0, cancelled=0)
+        async def _recover_expired(self) -> KnowledgeJobRecoveryResult:
+            return KnowledgeJobRecoveryResult()
 
         async def _submit_startup_maintenance_jobs(self) -> bool:
             nonlocal startup_submissions
@@ -358,10 +359,16 @@ async def test_maintenance_cleans_only_orphan_vectors_and_accepts_document_uuid_
             vectors.pop(item_id, None)
         return len(ids)
 
-    async def validate(_collection_name, expected_count=None, expected_metadata=None, expected_dimension=None, sample_size=1):
+    async def validate(
+        _collection_name,
+        expected_count=None,
+        expected_metadata=None,
+        expected_dimension=None,
+        sample_size=1,
+    ) -> CollectionValidationResult:
         del expected_metadata, expected_dimension, sample_size
         errors = () if expected_count is None or len(vectors) == expected_count else ("count_mismatch",)
-        return SimpleNamespace(
+        return CollectionValidationResult(
             exists=True,
             valid=not errors,
             count=len(vectors),
@@ -461,14 +468,20 @@ async def test_maintenance_marks_index_failed_without_submitting_embedding_migra
         del include
         return {"ids": [item_id for item_id in ids if item_id in vectors]}
 
-    async def validate(_collection_name, expected_count=None, expected_metadata=None, expected_dimension=None, sample_size=1):
+    async def validate(
+        _collection_name,
+        expected_count=None,
+        expected_metadata=None,
+        expected_dimension=None,
+        sample_size=1,
+    ) -> CollectionValidationResult:
         del expected_metadata, expected_dimension, sample_size
         if anomaly == "missing_collection":
-            return SimpleNamespace(exists=False, valid=False, count=0, errors=("collection_missing",))
+            return CollectionValidationResult(exists=False, valid=False, count=0, errors=("collection_missing",))
         if expected_count is None:
-            return SimpleNamespace(exists=True, valid=True, count=len(vectors), errors=())
+            return CollectionValidationResult(exists=True, valid=True, count=len(vectors), errors=())
         error = "dimension_mismatch" if anomaly == "dimension_mismatch" else "count_mismatch"
-        return SimpleNamespace(
+        return CollectionValidationResult(
             exists=True,
             valid=False,
             count=len(vectors) + (1 if anomaly == "count_mismatch" else 0),

@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncGenerator
 from copy import deepcopy
 from datetime import timedelta
@@ -25,6 +26,8 @@ from app.providers.database import get_db
 from app.providers.embedding import EmbeddingClient
 from app.providers.image_generation import ImageGenerationClient
 from app.providers.llm.client import LLMClient
+from app.transformers.openai import OpenAIChatCompletionsTransformer
+from app.transformers.openai import base as openai_transformer_base
 
 TEST_JWT_SECRET = "channel-permissions-integration-jwt-secret"
 TEST_PASSWORD_HASH = "fixed-channel-permissions-password-hash"
@@ -391,8 +394,33 @@ async def test_superuser_can_complete_channel_management_workflow(
     headers = {"Authorization": f"Bearer {token}"}
     seed_state = await _state_snapshot(session_factory)
 
-    async def list_models(*args: Any, **kwargs: Any) -> list[dict[str, str]]:
-        return [{"id": "chat-model"}]
+    http_models_sample = {"object": "list", "data": [{"id": "chat-model"}]}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        async def text(self) -> str:
+            return json.dumps(http_models_sample)
+
+    class FakeClientSession:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def get(self, url: str, *args: Any, **kwargs: Any) -> FakeResponse:
+            assert url == "https://llm.example/v1/models"
+            return FakeResponse()
 
     def chat_response() -> InternalResponse:
         return InternalResponse(
@@ -414,7 +442,9 @@ async def test_superuser_can_complete_channel_management_workflow(
     async def get_embeddings(*args: Any, **kwargs: Any) -> dict[str, list[dict[str, list[float]]]]:
         return {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
 
-    monkeypatch.setattr(LLMClient, "list_models", list_models)
+    monkeypatch.setattr(openai_transformer_base.aiohttp, "ClientSession", FakeClientSession)
+    monkeypatch.setattr(openai_transformer_base.aiohttp, "TCPConnector", lambda *args, **kwargs: None)
+    monkeypatch.setattr(LLMClient, "list_models", OpenAIChatCompletionsTransformer().list_models)
     monkeypatch.setattr(LLMClient, "generate", generate)
     monkeypatch.setattr(LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
     monkeypatch.setattr(ImageGenerationClient, "generate_image", generate_image)
@@ -504,7 +534,7 @@ async def test_superuser_can_complete_channel_management_workflow(
                 },
             )
         )
-        assert models_data == {"models": [{"id": "chat-model"}]}
+        assert models_data == {"models": [{"id": "chat-model", "owned_by": None, "created": None}]}
 
         chat_request = {
             "api_key": "test-api-key",

@@ -36,6 +36,7 @@ from app.core.memory import (
     normalize_memory_key,
 )
 from app.core.memory_jobs.manager import memory_job_manager
+from app.core.retrieval.schemas import RetrievalHit
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
@@ -968,27 +969,6 @@ async def test_append_memory_embedding_delta_rejects_uid_in_snapshot(
     assert await _get_deltas(memory_database, uid="delta-snapshot-user", migration_job_id=940) == []
 
 
-class _RecallHit:
-    def __init__(
-        self,
-        item_id: str,
-        metadata: dict[str, Any],
-        *,
-        dense_distance: float | None = None,
-        dense_rank: int | None = None,
-        sparse_score: float | None = None,
-        sparse_rank: int | None = None,
-        fusion_score: float | None = None,
-    ) -> None:
-        self.id = item_id
-        self.metadata = metadata
-        self.dense_distance = dense_distance
-        self.dense_rank = dense_rank
-        self.sparse_score = sparse_score
-        self.sparse_rank = sparse_rank
-        self.fusion_score = fusion_score
-
-
 def _hit(
     memory_id: int,
     *,
@@ -997,10 +977,11 @@ def _hit(
     version: int = 1,
     item_id: str | None = None,
     fusion_score: float | None = None,
-) -> _RecallHit:
-    return _RecallHit(
-        item_id or build_memory_vector_item_id(memory_id, version),
-        {
+) -> RetrievalHit:
+    return RetrievalHit(
+        id=item_id or build_memory_vector_item_id(memory_id, version),
+        content="untrusted vector content",
+        metadata={
             "uid": uid,
             "memory_id": memory_id,
             "version": version,
@@ -1105,7 +1086,7 @@ async def test_recall_filters_metadata_and_database_state_while_preserving_fusio
         _hit(valid_first.id, uid=uid, fusion_score=0.1),
     ]
 
-    async def fake_query(collection_name: str, vector: list[float], query: str, limit: int) -> list[_RecallHit]:
+    async def fake_query(collection_name: str, vector: list[float], query: str, limit: int) -> list[RetrievalHit]:
         assert collection_name.startswith("memory-test-")
         assert vector == [0.1, 0.2]
         assert query == "normalized query"
@@ -1185,7 +1166,7 @@ async def test_recall_touch_failure_returns_the_original_ok_result(
     async def fake_embed(*_args: Any, **_kwargs: Any) -> list[list[float]]:
         return [[0.1, 0.2]]
 
-    async def fake_query(*_args: Any, **_kwargs: Any) -> list[_RecallHit]:
+    async def fake_query(*_args: Any, **_kwargs: Any) -> list[RetrievalHit]:
         return [_hit(record.id, uid=uid)]
 
     async def failed_touch(*_args: Any, **_kwargs: Any) -> int:
@@ -1310,7 +1291,7 @@ async def test_recall_returns_complete_memories_and_respects_top_k(
         _vector: list[float],
         _query: str,
         limit: int,
-    ) -> list[_RecallHit]:
+    ) -> list[RetrievalHit]:
         assert limit == 12
         return [_hit(record.id, uid=uid) for record in records]
 
@@ -1386,7 +1367,7 @@ async def test_recall_returns_degraded_when_active_configuration_changes_after_e
     async def fake_embed(*_args: Any, **_kwargs: Any) -> list[list[float]]:
         return [[0.1, 0.2]]
 
-    async def query_then_change(*_args: Any, **_kwargs: Any) -> list[_RecallHit]:
+    async def query_then_change(*_args: Any, **_kwargs: Any) -> list[RetrievalHit]:
         async with memory_database() as change_db:
             changed = await memory_store_crud.update_by_uid(
                 change_db,

@@ -44,8 +44,10 @@ from app.core.session_reply_queue import executor_metadata as executor_metadata_
 from app.core.session_reply_queue import manager_result as manager_result_module
 from app.core.session_reply_queue import manager_submission as manager_submission_module
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.terminal import ShellNonInteractiveCompletedResult
 from app.core.tools import MANAGE_TODO_TOOL_NAME, TOOL_EXECUTOR_MAP
 from app.core.utils.dispatcher import channel_call as channel_call_module
+from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.request_token_baseline import build_provider_request_usage_metadata
 from app.core.utils.time import get_local_time
@@ -81,6 +83,11 @@ from app.providers.database import get_db
 from app.providers.llm.client import LLMClient
 from tests.database_support import clone_sqlite_schema
 from tests.integration.test_chat_websocket_permissions import _Socket
+from tests.unit.response_test_support import (
+    audit_confirmation_payload,
+    llm_response_payload,
+    pending_audit_tool_result,
+)
 
 
 @pytest_asyncio.fixture
@@ -305,21 +312,7 @@ async def _seed_pending_confirmation(
                 commit=False,
             )
 
-        pending_results = [
-            InternalMessage(
-                role=MessageRole.TOOL,
-                tool_call_id=tool_call.id,
-                content=json.dumps(
-                    {
-                        "status": AuditRecordStatus.PENDING.value,
-                        "error": "waiting for confirmation",
-                        "reason": "confirmation required",
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-            for tool_call in tool_calls
-        ]
+        pending_results = [pending_audit_tool_result(call.id) for call in tool_calls]
         await persist_pending_confirmation_bundle(
             db,
             audit_record_id=record.id,
@@ -327,12 +320,14 @@ async def _seed_pending_confirmation(
             session_id=session_id,
             profile_id=1,
             tool_results=pending_results,
-            confirmation_payload={
-                "type": "audit_confirmation",
-                "audit_record_id": record.id,
-                "status": "pending",
-                "confirmation_mode": "standard",
-            },
+            confirmation_payload=audit_confirmation_payload(
+                record.id,
+                summary=record.intent_summary,
+                risk=1,
+                expires_at=record.expires_at.isoformat(),
+                timeout_seconds=3600,
+                locale=record.language,
+            ),
             dedupe_key=f"audit-confirmation:{record.id}",
         )
         assert record.id is not None
@@ -425,13 +420,13 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
         return InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id=tool_call.id,
-            content=json.dumps(
-                {
-                    "status": "success",
-                    "stdout": f"{tool_call.arguments['command']}\n",
-                    "exit_code": 0,
-                }
-            ),
+            content=ShellNonInteractiveCompletedResult(
+                stdout=f"{tool_call.arguments['command']}\n",
+                stderr="",
+                exit_code=0,
+                system_info="test-system",
+            ).model_dump_json(),
+            tool_execution_status="succeeded",
         )
 
     monkeypatch.setattr(executor_confirmed_module, "process_single_tool", execute_tool)
@@ -454,7 +449,8 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
             pending_internal = InternalMessage.model_validate_json(pending_row.content or "{}")
             assert pending_internal.tool_call_id == pending_row.audit_tool_call_id
             replacement_payloads.append(json.loads(pending_internal.content))
-        assert [payload["status"] for payload in replacement_payloads] == ["success", "success"]
+        assert [payload["exit_code"] for payload in replacement_payloads] == [0, 0]
+        assert [payload["stderr"] for payload in replacement_payloads] == ["", ""]
         assert [payload["stdout"] for payload in replacement_payloads] == [
             "echo confirmed-1\n",
             "echo confirmed-2\n",
@@ -511,15 +507,10 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
             kwargs["persisted_profile_id"],
             dedupe_key=kwargs["final_message_dedupe_key"],
         )
+        response = llm_response_payload(content="confirmed tool completed", history=[])
+        response["choices"][0]["finish_reason"] = "stop"
         return {
-            "choices": [
-                {
-                    "message": {"role": MessageRole.ASSISTANT, "content": "confirmed tool completed"},
-                    "finish_reason": "stop",
-                }
-            ],
-            "history": [],
-            "files": None,
+            **response,
             "response_id": "confirmation-final",
             "llm_request_metadata": latest_llm_request_metadata,
         }
@@ -613,7 +604,8 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
     for original_call_id, call_versions in versions_by_call.items():
         assert [version.version_no for version in call_versions] == [0, 1, 2]
         final_payload = json.loads(InternalMessage.model_validate_json(call_versions[-1].content).content)
-        assert final_payload["status"] == "success"
+        assert final_payload["exit_code"] == 0
+        assert final_payload["stderr"] == ""
         expected_command = "echo confirmed-1" if original_call_id.endswith("-1") else "echo confirmed-2"
         assert final_payload["stdout"] == f"{expected_command}\n"
     parallel_limit_rows = [message for message in messages if message.type == MessageType.TOOL_RESULT and message.audit_record_id is None]
@@ -1795,15 +1787,20 @@ async def test_confirmation_execution_stop_preserves_started_result_and_cancels_
             if outcome == "interrupted":
                 raise AssertionError("interrupted shell call was not cancelled")
             if outcome == "success":
-                payload = {"status": "success", "exit_code": 0, "stdout": "controlled success\n"}
+                result = ShellNonInteractiveCompletedResult(
+                    stdout="controlled success\n",
+                    stderr="",
+                    exit_code=0,
+                    system_info="test-system",
+                )
             else:
-                payload = {
-                    "status": "failed",
-                    "exit_code": 7,
-                    "stdout": "controlled failed\n",
-                    "error": "controlled failure",
-                }
-            return json.dumps(payload, ensure_ascii=False)
+                result = ShellNonInteractiveCompletedResult(
+                    stdout="controlled failed\n",
+                    stderr="controlled failure",
+                    exit_code=7,
+                    system_info="test-system",
+                )
+            return result.model_dump_json()
 
     monkeypatch.setitem(TOOL_EXECUTOR_MAP, "execute_shell", ControlledShellExecutor)
 
@@ -1896,18 +1893,20 @@ async def test_confirmation_execution_stop_preserves_started_result_and_cancels_
         "original-shell-call-1",
         "original-shell-call-2",
     ]
-    result_payloads = {message.audit_tool_call_id: json.loads(InternalMessage.model_validate_json(message.content or "{}").content or "{}") for message in structured_results}
+    result_messages = {message.audit_tool_call_id: InternalMessage.model_validate_json(message.content or "{}") for message in structured_results}
+    result_payloads = {call_id: json.loads(result_message.content or "{}") for call_id, result_message in result_messages.items()}
+    first_result = result_messages["original-shell-call-1"]
     first_payload = result_payloads["original-shell-call-1"]
     assert first_payload["confirmation_decision"] == "approve"
+    assert get_tool_execution_status(first_result) == expected_first_execution_status.value
     if outcome == "success":
-        assert first_payload["status"] == "success"
         assert first_payload["exit_code"] == 0
         assert first_payload["stdout"] == "controlled success\n"
+        assert first_payload["stderr"] == ""
     elif outcome == "failed":
-        assert first_payload["status"] == "failed"
         assert first_payload["exit_code"] == 7
         assert first_payload["stdout"] == "controlled failed\n"
-        assert first_payload["error"] == "controlled failure"
+        assert first_payload["stderr"] == "controlled failure"
     else:
         assert first_payload["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
         assert first_payload["confirmation_status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
@@ -2114,16 +2113,12 @@ async def test_confirmation_audit_decision_continues_without_forced_memory_recal
         async def execute(self, **arguments) -> str:
             command = arguments["command"]
             commands.append(command)
-            return json.dumps(
-                {
-                    "status": "success",
-                    "command": command,
-                    "stdout": f"{command}\n",
-                    "stderr": "",
-                    "exit_code": 0,
-                },
-                ensure_ascii=False,
-            )
+            return ShellNonInteractiveCompletedResult(
+                stdout=f"{command}\n",
+                stderr="",
+                exit_code=0,
+                system_info="test-system",
+            ).model_dump_json()
 
     monkeypatch.setitem(TOOL_EXECUTOR_MAP, "execute_shell", FakeShellExecutor)
 
