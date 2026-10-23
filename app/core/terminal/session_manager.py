@@ -372,6 +372,57 @@ class TerminalSessionManager:
             failure_reason=terminal_session.failure_reason,
         )
 
+    async def get_write_status(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        uid: str,
+        session_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        request = TerminalStatusRequest(
+            terminal_session_id=terminal_session_id,
+            request_id=request_id,
+        )
+        terminal_session = await self.get_owned_session(
+            db,
+            request.terminal_session_id,
+            uid,
+            session_id,
+        )
+        if TerminalAction.STATUS.value not in terminal_session.allowed_actions:
+            raise ForbiddenException(
+                ERR_TERMINAL_ACTION_NOT_ALLOWED,
+                terminal_session_id=request.terminal_session_id,
+                action=TerminalAction.STATUS.value,
+            )
+
+        command = await terminal_control_command_crud.get_by_session_request(
+            db,
+            request.terminal_session_id,
+            request.request_id,
+        )
+        if command is None:
+            return {
+                "request_id": request.request_id,
+                "command_status": "not_found",
+                "result": None,
+                "error": None,
+            }
+        if command.action != TerminalAction.WRITE:
+            raise ParameterException(
+                ERR_TERMINAL_COMMAND_REQUEST_CONFLICT,
+                terminal_session_id=request.terminal_session_id,
+                action=TerminalAction.WRITE.value,
+                request_id=request.request_id,
+            )
+        return {
+            "request_id": request.request_id,
+            "command_status": command.status.value,
+            "result": command.result,
+            "error": command.error,
+        }
+
     async def enqueue_control(
         self,
         db: AsyncSession,

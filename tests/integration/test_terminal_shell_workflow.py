@@ -15,9 +15,14 @@ import app.core.terminal.session_runtime_commands as terminal_runtime_commands_m
 import app.core.terminal.session_runtime_core as terminal_runtime_core_module
 import app.core.terminal.session_runtime_state as terminal_runtime_state_module
 import app.core.terminal.worker_coordinator as terminal_worker_module
-from app.core.constants import ERR_TERMINAL_COMMAND_TIMEOUT, ERR_TERMINAL_WORKER_STOPPED
+from app.core.constants import (
+    ERR_TERMINAL_COMMAND_REQUEST_CONFLICT,
+    ERR_TERMINAL_COMMAND_TIMEOUT,
+    ERR_TERMINAL_WORKER_STOPPED,
+)
 from app.core.crud.terminal.session import terminal_control_command_crud
 from app.core.dispatchers.context import DispatchContext
+from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.terminal import (
     ShellInteractiveHandoffResult,
@@ -418,6 +423,28 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
         assert get_tool_execution_status(unknown_tool_result) == "execution_unknown"
 
         async with AsyncSessionLocal() as db:
+            pending_status_executor = _configure_executor(
+                TerminalStatusExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="write-timeout-pending-status-call",
+            )
+            pending_status = json.loads(
+                await pending_status_executor.execute(
+                    handoff.terminal_session_id,
+                    request_id=unknown_result["request_id"],
+                )
+            )
+        assert pending_status["status"] == TerminalSessionStatus.STARTING.value
+        assert pending_status["write_request"] == {
+            "request_id": unknown_result["request_id"],
+            "command_status": "pending",
+            "result": None,
+            "error": None,
+        }
+
+        async with AsyncSessionLocal() as db:
             pending_write = await terminal_control_command_crud.get_by_session_request(
                 db,
                 handoff.terminal_session_id,
@@ -437,6 +464,34 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
         assert recent_commands[0].id == command_id
         assert recent_commands[0].action is TerminalAction.WRITE
         assert not any(item.action is TerminalAction.READ for item in recent_commands)
+
+        async with AsyncSessionLocal() as db:
+            pending_retry_executor = _configure_executor(
+                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="write-timeout-pending-retry-call",
+            )
+            pending_retry_executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 0.05}}))
+            pending_retry_content = await pending_retry_executor.execute(
+                handoff.terminal_session_id,
+                data=write_data,
+                request_id=unknown_result["request_id"],
+            )
+        pending_retry_result = json.loads(pending_retry_content)
+        assert pending_retry_result["status"] == "execution_unknown"
+        assert pending_retry_result["request_id"] == unknown_result["request_id"]
+        async with AsyncSessionLocal() as db:
+            pending_retry_commands = await terminal_control_command_crud.list_recent_by_session(
+                db,
+                handoff.terminal_session_id,
+                limit=10,
+            )
+        assert len(pending_retry_commands) == 1
+        assert pending_retry_commands[0].id == command_id
+        assert pending_retry_commands[0].action is TerminalAction.WRITE
+        assert not any(item.action is TerminalAction.READ for item in pending_retry_commands)
 
         coordinator.start()
         async with AsyncSessionLocal() as db:
@@ -459,18 +514,39 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
         assert completed_write.result["output_offset_before_write"] == worker_result["output_offset_before_write"]
 
         async with AsyncSessionLocal() as db:
+            completed_status_executor = _configure_executor(
+                TerminalStatusExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="write-timeout-completed-status-call",
+            )
+            completed_status = json.loads(
+                await completed_status_executor.execute(
+                    handoff.terminal_session_id,
+                    request_id=unknown_result["request_id"],
+                )
+            )
+        completed_status_write = completed_status["write_request"]
+        assert completed_status_write["command_status"] == "succeeded"
+        assert completed_status_write["result"]["bytes_written"] == completed_write.result["bytes_written"]
+        assert completed_status_write["result"]["output_offset_before_write"] == completed_write.result["output_offset_before_write"]
+        assert completed_status_write["error"] is None
+
+        async with AsyncSessionLocal() as db:
             replay_executor = _configure_executor(
                 TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
-                tool_call_id=tool_call_id,
+                tool_call_id="write-timeout-replay-call",
             )
             replay_result = TerminalWriteResult.model_validate(
                 json.loads(
                     await replay_executor.execute(
                         handoff.terminal_session_id,
                         data=write_data,
+                        request_id=unknown_result["request_id"],
                     )
                 )
             )
@@ -481,14 +557,71 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
         assert replay_result.read_offset == completed_write.result["output_offset_before_write"]
 
         async with AsyncSessionLocal() as db:
+            conflict_executor = _configure_executor(
+                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="write-timeout-conflicting-replay-call",
+            )
+            with pytest.raises(ParameterException) as conflict_error:
+                await conflict_executor.execute(
+                    handoff.terminal_session_id,
+                    data="different input\n",
+                    request_id=unknown_result["request_id"],
+                )
+        assert conflict_error.value.message == ERR_TERMINAL_COMMAND_REQUEST_CONFLICT
+
+        async with AsyncSessionLocal() as db:
+            unchanged_original = await terminal_control_command_crud.get_by_session_request(
+                db,
+                handoff.terminal_session_id,
+                unknown_result["request_id"],
+            )
+            commands_after_conflict = await terminal_control_command_crud.list_recent_by_session(
+                db,
+                handoff.terminal_session_id,
+                limit=10,
+            )
+        assert unchanged_original is not None
+        assert unchanged_original.status is TerminalControlCommandStatus.SUCCEEDED
+        assert unchanged_original.payload["data"] == write_data
+        assert unchanged_original.result == completed_write.result
+        assert len(commands_after_conflict) == 1
+        assert commands_after_conflict[0].id == command_id
+        assert commands_after_conflict[0].action is TerminalAction.WRITE
+
+        async with AsyncSessionLocal() as db:
+            fresh_write_executor = _configure_executor(
+                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="write-timeout-fresh-operation-call",
+            )
+            fresh_write = TerminalWriteResult.model_validate(
+                json.loads(
+                    await fresh_write_executor.execute(
+                        handoff.terminal_session_id,
+                        data=write_data,
+                    )
+                )
+            )
+        assert fresh_write.duplicate is False
+        assert fresh_write.request_id != unknown_result["request_id"]
+
+        async with AsyncSessionLocal() as db:
             final_commands = await terminal_control_command_crud.list_recent_by_session(
                 db,
                 handoff.terminal_session_id,
                 limit=10,
             )
-        assert len(final_commands) == 1
-        assert final_commands[0].id == command_id
-        assert final_commands[0].action is TerminalAction.WRITE
+        assert len(final_commands) == 2
+        assert {item.request_id for item in final_commands} == {
+            unknown_result["request_id"],
+            fresh_write.request_id,
+        }
+        assert all(item.action is TerminalAction.WRITE for item in final_commands)
         assert not any(item.action is TerminalAction.READ for item in final_commands)
     finally:
         await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)

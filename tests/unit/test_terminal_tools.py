@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 import app.core.tools.terminal as terminal_module
 from app.core.constants import ERR_TERMINAL_COMMAND_TIMEOUT
@@ -207,7 +208,15 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
     expected = {
         "terminal_status": {
             "required": ["terminal_session_id"],
-            "properties": {"terminal_session_id": {}},
+            "properties": {
+                "terminal_session_id": {},
+                "request_id": {
+                    "type": "string",
+                    "minLength": 16,
+                    "maxLength": 128,
+                    "pattern": r"^[A-Za-z0-9_-]+$",
+                },
+            },
         },
         "terminal_read": {
             "required": ["terminal_session_id"],
@@ -219,7 +228,16 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
         },
         "terminal_write": {
             "required": ["terminal_session_id", "data"],
-            "properties": {"terminal_session_id": {}, "data": {"minLength": 1, "maxLength": 65_536}},
+            "properties": {
+                "terminal_session_id": {},
+                "data": {"minLength": 1, "maxLength": 65_536},
+                "request_id": {
+                    "type": "string",
+                    "minLength": 16,
+                    "maxLength": 128,
+                    "pattern": r"^[A-Za-z0-9_-]+$",
+                },
+            },
         },
         "terminal_resize": {
             "required": ["terminal_session_id", "columns", "rows"],
@@ -400,11 +418,90 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "write_request",
+    [
+        {"request_id": "request-status-pending-1", "command_status": "pending", "result": None, "error": None},
+        {
+            "request_id": "request-status-succeeded-1",
+            "command_status": "succeeded",
+            "result": {"bytes_written": 5, "output_offset_before_write": 14},
+            "error": None,
+        },
+    ],
+    ids=["pending", "succeeded"],
+)
+async def test_terminal_status_returns_write_request_status_without_enqueuing(monkeypatch, write_request):
+    snapshot = _snapshot(next_offset=14)
+
+    async def get_snapshot(*args, **kwargs):
+        return snapshot
+
+    async def get_write_status(*args, **kwargs):
+        return write_request
+
+    async def unexpected_enqueue(*args, **kwargs):
+        raise AssertionError("terminal_status must not enqueue terminal commands")
+
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "get_write_status", get_write_status)
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", unexpected_enqueue)
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_read", unexpected_enqueue)
+
+    result = json.loads(
+        await _executor(TerminalStatusExecutor).execute(
+            TERMINAL_SESSION_ID,
+            request_id=write_request["request_id"],
+        )
+    )
+
+    assert result == {**snapshot.model_dump(mode="json"), "write_request": write_request}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_id", ["", "short", "x" * 129, "invalid/request"])
+@pytest.mark.parametrize("executor_class", [TerminalStatusExecutor, TerminalWriteExecutor], ids=["status", "write"])
+async def test_terminal_status_and_write_reject_invalid_request_ids_without_enqueue(
+    monkeypatch,
+    executor_class,
+    request_id,
+):
+    control_requests = []
+
+    async def get_snapshot(*args, **kwargs):
+        return _snapshot()
+
+    async def enqueue_control(*args, **kwargs):
+        control_requests.append(args[3])
+        return SimpleNamespace(id=201), True
+
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", enqueue_control)
+
+    with pytest.raises(ValidationError):
+        if executor_class is TerminalStatusExecutor:
+            await _executor(executor_class).execute(TERMINAL_SESSION_ID, request_id=request_id)
+        else:
+            await _executor(executor_class).execute(
+                terminal_session_id=TERMINAL_SESSION_ID,
+                data="input",
+                request_id=request_id,
+            )
+
+    assert control_requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "output_changes",
     [False, True],
     ids=["no-new-output", "continuous-output"],
 )
-async def test_terminal_write_waits_for_confirmation_without_waiting_for_output(monkeypatch, output_changes):
+@pytest.mark.parametrize(
+    "request_id",
+    [None, "explicit-write-request-123"],
+    ids=["derived-request-id", "explicit-request-id"],
+)
+async def test_terminal_write_waits_for_confirmation_without_waiting_for_output(monkeypatch, output_changes, request_id):
     next_offset = 7
     control_requests = []
     read_requests = []
@@ -441,6 +538,7 @@ async def test_terminal_write_waits_for_confirmation_without_waiting_for_output(
         _executor(TerminalWriteExecutor, tool_timeout=5.0).execute(
             terminal_session_id=TERMINAL_SESSION_ID,
             data="input",
+            request_id=request_id,
         )
     )
     try:
@@ -466,6 +564,9 @@ async def test_terminal_write_waits_for_confirmation_without_waiting_for_output(
     assert result.bytes_written == 5
     assert result.read_offset == 7
     assert result.session_status is TerminalSessionStatus.RUNNING
+    expected_request_id = request_id or _executor(TerminalWriteExecutor)._derive_request_id(TerminalAction.WRITE)
+    assert result.request_id == expected_request_id
+    assert [request.request_id for request in control_requests] == [expected_request_id]
     assert read_requests == []
     assert [request.action for request in control_requests] == [TerminalAction.WRITE]
 

@@ -205,6 +205,262 @@ async def test_terminal_control_enqueue_is_idempotent_and_permission_scoped():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "result", "error"),
+    [
+        (TerminalControlCommandStatus.PENDING, None, None),
+        (TerminalControlCommandStatus.PROCESSING, None, None),
+        (TerminalControlCommandStatus.SUCCEEDED, {"bytes_written": 12, "output_offset_before_write": 64}, None),
+        (TerminalControlCommandStatus.FAILED, None, "write failed"),
+    ],
+)
+async def test_terminal_write_status_reads_persisted_write_fields_without_mutation(status, result, error):
+    terminal_session = await create_terminal_session(
+        terminal_session_id="x" * 32,
+        audit_record_id=111,
+        audit_execution_record_id=1011,
+        allowed_actions={TerminalAction.WRITE, TerminalAction.STATUS},
+    )
+    request_id = "write-status-request"
+    input_body = "must-not-appear-in-status"
+    request = TerminalWriteRequest(
+        terminal_session_id=terminal_session.terminal_session_id,
+        request_id=request_id,
+        data=input_body,
+    )
+
+    async with AsyncSessionLocal() as db:
+        command, created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            request,
+        )
+    assert created is True
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(update(TerminalControlCommand).where(TerminalControlCommand.id == command.id).values(status=status, result=result, error=error))
+        await db.commit()
+
+    async with AsyncSessionLocal() as db:
+        before = await terminal_control_command_crud.list_by_session(db, terminal_session.terminal_session_id)
+        response = await terminal_session_manager.get_write_status(
+            db,
+            terminal_session.terminal_session_id,
+            "user-1",
+            "chat-session-1",
+            request_id,
+        )
+        after = await terminal_control_command_crud.list_by_session(db, terminal_session.terminal_session_id)
+
+    assert response == {
+        "request_id": request_id,
+        "command_status": status.value,
+        "result": result,
+        "error": error,
+    }
+    assert set(response) == {"request_id", "command_status", "result", "error"}
+    assert input_body not in repr(response)
+    assert len(before) == len(after) == 1
+    assert before[0].status is status
+    assert after[0].status is status
+
+
+@pytest.mark.asyncio
+async def test_terminal_write_status_not_found_does_not_create_or_leak_commands():
+    source_session = await create_terminal_session(
+        terminal_session_id="n" * 32,
+        audit_record_id=112,
+        audit_execution_record_id=1012,
+        allowed_actions={TerminalAction.WRITE, TerminalAction.STATUS},
+    )
+    other_session = await create_terminal_session(
+        terminal_session_id="o" * 32,
+        audit_record_id=113,
+        audit_execution_record_id=1013,
+        allowed_actions={TerminalAction.WRITE, TerminalAction.STATUS},
+    )
+    request_id = "write-owned-by-source"
+
+    async with AsyncSessionLocal() as db:
+        _, created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            TerminalWriteRequest(
+                terminal_session_id=source_session.terminal_session_id,
+                request_id=request_id,
+                data="private input",
+            ),
+        )
+    assert created is True
+
+    async with AsyncSessionLocal() as db:
+        missing = await terminal_session_manager.get_write_status(
+            db,
+            source_session.terminal_session_id,
+            "user-1",
+            "chat-session-1",
+            "unknown-write-request",
+        )
+        other_terminal = await terminal_session_manager.get_write_status(
+            db,
+            other_session.terminal_session_id,
+            "user-1",
+            "chat-session-1",
+            request_id,
+        )
+        source_commands = await terminal_control_command_crud.list_by_session(db, source_session.terminal_session_id)
+        other_commands = await terminal_control_command_crud.list_by_session(db, other_session.terminal_session_id)
+
+    expected_not_found = {
+        "request_id": "unknown-write-request",
+        "command_status": "not_found",
+        "result": None,
+        "error": None,
+    }
+    assert missing == expected_not_found
+    assert other_terminal == {**expected_not_found, "request_id": request_id}
+    assert len(source_commands) == 1
+    assert other_commands == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_write_status_enforces_owner_and_status_permission():
+    terminal_session = await create_terminal_session(
+        terminal_session_id="p" * 32,
+        audit_record_id=114,
+        audit_execution_record_id=1014,
+        allowed_actions={TerminalAction.WRITE, TerminalAction.STATUS},
+    )
+    request_id = "protected-write-request"
+
+    async with AsyncSessionLocal() as db:
+        _, created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            TerminalWriteRequest(
+                terminal_session_id=terminal_session.terminal_session_id,
+                request_id=request_id,
+                data="private input",
+            ),
+        )
+    assert created is True
+
+    status_denied_session = await create_terminal_session(
+        terminal_session_id="r" * 32,
+        audit_record_id=115,
+        audit_execution_record_id=1015,
+        allowed_actions={TerminalAction.WRITE},
+    )
+    async with AsyncSessionLocal() as db:
+        _, status_denied_created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            TerminalWriteRequest(
+                terminal_session_id=status_denied_session.terminal_session_id,
+                request_id=request_id,
+                data="private input",
+            ),
+        )
+    assert status_denied_created is True
+
+    async with AsyncSessionLocal() as db:
+        with pytest.raises(ForbiddenException) as wrong_uid:
+            await terminal_session_manager.get_write_status(
+                db,
+                terminal_session.terminal_session_id,
+                "user-2",
+                "chat-session-1",
+                request_id,
+            )
+        with pytest.raises(ForbiddenException) as wrong_session:
+            await terminal_session_manager.get_write_status(
+                db,
+                terminal_session.terminal_session_id,
+                "user-1",
+                "chat-session-2",
+                request_id,
+            )
+        with pytest.raises(ForbiddenException) as status_denied:
+            await terminal_session_manager.get_write_status(
+                db,
+                status_denied_session.terminal_session_id,
+                "user-1",
+                "chat-session-1",
+                request_id,
+            )
+
+    assert wrong_uid.value.message == ERR_TERMINAL_SESSION_ACCESS_DENIED
+    assert wrong_session.value.message == ERR_TERMINAL_SESSION_ACCESS_DENIED
+    assert status_denied.value.message == ERR_TERMINAL_ACTION_NOT_ALLOWED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_session_id", "request_id"),
+    [("invalid-terminal-id", "valid-status-request"), ("s" * 32, "")],
+)
+async def test_terminal_write_status_validates_request_format(terminal_session_id, request_id):
+    async with AsyncSessionLocal() as db:
+        with pytest.raises(ValidationError):
+            await terminal_session_manager.get_write_status(
+                db,
+                terminal_session_id,
+                "user-1",
+                "chat-session-1",
+                request_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_terminal_write_status_rejects_read_command_output():
+    terminal_session = await create_terminal_session(
+        terminal_session_id="t" * 32,
+        audit_record_id=116,
+        audit_execution_record_id=1016,
+        allowed_actions={TerminalAction.READ, TerminalAction.STATUS},
+    )
+    read_request_id = "read-status-request"
+
+    async with AsyncSessionLocal() as db:
+        command, created = await terminal_session_manager.enqueue_read(
+            db,
+            "user-1",
+            "chat-session-1",
+            TerminalReadRequest(
+                terminal_session_id=terminal_session.terminal_session_id,
+                offset=0,
+            ),
+            read_request_id,
+        )
+        await db.execute(
+            update(TerminalControlCommand)
+            .where(TerminalControlCommand.id == command.id)
+            .values(
+                status=TerminalControlCommandStatus.SUCCEEDED,
+                result={"output": "private terminal output"},
+            )
+        )
+        await db.commit()
+
+    assert created is True
+    async with AsyncSessionLocal() as db:
+        with pytest.raises(ParameterException) as conflict:
+            await terminal_session_manager.get_write_status(
+                db,
+                terminal_session.terminal_session_id,
+                "user-1",
+                "chat-session-1",
+                read_request_id,
+            )
+
+    assert conflict.value.message == ERR_TERMINAL_COMMAND_REQUEST_CONFLICT
+
+
+@pytest.mark.asyncio
 async def test_terminal_starting_claims_require_recovery_after_lease_expiry():
     first_session = await create_terminal_session(
         terminal_session_id="a" * 32,
