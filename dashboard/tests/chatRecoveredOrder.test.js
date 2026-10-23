@@ -6,7 +6,7 @@ import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import * as assistantResponseIdentity from '../src/utils/assistantResponseIdentity.js'
 import { truncateErrorMessage } from '../src/utils/errorMessage.js'
-import { resolveChatActivityNotice } from '../src/utils/chatPresentation.js'
+import { getReasoningCollapseName, resolveChatActivityNotice } from '../src/utils/chatPresentation.js'
 import { MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME } from '../src/constants/index.js'
 import { test } from 'node:test'
 
@@ -134,20 +134,53 @@ const storedToolResult = (id, toolCallId, result) => ({
 for (const scenario of [
   { name: '无历史并发', mergeAt: null },
   { name: '工具turn_end后tool_start前历史合并', mergeAt: 'first-tool-turn' },
-  { name: '最终正文后turn_end前历史合并', mergeAt: 'final-content' }
+  { name: '最终正文后turn_end前历史合并', mergeAt: 'final-content' },
+  { name: '最终输出前重入', reenterAt: 'before-content' },
+  { name: '最终输出期间连续历史分页', reenterAt: 'before-content', paginate: true },
+  { name: '最终正文后重入', reenterAt: 'after-content' }
 ]) {
   test(`DeepSeek 展示顺序：${scenario.name}`, async t => {
-    const committedHistory = []
+    const committedHistory = scenario.paginate
+      ? Array.from({ length: 120 }, (_, index) => {
+          const id = index + 1
+          return {
+            id,
+            created_at: id / 1000,
+            role: 'user',
+            content: `fixture old history ${id}`
+          }
+        })
+      : []
     const harness = await createHarness(t, {
       sessions: [
         createSession('A', { source: 'ws', show_tool_calls: true, show_reasoning: true }),
         createSession('B', { source: 'ws', show_tool_calls: true, show_reasoning: true })
       ],
       initialRoute: { path: '/', query: { session_id: 'A' } },
-      sessionsHistory: () => committedHistory
+      sessionsHistory: ({ sessionId, page, size }) => {
+        if (sessionId !== 'A') return []
+        if (!scenario.paginate) return committedHistory
+        const end = committedHistory.length - ((page - 1) * size)
+        return committedHistory.slice(Math.max(0, end - size), end)
+      }
     })
     const { chat } = harness
     await harness.flush()
+    const oldHistoryIds = messages => Array.from(messages)
+      .filter(message => (
+        message.role === 'user'
+        && Number(message.db_id ?? message.id) >= 1
+        && Number(message.db_id ?? message.id) <= 120
+      ))
+      .map(message => String(message.db_id ?? message.id))
+    const initiallyLoadedOldHistoryIds = scenario.paginate
+      ? oldHistoryIds(chat.messages.value)
+      : []
+    if (scenario.paginate) {
+      assert.ok(initiallyLoadedOldHistoryIds.length > 0, '初始历史加载应包含旧用户消息')
+    }
+    let oldestOldHistoryIdBeforePagination = null
+    let paginatedOldHistoryIds = []
 
     const presentationProps = {
       get messages() {
@@ -220,6 +253,64 @@ for (const scenario of [
     }
     const mergeCommittedHistory = async () => {
       await receiveWs(streamEvent('audit_tool_results_update', null, null, { messages: [] }))
+    }
+    const reenterFinalStream = async ({ replayContent = false } = {}) => {
+      const sessionB = chat.sessions.value.find(session => session.session_id === 'B')
+      const sessionA = chat.sessions.value.find(session => session.session_id === 'A')
+      harness.module.handleSelectSession(sessionB)
+      await harness.flush()
+      harness.module.handleSelectSession(sessionA)
+      await harness.flush()
+
+      await receiveWs(streamEvent('agent_loop_start', 'response-final', 6))
+      await receiveWs(streamEvent('reasoning', 'response-final', 6, { content: '最终思考' }))
+      await receiveWs(streamEvent('agent_loop_output', 'response-final', 6))
+      if (replayContent) {
+        await receiveWs(streamEvent('content', 'response-final', 6, { content: '最终答复' }))
+      }
+    }
+    const paginateOldHistory = async () => {
+      const previousOldIds = oldHistoryIds(cachedPresentation.displayMessages.value)
+      assert.ok(previousOldIds.length > 0, '分页前展示应包含已加载的旧历史')
+      oldestOldHistoryIdBeforePagination = Math.min(...previousOldIds.map(Number))
+      const previousHistoryRequestCount = harness.apiState.historyRequests.length
+      let captureScrollAnchorCount = 0
+      chat.messageList.value = {
+        scrollTop: 0,
+        canFollowOutput: () => false,
+        captureScrollAnchor: () => {
+          captureScrollAnchorCount += 1
+          return { captureScrollAnchorCount }
+        },
+        restoreScrollAnchor: async () => {},
+        scrollToBottom: async () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {}
+      }
+
+      let paginatedDisplay = []
+      for (let page = 0; page < 3; page += 1) {
+        await chat.handleScroll()
+        await harness.flush()
+        paginatedDisplay = Array.from(cachedPresentation.displayMessages.value)
+      }
+
+      assert.equal(
+        harness.apiState.historyRequests.length - previousHistoryRequestCount,
+        3,
+        '连续滚动应实际请求三页历史'
+      )
+      assert.equal(captureScrollAnchorCount, 3, '每次历史分页都应捕获滚动锚点')
+      paginatedOldHistoryIds = oldHistoryIds(paginatedDisplay)
+      assert.ok(paginatedOldHistoryIds.length > 0, '分页后展示应保留旧用户历史')
+      assert.ok(
+        Math.min(...paginatedOldHistoryIds.map(Number)) < oldestOldHistoryIdBeforePagination,
+        '连续分页应扩展到更早的旧历史'
+      )
+      assert.ok(
+        initiallyLoadedOldHistoryIds.every(id => paginatedOldHistoryIds.includes(id)),
+        '连续分页不得丢失最初已加载的旧消息'
+      )
     }
 
     const memoryCall = {
@@ -300,7 +391,12 @@ for (const scenario of [
     await receiveWs(streamEvent('agent_loop_start', 'response-final', 6))
     await receiveWs(streamEvent('reasoning', 'response-final', 6, { content: '最终思考' }))
     await receiveWs(streamEvent('agent_loop_output', 'response-final', 6))
+    if (scenario.reenterAt === 'before-content') {
+      await reenterFinalStream()
+      if (scenario.paginate) await paginateOldHistory()
+    }
     await receiveWs(streamEvent('content', 'response-final', 6, { content: '最终答复' }))
+    if (scenario.reenterAt === 'after-content') await reenterFinalStream({ replayContent: true })
 
     const finalAssistant = {
       id: 212,
@@ -320,7 +416,7 @@ for (const scenario of [
       reasoning_content: '最终思考'
     }))
 
-    await receiveWs(streamEvent('done', 'response-final', 6, {
+    const doneEvent = streamEvent('done', 'response-final', 6, {
       message_id: 212,
       response: {
         work_id: 'work7',
@@ -339,13 +435,66 @@ for (const scenario of [
         }],
         history: responseHistory
       }
-    }))
+    })
+    await receiveWs(doneEvent)
+    const rawAfterDone = JSON.stringify(Array.from(chat.messages.value))
+    const displayAfterDone = JSON.stringify(summarizeDisplay(cachedPresentation.displayMessages.value))
+    await receiveWs(doneEvent)
+    await receiveWs(doneEvent)
+    assert.equal(
+      JSON.stringify(Array.from(chat.messages.value)),
+      rawAfterDone,
+      '重复完成事件必须保持原始消息状态幂等'
+    )
+    assert.equal(
+      JSON.stringify(summarizeDisplay(cachedPresentation.displayMessages.value)),
+      displayAfterDone,
+      '重复完成事件必须保持展示状态幂等'
+    )
 
     const rawMessages = Array.from(chat.messages.value, message => ({ ...message }))
     const displayedMessages = Array.from(cachedPresentation.displayMessages.value)
     const cachedSummary = summarizeDisplay(displayedMessages)
     const freshPresentation = useChatMessagePresentation({ props: presentationProps, t: key => key })
     const freshSummary = summarizeDisplay(freshPresentation.displayMessages.value)
+    const displayKeys = displayedMessages.map(cachedPresentation.getDisplayKey)
+    assert.equal(new Set(displayKeys).size, displayedMessages.length, '最终展示项 getDisplayKey 不得重复')
+    const reasoningCollapseNames = displayedMessages
+      .filter(message => message.reasoning_content !== undefined && message.reasoning_content !== null)
+      .map(getReasoningCollapseName)
+    assert.equal(
+      new Set(reasoningCollapseNames).size,
+      reasoningCollapseNames.length,
+      '有思考内容的展示项 getReasoningCollapseName 不得重复'
+    )
+    if (scenario.paginate) {
+      const displayedOldHistoryIds = oldHistoryIds(displayedMessages)
+      assert.ok(
+        initiallyLoadedOldHistoryIds.every(id => displayedOldHistoryIds.includes(id)),
+        '最终展示不得丢失最初已加载的旧消息'
+      )
+      assert.ok(
+        Math.min(...displayedOldHistoryIds.map(Number)) < oldestOldHistoryIdBeforePagination,
+        '最终展示应保留已扩展到更早位置的旧历史'
+      )
+      assert.ok(
+        paginatedOldHistoryIds.every(id => displayedOldHistoryIds.includes(id)),
+        '最终输出不得丢失分页后已展示的旧历史'
+      )
+      const displayedToolPairs = cachedSummary
+        .filter(message => message.type === 'tool_group')
+        .flatMap(message => message.pairs)
+      for (const [index, toolRound] of toolRounds.entries()) {
+        const pair = displayedToolPairs.find(item => item.toolCall?.id === toolRound.callId)
+        assert.ok(pair, `分页后不得丢失工具调用 ${toolRound.callId}`)
+        const resultContent = normalizeContent(pair.resultMessage?.content)
+        assert.equal(
+          resultContent && typeof resultContent === 'object' ? resultContent.content : resultContent,
+          `fixture result ${index + 1}`,
+          `分页后不得丢失工具结果 ${toolRound.callId}`
+        )
+      }
+    }
     const memoryToolPair = cachedSummary
       .filter(message => message.type === 'tool_group')
       .flatMap(message => message.pairs)

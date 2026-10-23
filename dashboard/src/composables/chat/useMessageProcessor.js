@@ -2,7 +2,7 @@
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
-import { findAssistantResponseReplacementIndex, getMessageDedupeKeys, isAssistantResponse, isToolCall, isToolResult, normalizeMessageContent } from '../../utils'
+import { findAssistantResponseReplacementIndex, getMessageDbId, getMessageDedupeKeys, isAssistantResponse, isToolCall, isToolResult, normalizeMessageContent } from '../../utils'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { appendStreamReasoning, finalizeStreamReasoning as finalizeReasoning } from './reasoningTracker.js'
 import { insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
@@ -511,7 +511,8 @@ export function useMessageProcessor() {
         turn: canonical.turn,
         responseId: canonical.response_id,
         requestId: canonical.request_id,
-        workId: canonical.work_id
+        workId: canonical.work_id,
+        dbId: getMessageDbId(canonical)
       })
       streamEventsByIdentity.delete(getStreamEventScope(
         canonical.response_id,

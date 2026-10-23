@@ -1,3 +1,5 @@
+import { getMessageDbId } from '../../utils/assistantResponseIdentity.js'
+
 const normalizeIdentity = value => value === undefined || value === null || value === '' ? null : String(value)
 
 const matchesThinking = (message, responseId, requestId, workId) => {
@@ -74,15 +76,34 @@ export const appendStreamReasoning = (messages, text, { turn, responseId, reques
   return nextMessages
 }
 
-export const finalizeStreamReasoning = (messages, reasoningContent, { turn, responseId, requestId, workId } = {}) => {
+export const finalizeStreamReasoning = (messages, reasoningContent, { turn, responseId, requestId, workId, dbId } = {}) => {
   const nextMessages = [...messages]
-  const reasoningIndex = nextMessages.findLastIndex(message => matchesReasoning(message, responseId, requestId, workId, turn))
+  const stableDbId = normalizeIdentity(dbId)
+  const assistantIndex = stableDbId !== null
+    ? nextMessages.findIndex(message => message?.role === 'assistant' && getMessageDbId(message) === stableDbId)
+    : nextMessages.findLastIndex(message => matchesAssistant(message, responseId, workId, turn))
+  const targetAssistant = stableDbId !== null ? nextMessages[assistantIndex] : undefined
+  const finalResponseId = targetAssistant && normalizeIdentity(responseId) === null
+    ? targetAssistant.response_id
+    : responseId
+  const finalWorkId = targetAssistant && normalizeIdentity(workId) === null
+    ? targetAssistant.work_id
+    : workId
+  const finalTurn = targetAssistant && normalizeIdentity(turn) === null
+    ? targetAssistant.turn
+    : turn
+  // 请求标识可能覆盖多个回合，不能单独用于历史思考归属。
+  const canMatchReasoning = stableDbId === null
+    || normalizeIdentity(finalResponseId) !== null
+    || (normalizeIdentity(finalWorkId) !== null && normalizeIdentity(finalTurn) !== null)
+  const matchesFinalReasoning = message => canMatchReasoning
+    && matchesReasoning(message, finalResponseId, requestId, finalWorkId, finalTurn)
+  const reasoningIndex = nextMessages.findLastIndex(matchesFinalReasoning)
   const streamedReasoning = reasoningIndex === -1 ? '' : String(nextMessages[reasoningIndex].reasoning_content || '')
   const finalReasoning = typeof reasoningContent === 'string' && reasoningContent.trim()
     ? reasoningContent
     : streamedReasoning
 
-  const assistantIndex = nextMessages.findLastIndex(message => matchesAssistant(message, responseId, workId, turn))
   if (assistantIndex !== -1 && finalReasoning.trim()) {
     nextMessages[assistantIndex] = {
       ...nextMessages[assistantIndex],
@@ -90,10 +111,13 @@ export const finalizeStreamReasoning = (messages, reasoningContent, { turn, resp
     }
   } else if (assistantIndex === -1 && finalReasoning.trim()) {
     const assistant = {
-      id: `assistant_${responseId || requestId || Date.now()}`,
+      id: stableDbId !== null
+        ? `assistant_db:${stableDbId}`
+        : `assistant_${responseId || requestId || Date.now()}`,
       role: 'assistant',
       content: '',
       reasoning_content: finalReasoning,
+      ...(stableDbId !== null ? { db_id: stableDbId } : {}),
       response_id: responseId,
       request_id: requestId,
       work_id: workId,
@@ -106,5 +130,5 @@ export const finalizeStreamReasoning = (messages, reasoningContent, { turn, resp
     nextMessages.splice(insertAt === -1 ? nextMessages.length : insertAt, 0, assistant)
   }
 
-  return nextMessages.filter(message => !matchesReasoning(message, responseId, requestId, workId, turn))
+  return nextMessages.filter(message => !matchesFinalReasoning(message))
 }
