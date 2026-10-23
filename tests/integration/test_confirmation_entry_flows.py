@@ -58,6 +58,7 @@ from app.models.session_reply_work_item import (
 )
 from app.models.session_todo import SessionTodoPlan
 from app.models.user import User
+from tests.unit.response_test_support import audit_confirmation_payload, pending_audit_tool_result
 
 
 @pytest_asyncio.fixture
@@ -204,18 +205,7 @@ async def add_pending_confirmation(
             profile_id=1,
             role=MessageRole.TOOL,
             type=MessageType.TOOL_RESULT,
-            content=InternalMessage(
-                role=MessageRole.TOOL,
-                tool_call_id="call-1",
-                content=json.dumps(
-                    {
-                        "status": AuditRecordStatus.PENDING.value,
-                        "error": "等待用户确认",
-                        "reason": "测试操作需要确认",
-                    },
-                    ensure_ascii=False,
-                ),
-            ).model_dump_json(exclude_none=True),
+            content=pending_audit_tool_result("call-1").model_dump_json(exclude_none=True),
             is_processed=True,
         )
     )
@@ -227,12 +217,13 @@ async def add_pending_confirmation(
             role=MessageRole.ASSISTANT,
             type=MessageType.AUDIT_CONFIRMATION,
             content=json.dumps(
-                {
-                    "type": "audit_confirmation",
-                    "audit_record_id": record.id,
-                    "status": "pending",
-                    "confirmation_mode": "standard",
-                }
+                audit_confirmation_payload(
+                    record.id,
+                    summary=record.intent_summary,
+                    risk=8 if high_risk else 5,
+                    expires_at=record.expires_at.isoformat(),
+                    timeout_seconds=3600,
+                )
             ),
             is_processed=True,
         )
@@ -641,7 +632,12 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
                 content=json.dumps(pending_content),
             )
         ],
-        confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
+        confirmation_payload=audit_confirmation_payload(
+            record.id,
+            expires_at=record.expires_at.isoformat(),
+            timeout_seconds=3600,
+            locale=record.language,
+        ),
         dedupe_key=None,
     )
 
@@ -734,14 +730,13 @@ async def test_superseding_persisted_pending_bundle_cancels_structured_results(d
         uid="owner",
         session_id="session-superseded",
         profile_id=1,
-        tool_results=[
-            InternalMessage(
-                role=MessageRole.TOOL,
-                tool_call_id="call-superseded",
-                content=json.dumps({"status": "pending"}),
-            )
-        ],
-        confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
+        tool_results=[pending_audit_tool_result("call-superseded")],
+        confirmation_payload=audit_confirmation_payload(
+            record.id,
+            expires_at=record.expires_at.isoformat(),
+            timeout_seconds=3600,
+            locale=record.language,
+        ),
         dedupe_key=None,
     )
 
@@ -817,14 +812,13 @@ async def test_new_tool_call_cancellation_invalidates_summary_and_versions_pendi
         uid="owner",
         session_id="session-new-tool-call",
         profile_id=1,
-        tool_results=[
-            InternalMessage(
-                role=MessageRole.TOOL,
-                tool_call_id="call-new-tool",
-                content=json.dumps({"status": AuditRecordStatus.PENDING.value}),
-            )
-        ],
-        confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
+        tool_results=[pending_audit_tool_result("call-new-tool")],
+        confirmation_payload=audit_confirmation_payload(
+            record.id,
+            expires_at=record.expires_at.isoformat(),
+            timeout_seconds=3600,
+            locale=record.language,
+        ),
         dedupe_key=None,
     )
     assert stored_results[0].id is not None
@@ -905,8 +899,13 @@ async def test_pending_confirmation_bundle_rolls_back_all_rows_when_activation_f
             uid="owner",
             session_id="session-failure",
             profile_id=1,
-            tool_results=[InternalMessage(role=MessageRole.TOOL, tool_call_id="call-failure", content=json.dumps({"status": "pending"}))],
-            confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
+            tool_results=[pending_audit_tool_result("call-failure")],
+            confirmation_payload=audit_confirmation_payload(
+                record.id,
+                expires_at=record.expires_at.isoformat(),
+                timeout_seconds=3600,
+                locale=record.language,
+            ),
             dedupe_key=None,
         )
 
@@ -986,7 +985,13 @@ async def test_web_entry_reaches_unified_submission_for_confirmation_outcomes(
             assert tool_result_payload["status"] == AuditRecordStatus.REJECTED.value
             assert tool_result_payload["confirmation_status"] == "reject"
             assert tool_result_payload["rejection_source"] == "user"
-            assert tool_result_payload["reason"] == "测试操作需要确认"
+            assert set(tool_result_payload) == {
+                "status",
+                "error",
+                "confirmation_status",
+                "confirmation_decision",
+                "rejection_source",
+            }
             assert tool_result_payload["error"] == t(ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER, locale="zh")
             assert tool_result_payload["error"] != t(MSG_AUDIT_WAITING_CONFIRMATION, locale="zh")
             assert tool_result_payload["error"] != t(ERR_AUDIT_ROUND_BLOCKED, locale="zh")

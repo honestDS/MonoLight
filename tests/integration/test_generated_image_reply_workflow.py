@@ -58,6 +58,7 @@ from app.providers.image_generation import ImageGenerationClient
 from app.schemas.response import SentFile
 from app.transformers.openai.responses import OpenAIResponsesTransformer
 from tests.database_support import clone_sqlite_schema
+from tests.unit.response_test_support import image_generation_payload
 
 UID = "generated-image-user"
 PROFILE_ID = 1
@@ -390,11 +391,10 @@ async def batch_image_workflow(
         await started_queue.put(prompt)
         try:
             await gate.wait()
-            return {
-                "created": 1,
-                "data": [{"b64_json": image_data}],
-                "model": kwargs.get("model_id", "background-image-model"),
-            }
+            return image_generation_payload(
+                kwargs.get("model_id", "background-image-model"),
+                b64_json=image_data,
+            )
         finally:
             active_prompts.discard(prompt)
 
@@ -1557,11 +1557,7 @@ async def test_completed_background_image_tasks_do_not_regenerate_images_in_fina
 
     async def fake_generate_image(**kwargs: Any) -> dict[str, Any]:
         image_generation_calls.append(copy.deepcopy(kwargs))
-        return {
-            "created": 1,
-            "data": [{"b64_json": expected_image_data}],
-            "model": "background-image-model",
-        }
+        return image_generation_payload("background-image-model", b64_json=expected_image_data)
 
     async def fake_post(_transformer, **kwargs: Any) -> dict[str, Any]:
         payload = copy.deepcopy(kwargs["payload"])
@@ -1882,11 +1878,7 @@ async def test_mixed_image_sources_share_per_user_temp_size_quota(
     native_path = send_file_to_user_module.resolve_file_token(native_file["id"])
 
     async def fake_generate_image(**_kwargs: Any) -> dict[str, Any]:
-        return {
-            "created": 1,
-            "data": [{"b64_json": image_data}],
-            "model": "background-image-model",
-        }
+        return image_generation_payload("background-image-model", b64_json=image_data)
 
     monkeypatch.setattr(ImageGenerationClient, "generate_image", fake_generate_image)
 

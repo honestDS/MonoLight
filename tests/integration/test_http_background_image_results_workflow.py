@@ -26,8 +26,11 @@ from app.core.prompts import (
     BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
 )
 from app.core.security import get_current_user
+from app.core.tools.file_tool.read import read_file
+from app.core.tools.image_generation import ImageGenerationExecutor
 from app.core.utils.background_task_result import build_background_task_success_result
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
+from app.core.utils.dispatcher.process_single_tool import _build_background_task_queued_result
 from app.core.utils.dispatcher.save_message import save_message
 from app.handler import register_handlers
 from app.models.background_task import (
@@ -48,6 +51,7 @@ from app.models.session_reply_work_item import (
 from app.models.user import User
 from app.providers.database import get_db
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
+from tests.unit.response_test_support import llm_response_payload
 
 UID = "http-image-user"
 SESSION_ID = "http-image-session"
@@ -87,20 +91,7 @@ async def _seed_reply_work(
         source_id="1",
         dedupe_key="http-image-foreground-work",
         status=SessionReplyWorkStatus.SUCCEEDED,
-        execution_state={
-            "response": {
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "已提交生图",
-                        },
-                        "finish_reason": True,
-                    }
-                ],
-                "history": [],
-            }
-        },
+        execution_state={"response": llm_response_payload("已提交生图", history=[])},
     )
     task = BackgroundTask(
         uid=UID,
@@ -188,9 +179,20 @@ async def test_completed_background_image_message_is_returned_by_http_history(
     finally:
         image.close()
     image_size = image_path.stat().st_size
+    image_executor = ImageGenerationExecutor(tmp_path, UID)
+    image_success_payload = json.loads(
+        image_executor._build_success_payload(
+            {
+                "path": str(image_path),
+                "name": image_path.name,
+                "description": "Generated image",
+                "mime_type": "image/png",
+            }
+        )
+    )
     task_result = build_background_task_success_result(
         "generate_image",
-        {"path": str(image_path)},
+        image_success_payload,
     )
 
     async with database_factory(foreign_keys=True, wal=True) as factory:
@@ -358,7 +360,9 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 background_result = find_tool_output(items, "generate-image-call")
                 assert background_result["status"] == "succeeded"
                 assert background_result["tool_name"] == "generate_image"
-                result_path = background_result["content"]["path"]
+                assert background_result["content"]["status"] == "success"
+                assert background_result["content"]["instruction"]
+                result_path = background_result["content"]["send_file_to_user"]["files"][0]["path"]
                 assert result_path == str(image_path)
                 arguments = json.dumps({"files": [{"path": result_path}]}, ensure_ascii=False)
                 if protocol == "OPENAI":
@@ -769,6 +773,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
 )
 async def test_background_image_summary_keeps_task_tool_results_paired(
     database_factory,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     requested_count: int,
     max_parallel_tools: int,
@@ -777,6 +782,29 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
     sibling_result_kind: str,
     history_id_reuse: str,
 ) -> None:
+    def image_payload(file_name: str) -> dict:
+        path = tmp_path / file_name
+        image = Image.new("RGB", (1, 1))
+        try:
+            image.save(path, format="PNG")
+        finally:
+            image.close()
+        return json.loads(
+            ImageGenerationExecutor(str(tmp_path), UID)._build_success_payload(
+                {
+                    "path": str(path),
+                    "name": file_name,
+                    "description": "Generated image",
+                    "mime_type": "image/png",
+                }
+            )
+        )
+
+    history_path = tmp_path / "history.txt"
+    report_path = tmp_path / "report.txt"
+    history_path.write_text("Historical file contents\n", encoding="utf-8")
+    report_path.write_text("Current report contents\n", encoding="utf-8")
+
     async with database_factory(foreign_keys=True, wal=True) as factory:
         async with factory() as db:
             channel = ModelChannel(
@@ -870,18 +898,12 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
                 InternalMessage(
                     role=MessageRole.TOOL,
                     tool_call_id=history_calls[1].id,
-                    content=json.dumps(
-                        {"status": "success", "tool_name": "file_tool", "entries": ["history.txt"]},
-                        ensure_ascii=False,
-                    ),
+                    content=json.dumps(read_file(history_path, start_line=None, end_line=None), ensure_ascii=False),
                 ),
                 InternalMessage(
                     role=MessageRole.TOOL,
                     tool_call_id=history_calls[0].id,
-                    content=json.dumps(
-                        {"status": "success", "tool_name": "generate_image", "frame": "history"},
-                        ensure_ascii=False,
-                    ),
+                    content=json.dumps(image_payload("history.png"), ensure_ascii=False),
                 ),
             ]
             history_assistant = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=history_calls)
@@ -890,17 +912,9 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
             for index in sibling_indexes:
                 sibling_call = current_calls[index]
                 if sibling_result_kind == "file_success":
-                    sibling_content = {
-                        "status": "success",
-                        "tool_name": sibling_call.name,
-                        "content": {"path": "report.txt"},
-                    }
+                    sibling_content = read_file(report_path, start_line=None, end_line=None)
                 else:
-                    sibling_content = {
-                        "status": "queued",
-                        "tool_name": sibling_call.name,
-                        "task_id": 100 + index,
-                    }
+                    sibling_content = json.loads(_build_background_task_queued_result(sibling_call.name, 100 + index))
                 sibling_results.append(
                     InternalMessage(
                         role=MessageRole.TOOL,
@@ -959,7 +973,7 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
 
         task_result = build_background_task_success_result(
             "generate_image",
-            {"status": "success", "frame": target_index + 1},
+            image_payload(f"current-{target_index + 1}.png"),
         )
         worker_id = "background-image-context-worker"
         async with factory() as db:

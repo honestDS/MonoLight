@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -39,6 +38,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     )
     from app.core.memory.management_helpers import _job_view
     from app.core.memory.normalization import build_memory_content_hash
+    from app.core.memory.results import MemoryMutationResult, MemoryMutationStatus
     from app.core.memory_jobs.manager import MemoryJobValidationError, memory_job_manager
     from app.core.memory_jobs.manager_common import MemoryJobSubmissionResult
     from app.models.memory import (
@@ -298,7 +298,7 @@ async def test_retry_failed_replacement_routes_back_through_normal_create_public
     assert failed.id is not None
     captured: dict[str, Any] = {}
 
-    async def fake_create(_db: AsyncSession, **kwargs: Any) -> SimpleNamespace:
+    async def fake_create(_db: AsyncSession, **kwargs: Any) -> MemoryMutationResult:
         captured.update(kwargs)
         retry_job = LongTermMemoryMutationJob(
             id=777,
@@ -309,7 +309,7 @@ async def test_retry_failed_replacement_routes_back_through_normal_create_public
             payload=publication,
             max_attempts=int(kwargs["max_attempts"]),
         )
-        return SimpleNamespace(status="accepted", job=retry_job, record=None)
+        return MemoryMutationResult(status=MemoryMutationStatus.ACCEPTED, job=retry_job)
 
     monkeypatch.setattr(memory_management_module.memory_service, "create", fake_create)
 

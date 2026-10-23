@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +15,9 @@ from app.core.crud.audit.audit import audit_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
+from app.core.tools import send_file_to_user as send_file_to_user_module
 from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
+from app.core.tools.send_file_to_user import SendFileToUserExecutor
 from app.models.audit import AuditExecutionRecord, AuditExecutionStatus, AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail
 from app.models.background_task import BackgroundTask, BackgroundTaskResponse, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
@@ -779,17 +782,20 @@ def test_tool_result_log_keeps_sensitive_values_and_is_truncated(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_background_without_audit_configuration_executes_tool_without_audit_binding(monkeypatch):
+async def test_background_without_audit_configuration_executes_tool_without_audit_binding(monkeypatch, tmp_path):
     profile = SimpleNamespace(id=3)
     cfg = SimpleNamespace(
         channel=SimpleNamespace(chat_channel=object()),
         security=SimpleNamespace(audit_channel_id=None, audit_model_id=None),
-        tool=SimpleNamespace(max_parallel_tools=5),
+        tool=SimpleNamespace(max_parallel_tools=5, allowed_operation_dirs=[str(tmp_path)]),
     )
+    file_bytes = b"generated image bytes"
+    file_path = tmp_path / "generated.png"
+    file_path.write_bytes(file_bytes)
     tool_call = InternalToolCall(
         id="call-send",
         name="send_file_to_user",
-        arguments={"files": [{"path": "/tmp/generated.png"}]},
+        arguments={"files": [{"path": str(file_path), "mime_type": "image/png"}]},
     )
     responses = [
         InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]), model="chat-model"),
@@ -823,7 +829,10 @@ async def test_background_without_audit_configuration_executes_tool_without_audi
 
     async def process_tool(current_tool_call, *_args, **_kwargs):
         processed_calls.append(current_tool_call.id)
-        return InternalMessage(role=MessageRole.TOOL, tool_call_id=current_tool_call.id, content='{"status":"success"}')
+        executor = SendFileToUserExecutor(project_root=str(tmp_path), uid="user-1")
+        executor.set_config(cfg)
+        result = await executor.execute(**current_tool_call.arguments)
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=current_tool_call.id, content=result)
 
     async def save_tool_response(_db, _session_id, _uid, _profile_id, tool_response, messages, turn_messages):
         messages.append(tool_response)
@@ -848,7 +857,11 @@ async def test_background_without_audit_configuration_executes_tool_without_audi
     monkeypatch.setattr(background_module, "save_assistant_message", save)
     monkeypatch.setattr(background_module, "persist_session_todo_snapshot_on_tool_results", persist_todo_snapshot)
     monkeypatch.setattr(background_module, "prevalidate_tool_round", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(background_module, "extract_files_to_user", lambda _responses: [])
+    monkeypatch.setattr(
+        send_file_to_user_module,
+        "_encode_token",
+        lambda payload: f"fixed-token-{Path(payload['path']).stem}",
+    )
     monkeypatch.setattr(background_module.audit_crud, "claim_passed_for_execution", fail_audit_binding)
     monkeypatch.setattr(background_module.audit_crud, "create_execution_attempt", fail_audit_binding)
 
@@ -861,24 +874,36 @@ async def test_background_without_audit_configuration_executes_tool_without_audi
         allow_tools=True,
     )
 
-    assert final_message.content == "后台总结"
+    assert background_module.parse_assistant_files_content(final_message.content) == "后台总结"
     assert processed_calls == ["call-send"]
-    assert files == []
+    assert len(files) == 1
+    assert files[0]["name"] == "generated.png"
+    assert files[0]["mime_type"] == "image/png"
+    assert files[0]["size"] == len(file_bytes)
+    assert "fixed-token-generated" in files[0]["download_url"]
 
 
 @pytest.mark.asyncio
-async def test_background_parallel_limit_persists_rejected_tool_results_and_finishes_reply(monkeypatch):
+async def test_background_parallel_limit_persists_rejected_tool_results_and_finishes_reply(monkeypatch, tmp_path):
     profile = SimpleNamespace(id=3)
     cfg = SimpleNamespace(
         channel=SimpleNamespace(chat_channel=object()),
         security=SimpleNamespace(audit_channel_id=None, audit_model_id=None),
-        tool=SimpleNamespace(max_parallel_tools=5, enabled_tools=["send_file_to_user"]),
+        tool=SimpleNamespace(
+            max_parallel_tools=5,
+            enabled_tools=["send_file_to_user"],
+            allowed_operation_dirs=[str(tmp_path)],
+        ),
     )
+    file_bytes = {}
+    for index in range(5):
+        file_bytes[index] = f"generated image bytes {index}".encode()
+        (tmp_path / f"generated-{index}.png").write_bytes(file_bytes[index])
     tool_calls = [
         InternalToolCall(
             id=f"call-{index}",
             name="send_file_to_user",
-            arguments={} if index == 5 else {"files": [{"path": f"/tmp/generated-{index}.png"}]},
+            arguments={} if index == 5 else {"files": [{"path": str(tmp_path / f"generated-{index}.png"), "mime_type": "image/png"}]},
         )
         for index in range(8)
     ]
@@ -934,10 +959,13 @@ async def test_background_parallel_limit_persists_rejected_tool_results_and_fini
 
     async def process_tool(current_tool_call, *_args, **_kwargs):
         processed_calls.append(current_tool_call.id)
+        executor = SendFileToUserExecutor(project_root=str(tmp_path), uid="user-1")
+        executor.set_config(cfg)
+        result = await executor.execute(**current_tool_call.arguments)
         return InternalMessage(
             role=MessageRole.TOOL,
             tool_call_id=current_tool_call.id,
-            content=json.dumps({"status": "success"}),
+            content=result,
         )
 
     async def save_tool_response(_db, _session_id, _uid, _profile_id, tool_response, messages, turn_messages):
@@ -960,6 +988,11 @@ async def test_background_parallel_limit_persists_rejected_tool_results_and_fini
     monkeypatch.setattr(background_module, "save_tool_response", save_tool_response)
     monkeypatch.setattr(background_module, "save_assistant_message", save)
     monkeypatch.setattr(background_module, "persist_session_todo_snapshot_on_tool_results", persist_todo_snapshot)
+    monkeypatch.setattr(
+        send_file_to_user_module,
+        "_encode_token",
+        lambda payload: f"fixed-token-{Path(payload['path']).stem}",
+    )
 
     final_message, _turn_messages, files = await BackgroundDispatcherMixin._generate_reply_from_history(
         object(),
@@ -990,8 +1023,13 @@ async def test_background_parallel_limit_persists_rejected_tool_results_and_fini
         assert result["limit"] == 5
         assert result["executed"] is False
 
-    assert final_message.content == "后台总结"
-    assert files == []
+    assert background_module.parse_assistant_files_content(final_message.content) == "后台总结"
+    assert len(files) == 5
+    for index, file_info in enumerate(files):
+        assert file_info["name"] == f"generated-{index}.png"
+        assert file_info["mime_type"] == "image/png"
+        assert file_info["size"] == len(file_bytes[index])
+        assert f"fixed-token-generated-{index}" in file_info["download_url"]
     assert responses == []
 
 

@@ -28,6 +28,7 @@ from app.models.audit import (
 )
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from tests.unit.response_test_support import audit_confirmation_payload, pending_audit_tool_result
 
 
 @pytest.fixture
@@ -83,6 +84,7 @@ async def _create_preparing(session, tmp_path, tool_count=2):
 
 
 async def _add_pending_confirmation_messages(session, record, *, include_card=True):
+    await session.refresh(record)
     source_message = Message(
         uid=record.uid,
         session_id=record.session_id,
@@ -104,11 +106,7 @@ async def _add_pending_confirmation_messages(session, record, *, include_card=Tr
         profile_id=1,
         role=MessageRole.TOOL,
         type=MessageType.TOOL_RESULT,
-        content=InternalMessage(
-            role=MessageRole.TOOL,
-            tool_call_id="call-1",
-            content=json.dumps({"status": AuditRecordStatus.PENDING.value, "error": "waiting"}),
-        ).model_dump_json(exclude_none=True),
+        content=pending_audit_tool_result("call-1").model_dump_json(exclude_none=True),
         is_processed=True,
     )
     session.add(tool_result)
@@ -120,7 +118,7 @@ async def _add_pending_confirmation_messages(session, record, *, include_card=Tr
             profile_id=1,
             role=MessageRole.ASSISTANT,
             type=MessageType.AUDIT_CONFIRMATION,
-            content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
+            content=json.dumps(audit_confirmation_payload(record.id, expires_at=record.expires_at.isoformat())),
             is_processed=True,
         )
         session.add(card)
@@ -542,20 +540,14 @@ async def test_confirmation_status_sync_uses_database_status_and_deduplicates_br
             context_file_path=str(context_file),
             expires_at=get_local_time() + timedelta(minutes=10),
         )
+        await session.refresh(record)
         card = Message(
             uid="u1",
             session_id="session-1",
             profile_id=1,
             role=MessageRole.ASSISTANT,
             type=MessageType.AUDIT_CONFIRMATION,
-            content=json.dumps(
-                {
-                    "type": "audit_confirmation",
-                    "audit_record_id": record.id,
-                    "summary": "run command",
-                    "status": AuditRecordStatus.PENDING.value,
-                }
-            ),
+            content=json.dumps(audit_confirmation_payload(record.id, summary="run command", expires_at=record.expires_at.isoformat())),
             is_processed=True,
         )
         session.add(card)
@@ -598,6 +590,7 @@ async def test_confirmation_status_event_contains_persisted_tool_result_and_is_j
             context_file_path=str(context_file),
             expires_at=get_local_time() + timedelta(minutes=10),
         )
+        await session.refresh(record)
         tool_result, _card = await _add_pending_confirmation_messages(session, record, include_card=False)
         card = Message(
             uid="u1",
@@ -605,7 +598,7 @@ async def test_confirmation_status_event_contains_persisted_tool_result_and_is_j
             profile_id=1,
             role=MessageRole.ASSISTANT,
             type=MessageType.AUDIT_CONFIRMATION,
-            content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
+            content=json.dumps(audit_confirmation_payload(record.id, expires_at=record.expires_at.isoformat())),
             is_processed=True,
         )
         session.add(card)
@@ -677,7 +670,8 @@ async def test_tool_result_notification_reads_result_after_status_event(audit_da
         )
         tool_result, card = await _add_pending_confirmation_messages(session, record)
         record.status = AuditRecordStatus.REJECTED
-        card_payload = {"audit_record_id": record.id, "status": AuditRecordStatus.REJECTED.value}
+        card_payload = json.loads(card.content)
+        card_payload["status"] = AuditRecordStatus.REJECTED.value
         await message_crud.update_content(session, message_id=card.id, content=json.dumps(card_payload))
         await message_crud.update_content(
             session,
@@ -726,7 +720,7 @@ async def test_confirmation_status_sync_covers_execution_terminal_states(audit_d
             profile_id=1,
             role=MessageRole.ASSISTANT,
             type=MessageType.AUDIT_CONFIRMATION,
-            content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
+            content=json.dumps(audit_confirmation_payload(record.id)),
             is_processed=True,
         )
         session.add(card)
@@ -759,7 +753,7 @@ async def test_confirmation_status_sync_uses_database_compare_and_swap_across_se
                 profile_id=1,
                 role=MessageRole.ASSISTANT,
                 type=MessageType.AUDIT_CONFIRMATION,
-                content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
+                content=json.dumps(audit_confirmation_payload(record.id)),
                 is_processed=True,
             )
         )
@@ -809,7 +803,7 @@ async def test_confirmation_status_sync_reloads_database_status_after_compare_an
             profile_id=1,
             role=MessageRole.ASSISTANT,
             type=MessageType.AUDIT_CONFIRMATION,
-            content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
+            content=json.dumps(audit_confirmation_payload(record.id)),
             is_processed=True,
         )
         session.add(card)
@@ -822,7 +816,9 @@ async def test_confirmation_status_sync_reloads_database_status_after_compare_an
             if first_attempt:
                 first_attempt = False
                 await db.execute(update(AuditRecord).where(AuditRecord.id == record.id).values(status=AuditRecordStatus.SUCCEEDED))
-                await db.execute(update(Message).where(Message.id == card.id).values(content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.SUCCEEDED.value})))
+                conflict_payload = audit_confirmation_payload(record.id)
+                conflict_payload["status"] = AuditRecordStatus.SUCCEEDED.value
+                await db.execute(update(Message).where(Message.id == card.id).values(content=json.dumps(conflict_payload)))
                 await db.commit()
                 return False
             return await original_update(db, **kwargs)
@@ -1035,13 +1031,14 @@ async def test_startup_interrupted_confirmation_syncs_unknown_card(audit_databas
             context_file_path=str(audit_file.resolve()),
             expires_at=get_local_time() + timedelta(minutes=10),
         )
+        await session.refresh(record)
         card = Message(
             uid="u1",
             session_id="session-1",
             profile_id=1,
             role=MessageRole.ASSISTANT,
             type=MessageType.AUDIT_CONFIRMATION,
-            content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
+            content=json.dumps(audit_confirmation_payload(record.id, expires_at=record.expires_at.isoformat())),
             is_processed=True,
         )
         session.add(card)

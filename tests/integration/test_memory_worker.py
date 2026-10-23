@@ -1,7 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -38,6 +37,7 @@ from app.core.memory_jobs.executor import (
     MemoryJobExecutor,
     MemoryJobLeaseLostError,
 )
+from app.core.retrieval.schemas import RetrievalHit
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
@@ -56,6 +56,7 @@ from app.models.memory import (
     LongTermMemoryType,
 )
 from app.providers.database.time import get_database_time
+from app.providers.vector.chroma import CollectionValidationResult
 
 
 class _ImportSafePersistentClient:
@@ -159,8 +160,11 @@ class _FakeVectorBackend:
             }
         return len(item_ids)
 
-    async def validate(self, collection_name: str) -> SimpleNamespace:
-        return SimpleNamespace(exists=collection_name in self.collections)
+    async def validate(self, collection_name: str) -> CollectionValidationResult:
+        collection = self.collections.get(collection_name)
+        if collection is None:
+            return CollectionValidationResult(exists=False, valid=False, errors=("collection_not_found",))
+        return CollectionValidationResult(exists=True, valid=True, count=len(collection["items"]))
 
     async def delete(self, collection_name: str, item_ids: list[str], **_kwargs: Any) -> int:
         self.delete_calls.append((collection_name, list(item_ids)))
@@ -1177,13 +1181,13 @@ async def test_plaintext_credential_lifecycle_is_published_recalled_deleted_and_
             vector: list[float],
             query: str,
             limit: int,
-        ) -> list[SimpleNamespace]:
+        ) -> list[RetrievalHit]:
             assert collection_name == "memory-collection-v1"
             assert vector == [0.1, 0.2, 0.3]
             assert query == "credential recall query"
             assert limit == 10
             return [
-                SimpleNamespace(
+                RetrievalHit(
                     id=updated_record.vector_item_id,
                     metadata={
                         "uid": uid,
@@ -1192,6 +1196,7 @@ async def test_plaintext_credential_lifecycle_is_published_recalled_deleted_and_
                         "embedding_revision": 1,
                     },
                     fusion_score=1.0,
+                    content="untrusted vector content",
                 )
             ]
 
@@ -2081,10 +2086,10 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
         _query: str,
         limit: int,
         **_kwargs: Any,
-    ) -> list[SimpleNamespace]:
+    ) -> list[RetrievalHit]:
         assert limit == 1
         return [
-            SimpleNamespace(
+            RetrievalHit(
                 id=build_memory_vector_item_id(1, 1),
                 metadata={
                     "uid": uid,
@@ -2093,6 +2098,7 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
                     "embedding_revision": 1,
                 },
                 fusion_score=1.0,
+                content="untrusted vector content",
             )
         ]
 

@@ -32,6 +32,8 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
 )
 from tests.database_support import clone_sqlite_schema
+from tests.integration.stream_event_test_support import dispatcher_stream_event
+from tests.unit.response_test_support import llm_response_payload
 
 
 @pytest_asyncio.fixture
@@ -102,27 +104,95 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
 
     async def controlled_dispatch_stream(**kwargs):
         additional_user_messages_fetcher = kwargs["additional_user_messages_fetcher"]
-        yield {"type": "agent_loop_start", "response_id": "response-a", "turn": 1}
-        yield {"type": "content", "content": "A first turn", "response_id": "response-a", "turn": 1}
+        yield dispatcher_stream_event(
+            "agent_loop_start",
+            session_id=kwargs["session_id"],
+            response_id="response-a",
+            turn=1,
+        )
+        yield dispatcher_stream_event(
+            "content",
+            session_id=kwargs["session_id"],
+            response_id="response-a",
+            turn=1,
+            content="A first turn",
+        )
         first_dispatch_started.set()
         await release_first_dispatch.wait()
 
+        first_message = await save_message(
+            kwargs["db"],
+            kwargs["session_id"],
+            kwargs["uid"],
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content="A first turn"),
+            kwargs["persisted_profile_id"],
+            dedupe_key=kwargs["final_message_dedupe_key"] + ":first",
+        )
         additional = await additional_user_messages_fetcher()
         assert additional is not None
         absorbed_contents.extend(str(message.content) for message in additional.messages)
-        yield {"type": "turn_end", "content": "A first turn", "response_id": "response-a", "turn": 1}
-        yield {"type": "agent_loop_start", "response_id": "response-bc", "turn": 2}
-        yield {"type": "content", "content": "B and C processed", "response_id": "response-bc", "turn": 2}
-        yield {"type": "turn_end", "content": "B and C processed", "response_id": "response-bc", "turn": 2}
-        yield {
-            "type": "done",
-            "response_id": "response-final",
-            "response": {
-                "content": "B and C processed",
-                "history": [],
-                "files": None,
-            },
-        }
+        yield dispatcher_stream_event(
+            "turn_end",
+            session_id=kwargs["session_id"],
+            response_id="response-a",
+            turn=1,
+            content="A first turn",
+            message_id=first_message.id,
+            finish_reason="stop",
+        )
+        yield dispatcher_stream_event(
+            "agent_loop_start",
+            session_id=kwargs["session_id"],
+            response_id="response-final",
+            turn=2,
+        )
+        yield dispatcher_stream_event(
+            "content",
+            session_id=kwargs["session_id"],
+            response_id="response-final",
+            turn=2,
+            content="B and C processed",
+        )
+        final_message = await save_message(
+            kwargs["db"],
+            kwargs["session_id"],
+            kwargs["uid"],
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content="B and C processed"),
+            kwargs["persisted_profile_id"],
+            dedupe_key=kwargs["final_message_dedupe_key"],
+        )
+        yield dispatcher_stream_event(
+            "turn_end",
+            session_id=kwargs["session_id"],
+            response_id="response-final",
+            turn=2,
+            content="B and C processed",
+            message_id=final_message.id,
+            finish_reason="stop",
+        )
+        response = llm_response_payload(
+            "B and C processed",
+            history=[
+                InternalMessage(
+                    id=row.id,
+                    role=MessageRole.ASSISTANT,
+                    content=row.content,
+                    created_at=row.created_at,
+                ).model_dump(mode="json", exclude_none=True)
+                for row in (first_message, final_message)
+            ],
+        )
+        response["choices"][0]["finish_reason"] = "stop"
+        yield dispatcher_stream_event(
+            "done",
+            session_id=kwargs["session_id"],
+            response_id="response-final",
+            response=response,
+        )
 
     monkeypatch.setattr("app.adapters.chat_web.resolve_profile_for_session", resolve_profile)
     monkeypatch.setattr("app.adapters.chat_ws.resolve_profile_for_session", resolve_profile)
@@ -230,6 +300,8 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
     assert all(work.status == SessionReplyWorkStatus.MERGED for work in works[1:])
     message_by_id = {message.id: message for message in messages}
     assert absorbed_contents == ["\n".join(str(message_by_id[int(work.source_id)].content) for work in works[1:])]
+    assistant_messages = [message for message in messages if message.role == MessageRole.ASSISTANT]
+    assert [message.content for message in assistant_messages] == ["A first turn", "B and C processed"]
     assert [event.sequence_no for event in persisted_events] == list(range(1, len(persisted_events) + 1))
     assert [event.event["type"] for event in persisted_events] == [
         "input_dequeued",
@@ -255,6 +327,13 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
     replayed_done = [event for event in replayed_events if event.get("type") == "done"]
     assert len(replayed_done) == 1
     assert replayed_done[0]["response_id"] == "response-final"
+    assert replayed_done[0]["response"]["choices"][0]["message"]["content"] == "B and C processed"
+    assert replayed_done[0]["response"]["choices"][0]["finish_reason"] == "stop"
+    replayed_history = replayed_done[0]["response"]["history"]
+    assert [message["content"] for message in replayed_history] == ["A first turn", "B and C processed"]
+    assert all("uid" not in message for message in replayed_history)
+    replayed_turn_ends = [event for event in replayed_events if event.get("type") == "turn_end"]
+    assert [event["message_id"] for event in replayed_turn_ends] == [message.id for message in assistant_messages]
 
     async with concurrent_queue_session_factory() as db:
         await session_reply_queue_manager.submit_user_message(
@@ -306,11 +385,7 @@ async def _persist_fake_foreground_reply(kwargs: dict, content: str) -> dict:
         kwargs["persisted_profile_id"],
         dedupe_key=kwargs["final_message_dedupe_key"],
     )
-    return {
-        "choices": [{"message": {"role": MessageRole.ASSISTANT, "content": content}, "finish_reason": "stop"}],
-        "history": [],
-        "files": None,
-    }
+    return llm_response_payload(content, history=[])
 
 
 @pytest.mark.asyncio
@@ -451,8 +526,19 @@ async def test_streamed_foreground_failure_is_terminal_after_persisted_output(
         sent_events.append(event)
 
     async def failing_stream(**_kwargs):
-        yield {"type": "agent_loop_start", "response_id": "response-stream-failure", "turn": 1}
-        yield {"type": "content", "content": "partial", "response_id": "response-stream-failure", "turn": 1}
+        yield dispatcher_stream_event(
+            "agent_loop_start",
+            session_id=_kwargs["session_id"],
+            response_id="response-stream-failure",
+            turn=1,
+        )
+        yield dispatcher_stream_event(
+            "content",
+            session_id=_kwargs["session_id"],
+            response_id="response-stream-failure",
+            turn=1,
+            content="partial",
+        )
         raise RuntimeError("stream interrupted")
 
     monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
@@ -510,6 +596,9 @@ async def test_websocket_resume_preserves_history_gap_and_drains_completed_strea
     async with factory() as db:
         db.add(ChatSession(session_id="resume-session", uid="owner", profile_id=1, source="ws"))
         db.add(Message(id=101, session_id="resume-session", uid="owner", profile_id=1, role=MessageRole.ASSISTANT, content="already visible"))
+        response = llm_response_payload("finished", history=[])
+        response["response_id"] = "last"
+        response["choices"][0]["finish_reason"] = "stop"
         work = SessionReplyWorkItem(
             uid="owner",
             session_id="resume-session",
@@ -520,7 +609,7 @@ async def test_websocket_resume_preserves_history_gap_and_drains_completed_strea
             source_id="100",
             dedupe_key="resume-work",
             status=SessionReplyWorkStatus.RUNNING,
-            execution_state={"response": {"content": "finished", "history": []}},
+            execution_state={"response": response},
         )
         db.add(work)
         await db.commit()
@@ -538,14 +627,73 @@ async def test_websocket_resume_preserves_history_gap_and_drains_completed_strea
 
         db.add(Message(id=102, session_id="resume-session", uid="owner", profile_id=1, role=MessageRole.ASSISTANT, content="gap reply"))
         events = [
-            {"type": "reasoning", "content": "old reasoning", "response_id": "old"},
-            {"type": "turn_end", "message_id": 101, "response_id": "old"},
-            {"type": "reasoning", "content": "gap reasoning", "response_id": "gap"},
-            {"type": "content", "content": "gap reply", "response_id": "gap"},
-            {"type": "turn_end", "message_id": 102, "response_id": "gap"},
-            {"type": "tool_start", "tool_call_id": "tool-1", "response_id": "gap", "name": "test", "arguments": {}},
-            {"type": "tool_end", "tool_call_id": "tool-1", "response_id": "gap", "result": "result"},
-            *[{"type": "content", "content": str(index), "response_id": "last"} for index in range(120)],
+            dispatcher_stream_event(
+                "reasoning",
+                session_id="resume-session",
+                response_id="old",
+                turn=1,
+                content="old reasoning",
+            ),
+            dispatcher_stream_event(
+                "turn_end",
+                session_id="resume-session",
+                response_id="old",
+                turn=1,
+                content="already visible",
+                finish_reason="stop",
+                message_id=101,
+            ),
+            dispatcher_stream_event(
+                "reasoning",
+                session_id="resume-session",
+                response_id="gap",
+                turn=2,
+                content="gap reasoning",
+            ),
+            dispatcher_stream_event(
+                "content",
+                session_id="resume-session",
+                response_id="gap",
+                turn=2,
+                content="gap reply",
+            ),
+            dispatcher_stream_event(
+                "turn_end",
+                session_id="resume-session",
+                response_id="gap",
+                turn=2,
+                content="gap reply",
+                finish_reason="tool_calls",
+                message_id=102,
+            ),
+            dispatcher_stream_event(
+                "tool_start",
+                session_id="resume-session",
+                response_id="gap",
+                turn=2,
+                tool_call_id="tool-1",
+                name="test",
+                arguments={},
+            ),
+            dispatcher_stream_event(
+                "tool_end",
+                session_id="resume-session",
+                response_id="gap",
+                turn=2,
+                tool_call_id="tool-1",
+                name="test",
+                result="result",
+            ),
+            *[
+                dispatcher_stream_event(
+                    "content",
+                    session_id="resume-session",
+                    response_id="last",
+                    turn=3,
+                    content=str(index),
+                )
+                for index in range(120)
+            ],
         ]
         for sequence, event in enumerate(events, 1):
             db.add(
@@ -560,6 +708,9 @@ async def test_websocket_resume_preserves_history_gap_and_drains_completed_strea
             db.add(work)
         await db.commit()
 
+        following_response = llm_response_payload("following reply", history=[])
+        following_response["response_id"] = "following"
+        following_response["choices"][0]["finish_reason"] = "stop"
         following = SessionReplyWorkItem(
             uid="owner",
             session_id="resume-session",
@@ -570,7 +721,7 @@ async def test_websocket_resume_preserves_history_gap_and_drains_completed_strea
             source_id="103",
             dedupe_key="following-resume-work",
             status=SessionReplyWorkStatus.SUCCEEDED,
-            execution_state={"response": {"content": "following reply", "history": []}},
+            execution_state={"response": following_response},
         )
         db.add(Message(id=104, session_id="resume-session", uid="owner", profile_id=1, role=MessageRole.ASSISTANT, content="following reply"))
         db.add(following)
@@ -579,7 +730,16 @@ async def test_websocket_resume_preserves_history_gap_and_drains_completed_strea
             SessionReplyStreamEvent(
                 work_id=following.id,
                 sequence_no=1,
-                event={"type": "turn_end", "session_id": "resume-session", "work_id": following.id, "message_id": 104},
+                event=dispatcher_stream_event(
+                    "turn_end",
+                    session_id="resume-session",
+                    response_id="following",
+                    turn=1,
+                    content="following reply",
+                    finish_reason="stop",
+                    message_id=104,
+                )
+                | {"work_id": following.id},
             )
         )
         await db.commit()
@@ -618,8 +778,10 @@ async def test_websocket_resume_preserves_history_gap_and_drains_completed_strea
     assert all(event.get("content") != "old reasoning" for event in socket.sent)
     assert any(event.get("content") == "gap reasoning" for event in socket.sent)
     assert any(event.get("message_id") == 102 for event in socket.sent)
-    assert [event["content"] for event in socket.sent if event.get("response_id") == "last"] == [str(index) for index in range(120)]
-    assert [event["type"] for event in socket.sent].count("done") == 2
+    assert [event["content"] for event in socket.sent if event.get("type") == "content" and event.get("response_id") == "last"] == [str(index) for index in range(120)]
+    done_events = [event for event in socket.sent if event["type"] == "done"]
+    assert len(done_events) == 2
+    assert [(event["response_id"], event["response"]["choices"][0]["message"]["content"]) for event in done_events] == [("last", "finished"), ("following", "following reply")]
     assert any(event.get("message_id") == 104 for event in socket.sent)
     assert socket.sent[-1]["type"] == "resume_complete"
     async with factory() as db:

@@ -37,6 +37,7 @@ from app.models.memory import (
     LongTermMemoryStore,
 )
 from app.providers.database import get_db
+from app.providers.vector.chroma import CollectionValidationResult
 from tests.database_support import clone_sqlite_schema
 
 MEMORY_TABLES = [
@@ -115,8 +116,19 @@ class MemoryVectorBackend:
             }
         return len(item_ids)
 
-    async def validate(self, collection_name: str) -> SimpleNamespace:
-        return SimpleNamespace(exists=collection_name in self.collections)
+    async def validate(self, collection_name: str) -> CollectionValidationResult:
+        collection = self.collections.get(collection_name)
+        if collection is None:
+            return CollectionValidationResult(
+                exists=False,
+                valid=False,
+                errors=("collection_not_found",),
+            )
+        return CollectionValidationResult(
+            exists=True,
+            valid=True,
+            count=len(collection),
+        )
 
     async def delete(
         self,

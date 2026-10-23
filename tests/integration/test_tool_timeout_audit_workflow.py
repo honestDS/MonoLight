@@ -39,6 +39,7 @@ from app.models.message import InternalMessage, InternalResponse, InternalToolCa
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import SessionReplyWorkStatus, SessionReplyWorkType
+from tests.unit.response_test_support import audit_confirmation_payload, pending_audit_tool_result
 
 
 @pytest_asyncio.fixture
@@ -177,26 +178,15 @@ async def _seed_pending_confirmation(
             uid=uid,
             session_id=session_id,
             profile_id=1,
-            tool_results=[
-                InternalMessage(
-                    role=MessageRole.TOOL,
-                    tool_call_id=tool_call.id,
-                    content=json.dumps(
-                        {
-                            "status": AuditRecordStatus.PENDING.value,
-                            "error": "waiting for confirmation",
-                            "reason": "confirmation required",
-                        },
-                        ensure_ascii=False,
-                    ),
-                )
-            ],
-            confirmation_payload={
-                "type": "audit_confirmation",
-                "audit_record_id": record.id,
-                "status": AuditRecordStatus.PENDING.value,
-                "confirmation_mode": "standard",
-            },
+            tool_results=[pending_audit_tool_result(tool_call.id)],
+            confirmation_payload=audit_confirmation_payload(
+                record.id,
+                summary=record.intent_summary,
+                risk=1,
+                expires_at=record.expires_at.isoformat(),
+                timeout_seconds=3600,
+                locale=record.language,
+            ),
             dedupe_key=f"audit-confirmation:{record.id}",
         )
         assert record.id is not None
