@@ -1421,6 +1421,7 @@ async def test_weixin_platform_flushes_old_batch_before_independent_decision(mon
         use_stream_dispatch=False,
         platform_type=handler.platform_type,
         status=MessagePlatformStatus.CONNECTED,
+        last_error="",
         account_id="account",
         config={},
         state={},
@@ -1465,6 +1466,7 @@ async def test_weixin_platform_flushes_old_batch_before_independent_decision(mon
 
     monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.AsyncSessionLocal", lambda: SessionContext())
     monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.get", get_platform)
+    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.get_for_update", get_platform)
     monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.update_runtime_state", _noop_async)
     monkeypatch.setattr(handler, "_build_adapter", lambda _platform: adapter)
     monkeypatch.setattr(handler, "_handle_message", handle_message)

@@ -69,7 +69,17 @@ class WeixinOpenClawClient:
         if self.session is None:
             raise RuntimeError(t(ERR_WEIXIN_OPENCLAW_SESSION_UNINITIALIZED))
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        timeout = aiohttp.ClientTimeout(total=(timeout_ms or self.config.api_timeout_ms) / 1000)
+        request_timeout_seconds = (timeout_ms or self.config.api_timeout_ms) / 1000
+        if endpoint.lstrip("/") == "ilink/bot/getupdates":
+            connect_timeout_seconds = self.config.api_timeout_ms / 1000
+            # 长轮询无响应属于读超时，连接阶段超时则单独识别。
+            timeout = aiohttp.ClientTimeout(
+                total=connect_timeout_seconds + request_timeout_seconds,
+                connect=connect_timeout_seconds,
+                sock_read=request_timeout_seconds,
+            )
+        else:
+            timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
         request_headers = self.build_headers(token_required=token_required)
         if headers:
             request_headers.update(headers)
