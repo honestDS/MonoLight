@@ -1,9 +1,11 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 
 import app.core.tools.terminal as terminal_module
+from app.core.constants import ERR_TERMINAL_COMMAND_TIMEOUT
 from app.core.dispatchers.context import DispatchContext
 from app.core.terminal import (
     ALL_TERMINAL_ACTIONS,
@@ -252,16 +254,12 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
                 assert properties[field] == value
 
     description = TERMINAL_WRITE_TOOL_SCHEMA["function"]["description"]
-    assert "read_timed_out" in description
     assert "terminal_read" in description
     assert "read_offset" in description
 
 
 @pytest.mark.asyncio
 async def test_terminal_executors_use_protocol_results_and_stable_request_ids(monkeypatch):
-    clock = [100.0]
-    snapshot_calls = 0
-    snapshot_offsets = []
     control_requests = []
     read_requests = []
     command_results = {}
@@ -269,17 +267,8 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     wait_timeouts = []
     write_result_payload = _write_command_result(bytes_written=5, output_offset_before_write=8)
 
-    class FakeLoop:
-        def time(self):
-            return clock[0]
-
     async def get_snapshot(*args, **kwargs):
-        nonlocal snapshot_calls
-        snapshot_calls += 1
-        next_offset = 0 if snapshot_calls == 1 else 8 if snapshot_calls == 2 else 14
-        snapshot_offsets.append(next_offset)
-        clock[0] += 0.2
-        return _snapshot(next_offset=next_offset)
+        return _snapshot(next_offset=14)
 
     async def enqueue_read(*args, **kwargs):
         request = args[3]
@@ -300,7 +289,6 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
         )
         command_results[command_id] = read_result.model_dump(mode="json")
         command_kinds[command_id] = "read"
-        clock[0] += 0.1
         return SimpleNamespace(id=command_id, kind="read"), len(read_requests) == 1
 
     async def enqueue_control(*args, **kwargs):
@@ -319,22 +307,14 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
             command_results[command_id] = {"status": "exited"}
             command_kinds[command_id] = "close"
             created = False
-        clock[0] += 0.1
         return SimpleNamespace(id=command_id, kind=request.action), created
 
     async def wait_for_command_result(*args, **kwargs):
         command_id = args[1]
         timeout_seconds = args[2]
         wait_timeouts.append((command_kinds[command_id], timeout_seconds))
-        clock[0] += 0.1
         return command_results[command_id]
 
-    async def no_sleep(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(terminal_module.asyncio, "get_running_loop", lambda: FakeLoop())
-    monkeypatch.setattr(terminal_module.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(terminal_module, "_TERMINAL_WRITE_READ_STABILITY_SECONDS", 0.0)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_read", enqueue_read)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", enqueue_control)
@@ -351,14 +331,24 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     write_executor = _executor(TerminalWriteExecutor, tool_timeout=5.0)
     write_payload = json.loads(await write_executor.execute(terminal_session_id=TERMINAL_SESSION_ID, data="input"))
     write_result = TerminalWriteResult.model_validate(write_payload)
-    repeated_write_result = TerminalWriteResult.model_validate(json.loads(await write_executor.execute(terminal_session_id=TERMINAL_SESSION_ID, data="input")))
+    repeated_write_payload = json.loads(await write_executor.execute(terminal_session_id=TERMINAL_SESSION_ID, data="input"))
+    repeated_write_result = TerminalWriteResult.model_validate(repeated_write_payload)
     assert write_result.action is TerminalAction.WRITE
     assert write_result.bytes_written == 5
     assert write_result.read_offset == 8
-    assert write_result.read_timed_out is False
-    assert write_result.read_result is not None
-    assert "terminal output" in write_result.read_result.output
-    assert write_result.read_result.requested_offset == write_result.read_offset
+    expected_write_fields = {
+        "terminal_session_id",
+        "request_id",
+        "action",
+        "duplicate",
+        "session_status",
+        "bytes_written",
+        "read_offset",
+    }
+    assert set(write_payload) == expected_write_fields
+    assert write_payload["bytes_written"] == 5
+    assert write_payload["read_offset"] == 8
+    assert set(repeated_write_payload) == expected_write_fields
     assert write_result.duplicate is False
     assert repeated_write_result.duplicate is True
     assert repeated_write_result.model_dump(mode="json", exclude={"duplicate"}) == write_result.model_dump(mode="json", exclude={"duplicate"})
@@ -393,21 +383,11 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     assert len(write_requests) == 2
     assert write_requests[0].request_id == write_requests[1].request_id
     assert write_requests[0].request_id == _executor(TerminalWriteExecutor)._derive_request_id(TerminalAction.WRITE)
-    assert len(read_requests) == 3
-    auto_read_requests = read_requests[1:]
-    assert auto_read_requests[0][0].offset == auto_read_requests[1][0].offset == 8
-    assert auto_read_requests[0][1] == auto_read_requests[1][1]
-    assert auto_read_requests[0][1] != read_requests[0][1]
-    assert write_requests[0].request_id != auto_read_requests[0][1]
+    assert len(read_requests) == 1
+    assert read_requests[0][0].offset == 0
     write_wait_timeouts = [timeout for kind, timeout in wait_timeouts if kind == "write"]
-    auto_read_wait_timeouts = [timeout for kind, timeout in wait_timeouts if kind == "read"][1:]
-    assert all(0 < timeout < 5.0 for timeout in write_wait_timeouts)
-    assert len(auto_read_wait_timeouts) == 2
-    assert all(0 < timeout < write_wait_timeouts[0] for timeout in auto_read_wait_timeouts)
-    assert snapshot_offsets[:4] == [0, 8, 14, 14]
-    assert snapshot_offsets[2] > snapshot_offsets[1]
-    assert snapshot_offsets[2] == snapshot_offsets[3]
-    assert snapshot_offsets[4] == 14
+    assert len(write_wait_timeouts) == 2
+    assert all(0 < timeout <= 5.0 for timeout in write_wait_timeouts)
     assert [request.action for request in control_requests] == [
         TerminalAction.WRITE,
         TerminalAction.WRITE,
@@ -419,21 +399,24 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
 
 
 @pytest.mark.asyncio
-async def test_terminal_write_times_out_without_read_or_close(monkeypatch):
-    clock = [100.0]
-    snapshot_calls = 0
+@pytest.mark.parametrize(
+    "output_changes",
+    [False, True],
+    ids=["no-new-output", "continuous-output"],
+)
+async def test_terminal_write_waits_for_confirmation_without_waiting_for_output(monkeypatch, output_changes):
+    next_offset = 7
     control_requests = []
     read_requests = []
-
-    class FakeLoop:
-        def time(self):
-            return clock[0]
+    confirmation_started = asyncio.Event()
+    release_confirmation = asyncio.Event()
 
     async def get_snapshot(*args, **kwargs):
-        nonlocal snapshot_calls
-        snapshot_calls += 1
-        clock[0] += 0.02
-        return _snapshot(next_offset=7)
+        nonlocal next_offset
+        snapshot = _snapshot(next_offset=next_offset)
+        if output_changes:
+            next_offset += 7
+        return snapshot
 
     async def enqueue_control(*args, **kwargs):
         request = args[3]
@@ -442,31 +425,108 @@ async def test_terminal_write_times_out_without_read_or_close(monkeypatch):
 
     async def enqueue_read(*args, **kwargs):
         read_requests.append(args[3])
-        raise AssertionError("timed-out terminal_write must not enqueue terminal_read")
+        raise AssertionError("terminal_write must not enqueue terminal_read")
 
     async def wait_for_command_result(*args, **kwargs):
-        clock[0] += 0.02
-        return _write_command_result(bytes_written=4, output_offset_before_write=7)
+        confirmation_started.set()
+        await release_confirmation.wait()
+        return _write_command_result(bytes_written=5, output_offset_before_write=7)
 
-    monkeypatch.setattr(terminal_module.asyncio, "get_running_loop", lambda: FakeLoop())
     monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_read", enqueue_read)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", enqueue_control)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "wait_for_command_result", wait_for_command_result)
 
-    result = TerminalWriteResult.model_validate(
-        json.loads(
-            await _executor(TerminalWriteExecutor, tool_timeout=0.01).execute(
+    task = asyncio.create_task(
+        _executor(TerminalWriteExecutor, tool_timeout=5.0).execute(
+            terminal_session_id=TERMINAL_SESSION_ID,
+            data="input",
+        )
+    )
+    try:
+        await asyncio.wait_for(confirmation_started.wait(), timeout=1.0)
+        assert not task.done()
+        release_confirmation.set()
+        result_payload = json.loads(await asyncio.wait_for(task, timeout=1.0))
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    result = TerminalWriteResult.model_validate(result_payload)
+    assert set(result_payload) == {
+        "terminal_session_id",
+        "request_id",
+        "action",
+        "duplicate",
+        "session_status",
+        "bytes_written",
+        "read_offset",
+    }
+    assert result.bytes_written == 5
+    assert result.read_offset == 7
+    assert result.session_status is TerminalSessionStatus.RUNNING
+    assert read_requests == []
+    assert [request.action for request in control_requests] == [TerminalAction.WRITE]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exception_type", "message"),
+    [(RuntimeError, "worker failure"), (TimeoutError, "receipt timeout")],
+)
+async def test_terminal_write_confirmation_failure_or_timeout_is_not_retried(
+    monkeypatch,
+    exception_type,
+    message,
+):
+    control_requests = []
+    read_requests = []
+    failure = exception_type(message)
+
+    async def get_snapshot(*args, **kwargs):
+        return _snapshot(next_offset=14)
+
+    async def enqueue_control(*args, **kwargs):
+        request = args[3]
+        control_requests.append(request)
+        return SimpleNamespace(id=201, kind=request.action), True
+
+    async def enqueue_read(*args, **kwargs):
+        read_requests.append(args[3])
+        raise AssertionError("terminal_write must not enqueue terminal_read")
+
+    async def wait_for_command_result(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_read", enqueue_read)
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", enqueue_control)
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "wait_for_command_result", wait_for_command_result)
+
+    executor = _executor(TerminalWriteExecutor, tool_timeout=5.0)
+    if exception_type is TimeoutError:
+        result_payload = json.loads(
+            await executor.execute(
                 terminal_session_id=TERMINAL_SESSION_ID,
                 data="input",
             )
         )
-    )
+        assert result_payload == {
+            "status": "execution_unknown",
+            "tool_name": "terminal_write",
+            "terminal_session_id": TERMINAL_SESSION_ID,
+            "request_id": control_requests[0].request_id,
+            "error_code": ERR_TERMINAL_COMMAND_TIMEOUT,
+            "error": str(failure),
+        }
+    else:
+        with pytest.raises(exception_type) as raised:
+            await executor.execute(
+                terminal_session_id=TERMINAL_SESSION_ID,
+                data="input",
+            )
 
-    assert result.read_timed_out is True
-    assert result.read_result is None
-    assert result.read_offset == 7
-    assert result.session_status is TerminalSessionStatus.RUNNING
-    assert snapshot_calls >= 2
+        assert raised.value is failure
     assert read_requests == []
     assert [request.action for request in control_requests] == [TerminalAction.WRITE]

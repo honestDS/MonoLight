@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from app.core.constants import (
+    ERR_TERMINAL_COMMAND_TIMEOUT,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
     TERMINAL_CLOSE_TOOL_NAME,
     TERMINAL_READ_TOOL_NAME,
@@ -14,7 +15,6 @@ from app.core.constants import (
 from app.core.i18n import t
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import (
-    TERMINAL_SESSION_FINAL_STATUSES,
     TerminalAction,
     TerminalActionReceipt,
     TerminalCloseRequest,
@@ -75,10 +75,10 @@ TERMINAL_WRITE_TOOL_SCHEMA = {
     "function": {
         "name": TERMINAL_WRITE_TOOL_NAME,
         "description": (
-            "Write input data to an interactive terminal session, then automatically wait for and read newly merged "
-            "output for up to the tool timeout. Use '\\n' to submit a line; the service handles platform-specific "
-            f"newline conversion. If read_timed_out is true, the terminal remains running; use {TERMINAL_READ_TOOL_NAME} from "
-            "read_offset to continue."
+            "Return only after the Worker completes the PTY write and saves a successful receipt. Does not wait for "
+            "output, CLI processing, or task completion. Use '\\n' to submit a line; the service handles "
+            f"platform-specific newline conversion. Read output separately with {TERMINAL_READ_TOOL_NAME} from "
+            "read_offset. A timeout means the write result is unknown; do not automatically resubmit."
         ),
         "parameters": {
             "type": "object",
@@ -137,9 +137,6 @@ SHELL_COMPANION_TOOL_SCHEMAS = [
 ]
 SHELL_COMPANION_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS)
 
-_TERMINAL_WRITE_READ_POLL_INTERVAL_SECONDS = 0.05
-_TERMINAL_WRITE_READ_STABILITY_SECONDS = 1.0
-
 
 class _TerminalExecutor(BaseExecutor):
     def _require_runtime_context(self) -> tuple[Any, str, str]:
@@ -148,11 +145,9 @@ class _TerminalExecutor(BaseExecutor):
             raise RuntimeError(t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
         return self.db, self.session_id, tool_call_id
 
-    def _derive_request_id(self, action: TerminalAction, discriminator: str | None = None) -> str:
+    def _derive_request_id(self, action: TerminalAction) -> str:
         _, session_id, tool_call_id = self._require_runtime_context()
         request_identity = f"{session_id}:{tool_call_id}:{action.value}"
-        if discriminator is not None:
-            request_identity = f"{request_identity}:{discriminator}"
         return hashlib.sha256(request_identity.encode()).hexdigest()
 
     def _tool_timeout(self) -> float:
@@ -192,9 +187,6 @@ class _TerminalExecutor(BaseExecutor):
         terminal_session_id: str,
         offset: int,
         max_bytes: int,
-        *,
-        request_id: str | None = None,
-        timeout_seconds: float | None = None,
     ) -> TerminalReadResult:
         db, session_id, _ = self._require_runtime_context()
         request = TerminalReadRequest(
@@ -207,9 +199,9 @@ class _TerminalExecutor(BaseExecutor):
             self.uid,
             session_id,
             request,
-            request_id or self._derive_request_id(TerminalAction.READ),
+            self._derive_request_id(TerminalAction.READ),
         )
-        return TerminalReadResult.model_validate(await self._wait_for_command(command, timeout_seconds))
+        return TerminalReadResult.model_validate(await self._wait_for_command(command))
 
     async def _build_action_receipt(
         self,
@@ -271,68 +263,24 @@ class TerminalWriteExecutor(_TerminalExecutor):
             session_id,
             request,
         )
-        write_result = await self._wait_for_command(command, max(0.0, deadline - loop.time()))
+        try:
+            write_result = await self._wait_for_command(command, max(0.0, deadline - loop.time()))
+        except TimeoutError as exc:
+            return json.dumps(
+                {
+                    "status": "execution_unknown",
+                    "tool_name": TERMINAL_WRITE_TOOL_NAME,
+                    "terminal_session_id": terminal_session_id,
+                    "request_id": request_id,
+                    "error_code": ERR_TERMINAL_COMMAND_TIMEOUT,
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+            )
         bytes_written = write_result["bytes_written"]
         output_offset_before_write = write_result.get("output_offset_before_write")
         if not isinstance(output_offset_before_write, int) or isinstance(output_offset_before_write, bool) or output_offset_before_write < 0:
             output_offset_before_write = snapshot_before_write.output_buffer.next_offset
-
-        latest_snapshot = snapshot_before_write
-        observed_offset = output_offset_before_write
-        stable_since: float | None = None
-        read_ready = False
-        while True:
-            latest_snapshot = await self._get_snapshot(terminal_session_id)
-            current_offset = latest_snapshot.output_buffer.next_offset
-            now = loop.time()
-            if current_offset > output_offset_before_write:
-                if current_offset != observed_offset:
-                    observed_offset = current_offset
-                    stable_since = now
-                elif stable_since is not None and now - stable_since >= _TERMINAL_WRITE_READ_STABILITY_SECONDS:
-                    read_ready = True
-            if read_ready or latest_snapshot.status in TERMINAL_SESSION_FINAL_STATUSES:
-                break
-
-            remaining = deadline - now
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(_TERMINAL_WRITE_READ_POLL_INTERVAL_SECONDS, remaining))
-
-        if not read_ready and latest_snapshot.status not in TERMINAL_SESSION_FINAL_STATUSES and loop.time() >= deadline:
-            result = TerminalWriteResult(
-                terminal_session_id=terminal_session_id,
-                request_id=request_id,
-                duplicate=not created,
-                session_status=latest_snapshot.status,
-                bytes_written=bytes_written,
-                read_offset=output_offset_before_write,
-                read_timed_out=True,
-            )
-            return self._dump_model(result)
-
-        try:
-            read_result = await self._read_once(
-                terminal_session_id,
-                output_offset_before_write,
-                65_536,
-                request_id=self._derive_request_id(
-                    TerminalAction.READ,
-                    f"{request_id}:{output_offset_before_write}",
-                ),
-                timeout_seconds=max(0.0, deadline - loop.time()),
-            )
-        except TimeoutError:
-            result = TerminalWriteResult(
-                terminal_session_id=terminal_session_id,
-                request_id=request_id,
-                duplicate=not created,
-                session_status=latest_snapshot.status,
-                bytes_written=bytes_written,
-                read_offset=output_offset_before_write,
-                read_timed_out=True,
-            )
-            return self._dump_model(result)
 
         latest_snapshot = await self._get_snapshot(terminal_session_id)
         result = TerminalWriteResult(
@@ -342,8 +290,6 @@ class TerminalWriteExecutor(_TerminalExecutor):
             session_status=latest_snapshot.status,
             bytes_written=bytes_written,
             read_offset=output_offset_before_write,
-            read_timed_out=False,
-            read_result=read_result,
         )
         return self._dump_model(result)
 

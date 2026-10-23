@@ -333,13 +333,16 @@ class TerminalReadResult(TerminalProtocolModel):
 
 
 class TerminalWriteResult(TerminalActionReceipt):
-    """Receipt for a write followed by an optional merged-output read."""
+    """Confirmation receipt for a write; it does not wait for or read output.
+
+    read_offset is the output position before the write, for use with a
+    separate read. It does not indicate that the CLI has processed or
+    completed the write.
+    """
 
     action: Literal[TerminalAction.WRITE] = TerminalAction.WRITE
     bytes_written: int = Field(ge=0)
     read_offset: int = Field(ge=0)
-    read_timed_out: bool
-    read_result: TerminalReadResult | None = None
 
 
 class TerminalSessionSnapshot(TerminalProtocolModel):
