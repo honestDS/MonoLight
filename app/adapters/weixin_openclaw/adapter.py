@@ -33,6 +33,7 @@ from app.core.audit.confirmation import message_has_quote
 from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_MESSAGE_PLATFORM_NOT_FOUND,
+    ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED,
     ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID,
     ERR_SESSION_ID_REQUIRED,
     ERR_SESSION_NO_PERMISSION,
@@ -387,7 +388,13 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
 
             if message_platform_id is not None:
                 platform = await message_platform_crud.get_for_update(db, platform_id=message_platform_id, uid=resolved_uid)
-                if platform is None or not platform.is_enabled or platform.status != MessagePlatformStatus.CONNECTED or platform.platform_type != MessagePlatformType.WEIXIN_OPENCLAW:
+                if (
+                    platform is None
+                    or not platform.is_enabled
+                    or platform.status not in {MessagePlatformStatus.CONNECTED, MessagePlatformStatus.ERROR}
+                    or (platform.status == MessagePlatformStatus.ERROR and platform.last_error == ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED)
+                    or platform.platform_type != MessagePlatformType.WEIXIN_OPENCLAW
+                ):
                     raise BaseBusinessException(message=ERR_MESSAGE_PLATFORM_NOT_FOUND)
 
                 latest_session = await session_crud.get_latest_for_message_platform(
@@ -402,12 +409,12 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                     legacy_session_id = build_session_id(message.user_id)
                     legacy_session = await session_crud.get_by_session_id(db, legacy_session_id)
                     if legacy_session is not None and legacy_session.uid == resolved_uid and legacy_session.source == "weixin-openclaw" and (legacy_session.message_platform_user_id is None or legacy_session.message_platform_user_id == message.user_id):
-                        legacy_platform = await message_platform_crud.get_platform_for_session(
+                        legacy_platforms = await message_platform_crud.get_platforms_for_sessions(
                             db,
-                            uid=resolved_uid,
-                            session_id=legacy_session_id,
-                            source="weixin-openclaw",
+                            sessions=[legacy_session],
+                            require_available=False,
                         )
+                        legacy_platform = legacy_platforms.get(legacy_session_id)
                         if legacy_platform is not None and legacy_platform.id == message_platform_id:
                             selected_session_id = legacy_session_id
                 message.session_id = selected_session_id or f"weixin-openclaw:{uuid.uuid4().hex}"

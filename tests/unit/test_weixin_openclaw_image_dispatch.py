@@ -23,6 +23,7 @@ from app.core.prompts import WEIXIN_OPENCLAW_CONCISE_OUTPUT_SYSTEM_PROMPT
 from app.core.utils.context_messages import to_jsonable
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.models.message import InternalMessage, MessageRole
+from app.models.message_platform import MessagePlatformStatus
 
 
 class InboundMediaAdapter:
@@ -482,9 +483,14 @@ async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector
         return SimpleNamespace(
             id=7,
             uid="owner",
+            status=MessagePlatformStatus.CONNECTED,
+            last_error="",
             state={},
             use_stream_dispatch=next(platform_stream_settings),
         )
+
+    async def get_platform_for_update(db, *, platform_id):
+        return await get_platform(db, platform_id)
 
     async def handle_message(_adapter, _message, **kwargs):
         captured_stream_requests.append(kwargs["use_stream_dispatch"])
@@ -496,6 +502,7 @@ async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector
     monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.AsyncSessionLocal", lambda: SessionContext())
     monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.InboundMessageCollector", FakeCollector)
     monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.get", get_platform)
+    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.get_for_update", get_platform_for_update)
 
     with pytest.raises(asyncio.CancelledError):
         await handler.run(7)

@@ -388,7 +388,7 @@ async def get_weixin_openclaw_login_status(
     elif qrcode_status == "expired":
         update_kwargs.update(
             {
-                "status": MessagePlatformStatus.ERROR,
+                "status": MessagePlatformStatus.DISCONNECTED,
                 "state": {**state, "qrcode": "", "qrcode_img_content": "", "qr_error": ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED},
                 "last_error": ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED,
             }

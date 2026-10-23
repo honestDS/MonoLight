@@ -2,10 +2,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
+from aiohttp import SocketTimeoutError
+
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
 from app.adapters.weixin_openclaw.constants import INBOUND_COLLECTION_MAX_WAIT_SECONDS, INBOUND_COLLECTION_QUIET_PERIOD_SECONDS
 from app.adapters.weixin_openclaw.message import merge_message_pair, parse_session_user_id
 from app.core.audit.confirmation import is_confirmation_candidate, message_has_quote
+from app.core.constants import ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED, MESSAGE_PLATFORM_RECONNECT_INTERVAL_SECONDS
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.session import session_crud
 from app.core.i18n import t
@@ -29,6 +32,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         use_stream_dispatch = False
         try:
             while True:
+                is_reconnecting = False
                 platform_uid = ""
                 previous_sync_buf = ""
                 try:
@@ -37,6 +41,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                     if not self.is_pollable(platform):
                         return
                     assert platform is not None
+                    is_reconnecting = platform.status == MessagePlatformStatus.ERROR
                     platform_uid = platform.uid or ""
                     use_stream_dispatch = self._resolve_use_stream_dispatch(platform)
                     previous_sync_buf = str((platform.state or {}).get("sync_buf") or "")
@@ -70,12 +75,14 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                         adapter.sync_buf = previous_sync_buf
                     messages = await adapter.poll_messages_once()
                     async with AsyncSessionLocal() as db:
-                        platform = await self._get_platform_by_id(db, platform_id)
+                        platform = await message_platform_crud.get_for_update(db, platform_id=platform_id)
                         if not self.is_pollable(platform):
                             return
                         assert platform is not None
+                        if self._adapter_signature(platform) != adapter_signature:
+                            continue
                         use_stream_dispatch = self._resolve_use_stream_dispatch(platform)
-                        if adapter.sync_buf != previous_sync_buf:
+                        if adapter.sync_buf != previous_sync_buf or platform.status == MessagePlatformStatus.ERROR or platform.last_error:
                             await message_platform_crud.update_runtime_state(db, platform=platform, state={"sync_buf": adapter.sync_buf}, status=MessagePlatformStatus.CONNECTED, last_error="")
                     assert collector is not None
                     for message in messages:
@@ -100,12 +107,14 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                         await asyncio.sleep(adapter.config.poll_interval_ms / 1000)
                 except asyncio.CancelledError:
                     raise
-                except TimeoutError:
+                except SocketTimeoutError:
+                    if is_reconnecting:
+                        await asyncio.sleep(MESSAGE_PLATFORM_RECONNECT_INTERVAL_SECONDS)
                     continue
                 except Exception as exc:
                     logger.bind(platform_id=platform_id).exception("message platform polling failed")
-                    await self._mark_error(platform_id, str(exc))
-                    await asyncio.sleep(5)
+                    await self._mark_error(platform_id, str(exc) or type(exc).__name__, adapter_signature=adapter_signature)
+                    await asyncio.sleep(MESSAGE_PLATFORM_RECONNECT_INTERVAL_SECONDS)
         finally:
             if collector is not None:
                 await collector.close()
@@ -123,7 +132,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         use_stream_dispatch: bool,
     ) -> None:
         try:
-            await self._save_context_token(platform_id, message)
+            await self._save_context_token(platform_id, message, adapter_signature=adapter_signature)
 
             async def runtime_validator() -> bool:
                 try:
@@ -151,7 +160,9 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
             return False
         if platform.platform_type != self.platform_type:
             return False
-        if platform.status != MessagePlatformStatus.CONNECTED:
+        if platform.status not in (MessagePlatformStatus.CONNECTED, MessagePlatformStatus.ERROR):
+            return False
+        if platform.status == MessagePlatformStatus.ERROR and platform.last_error == ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED:
             return False
         if not platform.uid:
             return False
@@ -195,11 +206,15 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
             config["merge_single_poll_messages"],
         )
 
-    async def _mark_error(self, platform_id: int, error: str) -> None:
+    async def _mark_error(self, platform_id: int, error: str, *, adapter_signature: tuple | None = None) -> None:
         async with AsyncSessionLocal() as db:
-            platform = await self._get_platform_by_id(db, platform_id)
-            if platform is not None:
-                await message_platform_crud.update_runtime_state(db, platform=platform, status=MessagePlatformStatus.ERROR, last_error=error[:1000])
+            platform = await message_platform_crud.get_for_update(db, platform_id=platform_id)
+            if not self.is_pollable(platform):
+                return
+            assert platform is not None
+            if adapter_signature is not None and self._adapter_signature(platform) != adapter_signature:
+                return
+            await message_platform_crud.update_runtime_state(db, platform=platform, status=MessagePlatformStatus.ERROR, last_error=error[:1000])
 
     async def _is_current_adapter(self, platform_id: int, adapter_signature: tuple | None) -> bool:
         if adapter_signature is None:
@@ -218,7 +233,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
     async def _build_session_adapter(self, uid: str, session_id: str, source: str):
         async with AsyncSessionLocal() as db:
             platform = await message_platform_crud.get_platform_for_session(db, uid=uid, session_id=session_id, source=source)
-            if not self.is_pollable(platform):
+            if platform is None or platform.status != MessagePlatformStatus.CONNECTED or not self.is_pollable(platform):
                 yield None
                 return
             session = await session_crud.get_by_session_id(db, session_id)
@@ -246,14 +261,22 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
             return
         adapter.context_tokens.update({str(user_id): str(token) for user_id, token in context_tokens.items() if user_id and token})
 
-    async def _save_context_token(self, platform_id: int, message: WeixinOpenClawMessage) -> None:
-        if not message.context_token:
+    async def _save_context_token(
+        self,
+        platform_id: int,
+        message: WeixinOpenClawMessage,
+        *,
+        adapter_signature: tuple | None,
+    ) -> None:
+        if not message.context_token or adapter_signature is None:
             return
         async with AsyncSessionLocal() as db:
-            platform = await self._get_platform_by_id(db, platform_id)
+            platform = await message_platform_crud.get_for_update(db, platform_id=platform_id)
             if not self.is_pollable(platform):
                 return
             assert platform is not None
+            if self._adapter_signature(platform) != adapter_signature:
+                return
             state = dict(platform.state or {})
             context_tokens = state.get("context_tokens") if isinstance(state.get("context_tokens"), dict) else {}
             context_tokens = dict(context_tokens)

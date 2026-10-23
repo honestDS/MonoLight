@@ -27,6 +27,7 @@ from app.api.v1 import chat as chat_api
 from app.api.v1 import message_platforms as message_platforms_api
 from app.core.constants import (
     ERR_MESSAGE_PLATFORM_NOT_FOUND,
+    ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED,
     ERR_SESSION_NO_PERMISSION,
 )
 from app.core.crud.message_platform.platform import message_platform_crud
@@ -1770,3 +1771,310 @@ async def test_session_list_resolves_platform_stream_mode_with_bounded_queries(
         assert {session_id: item["stream_llm_request"] for session_id, item in listed_by_id.items()} == expected_streams
         assert sum("from message_platform" in statement.lower() for statement in statements) == 1
         assert sum("from chat_session" in statement.lower() for statement in statements) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    ["none", "disable", "waiting-login", "token-changed", "owner-changed", "deleted", "qrcode-expired"],
+)
+async def test_weixin_openclaw_collected_messages_survive_poll_error_without_cross_account_dispatch(
+    database_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    _patch_external_dependencies(monkeypatch)
+    async with database_factory(wal=True, foreign_keys=True) as factory:
+        data = await _seed_platform_data(
+            factory,
+            stream_llm_request=False,
+            session_settings=_session_settings(enable_markdown=False),
+        )
+        _patch_runtime_database(monkeypatch, factory)
+        monkeypatch.setattr(weixin_openclaw_platform_module, "AsyncSessionLocal", factory)
+
+        async with factory() as db:
+            platform = await db.get(MessagePlatform, data["platform_id"])
+            assert platform is not None
+            platform.config = {
+                **(platform.config or {}),
+                "poll_interval_ms": 0,
+            }
+            await db.commit()
+
+        monkeypatch.setattr(weixin_openclaw_platform_module, "INBOUND_COLLECTION_QUIET_PERIOD_SECONDS", 0.01)
+        monkeypatch.setattr(weixin_openclaw_platform_module, "INBOUND_COLLECTION_MAX_WAIT_SECONDS", 0.02)
+
+        async def no_op_title(**_: Any) -> None:
+            return None
+
+        monkeypatch.setattr(weixin_openclaw_adapter_module, "generate_session_title_for_selected_profile", no_op_title)
+
+        request_count = 0
+
+        async def get_updates(
+            _self: WeixinOpenClawAdapter,
+            _method: str,
+            endpoint: str,
+            **_: Any,
+        ) -> dict[str, Any]:
+            nonlocal request_count
+            assert "getupdates" in endpoint.lower()
+            request_count += 1
+            if request_count == 2:
+                raise ConnectionError("offline")
+            assert request_count == 1
+            return {
+                "ret": 0,
+                "get_updates_buf": "next-sync",
+                "msgs": [
+                    {
+                        "from_user_id": EXTERNAL_USER,
+                        "to_user_id": "bot",
+                        "client_id": "collected-message-1",
+                        "message_id": "collected-message-1",
+                        "message_type": 1,
+                        "message_state": 2,
+                        "context_token": "new-context-token",
+                        "item_list": [{"type": 1, "text_item": {"text": "collected-one"}}],
+                    },
+                    {
+                        "from_user_id": EXTERNAL_USER,
+                        "to_user_id": "bot",
+                        "client_id": "collected-message-2",
+                        "message_id": "collected-message-2",
+                        "message_type": 1,
+                        "message_state": 2,
+                        "context_token": "new-context-token",
+                        "item_list": [{"type": 1, "text_item": {"text": "collected-two"}}],
+                    },
+                ],
+            }
+
+        monkeypatch.setattr(WeixinOpenClawAdapter, "request_json", get_updates)
+
+        release_dispatch = asyncio.Event()
+        done = asyncio.Event()
+        handler = WeixinOpenClawPlatformHandler()
+        original_handle_message = handler._handle_message
+
+        async def observe_handle_message(*args: Any, **kwargs: Any) -> Any:
+            try:
+                await release_dispatch.wait()
+                return await original_handle_message(*args, **kwargs)
+            finally:
+                done.set()
+
+        monkeypatch.setattr(handler, "_handle_message", observe_handle_message)
+
+        async def controlled_sleep(seconds: float) -> None:
+            if seconds != 30:
+                await asyncio.sleep(seconds)
+                return
+
+            async with factory() as db:
+                platform = await db.get(MessagePlatform, data["platform_id"])
+                assert platform is not None
+                assert platform.status == MessagePlatformStatus.ERROR
+                assert platform.last_error == "offline"
+
+                if change == "disable":
+                    platform.is_enabled = False
+                elif change == "waiting-login":
+                    platform.status = MessagePlatformStatus.WAITING_LOGIN
+                elif change == "token-changed":
+                    platform.config = {**(platform.config or {}), "token": "replacement-session-token"}
+                elif change == "owner-changed":
+                    db.add(User(uid="other-owner", username="collector-other-owner"))
+                    await db.flush()
+                    platform.uid = "other-owner"
+                elif change == "deleted":
+                    await db.delete(platform)
+                elif change == "qrcode-expired":
+                    platform.status = MessagePlatformStatus.ERROR
+                    platform.last_error = ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED
+
+                await db.commit()
+
+            release_dispatch.set()
+            await asyncio.wait_for(done.wait(), timeout=2)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            weixin_openclaw_platform_module,
+            "asyncio",
+            SimpleNamespace(CancelledError=asyncio.CancelledError, sleep=controlled_sleep),
+        )
+
+        run_task = asyncio.create_task(handler.run(data["platform_id"]))
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(run_task, timeout=2)
+        finally:
+            release_dispatch.set()
+            if not run_task.done():
+                run_task.cancel()
+            await asyncio.wait_for(asyncio.gather(run_task, return_exceptions=True), timeout=2)
+
+        assert request_count == 2
+        async with factory() as db:
+            sessions = (await db.execute(select(ChatSession))).scalars().all()
+            messages = (await db.execute(select(Message))).scalars().all()
+            works = (await db.execute(select(SessionReplyWorkItem))).scalars().all()
+
+            if change == "none":
+                assert len(sessions) == 1
+                session = sessions[0]
+                assert session.uid == UID
+                assert session.source == "weixin-openclaw"
+                assert session.message_platform_id == data["platform_id"]
+                assert session.message_platform_user_id == EXTERNAL_USER
+
+                assert len(messages) == 1
+                message = messages[0]
+                assert message.uid == UID
+                assert message.role == MessageRole.USER
+                assert message.content == "collected-one\ncollected-two"
+                assert message.session_id == session.session_id
+
+                assert len(works) == 1
+                work = works[0]
+                assert work.status == SessionReplyWorkStatus.READY_FOR_LLM
+                assert work.uid == UID
+                assert work.session_id == session.session_id
+                assert work.source_id == str(message.id)
+                assert work.source_type == "user_message"
+
+                platform = await db.get(MessagePlatform, data["platform_id"])
+                assert platform is not None
+                assert platform.status == MessagePlatformStatus.ERROR
+                assert platform.last_error == "offline"
+                assert platform.state["sync_buf"] == "next-sync"
+                assert platform.state["context_tokens"][EXTERNAL_USER] == "new-context-token"
+            else:
+                assert sessions == []
+                assert messages == []
+                assert works == []
+
+                platform = await db.get(MessagePlatform, data["platform_id"])
+                if change == "deleted":
+                    assert platform is None
+                else:
+                    assert platform is not None
+                    assert platform.state["context_tokens"][EXTERNAL_USER] == "context-token"
+                    if change == "disable":
+                        assert platform.is_enabled is False
+                        assert platform.status == MessagePlatformStatus.ERROR
+                        assert platform.last_error == "offline"
+                    elif change == "waiting-login":
+                        assert platform.status == MessagePlatformStatus.WAITING_LOGIN
+                        assert platform.last_error == "offline"
+                    elif change == "token-changed":
+                        assert platform.get_config_secret("token") == "replacement-session-token"
+                        assert platform.status == MessagePlatformStatus.ERROR
+                        assert platform.last_error == "offline"
+                    elif change == "owner-changed":
+                        assert platform.uid == "other-owner"
+                        assert platform.status == MessagePlatformStatus.ERROR
+                        assert platform.last_error == "offline"
+                    else:
+                        assert change == "qrcode-expired"
+                        assert platform.status == MessagePlatformStatus.ERROR
+                        assert platform.last_error == ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_weixin_openclaw_buffered_message_reuses_unbound_legacy_session_after_poll_error(
+    database_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_external_dependencies(monkeypatch)
+    async with database_factory(wal=True, foreign_keys=True) as factory:
+        data = await _seed_platform_data(
+            factory,
+            stream_llm_request=False,
+            session_settings=_session_settings(enable_markdown=False),
+        )
+        _patch_runtime_database(monkeypatch, factory)
+        monkeypatch.setattr(weixin_openclaw_platform_module, "AsyncSessionLocal", factory)
+
+        async with factory() as db:
+            platform = await db.get(MessagePlatform, data["platform_id"])
+            assert platform is not None
+            platform.status = MessagePlatformStatus.ERROR
+            platform.last_error = "offline"
+            db.add(
+                ChatSession(
+                    session_id=SESSION_ID,
+                    uid=UID,
+                    source="weixin-openclaw",
+                    profile_id=data["primary_profile_id"],
+                )
+            )
+            await db.commit()
+
+        async def no_op_title(**_: Any) -> None:
+            return None
+
+        async def unexpected_request(*_: Any, **__: Any) -> dict[str, Any]:
+            raise AssertionError("buffered message handling must not make a network request")
+
+        monkeypatch.setattr(weixin_openclaw_adapter_module, "generate_session_title_for_selected_profile", no_op_title)
+        monkeypatch.setattr(WeixinOpenClawAdapter, "request_json", unexpected_request)
+
+        handler = WeixinOpenClawPlatformHandler()
+        async with factory() as db:
+            platform = await db.get(MessagePlatform, data["platform_id"])
+            assert platform is not None
+            adapter = handler._build_adapter(platform)
+            adapter_signature = handler._adapter_signature(platform)
+
+        try:
+            await handler._handle_message(
+                adapter,
+                WeixinOpenClawMessage(
+                    user_id=EXTERNAL_USER,
+                    text="buffered-legacy",
+                    session_id=SESSION_ID,
+                    context_token="updated-context",
+                ),
+                uid=UID,
+                platform_id=data["platform_id"],
+                adapter_signature=adapter_signature,
+                use_stream_dispatch=False,
+            )
+        finally:
+            await adapter.close()
+
+        async with factory() as db:
+            sessions = (await db.execute(select(ChatSession))).scalars().all()
+            messages = (await db.execute(select(Message))).scalars().all()
+            works = (await db.execute(select(SessionReplyWorkItem))).scalars().all()
+
+            assert len(sessions) == 1
+            session = sessions[0]
+            assert session.session_id == SESSION_ID
+            assert session.uid == UID
+            assert session.source == "weixin-openclaw"
+            assert session.message_platform_id == data["platform_id"]
+            assert session.message_platform_user_id == EXTERNAL_USER
+
+            assert len(messages) == 1
+            message = messages[0]
+            assert message.session_id == SESSION_ID
+            assert message.uid == UID
+            assert message.role == MessageRole.USER
+            assert message.content == "buffered-legacy"
+
+            assert len(works) == 1
+            work = works[0]
+            assert work.session_id == SESSION_ID
+            assert work.status == SessionReplyWorkStatus.READY_FOR_LLM
+            assert work.source_type == "user_message"
+            assert work.source_id == str(message.id)
+
+            platform = await db.get(MessagePlatform, data["platform_id"])
+            assert platform is not None
+            assert platform.status == MessagePlatformStatus.ERROR
+            assert platform.last_error == "offline"
+            assert platform.state["context_tokens"][EXTERNAL_USER] == "updated-context"
