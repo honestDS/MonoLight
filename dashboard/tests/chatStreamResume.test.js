@@ -609,6 +609,61 @@ test('resume turn_end coalesces db history, streamed body, and reasoning in eith
   }
 })
 
+test('resume turn_end targets persisted history by message id without consuming another response reasoning', () => {
+  const requestId = 'request-shared-history'
+  const cases = [
+    { name: 'provided', reasoningContent: 'historical reasoning', expectedReasoning: 'historical reasoning' },
+    { name: 'empty', reasoningContent: '', expectedReasoning: undefined },
+    { name: 'omitted', expectedReasoning: undefined }
+  ]
+
+  for (const scenario of cases) {
+    const messages = [
+      {
+        id: 'assistant-history-first',
+        db_id: '201',
+        role: 'assistant',
+        content: 'first historical body',
+        request_id: requestId
+      },
+      {
+        id: 'assistant-history-second',
+        db_id: '202',
+        role: 'assistant',
+        content: 'second historical body',
+        request_id: requestId
+      },
+      {
+        id: 'reasoning-active',
+        role: 'reasoning',
+        content: '',
+        reasoning_content: 'active response reasoning',
+        request_id: requestId,
+        response_id: 'response-active'
+      }
+    ]
+    const turnEnd = {
+      type: 'turn_end',
+      message_id: 201,
+      ...(scenario.reasoningContent === undefined ? {} : { reasoning_content: scenario.reasoningContent })
+    }
+
+    const resumed = applyResumedTurnEnd(messages, turnEnd, requestId)
+
+    assert.equal(resumed.length, messages.length, scenario.name)
+    assert.deepEqual(
+      resumed.map(({ role, db_id, id }) => [role, db_id ?? id]),
+      messages.map(({ role, db_id, id }) => [role, db_id ?? id]),
+      scenario.name
+    )
+    assert.deepEqual(resumed.map(message => message.content), messages.map(message => message.content), scenario.name)
+    assert.equal(resumed[0].reasoning_content, scenario.expectedReasoning, scenario.name)
+    assert.equal(resumed[1].reasoning_content, undefined, scenario.name)
+    assert.deepEqual(resumed[2], messages[2], scenario.name)
+    assert.deepEqual(applyResumedTurnEnd(resumed, turnEnd, requestId), resumed, scenario.name)
+  }
+})
+
 test('resume turn_end preserves a tool assistant body on a length finish', () => {
   const identity = {
     responseId: 'response-tool',

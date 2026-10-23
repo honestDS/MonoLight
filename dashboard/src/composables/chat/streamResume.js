@@ -1,5 +1,6 @@
 import {
   findAssistantResponseReplacementIndex,
+  getMessageDbId,
   mergeAssistantResponse,
   mergeAssistantResponseIntoList
 } from '../../utils/assistantResponseIdentity.js'
@@ -109,7 +110,8 @@ export const applyResumedTurnEnd = (
     turn: canonicalTurn,
     responseId: canonicalResponseId,
     requestId: canonicalRequestId,
-    workId: canonicalWorkId
+    workId: canonicalWorkId,
+    dbId: getMessageDbId(canonicalMessage)
   })
 }
 
