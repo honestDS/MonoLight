@@ -549,53 +549,25 @@ def test_action_receipt_serializes_duplicate_flag_and_mutating_action():
     }
 
 
-def _read_result_for_write() -> TerminalReadResult:
-    return TerminalReadResult(
-        terminal_session_id=TERMINAL_SESSION_ID,
-        read_status=TerminalOutputReadStatus.OK,
-        requested_offset=4,
-        start_offset=4,
-        next_offset=8,
-        oldest_available_offset=0,
-        latest_offset=8,
-        sequence=1,
-        output="done",
-        eof=False,
-    )
-
-
-def test_write_result_contains_protocol_read_result_and_preserves_write_action():
-    read_result = _read_result_for_write()
+def test_write_result_serializes_complete_write_receipt_without_read_result():
     result = TerminalWriteResult(
         terminal_session_id=TERMINAL_SESSION_ID,
         request_id=REQUEST_ID,
         duplicate=False,
         session_status=TerminalSessionStatus.RUNNING,
-        bytes_written=4,
-        read_offset=4,
-        read_timed_out=False,
-        read_result=read_result,
+        bytes_written=37,
+        read_offset=12,
     )
 
-    assert result.action is TerminalAction.WRITE
-    assert result.read_result is read_result
-    assert result.model_dump(mode="json")["read_result"] == read_result.model_dump(mode="json")
-
-
-def test_write_result_represents_read_timeout_without_a_read_result():
-    result = TerminalWriteResult(
-        terminal_session_id=TERMINAL_SESSION_ID,
-        request_id=REQUEST_ID,
-        duplicate=True,
-        session_status=TerminalSessionStatus.RUNNING,
-        bytes_written=0,
-        read_offset=0,
-        read_timed_out=True,
-    )
-
-    assert result.action is TerminalAction.WRITE
-    assert result.read_timed_out is True
-    assert result.read_result is None
+    assert result.model_dump(mode="json") == {
+        "terminal_session_id": TERMINAL_SESSION_ID,
+        "request_id": REQUEST_ID,
+        "action": "write",
+        "duplicate": False,
+        "session_status": "running",
+        "bytes_written": 37,
+        "read_offset": 12,
+    }
 
 
 def test_write_result_enforces_boundaries_fixed_action_and_immutable_forbid_config():
@@ -606,7 +578,6 @@ def test_write_result_enforces_boundaries_fixed_action_and_immutable_forbid_conf
         "session_status": TerminalSessionStatus.RUNNING,
         "bytes_written": 0,
         "read_offset": 0,
-        "read_timed_out": True,
     }
 
     assert TerminalWriteResult(**base_payload).bytes_written == 0
