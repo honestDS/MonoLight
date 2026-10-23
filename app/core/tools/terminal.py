@@ -35,16 +35,24 @@ _TERMINAL_SESSION_ID_SCHEMA = {
     "pattern": r"^[A-Za-z0-9_-]+$",
 }
 
+_TERMINAL_REQUEST_ID_SCHEMA = {
+    "type": "string",
+    "minLength": 16,
+    "maxLength": 128,
+    "pattern": r"^[A-Za-z0-9_-]+$",
+}
+
 
 TERMINAL_STATUS_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": TERMINAL_STATUS_TOOL_NAME,
-        "description": "Get the current status, output bounds, and exit result of an interactive terminal session.",
+        "description": ("Get the current status, output bounds, and exit result of an interactive terminal session. When request_id is provided, also return the nested write_request status for that original WRITE request; this is submission status, not CLI task completion."),
         "parameters": {
             "type": "object",
             "properties": {
                 "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
+                "request_id": _TERMINAL_REQUEST_ID_SCHEMA,
             },
             "required": ["terminal_session_id"],
             "additionalProperties": False,
@@ -78,13 +86,17 @@ TERMINAL_WRITE_TOOL_SCHEMA = {
             "Return only after the Worker completes the PTY write and saves a successful receipt. Does not wait for "
             "output, CLI processing, or task completion. Use '\\n' to submit a line; the service handles "
             f"platform-specific newline conversion. Read output separately with {TERMINAL_READ_TOOL_NAME} from "
-            "read_offset. A timeout means the write result is unknown; do not automatically resubmit."
+            "read_offset. On the first submission, omitting request_id keeps automatic ID derivation. A timeout "
+            "means the write result is unknown; first query terminal_status with the original request_id. To reuse "
+            "the same operation, submit again with that original request_id, never a new ID; do not automatically "
+            "resubmit."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
                 "data": {"type": "string", "minLength": 1, "maxLength": 65_536},
+                "request_id": _TERMINAL_REQUEST_ID_SCHEMA,
             },
             "required": ["terminal_session_id", "data"],
             "additionalProperties": False,
@@ -229,10 +241,23 @@ class _TerminalExecutor(BaseExecutor):
 class TerminalStatusExecutor(_TerminalExecutor):
     requires_audit = False
 
-    async def execute(self, terminal_session_id: str) -> str:
-        request = TerminalStatusRequest(terminal_session_id=terminal_session_id)
-        self._derive_request_id(request.action)
-        return self._dump_model(await self._get_snapshot(request.terminal_session_id))
+    async def execute(self, terminal_session_id: str, request_id: str | None = None) -> str:
+        request = TerminalStatusRequest(terminal_session_id=terminal_session_id, request_id=request_id)
+        db, session_id, _ = self._require_runtime_context()
+        snapshot = await self._get_snapshot(request.terminal_session_id)
+        if request.request_id is None:
+            return self._dump_model(snapshot)
+        write_request = await terminal_session_manager.get_write_status(
+            db,
+            request.terminal_session_id,
+            self.uid,
+            session_id,
+            request.request_id,
+        )
+        return json.dumps(
+            {**snapshot.model_dump(mode="json"), "write_request": write_request},
+            ensure_ascii=False,
+        )
 
 
 class TerminalReadExecutor(_TerminalExecutor):
@@ -246,11 +271,11 @@ class TerminalReadExecutor(_TerminalExecutor):
 class TerminalWriteExecutor(_TerminalExecutor):
     requires_audit = True
 
-    async def execute(self, terminal_session_id: str, data: str) -> str:
+    async def execute(self, terminal_session_id: str, data: str, request_id: str | None = None) -> str:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._tool_timeout()
         snapshot_before_write = await self._get_snapshot(terminal_session_id)
-        request_id = self._derive_request_id(TerminalAction.WRITE)
+        request_id = self._derive_request_id(TerminalAction.WRITE) if request_id is None else request_id
         request = TerminalWriteRequest(
             terminal_session_id=terminal_session_id,
             request_id=request_id,

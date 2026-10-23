@@ -178,6 +178,7 @@ class TerminalProtocolModel(BaseModel):
 class TerminalStatusRequest(TerminalProtocolModel):
     action: Literal[TerminalAction.STATUS] = TerminalAction.STATUS
     terminal_session_id: TerminalSessionId
+    request_id: TerminalMutatingRequestId | None = None
 
 
 class TerminalReadRequest(TerminalProtocolModel):

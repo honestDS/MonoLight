@@ -1,5 +1,8 @@
 import asyncio
 import json
+import shlex
+import subprocess
+import sys
 import threading
 from collections.abc import AsyncGenerator
 from datetime import timedelta
@@ -8,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
@@ -15,15 +19,25 @@ import app.core.audit.service as audit_service_module
 import app.core.dispatchers.background as background_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_tools as interactive_tools_module
+import app.core.session_reply_queue.consumer as session_reply_consumer_module
+import app.core.session_reply_queue.executor_audit as executor_audit_module
+import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
+import app.core.terminal.session_runtime_commands as terminal_session_runtime_commands_module
+import app.core.terminal.session_runtime_core as terminal_session_runtime_core_module
+import app.core.terminal.session_runtime_state as terminal_session_runtime_state_module
+import app.core.terminal.worker_coordinator as terminal_worker_coordinator_module
 from app.core.audit.confirmation_persistence import persist_pending_confirmation_bundle
 from app.core.audit.integrity import build_tool_round_integrity_snapshot
-from app.core.constants import ERR_TOOL_EXECUTION_TIMEOUT, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import ERR_TERMINAL_COMMAND_TIMEOUT, ERR_TOOL_EXECUTION_TIMEOUT, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.context import ContextManager
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.terminal.manager import TerminalWorkerCoordinator, terminal_session_manager
+from app.core.terminal.schemas import ALL_TERMINAL_ACTIONS
 from app.core.tools.file_tool import FILE_TOOL_SCHEMA
 from app.core.tools.file_tool import executor as file_tool_executor_module
-from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
+from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status, process_single_tool
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.time import get_local_time
 from app.models.audit import (
@@ -38,7 +52,8 @@ from app.models.audit import (
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
-from app.models.session_reply_work_item import SessionReplyWorkStatus, SessionReplyWorkType
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
+from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus
 from tests.unit.response_test_support import audit_confirmation_payload, pending_audit_tool_result
 
 
@@ -94,15 +109,20 @@ async def _seed_pending_confirmation(
     tmp_path: Path,
     operation: str,
     exhausted_budget: bool,
+    tool_call: InternalToolCall | None = None,
+    initial_user_message: str | None = None,
 ) -> int:
     uid = "timeout-owner"
     session_id = "timeout-session"
-    tool_call = InternalToolCall(
-        id="original-file-call",
-        name="file_tool",
-        arguments=_tool_arguments(operation),
-    )
+    if tool_call is None:
+        tool_call = InternalToolCall(
+            id="original-file-call",
+            name="file_tool",
+            arguments=_tool_arguments(operation),
+        )
     cfg = _profile_config(tmp_path)
+    if tool_call.name == "terminal_write":
+        cfg.tool.enabled_tools = ["execute_shell"]
     integrity = build_tool_round_integrity_snapshot(
         tool_calls=[{"id": tool_call.id, "name": tool_call.name, "arguments": tool_call.arguments}],
         uid=uid,
@@ -126,6 +146,20 @@ async def _seed_pending_confirmation(
             )
         )
         await db.flush()
+
+        if initial_user_message is not None:
+            db.add(
+                Message(
+                    session_id=session_id,
+                    uid=uid,
+                    profile_id=1,
+                    role=MessageRole.USER,
+                    type=MessageType.TEXT,
+                    content=initial_user_message,
+                    is_processed=True,
+                )
+            )
+            await db.flush()
 
         source = Message(
             session_id=session_id,
@@ -494,6 +528,275 @@ async def test_file_tool_timeout_persists_execution_unknown_audit_state(
     assert len(executions) == 1
     assert executions[0].attempt_no == 1
     assert executions[0].status == AuditExecutionStatus.EXECUTION_UNKNOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform not in {"win32", "linux"}, reason="real PTY integration requires Windows or Linux")
+async def test_terminal_write_timeout_recovers_unknown_audit_and_late_command_result(
+    tool_timeout_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    terminal_session_id = "0123456789abcdef0123456789abcdef"
+    data = "audited input\n"
+    script_path = tmp_path / "wait_for_terminal_input.py"
+    await asyncio.to_thread(
+        script_path.write_text,
+        "import sys\nimport time\nsys.stdin.readline()\ntime.sleep(60)\n",
+        encoding="utf-8",
+    )
+    argv = [sys.executable, str(script_path)]
+    command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
+    source_tool_call = InternalToolCall(
+        id="original-terminal-call",
+        name="terminal_write",
+        arguments={"terminal_session_id": terminal_session_id, "data": data},
+    )
+    audit_record_id = await _seed_pending_confirmation(
+        tool_timeout_session_factory,
+        tmp_path=tmp_path,
+        operation="write",
+        exhausted_budget=False,
+        tool_call=source_tool_call,
+        initial_user_message="start the interactive terminal",
+    )
+
+    for module in (
+        session_reply_consumer_module,
+        executor_audit_module,
+        executor_lifecycle_module,
+        terminal_worker_coordinator_module,
+        terminal_session_runtime_core_module,
+        terminal_session_runtime_state_module,
+        terminal_session_runtime_commands_module,
+    ):
+        monkeypatch.setattr(module, "AsyncSessionLocal", tool_timeout_session_factory)
+
+    async def noop_send_session_event(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", noop_send_session_event)
+
+    async with tool_timeout_session_factory() as db:
+        terminal_session = await terminal_session_manager.create_session(
+            db,
+            uid="timeout-owner",
+            session_id="timeout-session",
+            profile_id=1,
+            original_tool_call_id=source_tool_call.id,
+            audit_record_id=None,
+            audit_execution_record_id=None,
+            command=command,
+            working_directory=str(tmp_path),
+            allowed_actions=ALL_TERMINAL_ACTIONS,
+            terminal_session_id=terminal_session_id,
+        )
+    assert terminal_session.audit_record_id is None
+    assert terminal_session.audit_execution_record_id is None
+
+    observed_request_ids: list[str] = []
+
+    async def reload_confirmed_tool_history(db, *, work, **_kwargs):
+        profile = await db.get(Profile, work.profile_id)
+        assert profile is not None
+        history = await ContextManager.get_messages(
+            db,
+            work.session_id,
+            work.uid,
+            profile,
+            current_message="approve",
+        )
+        (tool_result,) = [message for message in history if message.role == MessageRole.TOOL]
+        assert tool_result.tool_call_id == source_tool_call.id
+        assert tool_result.tool_execution_status == "execution_unknown"
+        assert get_tool_execution_status(tool_result) == "execution_unknown"
+        payload = json.loads(tool_result.content or "{}")
+        assert payload["status"] == "execution_unknown"
+        assert payload["tool_name"] == "terminal_write"
+        assert payload["terminal_session_id"] == terminal_session_id
+        assert payload["error_code"] == ERR_TERMINAL_COMMAND_TIMEOUT
+        assert isinstance(payload["error"], str) and payload["error"]
+        assert payload["confirmation_decision"] == "approve"
+        request_id = payload["request_id"]
+        assert isinstance(request_id, str) and request_id
+        observed_request_ids.append(request_id)
+        return {"content": "confirmed continuation", "history": [], "files": []}
+
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", reload_confirmed_tool_history)
+
+    async with tool_timeout_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        _message, submitted_work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="timeout-owner",
+            session_id="timeout-session",
+            profile=profile,
+            message="approve",
+            attachments=None,
+            source="http",
+        )
+    assert submission_status == "approved"
+    assert submitted_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+
+    async with tool_timeout_session_factory() as db:
+        claimed = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id="terminal-timeout-worker",
+            lease_seconds=300,
+        )
+    assert claimed is not None
+    assert claimed.status == SessionReplyWorkStatus.RUNNING
+    assert claimed.id is not None
+
+    async with tool_timeout_session_factory() as worker_db:
+        worker_db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (claimed.id, "terminal-timeout-worker")
+        response = await executor_confirmed_module._execute_confirmed_tools(
+            worker_db,
+            claimed,
+            "terminal-timeout-worker",
+        )
+    assert response["content"] == "confirmed continuation"
+    assert len(observed_request_ids) == 1
+    request_id = observed_request_ids[0]
+
+    def assert_unknown_audit_state(state, expected_request_id: str):
+        record, executions, card, tool_messages, versions = state
+        assert record is not None
+        assert record.status == AuditRecordStatus.EXECUTION_UNKNOWN
+        assert len(executions) == 1
+        assert executions[0].attempt_no == 1
+        assert executions[0].status == AuditExecutionStatus.EXECUTION_UNKNOWN
+        assert executions[0].new_tool_call_id
+        assert executions[0].new_tool_call_id != source_tool_call.id
+        assert json.loads(card.content or "{}")["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
+        assert len(tool_messages) == 1
+        (stored_message,) = parse_db_messages_to_internal(tool_messages)
+        assert stored_message.id == tool_messages[0].id
+        assert stored_message.role == MessageRole.TOOL
+        assert stored_message.tool_call_id == source_tool_call.id
+        assert stored_message.tool_execution_status == "execution_unknown"
+        assert get_tool_execution_status(stored_message) == "execution_unknown"
+        assert versions
+        stored_version = InternalMessage.model_validate_json(versions[-1].content)
+        assert stored_version.tool_call_id == source_tool_call.id
+        assert stored_version.tool_execution_status == "execution_unknown"
+        payload = json.loads(stored_version.content or "{}")
+        assert payload["status"] == "execution_unknown"
+        assert payload["terminal_session_id"] == terminal_session_id
+        assert payload["request_id"] == expected_request_id
+        assert payload["error_code"] == ERR_TERMINAL_COMMAND_TIMEOUT
+        assert payload["confirmation_decision"] == "approve"
+        return len(executions), len(tool_messages), len(versions), tool_messages[0].id, versions[-1].id
+
+    initial_audit_state = await _read_audit_state(tool_timeout_session_factory, audit_record_id)
+    audit_identity = assert_unknown_audit_state(initial_audit_state, request_id)
+    async with tool_timeout_session_factory() as db:
+        commands = list((await db.execute(select(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id == terminal_session_id))).scalars().all())
+    assert len(commands) == 1
+    write_command = commands[0]
+    assert write_command.id is not None
+    assert write_command.request_id == request_id
+    assert write_command.action.value == "write"
+    assert write_command.status == TerminalControlCommandStatus.PENDING
+    assert write_command.payload["data"] == data
+
+    async with tool_timeout_session_factory() as db:
+        await db.execute(update(SessionReplyWorkItem).where(SessionReplyWorkItem.id == claimed.id).values(lock_until=0))
+        await db.commit()
+    consumer = session_reply_consumer_module.SessionReplyConsumer()
+    await consumer._recover_expired()
+
+    async with tool_timeout_session_factory() as db:
+        recovered_work = await session_reply_work_item_crud.get(db, claimed.id)
+        assert recovered_work is not None
+        assert recovered_work.status == SessionReplyWorkStatus.FAILED
+        assert recovered_work.status != SessionReplyWorkStatus.READY_FOR_LLM
+        next_work = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id="terminal-timeout-retry-check",
+            lease_seconds=300,
+        )
+        assert next_work is None
+    recovered_audit_state = await _read_audit_state(tool_timeout_session_factory, audit_record_id)
+    assert assert_unknown_audit_state(recovered_audit_state, request_id) == audit_identity
+    await consumer._recover_expired()
+    repeated_recovery_state = await _read_audit_state(tool_timeout_session_factory, audit_record_id)
+    assert assert_unknown_audit_state(repeated_recovery_state, request_id) == audit_identity
+
+    async with tool_timeout_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        recovered_history = await ContextManager.get_messages(
+            db,
+            "timeout-session",
+            "timeout-owner",
+            profile,
+            current_message="resume after recovery",
+        )
+    (reloaded_tool_result,) = [message for message in recovered_history if message.role == MessageRole.TOOL]
+    assert reloaded_tool_result.tool_call_id == source_tool_call.id
+    assert reloaded_tool_result.tool_execution_status == "execution_unknown"
+    reloaded_payload = json.loads(reloaded_tool_result.content or "{}")
+    assert reloaded_payload["status"] == "execution_unknown"
+    assert reloaded_payload["terminal_session_id"] == terminal_session_id
+    assert reloaded_payload["request_id"] == request_id
+    assert reloaded_payload["error_code"] == ERR_TERMINAL_COMMAND_TIMEOUT
+
+    coordinator = TerminalWorkerCoordinator()
+    try:
+        coordinator.start()
+        async with tool_timeout_session_factory() as db:
+            late_write_result = await terminal_session_manager.wait_for_command_result(
+                db,
+                write_command.id,
+                timeout_seconds=15,
+            )
+        assert late_write_result["bytes_written"] == len(data.encode("utf-8"))
+        assert isinstance(late_write_result["output_offset_before_write"], int)
+        assert late_write_result["output_offset_before_write"] >= 0
+
+        async with tool_timeout_session_factory() as db:
+            profile = await db.get(Profile, 1)
+            assert profile is not None
+            cfg = ProfileConfig.model_validate(profile.configs)
+            cfg.tool.tool_timeout = 10
+            status_result = await process_single_tool(
+                InternalToolCall(
+                    id="terminal-status-after-timeout",
+                    name="terminal_status",
+                    arguments={"terminal_session_id": terminal_session_id, "request_id": request_id},
+                ),
+                db,
+                profile,
+                cfg,
+                [],
+                "timeout-owner",
+                "timeout-session",
+                0,
+                "timeout-owner",
+                context_window_k=16,
+                tool_result_round_budget_tokens=8192,
+            )
+        status_payload = json.loads(status_result.content or "{}")
+        write_request = status_payload["write_request"]
+        assert write_request["request_id"] == request_id
+        assert write_request["command_status"] == TerminalControlCommandStatus.SUCCEEDED.value
+        assert write_request["error"] is None
+        assert write_request["result"]["bytes_written"] == len(data.encode("utf-8"))
+        assert write_request["result"]["output_offset_before_write"] == late_write_result["output_offset_before_write"]
+
+        async with tool_timeout_session_factory() as db:
+            commands = list((await db.execute(select(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id == terminal_session_id))).scalars().all())
+        assert len(commands) == 1
+        assert commands[0].id == write_command.id
+        assert commands[0].status == TerminalControlCommandStatus.SUCCEEDED
+
+        final_audit_state = await _read_audit_state(tool_timeout_session_factory, audit_record_id)
+        assert assert_unknown_audit_state(final_audit_state, request_id) == audit_identity
+    finally:
+        await asyncio.wait_for(coordinator.stop(), 10)
 
 
 @pytest.mark.asyncio

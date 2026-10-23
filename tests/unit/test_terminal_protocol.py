@@ -229,6 +229,14 @@ def test_generated_terminal_identifiers_are_unique_and_valid():
             TerminalStatusRequest,
         ),
         (
+            {
+                "action": "status",
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "request_id": REQUEST_ID,
+            },
+            TerminalStatusRequest,
+        ),
+        (
             {"action": "read", "terminal_session_id": TERMINAL_SESSION_ID},
             TerminalReadRequest,
         ),
@@ -270,13 +278,34 @@ def test_terminal_request_discriminator_selects_action_model(
     assert isinstance(request, request_type)
 
 
+def test_terminal_status_request_serializes_optional_request_id():
+    request_without_id = TerminalStatusRequest(terminal_session_id=TERMINAL_SESSION_ID)
+    assert request_without_id.request_id is None
+    assert request_without_id.model_dump(mode="json") == {
+        "action": "status",
+        "terminal_session_id": TERMINAL_SESSION_ID,
+        "request_id": None,
+    }
+
+    request_with_id = TerminalStatusRequest(
+        terminal_session_id=TERMINAL_SESSION_ID,
+        request_id=REQUEST_ID,
+    )
+    assert request_with_id.request_id == REQUEST_ID
+    assert request_with_id.model_dump(mode="json") == {
+        "action": "status",
+        "terminal_session_id": TERMINAL_SESSION_ID,
+        "request_id": REQUEST_ID,
+    }
+
+
 def test_terminal_requests_forbid_extra_fields_and_unknown_actions():
     with pytest.raises(ValidationError):
         REQUEST_ADAPTER.validate_python(
             {
                 "action": "status",
                 "terminal_session_id": TERMINAL_SESSION_ID,
-                "request_id": REQUEST_ID,
+                "extra": True,
             }
         )
     with pytest.raises(ValidationError):
@@ -303,7 +332,7 @@ def test_terminal_session_id_boundaries_are_enforced(terminal_session_id: str):
 
 @pytest.mark.parametrize(
     "request_id",
-    ["r" * 15, "r" * 129, "invalid/request"],
+    ["r" * 15, "r" * 129, "invalid/request", ""],
 )
 def test_mutating_request_id_boundaries_are_enforced(request_id: str):
     with pytest.raises(ValidationError):
@@ -311,6 +340,11 @@ def test_mutating_request_id_boundaries_are_enforced(request_id: str):
             terminal_session_id=TERMINAL_SESSION_ID,
             request_id=request_id,
             data="x",
+        )
+    with pytest.raises(ValidationError):
+        TerminalStatusRequest(
+            terminal_session_id=TERMINAL_SESSION_ID,
+            request_id=request_id,
         )
 
 
