@@ -18,9 +18,9 @@ from app.core.background_tasks.reply_trigger import trigger_background_task_repl
 from app.core.constants import TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
-from app.core.prompts import EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
+from app.core.prompts import TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import session_reply_queue_manager
-from app.core.terminal.schemas import TerminalSessionStatus
+from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.core.tools.terminal_watch import ensure_terminal_auto_watch
 from app.core.utils.background_task_result import build_background_task_success_result
 from app.core.utils.dispatcher.save_message import save_message
@@ -31,6 +31,7 @@ from app.models.message_platform_outbox import MessagePlatformOutbox
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.terminal_session import TerminalSession
 from app.models.user import User
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
@@ -532,7 +533,25 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
         )
 
         async with factory() as db:
-            db.add_all([channel, profile, user, session])
+            db.add_all(
+                [
+                    channel,
+                    profile,
+                    user,
+                    session,
+                    TerminalSession(
+                        terminal_session_id=terminal_session_id,
+                        uid=UID,
+                        session_id=SESSION_ID,
+                        original_tool_call_id="initial-terminal-auto-watch",
+                        profile_id=PROFILE_ID,
+                        command="test terminal command",
+                        working_directory=".",
+                        status=TerminalSessionStatus.RUNNING,
+                        allowed_actions=[action.value for action in TerminalAction],
+                    ),
+                ]
+            )
             await db.flush()
             db.add_all(
                 [
@@ -831,7 +850,7 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
         assert background_payload["task_id"] == task_id
         assert background_payload["tool_name"] == TERMINAL_WATCH_TOOL_NAME
         assert background_payload["source"] == "terminal_auto_watch"
-        assert background_payload["instruction"] == EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
+        assert background_payload["instruction"] == TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
         assert background_payload["request_context"] == []
         assert background_payload["purpose"] is None
         assert background_payload["task"] == expected_task_result
@@ -882,6 +901,36 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
                 assert persisted_task.extra.get("submission_context") == []
             else:
                 assert persisted_task.extra["submission_context"] == [{"role": "user", "content": "obsolete-snapshot-sentinel"}]
+
+            auto_watch_tasks = [
+                task
+                for task in (
+                    await db.execute(
+                        select(BackgroundTask)
+                        .where(
+                            BackgroundTask.session_id == SESSION_ID,
+                            BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                        )
+                        .order_by(BackgroundTask.id)
+                    )
+                )
+                .scalars()
+                .all()
+                if task.extra.get("auto_terminal_watch") is True
+            ]
+            if event == "timeout":
+                assert len(auto_watch_tasks) == 2
+                next_task = next(task for task in auto_watch_tasks if task.id != task_id)
+                assert next_task.status == BackgroundTaskStatus.PENDING
+                assert next_task.reply_status == BackgroundTaskReplyStatus.PENDING
+                assert next_task.arguments["terminal_session_id"] == terminal_session_id
+                assert next_task.arguments["after_offset"] == observed_result["next_offset"]
+                assert next_task.arguments["condition"] == "process_exit"
+                assert persisted_task.extra["next_auto_watch_task_id"] == next_task.id
+            else:
+                assert event == "process_exit"
+                assert len(auto_watch_tasks) == 1
+                assert "next_auto_watch_task_id" not in persisted_task.extra
 
             persisted_messages = list((await db.execute(select(Message).where(Message.session_id == SESSION_ID).order_by(Message.id))).scalars().all())
             persisted_result_events = [message for message in persisted_messages if message.type == MessageType.BACKGROUND_TASK_RESULT]

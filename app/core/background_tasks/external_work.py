@@ -14,7 +14,7 @@ from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.interrupted import interrupt_background_tasks
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.prompts import EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT, PROMPT_TOOL_INTERRUPTED
+from app.core.prompts import EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT, PROMPT_TOOL_INTERRUPTED, TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.core.utils.background_task_result import build_background_task_failure_result
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.time import get_local_time
@@ -153,6 +153,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                     )
                     result_text = replacement if isinstance(replacement, str) else result_text
                 extra = task.extra if isinstance(task.extra, dict) else {}
+                instruction = TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT if extra.get("auto_terminal_watch") is True else EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
                 marker_payload = {
                     "type": "background_tool_result",
                     "ui_only": True,
@@ -160,7 +161,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                     "task_id": task.id,
                     "tool_name": task.tool_name,
                     "execution_status": execution_status,
-                    "instruction": EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT,
+                    "instruction": instruction,
                     "task": payload,
                     "tool_call": {"id": stored.tool_call_id, "name": task.tool_name, "arguments": dict(task.arguments or {})},
                     "request_context": extra.get("request_context") if isinstance(extra.get("request_context"), list) else [],
@@ -249,12 +250,13 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 files = extract_files_to_user([InternalMessage(role=MessageRole.TOOL, tool_call_id=original_call_id, content=result_text)])
                 if files:
                     checkpoint["files_to_user"] = merge_assistant_files(checkpoint.get("files_to_user", []), files)
+            resume_instruction = TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT if marker_payloads and all(marker["instruction"] == TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT for marker in marker_payloads) else EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
             checkpoint.update(
                 {
                     "messages": [],
                     "turn_messages": [],
                     "reload_history": True,
-                    "external_resume_messages": [InternalMessage(role=MessageRole.USER, id=None, content=json.dumps({"type": "external_work_resume", "instruction": EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT, "tasks": marker_payloads}, ensure_ascii=False)).model_dump(mode="json")],
+                    "external_resume_messages": [InternalMessage(role=MessageRole.USER, id=None, content=json.dumps({"type": "external_work_resume", "instruction": resume_instruction, "tasks": marker_payloads}, ensure_ascii=False)).model_dump(mode="json")],
                     "context_summary_trigger_mode": "user_message",
                     "context_summary_fixed_upper_message_id": latest_marker_id,
                 }

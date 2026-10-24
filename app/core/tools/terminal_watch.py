@@ -1,6 +1,5 @@
-import hashlib
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.core import constants
@@ -9,6 +8,7 @@ from app.core.i18n import t
 from app.core.terminal.schemas import TERMINAL_SESSION_FINAL_STATUSES, TerminalSessionStatus
 from app.core.terminal.watch_schema import TerminalWatchRequest
 from app.core.terminal.watcher import watch_terminal
+from app.core.utils.time import get_local_time
 
 from .base import BaseExecutor
 
@@ -61,34 +61,13 @@ async def ensure_terminal_auto_watch(
     if not callable(getattr(db, "execute", None)) or not callable(getattr(db, "commit", None)):
         return
 
-    active_watch = await background_task_crud.get_active_terminal_watch(
-        db,
-        uid,
-        session_id,
-        request.terminal_session_id,
-    )
-    if active_watch is not None:
-        return
-
-    digest = hashlib.sha256(f"{request.terminal_session_id}:{request.after_offset}".encode()).hexdigest()[:32]
-    await background_task_crud.create_task(
+    await background_task_crud.create_terminal_auto_watch(
         db,
         uid=uid,
         session_id=session_id,
         profile_id=profile_id,
-        tool_call_id=f"terminal-auto-watch:{digest}",
-        tool_name=constants.TERMINAL_WATCH_TOOL_NAME,
-        arguments={
-            "terminal_session_id": request.terminal_session_id,
-            "after_offset": request.after_offset,
-            "condition": "process_exit",
-        },
-        auto_reply=True,
-        extra={
-            "source": "terminal_auto_watch",
-            "auto_terminal_watch": True,
-            "terminal_session_id": request.terminal_session_id,
-        },
+        terminal_session_id=request.terminal_session_id,
+        after_offset=request.after_offset,
     )
 
 
@@ -117,13 +96,33 @@ class TerminalWatchExecutor(BaseExecutor):
             raise RuntimeError(t(constants.ERR_TOOL_RUNTIME_CONTEXT_MISSING))
 
         tool_timeout = self._tool_timeout()
-        deadline = task.created_at + timedelta(seconds=tool_timeout)
+        extra = task.extra if isinstance(task.extra, dict) else {}
+        auto_watch = extra.get("auto_terminal_watch") is True
+        if auto_watch:
+            observation_started_at = task.created_at
+            if isinstance(extra.get("observation_started_at"), str):
+                observation_started_at = datetime.fromisoformat(extra["observation_started_at"])
+            deadline = observation_started_at + timedelta(seconds=tool_timeout)
+        else:
+            deadline = task.created_at + timedelta(seconds=tool_timeout)
+
         await self.db.commit()
-        result = await watch_terminal(
-            task_id=task_id,
-            uid=self.uid,
-            session_id=self.session_id,
-            request=request,
-            deadline=deadline,
-        )
+        if auto_watch:
+            result = await watch_terminal(
+                task_id=task_id,
+                uid=self.uid,
+                session_id=self.session_id,
+                request=request,
+                deadline=deadline,
+                read_on_timeout=True,
+            )
+            result["observed_at"] = get_local_time().isoformat()
+        else:
+            result = await watch_terminal(
+                task_id=task_id,
+                uid=self.uid,
+                session_id=self.session_id,
+                request=request,
+                deadline=deadline,
+            )
         return json.dumps(result, ensure_ascii=False)
