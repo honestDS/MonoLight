@@ -6,13 +6,17 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from app.core.constants import ERR_WEIXIN_OPENCLAW_OUTBOUND_TEXT_FALLBACK_TOO_LONG
+from app.core.constants import ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED, ERR_WEIXIN_OPENCLAW_OUTBOUND_TEXT_FALLBACK_TOO_LONG
+from app.core.context import ContextManager
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
+from app.core.exceptions import LLMModelCapabilityException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.assistant_files import parse_assistant_files_content
+from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
+from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.providers.database import AsyncSessionLocal
 
@@ -136,6 +140,52 @@ async def _save_outbound_text_refinement_assistant_message(
         ai_msg=ai_msg,
         dedupe_key=dedupe_key,
     )
+
+
+async def _generate_refinement_message(
+    db: Any,
+    *,
+    uid: str,
+    session_id: str,
+    profile,
+    candidate: str,
+    policy: OutboundTextPolicy,
+) -> InternalMessage:
+    cfg = await validate_profile_and_cfg(db, profile)
+    chat_channel = cfg.channel.chat_channel
+    messages: list[InternalMessage] = []
+    if policy.additional_system_prompt:
+        messages.append(InternalMessage(role=MessageRole.SYSTEM, content=policy.additional_system_prompt))
+    messages.extend(
+        (
+            InternalMessage(role=MessageRole.ASSISTANT, content=candidate),
+            InternalMessage(role=MessageRole.USER, content=policy.refinement_prompt),
+        )
+    )
+
+    def build_request(chat_params, _chat_channel_obj, _model_entry):
+        return ContextManager.prepare_messages_for_model_request(
+            messages=messages,
+            context_window_k=chat_params["context_window_k"],
+            max_tokens=chat_params["max_tokens"],
+        )
+
+    response, *_ = await generate_chat_with_fallback(
+        db,
+        chat_channel=chat_channel,
+        request_builder=build_request,
+        call_context="message_platform_outbound_text_refinement",
+        cursor_key=f"{profile.id}:CHAT",
+        uid=uid,
+        session_id=session_id,
+        tools=None,
+        tool_choice="none",
+        require_content=True,
+    )
+    ai_msg = response.message
+    if ai_msg.tool_calls:
+        raise LLMModelCapabilityException(message=ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED)
+    return ai_msg
 
 
 async def process_outbound_text_event(
@@ -262,20 +312,13 @@ async def _generate_refined_outbound_text(
                 refined_text = parse_assistant_files_content(persisted_assistant_message.content)
                 return refined_text, True
 
-            from app.core.dispatchers.dispatcher import ChatDispatcher
-
-            ai_msg, _turn_messages, _files = await ChatDispatcher._generate_reply_from_history(
+            ai_msg = await _generate_refinement_message(
                 db,
                 uid=uid,
                 session_id=session_id,
                 profile=profile,
-                call_context="message_platform_outbound_text_refinement",
-                allow_tools=False,
-                submission_context=[InternalMessage(role=MessageRole.ASSISTANT, content=candidate)],
-                extra_messages=[InternalMessage(role=MessageRole.USER, content=policy.refinement_prompt)],
-                additional_system_prompt=policy.additional_system_prompt,
-                persist_response=False,
-                reply_source=source,
+                candidate=candidate,
+                policy=policy,
             )
             saved_msg = await _save_outbound_text_refinement_assistant_message(
                 db=db,

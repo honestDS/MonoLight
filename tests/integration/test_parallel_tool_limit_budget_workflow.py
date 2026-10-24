@@ -463,7 +463,6 @@ async def test_background_parallel_tool_limit_budget_uses_executable_call_count(
             persist_response=False,
             restrict_tools_to_background_allowlist=False,
             reply_source="scheduled_task",
-            submission_context=[assistant_message],
         )
 
     assert final_message.content == "background complete"

@@ -807,8 +807,7 @@ async def test_build_system_prompt_includes_memory_rules_only_when_both_switches
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("submission_context", [None, [InternalMessage(role=MessageRole.USER, content="history")]])
-async def test_background_active_reply_excludes_memory_tool_and_disables_memory_prompt(monkeypatch, submission_context):
+async def test_background_active_reply_excludes_memory_tool_and_disables_memory_prompt(monkeypatch):
     profile = _profile(memory_enabled=True)
     cfg = SimpleNamespace(
         channel=SimpleNamespace(chat_channel=object()),
@@ -816,7 +815,7 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
         memory=SimpleNamespace(enabled=True),
     )
     prepare_flags = []
-    build_flags = []
+    processed_flags = []
     requests = []
 
     async def fake_user(_db, _uid):
@@ -834,11 +833,8 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
 
     async def fake_prepare(*_args, **kwargs):
         prepare_flags.append(kwargs["include_longterm_memory"])
+        processed_flags.append(kwargs["processed_only"])
         return [InternalMessage(role=MessageRole.USER, content="request")]
-
-    async def fake_build_prompt(*_args, **kwargs):
-        build_flags.append(kwargs["include_longterm_memory"])
-        return "base system prompt"
 
     def fake_materialize(messages):
         return messages
@@ -879,7 +875,6 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
     monkeypatch.setattr(background_module, "validate_profile_and_cfg", fake_validate)
     monkeypatch.setattr(background_module, "get_tools_for_profile", fake_get_tools)
     monkeypatch.setattr(background_module, "prepare_messages", fake_prepare)
-    monkeypatch.setattr(background_module, "build_system_prompt", fake_build_prompt)
     monkeypatch.setattr(background_module, "materialize_user_environment_prompts", fake_materialize)
     monkeypatch.setattr(
         background_module.ContextManager,
@@ -896,7 +891,6 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
         profile=profile,
         call_context="background_task_proactive_reply",
         allow_tools=True,
-        submission_context=submission_context,
     )
 
     assert final_message.content == "background reply"
@@ -904,12 +898,8 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
     request_tool_names = {tool["function"]["name"] for tool in requests[0]["tools"]}
     assert MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME not in request_tool_names
     assert "send_file_to_user" in request_tool_names
-    if submission_context is None:
-        assert prepare_flags == [False]
-        assert build_flags == []
-    else:
-        assert prepare_flags == []
-        assert build_flags == [False]
+    assert prepare_flags == [False]
+    assert processed_flags == [True]
 
 
 @pytest.mark.asyncio

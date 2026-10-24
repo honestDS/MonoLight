@@ -6,7 +6,7 @@ from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
-from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
+from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT, EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
@@ -22,6 +22,7 @@ def _build_background_message_dedupe_key(task_id: int, purpose: str) -> str:
 
 
 def _build_background_tool_result_message(task: BackgroundTask) -> str:
+    extra = task.extra if isinstance(task.extra, dict) else {}
     task_result = task.result or {"status": task.status, "tool_name": task.tool_name, "error": task.error}
     tool_call = {
         "id": task.tool_call_id,
@@ -35,10 +36,15 @@ def _build_background_tool_result_message(task: BackgroundTask) -> str:
     return json.dumps(
         {
             "type": "background_tool_result",
-            "instruction": BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT,
+            "instruction": EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT if extra.get("auto_terminal_watch") is True else BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT,
             "task": task_result,
             "tool_call": tool_call,
             "tool_result": tool_result,
+            "task_id": task.id,
+            "tool_name": task.tool_name,
+            "source": extra.get("source"),
+            "request_context": extra.get("request_context") if isinstance(extra.get("request_context"), list) else [],
+            "purpose": extra.get("purpose"),
         },
         ensure_ascii=False,
     )
@@ -79,7 +85,7 @@ async def trigger_background_task_reply(task_id: int) -> None:
         result_message = Message(
             session_id=task.session_id,
             uid=task.uid,
-            role=MessageRole.ASSISTANT,
+            role=MessageRole.USER,
             type=MessageType.BACKGROUND_TASK_RESULT,
             content=_build_background_tool_result_message(task),
             profile_id=task.profile_id,

@@ -980,6 +980,16 @@ async def test_background_reply_persists_and_clears_audit_binding(work_type, mon
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
 
+    async def get_result(db, dedupe_key):
+        assert dedupe_key == "background-task:8:result"
+        return SimpleNamespace(
+            id=9,
+            uid=work.uid,
+            session_id=work.session_id,
+            profile_id=work.profile_id,
+            type=MessageType.BACKGROUND_TASK_RESULT,
+        )
+
     async def update_claimed(db, **kwargs):
         state = kwargs["values"]["execution_state"]
         work.execution_state = state
@@ -994,6 +1004,7 @@ async def test_background_reply_persists_and_clears_audit_binding(work_type, mon
 
     monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_replies_module.message_crud, "get_by_dedupe_key", get_result)
     monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
     monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
 
@@ -1056,6 +1067,18 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
 
+    marker = SimpleNamespace(
+        id=9,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile_id=work.profile_id,
+        type=MessageType.BACKGROUND_TASK_RESULT,
+    )
+
+    async def get_result(db, dedupe_key):
+        assert dedupe_key == "background-task:8:result"
+        return marker
+
     async def generate_reply(db, **kwargs):
         captured.update(kwargs)
         await kwargs["request_metadata_callback"](request_metadata)
@@ -1078,6 +1101,7 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
 
     monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_replies_module.message_crud, "get_by_dedupe_key", get_result)
     monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
     monkeypatch.setattr(executor_metadata_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(executor_metadata_module.session_crud, "update_llm_request_metadata", update_request_metadata)
@@ -1096,6 +1120,7 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
         "work_sequence_no": 1,
     }
     assert callable(captured["request_metadata_callback"])
+    assert captured["history_before_id"] == marker.id + 1
     assert response["llm_request_metadata"] == expected_request_metadata
     assert response["llm_request_metadata"]["input_tokens"] == 456
     assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(0.25)

@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import update
 from sqlmodel import select
 
+import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.message_platforms.manager as manager_module
 from app.core.constants import (
     MSG_MESSAGE_PLATFORM_TOOL_USED,
@@ -24,12 +25,15 @@ from app.core.message_platforms.notifier import build_outbox_dedupe_key, normali
 from app.core.message_platforms.outbound_text import OutboundTextPolicy, process_outbound_text_event, split_outbound_text_by_newline
 from app.core.message_platforms.tool_output import combine_proactive_reply_tool_output
 from app.core.utils.time import get_local_time
-from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.channel import ModelChannel
+from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.message_platform_outbox import MessagePlatformOutbox, MessagePlatformOutboxStatus
+from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal
 from app.providers.database.client import CancellationSafeAsyncSession
+from app.transformers.openai import OpenAIChatCompletionsTransformer
 
 
 class DeliveringHandler(MessagePlatformHandler):
@@ -220,10 +224,10 @@ def test_split_outbound_text_by_newline_prefers_closest_utf8_byte_balance():
 
 @pytest.mark.asyncio
 async def test_outbound_text_event_skips_refinement_when_original_content_can_split(monkeypatch):
-    async def generate_reply(*args, **kwargs):
+    async def generate_refinement(*args, **kwargs):
         raise AssertionError("refinement must not be called when the original text can split")
 
-    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(outbound_text_module, "_generate_refinement_message", generate_refinement)
     event = {"type": "proactive_reply", "content": "a" * 6 + "\n" + "b" * 6}
 
     processed = await process_outbound_text_event(
@@ -265,15 +269,15 @@ async def test_outbound_text_refinement_stops_when_compressed_candidate_can_spli
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=1, uid="uid")
 
-    async def generate_reply(db, **kwargs):
-        submitted_candidates.append(kwargs["submission_context"][0].content)
+    async def generate_refinement(db, **kwargs):
+        submitted_candidates.append(kwargs["candidate"])
         generated_calls.append(kwargs)
-        return InternalMessage(role=MessageRole.ASSISTANT, content="a" * 6 + "\n" + "b" * 6), [], []
+        return InternalMessage(role=MessageRole.ASSISTANT, content="a" * 6 + "\n" + "b" * 6)
 
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(outbound_text_module, "_generate_refinement_message", generate_refinement)
 
     processed = await process_outbound_text_event(
         "uid",
@@ -292,7 +296,8 @@ async def test_outbound_text_refinement_stops_when_compressed_candidate_can_spli
 
     assert submitted_candidates == ["a" * 20]
     assert processed == {"type": "proactive_reply", "content": "a" * 6 + "\n" + "b" * 6}
-    assert generated_calls[0]["persist_response"] is False
+    assert generated_calls[0]["candidate"] == "a" * 20
+    assert generated_calls[0]["policy"].utf8_byte_limit == 10
     assert len(persistence["user_save_calls"]) == 1
     user_save_call = persistence["user_save_calls"][0]
     assert user_save_call["session_id"] == "session"
@@ -335,14 +340,14 @@ async def test_outbound_text_refinement_uses_the_previous_round_result(monkeypat
         assert profile_id == 1
         return SimpleNamespace(id=1, uid="uid")
 
-    async def generate_reply(db, **kwargs):
-        submitted_candidates.append(kwargs["submission_context"][0].content)
-        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements)), [], []
+    async def generate_refinement(db, **kwargs):
+        submitted_candidates.append(kwargs["candidate"])
+        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements))
 
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(outbound_text_module, "_generate_refinement_message", generate_refinement)
 
     event = {"type": "proactive_reply", "content": "a" * 12}
     processed = await process_outbound_text_event(
@@ -384,14 +389,14 @@ async def test_outbound_text_refinement_keeps_candidate_after_unshortened_result
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=1, uid="uid")
 
-    async def generate_reply(db, **kwargs):
-        submitted_candidates.append(kwargs["submission_context"][0].content)
-        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements)), [], []
+    async def generate_refinement(db, **kwargs):
+        submitted_candidates.append(kwargs["candidate"])
+        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements))
 
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(outbound_text_module, "_generate_refinement_message", generate_refinement)
 
     processed = await process_outbound_text_event(
         "uid",
@@ -430,9 +435,9 @@ async def test_outbound_text_refinement_uses_fallback_after_three_oversized_roun
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=1, uid="uid")
 
-    async def generate_reply(db, **kwargs):
-        submitted_candidates.append(kwargs["submission_context"][0].content)
-        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements)), [], []
+    async def generate_refinement(db, **kwargs):
+        submitted_candidates.append(kwargs["candidate"])
+        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements))
 
     original_save_assistant_message = outbound_text_module._save_outbound_text_refinement_assistant_message
 
@@ -453,7 +458,7 @@ async def test_outbound_text_refinement_uses_fallback_after_three_oversized_roun
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(outbound_text_module, "_generate_refinement_message", generate_refinement)
     monkeypatch.setattr(outbound_text_module, "_save_outbound_text_refinement_assistant_message", save_assistant_message)
 
     policy = OutboundTextPolicy(
@@ -497,14 +502,14 @@ async def test_outbound_text_refinement_reuses_persisted_assistant_result_for_sa
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=1, uid="uid")
 
-    async def generate_reply(db, **kwargs):
-        generated_candidates.append(kwargs["submission_context"][0].content)
-        return InternalMessage(role=MessageRole.ASSISTANT, content="compressed"), [], []
+    async def generate_refinement(db, **kwargs):
+        generated_candidates.append(kwargs["candidate"])
+        return InternalMessage(role=MessageRole.ASSISTANT, content="compressed")
 
     monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr("app.core.dispatchers.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(outbound_text_module, "_generate_refinement_message", generate_refinement)
 
     event = {"event_id": "outbox:17", "type": "proactive_reply", "content": "a" * 20}
     policy = OutboundTextPolicy(
@@ -522,6 +527,151 @@ async def test_outbound_text_refinement_reuses_persisted_assistant_result_for_sa
     assert second["content"] == "compressed"
     assert generated_candidates == ["a" * 20]
     assert len(persistence["assistant_save_calls"]) == 1
+
+
+@pytest.mark.parametrize("upstream_kind", ["valid", "tool_calls"], ids=["valid-text", "tool-calls"])
+@pytest.mark.asyncio
+async def test_outbound_text_refinement_uses_minimal_independent_request_contract(upstream_kind, monkeypatch):
+    model_id = "outbound-refinement-model"
+    sentinel = "unrelated-history-sentinel"
+    usage_before = {
+        "input_tokens": 17,
+        "input_tokens_source": "provider",
+        "context_window_tokens": 32768,
+        "max_output_tokens": 512,
+        "output_tokens": 9,
+        "total_input_tokens": 17,
+        "total_output_tokens": 9,
+    }
+    policy = OutboundTextPolicy(
+        utf8_byte_limit=200,
+        max_refinement_attempts=3,
+        additional_system_prompt="policy system",
+        refinement_prompt="refinement user",
+        refinement_failed_message_key=MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
+    )
+    profile_configs = ProfileConfig.model_validate(
+        {
+            "channel": {
+                "chat_channel": {
+                    "rules": [
+                        {"channel_id": 1, "model_id": model_id, "priority": 1, "weight": 1},
+                    ]
+                }
+            },
+            "tool": {"enabled_tools": ["execute_shell"]},
+        }
+    ).model_dump(mode="json")
+
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
+    monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", AsyncSessionLocal)
+
+    async with AsyncSessionLocal() as db:
+        db.add(
+            ModelChannel(
+                id=1,
+                name="outbound-refinement-channel",
+                api_key="enc:v1:test-api-key",
+                base_url="https://llm.invalid/v1",
+                model_ids=[
+                    {
+                        "model_id": model_id,
+                        "usage": "CHAT",
+                        "protocol": "OPENAI",
+                        "context_window_k": 32,
+                        "max_tokens": 512,
+                        "is_enabled": True,
+                    }
+                ],
+            )
+        )
+        db.add(Profile(id=1, uid="uid", name="outbound-refinement-profile", configs=profile_configs))
+        session = await db.get(ChatSession, "session")
+        assert session is not None
+        session.profile_id = 1
+        session.llm_request_metadata = usage_before
+        db.add(
+            Message(
+                session_id="session",
+                uid="uid",
+                role=MessageRole.USER,
+                content=sentinel,
+                profile_id=1,
+                is_processed=True,
+            )
+        )
+        await db.commit()
+
+    payloads: list[dict[str, Any]] = []
+
+    async def fake_post_json(_transformer, *, payload, **_kwargs):
+        payloads.append(json.loads(json.dumps(payload, ensure_ascii=False)))
+        response_message: dict[str, Any] = {"role": "assistant", "content": "compressed"}
+        if upstream_kind == "tool_calls":
+            response_message["content"] = "forbidden tool output"
+            response_message["tool_calls"] = [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_shell",
+                        "arguments": json.dumps({"command": "echo must not run"}),
+                    },
+                }
+            ]
+        return {
+            "id": "chatcmpl-outbound-refinement",
+            "object": "chat.completion",
+            "model": model_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": response_message,
+                    "finish_reason": "tool_calls" if upstream_kind == "tool_calls" else "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+
+    monkeypatch.setattr(OpenAIChatCompletionsTransformer, "_post_json", fake_post_json)
+
+    event = {"event_id": "outbox:minimal-contract", "type": "proactive_reply", "content": "a" * 210}
+    first = await process_outbound_text_event("uid", "session", "outbox-test", event, policy)
+    if upstream_kind == "valid":
+        second = await process_outbound_text_event("uid", "session", "outbox-test", event, policy)
+        assert first["content"] == "compressed"
+        assert second["content"] == "compressed"
+        assert len(payloads) == 1
+    else:
+        assert first["content"] == t(MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED)
+        assert len(payloads) == policy.max_refinement_attempts
+        assert len(first["content"].encode("utf-8")) <= policy.utf8_byte_limit
+
+    expected_messages = [
+        {"role": MessageRole.SYSTEM.value, "content": policy.additional_system_prompt},
+        {"role": MessageRole.ASSISTANT.value, "content": "a" * 210},
+        {"role": MessageRole.USER.value, "content": policy.refinement_prompt},
+    ]
+    for payload in payloads:
+        assert payload["messages"] == expected_messages
+        assert "tools" not in payload
+        assert payload["tool_choice"] == "none"
+        assert sentinel not in json.dumps(payload, ensure_ascii=False)
+
+    async with AsyncSessionLocal() as db:
+        session = await db.get(ChatSession, "session")
+        assert session is not None
+        assert session.llm_request_metadata == usage_before
+        messages = list((await db.execute(select(Message).where(Message.session_id == "session").order_by(Message.id))).scalars())
+        assert not any(message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} for message in messages)
+        refinement_prompts = [message for message in messages if message.type == MessageType.OUTBOUND_TEXT_REFINEMENT]
+        assert len(refinement_prompts) == (1 if upstream_kind == "valid" else policy.max_refinement_attempts)
+        assert [message.content for message in refinement_prompts] == [policy.refinement_prompt] * len(refinement_prompts)
+        assistant_contents = [message.content for message in messages if message.role == MessageRole.ASSISTANT]
+        if upstream_kind == "valid":
+            assert assistant_contents == ["compressed"]
+        else:
+            assert assistant_contents == [t(MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED)]
 
 
 @pytest.mark.asyncio

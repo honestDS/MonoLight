@@ -8,96 +8,108 @@ from app.core.background_tasks.manager import BackgroundTaskManager
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
-@pytest.mark.parametrize("next_round_role", [MessageRole.USER, MessageRole.ASSISTANT])
-def test_build_submission_context_removes_only_current_sibling_tool_result(next_round_role):
-    historical_assistant = InternalMessage(
-        role=MessageRole.ASSISTANT,
-        tool_calls=[InternalToolCall(id="reused", name="historical_tool", arguments={"value": "history"})],
-        created_at=2.0,
-    )
-    historical_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="old-result", created_at=3.0)
-    target_call = InternalToolCall(id="target", name="target_tool", arguments={"value": "target"})
-    current_assistant = InternalMessage(
-        role=MessageRole.ASSISTANT,
-        tool_calls=[target_call, InternalToolCall(id="reused", name="sibling_tool", arguments={"value": "current"})],
-        created_at=4.0,
-    )
-    current_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="current-result", created_at=6.0)
-    next_round_boundary = InternalMessage(role=next_round_role, content="next-round", created_at=7.0)
-    later_assistant = InternalMessage(
-        role=MessageRole.ASSISTANT,
-        tool_calls=[InternalToolCall(id="reused", name="later_tool", arguments={"value": "later"})],
-        created_at=8.0,
-    )
-    later_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="later-result", created_at=9.0)
-    messages = [
-        InternalMessage(role=MessageRole.SYSTEM, content="runtime system prompt", created_at=1.0),
-        historical_assistant,
-        historical_result,
-        current_assistant,
-        InternalMessage(role=MessageRole.SYSTEM, content="system between turns", created_at=5.0),
-        current_result,
-        next_round_boundary,
-        later_assistant,
-        later_result,
-    ]
-    original_messages = [message.model_dump(mode="json") for message in messages]
-
-    submission_context = manager_module._build_submission_context(messages, "target")
-
-    expected_context = [
-        historical_assistant.model_dump(mode="json", exclude_none=True),
-        historical_result.model_dump(mode="json", exclude_none=True),
-        InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[target_call], created_at=4.0).model_dump(mode="json", exclude_none=True),
-        next_round_boundary.model_dump(mode="json", exclude_none=True),
-        later_assistant.model_dump(mode="json", exclude_none=True),
-        later_result.model_dump(mode="json", exclude_none=True),
-    ]
-    assert submission_context == expected_context
-    assert [message.model_dump(mode="json") for message in messages] == original_messages
-
-
-def test_build_submission_context_without_matching_target_only_excludes_system_messages():
-    historical_assistant = InternalMessage(
-        role=MessageRole.ASSISTANT,
-        tool_calls=[InternalToolCall(id="reused", name="historical_tool", arguments={"value": "history"})],
-        created_at=2.0,
-    )
-    historical_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="old-result", created_at=3.0)
-    later_assistant = InternalMessage(
-        role=MessageRole.ASSISTANT,
-        tool_calls=[InternalToolCall(id="reused", name="later_tool", arguments={"value": "later"})],
-        created_at=5.0,
-    )
-    later_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="reused", content="later-result", created_at=6.0)
-    messages = [
-        InternalMessage(role=MessageRole.SYSTEM, content="runtime system prompt", created_at=1.0),
-        historical_assistant,
-        historical_result,
-        InternalMessage(role=MessageRole.USER, content="next-round", created_at=4.0),
-        later_assistant,
-        later_result,
-        InternalMessage(role=MessageRole.SYSTEM, content="trailing system prompt", created_at=7.0),
-    ]
-    original_messages = [message.model_dump(mode="json") for message in messages]
-
-    submission_context = manager_module._build_submission_context(messages, "target")
-
-    expected_context = [
-        historical_assistant.model_dump(mode="json", exclude_none=True),
-        historical_result.model_dump(mode="json", exclude_none=True),
-        messages[3].model_dump(mode="json", exclude_none=True),
-        later_assistant.model_dump(mode="json", exclude_none=True),
-        later_result.model_dump(mode="json", exclude_none=True),
-    ]
-    assert submission_context == expected_context
-    assert [message.model_dump(mode="json") for message in messages] == original_messages
-
-
 @pytest.mark.asyncio
-async def test_submit_persists_submission_context_with_task_record(monkeypatch):
+async def test_submit_persists_request_context_with_task_record(monkeypatch):
     manager = BackgroundTaskManager()
     created_task = SimpleNamespace(id=7)
+    create_calls = []
+
+    async def create_task(db, **kwargs):
+        create_calls.append((db, kwargs))
+        return created_task
+
+    monkeypatch.setattr(manager_module.background_task_crud, "create_task", create_task)
+    profile = SimpleNamespace(id=3)
+    db = object()
+    arguments = {"command": "pwd"}
+    messages = [
+        InternalMessage(role=MessageRole.USER, id=11, content="更早的请求"),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content="处理更早的请求",
+            tool_calls=[InternalToolCall(id="old-call", name="execute_shell", arguments={"command": "ls"})],
+        ),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id="old-call", content="旧结果"),
+        InternalMessage(
+            role=MessageRole.USER,
+            id=22,
+            content="生成两个文件",
+            attachments=["instructions.txt"],
+            provider_metadata={"provider": "metadata-only"},
+        ),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content="执行当前请求中的命令",
+            tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments=arguments)],
+        ),
+    ]
+    original_messages = [message.model_dump(mode="json") for message in messages]
+    original_arguments = arguments.copy()
+
+    result = await manager.submit(
+        db,
+        uid="user-1",
+        session_id="session-1",
+        profile=profile,
+        tool_call_id="call-1",
+        tool_name="execute_shell",
+        arguments=arguments,
+        allowed_knowledge_base_ids=[4, 9],
+        source="background-test",
+        messages=messages,
+    )
+
+    assert result is created_task
+    assert len(create_calls) == 1
+    create_kwargs = create_calls[0][1]
+    assert create_kwargs["uid"] == "user-1"
+    assert create_kwargs["session_id"] == "session-1"
+    assert create_kwargs["profile_id"] == 3
+    assert create_kwargs["tool_call_id"] == "call-1"
+    assert create_kwargs["tool_name"] == "execute_shell"
+    assert create_kwargs["arguments"] == arguments
+    assert create_kwargs["auto_reply"] is True
+    extra = create_kwargs["extra"]
+    assert extra["allowed_knowledge_base_ids"] == [4, 9]
+    assert extra["source"] == "background-test"
+    assert extra["purpose"] == "执行当前请求中的命令"
+    assert extra["request_context"] == [
+        {
+            "id": 22,
+            "role": "user",
+            "content": "生成两个文件",
+            "attachments": ["instructions.txt"],
+        }
+    ]
+    assert "provider_metadata" not in extra["request_context"][0]
+    assert [message.model_dump(mode="json") for message in messages] == original_messages
+    assert arguments == original_arguments
+    assert manager._task is None
+    assert manager._running_by_profile == {}
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected_purpose"),
+    [
+        pytest.param(None, None, id="without-messages"),
+        pytest.param(
+            [
+                InternalMessage(role=MessageRole.SYSTEM, content="runtime system prompt"),
+                InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="执行无用户输入的命令",
+                    tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "pwd"})],
+                ),
+            ],
+            "执行无用户输入的命令",
+            id="without-user-message",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_submit_allows_empty_request_context(monkeypatch, messages, expected_purpose):
+    manager = BackgroundTaskManager()
+    created_task = SimpleNamespace(id=8)
     create_calls = []
 
     async def create_task(db, **kwargs):
@@ -116,28 +128,21 @@ async def test_submit_persists_submission_context_with_task_record(monkeypatch):
         tool_call_id="call-1",
         tool_name="execute_shell",
         arguments={"command": "pwd"},
-        messages=[
-            InternalMessage(role=MessageRole.SYSTEM, content="runtime system prompt"),
-            InternalMessage(role=MessageRole.USER, content="生成两个文件"),
-            InternalMessage(
-                role=MessageRole.ASSISTANT,
-                tool_calls=[
-                    InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "pwd"}),
-                    InternalToolCall(id="call-2", name="execute_shell", arguments={"command": "ls"}),
-                ],
-            ),
-        ],
+        allowed_knowledge_base_ids=[4, 9],
+        source="background-test",
+        messages=messages,
     )
 
     assert result is created_task
     assert len(create_calls) == 1
-    extra = create_calls[0][1]["extra"]
-    assert extra["source"] == "llm_tool_call"
-    assert [message["role"] for message in extra["submission_context"]] == ["user", "assistant"]
-    assert extra["submission_context"][0]["content"] == "生成两个文件"
-    assert [tool_call["id"] for tool_call in extra["submission_context"][1]["tool_calls"]] == ["call-1"]
-    assert manager._task is None
-    assert manager._running_by_profile == {}
+    create_kwargs = create_calls[0][1]
+    assert create_kwargs["auto_reply"] is True
+    assert create_kwargs["extra"] == {
+        "allowed_knowledge_base_ids": [4, 9],
+        "source": "background-test",
+        "request_context": [],
+        "purpose": expected_purpose,
+    }
 
 
 @pytest.mark.asyncio

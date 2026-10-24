@@ -854,7 +854,6 @@ async def test_background_unconfirmed_file_tool_timeout_persists_execution_unkno
                         persist_response=False,
                         restrict_tools_to_background_allowlist=False,
                         reply_source="scheduled_task",
-                        submission_context=[InternalMessage(role=MessageRole.USER, content="write the file")],
                     )
                 )
                 await asyncio.wait_for(started.wait(), timeout=5)

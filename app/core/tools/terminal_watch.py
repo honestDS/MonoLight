@@ -88,7 +88,6 @@ async def ensure_terminal_auto_watch(
             "source": "terminal_auto_watch",
             "auto_terminal_watch": True,
             "terminal_session_id": request.terminal_session_id,
-            "submission_context": [],
         },
     )
 
