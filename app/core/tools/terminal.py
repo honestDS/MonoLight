@@ -27,7 +27,7 @@ from app.core.terminal.schemas import (
 )
 
 from .base import BaseExecutor
-from .terminal_watch import TERMINAL_WATCH_TOOL_SCHEMA
+from .terminal_watch import TERMINAL_WATCH_TOOL_SCHEMA, ensure_terminal_auto_watch
 
 _TERMINAL_SESSION_ID_SCHEMA = {
     "type": "string",
@@ -247,6 +247,15 @@ class TerminalStatusExecutor(_TerminalExecutor):
         request = TerminalStatusRequest(terminal_session_id=terminal_session_id, request_id=request_id)
         db, session_id, _ = self._require_runtime_context()
         snapshot = await self._get_snapshot(request.terminal_session_id)
+        await ensure_terminal_auto_watch(
+            self.db,
+            uid=self.uid,
+            session_id=session_id,
+            profile_id=getattr(self.profile, "id", None),
+            terminal_session_id=request.terminal_session_id,
+            after_offset=snapshot.output_buffer.next_offset,
+            session_status=snapshot.status,
+        )
         if request.request_id is None:
             return self._dump_model(snapshot)
         write_request = await terminal_session_manager.get_write_status(
@@ -276,7 +285,7 @@ class TerminalWriteExecutor(_TerminalExecutor):
     async def execute(self, terminal_session_id: str, data: str, request_id: str | None = None) -> str:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._tool_timeout()
-        snapshot_before_write = await self._get_snapshot(terminal_session_id)
+        await self._get_snapshot(terminal_session_id)
         request_id = self._derive_request_id(TerminalAction.WRITE) if request_id is None else request_id
         request = TerminalWriteRequest(
             terminal_session_id=terminal_session_id,
@@ -306,10 +315,18 @@ class TerminalWriteExecutor(_TerminalExecutor):
             )
         bytes_written = write_result["bytes_written"]
         output_offset_before_write = write_result.get("output_offset_before_write")
-        if not isinstance(output_offset_before_write, int) or isinstance(output_offset_before_write, bool) or output_offset_before_write < 0:
-            output_offset_before_write = snapshot_before_write.output_buffer.next_offset
-
         latest_snapshot = await self._get_snapshot(terminal_session_id)
+        if not isinstance(output_offset_before_write, int) or isinstance(output_offset_before_write, bool) or output_offset_before_write < 0:
+            output_offset_before_write = latest_snapshot.output_buffer.next_offset
+        await ensure_terminal_auto_watch(
+            self.db,
+            uid=self.uid,
+            session_id=session_id,
+            profile_id=getattr(self.profile, "id", None),
+            terminal_session_id=terminal_session_id,
+            after_offset=output_offset_before_write,
+            session_status=latest_snapshot.status,
+        )
         result = TerminalWriteResult(
             terminal_session_id=terminal_session_id,
             request_id=request_id,

@@ -206,25 +206,36 @@ test('composed websocket send merges turn_end into the existing tool message', a
   assert.equal(r1Messages.length, 1)
 })
 
-test('composed websocket done filters internal history and preserves complete response', async t => {
+test('composed websocket done respects background result visibility and preserves complete response', async t => {
   for (const showToolCalls of [true, false]) {
     await t.test(`show_tool_calls=${showToolCalls}`, async nested => {
       const files = [{ name: 'answer.txt', url: '/files/answer.txt' }]
-      const internalHistory = [
+      const backgroundHistory = [
         {
           id: 101,
           type: 'background_result',
           role: 'user',
-          content: JSON.stringify({ type: 'background_tool_result', content: 'hidden user' })
+          content: JSON.stringify({
+            type: 'background_tool_result',
+            task: 'visible user background result',
+            tool_call: { id: 'background-user-call', name: 'background_lookup', arguments: {} }
+          })
         },
         { id: 102, type: 'background_result', role: 'user', content: '{broken-json' },
         {
           id: 103,
           type: 'background_result',
           role: 'assistant',
-          content: JSON.stringify({ type: 'background_tool_result', content: 'hidden assistant' })
+          content: JSON.stringify({
+            type: 'background_tool_result',
+            task: 'visible assistant background result',
+            tool_call: { id: 'background-assistant-call', name: 'background_lookup', arguments: {} }
+          })
         },
-        { id: 104, type: 'background_result', role: 'assistant', content: '{broken-json' },
+        { id: 104, type: 'background_result', role: 'assistant', content: '{broken-json' }
+      ]
+      const internalHistory = [
+        ...backgroundHistory,
         { id: 105, role: 'system', content: 'hidden system' },
         { id: 106, type: 'message', role: 'background_system', content: 'hidden legacy system' }
       ]
@@ -245,7 +256,10 @@ test('composed websocket done filters internal history and preserves complete re
         content: 'lookup result'
       }
       const finalHistoryMessage = { id: 203, role: 'assistant', content: 'complete reply' }
-      const internalIds = new Set(internalHistory.map(message => String(message.id)))
+      const backgroundIds = new Set(backgroundHistory.map(message => String(message.id)))
+      const hiddenIds = new Set(internalHistory
+        .filter(message => ['system', 'background_system'].includes(message.role))
+        .map(message => String(message.id)))
       const harness = await createHarness(nested, {
         sessions: [createSession('A', { source: 'ws', show_tool_calls: showToolCalls })],
         initialRoute: { path: '/', query: { session_id: 'A' } }
@@ -283,10 +297,14 @@ test('composed websocket done filters internal history and preserves complete re
         }
       }
 
-      const assertDoneMessages = () => {
+      const assertDoneMessages = (expectedBackgroundCount = showToolCalls ? backgroundIds.size : 0) => {
         const messages = chat.messages.value
         assert.equal(
-          messages.some(message => internalIds.has(String(message.db_id ?? message.id))),
+          messages.filter(message => backgroundIds.has(String(message.db_id ?? message.id))).length,
+          expectedBackgroundCount
+        )
+        assert.equal(
+          messages.some(message => hiddenIds.has(String(message.db_id ?? message.id))),
           false
         )
         assert.equal(
@@ -310,115 +328,152 @@ test('composed websocket done filters internal history and preserves complete re
         )
       }
 
+      const responseHistorySnapshot = JSON.stringify(doneEvent.response.history)
       await receiveWs(harness, doneEvent)
       assertDoneMessages()
-      const messageCount = chat.messages.value.length
+      const nonBackgroundMessageCount = chat.messages.value.filter(
+        message => !backgroundIds.has(String(message.db_id ?? message.id))
+      ).length
 
       await receiveWs(harness, doneEvent)
-      assert.equal(chat.messages.value.length, messageCount)
-      assertDoneMessages()
+      assert.equal(
+        chat.messages.value.filter(
+          message => !backgroundIds.has(String(message.db_id ?? message.id))
+        ).length,
+        nonBackgroundMessageCount
+      )
+      assertDoneMessages(
+        chat.messages.value.filter(message => backgroundIds.has(String(message.db_id ?? message.id))).length
+      )
+      assert.equal(JSON.stringify(doneEvent.response.history), responseHistorySnapshot)
     })
   }
 })
 
-test('composed history ignores internal background results but preserves ordinary messages', async t => {
+test('composed history respects background result visibility and preserves ordinary messages', async t => {
   for (const source of ['ws', 'http', 'external']) {
-    await t.test(source, async nested => {
-      const backgroundResults = ['user', 'assistant', 'system'].flatMap((role, roleIndex) => (
-        ['valid', 'corrupt', 'empty'].map((contentKind, contentIndex) => ({
-          id: 100 + roleIndex * 3 + contentIndex,
-          type: 'background_result',
-          role,
-          content: contentKind === 'valid'
-            ? JSON.stringify({ type: 'background_tool_result', content: 'internal result' })
-            : contentKind === 'corrupt' ? '{broken-json' : ''
-        }))
-      ))
-      const internalMessages = [
-        ...backgroundResults,
-        { id: 109, role: 'system', content: JSON.stringify({ type: 'background_tool_result' }) },
-        { id: 110, role: 'system', content: '{broken-json' },
-        { id: 111, role: 'system', content: '' },
-        {
-          id: 112,
-          type: 'message',
-          role: 'background_system',
-          content: JSON.stringify({ type: 'background_tool_result' })
-        }
-      ]
-      const ordinaryMessages = [
-        { id: 200, role: 'user', content: 'ordinary user message' },
-        {
-          id: 201,
-          role: 'user',
-          content: JSON.stringify({
+    for (const showToolCalls of [true, false]) {
+      await t.test(`${source}, show_tool_calls=${showToolCalls}`, async nested => {
+        const backgroundResults = ['user', 'assistant', 'system'].flatMap((role, roleIndex) => (
+          ['valid', 'corrupt', 'empty'].map((contentKind, contentIndex) => ({
+            id: 100 + roleIndex * 3 + contentIndex,
             type: 'background_result',
-            role: 'system',
-            content: 'ordinary JSON text'
-          })
-        },
-        { id: 202, role: 'assistant', content: 'ordinary assistant message' },
-        {
-          id: 203,
-          type: 'tool_result',
-          role: 'tool',
-          content: JSON.stringify({
+            role,
+            content: contentKind === 'valid'
+              ? JSON.stringify({
+                type: 'background_tool_result',
+                task: 'background result',
+                tool_call: {
+                  id: `background-call-${role}-${contentIndex}`,
+                  name: 'background_lookup',
+                  arguments: {}
+                }
+              })
+              : contentKind === 'corrupt' ? '{broken-json' : ''
+          }))
+        ))
+        const internalMessages = [
+          ...backgroundResults,
+          { id: 109, role: 'system', content: JSON.stringify({ type: 'background_tool_result' }) },
+          { id: 110, role: 'system', content: '{broken-json' },
+          { id: 111, role: 'system', content: '' },
+          {
+            id: 112,
+            type: 'message',
+            role: 'background_system',
+            content: JSON.stringify({ type: 'background_tool_result' })
+          }
+        ]
+        const ordinaryMessages = [
+          { id: 200, role: 'user', content: 'ordinary user message' },
+          {
+            id: 201,
+            role: 'user',
+            content: JSON.stringify({
+              type: 'background_result',
+              role: 'system',
+              content: 'ordinary JSON text'
+            })
+          },
+          { id: 202, role: 'assistant', content: 'ordinary assistant message' },
+          {
+            id: 203,
+            type: 'tool_result',
             role: 'tool',
-            tool_call_id: 'ordinary-tool',
-            content: 'ordinary tool result'
-          })
-        }
-      ]
-      const internalIds = new Set(internalMessages.map(message => String(message.id)))
-      const ordinaryIds = new Set(ordinaryMessages.map(message => String(message.id)))
-      const harness = await createHarness(nested, {
-        sessions: [createSession('A', {
-          source,
-          messages: [...internalMessages, ...ordinaryMessages]
-        })],
-        initialRoute: { path: '/', query: { session_id: 'A' } }
-      })
-      const { chat } = harness
+            content: JSON.stringify({
+              role: 'tool',
+              tool_call_id: 'ordinary-tool',
+              content: 'ordinary tool result'
+            })
+          }
+        ]
+        const backgroundIds = new Set(backgroundResults
+          .filter(message => message.role !== 'system')
+          .map(message => String(message.id)))
+        const hiddenIds = new Set([
+          ...backgroundResults.filter(message => message.role === 'system'),
+          ...internalMessages.filter(message => ['system', 'background_system'].includes(message.role))
+        ].map(message => String(message.id)))
+        const ordinaryIds = new Set(ordinaryMessages.map(message => String(message.id)))
+        const ordinaryHistorySnapshot = JSON.stringify([...internalMessages, ...ordinaryMessages])
+        const harness = await createHarness(nested, {
+          sessions: [createSession('A', {
+            source,
+            show_tool_calls: showToolCalls,
+            messages: [...internalMessages, ...ordinaryMessages]
+          })],
+          initialRoute: { path: '/', query: { session_id: 'A' } }
+        })
+        const { chat } = harness
 
-      const assertHistory = () => {
-        const messages = chat.messages.value
-        assert.equal(
-          messages.some(message => internalIds.has(String(message.db_id ?? message.id))),
-          false
-        )
-        assert.equal(
-          messages.some(message => ['system', 'background_system'].includes(message.role)),
-          false
-        )
-        for (const ordinary of ordinaryMessages) {
-          const matches = messages.filter(
-            message => String(message.db_id ?? message.id) === String(ordinary.id)
+        const assertHistory = () => {
+          const messages = chat.messages.value
+          assert.equal(
+            messages.filter(message => backgroundIds.has(String(message.db_id ?? message.id))).length,
+            showToolCalls ? backgroundIds.size : 0
           )
-          assert.equal(matches.length, 1)
-          assert.equal(matches[0].role, ordinary.role)
-          assert.equal(matches[0].content, ordinary.content)
+          assert.equal(
+            messages.some(message => hiddenIds.has(String(message.db_id ?? message.id))),
+            false
+          )
+          assert.equal(
+            messages.some(message => ['system', 'background_system'].includes(message.role)),
+            false
+          )
+          for (const ordinary of ordinaryMessages) {
+            const matches = messages.filter(
+              message => String(message.db_id ?? message.id) === String(ordinary.id)
+            )
+            const expectedCount = ordinary.type === 'tool_result' && !showToolCalls ? 0 : 1
+            assert.equal(matches.length, expectedCount)
+            if (expectedCount === 1) {
+              assert.equal(matches[0].role, ordinary.role)
+              assert.equal(matches[0].content, ordinary.content)
+            }
+          }
+          assert.equal(
+            messages.filter(message => ordinaryIds.has(String(message.db_id ?? message.id))).length,
+            showToolCalls ? ordinaryMessages.length : ordinaryMessages.length - 1
+          )
+          assert.equal(JSON.stringify([...internalMessages, ...ordinaryMessages]), ordinaryHistorySnapshot)
         }
-        assert.equal(
-          messages.filter(message => ordinaryIds.has(String(message.db_id ?? message.id))).length,
-          ordinaryMessages.length
-        )
-      }
 
-      await harness.flush()
-      await selectSession(harness, 'A')
-      assertHistory()
+        await harness.flush()
+        await selectSession(harness, 'A')
+        assertHistory()
 
-      await selectSession(harness, 'A')
-      assertHistory()
+        await selectSession(harness, 'A')
+        assertHistory()
 
-      await chat.reloadCurrentSessionHistory()
-      await harness.flush()
-      assertHistory()
+        await chat.reloadCurrentSessionHistory()
+        await harness.flush()
+        assertHistory()
 
-      await chat.loadSessions()
-      await harness.flush()
-      assertHistory()
-    })
+        await chat.loadSessions()
+        await harness.flush()
+        assertHistory()
+      })
+    }
   }
 })
 

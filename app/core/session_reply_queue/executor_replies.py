@@ -403,6 +403,7 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         submission_context=submission_context,
         initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
         initial_fixed_upper_message_id=initial_fixed_upper_message_id,
+        restrict_tools_to_background_allowlist=extra.get("auto_terminal_watch") is not True,
         reply_source="background_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),
         audit_execution_binding_callback=partial(

@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app.core.context import ContextManager
+from app.core.utils.dispatcher.external_work import build_external_wait_response
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
@@ -67,6 +68,63 @@ def test_background_task_result_is_preserved_as_new_user_trigger():
         MessageRole.USER,
     ]
     assert audited[-1].content == result_content
+
+
+def test_ui_only_background_task_result_marker_is_not_parsed_as_internal_message():
+    marker = Message(
+        id=1,
+        session_id="s1",
+        uid="u1",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.BACKGROUND_TASK_RESULT,
+        content=json.dumps(
+            {
+                "type": "background_tool_result",
+                "ui_only": True,
+                "task_id": 42,
+            },
+            ensure_ascii=False,
+        ),
+        is_processed=True,
+    )
+
+    assert parse_db_messages_to_internal([marker]) == []
+
+
+def test_external_wait_response_accepts_queued_tool_result_with_todo_snapshot_suffix():
+    tool_call = InternalToolCall(
+        id="call-external",
+        name="execute_shell",
+        arguments={"command": "echo fixture"},
+    )
+    todo_snapshot = '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"finish","status":"in_progress"}]}</current_session_todo_snapshot>'
+    queued_content = json.dumps({"status": "queued", "task_id": 42})
+    tool_result = InternalMessage(
+        id=17,
+        role=MessageRole.TOOL,
+        tool_call_id=tool_call.id,
+        content=f"{queued_content}\n\n{todo_snapshot}",
+    )
+
+    response = build_external_wait_response(
+        [tool_call],
+        [tool_result],
+        response_id="response-1",
+    )
+
+    assert response == {
+        "status": "waiting_external_work",
+        "pending_tools": [
+            {
+                "task_id": 42,
+                "tool_call_id": "call-external",
+                "tool_name": "execute_shell",
+                "tool_result_message_id": 17,
+                "response_id": "response-1",
+            }
+        ],
+    }
 
 
 def test_historical_file_send_chain_and_parallel_tool_are_preserved():

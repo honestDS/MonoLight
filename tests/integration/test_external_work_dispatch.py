@@ -123,6 +123,8 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             monkeypatch.setattr(executor_lifecycle_module, "send_session_event", notifier_module.send_session_event)
 
         provider_payloads: list[dict] = []
+        original_tool_result_message_id: int | None = None
+        queued_tool_payload: dict = {}
 
         async def fake_post_json(_transformer, **kwargs):
             payload = kwargs["payload"]
@@ -186,7 +188,8 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             tool_result = tool_messages[0]
             tool_call_id = tool_result.get("tool_call_id")
             assert isinstance(tool_call_id, str)
-            assert json.loads(tool_result["content"]) == {"stdout": "fixture", "exit_code": 0}
+            assert original_tool_result_message_id is not None
+            assert json.loads(tool_result["content"]) == queued_tool_payload
 
             resume_payload = None
             for item in messages:
@@ -214,6 +217,8 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             assert resume_payload["tasks"] == [
                 {
                     "type": "background_tool_result",
+                    "ui_only": True,
+                    "original_tool_result_message_id": original_tool_result_message_id,
                     "task_id": task_id,
                     "tool_name": "execute_shell",
                     "execution_status": "succeeded",
@@ -295,6 +300,15 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             assert tasks[0].status == BackgroundTaskStatus.PENDING
             assert not [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
             assert outbox_items == []
+            queued_tool_messages = [message for message in messages if message.type == MessageType.TOOL_RESULT]
+            assert len(queued_tool_messages) == 1
+            queued_tool_message = queued_tool_messages[0]
+            assert queued_tool_message.id is not None
+            original_tool_result_message_id = queued_tool_message.id
+            stored_queued_tool_result = InternalMessage.model_validate_json(queued_tool_message.content or "{}")
+            queued_tool_payload = json.loads(stored_queued_tool_result.content or "{}")
+            assert queued_tool_payload["status"] == "queued"
+            assert queued_tool_payload["task_id"] == tasks[0].id
         assert len(provider_payloads) == 1
 
         async with factory() as db:
@@ -375,6 +389,11 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             assert persisted_tasks[0].auto_reply is False
             assert persisted_tasks[0].result == {"content": {"stdout": "fixture", "exit_code": 0}}
             assert len([message for message in persisted_messages if message.type == MessageType.BACKGROUND_TASK_RESULT]) == 1
+            persisted_tool_results = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
+            assert len(persisted_tool_results) == 1
+            assert persisted_tool_results[0].id == original_tool_result_message_id
+            persisted_tool_result = InternalMessage.model_validate_json(persisted_tool_results[0].content or "{}")
+            assert json.loads(persisted_tool_result.content or "{}") == queued_tool_payload
             assert final_work.result_message_id is not None
             result_message = await db.get(Message, final_work.result_message_id)
             assert result_message is not None

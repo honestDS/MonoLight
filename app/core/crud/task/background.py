@@ -82,6 +82,32 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         result = await db.execute(select(BackgroundTask).where(BackgroundTask.audit_execution_record_id == audit_execution_record_id).execution_options(populate_existing=True))
         return result.scalars().first()
 
+    async def get_active_terminal_watch(
+        self,
+        db: AsyncSession,
+        uid: str,
+        session_id: str,
+        terminal_session_id: str,
+    ) -> BackgroundTask | None:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+            )
+            .order_by(BackgroundTask.created_at.desc(), BackgroundTask.id.desc())
+        )
+        for task in result.scalars():
+            extra = task.extra
+            if extra is not None and isinstance(extra, dict) and extra.get("auto_terminal_watch") is True and extra.get("terminal_session_id") == terminal_session_id:
+                return task
+            arguments = task.arguments
+            if isinstance(arguments, dict) and arguments.get("terminal_session_id") == terminal_session_id:
+                return task
+        return None
+
     async def list_by_audit_record(self, db: AsyncSession, audit_record_id: int) -> list[BackgroundTask]:
         result = await db.execute(select(BackgroundTask).where(BackgroundTask.audit_record_id == audit_record_id).order_by(BackgroundTask.id).execution_options(populate_existing=True))
         return list(result.scalars().all())

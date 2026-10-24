@@ -89,9 +89,30 @@ export function useChatMessagePresentation({ props, t }) {
     if (!fallbackDisplayKeys.has(message)) fallbackDisplayKeys.set(message, `message_${fallbackDisplayKeyIndex++}`)
     return fallbackDisplayKeys.get(message)
   }
+  const parseBackgroundResult = (message) => {
+    if (message?.type !== 'background_result') return null
+    try {
+      const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
+      if (
+        !payload
+        || typeof payload !== 'object'
+        || Array.isArray(payload)
+        || payload.type !== 'background_tool_result'
+        || !payload.tool_call
+        || typeof payload.tool_call !== 'object'
+        || Array.isArray(payload.tool_call)
+        || !Object.prototype.hasOwnProperty.call(payload, 'task')
+        || payload.task === undefined
+      ) return null
+      return payload
+    } catch {
+      return null
+    }
+  }
   const analyzeMessage = (message) => ({
     isToolCall: isToolCall(message),
-    isToolResult: isToolResult(message)
+    isToolResult: isToolResult(message),
+    backgroundPayload: parseBackgroundResult(message)
   })
 
   let cachedSources = []
@@ -128,6 +149,45 @@ export function useChatMessagePresentation({ props, t }) {
       const message = messages[index]
       const messageKey = getMessageKey(message, index)
       const analysis = analyzeMessage(message)
+
+      if (analysis.backgroundPayload) {
+        const payload = analysis.backgroundPayload
+        const toolCall = {
+          id: getToolCallId(payload.tool_call, `${messageKey}_background`),
+          name: payload.tool_call.name,
+          arguments: payload.tool_call.arguments
+        }
+        const resultMessage = {
+          ...message,
+          role: 'tool',
+          type: 'tool_result',
+          content: JSON.stringify({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: typeof payload.task === 'string' ? payload.task : JSON.stringify(payload.task)
+          })
+        }
+        const pair = { id: toolCall.id, toolCall, resultMessage }
+        Object.defineProperty(pair, '_backgroundResult', { value: true })
+        output.push({
+          id: `tool_group_${messageKey}`,
+          _displayKey: `tool_group_${messageKey}`,
+          type: 'tool_group',
+          role: 'assistant',
+          response_id: message.response_id || null,
+          request_id: message.request_id,
+          work_id: message.work_id,
+          turn: message.turn,
+          created_at: message.created_at,
+          content: '',
+          reasoning_content: message.reasoning_content || '',
+          pairs: [pair],
+          latestEvent: { type: 'result', pair }
+        })
+        activeToolGroup = null
+        outputCounts[index] = output.length
+        continue
+      }
 
       if (analysis.isToolCall) {
         const responseId = message.response_id || null
@@ -236,6 +296,7 @@ export function useChatMessagePresentation({ props, t }) {
   const getToolPairTitle = pair => t('chat.tool', { name: getToolPairName(pair) })
   const isToolPairReturned = (pair) => {
     if (!pair?.resultMessage) return false
+    if (pair._backgroundResult) return true
     let payload = getToolResultContent(pair.resultMessage)
     if (typeof payload === 'string') {
       try {

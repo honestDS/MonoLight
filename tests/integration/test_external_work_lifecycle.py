@@ -328,6 +328,25 @@ def _tool_result(snapshot: dict[str, Any], message_id: int) -> InternalMessage:
     return InternalMessage.model_validate_json(row.content or "{}")
 
 
+def _assert_queued_tool_result(snapshot: dict[str, Any], case: ExternalWorkCase, call_id: str) -> InternalMessage:
+    result = _tool_result(snapshot, case.result_message_ids[call_id])
+    assert result.tool_call_id == call_id
+    assert result.tool_execution_status is None
+    assert json.loads(result.content or "{}") == {
+        "status": "queued",
+        "task_id": case.task_ids[call_id],
+    }
+    return result
+
+
+def _assert_background_result_marker(marker: Message, *, task: Any, execution_status: str) -> dict[str, Any]:
+    assert marker.type == MessageType.BACKGROUND_TASK_RESULT
+    payload = json.loads(marker.content or "{}")
+    assert payload["task"] == task
+    assert payload["execution_status"] == execution_status
+    return payload
+
+
 def _messages_of_type(snapshot: dict[str, Any], message_type: MessageType) -> list[Message]:
     return [message for message in snapshot["messages"] if message.type == message_type]
 
@@ -382,18 +401,14 @@ async def test_parallel_external_resume_is_idempotent_and_persists_protocol_even
     assert work.execution_state["external_resume_pending"] is True
     assert "pending_tools" not in work.execution_state
 
+    _assert_queued_tool_result(snapshot, case, "call-1")
     result_row = next(message for message in snapshot["messages"] if message.id == case.result_message_ids["call-1"])
-    stored_result = InternalMessage.model_validate_json(result_row.content or "{}")
     assert result_row.id == case.result_message_ids["call-1"]
-    assert stored_result.tool_call_id == "call-1"
-    assert stored_result.content == "completed-once"
-    assert stored_result.tool_execution_status == "succeeded"
 
     markers = _messages_of_type(snapshot, MessageType.BACKGROUND_TASK_RESULT)
     assert len(markers) == 1
-    marker_payload = json.loads(markers[0].content or "{}")
+    marker_payload = _assert_background_result_marker(markers[0], task="completed-once", execution_status="succeeded")
     assert marker_payload["type"] == "background_tool_result"
-    assert marker_payload["task"] == "completed-once"
 
     tool_end_events = [event for event in snapshot["stream_events"] if event.event.get("type") == "tool_end"]
     assert len(tool_end_events) == 1
@@ -431,9 +446,12 @@ async def test_external_resume_projects_tool_result_notification(external_work_d
     assert len(tool_result_rows) == 1
     original_tool_row = tool_result_rows[0]
     assert original_tool_row.id == case.result_message_ids["call-1"]
-    stored_result = InternalMessage.model_validate_json(original_tool_row.content or "{}")
-    assert stored_result.tool_call_id == case.tool_calls[0].id
-    assert stored_result.content == final_content
+    _assert_queued_tool_result(first_snapshot, case, "call-1")
+
+    markers = _messages_of_type(first_snapshot, MessageType.BACKGROUND_TASK_RESULT)
+    assert len(markers) == 1
+    marker = markers[0]
+    _assert_background_result_marker(marker, task=final_content, execution_status="succeeded")
 
     projected_events = [event for event in first_status.get("session_events", []) if event.get("type") == "tool_results_update"]
     persisted_events = [event for event in first_snapshot["session_events"] if event.event.get("type") == "tool_results_update"]
@@ -442,12 +460,14 @@ async def test_external_resume_projects_tool_result_notification(external_work_d
         assert len(persisted_events) == 1
         projected_event = projected_events[0]
         projected_message = projected_event["messages"][0]
-        assert projected_message["id"] == original_tool_row.id
-        assert projected_message["db_id"] == original_tool_row.id
-        assert projected_message["content"] == original_tool_row.content
-        projected_result = InternalMessage.model_validate_json(projected_message["content"] or "{}")
-        assert projected_result.tool_call_id == case.tool_calls[0].id
-        assert projected_result.content == final_content
+        assert projected_message["id"] == marker.id
+        assert projected_message["db_id"] == marker.id
+        assert projected_message["role"] == "assistant"
+        assert projected_message["type"] == MessageType.BACKGROUND_TASK_RESULT.value
+        assert projected_message["content"] == marker.content
+        projected_payload = json.loads(projected_message["content"] or "{}")
+        assert projected_payload["task"] == final_content
+        assert projected_payload["execution_status"] == "succeeded"
 
         persisted_event = persisted_events[0].event
         assert persisted_event["type"] == projected_event["type"]
@@ -467,6 +487,7 @@ async def test_external_resume_projects_tool_result_notification(external_work_d
 
     assert second_status == first_status
     assert len(_messages_of_type(second_snapshot, MessageType.TOOL_RESULT)) == 1
+    assert len(_messages_of_type(second_snapshot, MessageType.BACKGROUND_TASK_RESULT)) == 1
     assert len([event for event in second_snapshot["session_events"] if event.event.get("type") == "tool_results_update"]) == (1 if show_tool_calls else 0)
 
 
@@ -482,7 +503,10 @@ async def test_reconcile_external_work_completes_task_before_suspension(external
     snapshot = await _snapshot(case)
     assert snapshot["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
     assert snapshot["tasks"][0].status == BackgroundTaskStatus.SUCCEEDED
-    assert len(_messages_of_type(snapshot, MessageType.BACKGROUND_TASK_RESULT)) == 1
+    _assert_queued_tool_result(snapshot, case, "call-1")
+    markers = _messages_of_type(snapshot, MessageType.BACKGROUND_TASK_RESULT)
+    assert len(markers) == 1
+    _assert_background_result_marker(markers[0], task="completed-before-wait", execution_status="succeeded")
     assert len([event for event in snapshot["session_events"] if event.event.get("type") == "work_ready"]) == 1
 
 
@@ -497,7 +521,7 @@ async def test_external_resume_waits_for_all_tasks_in_one_round(external_work_da
     assert not _messages_of_type(partial, MessageType.BACKGROUND_TASK_RESULT)
     assert not [event for event in partial["stream_events"] if event.event.get("type") == "tool_end"]
     assert not [event for event in partial["session_events"] if event.event.get("type") == "work_ready"]
-    assert _tool_result(partial, case.result_message_ids["call-1"]).tool_execution_status is None
+    _assert_queued_tool_result(partial, case, "call-1")
 
     await _complete_task(case, "call-2", "second-result")
     assert await external_work_module.resume_external_work_for_task(case.task_ids["call-2"]) is True
@@ -505,11 +529,16 @@ async def test_external_resume_waits_for_all_tasks_in_one_round(external_work_da
 
     complete = await _snapshot(case)
     assert complete["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
-    assert len(_messages_of_type(complete, MessageType.BACKGROUND_TASK_RESULT)) == 2
+    _assert_queued_tool_result(complete, case, "call-1")
+    _assert_queued_tool_result(complete, case, "call-2")
+    markers = _messages_of_type(complete, MessageType.BACKGROUND_TASK_RESULT)
+    assert len(markers) == 2
+    assert {(json.loads(marker.content or "{}")["task"], json.loads(marker.content or "{}")["execution_status"]) for marker in markers} == {
+        ("first-result", "succeeded"),
+        ("second-result", "succeeded"),
+    }
     assert len([event for event in complete["stream_events"] if event.event.get("type") == "tool_end"]) == 2
     assert len([event for event in complete["session_events"] if event.event.get("type") == "work_ready"]) == 1
-    assert _tool_result(complete, case.result_message_ids["call-1"]).tool_execution_status == "succeeded"
-    assert _tool_result(complete, case.result_message_ids["call-2"]).tool_execution_status == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -520,7 +549,7 @@ async def test_recover_interrupted_external_work_marks_unknown_and_is_idempotent
     first = await _snapshot(case)
     work = first["work"]
     task = first["tasks"][0]
-    stored_result = _tool_result(first, case.result_message_ids["call-1"])
+    stored_result = _assert_queued_tool_result(first, case, "call-1")
     assert task.status == BackgroundTaskStatus.FAILED
     assert task.result["status"] == "execution_unknown"
     assert task.extra["execution_unknown"] is True
@@ -528,11 +557,13 @@ async def test_recover_interrupted_external_work_marks_unknown_and_is_idempotent
     assert work.status == SessionReplyWorkStatus.CANCELLED
     assert work.locked_by is None
     assert work.lock_until is None
-    assert stored_result.tool_execution_status == "execution_unknown"
-    assert json.loads(stored_result.content or "{}") == {
-        "status": "execution_unknown",
-        "error": PROMPT_TOOL_INTERRUPTED,
-    }
+    markers = _messages_of_type(first, MessageType.BACKGROUND_TASK_RESULT)
+    assert len(markers) == 1
+    _assert_background_result_marker(
+        markers[0],
+        task={"status": "execution_unknown", "error": PROMPT_TOOL_INTERRUPTED},
+        execution_status="execution_unknown",
+    )
 
     async with external_work_database() as db:
         assert (
@@ -560,7 +591,7 @@ async def test_recover_interrupted_external_work_marks_unknown_and_is_idempotent
     assert len(_messages_of_type(second, MessageType.BACKGROUND_TASK_RESULT)) == marker_count
     assert len([event for event in second["session_events"] if event.event.get("type") == "work_ready"]) == ready_count
     assert len([event for event in second["stream_events"] if event.event.get("type") == "tool_end"]) == tool_end_count
-    assert _tool_result(second, case.result_message_ids["call-1"]).model_dump() == stored_result.model_dump()
+    assert _assert_queued_tool_result(second, case, "call-1").model_dump() == stored_result.model_dump()
 
 
 @pytest.mark.asyncio

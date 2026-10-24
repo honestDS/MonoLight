@@ -26,6 +26,11 @@ const getToolCallId = (message) => {
   return toolCallId === null || toolCallId === undefined || toolCallId === '' ? null : String(toolCallId)
 }
 
+const getOriginalToolResultMessageId = (message) => {
+  if (message?.type !== 'background_result') return null
+  return getComparableId(parseContent(message?.content)?.original_tool_result_message_id)
+}
+
 const mergeAuditToolResultIntoList = (messages, remoteMessage) => {
   const normalizedRemoteMessage = {
     ...remoteMessage,
@@ -33,9 +38,16 @@ const mergeAuditToolResultIntoList = (messages, remoteMessage) => {
   }
   const remoteDbId = getMessageDbId(normalizedRemoteMessage)
   const remoteToolCallId = getToolCallId(normalizedRemoteMessage)
-  let messageIndex = remoteDbId === null
+  const originalToolResultMessageId = getOriginalToolResultMessageId(normalizedRemoteMessage)
+  let messageIndex = originalToolResultMessageId === null
     ? -1
-    : messages.findIndex(message => getMessageDbId(message) === remoteDbId)
+    : messages.findIndex(message => getMessageDbId(message) === originalToolResultMessageId)
+
+  if (messageIndex === -1) {
+    messageIndex = remoteDbId === null
+      ? -1
+      : messages.findIndex(message => getMessageDbId(message) === remoteDbId)
+  }
 
   if (messageIndex === -1 && remoteToolCallId !== null) {
     messageIndex = messages.findIndex(message => getToolCallId(message) === remoteToolCallId)

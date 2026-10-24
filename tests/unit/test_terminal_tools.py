@@ -1,12 +1,14 @@
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
 import app.core.tools.terminal as terminal_module
-from app.core.constants import ERR_TERMINAL_COMMAND_TIMEOUT
+import app.core.tools.terminal_watch as terminal_watch_module
+from app.core.constants import ERR_TERMINAL_COMMAND_TIMEOUT, TERMINAL_WATCH_TOOL_NAME
 from app.core.dispatchers.context import DispatchContext
 from app.core.terminal import (
     ALL_TERMINAL_ACTIONS,
@@ -22,6 +24,7 @@ from app.core.terminal import (
 )
 from app.core.terminal.pty_base import PtyResourceSnapshot
 from app.core.terminal.session_runtime_commands import TerminalSessionRuntimeCommands
+from app.core.terminal.watch_schema import TerminalWatchRequest
 from app.core.tools import (
     SHELL_COMPANION_TOOL_SCHEMAS,
     SHELL_TOOL_SCHEMA,
@@ -36,6 +39,7 @@ from app.core.tools.terminal import (
     TerminalStatusExecutor,
     TerminalWriteExecutor,
 )
+from app.core.tools.terminal_watch import TerminalWatchExecutor, ensure_terminal_auto_watch
 from app.core.utils.dispatcher.process_single_tool import get_handed_off_terminal_session_id
 from app.models.profile import Profile, ProfileConfig
 from app.models.terminal_session import TerminalControlCommand
@@ -91,6 +95,17 @@ def _write_command_result(*, bytes_written: int, output_offset_before_write: int
         "bytes_written": bytes_written,
         "output_offset_before_write": output_offset_before_write,
     }
+
+
+class _FakeDatabase:
+    def __init__(self):
+        self.commit_count = 0
+
+    async def execute(self, *args, **kwargs):
+        return None
+
+    async def commit(self):
+        self.commit_count += 1
 
 
 @pytest.mark.asyncio
@@ -186,6 +201,132 @@ def _executor(executor_class, *, tool_timeout: float = 30.0):
 
 
 @pytest.mark.asyncio
+async def test_terminal_watch_executor_uses_profile_timeout_and_protocol_request(monkeypatch):
+    created_at = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
+    task = SimpleNamespace(id=901, uid="u1", session_id="session-1", created_at=created_at)
+    db = _FakeDatabase()
+    crud_calls = []
+    watch_calls = []
+
+    async def get_task(received_db, task_id):
+        crud_calls.append((received_db, task_id))
+        return task
+
+    async def watch_terminal(**kwargs):
+        watch_calls.append(kwargs)
+        return {"status": "observed"}
+
+    monkeypatch.setattr(terminal_watch_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(terminal_watch_module, "watch_terminal", watch_terminal)
+
+    executor = TerminalWatchExecutor(project_root=".", uid="u1")
+    executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 7.5}}))
+    executor.set_runtime_context(
+        dispatch_context=DispatchContext(
+            mode="background",
+            source="test",
+            uid="u1",
+            session_id="session-1",
+            profile=_profile([TERMINAL_WATCH_TOOL_NAME]),
+            db=db,
+            tool_call_id="terminal-watch-call",
+            task_id=task.id,
+        )
+    )
+
+    arguments = {
+        "terminal_session_id": TERMINAL_SESSION_ID,
+        "after_offset": 12,
+        "condition": "process_exit",
+    }
+    result = json.loads(await executor.execute(**arguments))
+
+    expected_request = TerminalWatchRequest.model_validate(arguments)
+    expected_deadline = created_at + timedelta(seconds=7.5)
+    assert result == {"status": "observed"}
+    assert crud_calls == [(db, task.id)]
+    assert watch_calls == [
+        {
+            "task_id": task.id,
+            "uid": "u1",
+            "session_id": "session-1",
+            "request": expected_request,
+            "deadline": expected_deadline,
+        }
+    ]
+    assert isinstance(watch_calls[0]["request"], TerminalWatchRequest)
+    assert watch_calls[0]["deadline"] != created_at + timedelta(seconds=1)
+    assert "timeout_seconds" not in arguments
+    assert db.commit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_terminal_auto_watch_creates_protocol_task_once(monkeypatch):
+    db = _FakeDatabase()
+    active_watch = None
+    active_lookup_calls = []
+    created_tasks = []
+    watch_calls = []
+
+    async def get_active_watch(received_db, uid, session_id, terminal_session_id):
+        active_lookup_calls.append((received_db, uid, session_id, terminal_session_id))
+        return active_watch
+
+    async def create_task(received_db, **kwargs):
+        created_tasks.append((received_db, kwargs))
+        return SimpleNamespace(id=902)
+
+    async def watch_terminal(**kwargs):
+        watch_calls.append(kwargs)
+
+    monkeypatch.setattr(terminal_watch_module.background_task_crud, "get_active_terminal_watch", get_active_watch)
+    monkeypatch.setattr(terminal_watch_module.background_task_crud, "create_task", create_task)
+    monkeypatch.setattr(terminal_watch_module, "watch_terminal", watch_terminal)
+
+    await ensure_terminal_auto_watch(
+        db,
+        uid="u1",
+        session_id="session-1",
+        profile_id=7,
+        terminal_session_id=TERMINAL_SESSION_ID,
+        after_offset=18,
+        session_status=TerminalSessionStatus.RUNNING,
+    )
+
+    assert active_lookup_calls == [(db, "u1", "session-1", TERMINAL_SESSION_ID)]
+    assert len(created_tasks) == 1
+    received_db, task_kwargs = created_tasks[0]
+    assert received_db is db
+    assert task_kwargs["uid"] == "u1"
+    assert task_kwargs["session_id"] == "session-1"
+    assert task_kwargs["profile_id"] == 7
+    assert task_kwargs["tool_name"] == TERMINAL_WATCH_TOOL_NAME
+    assert task_kwargs["auto_reply"] is True
+    assert task_kwargs["arguments"] == {
+        "terminal_session_id": TERMINAL_SESSION_ID,
+        "after_offset": 18,
+        "condition": "process_exit",
+    }
+    assert task_kwargs["extra"]["auto_terminal_watch"] is True
+    assert task_kwargs["extra"]["terminal_session_id"] == TERMINAL_SESSION_ID
+    assert watch_calls == []
+
+    active_watch = SimpleNamespace(id=903)
+    await ensure_terminal_auto_watch(
+        db,
+        uid="u1",
+        session_id="session-1",
+        profile_id=7,
+        terminal_session_id=TERMINAL_SESSION_ID,
+        after_offset=18,
+        session_status=TerminalSessionStatus.RUNNING,
+    )
+
+    assert len(active_lookup_calls) == 2
+    assert len(created_tasks) == 1
+
+
+@pytest.mark.asyncio
 async def test_get_tools_for_profile_exposes_shell_companions_only_with_shell():
     enabled_tools, _ = await get_tools_for_profile(None, _profile(["execute_shell"]))
     enabled_names = [tool["function"]["name"] for tool in enabled_tools if tool["function"]["name"] not in SYSTEM_BUILTIN_TOOL_NAMES]
@@ -261,7 +402,6 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
                     "enum": ["output", "process_exit", "output_contains", "quiet_for"],
                 },
                 "text": {"default": None},
-                "timeout_seconds": {"minimum": 1, "maximum": 86_400, "default": 600},
                 "settle_seconds": {"minimum": 1, "maximum": 60, "default": 2},
                 "max_bytes": {"minimum": 1, "maximum": 16_384, "default": 16_384},
             },

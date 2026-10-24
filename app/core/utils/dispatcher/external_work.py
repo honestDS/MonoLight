@@ -1,5 +1,6 @@
 import json
 
+from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import InternalMessage, InternalToolCall
 
 
@@ -13,7 +14,7 @@ def build_external_wait_response(
 
     for tool_result in tool_results:
         try:
-            payload = json.loads(tool_result.content or "")
+            payload = json.loads(strip_session_todo_snapshot(tool_result.content) or "")
         except (TypeError, ValueError):
             continue
 
