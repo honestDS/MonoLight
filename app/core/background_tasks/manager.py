@@ -38,28 +38,6 @@ def _serialize_request_message(message: InternalMessage) -> dict[str, Any]:
     return {key: serialized[key] for key in ("id", "role", "content", "attachments") if key in serialized}
 
 
-def _build_submission_context(messages: list[InternalMessage], tool_call_id: str) -> list[dict[str, Any]]:
-    target_message_index = next(
-        (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == MessageRole.ASSISTANT and messages[index].tool_calls and any(tool_call.id == tool_call_id for tool_call in messages[index].tool_calls)),
-        None,
-    )
-    context: list[InternalMessage] = []
-    removed_tool_call_ids: set[str] = set()
-    for index, message in enumerate(messages):
-        if message.role == MessageRole.SYSTEM:
-            continue
-        if message.role in {MessageRole.USER, MessageRole.ASSISTANT}:
-            removed_tool_call_ids.clear()
-        copied_message = message.model_copy(deep=True)
-        if index == target_message_index:
-            removed_tool_call_ids.update(tool_call.id for tool_call in copied_message.tool_calls if tool_call.id != tool_call_id)
-            copied_message.tool_calls = [tool_call for tool_call in copied_message.tool_calls if tool_call.id == tool_call_id]
-        if copied_message.role == MessageRole.TOOL and copied_message.tool_call_id in removed_tool_call_ids:
-            continue
-        context.append(copied_message)
-    return [message.model_dump(mode="json", exclude_none=True) for message in context]
-
-
 class BackgroundTaskManager:
     def __init__(self) -> None:
         self._running_by_profile: dict[int, set[asyncio.Task]] = defaultdict(set)
@@ -93,10 +71,15 @@ class BackgroundTaskManager:
         )
         claim_info = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
         if claim_info is None:
+            request_context: list[dict[str, Any]] = []
+            for message in reversed(submission_messages):
+                if message.role == MessageRole.USER and message.content is not None:
+                    request_context.append(_serialize_request_message(message))
+                    break
             extra_payload: dict[str, Any] = {
                 "allowed_knowledge_base_ids": allowed_knowledge_base_ids or [],
                 "source": source,
-                "submission_context": _build_submission_context(submission_messages, tool_call_id),
+                "request_context": request_context,
                 "purpose": purpose,
             }
         else:

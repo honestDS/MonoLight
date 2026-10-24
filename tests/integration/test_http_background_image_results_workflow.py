@@ -10,6 +10,7 @@ from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel, select
 
+import app.core.background_tasks.reply_trigger as reply_trigger_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.session_reply_queue.consumer as consumer_module
@@ -270,6 +271,18 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             db.add(task)
             await db.flush()
             assert task.id is not None
+            db.add(
+                Message(
+                    session_id=SESSION_ID,
+                    uid=UID,
+                    profile_id=profile.id,
+                    role=MessageRole.USER,
+                    type=MessageType.BACKGROUND_TASK_RESULT,
+                    content=reply_trigger_module._build_background_tool_result_message(task),
+                    is_processed=True,
+                    dedupe_key=f"background-task:{task.id}:result",
+                )
+            )
 
             work = SessionReplyWorkItem(
                 uid=UID,
@@ -324,6 +337,48 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert isinstance(content, str)
             return json.loads(content)
 
+        def find_background_result(items: list[dict]) -> dict:
+            background_results = []
+            for item in items:
+                if item.get("role") != MessageRole.USER.value or not isinstance(item.get("content"), str):
+                    continue
+                try:
+                    envelope = json.loads(item["content"])
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(envelope, dict) or not isinstance(envelope.get("user_message"), str):
+                    continue
+                try:
+                    background_result = json.loads(envelope["user_message"])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(background_result, dict) and background_result.get("type") == "background_tool_result":
+                    background_results.append(background_result)
+            assert len(background_results) == 1
+            return background_results[0]
+
+        def assert_background_result_payload(payload: dict) -> None:
+            assert payload["type"] == "background_tool_result"
+            assert payload["task"] == task_result
+            assert payload["task_id"] == task_id
+            assert payload["tool_name"] == "generate_image"
+            assert payload["tool_call"]["id"] == "generate-image-call"
+            assert payload["tool_result"]["tool_call_id"] == "generate-image-call"
+            assert json.loads(payload["tool_result"]["content"]) == task_result
+            result_path = payload["task"]["content"]["send_file_to_user"]["files"][0]["path"]
+            assert result_path == str(image_path)
+
+        def assert_persisted_background_result(messages: list[Message]) -> Message:
+            background_results = [message for message in messages if message.role == MessageRole.USER and message.type == MessageType.BACKGROUND_TASK_RESULT]
+            assert len(background_results) == 1
+            assert not any(message.role == MessageRole.USER and message.type != MessageType.BACKGROUND_TASK_RESULT for message in messages)
+            background_result = background_results[0]
+            assert background_result.dedupe_key == f"background-task:{task_id}:result"
+            assert background_result.is_processed is True
+            payload = json.loads(background_result.content or "{}")
+            assert_background_result_payload(payload)
+            return background_result
+
         def find_send_file_call(items: list[dict]) -> dict:
             if protocol == "OPENAI":
                 return next(tool_call for item in items if item.get("role") == MessageRole.ASSISTANT.value for tool_call in item.get("tool_calls") or [] if tool_call.get("function", {}).get("name") == "send_file_to_user")
@@ -357,13 +412,10 @@ async def test_completed_background_image_message_is_returned_by_http_history(
 
             if request_index == 0:
                 assert tool_names(payload) == ["send_file_to_user"]
-                background_result = find_tool_output(items, "generate-image-call")
-                assert background_result["status"] == "succeeded"
-                assert background_result["tool_name"] == "generate_image"
-                assert background_result["content"]["status"] == "success"
-                assert background_result["content"]["instruction"]
-                result_path = background_result["content"]["send_file_to_user"]["files"][0]["path"]
-                assert result_path == str(image_path)
+                background_result = find_background_result(items)
+                assert_background_result_payload(background_result)
+                assert not any((item.get("role") == MessageRole.TOOL.value and item.get("tool_call_id") == "generate-image-call") or (item.get("type") == "function_call_output" and item.get("call_id") == "generate-image-call") for item in items)
+                result_path = background_result["task"]["content"]["send_file_to_user"]["files"][0]["path"]
                 arguments = json.dumps({"files": [{"path": result_path}]}, ensure_ascii=False)
                 if protocol == "OPENAI":
                     return {
@@ -612,11 +664,13 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 persisted_tasks = (await db.execute(select(BackgroundTask))).scalars().all()
                 assert len(persisted_tasks) == 1
                 persisted_messages = (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all()
+                assert_persisted_background_result(persisted_messages)
                 tool_calls = [message for message in persisted_messages if message.type == MessageType.TOOL_CALL]
                 tool_results = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
                 assert len(tool_calls) == 1
                 assert len(tool_results) == 1
                 persisted_dump = json.dumps([message.content for message in persisted_messages], ensure_ascii=False)
+                persisted_tool_dump = json.dumps([message.content for message in [*tool_calls, *tool_results]], ensure_ascii=False)
                 persisted_send_call = InternalMessage.model_validate_json(tool_calls[0].content)
                 assert len(persisted_send_call.tool_calls or []) == 1
                 persisted_send_tool_call = persisted_send_call.tool_calls[0]
@@ -624,7 +678,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 persisted_send_result = InternalMessage.model_validate_json(tool_results[0].content)
                 assert persisted_send_result.tool_call_id == persisted_send_tool_call.id
                 assert json.loads(persisted_send_result.content or "{}")["status"] == "success"
-                assert "generate_image" not in persisted_dump
+                assert "generate_image" not in persisted_tool_dump
                 assert "final-violation-" not in persisted_dump
                 assert "伪成功正文" not in persisted_dump
                 assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in persisted_dump
@@ -665,12 +719,11 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert persisted_work.status == SessionReplyWorkStatus.SUCCEEDED
             assert persisted_work.result_message_id is not None
             assert persisted_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
-            assert persisted_task.extra["submission_context"] == []
             persisted_messages = (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all()
+            persisted_background_result = assert_persisted_background_result(persisted_messages)
             persisted_message_dump = json.dumps([message.content for message in persisted_messages], ensure_ascii=False)
             assert "final-violation-" not in persisted_message_dump
             assert "伪成功正文" not in persisted_message_dump
-            assert not any(message.role == MessageRole.USER for message in persisted_messages)
             assert all(message.guidance_prompt is None for message in persisted_messages)
             persisted_response = (persisted_work.execution_state or {}).get("response")
             assert isinstance(persisted_response, dict)
@@ -729,7 +782,12 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in history_dump
         assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in history_dump
         assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in history_dump
-        assert not any(item.get("role") == MessageRole.USER.value for item in history_items)
+        background_history_items = [item for item in history_items if item.get("role") == MessageRole.USER.value and item.get("type") == MessageType.BACKGROUND_TASK_RESULT.value]
+        assert len(background_history_items) == 1
+        background_history_item = background_history_items[0]
+        assert background_history_item["id"] == persisted_background_result.id
+        assert_background_result_payload(json.loads(background_history_item["content"]))
+        assert not any(item.get("role") == MessageRole.USER.value and item.get("type") != MessageType.BACKGROUND_TASK_RESULT.value for item in history_items)
         assistant_file_items = find_assistant_file_items(history_items)
         assert len(assistant_file_items) == 1
         history_item, assistant_files = assistant_file_items[0]
@@ -968,8 +1026,42 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
             assert task.id is not None
             task_id = task.id
             assert submission_payload == [message.model_dump(mode="json", exclude_none=True) for message in submission_messages]
-            expected_submission_context = task.extra["submission_context"]
-            assert isinstance(expected_submission_context, list)
+            assert current_user.id is not None
+            expected_request_context = [
+                {
+                    "id": current_user.id,
+                    "role": MessageRole.USER.value,
+                    "content": "当前用户文本",
+                }
+            ]
+            assert isinstance(task.extra, dict)
+            assert task.extra["request_context"] == expected_request_context
+            assert "submission_context" not in task.extra
+
+            existing_result_call_ids = {message.tool_call_id for message in current_results}
+            for index, current_call in enumerate(current_calls):
+                if current_call.id in existing_result_call_ids:
+                    continue
+                queued_task_id = task.id if index == target_index else 100 + index
+                queued_result = InternalMessage(
+                    role=MessageRole.TOOL,
+                    tool_call_id=current_call.id,
+                    content=_build_background_task_queued_result(current_call.name, queued_task_id),
+                )
+                saved_queued_result = await save_message(
+                    db,
+                    SESSION_ID,
+                    UID,
+                    MessageRole.TOOL,
+                    MessageType.TOOL_RESULT,
+                    queued_result,
+                    profile.id,
+                )
+                assert saved_queued_result.id is not None
+                queued_result.id = saved_queued_result.id
+                current_results.append(queued_result)
+                existing_result_call_ids.add(current_call.id)
+                original_message_contents[saved_queued_result.id] = saved_queued_result.content
 
         task_result = build_background_task_success_result(
             "generate_image",
@@ -984,6 +1076,18 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
             persisted_task.reply_status = BackgroundTaskReplyStatus.RUNNING
             persisted_task.reply_locked_by = worker_id
             persisted_task.reply_lock_until = int(time.time()) + 300
+            db.add(
+                Message(
+                    session_id=SESSION_ID,
+                    uid=UID,
+                    profile_id=profile.id,
+                    role=MessageRole.USER,
+                    type=MessageType.BACKGROUND_TASK_RESULT,
+                    content=reply_trigger_module._build_background_tool_result_message(persisted_task),
+                    is_processed=True,
+                    dedupe_key=f"background-task:{task_id}:result",
+                )
+            )
             work = SessionReplyWorkItem(
                 uid=UID,
                 session_id=SESSION_ID,
@@ -1005,8 +1109,13 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
             assert work.id is not None
             work_id = work.id
 
-        expected_function_calls = [(call.id, call.arguments) for call in history_calls] + [(target_call.id, target_call.arguments)]
-        expected_function_call_outputs = [(message.tool_call_id, json.loads(message.content or "{}")) for message in history_results] + [(target_call.id, task_result)]
+        expected_function_calls = [(call.id, call.arguments) for call in history_calls] + [(call.id, call.arguments) for call in current_calls]
+        expected_function_call_outputs = [(message.tool_call_id, json.loads(message.content or "{}")) for message in history_results] + [(message.tool_call_id, json.loads(message.content or "{}")) for message in current_results]
+        target_protocol_result = next(message for message in reversed(current_results) if message.tool_call_id == target_call.id)
+        target_protocol_payload = json.loads(target_protocol_result.content or "{}")
+        assert target_protocol_payload["status"] == "queued"
+        assert target_protocol_payload["task_id"] == task_id
+        assert target_protocol_payload != task_result
         provider_payloads = []
 
         async def fake_post_json(_transformer, **kwargs):
@@ -1050,6 +1159,7 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
             assert function_calls == expected_function_calls
             assert function_call_outputs == expected_function_call_outputs
             user_messages = []
+            background_results = []
             for item in input_items:
                 if item.get("role") != "user" or not isinstance(item.get("content"), str):
                     continue
@@ -1058,10 +1168,30 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
                 except json.JSONDecodeError:
                     continue
                 if isinstance(user_payload, dict):
-                    user_messages.append(user_payload.get("user_message"))
+                    user_message = user_payload.get("user_message")
+                    user_messages.append(user_message)
+                    if isinstance(user_message, str):
+                        try:
+                            background_result = json.loads(user_message)
+                        except json.JSONDecodeError:
+                            background_result = None
+                        if isinstance(background_result, dict) and background_result.get("type") == "background_tool_result":
+                            background_results.append(background_result)
             assert "此前用户文本" in user_messages
             assert "当前用户文本" in user_messages
             assert any(item.get("role") == "assistant" and item.get("content") == "此前助手文本" for item in input_items)
+            assert len(background_results) == 1
+            background_result = background_results[0]
+            assert background_result["task_id"] == task_id
+            assert background_result["task"] == task_result
+            assert background_result["tool_call"] == {
+                "id": target_call.id,
+                "name": "generate_image",
+                "arguments": target_call.arguments,
+            }
+            assert background_result["tool_result"]["tool_call_id"] == target_call.id
+            assert json.loads(background_result["tool_result"]["content"]) == task_result
+            assert background_result["request_context"] == expected_request_context
             return {
                 "status": "completed",
                 "model": MODEL_ID,
@@ -1107,7 +1237,22 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
             assert persisted_task.status == BackgroundTaskStatus.SUCCEEDED
             assert persisted_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
             assert persisted_task.result == task_result
-            assert persisted_task.extra["submission_context"] == expected_submission_context
+            assert persisted_task.extra["request_context"] == expected_request_context
+            assert "submission_context" not in persisted_task.extra
+            persisted_background_results = [message for message in (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all() if message.role == MessageRole.USER and message.type == MessageType.BACKGROUND_TASK_RESULT]
+            assert len(persisted_background_results) == 1
+            persisted_background_result = persisted_background_results[0]
+            assert persisted_background_result.dedupe_key == f"background-task:{task_id}:result"
+            assert persisted_background_result.is_processed is True
+            persisted_background_payload = json.loads(persisted_background_result.content or "{}")
+            assert persisted_background_payload["task_id"] == task_id
+            assert persisted_background_payload["task"] == task_result
+            assert persisted_background_payload["tool_call"] == {
+                "id": target_call.id,
+                "name": "generate_image",
+                "arguments": target_call.arguments,
+            }
+            assert persisted_background_payload["request_context"] == expected_request_context
 
             result_message = await db.get(Message, persisted_work.result_message_id)
             assert result_message is not None

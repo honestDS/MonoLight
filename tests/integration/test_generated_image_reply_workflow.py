@@ -656,28 +656,118 @@ async def batch_image_workflow(
         await manager.stop()
 
 
+def _responses_function_item_maps(payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    input_items = payload.get("input")
+    assert isinstance(input_items, list)
+    function_calls: dict[str, dict[str, Any]] = {}
+    function_outputs: dict[str, dict[str, Any]] = {}
+    for item in input_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call":
+            call_id = item.get("call_id") or item.get("id")
+            assert isinstance(call_id, str) and call_id
+            assert call_id not in function_calls
+            normalized_item = copy.deepcopy(item)
+            arguments = normalized_item.get("arguments")
+            if isinstance(arguments, str):
+                normalized_item["arguments"] = json.dumps(
+                    json.loads(arguments),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            function_calls[call_id] = normalized_item
+        elif item.get("type") == "function_call_output":
+            call_id = item.get("call_id") or item.get("id")
+            assert isinstance(call_id, str) and call_id
+            assert call_id not in function_outputs
+            function_outputs[call_id] = copy.deepcopy(item)
+    assert set(function_calls) == set(function_outputs)
+    return function_calls, function_outputs
+
+
+def _materialized_user_envelopes(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    input_items = payload.get("input")
+    assert isinstance(input_items, list)
+    envelopes: list[dict[str, Any]] = []
+    for item in input_items:
+        if not isinstance(item, dict) or item.get("role") != MessageRole.USER.value:
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            materialized = content
+        elif isinstance(content, list):
+            text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "input_text"]
+            assert all(isinstance(text, str) for text in text_parts)
+            materialized = "".join(text_parts)
+        else:
+            raise AssertionError("materialized user message content must be text")
+        envelope = json.loads(materialized)
+        assert isinstance(envelope, dict)
+        assert "user_message" in envelope
+        envelopes.append(envelope)
+    return envelopes
+
+
 async def _complete_single_round_image_tasks(
     workflow: SimpleNamespace,
     pending_tasks: list[BackgroundTask],
 ) -> None:
     task_ids = [task.id for task in pending_tasks]
     assert all(isinstance(task_id, int) for task_id in task_ids)
+    assert workflow.gateway_requests
+    historical_calls, historical_outputs = _responses_function_item_maps(workflow.gateway_requests[-1])
     prompts_by_task_id: dict[int, str] = {}
-    submission_snapshots: dict[int, list[dict[str, Any]]] = {}
+    request_context_snapshots: dict[int, list[dict[str, Any]]] = {}
+    purpose_snapshots: dict[int, Any] = {}
     for task in pending_tasks:
         assert task.id is not None
         prompt = (task.arguments or {}).get("prompt")
         assert isinstance(prompt, str)
         prompts_by_task_id[task.id] = prompt
-        extra = task.extra
-        assert isinstance(extra, dict)
-        submission_context = extra.get("submission_context")
-        assert isinstance(submission_context, list)
-        submission_snapshots[task.id] = copy.deepcopy(submission_context)
 
     async with workflow.factory() as db:
         result = await db.execute(select(Message).where(Message.session_id == workflow.session_id).order_by(Message.id.asc()))
-        source_messages = {message.id: message.content for message in result.scalars().all() if message.id is not None}
+        source_rows = list(result.scalars().all())
+        source_messages = {message.id: message.content for message in source_rows if message.id is not None}
+    source_user_messages = [message for message in source_rows if message.role == MessageRole.USER and message.type == MessageType.TEXT]
+    assert len(source_user_messages) == 1
+    source_user_message = source_user_messages[0]
+    assert source_user_message.id is not None
+    assert source_user_message.content is not None
+    expected_request_context = [
+        {
+            "id": source_user_message.id,
+            "role": MessageRole.USER.value,
+            "content": source_user_message.content,
+        }
+    ]
+    if source_user_message.attachments:
+        expected_request_context[0]["attachments"] = list(source_user_message.attachments)
+
+    for task in pending_tasks:
+        assert task.id is not None
+        extra = task.extra
+        assert isinstance(extra, dict)
+        request_context = extra.get("request_context")
+        assert request_context == expected_request_context
+        assert "submission_context" not in extra
+        request_context_snapshots[task.id] = copy.deepcopy(request_context)
+        assert "purpose" in extra
+        purpose = extra.get("purpose")
+        purpose_snapshots[task.id] = copy.deepcopy(purpose)
+        assert isinstance(task.tool_call_id, str)
+        historical_call = historical_calls.get(task.tool_call_id)
+        historical_output = historical_outputs.get(task.tool_call_id)
+        assert historical_call is not None
+        assert historical_output is not None
+        assert historical_call["name"] == task.tool_name
+        assert json.loads(historical_call["arguments"]) == task.arguments
+        historical_result = json.loads(historical_output["output"])
+        assert historical_result["status"] == "queued"
+        assert historical_result["tool_name"] == task.tool_name
+        assert historical_result["task_id"] == task.id
 
     expected_running_count = min(2, len(pending_tasks))
     await workflow.manager.schedule(workflow.profile)
@@ -724,7 +814,9 @@ async def _complete_single_round_image_tasks(
             assert completed_task.status == BackgroundTaskStatus.SUCCEEDED
             assert completed_task.attempt_count == 1
             assert completed_task.result is not None
-            assert completed_task.extra.get("submission_context") == submission_snapshots[task.id]
+            assert completed_task.extra.get("request_context") == request_context_snapshots[task.id]
+            assert "submission_context" not in completed_task.extra
+            assert completed_task.extra.get("purpose") == purpose_snapshots[task.id]
             completed_result = copy.deepcopy(completed_task.result)
 
         assert completed_result["status"] == "succeeded"
@@ -751,7 +843,9 @@ async def _complete_single_round_image_tasks(
         assert work.status == SessionReplyWorkStatus.SUCCEEDED
         assert work.result_message_id == result_message.id
         assert replied_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
-        assert replied_task.extra.get("submission_context") == submission_snapshots[task.id]
+        assert replied_task.extra.get("request_context") == request_context_snapshots[task.id]
+        assert "submission_context" not in replied_task.extra
+        assert replied_task.extra.get("purpose") == purpose_snapshots[task.id]
         assert result_message.role == MessageRole.ASSISTANT
         assert result_message.type == MessageType.TEXT
         assert result_message.content == f"Completed: {prompt}"
@@ -767,16 +861,35 @@ async def _complete_single_round_image_tasks(
 
         new_gateway_requests = workflow.gateway_requests[gateway_request_start:]
         assert len(new_gateway_requests) == 1
-        input_items = new_gateway_requests[0]["input"]
-        function_calls = [item for item in input_items if item.get("type") == "function_call"]
-        function_outputs = [item for item in input_items if item.get("type") == "function_call_output"]
-        assert len(function_calls) == 1
-        assert len(function_outputs) == 1
-        assert function_calls[0]["call_id"] == task.tool_call_id
-        assert function_outputs[0]["call_id"] == task.tool_call_id
-        assert function_calls[0]["name"] == "generate_image"
-        assert json.loads(function_calls[0]["arguments"]) == task.arguments
-        assert json.loads(function_outputs[0]["output"]) == completed_result
+        summary_calls, summary_outputs = _responses_function_item_maps(new_gateway_requests[0])
+        assert summary_calls == historical_calls
+        assert summary_outputs == historical_outputs
+        user_envelopes = _materialized_user_envelopes(new_gateway_requests[0])
+        result_events_by_task_id: dict[int, list[dict[str, Any]]] = {}
+        for envelope in user_envelopes:
+            user_message = envelope["user_message"]
+            if not isinstance(user_message, str):
+                continue
+            try:
+                event_payload = json.loads(user_message)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event_payload, dict) or event_payload.get("type") != "background_tool_result":
+                continue
+            event_task_id = event_payload.get("task_id")
+            assert isinstance(event_task_id, int)
+            result_events_by_task_id.setdefault(event_task_id, []).append(event_payload)
+        result_events = result_events_by_task_id.get(task.id, [])
+        assert len(result_events) == 1
+        result_event = result_events[0]
+        assert result_event["task"] == completed_result
+        assert result_event["tool_call"]["id"] == task.tool_call_id
+        assert result_event["tool_call"]["name"] == task.tool_name
+        assert result_event["tool_call"]["arguments"] == task.arguments
+        assert result_event["tool_result"]["tool_call_id"] == task.tool_call_id
+        assert json.loads(result_event["tool_result"]["content"]) == completed_result
+        assert result_event["request_context"] == request_context_snapshots[task.id]
+        assert result_event["purpose"] == purpose_snapshots[task.id]
         assert workflow.image_data not in json.dumps(new_gateway_requests[0], ensure_ascii=False)
 
         completed_task_ids.add(task.id)
@@ -800,7 +913,9 @@ async def _complete_single_round_image_tasks(
     assert all(task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED for task in persisted_tasks)
     for task in persisted_tasks:
         assert task.id is not None
-        assert task.extra.get("submission_context") == submission_snapshots[task.id]
+        assert task.extra.get("request_context") == request_context_snapshots[task.id]
+        assert "submission_context" not in task.extra
+        assert task.extra.get("purpose") == purpose_snapshots[task.id]
 
     assert Counter(request["prompt"] for request in workflow.image_requests) == Counter(prompts_by_task_id.values())
     assert len(workflow.image_requests) == len(pending_tasks)
@@ -2077,27 +2192,6 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
             for index, prompt in enumerate(prompts, start=1)
         ]
 
-    def input_item_maps(payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-        input_items = payload.get("input")
-        assert isinstance(input_items, list)
-        function_calls: dict[str, dict[str, Any]] = {}
-        function_outputs: dict[str, dict[str, Any]] = {}
-        for item in input_items:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "function_call":
-                call_id = item.get("call_id") or item.get("id")
-                assert isinstance(call_id, str) and call_id
-                assert call_id not in function_calls
-                function_calls[call_id] = copy.deepcopy(item)
-            elif item.get("type") == "function_call_output":
-                call_id = item.get("call_id") or item.get("id")
-                assert isinstance(call_id, str) and call_id
-                assert call_id not in function_outputs
-                function_outputs[call_id] = copy.deepcopy(item)
-        assert set(function_calls) == set(function_outputs)
-        return function_calls, function_outputs
-
     async def assert_persisted_state(completed_ids: set[int], started_ids: set[int], tasks: list[BackgroundTask]) -> None:
         async with workflow.factory() as db:
             result = await db.execute(select(BackgroundTask).where(BackgroundTask.session_id == workflow.session_id).order_by(BackgroundTask.id.asc()))
@@ -2127,7 +2221,7 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
     assert round_one_response["choices"][0]["message"]["content"] == "Image generation tasks accepted."
     assert len(workflow.gateway_requests) == 2
     round_one_payload = copy.deepcopy(workflow.gateway_requests[-1])
-    round_one_calls, round_one_outputs = input_item_maps(round_one_payload)
+    round_one_calls, round_one_outputs = _responses_function_item_maps(round_one_payload)
     assert len(round_one_calls) == 5
     assert set(round_one_calls) == set(round_one_outputs)
     serialized_round_one = json.dumps(round_one_payload, ensure_ascii=False)
@@ -2141,15 +2235,24 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
     assert all(task.attempt_count == 0 for task in round_one_tasks)
     round_one_task_ids = [task.id for task in round_one_tasks]
     assert all(isinstance(task_id, int) for task_id in round_one_task_ids)
-    round_one_submission_snapshots: dict[int, list[dict[str, Any]]] = {}
+    round_one_request_contexts: dict[int, list[dict[str, Any]]] = {}
+    purpose_by_task_id: dict[int, Any] = {}
     round_one_queued_payloads: dict[str, dict[str, Any]] = {}
     for task in round_one_tasks:
         assert task.id is not None
         assert task.reply_status == BackgroundTaskReplyStatus.PENDING
         assert isinstance(task.extra, dict)
-        submission_context = task.extra.get("submission_context")
-        assert isinstance(submission_context, list)
-        round_one_submission_snapshots[task.id] = copy.deepcopy(submission_context)
+        request_context = task.extra.get("request_context")
+        assert isinstance(request_context, list)
+        assert len(request_context) == 1
+        assert set(request_context[0]) == {"id", "role", "content"}
+        assert isinstance(request_context[0]["id"], int)
+        assert request_context[0]["role"] == MessageRole.USER.value
+        assert request_context[0]["content"] == "round-one batch request"
+        assert "submission_context" not in task.extra
+        round_one_request_contexts[task.id] = copy.deepcopy(request_context)
+        assert "purpose" in task.extra
+        purpose_by_task_id[task.id] = copy.deepcopy(task.extra["purpose"])
         assert isinstance(task.tool_call_id, str)
         assert task.tool_call_id in round_one_calls
         call_item = round_one_calls[task.tool_call_id]
@@ -2179,7 +2282,7 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
     assert round_two_response["choices"][0]["message"]["content"] == "Image generation tasks accepted."
     assert len(workflow.gateway_requests) == 4
     round_two_payload = copy.deepcopy(workflow.gateway_requests[-1])
-    round_two_calls, round_two_outputs = input_item_maps(round_two_payload)
+    round_two_calls, round_two_outputs = _responses_function_item_maps(round_two_payload)
     assert len(round_two_calls) == total_task_count
     assert set(round_two_calls) == set(round_two_outputs)
     assert set(round_one_calls).issubset(round_two_calls)
@@ -2196,7 +2299,8 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
     round_two_task_ids = [task.id for task in round_two_tasks]
     assert all(isinstance(task_id, int) for task_id in round_two_task_ids)
     assert not set(round_one_task_ids) & set(round_two_task_ids)
-    round_two_submission_snapshots: dict[int, list[dict[str, Any]]] = {}
+    round_two_request_contexts: dict[int, list[dict[str, Any]]] = {}
+    round_two_queued_payloads: dict[str, dict[str, Any]] = {}
     round_two_call_ids: set[str] = set()
     for task in tasks:
         assert task.id is not None
@@ -2211,14 +2315,27 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
         assert output_payload["tool_name"] == "generate_image"
         assert output_payload["task_id"] == task.id
         assert isinstance(task.extra, dict)
-        submission_context = task.extra.get("submission_context")
-        assert isinstance(submission_context, list)
-        if task.id in round_one_submission_snapshots:
-            assert task.extra.get("submission_context") == round_one_submission_snapshots[task.id]
+        request_context = task.extra.get("request_context")
+        assert isinstance(request_context, list)
+        assert len(request_context) == 1
+        assert set(request_context[0]) == {"id", "role", "content"}
+        assert isinstance(request_context[0]["id"], int)
+        assert request_context[0]["role"] == MessageRole.USER.value
+        if task.id in round_one_request_contexts:
+            assert request_context == round_one_request_contexts[task.id]
+            assert request_context[0]["content"] == "round-one batch request"
             assert output_payload == round_one_queued_payloads[task.tool_call_id]
         else:
             round_two_call_ids.add(task.tool_call_id)
-            round_two_submission_snapshots[task.id] = copy.deepcopy(submission_context)
+            assert request_context[0]["content"] == "round-two batch request"
+            round_two_request_contexts[task.id] = copy.deepcopy(request_context)
+        assert "submission_context" not in task.extra
+        assert "purpose" in task.extra
+        if task.id in purpose_by_task_id:
+            assert task.extra["purpose"] == purpose_by_task_id[task.id]
+        else:
+            purpose_by_task_id[task.id] = copy.deepcopy(task.extra["purpose"])
+        round_two_queued_payloads[task.tool_call_id] = copy.deepcopy(output_payload)
     assert len(round_two_call_ids) == round_two_count
     assert round_two_call_ids == {task.tool_call_id for task in round_two_tasks if task.tool_call_id is not None}
     await workflow.manager.schedule(workflow.profile)
@@ -2238,6 +2355,10 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
     completed_work_ids: dict[int, int] = {}
     result_message_ids: set[int] = set()
     summary_payloads: list[dict[str, Any]] = []
+    completed_results_by_task_id: dict[int, dict[str, Any]] = {}
+    request_context_by_task_id = {**round_one_request_contexts, **round_two_request_contexts}
+    task_by_id = {task.id: task for task in tasks}
+    task_by_call_id = {task.tool_call_id: task for task in tasks if task.tool_call_id is not None}
 
     for task_index in completion_order:
         task = tasks[task_index]
@@ -2261,7 +2382,9 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
             assert completed_task.attempt_count == 1
             assert completed_task.result is not None
             completed_result = copy.deepcopy(completed_task.result)
-            assert completed_task.extra.get("submission_context") == (round_one_submission_snapshots.get(task.id, round_two_submission_snapshots.get(task.id)))
+            assert completed_task.extra.get("request_context") == request_context_by_task_id[task.id]
+            assert "submission_context" not in completed_task.extra
+            assert completed_task.extra.get("purpose") == purpose_by_task_id[task.id]
 
         assert completed_result["status"] == "succeeded"
         assert completed_result["tool_name"] == "generate_image"
@@ -2287,7 +2410,9 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
         assert work.result_message_id == result_message.id
         assert replied_task.id == task.id
         assert replied_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
-        assert replied_task.extra.get("submission_context") == (round_one_submission_snapshots.get(task.id, round_two_submission_snapshots.get(task.id)))
+        assert replied_task.extra.get("request_context") == request_context_by_task_id[task.id]
+        assert "submission_context" not in replied_task.extra
+        assert replied_task.extra.get("purpose") == purpose_by_task_id[task.id]
         assert result_message.id is not None
         assert result_message.role == MessageRole.ASSISTANT
         assert result_message.type == MessageType.TEXT
@@ -2308,30 +2433,48 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
         assert len(new_gateway_requests) == 1
         summary_payload = new_gateway_requests[0]
         summary_payloads.append(copy.deepcopy(summary_payload))
-        summary_calls, summary_outputs = input_item_maps(summary_payload)
-        if task_index < 5:
-            expected_call_ids = {task.tool_call_id}
-            serialized_summary = json.dumps(summary_payload, ensure_ascii=False)
-            assert "round-one batch request" in serialized_summary
-            assert "round-two batch request" not in serialized_summary
-        else:
-            expected_call_ids = set(round_one_calls) | {task.tool_call_id}
-            serialized_summary = json.dumps(summary_payload, ensure_ascii=False)
-            assert "round-one batch request" in serialized_summary
-            assert "round-two batch request" in serialized_summary
-            assert not (set(round_two_call_ids) - {task.tool_call_id}) & set(summary_calls)
-        assert set(summary_calls) == expected_call_ids
-        assert set(summary_outputs) == expected_call_ids
-        for call_id in expected_call_ids:
+        summary_calls, summary_outputs = _responses_function_item_maps(summary_payload)
+        assert summary_calls == round_two_calls
+        assert summary_outputs == round_two_outputs
+        serialized_summary = json.dumps(summary_payload, ensure_ascii=False)
+        assert "round-one batch request" in serialized_summary
+        assert "round-two batch request" in serialized_summary
+        for call_id in round_two_calls:
             call_item = summary_calls[call_id]
             assert call_item["name"] == "generate_image"
-            expected_task = task if call_id == task.tool_call_id else next(candidate for candidate in round_one_tasks if candidate.tool_call_id == call_id)
+            expected_task = task_by_call_id[call_id]
             assert json.loads(call_item["arguments"]) == expected_task.arguments
             output_payload = json.loads(summary_outputs[call_id]["output"])
-            if call_id == task.tool_call_id:
-                assert output_payload == completed_result
-            else:
-                assert output_payload == round_one_queued_payloads[call_id]
+            assert output_payload == round_two_queued_payloads[call_id]
+        completed_results_by_task_id[task.id] = completed_result
+        user_envelopes = _materialized_user_envelopes(summary_payload)
+        result_events_by_task_id: dict[int, list[dict[str, Any]]] = {}
+        for envelope in user_envelopes:
+            user_message = envelope["user_message"]
+            if not isinstance(user_message, str):
+                continue
+            try:
+                event_payload = json.loads(user_message)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event_payload, dict) or event_payload.get("type") != "background_tool_result":
+                continue
+            event_task_id = event_payload.get("task_id")
+            assert isinstance(event_task_id, int)
+            result_events_by_task_id.setdefault(event_task_id, []).append(event_payload)
+        assert set(result_events_by_task_id) == set(completed_results_by_task_id)
+        for event_task_id, result_events in result_events_by_task_id.items():
+            assert len(result_events) == 1
+            result_event = result_events[0]
+            expected_task = task_by_id[event_task_id]
+            assert result_event["task"] == completed_results_by_task_id[event_task_id]
+            assert result_event["tool_call"]["id"] == expected_task.tool_call_id
+            assert result_event["tool_call"]["name"] == expected_task.tool_name
+            assert result_event["tool_call"]["arguments"] == expected_task.arguments
+            assert result_event["tool_result"]["tool_call_id"] == expected_task.tool_call_id
+            assert json.loads(result_event["tool_result"]["content"]) == completed_results_by_task_id[event_task_id]
+            assert result_event["request_context"] == request_context_by_task_id[event_task_id]
+            assert result_event["purpose"] == purpose_by_task_id[event_task_id]
         assert workflow.image_data not in json.dumps(summary_payload, ensure_ascii=False)
 
         completed_ids.add(task.id)
@@ -2382,8 +2525,9 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
     assert all(task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED for task in persisted_tasks)
     for task in persisted_tasks:
         assert task.id is not None
-        expected_snapshot = round_one_submission_snapshots.get(task.id, round_two_submission_snapshots.get(task.id))
-        assert task.extra.get("submission_context") == expected_snapshot
+        assert task.extra.get("request_context") == request_context_by_task_id[task.id]
+        assert "submission_context" not in task.extra
+        assert task.extra.get("purpose") == purpose_by_task_id[task.id]
     assert len(work_items) == total_task_count
     assert all(work_item.status == SessionReplyWorkStatus.SUCCEEDED for work_item in work_items)
     assert {work_item.id for work_item in work_items} == set(completed_work_ids.values())

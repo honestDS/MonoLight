@@ -62,7 +62,6 @@ from app.core.utils.dispatcher.helpers import (
     process_single_tool_with_isolated_db,
     validate_background_proactive_tool_calls,
 )
-from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import apply_platform_constraints_to_message, materialize_user_environment_prompts
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import (
@@ -137,7 +136,7 @@ class BackgroundDispatcherMixin:
         call_context: str,
         allow_tools: bool,
         extra_messages: list[InternalMessage] | None = None,
-        submission_context: list[InternalMessage] | None = None,
+        history_before_id: int | None = None,
         additional_system_prompt: str | None = None,
         guidance_prompt: str | None = None,
         persist_response: bool = True,
@@ -266,32 +265,23 @@ class BackgroundDispatcherMixin:
 
         async def build_initial_request(chat_params, chat_channel_obj, model_entry):
             nonlocal messages
-            if submission_context is None:
-                messages = await prepare_messages(
-                    db,
-                    session_id,
-                    uid,
-                    profile,
-                    cfg,
-                    None,
-                    "",
-                    False,
-                    context_window_k=chat_params["context_window_k"],
-                    max_tokens=chat_params["max_tokens"],
-                    tools=tools,
-                    additional_system_prompt=cleaned_platform_constraints or None,
-                    include_longterm_memory=False,
-                )
-            else:
-                system_prompt = await build_system_prompt(
-                    db,
-                    profile,
-                    include_longterm_memory=False,
-                )
-                messages = inject_system_prompt_text(
-                    [message.model_copy(deep=True) for message in submission_context],
-                    system_prompt,
-                )
+            messages = await prepare_messages(
+                db,
+                session_id,
+                uid,
+                profile,
+                cfg,
+                None,
+                "",
+                history_before_id is not None,
+                context_window_k=chat_params["context_window_k"],
+                max_tokens=chat_params["max_tokens"],
+                tools=tools,
+                history_before_id=history_before_id,
+                additional_system_prompt=cleaned_platform_constraints or None,
+                include_longterm_memory=False,
+                processed_only=True,
+            )
             if extra_messages:
                 messages.extend(message.model_copy(deep=True) for message in extra_messages)
             if cleaned_platform_constraints:

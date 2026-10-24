@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from sqlalchemy import update
 from sqlmodel import select
 
+import app.core.background_tasks.reply_trigger as reply_trigger_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.message_platforms.notifier as message_platform_notifier_module
@@ -357,11 +358,33 @@ async def _seed_work(
                 result=task_result,
                 auto_reply=True,
                 reply_status=BackgroundTaskReplyStatus.RUNNING,
-                extra={"submission_context": [InternalMessage(role=MessageRole.USER, content=content).model_dump(mode="json", exclude_none=True)]},
             )
             db.add(task)
             await db.flush()
             assert task.id is not None
+            db.add(
+                Message(
+                    session_id=SESSION_ID,
+                    uid=UID,
+                    profile_id=profile.id,
+                    role=MessageRole.USER,
+                    type=MessageType.TEXT,
+                    content=content,
+                    is_processed=True,
+                )
+            )
+            db.add(
+                Message(
+                    session_id=SESSION_ID,
+                    uid=UID,
+                    profile_id=profile.id,
+                    role=MessageRole.USER,
+                    type=MessageType.BACKGROUND_TASK_RESULT,
+                    content=reply_trigger_module._build_background_tool_result_message(task),
+                    is_processed=True,
+                    dedupe_key=f"background-task:{task.id}:result",
+                )
+            )
             source_id = str(task.id)
             source_type = SessionReplySourceType.BACKGROUND_TASK
 

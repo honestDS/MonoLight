@@ -16,7 +16,7 @@ from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
-from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT, PROMPT_TOOL_INTERRUPTED
+from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue.executor_audit import _persist_work_audit_execution_binding
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.session_reply_queue.executor_interactive import (
@@ -30,7 +30,6 @@ from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.background_task import BackgroundTask
 from app.models.message import InternalMessage, MessageRole, MessageType, decode_message_content
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import SessionReplyWorkItem
@@ -324,44 +323,6 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
     )
 
 
-def _load_background_submission_context(task: BackgroundTask) -> list[InternalMessage] | None:
-    extra = task.extra if isinstance(task.extra, dict) else {}
-    if "submission_context" not in extra:
-        return None
-    raw_context = extra.get("submission_context")
-    if not isinstance(raw_context, list):
-        return None
-    return [InternalMessage.model_validate(message) for message in raw_context if isinstance(message, dict)]
-
-
-def _fallback_last_frozen_user_message_id(messages: list[InternalMessage] | None) -> int | None:
-    if not messages:
-        return None
-    return max(
-        (message.id for message in messages if message.role == MessageRole.USER and message.id is not None),
-        default=None,
-    )
-
-
-def _build_background_result_messages(task: BackgroundTask) -> list[InternalMessage]:
-    task_result = task.result or {
-        "status": task.status,
-        "tool_name": task.tool_name,
-        "error": task.error,
-    }
-    return [
-        InternalMessage(
-            role=MessageRole.TOOL,
-            tool_call_id=task.tool_call_id,
-            content=json.dumps(task_result, ensure_ascii=False),
-        ),
-        InternalMessage(
-            role=MessageRole.USER,
-            content=BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT,
-        ),
-    ]
-
-
 async def _persist_work_audit_execution_binding_callback(
     binding: dict[str, Any] | None,
     *,
@@ -386,10 +347,10 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
 
-    submission_context = _load_background_submission_context(task)
+    result_event = await message_crud.get_by_dedupe_key(db, f"background-task:{int(work.source_id)}:result")
+    if result_event is None or result_event.id is None or result_event.uid != work.uid or result_event.session_id != work.session_id or result_event.profile_id != work.profile_id or result_event.type != MessageType.BACKGROUND_TASK_RESULT:
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     extra = task.extra if isinstance(task.extra, dict) else {}
-    stored_boundary_message_id = extra.get("context_summary_user_boundary_message_id")
-    initial_fixed_upper_message_id = stored_boundary_message_id if (isinstance(stored_boundary_message_id, int) and not isinstance(stored_boundary_message_id, bool) and stored_boundary_message_id > 0) else _fallback_last_frozen_user_message_id(submission_context)
     ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
         db,
         work=work,
@@ -399,10 +360,9 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         profile=profile,
         call_context="session_reply_background_summary",
         allow_tools=True,
-        extra_messages=_build_background_result_messages(task) if submission_context is not None else None,
-        submission_context=submission_context,
         initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
-        initial_fixed_upper_message_id=initial_fixed_upper_message_id,
+        history_before_id=result_event.id + 1,
+        initial_fixed_upper_message_id=result_event.id,
         restrict_tools_to_background_allowlist=extra.get("auto_terminal_watch") is not True,
         reply_source="background_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),
