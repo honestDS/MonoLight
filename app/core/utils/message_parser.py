@@ -44,10 +44,16 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             suppress_tool_result_metadata = False
             provider_metadata = msg.provider_metadata if isinstance(msg.provider_metadata, dict) else None
 
-            # 直接检测：仅在类型明确为 TOOL_CALL 或 TOOL_RESULT 时尝试解析 JSON
+            # 直接检测：仅在需要的消息类型中尝试解析 JSON
             if m_type in {MessageType.AUDIT_CONFIRMATION, MessageType.AUDIT_DECISION}:
                 continue
             if m_type == MessageType.BACKGROUND_TASK_RESULT:
+                try:
+                    payload = json.loads(content)
+                except (json.JSONDecodeError, TypeError):
+                    payload = None
+                if isinstance(payload, dict) and payload.get("ui_only") is True:
+                    continue
                 parsed_history.extend(_parse_background_task_result_message(msg, content))
                 continue
             elif m_type == MessageType.SCHEDULED_TASK_TRIGGER:

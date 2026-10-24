@@ -77,7 +77,21 @@ class SessionReplyResult:
             rows: list[dict[str, Any]] = []
             for message_id in message_ids:
                 message = await message_crud.get(db, message_id)
-                if message is None or message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id or message.role != MessageRole.TOOL or message.type != MessageType.TOOL_RESULT:
+                if message is None or message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id:
+                    continue
+                if message.type == MessageType.BACKGROUND_TASK_RESULT:
+                    rows.append(
+                        {
+                            "id": message.id,
+                            "db_id": message.id,
+                            "role": "assistant",
+                            "type": MessageType.BACKGROUND_TASK_RESULT.value,
+                            "content": message.content,
+                            "created_at": message.created_at.timestamp() if message.created_at is not None else None,
+                        }
+                    )
+                    continue
+                if message.role != MessageRole.TOOL or message.type != MessageType.TOOL_RESULT:
                     continue
                 rows.append(
                     {

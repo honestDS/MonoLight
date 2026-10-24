@@ -25,7 +25,7 @@ const isRequiredConfirmation = (message, content) => (
 
 export const isToolOutputMessage = (message) => {
   if (!message || typeof message !== 'object') return false
-  if (message.type === 'tool_call' || message.type === 'tool_result' || message.role === 'tool' || hasToolCalls(message)) {
+  if (message.type === 'tool_call' || message.type === 'tool_result' || message.type === 'background_result' || message.role === 'tool' || hasToolCalls(message)) {
     return true
   }
 
@@ -37,9 +37,11 @@ export const filterToolOutputMessages = (messages, showToolCalls = true) => {
   if (!Array.isArray(messages)) return messages || []
 
   return messages.filter((message) => {
-    if (message?.type === 'background_result' || message?.role === 'system' || message?.role === 'background_system') {
+    if (message?.role === 'system' || message?.role === 'background_system') {
       return false
     }
+
+    if (message?.type === 'background_result') return showToolCalls
 
     if (showToolCalls) return true
 

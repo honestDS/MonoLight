@@ -29,6 +29,7 @@ from app.core.terminal.process_config import build_subprocess_env
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
+from .terminal_watch import ensure_terminal_auto_watch
 
 
 class ShellExecutor(BaseExecutor):
@@ -240,6 +241,15 @@ class ShellExecutor(BaseExecutor):
             terminal_session.terminal_session_id,
             self.uid,
             self.session_id,
+        )
+        await ensure_terminal_auto_watch(
+            self.db,
+            uid=self.uid,
+            session_id=self.session_id,
+            profile_id=self.profile.id,
+            terminal_session_id=snapshot.terminal_session_id,
+            after_offset=snapshot.output_buffer.next_offset,
+            session_status=snapshot.status,
         )
         handoff = ShellInteractiveHandoffResult(
             terminal_session_id=snapshot.terminal_session_id,

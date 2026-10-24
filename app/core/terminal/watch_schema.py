@@ -6,9 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.constants import (
     ERR_TERMINAL_WATCH_CONDITION_INVALID,
-    TERMINAL_WATCH_DEFAULT_TIMEOUT_SECONDS,
     TERMINAL_WATCH_MAX_OUTPUT_BYTES,
-    TERMINAL_WATCH_MAX_TIMEOUT_SECONDS,
 )
 from app.core.i18n import t
 from app.core.terminal.schemas import TerminalSessionId
@@ -26,11 +24,6 @@ class TerminalWatchRequest(BaseModel):
     after_offset: int = Field(ge=0)
     condition: Literal["output", "process_exit", "output_contains", "quiet_for"] = "output"
     text: str | None = Field(default=None, min_length=1, max_length=512)
-    timeout_seconds: float = Field(
-        default=TERMINAL_WATCH_DEFAULT_TIMEOUT_SECONDS,
-        ge=1,
-        le=TERMINAL_WATCH_MAX_TIMEOUT_SECONDS,
-    )
     settle_seconds: float = Field(default=2, ge=1, le=60)
     max_bytes: int = Field(default=TERMINAL_WATCH_MAX_OUTPUT_BYTES, ge=1, le=TERMINAL_WATCH_MAX_OUTPUT_BYTES)
 

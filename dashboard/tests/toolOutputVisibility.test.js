@@ -39,6 +39,15 @@ test('non-stream response hides tool-round reasoning with tool output but preser
 })
 
 const internalMessages = [
+  {
+    type: 'background_result',
+    role: 'assistant',
+    content: JSON.stringify({
+      type: 'background_tool_result',
+      tool_call: { id: 'background-call-1', name: 'search', arguments: { query: 'MonoLight' } },
+      task: 'background result'
+    })
+  },
   { type: 'background_result', role: 'user', content: { status: 'completed' } },
   { type: 'background_result', role: 'assistant', content: '{"status":"completed"}' },
   { type: 'background_result', role: 'user', content: '{"status":"completed"' },
@@ -47,10 +56,16 @@ const internalMessages = [
   { role: 'system', content: 'internal system message' },
   { role: 'background_system', content: 'legacy internal message' }
 ]
+const backgroundResults = internalMessages.filter(
+  message => message.type === 'background_result'
+)
 
 for (const showToolCalls of [true, false]) {
-  test(`internal messages are hidden when showToolCalls=${showToolCalls}`, () => {
-    assert.deepEqual(filterToolOutputMessages(internalMessages, showToolCalls), [])
+  test(`background results follow showToolCalls=${showToolCalls}`, () => {
+    assert.deepEqual(
+      filterToolOutputMessages(internalMessages, showToolCalls),
+      showToolCalls ? backgroundResults : []
+    )
   })
 }
 
@@ -96,7 +111,7 @@ for (const [showToolCalls, expected] of [
   })
 }
 
-test('response history filtering removes internal messages without mutating response data', () => {
+test('response history filtering applies tool visibility without mutating response data', () => {
   const response = {
     id: 'response-1',
     choices: [
@@ -120,6 +135,7 @@ test('response history filtering removes internal messages without mutating resp
   for (const showToolCalls of [true, false]) {
     const filtered = filterResponseHistoryToolOutput(response, showToolCalls)
     const expectedHistory = [
+      ...(showToolCalls ? backgroundResults : []),
       visibilityCases.user,
       visibilityCases.assistant,
       ...(showToolCalls

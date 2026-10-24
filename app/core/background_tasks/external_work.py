@@ -142,21 +142,21 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                     if detail is None or detail.original_tool_call_id != stored.tool_call_id or detail.tool_name != task.tool_name:
                         raise ValueError(_unknown_error())
                 payload, result_text, execution_status = _build_result(task)
-                replacement = await replace_pending_tool_result(db, pending_message=pending_message, original_tool_call_id=stored.tool_call_id, content=result_text, tool_execution_status=execution_status, audit_record_id=pending_message.audit_record_id)
-                result_text = replacement if isinstance(replacement, str) else result_text
-                message_snapshots.append(
-                    {
-                        "id": pending_message.id,
-                        "db_id": pending_message.id,
-                        "role": "tool",
-                        "type": "tool_result",
-                        "content": pending_message.content,
-                        "created_at": pending_message.created_at.timestamp() if pending_message.created_at is not None else None,
-                    }
-                )
+                if pending_message.audit_record_id is not None:
+                    replacement = await replace_pending_tool_result(
+                        db,
+                        pending_message=pending_message,
+                        original_tool_call_id=stored.tool_call_id,
+                        content=result_text,
+                        tool_execution_status=execution_status,
+                        audit_record_id=pending_message.audit_record_id,
+                    )
+                    result_text = replacement if isinstance(replacement, str) else result_text
                 extra = task.extra if isinstance(task.extra, dict) else {}
                 marker_payload = {
                     "type": "background_tool_result",
+                    "ui_only": True,
+                    "original_tool_result_message_id": pending_message.id,
                     "task_id": task.id,
                     "tool_name": task.tool_name,
                     "execution_status": execution_status,
@@ -169,9 +169,34 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 marker = await save_message(db, session_id, uid, MessageRole.USER, MessageType.BACKGROUND_TASK_RESULT, json.dumps(marker_payload, ensure_ascii=False), work.profile_id, is_processed=True, dedupe_key=f"background-task:{task.id}:result", commit=False)
                 if not _is_positive_int(marker.id):
                     raise ValueError(_unknown_error())
+                marker_content = marker.content if isinstance(marker.content, str) else json.dumps(marker_payload, ensure_ascii=False)
+                message_snapshots.append(
+                    {
+                        "id": marker.id,
+                        "db_id": marker.id,
+                        "role": "assistant",
+                        "type": MessageType.BACKGROUND_TASK_RESULT.value,
+                        "content": marker_content,
+                        "created_at": marker.created_at if marker.created_at is not None else None,
+                    }
+                )
                 marker_payloads.append(marker_payload)
                 result_entries.append((slot, stored.tool_call_id, payload, result_text, marker.id))
 
+            pending_message_ids = {slot[3] for slot, _task in task_entries}
+            existing_message_ids = state.get("external_tool_result_message_ids")
+            external_tool_result_message_ids: list[int] = []
+            seen_message_ids: set[int] = set()
+            if isinstance(existing_message_ids, list):
+                for message_id in existing_message_ids:
+                    if _is_positive_int(message_id) and message_id not in pending_message_ids and message_id not in seen_message_ids:
+                        seen_message_ids.add(message_id)
+                        external_tool_result_message_ids.append(message_id)
+            for _slot_data, _call_id, _payload, _result_text, marker_id in result_entries:
+                if marker_id not in seen_message_ids:
+                    seen_message_ids.add(marker_id)
+                    external_tool_result_message_ids.append(marker_id)
+            state["external_tool_result_message_ids"] = external_tool_result_message_ids
             latest_marker_id = max(marker_id for _slot_data, _call_id, _payload, _result, marker_id in result_entries)
             if bool(state.get("show_tool_calls")):
                 sequence_no = await session_reply_stream_event_crud.get_latest_sequence(db, work_id=work.id)

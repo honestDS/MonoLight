@@ -4,8 +4,8 @@ import i18n from '../i18n'
 import {
   findAssistantResponseReplacementIndex,
   getMessageDbId,
-  isAssistantResponse,
-  isPlainAssistantResponse,
+  isAssistantResponse as identityIsAssistantResponse,
+  isPlainAssistantResponse as identityIsPlainAssistantResponse,
   mergeAssistantResponse,
   mergeAssistantResponseIntoList
 } from './assistantResponseIdentity'
@@ -13,13 +13,27 @@ import {
 export {
   findAssistantResponseReplacementIndex,
   getMessageDbId,
-  isAssistantResponse,
-  isPlainAssistantResponse,
   mergeAssistantResponse,
   mergeAssistantResponseIntoList
 }
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
+
+const sourceIsAssistantResponse = typeof identityIsAssistantResponse === 'function'
+  ? identityIsAssistantResponse
+  : globalThis.isAssistantResponse
+const sourceIsPlainAssistantResponse = typeof identityIsPlainAssistantResponse === 'function'
+  ? identityIsPlainAssistantResponse
+  : globalThis.isPlainAssistantResponse
+const isBackgroundResultMessage = message => message?.type === 'background_result'
+
+export const isAssistantResponse = message => (
+  !isBackgroundResultMessage(message) && sourceIsAssistantResponse(message)
+)
+
+export const isPlainAssistantResponse = message => (
+  !isBackgroundResultMessage(message) && sourceIsPlainAssistantResponse(message)
+)
 
 const formatDateObject = (date, fallback = '') => {
   try {
@@ -47,6 +61,13 @@ export const normalizeMessageContent = (content) => {
   return content
 }
 
+const getOriginalToolResultMessageId = (message) => {
+  if (message?.type !== 'background_result') return null
+  const content = normalizeMessageContent(message.content)
+  const messageId = content?.original_tool_result_message_id
+  return messageId === null || messageId === undefined || messageId === '' ? null : String(messageId)
+}
+
 export const getToolResultCallId = (message) => {
   const content = normalizeMessageContent(message?.content)
   const isToolResultMessage = message?.type === 'tool_result' || message?.role === 'tool' || content?.role === 'tool'
@@ -56,6 +77,12 @@ export const getToolResultCallId = (message) => {
 }
 
 export const findMessageReplacementIndex = (messages, incomingMessage) => {
+  const originalToolResultMessageId = getOriginalToolResultMessageId(incomingMessage)
+  if (originalToolResultMessageId !== null) {
+    const originalIndex = messages.findIndex(message => getMessageDbId(message) === originalToolResultMessageId)
+    if (originalIndex !== -1) return originalIndex
+  }
+
   const incomingDbId = getMessageDbId(incomingMessage)
   if (incomingDbId !== null) {
     const dbIdIndex = messages.findIndex(message => getMessageDbId(message) === incomingDbId)
@@ -102,6 +129,8 @@ export const getMessageDedupeKeys = (message) => {
 
   const content = normalizeMessageContent(message?.content)
   const messageType = message?.type || message?.role || 'message'
+  const originalToolResultMessageId = getOriginalToolResultMessageId(message)
+  if (originalToolResultMessageId !== null) keys.add(`db:${originalToolResultMessageId}`)
   if (message?.response_id) keys.add(`response:${messageType}:${message.response_id}`)
   if (message?.work_id && message?.turn !== undefined && message?.turn !== null) {
     keys.add(`work_turn:${messageType}:${message.work_id}:${message.turn}`)
