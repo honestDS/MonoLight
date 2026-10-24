@@ -89,6 +89,7 @@ class ContextManager:
         after_id: int | None = None,
         context_window_k: int = 4,
         reserved_tokens: int = 0,
+        processed_only: bool = False,
     ) -> list[InternalMessage]:
         """
         获取总结边界之后的完整持久化历史，并仅做工具链协议对齐。
@@ -104,6 +105,8 @@ class ContextManager:
             before_id=before_id,
             after_id=after_id,
         )
+        if processed_only:
+            raw_history = [message for message in raw_history if message.is_processed]
         parsed_history_desc = parse_db_messages_to_internal(raw_history)
         parsed_history = list(reversed(parsed_history_desc))
         return cls.audit_tool_chain(

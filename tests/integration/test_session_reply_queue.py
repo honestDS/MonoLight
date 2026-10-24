@@ -196,7 +196,7 @@ async def test_concurrent_claims_keep_same_session_serial_and_claim_other_sessio
 
 
 @pytest.mark.asyncio
-async def test_claim_does_not_skip_an_earlier_waiting_work(db_session: AsyncSession):
+async def test_claim_skips_an_earlier_waiting_external_work(db_session: AsyncSession):
     crud = CRUDSessionReplyWorkItem()
     first = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=1, dedupe_key="foreground-message:1")
     second = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=2, dedupe_key="foreground-message:2")
@@ -206,9 +206,13 @@ async def test_claim_does_not_skip_an_earlier_waiting_work(db_session: AsyncSess
 
     claimed = await crud.claim_next(db_session, worker_id="worker-1", lease_seconds=300)
 
-    assert claimed is None
-    await db_session.refresh(second)
-    assert second.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert claimed is not None
+    assert claimed.id == second.id
+    assert claimed.status == SessionReplyWorkStatus.RUNNING
+    assert claimed.locked_by == "worker-1"
+    await db_session.refresh(first)
+    assert first.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    assert first.locked_by is None
 
 
 @pytest.mark.asyncio

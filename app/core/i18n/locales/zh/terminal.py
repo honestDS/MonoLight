@@ -12,6 +12,7 @@ MESSAGES = {
     "ERR_TERMINAL_READ_OK_INVALID": "正常读取必须从请求的可用偏移量开始",
     "ERR_TERMINAL_READ_EMPTY_INVALID": "空读取不得包含未读输出",
     "ERR_TERMINAL_READ_EXPIRED_INVALID": "已过期读取不得包含保留输出",
+    "ERR_TERMINAL_WATCH_CONDITION_INVALID": "终端监听条件无效：{detail}",
     "ERR_TERMINAL_EXITED_OUTCOME_INVALID": "已退出会话必须包含 exit_code 且不得包含 failure_reason",
     "ERR_TERMINAL_FAILURE_OUTCOME_INVALID": "失败或丢失会话必须包含 failure_reason 且不得包含 exit_code",
     "ERR_TERMINAL_ACTIVE_OUTCOME_INVALID": "非终态会话不得包含 exit_code 或 failure_reason",

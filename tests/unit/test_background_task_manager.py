@@ -154,7 +154,9 @@ async def test_schedule_respects_profile_concurrency_limit(monkeypatch):
         async def __aexit__(self, exc_type, exc_value, traceback):
             return None
 
-    async def list_pending(db, *, profile_id, limit):
+    async def list_pending(db, *, profile_id, limit, observer):
+        if observer:
+            return []
         assert profile_id == 9
         assert limit == 2
         return pending_tasks[:limit]
@@ -186,6 +188,7 @@ async def test_run_loop_periodically_recovers_expired_running_tasks(monkeypatch)
     manager = BackgroundTaskManager()
     recover_calls = 0
     recover_reply_calls = 0
+    reconcile_calls = 0
     dispatch_calls = 0
     monotonic_values = iter([0, 30, 30])
 
@@ -196,6 +199,10 @@ async def test_run_loop_periodically_recovers_expired_running_tasks(monkeypatch)
     async def recover_replies():
         nonlocal recover_reply_calls
         recover_reply_calls += 1
+
+    async def reconcile_external_work():
+        nonlocal reconcile_calls
+        reconcile_calls += 1
 
     async def dispatch_tasks():
         nonlocal dispatch_calls
@@ -208,6 +215,7 @@ async def test_run_loop_periodically_recovers_expired_running_tasks(monkeypatch)
     monkeypatch.setattr(manager_module, "monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(manager_module, "recover_pending_background_tasks", recover_tasks)
     monkeypatch.setattr(manager_module, "recover_pending_background_task_replies", recover_replies)
+    monkeypatch.setattr(manager_module, "reconcile_external_work", reconcile_external_work)
     monkeypatch.setattr(manager, "dispatch_pending_tasks", dispatch_tasks)
     monkeypatch.setattr(manager, "dispatch_pending_replies", dispatch_replies)
 
@@ -215,6 +223,7 @@ async def test_run_loop_periodically_recovers_expired_running_tasks(monkeypatch)
 
     assert recover_calls == 1
     assert recover_reply_calls == 1
+    assert reconcile_calls == 1
     assert dispatch_calls == 1
 
 

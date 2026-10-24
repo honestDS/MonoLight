@@ -43,6 +43,7 @@ async def prepare_messages(
     history_before_id: int | None = None,
     additional_system_prompt: str | None = None,
     include_longterm_memory: bool = True,
+    processed_only: bool = False,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为历史消息加载的预留量。
     # 总结阈值与硬窗口由模型调用前的统一检查点按完整请求重新计算。
@@ -104,6 +105,7 @@ async def prepare_messages(
         after_id=summary_state.message_id,
         context_window_k=context_window_k,
         reserved_tokens=reserved_tokens,
+        processed_only=processed_only,
     )
     if summary_message is not None:
         messages.insert(0, summary_message)

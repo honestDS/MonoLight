@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
+from app.core.constants import ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.base import CRUDBase
 from app.core.i18n import t
@@ -22,6 +22,12 @@ from app.providers.database.time import get_database_time, get_database_timestam
 
 
 class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, BackgroundTaskCreate]):
+    @staticmethod
+    def _has_origin_work(task: BackgroundTask) -> bool:
+        extra = task.extra if isinstance(task.extra, dict) else {}
+        origin_work_id = extra.get("origin_work_id")
+        return isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0
+
     @staticmethod
     def _not_unknown_audit_condition():
         unknown_audit = select(AuditRecord.id).where(
@@ -80,10 +86,12 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         result = await db.execute(select(BackgroundTask).where(BackgroundTask.audit_record_id == audit_record_id).order_by(BackgroundTask.id).execution_options(populate_existing=True))
         return list(result.scalars().all())
 
-    async def list_pending(self, db: AsyncSession, *, profile_id: int | None = None, limit: int = 100) -> list[BackgroundTask]:
+    async def list_pending(self, db: AsyncSession, *, profile_id: int | None = None, limit: int = 100, observer: bool | None = None) -> list[BackgroundTask]:
         stmt = select(BackgroundTask).where(BackgroundTask.status == BackgroundTaskStatus.PENDING, self._not_unknown_audit_condition()).order_by(BackgroundTask.created_at.asc()).limit(limit)
         if profile_id is not None:
             stmt = stmt.where(BackgroundTask.profile_id == profile_id)
+        if observer is not None:
+            stmt = stmt.where(BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME if observer else BackgroundTask.tool_name != TERMINAL_WATCH_TOOL_NAME)
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
@@ -401,15 +409,17 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         task = await self.get(db, task_id)
         if task is None:
             return False
-        if task.audit_execution_record_id is not None:
+        has_origin_work = self._has_origin_work(task)
+        if task.audit_execution_record_id is not None or has_origin_work:
             if task.status != BackgroundTaskStatus.RUNNING or task.locked_by != worker_id or task.lock_until is None or (expected_lock_until is not None and task.lock_until != expected_lock_until):
                 return False
+            unknown_error = t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN)
             return await self.mark_execution_unknown(
                 db,
                 task_id=task_id,
                 worker_id=worker_id,
-                error=t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN),
-                result=build_background_task_failure_result(task.tool_name, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN)),
+                error=unknown_error,
+                result=({"status": "execution_unknown", "tool_name": task.tool_name, "error": unknown_error} if has_origin_work else build_background_task_failure_result(task.tool_name, unknown_error)),
                 auto_reply=task.auto_reply,
                 expected_lock_until=expected_lock_until if expected_lock_until is not None else task.lock_until,
             )
@@ -563,12 +573,16 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         expected_lock_until: int | None = None,
     ) -> bool:
         task = await self.get(db, task_id)
-        if task is None or task.audit_execution_record_id is None:
+        if task is None:
             return False
+        has_origin_work = self._has_origin_work(task)
         extra = {
             **(task.extra if isinstance(task.extra, dict) else {}),
-            "audit_execution_unknown": True,
         }
+        if task.audit_execution_record_id is None or has_origin_work:
+            extra["execution_unknown"] = True
+        if task.audit_execution_record_id is not None:
+            extra["audit_execution_unknown"] = True
         marked = await self.mark_failed(
             db,
             task_id=task_id,
@@ -584,6 +598,9 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         if not marked:
             await db.rollback()
             return False
+        if task.audit_execution_record_id is None:
+            await db.commit()
+            return True
         audit_marked = await self._mark_audit_unknown(db, task, error_reason=error)
         if not audit_marked:
             execution = await audit_crud.get_execution_record(db, task.audit_execution_record_id)
@@ -679,80 +696,58 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         now = await get_database_timestamp(db)
         finished_at = await get_database_time(db)
         result = await db.execute(
-            select(
-                BackgroundTask.id,
-                BackgroundTask.locked_by,
-                BackgroundTask.lock_until,
-                BackgroundTask.attempt_count,
-                BackgroundTask.auto_reply,
-                BackgroundTask.tool_name,
-                BackgroundTask.audit_record_id,
-                BackgroundTask.audit_execution_record_id,
-            ).where(
+            select(BackgroundTask).where(
                 BackgroundTask.profile_id == profile_id,
                 BackgroundTask.status == BackgroundTaskStatus.RUNNING,
                 BackgroundTask.lock_until < now,
             )
         )
-        expired_tasks = list(result.all())
+        expired_tasks = list(result.scalars().all())
         reply_task_ids: list[int] = []
-        for task_id, locked_by, lock_until, attempt_count, auto_reply, tool_name, audit_record_id, audit_execution_record_id in expired_tasks:
+        for task in expired_tasks:
+            if task.id is None:
+                continue
             conditions = (
-                BackgroundTask.id == task_id,
+                BackgroundTask.id == task.id,
                 BackgroundTask.status == BackgroundTaskStatus.RUNNING,
-                BackgroundTask.locked_by == locked_by,
-                BackgroundTask.lock_until == lock_until,
+                BackgroundTask.locked_by == task.locked_by,
+                BackgroundTask.lock_until == task.lock_until,
                 BackgroundTask.lock_until < now,
             )
-            if audit_execution_record_id is not None:
-                update_result = await db.execute(
-                    update(BackgroundTask)
-                    .where(*conditions)
-                    .values(
-                        status=BackgroundTaskStatus.FAILED,
-                        error=t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN),
-                        result=build_background_task_failure_result(tool_name, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN)),
-                        finished_at=finished_at,
-                        locked_by=None,
-                        lock_until=None,
-                        reply_status=BackgroundTaskReplyStatus.PENDING if auto_reply else BackgroundTaskReplyStatus.NONE,
-                        reply_locked_by=None,
-                        reply_lock_until=None,
-                    )
-                    .execution_options(synchronize_session=False)
+            has_origin_work = self._has_origin_work(task)
+            if task.audit_execution_record_id is not None or has_origin_work:
+                unknown_error = t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN)
+                marked = await self.mark_execution_unknown(
+                    db,
+                    task_id=task.id,
+                    worker_id=task.locked_by,
+                    error=unknown_error,
+                    result=({"status": "execution_unknown", "tool_name": task.tool_name, "error": unknown_error} if has_origin_work else build_background_task_failure_result(task.tool_name, unknown_error)),
+                    auto_reply=task.auto_reply,
+                    require_unexpired_lease=False,
+                    expected_lock_until=task.lock_until,
                 )
-                if update_result.rowcount == 1:
-                    task = await self.get(db, task_id)
-                    audit_marked = task is not None and await self._mark_audit_unknown(db, task, error_reason=t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
-                    if not audit_marked and task is not None:
-                        execution = await audit_crud.get_execution_record(db, task.audit_execution_record_id)
-                        record = await audit_crud.get_record(db, task.audit_record_id) if task.audit_record_id is not None else None
-                        audit_marked = execution is not None and execution.status == "execution_unknown" and record is not None and record.status == "execution_unknown"
-                    if not audit_marked:
-                        await db.rollback()
-                        continue
-                    if auto_reply:
-                        reply_task_ids.append(task_id)
-                    await db.commit()
-            elif attempt_count >= max_attempts:
+                if marked and task.auto_reply:
+                    reply_task_ids.append(task.id)
+            elif task.attempt_count >= max_attempts:
                 update_result = await db.execute(
                     update(BackgroundTask)
                     .where(*conditions)
                     .values(
                         status=BackgroundTaskStatus.FAILED,
                         error=max_attempts_error,
-                        result=build_background_task_failure_result(tool_name, max_attempts_error),
+                        result=build_background_task_failure_result(task.tool_name, max_attempts_error),
                         finished_at=finished_at,
                         locked_by=None,
                         lock_until=None,
-                        reply_status=BackgroundTaskReplyStatus.PENDING if auto_reply else BackgroundTaskReplyStatus.NONE,
+                        reply_status=BackgroundTaskReplyStatus.PENDING if task.auto_reply else BackgroundTaskReplyStatus.NONE,
                         reply_locked_by=None,
                         reply_lock_until=None,
                     )
                     .execution_options(synchronize_session=False)
                 )
-                if update_result.rowcount == 1 and auto_reply:
-                    reply_task_ids.append(task_id)
+                if update_result.rowcount == 1 and task.auto_reply:
+                    reply_task_ids.append(task.id)
             else:
                 await db.execute(
                     update(BackgroundTask)

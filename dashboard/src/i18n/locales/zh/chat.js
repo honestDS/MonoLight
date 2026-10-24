@@ -62,7 +62,6 @@ export default {
   tool: '{name}',
   tool_call: '工具调用: {name}',
   tool_result: '工具返回: {name}',
-  background_task_result: '后台任务: {name}',
   audit_confirmation_title: '操作需要确认',
   audit_risk: '风险评分: {score}',
   audit_status: '状态: {status}',

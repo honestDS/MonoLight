@@ -1207,9 +1207,10 @@ async def _run_audited_interactive_dispatch(
         return SimpleNamespace(id=saved_message_id, content=message.content)
 
     async def save_tool_response(db, session_id, uid, profile_id, tool_result, messages, turn_messages):
+        tool_result.id = 200
         messages.append(tool_result)
         turn_messages.append(tool_result)
-        return SimpleNamespace(id=200)
+        return tool_result
 
     async def audit_round(*args, **kwargs):
         nonlocal next_audit_record_id

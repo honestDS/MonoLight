@@ -7,11 +7,13 @@ from app.core.constants import (
     ERR_SESSION_REPLY_WORK_ENDED,
     ERR_SESSION_REPLY_WORK_NOT_FOUND,
 )
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.session import session_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import t
-from app.models.message import Message
+from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
 )
@@ -59,6 +61,44 @@ class SessionReplyResult:
         elif work.status == SessionReplyWorkStatus.CANCELLED:
             error = work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status)
 
+        session_events: list[dict[str, Any]] = []
+        session = await session_crud.get_by_session_id(db, work.session_id)
+        if session is not None and session.uid == work.uid and session.show_tool_calls is True:
+            execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+            raw_message_ids = execution_state.get("external_tool_result_message_ids")
+            message_ids: list[int] = []
+            seen_message_ids: set[int] = set()
+            if isinstance(raw_message_ids, list):
+                for message_id in raw_message_ids:
+                    if isinstance(message_id, int) and not isinstance(message_id, bool) and message_id > 0 and message_id not in seen_message_ids:
+                        seen_message_ids.add(message_id)
+                        message_ids.append(message_id)
+
+            rows: list[dict[str, Any]] = []
+            for message_id in message_ids:
+                message = await message_crud.get(db, message_id)
+                if message is None or message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id or message.role != MessageRole.TOOL or message.type != MessageType.TOOL_RESULT:
+                    continue
+                rows.append(
+                    {
+                        "id": message.id,
+                        "db_id": message.id,
+                        "role": "tool",
+                        "type": "tool_result",
+                        "content": message.content,
+                        "created_at": message.created_at.timestamp() if message.created_at is not None else None,
+                    }
+                )
+            if rows:
+                session_events = [
+                    {
+                        "type": "tool_results_update",
+                        "session_id": work.session_id,
+                        "work_id": work.id,
+                        "messages": rows,
+                    }
+                ]
+
         return {
             "work_id": work_id,
             "resolved_work_id": work.id,
@@ -68,6 +108,7 @@ class SessionReplyResult:
             "result_message_id": work.result_message_id,
             "response": response,
             "error": error,
+            **({"session_events": session_events} if session_events else {}),
         }
 
     async def wait_for_session_stream(
@@ -189,6 +230,16 @@ class SessionReplyResult:
 
                 if events:
                     continue
+
+                if work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK:
+                    yield {
+                        "type": "work_suspended",
+                        "work_id": target_work_id,
+                        "session_id": work.session_id,
+                        "work_sequence_no": work.sequence_no,
+                        "request_ids": get_work_request_ids(work),
+                    }
+                    return
 
                 if work.status == SessionReplyWorkStatus.SUCCEEDED:
                     response = (work.execution_state or {}).get("response")

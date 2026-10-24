@@ -26,6 +26,7 @@ from app.core.exceptions import ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
+from app.core.utils.dispatcher.external_work import build_external_wait_response
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import dump_output_history, extract_files_to_user
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
@@ -629,10 +630,10 @@ async def handle_interactive_tool_round(
     try:
         for completed_task in asyncio.as_completed(tasks):
             tool_res = await completed_task
+            queued_task_id = get_queued_background_task_id(tool_res.content)
             tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_res.tool_call_id)
             if audit_claim_token is not None:
                 execution_id = audit_execution_ids[tool_res.tool_call_id]
-                queued_task_id = get_queued_background_task_id(tool_res.content)
                 terminal_session_id = get_handed_off_terminal_session_id(tool_res.content) if tool_call is not None and tool_call.name == SHELL_TOOL_NAME else None
                 if queued_task_id is None and terminal_session_id is None:
                     execution_status = AuditExecutionStatus(get_tool_execution_status(tool_res))
@@ -689,7 +690,7 @@ async def handle_interactive_tool_round(
                 )
             else:
                 await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
-            if state.stream_event_callback is not None and state.show_tool_calls:
+            if state.stream_event_callback is not None and state.show_tool_calls and (queued_task_id is None or getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY) is None):
                 await state.stream_event_callback(
                     {
                         "type": "tool_end",
@@ -743,4 +744,6 @@ async def handle_interactive_tool_round(
             await update_confirmation_message_status(state.db, audit_record_id=audit_round.audit_record_id)
 
     await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+    if getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY) is not None:
+        return build_external_wait_response(ai_msg.tool_calls, stored_tool_results, response_id)
     return None

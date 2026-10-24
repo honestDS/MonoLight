@@ -251,6 +251,21 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
             "required": ["terminal_session_id"],
             "properties": {"terminal_session_id": {}, "force": {"default": False}},
         },
+        "terminal_watch": {
+            "required": ["terminal_session_id", "after_offset"],
+            "properties": {
+                "terminal_session_id": {},
+                "after_offset": {"minimum": 0},
+                "condition": {
+                    "default": "output",
+                    "enum": ["output", "process_exit", "output_contains", "quiet_for"],
+                },
+                "text": {"default": None},
+                "timeout_seconds": {"minimum": 1, "maximum": 86_400, "default": 600},
+                "settle_seconds": {"minimum": 1, "maximum": 60, "default": 2},
+                "max_bytes": {"minimum": 1, "maximum": 16_384, "default": 16_384},
+            },
+        },
     }
 
     assert "terminal_signal" not in {schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS}
@@ -260,12 +275,15 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
         assert parameters["additionalProperties"] is False
         assert parameters["required"] == expected[name]["required"]
         assert set(parameters["properties"]) == set(expected[name]["properties"])
-        assert parameters["properties"]["terminal_session_id"] == {
-            "type": "string",
-            "minLength": 32,
-            "maxLength": 128,
-            "pattern": r"^[A-Za-z0-9_-]+$",
-        }
+        if name == "terminal_watch":
+            assert parameters["properties"]["terminal_session_id"] == {"$ref": "#/$defs/TerminalSessionId"}
+        else:
+            assert parameters["properties"]["terminal_session_id"] == {
+                "type": "string",
+                "minLength": 32,
+                "maxLength": 128,
+                "pattern": r"^[A-Za-z0-9_-]+$",
+            }
         for property_name, property_expectations in expected[name]["properties"].items():
             properties = parameters["properties"][property_name]
             for field, value in property_expectations.items():

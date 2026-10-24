@@ -8,6 +8,7 @@ from typing import (
     Literal,
 )
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
@@ -25,6 +26,7 @@ from app.core.constants import (
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
     SHELL_TOOL_NAME,
+    TERMINAL_WATCH_TOOL_NAME,
     TOOL_TIMEOUT_EXCLUDED_TOOL_NAMES,
 )
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
@@ -37,6 +39,7 @@ from app.core.log import (
 from app.core.paths import get_user_temp_dir
 from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.terminal.schemas import ShellInteractiveHandoffResult
+from app.core.terminal.watch_schema import TerminalWatchRequest
 from app.core.tools import (
     KNOWLEDGE_BASE_QUERY_TOOL_NAME,
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
@@ -274,6 +277,14 @@ def _build_schema_validation_result(tool_name: str, errors: list[str]) -> str:
     return _build_tool_error_result(tool_name, t(ERR_TOOL_ARGUMENT_SCHEMA_INVALID, tool_name=tool_name, detail=detail))
 
 
+def _validate_terminal_watch_arguments(args: dict[str, Any]) -> list[str]:
+    try:
+        TerminalWatchRequest.model_validate(args)
+    except ValidationError as exc:
+        return [str(error.get("msg", error)) for error in exc.errors()]
+    return []
+
+
 def prevalidate_tool_round_protocol(
     tool_calls: list[Any],
     cfg: ProfileConfig,
@@ -332,13 +343,15 @@ def prevalidate_tool_round(
             )
         elif parameters_schema is not None and (schema_errors := _validate_schema_value(args, parameters_schema, "arguments")):
             errors[tool_call.id] = _build_schema_validation_result(tool_name, schema_errors)
+        elif tool_name == TERMINAL_WATCH_TOOL_NAME and (schema_errors := _validate_terminal_watch_arguments(args)):
+            errors[tool_call.id] = _build_schema_validation_result(tool_name, schema_errors)
         elif tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
             _, validation_error = validate_longterm_memory_arguments(args)
             if validation_error:
                 errors[tool_call.id] = _build_tool_error_result(tool_name, validation_error)
-            elif (tool_runs_in_background(tool_name) or background_requested) and not allow_background_submission:
+            elif (tool_runs_in_background(tool_name, args) or background_requested) and not allow_background_submission:
                 errors[tool_call.id] = _build_background_task_unsupported_result(tool_name)
-        elif (tool_runs_in_background(tool_name) or background_requested) and not allow_background_submission:
+        elif (tool_runs_in_background(tool_name, args) or background_requested) and not allow_background_submission:
             errors[tool_call.id] = _build_background_task_unsupported_result(tool_name)
     return errors
 
@@ -373,7 +386,7 @@ async def process_single_tool(
     missing_arguments = sorted(parameter_name for parameter_name in get_tool_required_parameters(tool_name) if parameter_name not in args)
     unsupported_arguments = sorted(argument_name for argument_name in args if not tool_schema_has_parameter(tool_name, argument_name))
     background_requested = bool(args.pop("run_in_background", False))
-    background_required = tool_runs_in_background(tool_name)
+    background_required = tool_runs_in_background(tool_name, args)
     run_in_background = background_required or background_requested
 
     log_args = json.dumps(args, ensure_ascii=False)
@@ -385,6 +398,8 @@ async def process_single_tool(
         tool_result = _build_missing_required_arguments_result(tool_name, missing_arguments)
     elif unsupported_arguments:
         tool_result = _build_unsupported_arguments_result(tool_name, unsupported_arguments)
+    elif tool_name == TERMINAL_WATCH_TOOL_NAME and (schema_errors := _validate_terminal_watch_arguments(args)):
+        tool_result = _build_schema_validation_result(tool_name, schema_errors)
     elif run_in_background and not allow_background_submission:
         tool_result = _build_background_task_unsupported_result(tool_name)
     else:
@@ -499,7 +514,7 @@ async def process_single_tool(
     )
     tool_msg.tool_execution_status = get_tool_execution_status(tool_msg)
     is_recall_tool = tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME or (tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME and args.get("operation") == "recall")
-    if not is_recall_tool:
+    if not is_recall_tool and get_queued_background_task_id(tool_msg.content) is None:
         if tool_result_round_budget_tokens is None:
             tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
         else:

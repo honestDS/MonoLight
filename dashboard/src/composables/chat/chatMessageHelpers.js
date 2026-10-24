@@ -5,19 +5,10 @@ import {
 } from '../../utils'
 
 const normalizeHistoryMessage = (message) => {
-  const normalizedMessage = {
+  return {
     ...message,
     db_id: message?.db_id ?? message?.id
   }
-  const content = normalizeMessageContent(message?.content)
-  if (message?.type === 'background_result' && content?.type === 'background_tool_result') {
-    return {
-      ...normalizedMessage,
-      role: 'background_system',
-      content: JSON.stringify(content)
-    }
-  }
-  return normalizedMessage
 }
 
 const getAuditConfirmationRecordId = (message) => {

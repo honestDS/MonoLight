@@ -291,6 +291,7 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyWorkItem.session_id == work.session_id,
                 SessionReplyWorkItem.sequence_no < work.sequence_no,
                 SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
+                SessionReplyWorkItem.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
             )
             .limit(1)
         )
@@ -345,6 +346,7 @@ class CRUDSessionReplyWorkItem:
                         earlier_work.c.session_id == SessionReplyWorkItem.session_id,
                         earlier_work.c.sequence_no < SessionReplyWorkItem.sequence_no,
                         earlier_work.c.status.not_in(_TERMINAL_STATUS_VALUES),
+                        earlier_work.c.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value,
                     )
                 ),
                 ~exists(
@@ -813,6 +815,7 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyWorkItem.session_id == work.session_id,
                 SessionReplyWorkItem.sequence_no > work.sequence_no,
                 SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
+                SessionReplyWorkItem.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
                 or_(
                     SessionReplyWorkItem.work_type != SessionReplyWorkType.FOREGROUND_REPLY,
                     SessionReplyWorkItem.profile_id != work.profile_id,

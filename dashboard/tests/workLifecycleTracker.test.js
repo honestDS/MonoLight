@@ -680,3 +680,153 @@ for (const terminalType of ['done', 'error']) {
     assert.deepEqual(messages.map(message => message.id), ['temporary-reasoning'])
   })
 }
+
+test('suspending work removes its thinking and queued state without affecting other messages', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = [userMessage('request-a'), userMessage('request-b')]
+
+  messages = tracker.markInputQueued(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    event_sequence_no: 1
+  })
+  messages = tracker.markInputQueued(messages, {
+    request_id: 'request-b',
+    work_id: 'work-b',
+    event_sequence_no: 1
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-a',
+    event_sequence_no: 2
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-b',
+    work_id: 'work-b',
+    response_id: 'response-b',
+    event_sequence_no: 2
+  })
+  messages.push(
+    {
+      id: 'reasoning-work-a',
+      role: 'reasoning',
+      content: 'A reasoning',
+      work_id: 'work-a',
+      request_id: 'request-a'
+    },
+    {
+      id: 'tool-work-a',
+      role: 'tool',
+      content: 'A tool result',
+      work_id: 'work-a',
+      request_id: 'request-a'
+    }
+  )
+
+  const suspendEvent = {
+    type: 'suspended',
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 3
+  }
+  messages = tracker.suspendWorkLifecycle(messages, suspendEvent)
+
+  assert.equal(messages.find(message => message.id === 'user_request-a').status, undefined)
+  assert.equal(messages.some(message => message.role === 'thinking' && message.work_id === 'work-a'), false)
+  assert.equal(messages.find(message => message.id === 'reasoning-work-a').content, 'A reasoning')
+  assert.equal(messages.find(message => message.id === 'tool-work-a').content, 'A tool result')
+  assert.equal(messages.find(message => message.response_id === 'response-b').content, '')
+  assert.equal(tracker.isWorkTerminal('work-a'), false)
+
+  const repeatedSuspend = tracker.suspendWorkLifecycle(messages, suspendEvent)
+  assert.deepEqual(repeatedSuspend, messages)
+})
+
+test('suspension blocks stale agent loop starts but admits a newer response sequence', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = tracker.startAgentLoop([], {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-old',
+    event_sequence_no: 1
+  })
+
+  messages = tracker.suspendWorkLifecycle(messages, {
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 2
+  })
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
+
+  const afterStaleSequence = tracker.startAgentLoop(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-stale-sequence',
+    event_sequence_no: 1
+  })
+  assert.deepEqual(afterStaleSequence, messages)
+
+  const afterOldResponse = tracker.startAgentLoop(afterStaleSequence, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-old',
+    event_sequence_no: 3
+  })
+  assert.deepEqual(afterOldResponse, messages)
+
+  messages = tracker.startAgentLoop(afterOldResponse, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-new',
+    event_sequence_no: 4
+  })
+  assert.equal(messages.find(message => message.response_id === 'response-new').role, 'thinking')
+})
+
+test('late suspension does not change terminal work and reset allows a new lifecycle', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = [userMessage('request-a')]
+
+  messages = tracker.markInputQueued(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    event_sequence_no: 1
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-a',
+    event_sequence_no: 2
+  })
+  messages = tracker.finishWorkLifecycle(messages, {
+    type: 'done',
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 3
+  })
+
+  const afterLateSuspend = tracker.suspendWorkLifecycle(messages, {
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 4
+  })
+  assert.deepEqual(afterLateSuspend, messages)
+  assert.equal(tracker.isWorkTerminal('work-a'), true)
+
+  messages = tracker.resetWorkLifecycle(afterLateSuspend)
+  assert.equal(tracker.isWorkTerminal('work-a'), false)
+  messages = tracker.markInputQueued(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    event_sequence_no: 1
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-b',
+    event_sequence_no: 2
+  })
+
+  assert.equal(messages.find(message => message.response_id === 'response-b').role, 'thinking')
+})

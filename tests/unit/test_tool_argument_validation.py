@@ -32,7 +32,7 @@ async def test_process_single_tool_splits_explicit_round_result_budget_across_pa
     tool_call = SimpleNamespace(
         id="call-1",
         name="execute_shell",
-        arguments={"command": "echo ok", "execution_mode": "non_interactive"},
+        arguments={"command": "echo ok", "execution_mode": "interactive"},
     )
     captured_budget_tokens: list[int] = []
 
@@ -75,7 +75,7 @@ async def test_process_single_tool_keeps_half_context_fallback_when_round_budget
     tool_call = SimpleNamespace(
         id="call-1",
         name="execute_shell",
-        arguments={"command": "echo ok", "execution_mode": "non_interactive"},
+        arguments={"command": "echo ok", "execution_mode": "interactive"},
     )
     captured_budget_tokens: list[int] = []
 
@@ -117,7 +117,7 @@ async def test_process_single_tool_spills_large_result_and_returns_absolute_path
     tool_call = SimpleNamespace(
         id="call-large-result",
         name="execute_shell",
-        arguments={"command": "echo large", "execution_mode": "non_interactive"},
+        arguments={"command": "echo large", "execution_mode": "interactive"},
     )
     full_result = json.dumps({"html": "x" * 200_000}, ensure_ascii=False)
 
@@ -164,7 +164,7 @@ async def test_process_single_tool_moves_result_post_processing_off_event_loop(m
     tool_call = SimpleNamespace(
         id="call-blocking-post-process",
         name="execute_shell",
-        arguments={"command": "echo ok", "execution_mode": "non_interactive"},
+        arguments={"command": "echo ok", "execution_mode": "interactive"},
     )
 
     class FakeExecutor:

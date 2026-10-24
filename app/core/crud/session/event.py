@@ -9,6 +9,7 @@ from sqlmodel import func, select
 from app.core.crud.base import CRUDBase
 from app.core.utils.time import get_local_time
 from app.models.session_event import SessionEvent
+from app.providers.database import ensure_sqlite_outer_transaction
 
 SESSION_EVENT_RETENTION_HOURS = 24
 
@@ -22,13 +23,28 @@ class CRUDSessionEvent(CRUDBase[SessionEvent, SessionEvent, SessionEvent]):
         uid: str,
         session_id: str,
         event: dict[str, Any],
+        commit: bool = True,
     ) -> tuple[SessionEvent, bool]:
         item = SessionEvent(dedupe_key=dedupe_key, uid=uid, session_id=session_id, event=event)
-        db.add(item)
+        if commit:
+            db.add(item)
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                existing = await self.get_by_dedupe_key(db, dedupe_key)
+                if existing is None:
+                    raise
+                return existing, False
+            await db.refresh(item)
+            return item, True
+
+        await ensure_sqlite_outer_transaction(db)
         try:
-            await db.commit()
+            async with db.begin_nested():
+                db.add(item)
+                await db.flush()
         except IntegrityError:
-            await db.rollback()
             existing = await self.get_by_dedupe_key(db, dedupe_key)
             if existing is None:
                 raise

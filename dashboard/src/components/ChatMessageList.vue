@@ -210,15 +210,6 @@
             :rendered-content="renderMarkdown(getReasoningContent(msg))"
           />
         </template>
-        <template v-else-if="msg.role === 'background_system'">
-          <div class="message-header">
-            <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
-          </div>
-          <div class="content background-system-card">
-            <div class="background-system-title">{{ getBackgroundSystemTitle(msg) }}</div>
-            <div class="background-system-text">{{ getBackgroundSystemText(msg) }}</div>
-          </div>
-        </template>
         <template v-else>
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
@@ -437,8 +428,6 @@ const {
   getMessageFiles,
   getReasoningContent,
   getGuidanceText,
-  getBackgroundSystemTitle,
-  getBackgroundSystemText,
   formatFileSize,
   getMessageClass,
   didLastDisplayChangePrepend

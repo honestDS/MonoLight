@@ -321,10 +321,10 @@ async def _dispatch_interactive_work(
         raise_errors=True,
     ):
         event_type = event.get("type")
-        if event_type == "done":
+        if event_type in {"done", "external_wait"}:
             response = event.get("response")
             response_id = event.get("response_id")
-            if isinstance(response, dict) and isinstance(response_id, str) and response_id:
+            if event_type == "done" and isinstance(response, dict) and isinstance(response_id, str) and response_id:
                 response = {**response, "response_id": response_id}
         elif event_type == "error":
             error_message = str(event.get("message") or t(ERR_LLM_UNEXPECTED_ERROR))

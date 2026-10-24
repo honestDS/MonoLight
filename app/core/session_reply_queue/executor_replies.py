@@ -31,7 +31,7 @@ from app.core.utils.dispatcher.helpers import dump_background_proactive_history,
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask
-from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.message import InternalMessage, MessageRole, MessageType, decode_message_content
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import SessionReplyWorkItem
 
@@ -266,7 +266,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
     resume_state = execution_state.get("dispatcher_checkpoint")
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
         resume_state = None
-    else:
+    elif resume_state.get("reload_history") is not True:
         resume_state = await _restore_foreground_tool_replies(
             db,
             work=work,
@@ -284,6 +284,43 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         attachments=attachments or None,
         allow_additional_user_messages=True,
         execution_resume_state=resume_state,
+    )
+
+
+async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: str) -> dict[str, Any]:
+    execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+    checkpoint = execution_state.get("dispatcher_checkpoint")
+    if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+
+    message_ids = work.input_message_ids
+    if not message_ids:
+        message_ids = [execution_state.get("decision_message_id")]
+    if not isinstance(message_ids, list) or not message_ids or any(not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0 for message_id in message_ids) or len(message_ids) != len(set(message_ids)):
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+
+    message = await message_crud.get(db, message_ids[-1])
+    if message is None or message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id or message.role != MessageRole.USER or message.type not in (MessageType.TEXT, MessageType.AUDIT_DECISION):
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+
+    initial_message = InternalMessage.from_user_input(
+        id=message.id,
+        content=decode_message_content(message.content, message.content_format),
+        attachments=message.attachments,
+        environment_prompt=message.environment_prompt,
+        guidance_prompt=message.guidance_prompt,
+    )
+    return await _dispatch_interactive_work(
+        db,
+        work=work,
+        worker_id=worker_id,
+        message=initial_message.content or "",
+        initial_message=initial_message,
+        history_before_id=message_ids[0],
+        frozen_user_message_ids=message_ids,
+        attachments=initial_message.attachments,
+        allow_additional_user_messages=True,
+        execution_resume_state=checkpoint,
     )
 
 

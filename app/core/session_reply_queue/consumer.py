@@ -63,6 +63,11 @@ class SessionReplyConsumer:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._running.clear()
 
+    def _discard_completed(self, work_id: int, finished_task: asyncio.Task) -> None:
+        task_entry = self._running.get(work_id)
+        if task_entry is not None and task_entry[0] is finished_task:
+            self._running.pop(work_id, None)
+
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
         while not self._stop_event.is_set():
@@ -113,7 +118,7 @@ class SessionReplyConsumer:
                     language = str((work.execution_state or {}).get("language") or "zh")
                     task = asyncio.create_task(self._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts, language))
                     self._running[work.id] = (task, worker_id)
-                    task.add_done_callback(lambda _task, work_id=work.id: self._running.pop(work_id, None))
+                    task.add_done_callback(lambda finished_task, work_id=work.id: self._discard_completed(work_id, finished_task))
                     claimed_count += 1
 
                 if claimed_count == 0:

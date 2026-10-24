@@ -6,18 +6,23 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.background_tasks.external_work import reconcile_external_work
 from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
 from app.core.background_tasks.reply_trigger import trigger_background_task_reply
 from app.core.background_tasks.runner import run_background_task
-from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
+from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_MAX_CONCURRENCY
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
+from app.models.session_reply_work_item import SessionReplyWorkStatus
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -26,6 +31,11 @@ BACKGROUND_TASK_POLL_INTERVAL_SECONDS = 0.5
 BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS = 30
 BACKGROUND_TASK_PROFILE_FETCH_LIMIT = 100
 BACKGROUND_TASK_REPLY_MAX_CONCURRENCY = 4
+
+
+def _serialize_request_message(message: InternalMessage) -> dict[str, Any]:
+    serialized = message.model_dump(mode="json", exclude_none=True)
+    return {key: serialized[key] for key in ("id", "role", "content", "attachments") if key in serialized}
 
 
 def _build_submission_context(messages: list[InternalMessage], tool_call_id: str) -> list[dict[str, Any]]:
@@ -53,6 +63,7 @@ def _build_submission_context(messages: list[InternalMessage], tool_call_id: str
 class BackgroundTaskManager:
     def __init__(self) -> None:
         self._running_by_profile: dict[int, set[asyncio.Task]] = defaultdict(set)
+        self._running_observers: set[asyncio.Task] = set()
         self._running_replies: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
@@ -75,11 +86,48 @@ class BackgroundTaskManager:
     ) -> BackgroundTask:
         audit_record_id = None
         audit_execution_record_id = None
-        extra_payload: dict[str, Any] = {
-            "allowed_knowledge_base_ids": allowed_knowledge_base_ids or [],
-            "source": source,
-            "submission_context": _build_submission_context(messages or [], tool_call_id),
-        }
+        submission_messages = messages or []
+        purpose = next(
+            (message.content for message in reversed(submission_messages) if message.role == MessageRole.ASSISTANT and message.tool_calls and any(tool_call.id == tool_call_id for tool_call in message.tool_calls)),
+            None,
+        )
+        claim_info = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+        if claim_info is None:
+            extra_payload: dict[str, Any] = {
+                "allowed_knowledge_base_ids": allowed_knowledge_base_ids or [],
+                "source": source,
+                "submission_context": _build_submission_context(submission_messages, tool_call_id),
+                "purpose": purpose,
+            }
+        else:
+            if not isinstance(claim_info, (tuple, list)) or len(claim_info) != 2 or not isinstance(claim_info[0], int) or isinstance(claim_info[0], bool) or claim_info[0] <= 0 or not isinstance(claim_info[1], str) or not claim_info[1]:
+                raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+            origin_work_id, worker_id = claim_info
+            origin_work = await session_reply_work_item_crud.get(db, origin_work_id)
+            if origin_work is None or origin_work.uid != uid or origin_work.session_id != session_id or origin_work.profile_id != profile.id or origin_work.status != SessionReplyWorkStatus.RUNNING or origin_work.locked_by != worker_id:
+                raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+
+            request_context: list[dict[str, Any]] = []
+            for message_id in origin_work.input_message_ids or []:
+                message = await message_crud.get(db, message_id)
+                if message is None or message.uid != uid or message.session_id != session_id or message.role != MessageRole.USER or message.type != MessageType.TEXT:
+                    continue
+                parsed_messages = parse_db_messages_to_internal([message])
+                if parsed_messages and parsed_messages[0].role == MessageRole.USER:
+                    request_context.append(_serialize_request_message(parsed_messages[0]))
+            if not request_context:
+                for message in reversed(submission_messages):
+                    if message.role == MessageRole.USER and message.content is not None:
+                        request_context.append(_serialize_request_message(message))
+                        break
+            extra_payload = {
+                "allowed_knowledge_base_ids": allowed_knowledge_base_ids or [],
+                "source": source,
+                "origin_work_id": origin_work.id,
+                "origin_work_identity": origin_work.dedupe_key,
+                "request_context": request_context,
+                "purpose": purpose,
+            }
         if isinstance(context_summary_boundary_message_id, int) and not isinstance(context_summary_boundary_message_id, bool) and context_summary_boundary_message_id > 0:
             extra_payload["context_summary_user_boundary_message_id"] = context_summary_boundary_message_id
         if hasattr(db, "execute"):
@@ -93,12 +141,30 @@ class BackgroundTaskManager:
                     raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
                 audit_record_id = audit_record.id
                 audit_execution_record_id = execution.id
+                if "request_context" in extra_payload and not extra_payload["request_context"]:
+                    source_assistant_message_id = audit_record.source_assistant_message_id
+                    if isinstance(source_assistant_message_id, int) and not isinstance(source_assistant_message_id, bool):
+                        history = await message_crud.get_history_backward_by_id(
+                            db,
+                            session_id=session_id,
+                            uid=uid,
+                            before_id=source_assistant_message_id,
+                            limit=200,
+                        )
+                        for message in history:
+                            if message.role != MessageRole.USER or message.type != MessageType.TEXT:
+                                continue
+                            parsed_messages = parse_db_messages_to_internal([message])
+                            if parsed_messages and parsed_messages[0].role == MessageRole.USER:
+                                extra_payload["request_context"] = [_serialize_request_message(parsed_messages[0])]
+                                break
                 extra_payload["audit_binding"] = {
                     "audit_record_id": audit_record.id,
                     "audit_execution_record_id": execution.id,
                     "claim_token": execution.claim_token,
                     "handoff_state": "persisted",
                 }
+        origin_work = claim_info is not None
         try:
             task = await background_task_crud.create_task(
                 db,
@@ -108,7 +174,7 @@ class BackgroundTaskManager:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 arguments=arguments,
-                auto_reply=True,
+                auto_reply=not origin_work,
                 extra=extra_payload,
                 audit_record_id=audit_record_id,
                 audit_execution_record_id=audit_execution_record_id,
@@ -153,8 +219,10 @@ class BackgroundTaskManager:
 
         async with self._lock:
             active_tasks = [task for tasks in self._running_by_profile.values() for task in tasks if not task.done()]
+            active_tasks.extend(task for task in self._running_observers if not task.done())
             active_tasks.extend(task for task in self._running_replies if not task.done())
             self._running_by_profile.clear()
+            self._running_observers.clear()
             self._running_replies.clear()
 
         for task in active_tasks:
@@ -192,20 +260,39 @@ class BackgroundTaskManager:
             log = log.bind(running_count=len(running), free_slots=free_slots)
             if free_slots <= 0:
                 log.info(t("LOG_BACKGROUND_TASK_SCHEDULE_NO_SLOT"))
+            else:
+                async with AsyncSessionLocal() as db:
+                    pending_tasks = await background_task_crud.list_pending(
+                        db,
+                        profile_id=profile.id,
+                        limit=free_slots,
+                        observer=False,
+                    )
+
+                for pending_task in pending_tasks:
+                    if pending_task.id is None:
+                        continue
+                    task = asyncio.create_task(self._run_task(pending_task.id, profile.id))
+                    running.add(task)
+
+            self._running_observers.difference_update({task for task in self._running_observers if task.done()})
+            observer_slots = max(0, TERMINAL_WATCH_MAX_CONCURRENCY - len(self._running_observers))
+            if observer_slots <= 0:
                 return
 
             async with AsyncSessionLocal() as db:
-                pending_tasks = await background_task_crud.list_pending(
+                pending_observers = await background_task_crud.list_pending(
                     db,
                     profile_id=profile.id,
-                    limit=free_slots,
+                    limit=observer_slots,
+                    observer=True,
                 )
 
-            for pending_task in pending_tasks:
-                if pending_task.id is None:
+            for pending_observer in pending_observers:
+                if pending_observer.id is None:
                     continue
-                task = asyncio.create_task(self._run_task(pending_task.id, profile.id))
-                running.add(task)
+                task = asyncio.create_task(self._run_observer(pending_observer.id))
+                self._running_observers.add(task)
 
     async def dispatch_pending_replies(self) -> None:
         async with self._lock:
@@ -230,6 +317,7 @@ class BackgroundTaskManager:
                 if monotonic() >= next_recovery_at:
                     await recover_pending_background_tasks()
                     await recover_pending_background_task_replies()
+                    await reconcile_external_work()
                     next_recovery_at = monotonic() + BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS
                 await self.dispatch_pending_tasks()
                 await self.dispatch_pending_replies()
@@ -263,6 +351,15 @@ class BackgroundTaskManager:
                     running.discard(current_task)
                     if not running:
                         self._running_by_profile.pop(profile_id, None)
+
+    async def _run_observer(self, task_id: int) -> None:
+        try:
+            await run_background_task(task_id)
+        finally:
+            current_task = asyncio.current_task()
+            async with self._lock:
+                if current_task is not None:
+                    self._running_observers.discard(current_task)
 
 
 background_task_manager = BackgroundTaskManager()

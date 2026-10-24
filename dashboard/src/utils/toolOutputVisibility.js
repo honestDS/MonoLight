@@ -34,19 +34,25 @@ export const isToolOutputMessage = (message) => {
 }
 
 export const filterToolOutputMessages = (messages, showToolCalls = true) => {
-  if (!Array.isArray(messages) || showToolCalls) return messages || []
+  if (!Array.isArray(messages)) return messages || []
 
   return messages.filter((message) => {
+    if (message?.type === 'background_result' || message?.role === 'system' || message?.role === 'background_system') {
+      return false
+    }
+
+    if (showToolCalls) return true
+
     const content = parseContentPayload(message?.content)
     return isRequiredConfirmation(message, content) || !isToolOutputMessage(message)
   })
 }
 
 export const filterResponseHistoryToolOutput = (response, showToolCalls = true) => {
-  if (!response || typeof response !== 'object' || showToolCalls || !Array.isArray(response.history)) return response
+  if (!response || typeof response !== 'object' || !Array.isArray(response.history)) return response
 
   return {
     ...response,
-    history: filterToolOutputMessages(response.history, false)
+    history: filterToolOutputMessages(response.history, showToolCalls)
   }
 }

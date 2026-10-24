@@ -13,6 +13,8 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
+import app.core.background_tasks.external_work as external_work_module
+import app.core.background_tasks.runner as runner_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_generation as interactive_generation_module
 import app.core.dispatchers.interactive_runtime as interactive_runtime_module
@@ -61,12 +63,13 @@ from app.models.audit import (
     AuditToolDetail,
     AuditToolResultVersion,
 )
-from app.models.background_task import BackgroundTask
+from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseDocument, KnowledgeBaseProfileBinding
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
+from app.models.session_event import SessionEvent
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose, SessionReplyProviderUsage
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
@@ -127,6 +130,7 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
         SessionReplyWorkItem.__table__,
         SessionReplyProviderUsage.__table__,
         SessionReplyStreamEvent.__table__,
+        SessionEvent.__table__,
     ]
     await clone_sqlite_schema(tmp_path / "confirmation-workflow.db", tables=tables)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -166,21 +170,26 @@ async def _seed_pending_confirmation(
     working_directory: Path,
     include_parallel_limit_exceeded_call: bool = False,
     include_initial_user_message: bool = False,
+    confirmed_tool_calls: list[InternalToolCall] | None = None,
 ) -> int:
     uid = "owner"
     session_id = "session-confirmation"
-    tool_calls = [
-        InternalToolCall(
-            id="original-shell-call-1",
-            name="execute_shell",
-            arguments={"command": "echo confirmed-1", "execution_mode": "non_interactive"},
-        ),
-        InternalToolCall(
-            id="original-shell-call-2",
-            name="execute_shell",
-            arguments={"command": "echo confirmed-2", "execution_mode": "non_interactive"},
-        ),
-    ]
+    tool_calls = (
+        confirmed_tool_calls
+        if confirmed_tool_calls is not None
+        else [
+            InternalToolCall(
+                id="original-shell-call-1",
+                name="execute_shell",
+                arguments={"command": "echo confirmed-1", "execution_mode": "non_interactive"},
+            ),
+            InternalToolCall(
+                id="original-shell-call-2",
+                name="execute_shell",
+                arguments={"command": "echo confirmed-2", "execution_mode": "non_interactive"},
+            ),
+        ]
+    )
     parallel_limit_exceeded_call = InternalToolCall(
         id="original-shell-call-over-limit",
         name="execute_shell",
@@ -188,6 +197,8 @@ async def _seed_pending_confirmation(
     )
     source_tool_calls = [*tool_calls, parallel_limit_exceeded_call] if include_parallel_limit_exceeded_call else tool_calls
     profile_configs = _profile_config()
+    if confirmed_tool_calls is not None:
+        profile_configs["tool"]["enabled_tools"] = list(dict.fromkeys(tool_call.name for tool_call in tool_calls))
     if include_parallel_limit_exceeded_call:
         profile_configs["tool"]["max_parallel_tools"] = len(tool_calls)
     parallel_limit_exceeded_payload = {
@@ -1748,6 +1759,18 @@ async def test_confirmation_execution_stop_preserves_started_result_and_cancels_
     audit_record_id = await _seed_pending_confirmation(
         confirmation_workflow_session_factory,
         working_directory=tmp_path,
+        confirmed_tool_calls=[
+            InternalToolCall(
+                id="original-shell-call-1",
+                name="file_tool",
+                arguments={"operation": "read", "path": str(tmp_path / "started.txt")},
+            ),
+            InternalToolCall(
+                id="original-shell-call-2",
+                name="file_tool",
+                arguments={"operation": "read", "path": str(tmp_path / "remaining.txt")},
+            ),
+        ],
     )
 
     async with confirmation_workflow_session_factory() as db:
@@ -1769,40 +1792,28 @@ async def test_confirmation_execution_stop_preserves_started_result_and_cancels_
     monkeypatch.setattr(confirmation_events_module, "send_session_event", capture_session_event)
     monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
 
-    commands: list[str] = []
+    paths: list[str] = []
     first_started = asyncio.Event()
     release_first = asyncio.Event()
 
-    class ControlledShellExecutor:
+    class ControlledFileExecutor:
         requires_audit = True
 
         def __init__(self, **_kwargs) -> None:
             pass
 
         async def execute(self, **arguments) -> str:
-            commands.append(arguments["command"])
-            assert len(commands) == 1
+            paths.append(arguments["path"])
+            assert len(paths) == 1
             first_started.set()
             await release_first.wait()
             if outcome == "interrupted":
-                raise AssertionError("interrupted shell call was not cancelled")
+                raise AssertionError("interrupted file call was not cancelled")
             if outcome == "success":
-                result = ShellNonInteractiveCompletedResult(
-                    stdout="controlled success\n",
-                    stderr="",
-                    exit_code=0,
-                    system_info="test-system",
-                )
-            else:
-                result = ShellNonInteractiveCompletedResult(
-                    stdout="controlled failed\n",
-                    stderr="controlled failure",
-                    exit_code=7,
-                    system_info="test-system",
-                )
-            return result.model_dump_json()
+                return json.dumps({"status": "success", "operation": "read", "content": "controlled success"})
+            return json.dumps({"status": "failed", "operation": "read", "error": "controlled failure"})
 
-    monkeypatch.setitem(TOOL_EXECUTOR_MAP, "execute_shell", ControlledShellExecutor)
+    monkeypatch.setitem(TOOL_EXECUTOR_MAP, "file_tool", ControlledFileExecutor)
 
     async with confirmation_workflow_session_factory() as db:
         profile = await db.get(Profile, 1)
@@ -1870,7 +1881,7 @@ async def test_confirmation_execution_stop_preserves_started_result_and_cancels_
         claims = list((await db.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == audit_record_id))).scalars().all())
         versions = list((await db.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == audit_record_id).order_by(AuditToolResultVersion.original_tool_call_id, AuditToolResultVersion.version_no))).scalars().all())
 
-    assert commands == ["echo confirmed-1"]
+    assert paths == [str(tmp_path / "started.txt")]
     assert record is not None
     assert record.status == expected_audit_status
     assert record.decision is not None and record.decision.value == "approve"
@@ -1900,13 +1911,13 @@ async def test_confirmation_execution_stop_preserves_started_result_and_cancels_
     assert first_payload["confirmation_decision"] == "approve"
     assert get_tool_execution_status(first_result) == expected_first_execution_status.value
     if outcome == "success":
-        assert first_payload["exit_code"] == 0
-        assert first_payload["stdout"] == "controlled success\n"
-        assert first_payload["stderr"] == ""
+        assert first_payload["status"] == "success"
+        assert first_payload["operation"] == "read"
+        assert first_payload["content"] == "controlled success"
     elif outcome == "failed":
-        assert first_payload["exit_code"] == 7
-        assert first_payload["stdout"] == "controlled failed\n"
-        assert first_payload["stderr"] == "controlled failure"
+        assert first_payload["status"] == "failed"
+        assert first_payload["operation"] == "read"
+        assert first_payload["error"] == "controlled failure"
     else:
         assert first_payload["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
         assert first_payload["confirmation_status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
@@ -2072,6 +2083,8 @@ async def test_confirmation_audit_decision_continues_without_forced_memory_recal
     for module in (executor_lifecycle_module, executor_interactive_module, executor_metadata_module):
         monkeypatch.setattr(module, "AsyncSessionLocal", confirmation_workflow_session_factory)
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", confirmation_workflow_session_factory)
+    monkeypatch.setattr(runner_module, "AsyncSessionLocal", confirmation_workflow_session_factory)
+    monkeypatch.setattr(external_work_module, "AsyncSessionLocal", confirmation_workflow_session_factory)
 
     fake_channel = SimpleNamespace(
         id=1,
@@ -2237,6 +2250,36 @@ async def test_confirmation_audit_decision_continues_without_forced_memory_recal
     assert claimed_work is not None
     assert claimed_work.id == submitted_work_id
     await executor_lifecycle_module.execute_session_reply_work(claimed_work.id, worker_id)
+
+    if decision != "拒绝":
+        async with confirmation_workflow_session_factory() as db:
+            suspended_work = await db.get(SessionReplyWorkItem, submitted_work_id)
+            background_tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
+
+        assert suspended_work is not None
+        assert suspended_work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert len(background_tasks) == 2
+        assert [task.status for task in background_tasks] == [BackgroundTaskStatus.PENDING, BackgroundTaskStatus.PENDING]
+        assert commands == []
+
+        for task in background_tasks:
+            assert task.id is not None
+            await runner_module.run_background_task(task.id, worker_id=f"{worker_id}-background-{task.id}")
+
+        async with confirmation_workflow_session_factory() as db:
+            resumed_work = await db.get(SessionReplyWorkItem, submitted_work_id)
+        assert resumed_work is not None
+        assert resumed_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+        async with confirmation_workflow_session_factory() as db:
+            claimed_work = await session_reply_work_item_crud.claim_next(
+                db,
+                worker_id=worker_id,
+                lease_seconds=300,
+            )
+        assert claimed_work is not None
+        assert claimed_work.id == submitted_work_id
+        await executor_lifecycle_module.execute_session_reply_work(claimed_work.id, worker_id)
 
     async with confirmation_workflow_session_factory() as db:
         record = await db.get(AuditRecord, audit_record_id)

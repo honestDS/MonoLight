@@ -208,8 +208,28 @@ async def dispatch_interactive(
                 state.tools, state.allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, goal_mode=state.goal_mode)
 
                 if state.execution_resume_state is not None:
-                    state.messages = [InternalMessage.model_validate(item) for item in state.execution_resume_state.get("messages", [])]
-                    state.current_turn = int(state.execution_resume_state.get("current_turn", 0))
+                    resume_state = state.execution_resume_state
+                    if resume_state.get("reload_history") is True:
+                        state.messages = await prepare_messages(
+                            db,
+                            session_id,
+                            uid,
+                            profile,
+                            state.cfg,
+                            state.initial_msg,
+                            message,
+                            False,
+                            context_window_k=state.chat_params["context_window_k"],
+                            max_tokens=state.chat_params["max_tokens"],
+                            tools=state.tools,
+                            history_before_id=None,
+                            additional_system_prompt=additional_system_prompt,
+                            processed_only=True,
+                        )
+                        state.messages.extend(InternalMessage.model_validate(item) for item in resume_state.get("external_resume_messages", []))
+                    else:
+                        state.messages = [InternalMessage.model_validate(item) for item in resume_state.get("messages", [])]
+                    state.current_turn = int(resume_state.get("current_turn", 0))
                     state.execution_resume_state = None
                 else:
                     state.messages = await prepare_messages(

@@ -27,6 +27,7 @@ from app.core.terminal.schemas import (
 )
 
 from .base import BaseExecutor
+from .terminal_watch import TERMINAL_WATCH_TOOL_SCHEMA
 
 _TERMINAL_SESSION_ID_SCHEMA = {
     "type": "string",
@@ -146,6 +147,7 @@ SHELL_COMPANION_TOOL_SCHEMAS = [
     TERMINAL_WRITE_TOOL_SCHEMA,
     TERMINAL_RESIZE_TOOL_SCHEMA,
     TERMINAL_CLOSE_TOOL_SCHEMA,
+    TERMINAL_WATCH_TOOL_SCHEMA,
 ]
 SHELL_COMPANION_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS)
 
@@ -352,6 +354,7 @@ __all__ = [
     "TERMINAL_RESIZE_TOOL_SCHEMA",
     "TERMINAL_STATUS_TOOL_SCHEMA",
     "TERMINAL_WRITE_TOOL_SCHEMA",
+    "TERMINAL_WATCH_TOOL_SCHEMA",
     "TerminalCloseExecutor",
     "TerminalReadExecutor",
     "TerminalResizeExecutor",

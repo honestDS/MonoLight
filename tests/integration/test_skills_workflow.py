@@ -9,6 +9,7 @@ import pytest_asyncio
 from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
+import app.core.background_tasks.runner as background_task_runner
 import app.core.paths as paths
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.constants import (
@@ -27,6 +28,7 @@ from app.core.utils.dispatcher.process_single_tool import (
     process_single_tool,
 )
 from app.models.audit import AuditRecord, AuditRecordStatus, AuditToolConclusion
+from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.channel import ModelChannel
 from app.models.message import (
     InternalMessage,
@@ -604,9 +606,13 @@ async def test_audited_script_reads_evidence_then_runs_only_in_user_temp(
     profile = _profile(configs=cfg.model_dump(mode="json"), profile_id=1)
     _patch_audit_root(monkeypatch, tmp_path / "audit")
     monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
+    monkeypatch.setattr(background_task_runner, "AsyncSessionLocal", skills_database)
     await _seed_audit_channel(skills_database)
 
     async with skills_database() as db:
+        db.add(profile)
+        await db.commit()
+
         browse_result = await _process_tool(
             db,
             _skill_call("browse-runner", operation="browse", skill_id="runner"),
@@ -661,9 +667,23 @@ async def test_audited_script_reads_evidence_then_runs_only_in_user_temp(
 
         shell_result = await _process_tool(db, shell_call, profile, cfg)
         shell_payload = json.loads(shell_result.content or "{}")
-        assert shell_payload["exit_code"] == 0
+        assert shell_payload["status"] == "queued"
+        task_id = shell_payload["task_id"]
+        assert isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0
 
         user_temp_dir = get_user_temp_dir(tmp_path, UID)
+        assert not (user_temp_dir / "output.txt").exists()
+
+        await background_task_runner.run_background_task(task_id)
+
+        async with skills_database() as result_db:
+            task = await result_db.get(BackgroundTask, task_id)
+        assert task is not None
+        assert task.status is BackgroundTaskStatus.SUCCEEDED
+        assert task.attempt_count == 1
+        assert task.result is not None
+        assert task.result["content"]["exit_code"] == 0
+
         assert (user_temp_dir / "output.txt").read_text(encoding="utf-8") == "created"
         assert not (document.parent / "output.txt").exists()
         package_after = {item.relative_to(document.parent): item.read_bytes() for item in document.parent.rglob("*") if item.is_file()}

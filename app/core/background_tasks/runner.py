@@ -6,7 +6,8 @@ from time import monotonic
 from typing import Any
 
 from app.core.audit.confirmation import update_confirmation_message_status
-from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED
+from app.core.background_tasks.external_work import resume_external_work_for_task
+from app.core.constants import BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.task.background import background_task_crud
@@ -121,6 +122,48 @@ def _build_profile_mismatch_error(task: BackgroundTask) -> str:
     return t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE)
 
 
+async def _resume_external_task_if_bound(task: BackgroundTask) -> None:
+    task_id = task.id
+    extra = task.extra if isinstance(task.extra, dict) else {}
+    origin_work_id = extra.get("origin_work_id")
+    if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
+        return
+    if not isinstance(origin_work_id, int) or isinstance(origin_work_id, bool) or origin_work_id <= 0:
+        return
+    try:
+        await resume_external_work_for_task(task_id)
+    except Exception as exc:
+        logger.error(
+            "Failed to resume external work for background task",
+            task_id=task_id,
+            error=str(exc),
+            exc_info=True,
+        )
+
+
+async def _watch_task_control(task_id: int, worker_id: str, log: Any) -> bool:
+    while True:
+        await asyncio.sleep(BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS)
+        try:
+            async with AsyncSessionLocal() as db:
+                task = await background_task_crud.get(db, task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error(f"Failed to inspect background task control: {exc}", exc_info=True)
+            continue
+
+        if task is None:
+            log.warning(t("LOG_BACKGROUND_TASK_MISSING"))
+            return False
+        if task.status == BackgroundTaskStatus.CANCELLED:
+            log.info(t("LOG_BACKGROUND_TASK_CANCELLED"))
+            return False
+        if task.status == BackgroundTaskStatus.RUNNING and task.locked_by != worker_id:
+            log.warning(t("LOG_BACKGROUND_TASK_LEASE_LOST"))
+            return False
+
+
 async def _renew_task_lease(task_id: int, worker_id: str, log: Any) -> bool:
     lease_deadline = monotonic() + BACKGROUND_TASK_LEASE_SECONDS
     retry_delay = 1.0
@@ -199,13 +242,21 @@ async def run_background_task(task_id: int, *, worker_id: str | None = None) -> 
 
     execution_task = asyncio.create_task(_execute_claimed_background_task(task_id, worker, log))
     lease_task = asyncio.create_task(_renew_task_lease(task_id, worker, log))
+    control_task = asyncio.create_task(_watch_task_control(task_id, worker, log))
     try:
         done, _pending = await asyncio.wait(
-            {execution_task, lease_task},
+            {execution_task, lease_task, control_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
         if execution_task in done:
             await execution_task
+        elif control_task in done:
+            control_active = await control_task
+            if not control_active:
+                execution_task.cancel()
+                await asyncio.gather(execution_task, return_exceptions=True)
+                await asyncio.shield(_release_task_claim(task_id, worker, log))
+                return
         else:
             lease_renewed = await lease_task
             if not lease_renewed:
@@ -218,11 +269,15 @@ async def run_background_task(task_id: int, *, worker_id: str | None = None) -> 
         await asyncio.gather(execution_task, return_exceptions=True)
         lease_task.cancel()
         await asyncio.gather(lease_task, return_exceptions=True)
+        control_task.cancel()
+        await asyncio.gather(control_task, return_exceptions=True)
         await asyncio.shield(_release_task_claim(task_id, worker, log))
         raise
     finally:
         lease_task.cancel()
         await asyncio.gather(lease_task, return_exceptions=True)
+        control_task.cancel()
+        await asyncio.gather(control_task, return_exceptions=True)
 
 
 async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) -> bool:
@@ -247,6 +302,7 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
                 session_id=task.session_id,
                 profile=profile,
                 db=db,
+                tool_call_id=getattr(task, "tool_call_id", None),
                 task_id=task.id,
                 allowed_knowledge_base_ids=task.extra.get("allowed_knowledge_base_ids") if isinstance(task.extra, dict) else None,
             )
@@ -289,18 +345,38 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             await db.refresh(task)
             if task.status == BackgroundTaskStatus.CANCELLED:
                 log.info(t("LOG_BACKGROUND_TASK_CANCELLED"))
+                await db.commit()
+                await _resume_external_task_if_bound(task)
                 return False
             if binding is None:
-                marked = await background_task_crud.mark_succeeded(
-                    db,
-                    task_id=task_id,
-                    worker_id=worker,
-                    result=_build_success_result(task, raw_result),
-                    auto_reply=task.auto_reply,
-                )
+                tool_succeeded = _tool_result_succeeded(raw_result)
+                if tool_succeeded:
+                    marked = await background_task_crud.mark_succeeded(
+                        db,
+                        task_id=task_id,
+                        worker_id=worker,
+                        result=_build_success_result(task, raw_result),
+                        auto_reply=task.auto_reply,
+                    )
+                else:
+                    result_summary = serialize_execution_summary(raw_result, max_chars=1000)
+                    task_result = _build_failure_result(task, result_summary)
+                    task_result["content"] = _build_success_result(task, raw_result)["content"]
+                    marked = await background_task_crud.mark_failed(
+                        db,
+                        task_id=task_id,
+                        worker_id=worker,
+                        error=result_summary,
+                        result=task_result,
+                        auto_reply=task.auto_reply,
+                    )
                 if not marked:
                     return False
-                log.info(t("LOG_BACKGROUND_TASK_SUCCEEDED"))
+                if tool_succeeded:
+                    log.info(t("LOG_BACKGROUND_TASK_SUCCEEDED"))
+                else:
+                    log.info(t("LOG_BACKGROUND_TASK_FAILED", error=result_summary))
+                await _resume_external_task_if_bound(task)
                 return True
 
             audit_record_id, execution_record_id, claim_token = binding
@@ -322,7 +398,11 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
                 await db.rollback()
                 await _mark_bound_execution_unknown(db, task, worker, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
                 return False
-            task_result = _build_success_result(task, raw_result) if execution_status == AuditExecutionStatus.SUCCEEDED else _build_failure_result(task, result_summary)
+            if execution_status == AuditExecutionStatus.SUCCEEDED:
+                task_result = _build_success_result(task, raw_result)
+            else:
+                task_result = _build_failure_result(task, result_summary)
+                task_result["content"] = _build_success_result(task, raw_result)["content"]
             marked = (
                 await background_task_crud.mark_succeeded(
                     db,
@@ -354,6 +434,7 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
                 commit=False,
             )
             await db.commit()
+            await _resume_external_task_if_bound(task)
             if round_status is not None:
                 await update_confirmation_message_status(db, audit_record_id=audit_record_id)
             log.info(t("LOG_BACKGROUND_TASK_SUCCEEDED") if execution_status == AuditExecutionStatus.SUCCEEDED else t("LOG_BACKGROUND_TASK_FAILED", error=result_summary))
@@ -365,6 +446,8 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             await db.refresh(task)
             if task.status == BackgroundTaskStatus.CANCELLED:
                 log.info(t("LOG_BACKGROUND_TASK_CANCELLED"))
+                await db.commit()
+                await _resume_external_task_if_bound(task)
                 return False
             error_message = _safe_exception_message(exc)
             log.error(t("LOG_BACKGROUND_TASK_FAILED", error=error_message), exc_info=True)
@@ -403,6 +486,7 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
                         commit=False,
                     )
                     await db.commit()
+                    await _resume_external_task_if_bound(task)
                     await update_confirmation_message_status(db, audit_record_id=audit_record_id)
                     return True
                 await db.rollback()
@@ -418,6 +502,7 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             )
             if not marked:
                 return False
+            await _resume_external_task_if_bound(task)
             return True
 
 
@@ -434,7 +519,7 @@ async def _mark_bound_execution_unknown(task_db, task: BackgroundTask, worker: s
         claim_token=claim_token,
         error_reason=error,
     )
-    await background_task_crud.mark_execution_unknown(
+    marked = await background_task_crud.mark_execution_unknown(
         task_db,
         task_id=task.id,
         worker_id=worker,
@@ -442,4 +527,6 @@ async def _mark_bound_execution_unknown(task_db, task: BackgroundTask, worker: s
         result=_build_failure_result(task, error),
         auto_reply=task.auto_reply,
     )
+    if marked:
+        await _resume_external_task_if_bound(task)
     await update_confirmation_message_status(task_db, audit_record_id=audit_record_id)
