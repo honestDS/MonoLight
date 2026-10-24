@@ -55,6 +55,7 @@ from .terminal import (
     TerminalStatusExecutor,
     TerminalWriteExecutor,
 )
+from .terminal_watch import TERMINAL_WATCH_TOOL_SCHEMA, TerminalWatchExecutor
 from .todo import MANAGE_TODO_TOOL_NAME, MANAGE_TODO_TOOL_SCHEMA, ManageTodoExecutor
 from .web_tool import WEB_TOOL_SCHEMA, WebToolExecutor
 
@@ -122,6 +123,7 @@ TOOL_EXECUTOR_MAP = {
     TERMINAL_WRITE_TOOL_SCHEMA["function"]["name"]: TerminalWriteExecutor,
     TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
     TERMINAL_CLOSE_TOOL_SCHEMA["function"]["name"]: TerminalCloseExecutor,
+    TERMINAL_WATCH_TOOL_SCHEMA["function"]["name"]: TerminalWatchExecutor,
     MANAGE_TODO_TOOL_NAME: ManageTodoExecutor,
     SKILL_TOOL_SCHEMA["function"]["name"]: SkillExecutor,
 }
@@ -223,8 +225,10 @@ def get_tool_required_parameters(tool_name: str) -> list[str]:
     return []
 
 
-def tool_runs_in_background(tool_name: str) -> bool:
-    return tool_name in ALWAYS_BACKGROUND_TOOL_NAMES
+def tool_runs_in_background(tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
+    from app.core.background_tasks.policy import requires_background_execution
+
+    return tool_name in ALWAYS_BACKGROUND_TOOL_NAMES or requires_background_execution(tool_name, arguments)
 
 
 def _get_enabled_tool_names(profile: Profile) -> set[str]:

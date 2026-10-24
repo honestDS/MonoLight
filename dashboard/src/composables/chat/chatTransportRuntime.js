@@ -26,6 +26,8 @@ const lifecycleEventTypes = new Set([
   'done',
   'cancelled',
   'resume_complete',
+  'work_suspended',
+  'tool_results_update',
   'error',
   'proactive_reply'
 ])
@@ -221,6 +223,8 @@ export function createChatTransport({ wsManager, api, getToken, reportError, tra
       onAgentLoopOutput,
       onLlmRequestMetadata,
       onWorkFinished,
+      onWorkSuspended,
+      onToolResultsUpdate,
       deferAgentLoopOutput = false,
       completeBeforeWorkFinished = false,
       deferLoadingUntilResumeComplete = false,
@@ -380,6 +384,16 @@ export function createChatTransport({ wsManager, api, getToken, reportError, tra
       return
     }
 
+    if (type === 'work_suspended') {
+      if (onWorkSuspended) onWorkSuspended(data)
+      getEventRequestIds(data).forEach(suspendedRequestId => callbacksMap.delete(suspendedRequestId))
+      if (setLoading && !deferLoadingUntilResumeComplete) {
+        setLoading(false)
+      }
+      if (scrollToBottom) scrollToBottom()
+      return
+    }
+
     if (type === 'resume_complete') {
       if (onResumeComplete) onResumeComplete(data)
       if (setLoading) setLoading(false)
@@ -425,6 +439,15 @@ export function createChatTransport({ wsManager, api, getToken, reportError, tra
 
     if (type === 'audit_tool_results_update') {
       if (onAuditToolResultsUpdate) onAuditToolResultsUpdate(data)
+      return
+    }
+
+    if (type === 'tool_results_update') {
+      if (onToolResultsUpdate) {
+        onToolResultsUpdate(data)
+      } else if (onAuditToolResultsUpdate) {
+        onAuditToolResultsUpdate(data)
+      }
       return
     }
 

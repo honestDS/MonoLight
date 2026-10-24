@@ -533,7 +533,7 @@ async def test_process_single_tool_preserves_managed_knowledge_order_and_full_te
     [
         (
             process_single_tool_module.SHELL_TOOL_NAME,
-            {"command": "echo test", "execution_mode": "non_interactive"},
+            {"command": "echo test", "execution_mode": "interactive"},
             "managed_knowledge",
         ),
         (

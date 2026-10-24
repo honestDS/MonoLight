@@ -7,6 +7,7 @@ import {
   getToolCallName,
   getToolCalls,
   getToolResultName,
+  getToolResultContent,
   isToolCall,
   isToolResult
 } from '../../utils/index.js'
@@ -233,7 +234,17 @@ export function useChatMessagePresentation({ props, t }) {
 
   const getToolPairName = pair => pair.toolCall ? getToolCallName(pair.toolCall) : getToolResultName(pair.resultMessage)
   const getToolPairTitle = pair => t('chat.tool', { name: getToolPairName(pair) })
-  const isToolGroupReturned = group => Boolean(group?.pairs?.length) && group.pairs.every(pair => pair.resultMessage)
+  const isToolPairReturned = (pair) => {
+    if (!pair?.resultMessage) return false
+    let payload = getToolResultContent(pair.resultMessage)
+    if (typeof payload === 'string') {
+      try {
+        payload = JSON.parse(payload)
+      } catch {}
+    }
+    return !(payload && typeof payload === 'object' && payload.status === 'queued' && Number.isSafeInteger(payload.task_id) && payload.task_id > 0)
+  }
+  const isToolGroupReturned = group => Boolean(group?.pairs?.length) && group.pairs.every(isToolPairReturned)
   const getToolGroupStateClass = group => isToolGroupReturned(group) ? 'is-result' : 'is-call'
   const getToolGroupStatus = group => t(isToolGroupReturned(group) ? 'chat.tool_status_returned' : 'chat.tool_status_calling')
 
@@ -260,29 +271,13 @@ export function useChatMessagePresentation({ props, t }) {
     return content.slice(GUIDANCE_START_MARKER.length, -GUIDANCE_END_MARKER.length).trim()
   }
 
-  const parseBackgroundSystemContent = (content) => {
-    try {
-      const parsed = typeof content === 'string' ? JSON.parse(content) : content
-      return parsed?.type === 'background_tool_result' ? parsed : null
-    } catch {
-      return null
-    }
-  }
-  const getBackgroundSystemTitle = (message) => t('chat.background_task_result', {
-    name: parseBackgroundSystemContent(message.content)?.task?.tool_name || t('common.unknown_tool')
-  })
-  const getBackgroundSystemText = (message) => {
-    const parsed = parseBackgroundSystemContent(message.content)
-    return parsed?.task?.summary || parsed?.task?.error || parsed?.task?.content || parsed?.instruction || ''
-  }
-
   const formatFileSize = (size) => {
     if (!Number.isFinite(size)) return '-'
     if (size < 1024) return `${size} B`
     if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
     return `${(size / 1024 / 1024).toFixed(1)} MB`
   }
-  const getMessageClass = role => ({ user: 'user', background_system: 'background-system', err: 'error' })[role] || 'ai'
+  const getMessageClass = role => ({ user: 'user', err: 'error' })[role] || 'ai'
   const didLastDisplayChangePrepend = () => lastDisplayChangeWasPrepend
 
   return {
@@ -301,8 +296,6 @@ export function useChatMessagePresentation({ props, t }) {
     getMessageFiles,
     getReasoningContent,
     getGuidanceText,
-    getBackgroundSystemTitle,
-    getBackgroundSystemText,
     formatFileSize,
     getMessageClass,
     didLastDisplayChangePrepend

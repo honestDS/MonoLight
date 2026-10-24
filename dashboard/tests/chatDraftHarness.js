@@ -652,7 +652,8 @@ export const createHarness = async (t, options = {}) => {
       insertTerminalHistory: terminalHistory.insertTerminalHistory,
       processStreamError: terminalHistory.processStreamError,
       processStreamToolStart: terminalHistory.processStreamToolStart,
-      applyResumedTurnEnd: streamResume.applyResumedTurnEnd
+      applyResumedTurnEnd: streamResume.applyResumedTurnEnd,
+      ...toolOutputVisibility
     },
     ['resolveAssistantDisplayContent', 'useMessageProcessor']
   )

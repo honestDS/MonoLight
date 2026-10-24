@@ -124,7 +124,17 @@ def _install_fake_executor(monkeypatch, tool_name: str, execute_callback):
     return started, finished
 
 
-async def _call_tool(tool_name: str, arguments: dict, timeout: float, active_tasks: set[asyncio.Task]):
+async def _call_tool(
+    tool_name: str,
+    arguments: dict,
+    timeout: float,
+    active_tasks: set[asyncio.Task],
+    force_foreground: bool = False,
+):
+    call_arguments = dict(arguments)
+    if force_foreground and tool_name == "execute_shell" and call_arguments.get("execution_mode") == "non_interactive":
+        call_arguments["execution_mode"] = "interactive"
+
     cfg = ProfileConfig.model_validate(
         {
             "tool": {
@@ -134,7 +144,7 @@ async def _call_tool(tool_name: str, arguments: dict, timeout: float, active_tas
         }
     )
     return await process_single_tool_module.process_single_tool(
-        InternalToolCall(id=f"call-{tool_name}", name=tool_name, arguments=arguments),
+        InternalToolCall(id=f"call-{tool_name}", name=tool_name, arguments=call_arguments),
         SimpleNamespace(info={}),
         Profile(uid="test-user", name="test-profile", configs=cfg.model_dump()),
         cfg,
@@ -293,7 +303,7 @@ async def test_self_managed_tool_calls_are_not_wrapped_in_public_timeout(
     _, finished = _install_fake_executor(monkeypatch, tool_name, execute_callback)
     active_tasks = set()
 
-    message = await asyncio.wait_for(_call_tool(tool_name, arguments, 0.02, active_tasks), timeout=2)
+    message = await asyncio.wait_for(_call_tool(tool_name, arguments, 0.02, active_tasks, force_foreground=True), timeout=2)
 
     assert isinstance(message, InternalMessage)
     assert message.role == MessageRole.TOOL
@@ -319,7 +329,7 @@ async def test_tool_cancellation_propagates_and_cleans_up(monkeypatch, _isolated
 
     started, finished = _install_fake_executor(monkeypatch, tool_name, execute_callback)
     active_tasks = set()
-    call_task = asyncio.create_task(_call_tool(tool_name, arguments, 1.0, active_tasks))
+    call_task = asyncio.create_task(_call_tool(tool_name, arguments, 1.0, active_tasks, force_foreground=True))
 
     await asyncio.wait_for(started.wait(), timeout=1)
     call_task.cancel()

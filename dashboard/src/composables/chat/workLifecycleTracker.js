@@ -225,6 +225,8 @@ export const finishWorkLifecycle = (messages, event) => {
     })
 }
 
+export const suspendWorkLifecycle = (messages, event) => finishWorkLifecycle(messages, event)
+
 export const resetWorkLifecycle = messages => messages
   .filter(message => message?.role !== 'thinking')
   .map(message => {
@@ -344,6 +346,15 @@ export function createWorkLifecycleTracker() {
         terminalRequestIds.add(requestId)
       })
       return finishWorkLifecycle(messages, event)
+    },
+
+    suspendWorkLifecycle(messages, event) {
+      const requestIds = getEventRequestIds(event)
+      const state = getWorkState(event)
+      if (state && (state.terminal || !acceptsWorkEvent(state, event))) return messages
+
+      requestIds.forEach(requestId => dequeuedRequestIds.add(requestId))
+      return suspendWorkLifecycle(messages, event)
     },
 
     isWorkTerminal(workId) {

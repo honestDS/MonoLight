@@ -49,6 +49,7 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
     monkeypatch.setattr(background_task_worker, "install_shutdown_signal_handlers", lambda stop_event: None)
     monkeypatch.setattr(background_task_worker, "create_database_tables", create_tables)
     monkeypatch.setattr(background_task_worker, "run_with_worker_lease", run_with_lease)
+    monkeypatch.setattr(background_task_worker, "recover_interrupted_external_work", recover_tasks)
     monkeypatch.setattr(background_task_worker, "recover_pending_background_tasks", recover_tasks)
     monkeypatch.setattr(background_task_worker, "recover_pending_background_task_replies", recover_replies)
     monkeypatch.setattr(background_task_worker.background_task_manager, "start", start_manager)
@@ -71,6 +72,7 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
     assert events == [
         "tables",
         "lease:background_task",
+        "recover",
         "recover",
         "recover-replies",
         "manager-start",

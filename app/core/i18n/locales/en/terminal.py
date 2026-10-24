@@ -1,6 +1,7 @@
 MESSAGES = {
     "ERR_TERMINAL_STATUS_TARGET_INVALID": "Invalid terminal session target status: {target}",
     "ERR_TERMINAL_STATUS_TRANSITION_INVALID": "Invalid terminal session status transition: {current} -> {target}",
+    "ERR_TERMINAL_WATCH_CONDITION_INVALID": "Invalid terminal watch condition: {detail}",
     "ERR_TERMINAL_OUTPUT_OFFSET_ORDER_INVALID": "next_offset must not precede oldest_offset",
     "ERR_TERMINAL_OUTPUT_SEQUENCE_ORDER_INVALID": "next_sequence must not precede oldest_sequence",
     "ERR_TERMINAL_OUTPUT_CAPACITY_EXCEEDED": "retained output must not exceed capacity_bytes",

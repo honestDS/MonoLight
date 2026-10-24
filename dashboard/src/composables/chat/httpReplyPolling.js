@@ -99,6 +99,45 @@ export function createHttpReplyPolling({
     return false
   }
 
+  const suspendHttpWorkLifecycle = ({ sessionId, workId, resolvedWorkId, requestIds }) => {
+    const normalizedSessionId = normalizeHttpIdentity(sessionId)
+    const normalizedWorkId = normalizeHttpIdentity(workId)
+    const normalizedResolvedWorkId = normalizeHttpIdentity(resolvedWorkId)
+    const relatedRequestIds = getPendingHttpRequestIdsForWork(
+      normalizedSessionId,
+      normalizedWorkId,
+      requestIds
+    )
+
+    if (isCurrentWritableHttpSession(normalizedSessionId)) {
+      const lifecycleEvent = {
+        type: 'work_suspended',
+        work_id: normalizedResolvedWorkId || normalizedWorkId,
+        request_ids: Array.from(relatedRequestIds),
+        session_id: normalizedSessionId
+      }
+      chatState.messages.value = workLifecycleTracker.suspendWorkLifecycle(
+        chatState.messages.value,
+        lifecycleEvent
+      )
+
+      if (normalizedResolvedWorkId && normalizedResolvedWorkId !== normalizedWorkId) {
+        for (const requestId of relatedRequestIds) {
+          chatState.messages.value = workLifecycleTracker.suspendWorkLifecycle(
+            chatState.messages.value,
+            {
+              type: 'work_suspended',
+              request_ids: [requestId],
+              session_id: normalizedSessionId
+            }
+          )
+        }
+      }
+    }
+
+    return relatedRequestIds
+  }
+
   const finishHttpWorkLifecycle = ({ sessionId, workId, resolvedWorkId, requestIds, type }) => {
     const normalizedSessionId = normalizeHttpIdentity(sessionId)
     const normalizedWorkId = normalizeHttpIdentity(workId)
@@ -234,9 +273,21 @@ export function createHttpReplyPolling({
     const resultSessionId = normalizeHttpIdentity(statusData.session_id)
     if (resultSessionId && resultSessionId !== normalizedSessionId) return null
 
+    applyNonStreamSessionEvents(statusData)
+
     const status = String(statusData.status || '').toLowerCase()
     if (['ready_for_llm', 'running', 'waiting_external_work'].includes(status)) {
       observedHttpWorkStatuses.delete(workId)
+      if (status === 'waiting_external_work') {
+        suspendHttpWorkLifecycle({
+          sessionId: normalizedSessionId,
+          workId,
+          resolvedWorkId: statusData.resolved_work_id,
+          requestIds: Array.isArray(statusData.request_ids)
+            ? statusData.request_ids
+            : work?.request_ids
+        })
+      }
       return { active: true }
     }
     if (!['succeeded', 'failed', 'cancelled'].includes(status)) {
@@ -394,6 +445,15 @@ export function createHttpReplyPolling({
         && !(status === 'merged' && session.is_reply_running === true && activeStatuses.includes(previousStatus))
       ) {
         observedHttpWorkStatuses.set(workId, status)
+      }
+
+      if (status === 'waiting_external_work') {
+        suspendHttpWorkLifecycle({
+          sessionId,
+          workId,
+          resolvedWorkId: work?.resolved_work_id,
+          requestIds: work.request_ids
+        })
       }
 
       if (!shouldFetchHttpWorkStatus({

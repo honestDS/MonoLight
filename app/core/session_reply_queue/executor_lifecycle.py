@@ -2,14 +2,18 @@ import time
 
 from sqlalchemy import update
 
+from app.core.background_tasks.external_work import resume_external_work_for_task
 from app.core.constants import (
+    ERR_INTERNAL_SERVER_ERROR,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
+from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
+from app.core.log import get_logger
 from app.core.message_platforms.notifier import send_session_event
 from app.core.session_reply_queue.executor_common import (
     _error_message_dedupe_key,
@@ -19,13 +23,20 @@ from app.core.session_reply_queue.executor_common import (
     _result_message_dedupe_key,
 )
 from app.core.session_reply_queue.executor_confirmed import _execute_confirmed_tools
-from app.core.session_reply_queue.executor_replies import _execute_background, _execute_foreground, _execute_scheduled
+from app.core.session_reply_queue.executor_replies import (
+    _execute_background,
+    _execute_external_resume,
+    _execute_foreground,
+    _execute_scheduled,
+)
 from app.core.session_reply_queue.manager import build_identified_work_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
+
+logger = get_logger(__name__)
 
 __all__ = [
     "execute_session_reply_work",
@@ -46,6 +57,8 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         persisted_result = await _get_persisted_result(db, work)
         if persisted_result is not None:
             response = (work.execution_state or {}).get("response") or _response_from_persisted_message(work, persisted_result)
+        elif (work.execution_state or {}).get("external_resume_pending") is True:
+            response = await _execute_external_resume(db, work, worker_id)
         elif work.work_type == SessionReplyWorkType.FOREGROUND_REPLY:
             response = await _execute_foreground(db, work, worker_id)
         elif work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
@@ -54,6 +67,28 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             response = await _execute_background(db, work, worker_id)
         else:
             response = await _execute_scheduled(db, work, worker_id)
+
+        if isinstance(response, dict) and response.get("status") == "waiting_external_work":
+            pending_tools = response.get("pending_tools")
+            if not isinstance(pending_tools, list) or not pending_tools or any(not isinstance(pending_tool, dict) for pending_tool in pending_tools):
+                raise RuntimeError(t(ERR_INTERNAL_SERVER_ERROR))
+            if not await external_work_crud.suspend_claimed(
+                db,
+                work=work,
+                worker_id=worker_id,
+                pending_tools=response["pending_tools"],
+                commit=True,
+            ):
+                return
+            for pending_tool in pending_tools:
+                task_id = pending_tool.get("task_id")
+                if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
+                    continue
+                try:
+                    await resume_external_work_for_task(task_id)
+                except Exception:
+                    logger.exception("Failed to resume external work for task {}", task_id)
+            return
 
         result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
         if result_message is None:

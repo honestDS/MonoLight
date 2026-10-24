@@ -4,6 +4,7 @@ import { chatApi } from '../../api'
 import i18n from '../../i18n'
 import { findAssistantResponseReplacementIndex, getMessageDbId, getMessageDedupeKeys, isAssistantResponse, isToolCall, isToolResult, normalizeMessageContent } from '../../utils'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
+import { filterToolOutputMessages } from '../../utils/toolOutputVisibility.js'
 import { appendStreamReasoning, finalizeStreamReasoning as finalizeReasoning } from './reasoningTracker.js'
 import { insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
 import { insertTerminalHistory, processStreamError, processStreamToolStart } from './terminalHistory.js'
@@ -18,15 +19,6 @@ export const resolveAssistantDisplayContent = (content, refusal, finishReason) =
   if (finishReason === 'content_filter' || finishReason === 'refusal') return t('chat.response_refused')
   if (finishReason === 'incomplete') return t('chat.response_incomplete')
   return ''
-}
-
-const parseBackgroundSystemMessage = (item) => {
-  if (item?.type !== 'background_result' && item?.role !== 'system') return null
-  try {
-    const payload = typeof item.content === 'string' ? JSON.parse(item.content) : item.content
-    if (payload?.type === 'background_tool_result') return payload
-  } catch {}
-  return null
 }
 
 const insertBeforeThinking = (messagesRef, message, thinkingId, requestId) =>
@@ -338,7 +330,7 @@ export function useMessageProcessor() {
       refusal,
       finishReason
     )
-    const history = response.history || []
+    const history = filterToolOutputMessages(response.history || [])
     const responseFiles = response.files || []
     const aiCreatedAt = choice?.created_at || response.created_at || null
     const role = choiceMessage?.role || response.role || 'assistant'
@@ -354,18 +346,6 @@ export function useMessageProcessor() {
           const id = `history_${Date.now()}_${idx}`
           const dbId = item?.id ?? item?.db_id ?? item?.message_id
           const requestIdForMessage = item?.request_id ?? requestId
-          const backgroundPayload = parseBackgroundSystemMessage(item)
-          if (backgroundPayload) {
-            return {
-              ...item,
-              id,
-              ...(dbId !== null && dbId !== undefined && dbId !== '' ? { db_id: dbId } : {}),
-              role: 'background_system',
-              content: JSON.stringify(backgroundPayload),
-              created_at: item.created_at || null,
-              ...(requestIdForMessage ? { request_id: requestIdForMessage } : {})
-            }
-          }
           const isToolRelated = (item.tool_calls && item.tool_calls.length > 0) || item.role === 'tool'
           return {
             ...item,

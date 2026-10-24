@@ -163,6 +163,21 @@ export function useChatSessionEvents({
     onTodoUpdate: event => {
       if (isCurrentRequestSession()) applyTodoTransportPayload(event)
     },
+    onWorkSuspended: event => {
+      refreshSessionLoadingState()
+      applyLifecycleEvent(workLifecycleTracker.suspendWorkLifecycle, event, isCurrentRequestSession)
+      if (
+        isCurrentRequestSession()
+        && (!event?.session_id || event.session_id === sessionManager.currentSessionId.value)
+      ) {
+        contextSummaryTracker.endContextSummaryWork(
+          contextSummaryWorkKeys.value,
+          contextSummaryRequestKeys,
+          event,
+          event.request_id
+        )
+      }
+    },
     onWorkFinished: event => {
       refreshSessionLoadingState()
       applyLifecycleEvent(workLifecycleTracker.finishWorkLifecycle, event, isCurrentRequestSession)
@@ -447,6 +462,7 @@ export function useChatSessionEvents({
       },
       onAuditConfirmationStatus: applyAuditConfirmationStatus,
       onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
+      onToolResultsUpdate: applyAuditToolResultsUpdate,
       setLoading
     }
 
@@ -495,7 +511,7 @@ export function useChatSessionEvents({
     for (const event of events) {
       if (event?.type === 'audit_confirmation_status') {
         applyAuditConfirmationStatus(event)
-      } else if (event?.type === 'audit_tool_results_update') {
+      } else if (event?.type === 'audit_tool_results_update' || event?.type === 'tool_results_update') {
         applyAuditToolResultsUpdate(event)
       } else if (event?.type === 'todo_update') {
         applyTodoTransportPayload(event)

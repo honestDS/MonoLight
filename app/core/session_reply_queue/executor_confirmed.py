@@ -39,6 +39,7 @@ from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_messages import message_token_text
+from app.core.utils.dispatcher.external_work import build_external_wait_response
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
 from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
@@ -570,6 +571,12 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         session_id=work.session_id,
         tool_results=[message for message in replacement_state.turn_messages if message.role == MessageRole.TOOL],
     )
+    wait_response = build_external_wait_response(
+        confirmed_calls,
+        [message for message in replacement_state.turn_messages if message.role == MessageRole.TOOL],
+    )
+    if wait_response is not None:
+        return wait_response
 
     guidance_prompt = (work.execution_state or {}).get("guidance_prompt")
     initial_message = InternalMessage(
@@ -590,6 +597,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         allow_additional_user_messages=True,
         execution_resume_state=None,
     )
+    if interactive_response.get("status") == "waiting_external_work":
+        return interactive_response
     content = parse_assistant_files_content(_response_content(interactive_response))
     history = interactive_response.get("history", [])
     files = interactive_response.get("files") or []

@@ -2,6 +2,7 @@ import asyncio
 import os
 
 import app.warning_filters  # noqa: F401
+from app.core.background_tasks.external_work import recover_interrupted_external_work
 from app.core.background_tasks.manager import background_task_manager
 from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
 from app.core.log import LogManager, get_logger
@@ -20,6 +21,7 @@ BACKGROUND_TASK_WORKER_NAME = "background_task"
 
 
 async def run_owned_background_task_worker(owned_stop_event: asyncio.Event) -> None:
+    await recover_interrupted_external_work()
     await recover_pending_background_tasks()
     await recover_pending_background_task_replies()
 

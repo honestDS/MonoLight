@@ -46,7 +46,6 @@ export default {
   tool: '{name}',
   tool_call: 'Tool call: {name}',
   tool_result: 'Tool result: {name}',
-  background_task_result: 'Background task: {name}',
   audit_confirmation_title: 'Confirmation required',
   audit_risk: 'Risk score: {score}',
   audit_status: 'Status: {status}',

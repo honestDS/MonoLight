@@ -215,7 +215,7 @@ async def _run_websocket_resume(
                 if not _event_matches_session(response, session_id):
                     continue
                 await websocket.send_json(response)
-                if response.get("type") in {"done", "error", "cancelled"}:
+                if response.get("type") in {"done", "error", "cancelled", "work_suspended"}:
                     work_sequence_no = response.get("work_sequence_no")
                     if type(work_sequence_no) is int and work_sequence_no >= 0 and session_id == state.current_session_id and state.stream_task is running_task:
                         state.after_work_sequence_no = work_sequence_no
@@ -928,10 +928,7 @@ async def chat_websocket(
                         if session and not session.show_tool_calls:
                             should_forward = False
                     if should_forward:
-                        if event.get("type") in {"proactive_reply", "proactive_reply_error"} and event.get("source") in {
-                            "foreground",
-                            "confirmed_tool_execution",
-                        }:
+                        if event.get("type") == "work_ready" or (event.get("type") in {"proactive_reply", "proactive_reply_error"} and event.get("source") in {"foreground", "confirmed_tool_execution"}):
                             _wake_websocket_stream(websocket, state)
                         else:
                             await websocket.send_json(event)

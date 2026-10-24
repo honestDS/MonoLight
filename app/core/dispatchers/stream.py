@@ -195,6 +195,17 @@ class StreamDispatcherMixin:
                     yield cls._build_error_event(payload.render_message(), session_id, request_id)
                     break
 
+                if payload.get("status") == "waiting_external_work":
+                    external_wait_event = {
+                        "type": "external_wait",
+                        "session_id": session_id,
+                        "response": payload,
+                    }
+                    if request_id is not None:
+                        external_wait_event["request_id"] = request_id
+                    yield external_wait_event
+                    break
+
                 yield cls._build_done_event(
                     payload,
                     session_id=session_id,
