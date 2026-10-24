@@ -6,7 +6,7 @@ from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
-from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT, EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
+from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT, TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
@@ -36,7 +36,7 @@ def _build_background_tool_result_message(task: BackgroundTask) -> str:
     return json.dumps(
         {
             "type": "background_tool_result",
-            "instruction": EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT if extra.get("auto_terminal_watch") is True else BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT,
+            "instruction": TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT if extra.get("auto_terminal_watch") is True else BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT,
             "task": task_result,
             "tool_call": tool_call,
             "tool_result": tool_result,

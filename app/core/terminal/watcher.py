@@ -73,6 +73,7 @@ async def watch_terminal(
     session_id: str,
     request: TerminalWatchRequest,
     deadline: datetime,
+    read_on_timeout: bool = False,
 ) -> dict:
     after_offset = request.after_offset
     cursor = after_offset
@@ -114,26 +115,27 @@ async def watch_terminal(
         if snapshot.status in TERMINAL_SESSION_FINAL_STATUSES:
             event = "process_exit" if snapshot.status is TerminalSessionStatus.EXITED else "terminal_error"
             output_truncated = bounds.oldest_offset > cursor
-        elif now >= deadline:
+        if event is None and now >= deadline:
             event = "timeout"
-        elif bounds.oldest_offset > cursor:
+        if event is None and bounds.oldest_offset > cursor:
             event = "output_gap"
             output_truncated = True
-        elif request.condition == "output":
+        if event is None and request.condition == "output":
             if new_output and first_output_time is None:
                 first_output_time = now
             if first_output_time is not None and now >= first_output_time + timedelta(seconds=request.settle_seconds):
                 event = "output"
-        elif request.condition == "quiet_for":
+        if event is None and request.condition == "quiet_for":
             if new_output:
                 last_change_time = now
             if last_change_time is not None and bounds.next_offset > cursor and now >= last_change_time + timedelta(seconds=request.settle_seconds):
                 event = "quiet_for"
-        elif request.condition == "output_contains" and latest_offset > cursor:
+        if event is None and request.condition == "output_contains" and latest_offset > cursor:
             scan_page = True
             read_offset = cursor
 
-        if not scan_page and event is not None and event != "timeout" and now < deadline and latest_offset > cursor and latest_offset > bounds.oldest_offset:
+        extended_read_window = read_on_timeout and event in {"timeout", "process_exit", "terminal_error"} and latest_offset > cursor and latest_offset > bounds.oldest_offset
+        if not scan_page and event is not None and ((event != "timeout" and now < deadline) or extended_read_window) and latest_offset > cursor and latest_offset > bounds.oldest_offset:
             read_offset = max(
                 cursor,
                 bounds.oldest_offset,
@@ -149,19 +151,20 @@ async def watch_terminal(
                     terminal_session_id=request.terminal_session_id,
                     offset=read_offset,
                     max_bytes=request.max_bytes,
-                    timeout_seconds=min(5.0, remaining),
+                    timeout_seconds=5.0 if extended_read_window else min(5.0, remaining),
                 )
             except TimeoutError:
                 event = "observation_error"
             else:
                 last_seen_offset = max(last_seen_offset, read_result.latest_offset)
-                if read_result.read_status in {
+                read_gap = read_result.read_status in {
                     TerminalOutputReadStatus.TRUNCATED,
                     TerminalOutputReadStatus.EXPIRED,
-                }:
+                }
+                if read_gap:
                     event = "output_gap"
                     output_truncated = True
-                elif scan_page:
+                if not read_gap and scan_page:
                     text = request.text or ""
                     combined = suffix + read_result.output
                     if text in combined:
@@ -169,11 +172,10 @@ async def watch_terminal(
                         matched_text = text
                         match_context = suffix
                         output_truncated = output_truncated or read_result.start_offset > after_offset
-                    else:
+                    if event is None:
                         cursor = read_result.next_offset
                         suffix = combined[-(len(text) - 1) :] if len(text) > 1 else ""
-                        event = None
-                elif read_result.start_offset > cursor:
+                if not read_gap and not scan_page and read_result.start_offset > cursor:
                     output_truncated = True
 
         if event is None:

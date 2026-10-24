@@ -8,10 +8,12 @@ from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    TERMINAL_WATCH_TOOL_NAME,
 )
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.notifier import send_session_event
@@ -108,17 +110,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
     await send_session_event(work.uid, work.session_id, _event_for_work(work, identified_response))
 
     async with AsyncSessionLocal() as db:
-        if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
-            await db.execute(
-                update(BackgroundTask)
-                .where(BackgroundTask.id == int(work.source_id))
-                .values(
-                    reply_status=BackgroundTaskReplyStatus.SUCCEEDED,
-                    reply_locked_by=None,
-                    reply_lock_until=None,
-                )
-            )
-        await session_reply_work_item_crud.mark_terminal(
+        updated = await session_reply_work_item_crud.mark_terminal(
             db,
             work_id=work_id,
             worker_id=worker_id,
@@ -127,6 +119,35 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             event_sent=True,
             commit=False,
         )
+        if not updated:
+            await db.rollback()
+            return
+
+        if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
+            await db.execute(
+                update(BackgroundTask)
+                .where(
+                    BackgroundTask.id == int(work.source_id),
+                    BackgroundTask.reply_status == BackgroundTaskReplyStatus.RUNNING,
+                )
+                .values(
+                    reply_status=BackgroundTaskReplyStatus.SUCCEEDED,
+                    reply_locked_by=None,
+                    reply_lock_until=None,
+                )
+            )
+            task = await background_task_crud.get(db, int(work.source_id))
+            if task is not None and task.tool_name == TERMINAL_WATCH_TOOL_NAME and isinstance(task.extra, dict) and task.extra.get("auto_terminal_watch") is True:
+                await background_task_crud.create_terminal_auto_watch(
+                    db,
+                    uid=task.uid,
+                    session_id=task.session_id,
+                    profile_id=task.profile_id,
+                    terminal_session_id=task.arguments["terminal_session_id"],
+                    after_offset=task.arguments["after_offset"],
+                    previous_task_id=task.id,
+                    commit=False,
+                )
         await db.commit()
 
 

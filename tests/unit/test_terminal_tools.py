@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+import app.core.terminal.watcher as terminal_watcher_module
 import app.core.tools.terminal as terminal_module
 import app.core.tools.terminal_watch as terminal_watch_module
 from app.core.constants import ERR_TERMINAL_COMMAND_TIMEOUT, TERMINAL_WATCH_TOOL_NAME
@@ -203,7 +204,7 @@ def _executor(executor_class, *, tool_timeout: float = 30.0):
 @pytest.mark.asyncio
 async def test_terminal_watch_executor_uses_profile_timeout_and_protocol_request(monkeypatch):
     created_at = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
-    task = SimpleNamespace(id=901, uid="u1", session_id="session-1", created_at=created_at)
+    task = SimpleNamespace(id=901, uid="u1", session_id="session-1", created_at=created_at, extra={})
     db = _FakeDatabase()
     crud_calls = []
     watch_calls = []
@@ -257,31 +258,169 @@ async def test_terminal_watch_executor_uses_profile_timeout_and_protocol_request
     assert isinstance(watch_calls[0]["request"], TerminalWatchRequest)
     assert watch_calls[0]["deadline"] != created_at + timedelta(seconds=1)
     assert "timeout_seconds" not in arguments
+    assert "read_on_timeout" not in watch_calls[0]
     assert db.commit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_watch_executor_auto_watch_uses_observation_deadline_and_reads_on_timeout(monkeypatch):
+    created_at = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
+    observation_started_at = datetime(2026, 10, 24, 12, 0, 3, tzinfo=UTC)
+    fixed_now = datetime(2026, 10, 24, 12, 0, 4, tzinfo=UTC)
+    task = SimpleNamespace(
+        id=902,
+        uid="u1",
+        session_id="session-1",
+        created_at=created_at,
+        extra={
+            "auto_terminal_watch": True,
+            "observation_started_at": "2026-10-24T12:00:03+00:00",
+        },
+    )
+    db = _FakeDatabase()
+    crud_calls = []
+    watch_calls = []
+
+    async def get_task(received_db, task_id):
+        crud_calls.append((received_db, task_id))
+        return task
+
+    async def watch_terminal(**kwargs):
+        watch_calls.append(kwargs)
+        return {"status": "observed"}
+
+    monkeypatch.setattr(terminal_watch_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(terminal_watch_module, "get_local_time", lambda: fixed_now)
+    monkeypatch.setattr(terminal_watch_module, "watch_terminal", watch_terminal)
+
+    executor = TerminalWatchExecutor(project_root=".", uid="u1")
+    executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 7.5}}))
+    executor.set_runtime_context(
+        dispatch_context=DispatchContext(
+            mode="background",
+            source="test",
+            uid="u1",
+            session_id="session-1",
+            profile=_profile([TERMINAL_WATCH_TOOL_NAME]),
+            db=db,
+            tool_call_id="terminal-watch-call",
+            task_id=task.id,
+        )
+    )
+
+    arguments = {
+        "terminal_session_id": TERMINAL_SESSION_ID,
+        "after_offset": 12,
+        "condition": "process_exit",
+    }
+    result = json.loads(await executor.execute(**arguments))
+
+    assert crud_calls == [(db, task.id)]
+    assert watch_calls[0]["deadline"] == observation_started_at + timedelta(seconds=7.5)
+    assert watch_calls[0]["read_on_timeout"] is True
+    assert result["observed_at"] == fixed_now.isoformat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("read_on_timeout", "expected_output", "expected_next_offset"),
+    [
+        (None, "", 0),
+        (True, "new-output-14!", 14),
+    ],
+    ids=["default", "read-on-timeout"],
+)
+async def test_watch_terminal_read_on_timeout_isolated_from_default(
+    monkeypatch,
+    read_on_timeout,
+    expected_output,
+    expected_next_offset,
+):
+    fixed_now = datetime(2026, 10, 24, 12, 0, 1, tzinfo=UTC)
+    snapshot = _snapshot(next_offset=14)
+    read_requests = []
+
+    class FakeAsyncSessionLocal:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return None
+
+        async def commit(self):
+            return None
+
+    async def get_snapshot(*args, **kwargs):
+        return snapshot
+
+    async def read(**kwargs):
+        read_requests.append(kwargs)
+        output = "new-output-14!"
+        offset = kwargs["offset"]
+        next_offset = offset + len(output.encode("ascii"))
+        return TerminalReadResult(
+            terminal_session_id=TERMINAL_SESSION_ID,
+            read_status=TerminalOutputReadStatus.OK,
+            requested_offset=offset,
+            start_offset=offset,
+            next_offset=next_offset,
+            oldest_available_offset=0,
+            latest_offset=next_offset,
+            sequence=1,
+            output=output,
+            eof=False,
+        )
+
+    monkeypatch.setattr(terminal_watcher_module, "AsyncSessionLocal", FakeAsyncSessionLocal)
+    monkeypatch.setattr(terminal_watcher_module.terminal_session_manager, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(terminal_watcher_module, "_read", read)
+    monkeypatch.setattr(terminal_watcher_module, "get_local_time", lambda: fixed_now)
+
+    arguments = {
+        "task_id": 901,
+        "uid": "u1",
+        "session_id": "session-1",
+        "request": TerminalWatchRequest(terminal_session_id=TERMINAL_SESSION_ID, after_offset=0),
+        "deadline": fixed_now - timedelta(seconds=1),
+    }
+    if read_on_timeout is not None:
+        arguments["read_on_timeout"] = read_on_timeout
+
+    result = await terminal_watcher_module.watch_terminal(**arguments)
+
+    assert result == {
+        "terminal_session_id": TERMINAL_SESSION_ID,
+        "event": "timeout",
+        "after_offset": 0,
+        "session_status": "running",
+        "exit_code": None,
+        "failure_reason": None,
+        "output": expected_output,
+        "start_offset": 0,
+        "next_offset": expected_next_offset,
+        "latest_offset": 14,
+        "output_truncated": False,
+        "eof": False,
+    }
+    if read_on_timeout is None:
+        assert read_requests == []
+    else:
+        assert len(read_requests) == 1
+        assert read_requests[0]["offset"] == 0
+        assert read_requests[0]["max_bytes"] == 16_384
+        assert 0 < read_requests[0]["timeout_seconds"] <= 5.0
 
 
 @pytest.mark.asyncio
 async def test_ensure_terminal_auto_watch_creates_protocol_task_once(monkeypatch):
     db = _FakeDatabase()
-    active_watch = None
-    active_lookup_calls = []
     created_tasks = []
-    watch_calls = []
 
-    async def get_active_watch(received_db, uid, session_id, terminal_session_id):
-        active_lookup_calls.append((received_db, uid, session_id, terminal_session_id))
-        return active_watch
-
-    async def create_task(received_db, **kwargs):
+    async def create_terminal_auto_watch(received_db, **kwargs):
         created_tasks.append((received_db, kwargs))
         return SimpleNamespace(id=902)
 
-    async def watch_terminal(**kwargs):
-        watch_calls.append(kwargs)
-
-    monkeypatch.setattr(terminal_watch_module.background_task_crud, "get_active_terminal_watch", get_active_watch)
-    monkeypatch.setattr(terminal_watch_module.background_task_crud, "create_task", create_task)
-    monkeypatch.setattr(terminal_watch_module, "watch_terminal", watch_terminal)
+    monkeypatch.setattr(terminal_watch_module.background_task_crud, "create_terminal_auto_watch", create_terminal_auto_watch)
 
     await ensure_terminal_auto_watch(
         db,
@@ -293,25 +432,15 @@ async def test_ensure_terminal_auto_watch_creates_protocol_task_once(monkeypatch
         session_status=TerminalSessionStatus.RUNNING,
     )
 
-    assert active_lookup_calls == [(db, "u1", "session-1", TERMINAL_SESSION_ID)]
     assert len(created_tasks) == 1
     received_db, task_kwargs = created_tasks[0]
     assert received_db is db
     assert task_kwargs["uid"] == "u1"
     assert task_kwargs["session_id"] == "session-1"
     assert task_kwargs["profile_id"] == 7
-    assert task_kwargs["tool_name"] == TERMINAL_WATCH_TOOL_NAME
-    assert task_kwargs["auto_reply"] is True
-    assert task_kwargs["arguments"] == {
-        "terminal_session_id": TERMINAL_SESSION_ID,
-        "after_offset": 18,
-        "condition": "process_exit",
-    }
-    assert task_kwargs["extra"]["auto_terminal_watch"] is True
-    assert task_kwargs["extra"]["terminal_session_id"] == TERMINAL_SESSION_ID
-    assert watch_calls == []
+    assert task_kwargs["terminal_session_id"] == TERMINAL_SESSION_ID
+    assert task_kwargs["after_offset"] == 18
 
-    active_watch = SimpleNamespace(id=903)
     await ensure_terminal_auto_watch(
         db,
         uid="u1",
@@ -322,8 +451,7 @@ async def test_ensure_terminal_auto_watch_creates_protocol_task_once(monkeypatch
         session_status=TerminalSessionStatus.RUNNING,
     )
 
-    assert len(active_lookup_calls) == 2
-    assert len(created_tasks) == 1
+    assert len(created_tasks) == 2
 
 
 @pytest.mark.asyncio
