@@ -148,7 +148,7 @@ def build_identified_work_response(
     *,
     message_id: int | None = None,
 ) -> dict[str, Any]:
-    identified_response = {**response, "work_id": work.id}
+    identified_response = {**response, "work_id": work.id, "work_sequence_no": work.sequence_no}
     result_message_id = getattr(work, "result_message_id", None) if message_id is None else message_id
     if isinstance(result_message_id, int) and not isinstance(result_message_id, bool) and result_message_id > 0:
         identified_response["message_id"] = result_message_id

@@ -144,6 +144,12 @@ export function useChatSessionEvents({
   }
 
   const createLifecycleCallbacks = isCurrentRequestSession => ({
+    onWorkEvent: event => {
+      if (!isCurrentRequestSession()) return false
+      const currentSessionId = sessionManager.currentSessionId.value
+      if (event?.session_id && currentSessionId && event.session_id !== currentSessionId) return false
+      return workLifecycleTracker.observeWorkEvent(event)
+    },
     onInputAccepted: () => {
       refreshSessionLoadingState()
     },
@@ -218,6 +224,7 @@ export function useChatSessionEvents({
   const getCompletedWorkId = (data) => data?.work_id ?? data?.response?.work_id
 
   const shouldProcessCompletedWork = (data) => {
+    if (!workLifecycleTracker.observeWorkEvent(data)) return false
     const workId = getCompletedWorkId(data)
     return !workLifecycleTracker.isWorkTerminal(workId)
       || workLifecycleTracker.isAcceptedTerminalEvent(data)

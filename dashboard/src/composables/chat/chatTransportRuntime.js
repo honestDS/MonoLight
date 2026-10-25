@@ -223,6 +223,7 @@ export function createChatTransport({ wsManager, api, getToken, reportError, tra
       onAgentLoopOutput,
       onLlmRequestMetadata,
       onWorkFinished,
+      onWorkEvent,
       onWorkSuspended,
       onToolResultsUpdate,
       deferAgentLoopOutput = false,
@@ -235,6 +236,7 @@ export function createChatTransport({ wsManager, api, getToken, reportError, tra
 
     // 忽略心跳响应
     if (data.type === 'pong' || data.type === 'ping') return
+    if (onWorkEvent && onWorkEvent(data) === false) return
 
     const type = data.type
     const requestId = hasIdentity(data.request_id) ? data.request_id : currentRequestId

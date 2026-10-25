@@ -116,6 +116,7 @@ class SessionReplyResult:
         return {
             "work_id": work_id,
             "resolved_work_id": work.id,
+            "work_sequence_no": work.sequence_no,
             "session_id": work.session_id,
             "status": work.status.value,
             "request_ids": get_work_request_ids(work),
@@ -166,7 +167,7 @@ class SessionReplyResult:
                 history_message_id=history_message_id,
             ):
                 response_event = dict(event)
-                response_event["work_sequence_no"] = work.sequence_no
+                response_event.setdefault("work_sequence_no", work.sequence_no)
                 if "request_ids" not in response_event:
                     response_event["request_ids"] = get_work_request_ids(work)
                 yield response_event
@@ -267,6 +268,7 @@ class SessionReplyResult:
                         "type": "done",
                         "session_id": work.session_id,
                         "work_id": target_work_id,
+                        "work_sequence_no": work.sequence_no,
                         "response_id": response_id,
                         "history": identified_response.get("history", []),
                         "files": identified_response.get("files"),
@@ -296,6 +298,7 @@ class SessionReplyResult:
                         "type": "cancelled",
                         "session_id": work.session_id,
                         "work_id": target_work_id,
+                        "work_sequence_no": work.sequence_no,
                         "request_ids": get_work_request_ids(work),
                     }
                     return

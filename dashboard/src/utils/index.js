@@ -4,36 +4,29 @@ import i18n from '../i18n'
 import {
   findAssistantResponseReplacementIndex,
   getMessageDbId,
-  isAssistantResponse as identityIsAssistantResponse,
-  isPlainAssistantResponse as identityIsPlainAssistantResponse,
+  isAssistantResponse,
+  isPlainAssistantResponse,
   mergeAssistantResponse,
   mergeAssistantResponseIntoList
 } from './assistantResponseIdentity'
+import {
+  getOriginalToolResultMessageId,
+  getToolResultCallId,
+  mergeToolResultMessage,
+  mergeToolResultIntoList
+} from './toolResultState'
 
 export {
   findAssistantResponseReplacementIndex,
   getMessageDbId,
+  isAssistantResponse,
+  isPlainAssistantResponse,
+  getToolResultCallId,
   mergeAssistantResponse,
   mergeAssistantResponseIntoList
 }
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
-
-const sourceIsAssistantResponse = typeof identityIsAssistantResponse === 'function'
-  ? identityIsAssistantResponse
-  : globalThis.isAssistantResponse
-const sourceIsPlainAssistantResponse = typeof identityIsPlainAssistantResponse === 'function'
-  ? identityIsPlainAssistantResponse
-  : globalThis.isPlainAssistantResponse
-const isBackgroundResultMessage = message => message?.type === 'background_result'
-
-export const isAssistantResponse = message => (
-  !isBackgroundResultMessage(message) && sourceIsAssistantResponse(message)
-)
-
-export const isPlainAssistantResponse = message => (
-  !isBackgroundResultMessage(message) && sourceIsPlainAssistantResponse(message)
-)
 
 const formatDateObject = (date, fallback = '') => {
   try {
@@ -61,21 +54,6 @@ export const normalizeMessageContent = (content) => {
   return content
 }
 
-const getOriginalToolResultMessageId = (message) => {
-  if (message?.type !== 'background_result') return null
-  const content = normalizeMessageContent(message.content)
-  const messageId = content?.original_tool_result_message_id
-  return messageId === null || messageId === undefined || messageId === '' ? null : String(messageId)
-}
-
-export const getToolResultCallId = (message) => {
-  const content = normalizeMessageContent(message?.content)
-  const isToolResultMessage = message?.type === 'tool_result' || message?.role === 'tool' || content?.role === 'tool'
-  if (!isToolResultMessage) return null
-  const toolCallId = content?.tool_call_id || message?.tool_call_id
-  return toolCallId === null || toolCallId === undefined || toolCallId === '' ? null : String(toolCallId)
-}
-
 export const findMessageReplacementIndex = (messages, incomingMessage) => {
   const originalToolResultMessageId = getOriginalToolResultMessageId(incomingMessage)
   if (originalToolResultMessageId !== null) {
@@ -94,21 +72,27 @@ export const findMessageReplacementIndex = (messages, incomingMessage) => {
   return messages.findIndex(message => getToolResultCallId(message) === incomingToolCallId)
 }
 
-export const mergeRemoteMessage = (localMessage, remoteMessage) => ({
-  ...localMessage,
-  ...remoteMessage,
-  id: localMessage?.id ?? remoteMessage?.id,
-  response_id: localMessage?.response_id ?? remoteMessage?.response_id,
-  request_id: localMessage?.request_id ?? remoteMessage?.request_id,
-  work_id: localMessage?.work_id ?? remoteMessage?.work_id,
-  turn: localMessage?.turn ?? remoteMessage?.turn
-})
+export const mergeRemoteMessage = (localMessage, remoteMessage) => {
+  if (getToolResultCallId(localMessage) !== null && getToolResultCallId(remoteMessage) !== null) {
+    return mergeToolResultMessage(localMessage, remoteMessage)
+  }
+  return {
+    ...localMessage,
+    ...remoteMessage,
+    id: localMessage?.id ?? remoteMessage?.id,
+    response_id: localMessage?.response_id ?? remoteMessage?.response_id,
+    request_id: localMessage?.request_id ?? remoteMessage?.request_id,
+    work_id: localMessage?.work_id ?? remoteMessage?.work_id,
+    turn: localMessage?.turn ?? remoteMessage?.turn
+  }
+}
 
 export const mergeRemoteMessageIntoList = (messages, remoteMessage) => {
   const message = {
     ...remoteMessage,
     db_id: remoteMessage?.db_id ?? remoteMessage?.id
   }
+  if (getToolResultCallId(message) !== null) return mergeToolResultIntoList(messages, message)
   const replacementIndex = findMessageReplacementIndex(messages, message)
   if (replacementIndex === -1) return [...messages, message]
   return messages.map((item, index) => index === replacementIndex ? mergeRemoteMessage(item, message) : item)
@@ -141,7 +125,7 @@ export const getMessageDedupeKeys = (message) => {
     if (toolCallId) keys.add(`tool_call:${toolCallId}`)
   }
 
-  const toolCallId = content?.tool_call_id || message?.tool_call_id
+  const toolCallId = getToolResultCallId(message)
   if (toolCallId) keys.add(`tool_result:${toolCallId}`)
 
   if (keys.size === 0) {

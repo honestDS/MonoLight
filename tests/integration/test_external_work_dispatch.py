@@ -1,3 +1,4 @@
+import copy
 import json
 
 import pytest
@@ -150,7 +151,7 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
 
         async def fake_post_json(_transformer, **kwargs):
             payload = kwargs["payload"]
-            provider_payloads.append(payload)
+            provider_payloads.append(copy.deepcopy(payload))
             request_number = len(provider_payloads)
             assert payload["model"] == MODEL_ID
             assert payload["stream"] is False
@@ -189,6 +190,9 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
 
             assert request_number == 2
             messages = payload["messages"]
+            first_payload = provider_payloads[0]
+            assert messages[: len(first_payload["messages"])] == first_payload["messages"]
+            assert payload["tools"] == first_payload["tools"]
 
             def contains_expected_content(item: dict, expected: str) -> bool:
                 content = item.get("content")

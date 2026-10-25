@@ -147,8 +147,8 @@
                   <template #title>
                     <span class="tool-pair-title">
                       <span class="tool-pair-name">{{ getToolPairTitle(pair) }}</span>
-                      <span :class="['tool-pair-status', pair.resultMessage ? 'is-result' : 'is-call']">
-                        {{ $t(pair.resultMessage ? 'chat.tool_status_returned' : 'chat.tool_status_calling') }}
+                      <span :class="['tool-pair-status', isToolPairReturned(pair) ? 'is-result' : 'is-call']">
+                        {{ $t(isToolPairReturned(pair) ? 'chat.tool_status_returned' : 'chat.tool_status_calling') }}
                       </span>
                     </span>
                   </template>
@@ -422,6 +422,7 @@ const {
   displayMessages,
   activityNotice,
   getToolPairTitle,
+  isToolPairReturned,
   getToolGroupStateClass,
   getToolGroupStatus,
   getMessageText,

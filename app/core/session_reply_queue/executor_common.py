@@ -100,6 +100,7 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         "source": source,
         "session_id": work.session_id,
         "work_id": work.id,
+        "work_sequence_no": work.sequence_no,
         "content": content,
         "history": response.get("history", []),
         "files": response.get("files", []),

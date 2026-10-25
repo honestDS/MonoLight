@@ -980,6 +980,189 @@ test('HTTP status queries returning after reset or session/mode changes are igno
   }
 })
 
+test('HTTP same-work sequence recovery refetches terminal status after lifecycle reset', async () => {
+  for (const nextSequenceNo of [6, 7]) {
+    const nextRequestId = 'request-A'
+    const makeSession = (sequenceNo, status, isReplyRunning, requestId) => ({
+      session_id: 'A',
+      source: 'http',
+      is_reply_running: isReplyRunning,
+      reply_works: [{
+        work_id: 'work-A',
+        status,
+        sequence_no: sequenceNo,
+        request_ids: [requestId]
+      }]
+    })
+    const harness = createHarness({
+      sessions: [makeSession(5, 'running', true, 'request-A')],
+      currentSessionId: 'A',
+      messages: [
+        { id: 'queued', role: 'user', request_id: 'request-A', status: 'queued' },
+        { id: 'thinking', role: 'thinking', work_id: 'work-A', request_ids: ['request-A'] }
+      ],
+      pendingHttpRequests: [
+        ['request-A', { sessionId: 'A', workId: 'work-A' }]
+      ]
+    })
+    harness.replyWorkStatusBehavior = () => {
+      const callNo = harness.replyWorkStatusCalls.length
+      const requestId = callNo === 1 ? 'request-A' : nextRequestId
+      const sequenceNo = callNo === 1 ? 5 : nextSequenceNo
+      return {
+        data: {
+          data: {
+            session_id: 'A',
+            status: 'succeeded',
+            work_sequence_no: sequenceNo,
+            request_ids: [requestId],
+            response: { request_ids: [requestId] }
+          }
+        }
+      }
+    }
+
+    const processSnapshot = async snapshot => {
+      harness.sessions.value = [snapshot]
+      await harness.processHttpSessionSnapshot([snapshot])
+    }
+
+    await processSnapshot(makeSession(5, 'running', true, 'request-A'))
+    assert.deepEqual(harness.replyWorkStatusCalls, [])
+    assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), false)
+
+    await processSnapshot(makeSession(5, 'succeeded', false, 'request-A'))
+    assert.deepEqual(harness.replyWorkStatusCalls, ['work-A'])
+    assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), true)
+    assert.equal(harness.pendingHttpRequests.has('request-A'), false)
+    assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), false)
+    assert.deepEqual(harness.errors, [])
+
+    if (nextSequenceNo === 6) {
+      await processSnapshot(makeSession(6, 'running', true, nextRequestId))
+      assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), false)
+      assert.equal(harness.chatState.loading.value, true)
+      assert.deepEqual(harness.replyWorkStatusCalls, ['work-A'])
+    }
+
+    harness.chatState.messages.value = harness.workLifecycleTracker.startAgentLoop(
+      harness.chatState.messages.value,
+      {
+        work_id: 'work-A',
+        work_sequence_no: nextSequenceNo,
+        response_id: `response-${nextSequenceNo}`,
+        request_ids: [nextRequestId]
+      }
+    )
+    assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), false)
+    assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), true)
+
+    const nextTerminalSnapshot = makeSession(nextSequenceNo, 'succeeded', false, nextRequestId)
+    await processSnapshot(nextTerminalSnapshot)
+    assert.deepEqual(harness.replyWorkStatusCalls, ['work-A', 'work-A'])
+    assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), true)
+    assert.equal(harness.pendingHttpRequests.size, 0)
+    assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), false)
+    assert.deepEqual(harness.errors, [])
+
+    await processSnapshot(nextTerminalSnapshot)
+    assert.deepEqual(harness.replyWorkStatusCalls, ['work-A', 'work-A'])
+    assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), true)
+    assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), false)
+  }
+})
+
+test('late HTTP status from an older same-work sequence cannot finish a newer lifecycle', async () => {
+  const oldStatusDeferred = createDeferred()
+  const makeSession = (sequenceNo, status, isReplyRunning, requestId) => ({
+    session_id: 'A',
+    source: 'http',
+    is_reply_running: isReplyRunning,
+    reply_works: [{
+      work_id: 'work-A',
+      status,
+      sequence_no: sequenceNo,
+      request_ids: [requestId]
+    }]
+  })
+  const harness = createHarness({
+    sessions: [makeSession(5, 'running', true, 'request-A')],
+    currentSessionId: 'A',
+    messages: [
+      { id: 'thinking', role: 'thinking', work_id: 'work-A', request_ids: ['request-A'] }
+    ],
+    pendingHttpRequests: [
+      ['request-A', { sessionId: 'A', workId: 'work-A' }]
+    ]
+  })
+  harness.replyWorkStatusBehavior = () => oldStatusDeferred.promise
+
+  const processSnapshot = async snapshot => {
+    harness.sessions.value = [snapshot]
+    await harness.processHttpSessionSnapshot([snapshot])
+  }
+
+  await processSnapshot(makeSession(5, 'running', true, 'request-A'))
+  const oldStatusProcessing = processSnapshot(makeSession(5, 'failed', false, 'request-A'))
+  assert.deepEqual(harness.replyWorkStatusCalls, ['work-A'])
+
+  harness.pendingHttpRequests.clear()
+  harness.trackHttpSubmission('request-B', 'A', 'work-A')
+  await processSnapshot(makeSession(6, 'running', true, 'request-B'))
+  harness.chatState.messages.value = harness.workLifecycleTracker.startAgentLoop(
+    harness.chatState.messages.value,
+    {
+      work_id: 'work-A',
+      work_sequence_no: 6,
+      response_id: 'response-6',
+      request_ids: ['request-B']
+    }
+  )
+  assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), false)
+  assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), true)
+
+  oldStatusDeferred.resolve({
+    data: {
+      data: {
+        session_id: 'A',
+        status: 'failed',
+        work_sequence_no: 5,
+        error: 'stale failure',
+        request_ids: ['request-A']
+      }
+    }
+  })
+  await oldStatusProcessing
+
+  assert.deepEqual(harness.replyWorkStatusCalls, ['work-A'])
+  assert.deepEqual(harness.errors, [])
+  assert.deepEqual(harness.messageProcessorErrors, [])
+  assert.equal(harness.chatState.messages.value.some(message => message.role === 'err'), false)
+  assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), true)
+  assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), false)
+  assert.equal(harness.pendingHttpRequests.has('request-B'), true)
+
+  harness.replyWorkStatusBehavior = () => ({
+    data: {
+      data: {
+        session_id: 'A',
+        status: 'succeeded',
+        work_sequence_no: 6,
+        request_ids: ['request-B'],
+        response: { request_ids: ['request-B'] }
+      }
+    }
+  })
+  const newTerminalSnapshot = makeSession(6, 'succeeded', false, 'request-B')
+  await processSnapshot(newTerminalSnapshot)
+
+  assert.deepEqual(harness.replyWorkStatusCalls, ['work-A', 'work-A'])
+  assert.deepEqual(harness.errors, [])
+  assert.equal(harness.workLifecycleTracker.isWorkTerminal('work-A'), true)
+  assert.equal(harness.chatState.messages.value.some(message => message.role === 'thinking'), false)
+  assert.equal(harness.pendingHttpRequests.has('request-B'), false)
+})
+
 test('processStreamError deduplicates event IDs and omits invalid message IDs', () => {
   const messages = Vue.ref([])
 

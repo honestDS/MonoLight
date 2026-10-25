@@ -1,14 +1,20 @@
 import json
+import time
 
 import pytest
 
 import app.providers.database as database_provider
 from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
+from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue.manager_result import SessionReplyResult
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
+    SessionReplySequence,
     SessionReplySourceType,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
@@ -545,3 +551,200 @@ async def test_cancelled_resume_remains_isolated_by_user(
     )
 
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_reopened_work_preserves_stream_event_rounds(
+    concurrent_session_factory,
+    monkeypatch,
+):
+    session_id = "reopened-stream-rounds"
+    work_id = 801
+    input_message_id = 901
+    first_result_message_id = 902
+    second_result_message_id = 903
+    first_sequence = 4
+
+    monkeypatch.setattr(database_provider, "AsyncSessionLocal", concurrent_session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", concurrent_session_factory)
+
+    now = int(time.time())
+    async with concurrent_session_factory() as db:
+        db.add_all(
+            [
+                ChatSession(session_id=session_id, uid="user-1", profile_id=1, source="http"),
+                Message(id=input_message_id, uid="user-1", session_id=session_id, profile_id=1, role=MessageRole.USER, type=MessageType.TEXT, content="original input must remain unchanged", is_processed=True),
+                SessionReplySequence(session_id=session_id, next_sequence_no=first_sequence + 1),
+                SessionReplyWorkItem(
+                    id=work_id,
+                    uid="user-1",
+                    session_id=session_id,
+                    profile_id=1,
+                    sequence_no=first_sequence,
+                    work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                    source_type=SessionReplySourceType.USER_MESSAGE,
+                    source_id=str(input_message_id),
+                    dedupe_key=f"{session_id}:{input_message_id}",
+                    status=SessionReplyWorkStatus.RUNNING,
+                    input_message_ids=[input_message_id],
+                    execution_state={
+                        "message_source": "http",
+                        "request_ids": ["round-request"],
+                        "stream_requested": True,
+                    },
+                    locked_by="round-one-worker",
+                    lock_until=now + 300,
+                    attempt_count=1,
+                    max_attempts=3,
+                    available_at=now,
+                ),
+            ]
+        )
+        await db.commit()
+
+    rounds = [
+        {
+            "worker_id": "round-one-worker",
+            "response_id": "response-round-one",
+            "result_message_id": first_result_message_id,
+            "tool_call_id": "round-one-tool",
+            "tool_name": "read",
+            "turn": 1,
+            "content": "round one persisted result",
+        },
+        {
+            "worker_id": "round-two-worker",
+            "response_id": "response-round-two",
+            "result_message_id": second_result_message_id,
+            "tool_call_id": "round-two-tool",
+            "tool_name": "write",
+            "turn": 2,
+            "content": "round two persisted result",
+        },
+    ]
+
+    async def run_round(work, round_data):
+        async with concurrent_session_factory() as db:
+            latest_sequence = await session_reply_stream_event_crud.get_latest_sequence(db, work_id=work_id)
+        stream_state = executor_interactive_module._InteractiveWorkStreamEventState(
+            work=work,
+            worker_id=round_data["worker_id"],
+            next_sequence=latest_sequence + 1,
+            dequeued_request_ids=set(),
+            turn_end_content_by_response_id={},
+            tool_names_by_response_id={},
+        )
+        events = (
+            {"type": "agent_loop_start", "turn": round_data["turn"], "response_id": round_data["response_id"]},
+            {"type": "tool_start", "response_id": round_data["response_id"], "tool_call_id": round_data["tool_call_id"], "name": round_data["tool_name"]},
+            {"type": "content", "response_id": round_data["response_id"], "content": round_data["content"]},
+        )
+        for event in events:
+            persisted = await executor_interactive_module._persist_interactive_work_stream_event(stream_state, event)
+            assert persisted["work_sequence_no"] == work.sequence_no
+
+        response = {"content": round_data["content"], "response_id": round_data["response_id"], "message_id": round_data["result_message_id"], "history": [], "files": []}
+        async with concurrent_session_factory() as db:
+            db.add(Message(id=round_data["result_message_id"], uid="user-1", session_id=session_id, profile_id=1, role=MessageRole.ASSISTANT, type=MessageType.TEXT, content=round_data["content"], is_processed=True))
+            await db.flush()
+            current = await session_reply_work_item_crud.get(db, work_id)
+            assert current is not None
+            state = {**(current.execution_state or {}), "response": response}
+            assert await session_reply_work_item_crud.update_claimed(db, work_id=work_id, worker_id=round_data["worker_id"], values={"result_message_id": round_data["result_message_id"], "execution_state": state}, commit=False)
+            assert await session_reply_work_item_crud.mark_terminal(db, work_id=work_id, worker_id=round_data["worker_id"], status=SessionReplyWorkStatus.SUCCEEDED, result_message_id=round_data["result_message_id"], event_sent=True)
+        return response, len(events)
+
+    result_manager = SessionReplyResult()
+    async with concurrent_session_factory() as db:
+        work = await session_reply_work_item_crud.get(db, work_id)
+    assert work is not None
+    outputs = []
+    after_event_sequence = 0
+    for index, round_data in enumerate(rounds):
+        if index:
+            async with concurrent_session_factory() as db:
+                completed = await session_reply_work_item_crud.get(db, work_id)
+                assert completed is not None and completed.status == SessionReplyWorkStatus.SUCCEEDED
+                assert await terminal_watch_reply_crud.reopen_completed(db, completed)
+                await db.commit()
+            async with concurrent_session_factory() as db:
+                work = await session_reply_work_item_crud.claim_next(
+                    db,
+                    worker_id=round_data["worker_id"],
+                    lease_seconds=300,
+                )
+            assert work is not None and work.id == work_id
+            assert work.sequence_no > outputs[-1]["work_sequence_no"]
+
+        response, event_count = await run_round(work, round_data)
+        direct_stream = [
+            event
+            async for event in result_manager.wait_for_stream(
+                work_id,
+                after_sequence_no=after_event_sequence,
+                resume_mode=False,
+                history_message_id=0,
+            )
+        ]
+        session_stream = [
+            event
+            async for event in result_manager.wait_for_session_stream(
+                uid="user-1",
+                session_id=session_id,
+                history_message_id=0,
+                after_work_sequence_no=outputs[0]["work_sequence_no"] if outputs else 0,
+                interactive_only=True,
+            )
+        ]
+        outputs.append(
+            {
+                "work_sequence_no": work.sequence_no,
+                "event_count": event_count,
+                "response": response,
+                "direct": direct_stream,
+                "session": session_stream,
+            }
+        )
+        after_event_sequence = max(event["event_sequence_no"] for event in direct_stream if event.get("type") != "done")
+
+    first, second = outputs
+    first_direct_done = next(event for event in first["direct"] if event.get("type") == "done")
+    second_direct_done = next(event for event in second["direct"] if event.get("type") == "done")
+    first_session_done = next(event for event in first["session"] if event.get("type") == "done")
+    resumed_session_done = next(event for event in second["session"] if event.get("type") == "done")
+    for output in outputs:
+        stream_events = [event for event in output["direct"] if event.get("type") != "done"]
+        assert len(stream_events) == output["event_count"]
+        assert all(event["work_sequence_no"] == output["work_sequence_no"] for event in stream_events)
+
+    assert first_direct_done["response"] == {**first["response"], "work_id": work_id, "work_sequence_no": first["work_sequence_no"]}
+    assert second_direct_done["response"] == {**second["response"], "work_id": work_id, "work_sequence_no": second["work_sequence_no"]}
+    assert first_direct_done["work_sequence_no"] == first["work_sequence_no"]
+    assert second_direct_done["work_sequence_no"] == second["work_sequence_no"]
+    assert first_session_done["response"] == first_direct_done["response"]
+    assert resumed_session_done["response"] == second_direct_done["response"]
+    assert first_direct_done["response_id"] != second_direct_done["response_id"]
+    assert first_direct_done["message_id"] != second_direct_done["message_id"]
+
+    resumed_events = [event for event in second["session"] if event.get("type") != "done"]
+    event_total = sum(output["event_count"] for output in outputs)
+    assert [event["event_sequence_no"] for event in resumed_events] == list(range(1, event_total + 1))
+    assert [event["work_sequence_no"] for event in resumed_events] == ([first["work_sequence_no"]] * first["event_count"] + [second["work_sequence_no"]] * second["event_count"])
+
+    async with concurrent_session_factory() as db:
+        status = await result_manager.get_work_status(db, work_id, uid="user-1")
+        persisted_events = await session_reply_stream_event_crud.list_after_sequence(db, work_id=work_id, after_sequence_no=0)
+        persisted_messages = {message_id: (await db.get(Message, message_id)).content for message_id in (input_message_id, first_result_message_id, second_result_message_id)}
+    result = await result_manager.wait_for_result(work_id)
+    assert status["status"] == SessionReplyWorkStatus.SUCCEEDED.value
+    assert status["work_sequence_no"] == second["work_sequence_no"]
+    assert status["result_message_id"] == second_result_message_id
+    assert status["response"] == second_direct_done["response"]
+    assert result == second_direct_done["response"]
+    assert [item.sequence_no for item in persisted_events] == list(range(1, event_total + 1))
+    assert [item.event["work_sequence_no"] for item in persisted_events] == ([first["work_sequence_no"]] * first["event_count"] + [second["work_sequence_no"]] * second["event_count"])
+    assert persisted_messages == {
+        input_message_id: "original input must remain unchanged",
+        first_result_message_id: "round one persisted result",
+        second_result_message_id: "round two persisted result",
+    }

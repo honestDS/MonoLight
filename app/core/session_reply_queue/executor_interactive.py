@@ -51,6 +51,7 @@ async def _persist_interactive_work_stream_event(
         **event,
         "session_id": work.session_id,
         "work_id": work.id,
+        "work_sequence_no": work.sequence_no,
         "event_sequence_no": stream_state.next_sequence,
     }
     async with AsyncSessionLocal() as event_db:

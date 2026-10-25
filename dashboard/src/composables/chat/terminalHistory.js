@@ -6,6 +6,7 @@ import {
   mergeAssistantResponseIntoList
 } from '../../utils/assistantResponseIdentity.js'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
+import { getToolResultCallId, mergeToolResultIntoList } from '../../utils/toolResultState.js'
 import { findThinkingIndex, insertMessageBeforeThinking } from './thinkingTracker.js'
 
 const normalizeMessageContent = (content) => {
@@ -28,7 +29,7 @@ const getToolMessageDedupeKeys = (message) => {
     if (toolCallId) keys.add(`tool_call:${toolCallId}`)
   }
 
-  const toolCallId = content?.tool_call_id || message?.tool_call_id
+  const toolCallId = getToolResultCallId(message)
   if (toolCallId) keys.add(`tool_result:${toolCallId}`)
   return [...keys]
 }
@@ -144,6 +145,11 @@ export const insertTerminalHistory = (
     }
 
     const messageKeys = getToolMessageDedupeKeys(message)
+    const toolResultKey = messageKeys.find(key => key.startsWith('tool_result:'))
+    if (toolResultKey && pendingToolKeys.has(toolResultKey)) {
+      orderedMessages = mergeToolResultIntoList(orderedMessages, message)
+      continue
+    }
     if ([...messageKeys].some(key => pendingToolKeys.has(key))) continue
     messageKeys.forEach(key => pendingToolKeys.add(key))
     orderedMessages.push(message)
@@ -196,6 +202,9 @@ export const insertTerminalHistory = (
           messagesRef.value = mergeAssistantResponseIntoList(messagesRef.value, mergedMessage)
         }
         existingIndex = findExistingMessageIndex(mergedMessage)
+      } else if (getToolResultCallId(message)) {
+        messagesRef.value = mergeToolResultIntoList(messagesRef.value, message)
+        existingIndex = findExistingMessageIndex(message)
       } else {
         messagesRef.value[existingIndex] = {
           ...existingMessage,
