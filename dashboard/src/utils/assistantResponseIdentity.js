@@ -108,6 +108,7 @@ export const isAssistantResponse = (message) => {
   return message?.role === 'assistant'
     && message.type !== 'audit_confirmation'
     && message.type !== 'tool_result'
+    && message.type !== 'background_result'
     && message.role !== 'tool'
     && content?.role !== 'tool'
     && content?.type !== 'audit_confirmation'

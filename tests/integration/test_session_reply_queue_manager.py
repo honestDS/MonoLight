@@ -934,6 +934,7 @@ async def test_wait_for_result_returns_resolved_work_id(monkeypatch):
     response = await manager.wait_for_result(9)
 
     assert response["work_id"] == 7
+    assert response["work_sequence_no"] == 1
     assert response["message_id"] == 9
     assert response["choices"][0]["message"]["content"] == "result"
 
@@ -991,6 +992,7 @@ async def test_wait_for_stream_returns_result_message_identity_in_done_event(mon
             "type": "done",
             "session_id": "session-1",
             "work_id": 7,
+            "work_sequence_no": 1,
             "response_id": "response-turn-final",
             "message_id": 9,
             "history": [],
@@ -1001,6 +1003,7 @@ async def test_wait_for_stream_returns_result_message_identity_in_done_event(mon
                 "files": [],
                 "response_id": "response-turn-final",
                 "work_id": 7,
+                "work_sequence_no": 1,
                 "message_id": 9,
             },
             "request_ids": ["request-1"],

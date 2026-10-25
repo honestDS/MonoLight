@@ -830,3 +830,72 @@ test('late suspension does not change terminal work and reset allows a new lifec
 
   assert.equal(messages.find(message => message.response_id === 'response-b').role, 'thinking')
 })
+
+test('keeps work lifecycle rounds isolated while deduplicating responses', () => {
+  const tracker = createWorkLifecycleTracker()
+  const lifecycleEvent = overrides => ({
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    ...overrides
+  })
+
+  let messages = tracker.startAgentLoop([], lifecycleEvent({
+    response_id: 'response-old',
+    work_sequence_no: 5
+  }))
+  messages = tracker.finishWorkLifecycle(messages, lifecycleEvent({
+    type: 'done',
+    work_sequence_no: 5
+  }))
+  assert.equal(tracker.isWorkTerminal('work-a'), true)
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
+
+  assert.equal(tracker.observeWorkEvent(lifecycleEvent({ work_sequence_no: 6 })), true)
+  assert.equal(tracker.isWorkTerminal('work-a'), false)
+
+  const afterOldResponse = tracker.startAgentLoop(messages, lifecycleEvent({
+    type: 'agent_loop_start',
+    response_id: 'response-old',
+    work_sequence_no: 6
+  }))
+  assert.deepEqual(afterOldResponse, messages)
+
+  messages = tracker.startAgentLoop(afterOldResponse, lifecycleEvent({
+    type: 'agent_loop_start',
+    response_id: 'response-new',
+    work_sequence_no: 6
+  }))
+  assert.equal(messages.some(message => (
+    message.role === 'thinking' && message.response_id === 'response-new'
+  )), true)
+
+  for (const staleEvent of [
+    lifecycleEvent({ type: 'done', work_sequence_no: 5 }),
+    lifecycleEvent({ type: 'cancelled', work_sequence_no: 5 }),
+    lifecycleEvent({
+      type: 'agent_loop_start',
+      response_id: 'response-stale',
+      work_sequence_no: 5
+    })
+  ]) {
+    const afterStaleEvent = staleEvent.type === 'agent_loop_start'
+      ? tracker.startAgentLoop(messages, staleEvent)
+      : tracker.finishWorkLifecycle(messages, staleEvent)
+    assert.deepEqual(afterStaleEvent, messages)
+  }
+
+  const secondTerminal = lifecycleEvent({ type: 'done', work_sequence_no: 6 })
+  messages = tracker.finishWorkLifecycle(messages, secondTerminal)
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
+  assert.equal(tracker.isWorkTerminal('work-a'), true)
+
+  const afterRepeatedTerminal = tracker.finishWorkLifecycle(messages, secondTerminal)
+  assert.deepEqual(afterRepeatedTerminal, messages)
+
+  const afterMissingSequenceStart = tracker.startAgentLoop(messages, lifecycleEvent({
+    type: 'agent_loop_start',
+    response_id: 'response-without-sequence'
+  }))
+  assert.deepEqual(afterMissingSequenceStart, messages)
+  assert.equal(tracker.isWorkTerminal('work-a'), true)
+})

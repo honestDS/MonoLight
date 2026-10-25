@@ -7,12 +7,18 @@ import {
   getToolCallName,
   getToolCalls,
   getToolResultName,
-  getToolResultContent,
   isToolCall,
   isToolResult
 } from '../../utils/index.js'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { resolveChatActivityNotice } from '../../utils/chatPresentation.js'
+import {
+  getBackgroundToolResultPayload,
+  getToolResultCallId,
+  isToolResultPending,
+  mergeToolResultMessage,
+  projectToolResultMessage
+} from '../../utils/toolResultState.js'
 
 export function useChatMessagePresentation({ props, t }) {
   const tokenNumberFormatter = new Intl.NumberFormat()
@@ -70,14 +76,6 @@ export function useChatMessagePresentation({ props, t }) {
   }
 
   const getToolCallId = (toolCall, fallback) => toolCall?.id || toolCall?.function?.id || fallback
-  const getToolResultCallId = (message) => {
-    try {
-      const content = typeof message?.content === 'string' ? JSON.parse(message.content) : message?.content
-      return content?.tool_call_id || message?.tool_call_id || null
-    } catch {
-      return message?.tool_call_id || null
-    }
-  }
 
   const fallbackDisplayKeys = new WeakMap()
   let fallbackDisplayKeyIndex = 0
@@ -89,31 +87,15 @@ export function useChatMessagePresentation({ props, t }) {
     if (!fallbackDisplayKeys.has(message)) fallbackDisplayKeys.set(message, `message_${fallbackDisplayKeyIndex++}`)
     return fallbackDisplayKeys.get(message)
   }
-  const parseBackgroundResult = (message) => {
-    if (message?.type !== 'background_result') return null
-    try {
-      const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
-      if (
-        !payload
-        || typeof payload !== 'object'
-        || Array.isArray(payload)
-        || payload.type !== 'background_tool_result'
-        || !payload.tool_call
-        || typeof payload.tool_call !== 'object'
-        || Array.isArray(payload.tool_call)
-        || !Object.prototype.hasOwnProperty.call(payload, 'task')
-        || payload.task === undefined
-      ) return null
-      return payload
-    } catch {
-      return null
-    }
-  }
   const analyzeMessage = (message) => ({
     isToolCall: isToolCall(message),
     isToolResult: isToolResult(message),
-    backgroundPayload: parseBackgroundResult(message)
+    backgroundPayload: getBackgroundToolResultPayload(message)
   })
+  const isToolMessage = message => {
+    const analysis = analyzeMessage(message)
+    return analysis.isToolCall || analysis.isToolResult || Boolean(analysis.backgroundPayload)
+  }
 
   let cachedSources = []
   let cachedDisplayMessages = []
@@ -132,10 +114,10 @@ export function useChatMessagePresentation({ props, t }) {
     let rebuildStart = firstChanged
     const changedCurrent = messages[rebuildStart]
     const changedPrevious = cachedSources[rebuildStart]
-    if ((changedCurrent && (isToolCall(changedCurrent) || isToolResult(changedCurrent))) || (changedPrevious && (isToolCall(changedPrevious) || isToolResult(changedPrevious)))) {
+    if ((changedCurrent && isToolMessage(changedCurrent)) || (changedPrevious && isToolMessage(changedPrevious))) {
       while (rebuildStart > 0) {
         const previousMessage = messages[rebuildStart - 1]
-        if (!isToolCall(previousMessage) && !isToolResult(previousMessage)) break
+        if (!isToolMessage(previousMessage)) break
         rebuildStart -= 1
       }
     }
@@ -143,51 +125,75 @@ export function useChatMessagePresentation({ props, t }) {
     const prefixLength = rebuildStart > 0 ? cachedOutputCounts[rebuildStart - 1] : 0
     const output = cachedDisplayMessages.slice(0, prefixLength)
     const outputCounts = cachedOutputCounts.slice(0, rebuildStart)
+    const writableGroups = new WeakSet()
     let activeToolGroup = null
+
+    const cloneToolGroup = (group) => {
+      const pairCopies = new Map()
+      const pairs = (group.pairs || []).map((pair) => {
+        const pairCopy = { ...pair }
+        pairCopies.set(pair, pairCopy)
+        if (Object.prototype.hasOwnProperty.call(pair, '_resultMessage')) {
+          Object.defineProperty(pairCopy, '_resultMessage', {
+            value: pair._resultMessage,
+            writable: true,
+            configurable: true
+          })
+        }
+        return pairCopy
+      })
+      const groupCopy = { ...group, pairs }
+      if (group.latestEvent?.pair && pairCopies.has(group.latestEvent.pair)) {
+        groupCopy.latestEvent = {
+          ...group.latestEvent,
+          pair: pairCopies.get(group.latestEvent.pair)
+        }
+      }
+      return groupCopy
+    }
+    const ensureWritableGroup = (group, index) => {
+      if (index < prefixLength && !writableGroups.has(group)) {
+        const groupCopy = cloneToolGroup(group)
+        output[index] = groupCopy
+        writableGroups.add(groupCopy)
+        return groupCopy
+      }
+      return group
+    }
+    const toolIdsEqual = (left, right) => left !== null && left !== undefined && right !== null && right !== undefined && String(left) === String(right)
+    const findPair = (group, toolCallId) => group?.pairs.find(pair => toolIdsEqual(pair.id, toolCallId))
+    const findGroupWithPair = (toolCallId) => {
+      if (toolCallId === null || toolCallId === undefined) return null
+      for (let index = output.length - 1; index >= 0; index -= 1) {
+        const group = output[index]
+        if (group.type !== 'tool_group') continue
+        const pair = findPair(group, toolCallId)
+        if (pair) return { group, index, pair }
+      }
+      return null
+    }
+    const setPairResult = (pair, resultMessage, sourceMessage = resultMessage) => {
+      const previousResultMessage = Object.prototype.hasOwnProperty.call(pair, '_resultMessage')
+        ? pair._resultMessage
+        : pair.resultMessage
+      const mergedResultMessage = previousResultMessage
+        ? mergeToolResultMessage(previousResultMessage, sourceMessage)
+        : sourceMessage
+      pair.resultMessage = projectToolResultMessage(mergedResultMessage)
+      Object.defineProperty(pair, '_resultMessage', {
+        value: mergedResultMessage,
+        writable: true,
+        configurable: true
+      })
+    }
 
     for (let index = rebuildStart; index < messages.length; index += 1) {
       const message = messages[index]
       const messageKey = getMessageKey(message, index)
       const analysis = analyzeMessage(message)
 
-      if (analysis.backgroundPayload) {
-        const payload = analysis.backgroundPayload
-        const toolCall = {
-          id: getToolCallId(payload.tool_call, `${messageKey}_background`),
-          name: payload.tool_call.name,
-          arguments: payload.tool_call.arguments
-        }
-        const resultMessage = {
-          ...message,
-          role: 'tool',
-          type: 'tool_result',
-          content: JSON.stringify({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: typeof payload.task === 'string' ? payload.task : JSON.stringify(payload.task)
-          })
-        }
-        const pair = { id: toolCall.id, toolCall, resultMessage }
-        Object.defineProperty(pair, '_backgroundResult', { value: true })
-        output.push({
-          id: `tool_group_${messageKey}`,
-          _displayKey: `tool_group_${messageKey}`,
-          type: 'tool_group',
-          role: 'assistant',
-          response_id: message.response_id || null,
-          request_id: message.request_id,
-          work_id: message.work_id,
-          turn: message.turn,
-          created_at: message.created_at,
-          content: '',
-          reasoning_content: message.reasoning_content || '',
-          pairs: [pair],
-          latestEvent: { type: 'result', pair }
-        })
-        activeToolGroup = null
-        outputCounts[index] = output.length
-        continue
-      }
+      const resultMessage = analysis.backgroundPayload ? projectToolResultMessage(message) : message
+      const isResultMessage = analysis.isToolResult || Boolean(analysis.backgroundPayload)
 
       if (analysis.isToolCall) {
         const responseId = message.response_id || null
@@ -228,14 +234,14 @@ export function useChatMessagePresentation({ props, t }) {
         continue
       }
 
-      if (analysis.isToolResult) {
-        const toolCallId = getToolResultCallId(message)
-        let targetGroup = activeToolGroup
-        let pair = targetGroup?.pairs.find(item => item.id === toolCallId)
-        if (!pair) {
-          targetGroup = [...output].reverse().find(item => item.type === 'tool_group' && item.pairs.some(toolPair => toolPair.id === toolCallId))
-          pair = targetGroup?.pairs.find(item => item.id === toolCallId)
-        }
+      if (isResultMessage) {
+        const toolCallId = getToolResultCallId(resultMessage)
+        let target = activeToolGroup ? { group: activeToolGroup, index: output.indexOf(activeToolGroup), pair: findPair(activeToolGroup, toolCallId) } : null
+        if (!target?.pair) target = findGroupWithPair(toolCallId)
+        let targetGroup = target?.group
+        let pair = target?.pair
+        if (targetGroup && target?.index !== -1) targetGroup = ensureWritableGroup(targetGroup, target.index)
+        if (targetGroup && pair && targetGroup !== target.group) pair = findPair(targetGroup, toolCallId)
         if (!targetGroup) {
           targetGroup = {
             id: `tool_group_${message.response_id || messageKey}`,
@@ -252,10 +258,12 @@ export function useChatMessagePresentation({ props, t }) {
           output.push(targetGroup)
         }
         if (!pair) {
-          pair = { id: toolCallId || messageKey, toolCall: null, resultMessage: null }
+          pair = { id: toolCallId || messageKey, toolCall: resultMessage.tool_call || null, resultMessage: null }
           targetGroup.pairs.push(pair)
+        } else if (!pair.toolCall && resultMessage.tool_call) {
+          pair.toolCall = resultMessage.tool_call
         }
-        pair.resultMessage = message
+        setPairResult(pair, resultMessage, message)
         targetGroup.latestEvent = { type: 'result', pair }
         activeToolGroup = targetGroup
         outputCounts[index] = output.length
@@ -296,14 +304,7 @@ export function useChatMessagePresentation({ props, t }) {
   const getToolPairTitle = pair => t('chat.tool', { name: getToolPairName(pair) })
   const isToolPairReturned = (pair) => {
     if (!pair?.resultMessage) return false
-    if (pair._backgroundResult) return true
-    let payload = getToolResultContent(pair.resultMessage)
-    if (typeof payload === 'string') {
-      try {
-        payload = JSON.parse(payload)
-      } catch {}
-    }
-    return !(payload && typeof payload === 'object' && payload.status === 'queued' && Number.isSafeInteger(payload.task_id) && payload.task_id > 0)
+    return !isToolResultPending(pair.resultMessage)
   }
   const isToolGroupReturned = group => Boolean(group?.pairs?.length) && group.pairs.every(isToolPairReturned)
   const getToolGroupStateClass = group => isToolGroupReturned(group) ? 'is-result' : 'is-call'
@@ -351,6 +352,7 @@ export function useChatMessagePresentation({ props, t }) {
     displayMessages,
     activityNotice,
     getToolPairTitle,
+    isToolPairReturned,
     getToolGroupStateClass,
     getToolGroupStatus,
     getMessageText,

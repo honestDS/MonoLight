@@ -11,11 +11,13 @@ import {
   findAssistantResponseReplacementIndex,
   findMessageReplacementIndex,
   getMessageDedupeKeys,
+  getToolResultCallId,
   isAssistantResponse,
   isPlainAssistantResponse,
   mergeAssistantResponseIntoList,
   mergeRemoteMessage
 } from '../../utils'
+import { mergeToolResultIntoList } from '../../utils/toolResultState'
 import { filterToolOutputMessages } from '../../utils/toolOutputVisibility'
 
 const HTTP_HISTORY_FAST_SYNC_INTERVAL_MS = 2000
@@ -124,7 +126,11 @@ export function useChatHistory({
       }
       const replacementIndex = findMessageReplacementIndex(mergedMessages, message)
       if (replacementIndex !== -1) {
-        mergedMessages[replacementIndex] = mergeRemoteMessage(mergedMessages[replacementIndex], message)
+        if (getToolResultCallId(message) !== null) {
+          mergedMessages = mergeToolResultIntoList(mergedMessages, message)
+        } else {
+          mergedMessages[replacementIndex] = mergeRemoteMessage(mergedMessages[replacementIndex], message)
+        }
         getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
         changed = true
         continue

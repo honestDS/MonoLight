@@ -1,5 +1,5 @@
-import { getMessageDbId } from '../../utils/assistantResponseIdentity.js'
 import { filterToolOutputMessages, isToolOutputMessage } from '../../utils/toolOutputVisibility.js'
+import { mergeToolResultIntoList } from '../../utils/toolResultState.js'
 
 const parseContent = (content) => {
   if (typeof content === 'string') {
@@ -19,54 +19,6 @@ const getComparableId = (value) => {
 }
 
 const hasValidStatus = (status) => typeof status === 'string' && status.trim() !== ''
-
-const getToolCallId = (message) => {
-  const serializedMessage = parseContent(message?.content)
-  const toolCallId = serializedMessage?.tool_call_id ?? message?.tool_call_id
-  return toolCallId === null || toolCallId === undefined || toolCallId === '' ? null : String(toolCallId)
-}
-
-const getOriginalToolResultMessageId = (message) => {
-  if (message?.type !== 'background_result') return null
-  return getComparableId(parseContent(message?.content)?.original_tool_result_message_id)
-}
-
-const mergeAuditToolResultIntoList = (messages, remoteMessage) => {
-  const normalizedRemoteMessage = {
-    ...remoteMessage,
-    db_id: remoteMessage.db_id ?? remoteMessage.id
-  }
-  const remoteDbId = getMessageDbId(normalizedRemoteMessage)
-  const remoteToolCallId = getToolCallId(normalizedRemoteMessage)
-  const originalToolResultMessageId = getOriginalToolResultMessageId(normalizedRemoteMessage)
-  let messageIndex = originalToolResultMessageId === null
-    ? -1
-    : messages.findIndex(message => getMessageDbId(message) === originalToolResultMessageId)
-
-  if (messageIndex === -1) {
-    messageIndex = remoteDbId === null
-      ? -1
-      : messages.findIndex(message => getMessageDbId(message) === remoteDbId)
-  }
-
-  if (messageIndex === -1 && remoteToolCallId !== null) {
-    messageIndex = messages.findIndex(message => getToolCallId(message) === remoteToolCallId)
-  }
-  if (messageIndex === -1) return [...messages, normalizedRemoteMessage]
-
-  return messages.map((message, index) => {
-    if (index !== messageIndex) return message
-    return {
-      ...message,
-      ...normalizedRemoteMessage,
-      id: message?.id ?? normalizedRemoteMessage.id,
-      response_id: message?.response_id ?? normalizedRemoteMessage.response_id,
-      request_id: message?.request_id ?? normalizedRemoteMessage.request_id,
-      work_id: message?.work_id ?? normalizedRemoteMessage.work_id,
-      turn: message?.turn ?? normalizedRemoteMessage.turn
-    }
-  })
-}
 
 const matchesMessageId = (message, messageId) => {
   const persistedIds = [message?.db_id, message?.message_id]
@@ -139,7 +91,7 @@ export const applyAuditToolResultsUpdateToMessages = (messages, data, showToolCa
       Array.isArray(remoteMessage) ||
       !isToolOutputMessage(remoteMessage)
     ) continue
-    updatedMessages = mergeAuditToolResultIntoList(updatedMessages, remoteMessage)
+    updatedMessages = mergeToolResultIntoList(updatedMessages, remoteMessage)
     updated = true
   }
 

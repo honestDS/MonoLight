@@ -5,6 +5,7 @@ import i18n from '../../i18n'
 import { findAssistantResponseReplacementIndex, getMessageDbId, getMessageDedupeKeys, isAssistantResponse, isToolCall, isToolResult, normalizeMessageContent } from '../../utils'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { filterToolOutputMessages } from '../../utils/toolOutputVisibility.js'
+import { mergeToolResultIntoList } from '../../utils/toolResultState.js'
 import { appendStreamReasoning, finalizeStreamReasoning as finalizeReasoning } from './reasoningTracker.js'
 import { insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
 import { insertTerminalHistory, processStreamError, processStreamToolStart } from './terminalHistory.js'
@@ -245,23 +246,6 @@ export function useMessageProcessor() {
 
   // 处理流式下的工具调用结束，推送 tool 返回结果
   const processStreamToolEnd = (messagesRef, toolEnd, responseId, requestId, workId) => {
-    const existingIdx = findToolResultIndex(messagesRef.value, toolEnd.tool_call_id)
-    if (existingIdx !== -1) {
-      const existingMsg = messagesRef.value[existingIdx]
-      messagesRef.value[existingIdx] = {
-        ...existingMsg,
-        content: JSON.stringify({
-          role: 'tool',
-          tool_call_id: toolEnd.tool_call_id,
-          content: toolEnd.result
-        }),
-        response_id: existingMsg.response_id || responseId,
-        request_id: existingMsg.request_id || requestId,
-        work_id: existingMsg.work_id || workId
-      }
-      return
-    }
-
     const contentObj = {
       role: 'tool',
       tool_call_id: toolEnd.tool_call_id,
@@ -277,6 +261,12 @@ export function useMessageProcessor() {
       request_id: requestId,
       work_id: workId,
       created_at: Date.now() / 1000
+    }
+
+    const existingIdx = findToolResultIndex(messagesRef.value, toolEnd.tool_call_id)
+    if (existingIdx !== -1) {
+      messagesRef.value = mergeToolResultIntoList(messagesRef.value, newMsg)
+      return
     }
 
     const toolCallIdx = findToolCallIndex(messagesRef.value, toolEnd.tool_call_id)

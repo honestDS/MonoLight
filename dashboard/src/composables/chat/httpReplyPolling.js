@@ -29,6 +29,7 @@ export function createHttpReplyPolling({
 }) {
   const t = translate
   const observedHttpWorkStatuses = new Map()
+  const observedHttpWorkSequences = new Map()
   const observedHttpLatestMessageIds = new Map()
   const fetchingHttpWorks = new Set()
   const resolvedHttpWorks = new Set()
@@ -51,10 +52,47 @@ export function createHttpReplyPolling({
     httpPollingStateVersion += 1
     pendingHttpRequests.clear()
     observedHttpWorkStatuses.clear()
+    observedHttpWorkSequences.clear()
     observedHttpLatestMessageIds.clear()
     fetchingHttpWorks.clear()
     resolvedHttpWorks.clear()
     externalHistoryState = null
+  }
+
+  const observeHttpWorkSequence = event => {
+    const workId = normalizeHttpIdentity(event?.work_id)
+    const workSequenceNo = Number.isInteger(event?.work_sequence_no) && event.work_sequence_no > 0
+      ? event.work_sequence_no
+      : null
+    const previousSequenceNo = workId
+      ? observedHttpWorkSequences.get(workId)
+      : undefined
+
+    if (
+      typeof workLifecycleTracker.observeWorkEvent === 'function'
+      && workLifecycleTracker.observeWorkEvent({
+        ...event,
+        work_id: workId
+      }) === false
+    ) {
+      return { accepted: false, generationChanged: false }
+    }
+
+    if (!workId || workSequenceNo === null) {
+      return { accepted: true, generationChanged: false }
+    }
+    if (previousSequenceNo !== undefined && workSequenceNo < previousSequenceNo) {
+      return { accepted: false, generationChanged: false }
+    }
+
+    const generationChanged = previousSequenceNo !== undefined
+      && workSequenceNo > previousSequenceNo
+    if (generationChanged) {
+      resolvedHttpWorks.delete(workId)
+      observedHttpWorkStatuses.delete(workId)
+    }
+    observedHttpWorkSequences.set(workId, workSequenceNo)
+    return { accepted: true, generationChanged }
   }
 
   const isCurrentWritableHttpSession = sessionId => (
@@ -273,6 +311,13 @@ export function createHttpReplyPolling({
     const resultSessionId = normalizeHttpIdentity(statusData.session_id)
     if (resultSessionId && resultSessionId !== normalizedSessionId) return null
 
+    const resolvedWorkId = normalizeHttpIdentity(statusData.resolved_work_id) || workId
+    const sequenceObservation = observeHttpWorkSequence({
+      ...statusData,
+      work_id: resolvedWorkId
+    })
+    if (!sequenceObservation.accepted) return null
+
     applyNonStreamSessionEvents(statusData)
 
     const status = String(statusData.status || '').toLowerCase()
@@ -296,7 +341,6 @@ export function createHttpReplyPolling({
     }
 
     const response = statusData.response
-    const resolvedWorkId = normalizeHttpIdentity(statusData.resolved_work_id) || workId
     const requestIds = Array.isArray(statusData.request_ids)
       ? statusData.request_ids
       : work?.request_ids
@@ -434,6 +478,13 @@ export function createHttpReplyPolling({
       const status = String(work?.status || '').toLowerCase()
       if (!workId || !status) continue
 
+      const sequenceObservation = observeHttpWorkSequence({
+        work_id: workId,
+        work_sequence_no: work.sequence_no,
+        request_ids: work.request_ids
+      })
+      if (!sequenceObservation.accepted) continue
+
       const previousStatus = observedHttpWorkStatuses.get(workId)
       const hasPendingRequest = hasPendingHttpRequestForWork(
         sessionId,
@@ -459,7 +510,7 @@ export function createHttpReplyPolling({
       if (!shouldFetchHttpWorkStatus({
         status,
         previousStatus,
-        hasPendingRequest,
+        hasPendingRequest: hasPendingRequest || sequenceObservation.generationChanged,
         historyLoaded: initialHistoryLoaded.value,
         sessionLoading: session.is_reply_running,
         resolved: resolvedHttpWorks.has(workId),

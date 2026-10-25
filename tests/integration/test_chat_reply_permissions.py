@@ -182,6 +182,7 @@ async def test_reply_work_status_owner_admin_and_non_owner_boundaries(
     expected = {
         "work_id": work.id,
         "resolved_work_id": work.id,
+        "work_sequence_no": work.sequence_no,
         "session_id": session.session_id,
         "status": status.value,
         "request_ids": [f"{status.value}-request"],
@@ -333,12 +334,14 @@ async def test_succeeded_reply_projects_owner_todo_and_background_state(
         "content": "owner reply",
         "history": [],
         "work_id": work.id,
+        "work_sequence_no": work.sequence_no,
         "message_id": result_message.id,
         "session_todo": expected_todo,
     }
     expected_data = {
         "work_id": work.id,
         "resolved_work_id": work.id,
+        "work_sequence_no": work.sequence_no,
         "session_id": owner_session.session_id,
         "status": SessionReplyWorkStatus.SUCCEEDED.value,
         "request_ids": ["owner-request"],
@@ -461,6 +464,7 @@ async def test_failed_reply_and_same_session_merged_reply_preserve_owner_project
     expected_failed = {
         "work_id": failed.id,
         "resolved_work_id": failed.id,
+        "work_sequence_no": failed.sequence_no,
         "session_id": session.session_id,
         "status": SessionReplyWorkStatus.FAILED.value,
         "request_ids": ["failed-request"],
@@ -471,6 +475,7 @@ async def test_failed_reply_and_same_session_merged_reply_preserve_owner_project
     expected_merged = {
         "work_id": merged.id,
         "resolved_work_id": target.id,
+        "work_sequence_no": target.sequence_no,
         "session_id": session.session_id,
         "status": SessionReplyWorkStatus.SUCCEEDED.value,
         "request_ids": ["merged-target-request"],
@@ -479,6 +484,7 @@ async def test_failed_reply_and_same_session_merged_reply_preserve_owner_project
             "content": "merged reply",
             "history": [],
             "work_id": target.id,
+            "work_sequence_no": target.sequence_no,
             "message_id": merged_message.id,
             "session_todo": {"revision": 0, "todos": []},
         },

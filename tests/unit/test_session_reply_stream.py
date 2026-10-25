@@ -1246,6 +1246,7 @@ async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monk
     states = [
         SimpleNamespace(
             id=7,
+            sequence_no=1,
             session_id="session-1",
             status=SessionReplyWorkStatus.RUNNING,
             execution_state={},
@@ -1253,6 +1254,7 @@ async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monk
         ),
         SimpleNamespace(
             id=7,
+            sequence_no=1,
             session_id="session-1",
             status=SessionReplyWorkStatus.SUCCEEDED,
             execution_state={
@@ -1326,6 +1328,7 @@ async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monk
     assert "".join(event["content"] for event in yielded if event["type"] == "content") == "你好"
     assert yielded[-1]["history"] == [{"role": "assistant", "content": "你好"}]
     assert yielded[-1]["request_ids"] == ["request-1", "request-2"]
+    assert yielded[-1]["work_sequence_no"] == 1
 
 
 @pytest.mark.asyncio
@@ -1333,6 +1336,7 @@ async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
     manager = SessionReplyQueueManager()
     work = SimpleNamespace(
         id=7,
+        sequence_no=1,
         session_id="session-1",
         status=SessionReplyWorkStatus.FAILED,
         execution_state={"request_ids": ["request-1", "request-2"]},
@@ -1379,6 +1383,7 @@ async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
     assert yielded[0]["event_id"].startswith("session-reply-work:")
     assert yielded[0]["event_id"].endswith(":error")
     assert yielded[0]["request_ids"] == ["request-1", "request-2"]
+    assert yielded[0]["work_sequence_no"] == 1
 
 
 @pytest.mark.asyncio
@@ -1830,6 +1835,7 @@ async def test_wait_for_stream_switches_merged_target_without_replay_before_term
     manager = SessionReplyQueueManager()
     target_work = SimpleNamespace(
         id=8,
+        sequence_no=2,
         session_id="session-1",
         status=SessionReplyWorkStatus.RUNNING,
         execution_state={"request_ids": ["request-1", "request-2", "request-1"]},
@@ -1929,6 +1935,7 @@ async def test_wait_for_stream_switches_merged_target_without_replay_before_term
     assert yielded[-2]["response_id"] == yielded[-1]["response_id"] == "response-final"
     assert yielded[-1]["message_id"] == 91
     assert yielded[-1]["request_ids"] == ["request-1", "request-2"]
+    assert yielded[-1]["work_sequence_no"] == 2
     assert yielded[0]["request_ids"] == ["request-1", "request-2"]
     assert late_unmerged_request_ids == ["request-3"]
     assert all("request-3" not in event.get("request_ids", []) for event in yielded)

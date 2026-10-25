@@ -206,6 +206,126 @@ test('composed websocket send merges turn_end into the existing tool message', a
   assert.equal(r1Messages.length, 1)
 })
 
+test('composed websocket reuses a work sequence without accepting late prior events', async t => {
+  const harness = await createHarness(t, {
+    sessions: [createSession('A', { source: 'ws', show_tool_calls: true })],
+    initialRoute: { path: '/', query: { session_id: 'A' } }
+  })
+  const { chat } = harness
+  const stream = {
+    session_id: 'A',
+    request_id: 'request-reused',
+    request_ids: ['request-reused'],
+    work_id: 'work-reused',
+    turn: 1
+  }
+  const toolCallId = 'call-reused'
+  const receive = fields => receiveWs(harness, { ...stream, ...fields })
+
+  await harness.flush()
+  await receive({
+    type: 'agent_loop_start',
+    response_id: 'response-old',
+    work_sequence_no: 5,
+    event_sequence_no: 1
+  })
+  await receive({
+    type: 'done',
+    response_id: 'response-old',
+    message_id: 101,
+    work_sequence_no: 5,
+    event_sequence_no: 2,
+    response: {
+      work_id: 'work-reused',
+      response_id: 'response-old',
+      message_id: 101,
+      choices: [{ message: { role: 'assistant', content: '旧回复' }, finish_reason: 'stop' }]
+    }
+  })
+
+  await receive({
+    type: 'agent_loop_start',
+    response_id: 'response-new-tool',
+    work_sequence_no: 6,
+    event_sequence_no: 3
+  })
+  await receive({ type: 'cancelled', work_sequence_no: 5, event_sequence_no: 4 })
+  assert.equal(chat.messages.value.filter(message => message.role === 'thinking').length, 1)
+
+  await receive({
+    type: 'tool_start',
+    response_id: 'response-new-tool',
+    tool_call_id: toolCallId,
+    name: 'lookup',
+    arguments: '{}',
+    work_sequence_no: 6,
+    event_sequence_no: 5
+  })
+  await receive({
+    type: 'content',
+    response_id: 'response-old-late',
+    content: '旧迟到正文',
+    work_sequence_no: 5,
+    event_sequence_no: 6
+  })
+  await receive({
+    type: 'tool_end',
+    response_id: 'response-new-tool',
+    tool_call_id: toolCallId,
+    name: 'lookup',
+    result: { status: 'queued', task_id: 42 },
+    work_sequence_no: 6,
+    event_sequence_no: 7
+  })
+  await receive({
+    type: 'tool_end',
+    response_id: 'response-old-late',
+    tool_call_id: toolCallId,
+    name: 'lookup',
+    result: { status: 'queued', task_id: 99 },
+    work_sequence_no: 5,
+    event_sequence_no: 8
+  })
+  const queuedResult = JSON.parse(chat.messages.value.find(message => message.role === 'tool').content).content
+  assert.deepEqual(queuedResult, { status: 'queued', task_id: 42 })
+
+  await receive({
+    type: 'tool_end',
+    response_id: 'response-new-tool',
+    tool_call_id: toolCallId,
+    name: 'lookup',
+    result: '最终工具结果',
+    work_sequence_no: 6,
+    event_sequence_no: 9
+  })
+  await receive({
+    type: 'done',
+    response_id: 'response-new-final',
+    message_id: 102,
+    work_sequence_no: 6,
+    event_sequence_no: 10,
+    response: {
+      work_id: 'work-reused',
+      response_id: 'response-new-final',
+      message_id: 102,
+      choices: [{ message: { role: 'assistant', content: '新回复' }, finish_reason: 'stop' }]
+    }
+  })
+
+  const messages = chat.messages.value
+  const toolCalls = messages.filter(message => message.role === 'assistant' && chat.isToolCall(message))
+  const toolResults = messages.filter(message => message.role === 'tool')
+  assert.equal(toolCalls.length, 1)
+  assert.equal(toolResults.length, 1)
+  assert.equal(JSON.parse(toolResults[0].content).tool_call_id, toolCallId)
+  assert.equal(JSON.parse(toolResults[0].content).content, '最终工具结果')
+  assert.equal(messages.filter(message => message.response_id === 'response-old' && message.content === '旧回复').length, 1)
+  assert.equal(messages.filter(message => message.response_id === 'response-new-final' && message.content === '新回复').length, 1)
+  assert.equal(messages.some(message => message.content === '旧迟到正文'), false)
+  assert.equal(messages.some(message => message.role === 'err'), false)
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
+})
+
 test('composed websocket done respects background result visibility and preserves complete response', async t => {
   for (const showToolCalls of [true, false]) {
     await t.test(`show_tool_calls=${showToolCalls}`, async nested => {

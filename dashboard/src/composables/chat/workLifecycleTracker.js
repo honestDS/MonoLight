@@ -239,7 +239,18 @@ const getEventSequenceNo = event => (
   Number.isFinite(event?.event_sequence_no) ? event.event_sequence_no : null
 )
 
+const getWorkSequenceNo = event => {
+  const sequenceCandidates = [
+    event?.work_sequence_no,
+    event?.response?.work_sequence_no
+  ]
+  return sequenceCandidates.find(sequenceNo => (
+    Number.isInteger(sequenceNo) && sequenceNo > 0
+  )) ?? null
+}
+
 const createWorkState = () => ({
+  workSequenceNo: null,
   workEventSequenceNo: null,
   sessionNotificationSequenceNo: null,
   outputResponseIds: new Set(),
@@ -254,11 +265,30 @@ export function createWorkLifecycleTracker() {
   const terminalRequestIds = new Set()
   let acceptedTerminalEvents = new WeakSet()
 
+  const observeWorkSequence = (state, event) => {
+    const workSequenceNo = getWorkSequenceNo(event)
+    if (workSequenceNo === null) return true
+    if (state.workSequenceNo === null) {
+      state.workSequenceNo = workSequenceNo
+      return true
+    }
+    if (workSequenceNo < state.workSequenceNo) return false
+    if (workSequenceNo === state.workSequenceNo) return true
+
+    state.workSequenceNo = workSequenceNo
+    state.terminal = false
+    state.terminalType = null
+    getEventRequestIds(event).forEach(requestId => terminalRequestIds.delete(requestId))
+    return true
+  }
+
   const getWorkState = (event, create = true) => {
     const workId = normalizeIdentity(event?.work_id)
     if (!workId) return null
     if (!workStates.has(workId) && create) workStates.set(workId, createWorkState())
-    return workStates.get(workId) || null
+    const state = workStates.get(workId) || null
+    if (!state || !observeWorkSequence(state, event)) return null
+    return state
   }
 
   const acceptsWorkEvent = (state, event) => {
@@ -274,11 +304,17 @@ export function createWorkLifecycleTracker() {
   }
 
   return {
+    observeWorkEvent(event) {
+      if (!hasIdentity(event?.work_id)) return true
+      return getWorkState(event) !== null
+    },
+
     startRequestLifecycle(messages, event) {
       const requestId = normalizeIdentity(event?.request_id)
       if (!requestId || dequeuedRequestIds.has(requestId)) return messages
 
       const state = getWorkState(event)
+      if (hasIdentity(event?.work_id) && !state) return messages
       if (state?.terminal) return messages
       if (state && !acceptsWorkEvent(state, event)) return messages
       return startRequestLifecycle(messages, event)
@@ -289,7 +325,8 @@ export function createWorkLifecycleTracker() {
       if (!requestId || dequeuedRequestIds.has(requestId)) return messages
 
       const state = getWorkState(event)
-      if (state && (state.terminal || !acceptsWorkEvent(state, event))) return messages
+      if (hasIdentity(event?.work_id) && !state) return messages
+      if (state?.terminal || (state && !acceptsWorkEvent(state, event))) return messages
       return markInputQueued(messages, event)
     },
 
@@ -298,6 +335,7 @@ export function createWorkLifecycleTracker() {
       if (requestIds.size === 0) return messages
 
       const state = getWorkState(event)
+      if (hasIdentity(event?.work_id) && !state) return messages
       if (state?.terminal) return messages
       if (state && !acceptsWorkEvent(state, event)) return messages
 
@@ -308,10 +346,10 @@ export function createWorkLifecycleTracker() {
     startAgentLoop(messages, event) {
       const responseId = normalizeIdentity(event?.response_id)
       if (!responseId) return messages
-      if (hasRequestIdIntersection(getEventRequestIds(event), terminalRequestIds)) return messages
 
       const state = getWorkState(event)
       if (!state || state.terminal || !acceptsWorkEvent(state, event)) return messages
+      if (hasRequestIdIntersection(getEventRequestIds(event), terminalRequestIds)) return messages
       if (state.outputResponseIds.has(responseId) || state.startedResponseIds.has(responseId)) return messages
 
       state.startedResponseIds.add(responseId)
@@ -332,6 +370,7 @@ export function createWorkLifecycleTracker() {
     finishWorkLifecycle(messages, event) {
       const requestIds = getEventRequestIds(event)
       const state = getWorkState(event)
+      if (hasIdentity(event?.work_id) && !state) return messages
       if (state) {
         if (state.terminal || !acceptsWorkEvent(state, event)) return messages
         state.terminal = true
@@ -351,6 +390,7 @@ export function createWorkLifecycleTracker() {
     suspendWorkLifecycle(messages, event) {
       const requestIds = getEventRequestIds(event)
       const state = getWorkState(event)
+      if (hasIdentity(event?.work_id) && !state) return messages
       if (state && (state.terminal || !acceptsWorkEvent(state, event))) return messages
 
       requestIds.forEach(requestId => dequeuedRequestIds.add(requestId))

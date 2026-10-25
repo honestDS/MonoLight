@@ -18,6 +18,7 @@ import * as identity from '../src/utils/assistantResponseIdentity.js'
 import * as profileOptions from '../src/utils/profileOptions.js'
 import * as todoPresentation from '../src/utils/todoPresentation.js'
 import * as toolOutputVisibility from '../src/utils/toolOutputVisibility.js'
+import * as toolResultState from '../src/utils/toolResultState.js'
 import * as errorMessage from '../src/utils/errorMessage.js'
 import * as reasoningTracker from '../src/composables/chat/reasoningTracker.js'
 import * as thinkingTracker from '../src/composables/chat/thinkingTracker.js'
@@ -158,7 +159,7 @@ const i18n = {
 
 const utils = loadPath(
   '../src/utils/index.js',
-  { i18n, ...identity },
+  { i18n, ...identity, ...toolResultState },
   [
     'findAssistantResponseReplacementIndex',
     'getMessageDbId',
@@ -653,7 +654,8 @@ export const createHarness = async (t, options = {}) => {
       processStreamError: terminalHistory.processStreamError,
       processStreamToolStart: terminalHistory.processStreamToolStart,
       applyResumedTurnEnd: streamResume.applyResumedTurnEnd,
-      ...toolOutputVisibility
+      ...toolOutputVisibility,
+      ...toolResultState
     },
     ['resolveAssistantDisplayContent', 'useMessageProcessor']
   )
@@ -688,11 +690,12 @@ export const createHarness = async (t, options = {}) => {
     ...sessionTransportMode,
     ...transportNotifications,
     ...llmRequestMetadata,
-    ...utils,
-    ...profileOptions,
-    ...todoPresentation,
-    ...toolOutputVisibility,
-    ...chatContentReveal,
+     ...utils,
+     ...profileOptions,
+     ...todoPresentation,
+     ...toolOutputVisibility,
+     ...toolResultState,
+     ...chatContentReveal,
     chatApi,
     i18n,
     ...errorMessage,
