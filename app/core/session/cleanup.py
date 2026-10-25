@@ -23,6 +23,18 @@ async def delete_session_data(
     if session is None or (not is_admin and session.uid != uid):
         return False
 
+    await session_reply_work_item_crud.cancel_session(
+        db,
+        session_id=session_id,
+        uid=session.uid,
+        commit=False,
+    )
+    await background_task_crud.cleanup_by_session(
+        db,
+        session_id=session_id,
+        is_admin=True,
+        commit=False,
+    )
     await audit_crud.cancel_confirmation_by_session(
         db,
         uid=session.uid,
@@ -48,12 +60,6 @@ async def delete_session_data(
         commit=False,
     )
     await message_platform_outbox_crud.delete_by_session(
-        db,
-        session_id=session_id,
-        is_admin=True,
-        commit=False,
-    )
-    await background_task_crud.cleanup_by_session(
         db,
         session_id=session_id,
         is_admin=True,

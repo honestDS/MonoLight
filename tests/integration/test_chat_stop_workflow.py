@@ -18,6 +18,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.security import get_current_user
+from app.core.session.cleanup import delete_session_data
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_audit as executor_audit_module
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
@@ -30,9 +31,12 @@ from app.handler import register_handlers
 from app.models.audit import AuditConfirmationClaim, AuditRecord
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.message_platform_outbox import MessagePlatformOutbox
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
+from app.models.scheduled_task import ScheduledTask
 from app.models.session import ChatSession
+from app.models.session_event import SessionEvent
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySequence,
@@ -41,6 +45,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.session_todo import SessionTodoPlan
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
@@ -69,6 +74,7 @@ async def db_session(tmp_path) -> AsyncIterator[async_sessionmaker[AsyncSession]
             PromptLibrary.__table__,
             Profile.__table__,
             ChatSession.__table__,
+            SessionTodoPlan.__table__,
             Message.__table__,
             BackgroundTask.__table__,
             AuditRecord.__table__,
@@ -76,6 +82,9 @@ async def db_session(tmp_path) -> AsyncIterator[async_sessionmaker[AsyncSession]
             SessionReplySequence.__table__,
             SessionReplyWorkItem.__table__,
             SessionReplyStreamEvent.__table__,
+            SessionEvent.__table__,
+            MessagePlatformOutbox.__table__,
+            ScheduledTask.__table__,
             TerminalSession.__table__,
             TerminalControlCommand.__table__,
         ],
@@ -1331,3 +1340,100 @@ async def test_http_stop_cancels_running_background_runner(
     assert len(tasks) == 1
     assert tasks[0].id == task_id
     assert tasks[0].result is None
+
+
+@pytest.mark.asyncio
+async def test_delete_session_cancels_running_background_runner(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _work_id, _message_id, session_id = await _seed_reply_work(
+        db_session,
+        session_id="background-delete-session",
+        status=SessionReplyWorkStatus.RUNNING,
+        worker_id="reply-worker",
+    )
+    async with db_session() as db:
+        task = BackgroundTask(
+            uid="owner",
+            session_id=session_id,
+            profile_id=1,
+            tool_call_id=f"{session_id}-tool-call",
+            tool_name="ordinary_background_tool",
+            arguments={},
+            auto_reply=True,
+            extra={},
+        )
+        db.add(task)
+        await db.commit()
+        assert task.id is not None
+        task_id = task.id
+
+    execution_started = asyncio.Event()
+    execution_cancelled = asyncio.Event()
+    release_execution = asyncio.Event()
+
+    class BlockingExecutor:
+        requires_audit = False
+
+        def __init__(self, project_root: str, uid: str = "default") -> None:
+            self.project_root = project_root
+            self.uid = uid
+
+        def set_config(self, _cfg) -> None:
+            pass
+
+        def set_runtime_context(self, **_kwargs) -> None:
+            pass
+
+        async def execute(self, **_kwargs):
+            execution_started.set()
+            try:
+                await release_execution.wait()
+            except asyncio.CancelledError:
+                execution_cancelled.set()
+                raise
+            return {"content": "unexpected completion"}
+
+    monkeypatch.setattr(runner_module, "AsyncSessionLocal", db_session)
+    monkeypatch.setitem(runner_module.TOOL_EXECUTOR_MAP, "ordinary_background_tool", BlockingExecutor)
+    runner_task = asyncio.create_task(runner_module.run_background_task(task_id, worker_id="background-worker"))
+    try:
+        await asyncio.wait_for(execution_started.wait(), timeout=5)
+        async with db_session() as db:
+            deleted = await delete_session_data(
+                db,
+                session_id=session_id,
+                uid="owner",
+                is_admin=False,
+            )
+            await db.commit()
+        assert deleted is True
+        await asyncio.wait_for(execution_cancelled.wait(), timeout=5)
+        runner_result = await asyncio.wait_for(runner_task, timeout=5)
+        assert runner_result is None
+    finally:
+        if not runner_task.done():
+            runner_task.cancel()
+        await asyncio.gather(runner_task, return_exceptions=True)
+
+    async with db_session() as db:
+        deleted_session = await db.get(ChatSession, session_id)
+        cancelled_task = await db.get(BackgroundTask, task_id)
+        late_claim = await background_task_crud.try_claim(
+            db,
+            task_id=task_id,
+            worker_id="late-worker",
+        )
+    assert deleted_session is None
+    assert late_claim is None
+    assert cancelled_task is not None
+    assert cancelled_task.status == BackgroundTaskStatus.CANCELLED
+    assert cancelled_task.session_id == f"deleted-session:{task_id}"
+    assert cancelled_task.auto_reply is False
+    assert cancelled_task.reply_status == BackgroundTaskReplyStatus.NONE
+    assert cancelled_task.locked_by is None
+    assert cancelled_task.lock_until is None
+    assert cancelled_task.reply_locked_by is None
+    assert cancelled_task.reply_lock_until is None
+    assert cancelled_task.result is None

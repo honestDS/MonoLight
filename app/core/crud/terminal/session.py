@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.constants import ERR_TERMINAL_COMMAND_RESULT_ERROR_EXCLUSIVE, ERR_TERMINAL_PTY_CLOSED
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.i18n import t
 from app.core.terminal.schemas import (
     TERMINAL_SESSION_FINAL_STATUSES,
@@ -150,6 +151,7 @@ class CRUDTerminalSession:
         terminal_session_id: str | None = None,
         commit: bool = True,
     ) -> TerminalSession:
+        await ensure_session_reply_work_claim(db)
         normalized_allowed_actions = sorted({TerminalAction(action).value for action in allowed_actions})
         terminal_session = TerminalSession(
             terminal_session_id=terminal_session_id if terminal_session_id is not None else generate_terminal_session_id(),

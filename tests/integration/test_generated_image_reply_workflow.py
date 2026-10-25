@@ -28,6 +28,7 @@ import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.crud.session.reply_work_item as reply_work_item_module
 import app.core.dispatchers.background as background_dispatcher_module
 import app.core.dispatchers.dispatcher as dispatcher_module
+import app.core.session_reply_queue.executor_interactive as executor_interactive_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
@@ -51,6 +52,7 @@ from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
+from app.models.session_reply_stream_event import SessionReplyStreamEvent  # noqa: F401
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.models.user import User
 from app.providers.database import get_db
@@ -508,6 +510,7 @@ async def batch_image_workflow(
         runner_module,
         reply_trigger_module,
         background_dispatcher_module,
+        executor_interactive_module,
         executor_lifecycle_module,
         executor_metadata_module,
     ):

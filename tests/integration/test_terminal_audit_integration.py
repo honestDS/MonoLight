@@ -10,6 +10,7 @@ import app.core.terminal.session_runtime_core as terminal_runtime_core_module
 import app.core.terminal.session_runtime_state as terminal_runtime_state_module
 import app.core.terminal.worker_coordinator as terminal_worker_module
 from app.core.crud.audit.audit import audit_crud
+from app.core.exceptions import ServerException
 from app.core.terminal.manager import cleanup_terminal_sessions_by_chat_session
 from app.core.terminal.schemas import TerminalOutputBufferState, TerminalSessionStatus
 from app.core.terminal.session_runtime import _TerminalSessionRuntime
@@ -436,6 +437,52 @@ async def test_cleanup_terminal_sessions_by_chat_session_finalizes_audit_and_del
     assert repeated_record.status is AuditRecordStatus.EXECUTION_UNKNOWN
     assert repeated_record.execution_claim_token is None
     assert stored_record.execution_claim_token is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_terminal_sessions_by_chat_session_preserves_data_when_process_cleanup_fails(
+    terminal_audit_database,
+    tmp_path,
+    monkeypatch,
+):
+    async def fail_process_cleanup(_identity):
+        return SimpleNamespace(errors=("process did not terminate pid 123",))
+
+    monkeypatch.setattr(terminal_audit_lifecycle_module, "cleanup_terminal_process_identity", fail_process_cleanup)
+    audit_record_id, runtimes = await _seed_audit_execution(terminal_audit_database, tmp_path)
+    execution_id, terminal_session = runtimes[0]
+    control_command = TerminalControlCommand(
+        terminal_session_id=terminal_session.terminal_session_id,
+        request_id="cleanup-request",
+        action="close",
+        payload={"force": True},
+        payload_hash="c" * 64,
+        status=TerminalControlCommandStatus.PENDING,
+    )
+    async with terminal_audit_database() as db:
+        db.add(control_command)
+        await db.commit()
+    assert control_command.id is not None
+
+    async with terminal_audit_database() as db:
+        with pytest.raises(ServerException):
+            await cleanup_terminal_sessions_by_chat_session(
+                db,
+                session_id="chat-session-1",
+                uid="user-1",
+            )
+        await db.rollback()
+        stored_terminal = await db.get(TerminalSession, terminal_session.terminal_session_id)
+        stored_command = await db.get(TerminalControlCommand, control_command.id)
+        stored_execution = await db.get(AuditExecutionRecord, execution_id)
+        stored_record = await db.get(AuditRecord, audit_record_id)
+
+    assert stored_terminal is not None
+    assert stored_command is not None
+    assert stored_execution is not None and stored_execution.status is AuditExecutionStatus.RUNNING
+    assert stored_record is not None
+    assert stored_record.status is AuditRecordStatus.EXECUTING
+    assert stored_record.execution_claim_token == CLAIM_TOKEN
 
 
 @pytest.mark.asyncio
