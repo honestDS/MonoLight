@@ -1,5 +1,8 @@
+import os
+import platform
 from collections.abc import AsyncGenerator
 
+import psutil
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -219,7 +222,14 @@ async def test_delete_session_data_rejects_non_owner_without_changes(db_session:
         working_directory="/workspace",
         status=TerminalSessionStatus.RUNNING,
         allowed_actions=[TerminalAction.CLOSE.value],
-        process_identity=None,
+        process_identity={
+            "platform": platform.system(),
+            "boot_time": psutil.boot_time(),
+            "root_pid": os.getpid() + 100_000,
+            "root_create_time": 10.0,
+            "process_group_id": None,
+            "known_processes": {str(os.getpid() + 100_000): 10.0},
+        },
     )
     db_session.add(terminal_session)
     await db_session.commit()
@@ -241,6 +251,7 @@ async def test_delete_session_data_rejects_non_owner_without_changes(db_session:
 @pytest.mark.asyncio
 async def test_delete_session_data_removes_all_associations_and_cancels_running_task(db_session: AsyncSession):
     completed_task_id, pending_task_id, running_task_id = await _seed_session_data(db_session)
+    root_pid = os.getpid() + 100_000
     target_terminal = TerminalSession(
         terminal_session_id="terminal-session-1",
         uid="user-1",
@@ -251,7 +262,14 @@ async def test_delete_session_data_removes_all_associations_and_cancels_running_
         working_directory="/workspace",
         status=TerminalSessionStatus.RUNNING,
         allowed_actions=[TerminalAction.CLOSE.value],
-        process_identity=None,
+        process_identity={
+            "platform": platform.system(),
+            "boot_time": psutil.boot_time(),
+            "root_pid": root_pid,
+            "root_create_time": 10.0,
+            "process_group_id": None,
+            "known_processes": {str(root_pid): 10.0},
+        },
     )
     target_command = TerminalControlCommand(
         terminal_session_id=target_terminal.terminal_session_id,

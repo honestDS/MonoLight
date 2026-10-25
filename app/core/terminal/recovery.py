@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import math
 import os
 import platform
 import signal
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
 import psutil
+
+from app.core.constants import TERMINAL_WINDOWS_BOOT_TIME_TOLERANCE_SECONDS
 
 __all__ = [
     "TerminalProcessCleanupResult",
@@ -46,6 +50,34 @@ def _same_create_time(actual: Any, expected: float) -> bool:
     return _is_valid_create_time(actual) and float(actual) == expected
 
 
+def _read_windows_boot_id() -> str | None:
+    if platform.system() != "Windows":
+        return None
+    try:
+        ntdll = ctypes.WinDLL("ntdll")
+        query_system_information = ntdll.NtQuerySystemInformation
+        query_system_information.argtypes = [
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+        ]
+        query_system_information.restype = ctypes.c_long
+        buffer = ctypes.create_string_buffer(64)
+        returned_length = ctypes.c_ulong()
+        status = query_system_information(
+            90,
+            buffer,
+            ctypes.sizeof(buffer),
+            ctypes.byref(returned_length),
+        )
+        if status != 0 or returned_length.value < 16:
+            return None
+        return str(uuid.UUID(bytes_le=buffer.raw[:16]))
+    except Exception:
+        return None
+
+
 def _normalise_identity(identity: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(identity, dict):
         return None
@@ -54,9 +86,17 @@ def _normalise_identity(identity: dict[str, Any] | None) -> dict[str, Any] | Non
     root_create_time = identity.get("root_create_time")
     identity_platform = identity.get("platform")
     boot_time = identity.get("boot_time")
+    boot_id = identity.get("boot_id")
     known_processes = identity.get("known_processes")
     if not _is_valid_pid(root_pid) or not _is_valid_create_time(root_create_time) or not isinstance(identity_platform, str) or not identity_platform or not _is_valid_create_time(boot_time) or not isinstance(known_processes, dict):
         return None
+    if boot_id is not None:
+        if not isinstance(boot_id, str):
+            return None
+        try:
+            boot_id = str(uuid.UUID(boot_id))
+        except (ValueError, AttributeError, TypeError):
+            return None
 
     normalised_known_processes: dict[str, float] = {}
     for raw_pid, raw_create_time in known_processes.items():
@@ -76,7 +116,7 @@ def _normalise_identity(identity: dict[str, Any] | None) -> dict[str, Any] | Non
     if process_group_id is not None and not _is_valid_pid(process_group_id):
         process_group_id = None
 
-    return {
+    normalised_identity = {
         "platform": identity_platform,
         "boot_time": float(boot_time),
         "root_pid": root_pid,
@@ -84,6 +124,43 @@ def _normalise_identity(identity: dict[str, Any] | None) -> dict[str, Any] | Non
         "process_group_id": process_group_id,
         "known_processes": normalised_known_processes,
     }
+    if boot_id is not None:
+        normalised_identity["boot_id"] = boot_id
+    return normalised_identity
+
+
+def _compare_startup_identity(
+    identity: dict[str, Any],
+    current_platform: str,
+    current_boot_time: Any,
+    current_boot_id: str | None,
+) -> tuple[bool, str | None]:
+    if identity["platform"] != current_platform:
+        return False, None
+
+    stored_boot_id = identity.get("boot_id")
+    if stored_boot_id is not None:
+        if current_boot_id is None:
+            return False, "unable to read Windows boot identifier"
+        try:
+            normalised_current_boot_id = str(uuid.UUID(current_boot_id))
+        except (ValueError, AttributeError, TypeError):
+            return False, "unable to read Windows boot identifier"
+        return normalised_current_boot_id == stored_boot_id, None
+
+    if not _is_valid_create_time(current_boot_time):
+        return False, "unable to read boot time"
+    if current_platform == "Windows":
+        return (
+            math.isclose(
+                float(current_boot_time),
+                identity["boot_time"],
+                rel_tol=0.0,
+                abs_tol=TERMINAL_WINDOWS_BOOT_TIME_TOLERANCE_SECONDS,
+            ),
+            None,
+        )
+    return _same_create_time(current_boot_time, identity["boot_time"]), None
 
 
 def _safe_process_create_time(process: psutil.Process) -> float | None:
@@ -117,6 +194,7 @@ def _capture_process_identity(pid: int, previous_identity: dict[str, Any] | None
         return None
 
     current_platform = platform.system()
+    current_boot_id = _read_windows_boot_id() if current_platform == "Windows" else None
     try:
         current_boot_time = psutil.boot_time()
     except Exception:
@@ -125,26 +203,37 @@ def _capture_process_identity(pid: int, previous_identity: dict[str, Any] | None
         return None
 
     previous = _normalise_identity(previous_identity)
-    if previous is not None and (previous["platform"] != current_platform or not _same_create_time(previous["boot_time"], float(current_boot_time))):
-        previous = None
+    if previous is not None:
+        previous_matches, comparison_error = _compare_startup_identity(
+            previous,
+            current_platform,
+            current_boot_time,
+            current_boot_id,
+        )
+        if comparison_error is not None:
+            return None
+        if not previous_matches:
+            previous = None
     previous_processes = _retain_previous_processes(previous) if previous is not None and previous["root_pid"] == pid else {}
+    previous_snapshot = None
+    if previous is not None:
+        previous_snapshot = {
+            **previous,
+            "known_processes": previous_processes,
+        }
+        if current_boot_id is not None:
+            previous_snapshot["boot_id"] = current_boot_id
     try:
         root_process = psutil.Process(pid)
         root_create_time = _safe_process_create_time(root_process)
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         if previous is None or previous["root_pid"] != pid:
             return None
-        return {
-            **previous,
-            "known_processes": previous_processes,
-        }
+        return previous_snapshot
 
     if root_create_time is None:
         if previous is not None and previous["root_pid"] == pid:
-            return {
-                **previous,
-                "known_processes": previous_processes,
-            }
+            return previous_snapshot
         return None
     if (
         previous is not None
@@ -154,10 +243,7 @@ def _capture_process_identity(pid: int, previous_identity: dict[str, Any] | None
             previous["root_create_time"],
         )
     ):
-        return {
-            **previous,
-            "known_processes": previous_processes,
-        }
+        return previous_snapshot
 
     known_processes: dict[str, float] = {str(pid): root_create_time}
     try:
@@ -187,7 +273,7 @@ def _capture_process_identity(pid: int, previous_identity: dict[str, Any] | None
         except OSError:
             process_group_id = None
 
-    return {
+    captured_identity = {
         "platform": current_platform,
         "boot_time": float(current_boot_time),
         "root_pid": pid,
@@ -195,6 +281,9 @@ def _capture_process_identity(pid: int, previous_identity: dict[str, Any] | None
         "process_group_id": process_group_id,
         "known_processes": known_processes,
     }
+    if current_boot_id is not None:
+        captured_identity["boot_id"] = current_boot_id
+    return captured_identity
 
 
 async def capture_terminal_process_identity(
@@ -284,16 +373,27 @@ def _cleanup_process_identity(identity: dict[str, Any] | None) -> TerminalProces
 
     current_platform = platform.system()
     if normalised_identity["platform"] != current_platform:
-        return TerminalProcessCleanupResult((), (), ("process identity platform mismatch",))
-    try:
-        current_boot_time = psutil.boot_time()
-    except Exception as error:
-        return TerminalProcessCleanupResult((), (), (f"unable to read boot time: {error}",))
-    if not _is_valid_create_time(current_boot_time) or not _same_create_time(
+        return TerminalProcessCleanupResult((), (), ())
+
+    current_boot_time: float | None = None
+    current_boot_id: str | None = None
+    if normalised_identity.get("boot_id") is not None:
+        current_boot_id = _read_windows_boot_id()
+    else:
+        try:
+            current_boot_time = psutil.boot_time()
+        except Exception as error:
+            return TerminalProcessCleanupResult((), (), (f"unable to read boot time: {error}",))
+    startup_matches, comparison_error = _compare_startup_identity(
+        normalised_identity,
+        current_platform,
         current_boot_time,
-        normalised_identity["boot_time"],
-    ):
-        return TerminalProcessCleanupResult((), (), ("process identity boot time mismatch",))
+        current_boot_id,
+    )
+    if comparison_error is not None:
+        return TerminalProcessCleanupResult((), (), (comparison_error,))
+    if not startup_matches:
+        return TerminalProcessCleanupResult((), (), ())
 
     errors: list[str] = []
     current_pid = os.getpid()

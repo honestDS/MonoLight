@@ -3,12 +3,14 @@ import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    ERR_TERMINAL_COMMAND_FAILED,
     ERR_TERMINAL_SESSION_DELETED,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.terminal.session import (
     terminal_session_crud,
 )
+from app.core.exceptions import ServerException
 from app.core.i18n import t
 from app.core.terminal.recovery import cleanup_terminal_process_identity
 from app.core.terminal.schemas import (
@@ -175,21 +177,23 @@ async def cleanup_terminal_sessions_by_chat_session(
     )
     failure_reason = t(ERR_TERMINAL_SESSION_DELETED)
     for terminal_session in terminal_sessions:
-        try:
-            cleanup_result = await cleanup_terminal_process_identity(terminal_session.process_identity)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception(
-                "Terminal session process cleanup failed",
-                extra={
-                    "terminal_session_id": terminal_session.terminal_session_id,
-                    "session_id": session_id,
-                    "uid": uid,
-                    "error": str(exc),
-                },
-            )
-        else:
+        skip_process_cleanup = terminal_session.process_identity is None and (terminal_session.status in TERMINAL_SESSION_FINAL_STATUSES or (terminal_session.status is TerminalSessionStatus.STARTING and terminal_session.locked_by is None))
+        if not skip_process_cleanup:
+            try:
+                cleanup_result = await cleanup_terminal_process_identity(terminal_session.process_identity)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "Terminal session process cleanup failed",
+                    extra={
+                        "terminal_session_id": terminal_session.terminal_session_id,
+                        "session_id": session_id,
+                        "uid": uid,
+                        "error": str(exc),
+                    },
+                )
+                raise ServerException(message=ERR_TERMINAL_COMMAND_FAILED, error=str(exc)) from exc
             if cleanup_result.errors:
                 logger.error(
                     "Terminal session process cleanup reported errors",
@@ -199,6 +203,10 @@ async def cleanup_terminal_sessions_by_chat_session(
                         "uid": uid,
                         "errors": cleanup_result.errors,
                     },
+                )
+                raise ServerException(
+                    message=ERR_TERMINAL_COMMAND_FAILED,
+                    error="; ".join(cleanup_result.errors),
                 )
 
         if terminal_session.status not in TERMINAL_SESSION_FINAL_STATUSES:

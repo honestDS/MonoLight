@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import uuid
 
 import psutil
 import pytest
@@ -340,7 +341,7 @@ async def test_cleanup_terminal_process_identity_rejects_different_boot_time(mon
     process_queries: list[int] = []
     identity = {
         "platform": platform_name,
-        "boot_time": recovery.psutil.boot_time() - 1.0,
+        "boot_time": recovery.psutil.boot_time() - 5.0,
         "root_pid": root_pid,
         "root_create_time": root_create_time,
         "process_group_id": root_pid if platform_name != "Windows" else None,
@@ -356,5 +357,144 @@ async def test_cleanup_terminal_process_identity_rejects_different_boot_time(mon
     result = await cleanup_terminal_process_identity(identity)
 
     assert result.terminated_processes == ()
-    assert result.errors
+    assert result.errors == ()
     assert process_queries == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            {
+                "identity_boot_id": None,
+                "current_boot_id": None,
+                "current_boot_time": 100.000063,
+                "actual_root_create_time": 10.0,
+                "should_query": True,
+                "should_kill": True,
+                "errors": (),
+            },
+            id="legacy-boot-time-microsecond-drift",
+        ),
+        pytest.param(
+            {
+                "identity_boot_id": "11111111-1111-1111-1111-111111111111",
+                "current_boot_id": "11111111-1111-1111-1111-111111111111",
+                "current_boot_time": 999.0,
+                "actual_root_create_time": 10.0,
+                "should_query": True,
+                "should_kill": True,
+                "errors": (),
+            },
+            id="matching-native-boot-id",
+        ),
+        pytest.param(
+            {
+                "identity_boot_id": "11111111-1111-1111-1111-111111111111",
+                "current_boot_id": "22222222-2222-2222-2222-222222222222",
+                "current_boot_time": 999.0,
+                "actual_root_create_time": 10.0,
+                "should_query": False,
+                "should_kill": False,
+                "errors": (),
+            },
+            id="different-native-boot-id",
+        ),
+        pytest.param(
+            {
+                "identity_boot_id": "11111111-1111-1111-1111-111111111111",
+                "current_boot_id": None,
+                "current_boot_time": 999.0,
+                "actual_root_create_time": 10.0,
+                "should_query": False,
+                "should_kill": False,
+                "errors": ("unable to read Windows boot identifier",),
+            },
+            id="stored-native-boot-id-unreadable",
+        ),
+        pytest.param(
+            {
+                "identity_boot_id": None,
+                "current_boot_id": None,
+                "current_boot_time": 100.000063,
+                "actual_root_create_time": 20.0,
+                "should_query": True,
+                "should_kill": False,
+                "errors": (),
+            },
+            id="legacy-root-create-time-mismatch",
+        ),
+    ],
+)
+async def test_cleanup_terminal_process_identity_respects_windows_startup_identity(monkeypatch, case):
+    current_pid = os.getpid()
+    root_pid = current_pid + 100_000
+    process_queries: list[int] = []
+    kill_calls: list[int] = []
+
+    class FakeProcess:
+        def __init__(self, pid):
+            process_queries.append(pid)
+            assert pid == root_pid
+            self.pid = pid
+
+        def create_time(self):
+            return case["actual_root_create_time"]
+
+        def children(self, recursive=False):
+            assert recursive is True
+            return ()
+
+        def ppid(self):
+            return current_pid
+
+        def kill(self):
+            kill_calls.append(self.pid)
+
+    identity = {
+        "platform": "Windows",
+        "boot_time": 100.0,
+        "root_pid": root_pid,
+        "root_create_time": 10.0,
+        "process_group_id": None,
+        "known_processes": {str(root_pid): 10.0},
+    }
+    if case["identity_boot_id"] is not None:
+        identity["boot_id"] = case["identity_boot_id"]
+
+    monkeypatch.setattr(recovery.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(recovery.psutil, "boot_time", lambda: case["current_boot_time"])
+    monkeypatch.setattr(recovery, "_read_windows_boot_id", lambda: case["current_boot_id"])
+    monkeypatch.setattr(recovery.psutil, "Process", FakeProcess)
+    monkeypatch.setattr(recovery.psutil, "wait_procs", lambda processes, timeout: ([], []))
+
+    result = await cleanup_terminal_process_identity(identity)
+
+    expected_pids = (root_pid,) if case["should_kill"] else ()
+    expected_queries = [root_pid] if case["should_query"] else []
+    expected_kills = [root_pid] if case["should_kill"] else []
+    assert result.matched_processes == expected_pids
+    assert result.terminated_processes == expected_pids
+    assert result.errors == case["errors"]
+    assert process_queries == expected_queries
+    assert kill_calls == expected_kills
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native boot identifier only")
+def test_windows_boot_id_is_stable_across_independent_interpreters():
+    command = "from app.core.terminal.recovery import _read_windows_boot_id; print(_read_windows_boot_id() or '')"
+    boot_ids = [
+        subprocess.run(
+            [sys.executable, "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+        for _ in range(2)
+    ]
+
+    assert all(boot_ids)
+    assert boot_ids[0] == boot_ids[1]
+    assert uuid.UUID(boot_ids[0])

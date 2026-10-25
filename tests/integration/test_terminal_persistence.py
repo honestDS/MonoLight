@@ -1,4 +1,6 @@
+import asyncio
 import sys
+import time
 
 import pytest
 from pydantic import ValidationError
@@ -12,7 +14,9 @@ from app.core.constants import (
     ERR_TERMINAL_SESSION_ACCESS_DENIED,
     ERR_TERMINAL_SESSION_LEASE_LOST,
     ERR_TERMINAL_SESSION_NOT_FOUND,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.terminal.session import terminal_control_command_crud, terminal_session_crud
 from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
 from app.core.i18n import t
@@ -29,6 +33,12 @@ from app.core.terminal import (
 )
 from app.core.terminal.manager import terminal_session_manager
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import (
+    SessionReplySourceType,
+    SessionReplyWorkItem,
+    SessionReplyWorkStatus,
+    SessionReplyWorkType,
+)
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.providers.database import AsyncSessionLocal
 from app.providers.database.client import CancellationSafeAsyncSession
@@ -79,6 +89,74 @@ async def create_terminal_session(
             output_capacity_bytes=output_capacity_bytes,
             terminal_session_id=terminal_session_id,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removal", ["cancelled", "deleted"])
+async def test_terminal_session_creation_rejects_lost_session_reply_work_claim(removal):
+    worker_id = "reply-worker"
+    terminal_session_id = "t" * 32
+
+    async with AsyncSessionLocal() as db:
+        work = SessionReplyWorkItem(
+            uid="user-1",
+            session_id="chat-session-1",
+            profile_id=1,
+            sequence_no=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="message-1",
+            dedupe_key=f"terminal-lease-{removal}",
+            status=SessionReplyWorkStatus.RUNNING,
+            locked_by=worker_id,
+            lock_until=int(time.time()) + 300,
+        )
+        db.add(work)
+        await db.commit()
+        assert work.id is not None
+        work_id = work.id
+
+        if removal == "cancelled":
+            assert (
+                await session_reply_work_item_crud.cancel_session(
+                    db,
+                    session_id="chat-session-1",
+                    uid="user-1",
+                    commit=True,
+                )
+                == 1
+            )
+        else:
+            assert (
+                await session_reply_work_item_crud.delete_by_session(
+                    db,
+                    session_id="chat-session-1",
+                    uid="user-1",
+                    commit=True,
+                )
+                == 1
+            )
+
+    async with AsyncSessionLocal() as db:
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
+        with pytest.raises(asyncio.CancelledError):
+            await terminal_session_manager.create_session(
+                db,
+                uid="user-1",
+                session_id="chat-session-1",
+                profile_id=1,
+                original_tool_call_id="reply-lease-terminal",
+                audit_record_id=None,
+                audit_execution_record_id=None,
+                command="python -i",
+                working_directory="temp/user-1",
+                allowed_actions=ALL_TERMINAL_ACTIONS,
+                terminal_session_id=terminal_session_id,
+            )
+
+    async with AsyncSessionLocal() as db:
+        assert await terminal_session_crud.get(db, terminal_session_id) is None
+        assert await db.get(ChatSession, "chat-session-1") is not None
 
 
 @pytest.mark.asyncio
