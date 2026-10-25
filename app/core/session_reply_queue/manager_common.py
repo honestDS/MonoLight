@@ -121,11 +121,16 @@ def build_foreground_message_dedupe_key(session_id: str, message_id: int) -> str
 
 def build_session_reply_work_identity(work: SessionReplyWorkItem) -> str:
     created_at = work.created_at.replace(tzinfo=None).isoformat(timespec="microseconds") if isinstance(work.created_at, datetime) else str(work.created_at)
+    execution_state = getattr(work, "execution_state", None)
+    terminal_resume_generation = execution_state.get("terminal_resume_generation") if isinstance(execution_state, dict) else None
+    identity_payload: dict[str, Any] = {
+        "dedupe_key": work.dedupe_key,
+        "created_at": created_at,
+    }
+    if isinstance(terminal_resume_generation, int) and not isinstance(terminal_resume_generation, bool) and terminal_resume_generation > 0:
+        identity_payload["terminal_resume_generation"] = terminal_resume_generation
     payload = json.dumps(
-        {
-            "dedupe_key": work.dedupe_key,
-            "created_at": created_at,
-        },
+        identity_payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

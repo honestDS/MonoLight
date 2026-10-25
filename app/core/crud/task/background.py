@@ -97,7 +97,10 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         terminal_session_id: str,
         *,
         automatic_only: bool = False,
+        manual_only: bool = False,
     ) -> BackgroundTask | None:
+        if automatic_only and manual_only:
+            return None
         active_statuses = [BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]
         status_condition = BackgroundTask.status.in_(active_statuses)
         if automatic_only:
@@ -127,6 +130,13 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 if extra.get("terminal_session_id") == terminal_session_id:
                     return task
                 continue
+            if manual_only:
+                if isinstance(extra, dict) and extra.get("auto_terminal_watch") is True:
+                    continue
+                arguments = task.arguments
+                if isinstance(arguments, dict) and arguments.get("terminal_session_id") == terminal_session_id:
+                    return task
+                continue
             if extra is not None and isinstance(extra, dict) and extra.get("auto_terminal_watch") is True and extra.get("terminal_session_id") == terminal_session_id:
                 return task
             arguments = task.arguments
@@ -144,6 +154,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         terminal_session_id: str,
         after_offset: int,
         previous_task_id: int | None = None,
+        origin_work_id: int | None = None,
+        origin_work_identity: str | None = None,
         commit: bool = True,
     ) -> BackgroundTask | None:
         lock_result = await db.execute(
@@ -167,6 +179,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
 
         previous_task: BackgroundTask | None = None
         previous_content: dict[str, Any] | None = None
+        previous_extra: dict[str, Any] = {}
         if previous_task_id is not None:
             previous_result = await db.execute(select(BackgroundTask).where(BackgroundTask.id == previous_task_id).execution_options(populate_existing=True))
             previous_task = previous_result.scalars().first()
@@ -201,6 +214,11 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 return None
             previous_content = candidate_content
 
+        if origin_work_id is None:
+            origin_work_id = previous_extra.get("origin_work_id")
+        if origin_work_identity is None:
+            origin_work_identity = previous_extra.get("origin_work_identity")
+
         active_watch = await self.get_active_terminal_watch(
             db,
             uid,
@@ -224,6 +242,10 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         }
         if previous_content is not None and isinstance(previous_content.get("observed_at"), str):
             extra["observation_started_at"] = previous_content["observed_at"]
+        if isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0:
+            extra["origin_work_id"] = origin_work_id
+        if isinstance(origin_work_identity, str) and origin_work_identity.strip():
+            extra["origin_work_identity"] = origin_work_identity
         task = await self.create_task(
             db,
             uid=uid,
@@ -306,6 +328,12 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED]),
                 BackgroundTask.auto_reply.is_(True),
                 BackgroundTask.reply_status == BackgroundTaskReplyStatus.PENDING,
+                not_(
+                    and_(
+                        BackgroundTask.extra["auto_terminal_watch"].as_boolean().is_(True),
+                        BackgroundTask.extra["terminal_auto_watch_routed"].as_boolean().is_(True),
+                    )
+                ),
             )
             .order_by(BackgroundTask.finished_at.asc(), BackgroundTask.id.asc())
             .limit(limit)

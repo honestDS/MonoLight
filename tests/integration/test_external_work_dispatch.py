@@ -1395,7 +1395,7 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             assert terminal_session.exit_code == 0
 
             persisted_tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
-            assert len(persisted_tasks) == 2
+            assert len(persisted_tasks) == (2 if source_auto else 3)
             assert len([task for task in persisted_tasks if task.id == seed_task_id]) == 1
             if source_auto:
                 auto_watch_tasks = [task for task in persisted_tasks if task.extra.get("auto_terminal_watch") is True]
@@ -1403,7 +1403,20 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
                 assert auto_watch_tasks[0].id == seed_task_id
                 assert "next_auto_watch_task_id" not in seed_task.extra
             else:
-                assert not any(task.extra.get("auto_terminal_watch") is True for task in persisted_tasks)
+                auto_watch_tasks = [task for task in persisted_tasks if task.extra.get("auto_terminal_watch") is True]
+                assert len(auto_watch_tasks) == 1
+                auto_watch_task = auto_watch_tasks[0]
+                assert auto_watch_task.id != seed_task_id
+                assert auto_watch_task.status == BackgroundTaskStatus.PENDING
+                assert auto_watch_task.auto_reply is True
+                assert auto_watch_task.reply_status == BackgroundTaskReplyStatus.PENDING
+                assert auto_watch_task.extra["origin_work_id"] == work_id
+                assert auto_watch_task.extra["terminal_session_id"] == terminal_session_id
+                assert auto_watch_task.arguments == {
+                    "terminal_session_id": terminal_session_id,
+                    "after_offset": observed_result["next_offset"],
+                    "condition": "process_exit",
+                }
 
             work_items = list((await db.execute(select(SessionReplyWorkItem).order_by(SessionReplyWorkItem.id))).scalars().all())
             assert len(work_items) == 1

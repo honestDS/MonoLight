@@ -3,13 +3,14 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from app.core import constants
-from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.terminal.schemas import TERMINAL_SESSION_FINAL_STATUSES, TerminalSessionStatus
 from app.core.terminal.watch_schema import TerminalWatchRequest
 from app.core.terminal.watcher import watch_terminal
 from app.core.utils.time import get_local_time
+from app.models.session_reply_work_item import SessionReplyWorkStatus
 
 from .base import BaseExecutor
 
@@ -63,14 +64,25 @@ async def ensure_terminal_auto_watch(
         return
 
     await ensure_session_reply_work_claim(db)
-    await background_task_crud.create_terminal_auto_watch(
-        db,
-        uid=uid,
-        session_id=session_id,
-        profile_id=profile_id,
-        terminal_session_id=request.terminal_session_id,
-        after_offset=request.after_offset,
-    )
+    claim = getattr(db, "info", {}).get(constants.SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+    create_kwargs = {
+        "uid": uid,
+        "session_id": session_id,
+        "profile_id": profile_id,
+        "terminal_session_id": request.terminal_session_id,
+        "after_offset": request.after_offset,
+    }
+    if claim is not None:
+        if not isinstance(claim, (tuple, list)) or len(claim) != 2 or not isinstance(claim[0], int) or isinstance(claim[0], bool) or claim[0] <= 0 or not isinstance(claim[1], str) or not claim[1]:
+            raise RuntimeError(t(constants.ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+        work_id, worker_id = claim
+        work = await session_reply_work_item_crud.get(db, work_id)
+        if work is None or work.uid != uid or work.session_id != session_id or work.profile_id != profile_id or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
+            raise RuntimeError(t(constants.ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+        create_kwargs["origin_work_id"] = work.id
+        create_kwargs["origin_work_identity"] = work.dedupe_key
+
+    await background_task_crud.create_terminal_auto_watch(db, **create_kwargs)
 
 
 class TerminalWatchExecutor(BaseExecutor):

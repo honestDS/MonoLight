@@ -43,6 +43,8 @@ class BackgroundTaskManager:
         self._running_by_profile: dict[int, set[asyncio.Task]] = defaultdict(set)
         self._running_observers: set[asyncio.Task] = set()
         self._running_replies: set[asyncio.Task] = set()
+        self._running_execution_task_ids: set[int] = set()
+        self._running_reply_task_ids: set[int] = set()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -207,6 +209,8 @@ class BackgroundTaskManager:
             self._running_by_profile.clear()
             self._running_observers.clear()
             self._running_replies.clear()
+            self._running_execution_task_ids.clear()
+            self._running_reply_task_ids.clear()
 
         for task in active_tasks:
             task.cancel()
@@ -255,7 +259,15 @@ class BackgroundTaskManager:
                 for pending_task in pending_tasks:
                     if pending_task.id is None:
                         continue
-                    task = asyncio.create_task(self._run_task(pending_task.id, profile.id))
+                    task_id = pending_task.id
+                    if task_id in self._running_execution_task_ids:
+                        continue
+                    self._running_execution_task_ids.add(task_id)
+                    try:
+                        task = asyncio.create_task(self._run_task(task_id, profile.id))
+                    except BaseException:
+                        self._running_execution_task_ids.discard(task_id)
+                        raise
                     running.add(task)
 
             self._running_observers.difference_update({task for task in self._running_observers if task.done()})
@@ -274,7 +286,15 @@ class BackgroundTaskManager:
             for pending_observer in pending_observers:
                 if pending_observer.id is None:
                     continue
-                task = asyncio.create_task(self._run_observer(pending_observer.id))
+                task_id = pending_observer.id
+                if task_id in self._running_execution_task_ids:
+                    continue
+                self._running_execution_task_ids.add(task_id)
+                try:
+                    task = asyncio.create_task(self._run_observer(task_id))
+                except BaseException:
+                    self._running_execution_task_ids.discard(task_id)
+                    raise
                 self._running_observers.add(task)
 
     async def dispatch_pending_replies(self) -> None:
@@ -290,7 +310,15 @@ class BackgroundTaskManager:
             for pending_reply in pending_replies:
                 if pending_reply.id is None:
                     continue
-                task = asyncio.create_task(self._run_reply(pending_reply.id))
+                task_id = pending_reply.id
+                if task_id in self._running_reply_task_ids:
+                    continue
+                self._running_reply_task_ids.add(task_id)
+                try:
+                    task = asyncio.create_task(self._run_reply(task_id))
+                except BaseException:
+                    self._running_reply_task_ids.discard(task_id)
+                    raise
                 self._running_replies.add(task)
 
     async def _run_loop(self) -> None:
@@ -317,15 +345,20 @@ class BackgroundTaskManager:
     async def _run_reply(self, task_id: int) -> None:
         try:
             await trigger_background_task_reply(task_id)
+        except Exception:
+            logger.bind(task_id=task_id).exception("Background task reply failed")
         finally:
             current_task = asyncio.current_task()
             async with self._lock:
                 if current_task is not None:
                     self._running_replies.discard(current_task)
+                self._running_reply_task_ids.discard(task_id)
 
     async def _run_task(self, task_id: int, profile_id: int) -> None:
         try:
             await run_background_task(task_id)
+        except Exception:
+            logger.bind(task_id=task_id, profile_id=profile_id).exception("Background task execution failed")
         finally:
             current_task = asyncio.current_task()
             async with self._lock:
@@ -334,15 +367,19 @@ class BackgroundTaskManager:
                     running.discard(current_task)
                     if not running:
                         self._running_by_profile.pop(profile_id, None)
+                self._running_execution_task_ids.discard(task_id)
 
     async def _run_observer(self, task_id: int) -> None:
         try:
             await run_background_task(task_id)
+        except Exception:
+            logger.bind(task_id=task_id).exception("Background task observer failed")
         finally:
             current_task = asyncio.current_task()
             async with self._lock:
                 if current_task is not None:
                     self._running_observers.discard(current_task)
+                self._running_execution_task_ids.discard(task_id)
 
 
 background_task_manager = BackgroundTaskManager()

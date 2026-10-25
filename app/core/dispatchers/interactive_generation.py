@@ -232,9 +232,10 @@ async def generate_interactive_turn(
                     state.checkpoint_state.session_total_cached_tokens,
                 ),
             }
+            # 跨会话事件写入前先提交主事务，释放主事务占用。
+            await state.db.commit()
             if state.stream_event_callback is not None:
                 await state.stream_event_callback(dict(state.latest_llm_request_metadata))
-            await state.db.commit()
             provider_request_id = str(uuid.uuid4())
             attempt_started_at = get_local_time()
             upstream_streaming = state.stream_llm_request if state.stream_llm_request is not None else state.stream_event_callback is not None

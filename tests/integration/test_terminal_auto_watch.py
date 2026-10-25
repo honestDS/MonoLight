@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 from collections.abc import AsyncIterator
 
 import pytest
@@ -8,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 from app.core.audit.confirmation_lifecycle import stop_interactive_reply
-from app.core.constants import TERMINAL_WATCH_TOOL_NAME
+from app.core.background_tasks import reply_trigger as reply_trigger_module
+from app.core.background_tasks.terminal_watch_reply import prepare_terminal_auto_watch_resume
+from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.task.background import background_task_crud
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
@@ -18,7 +21,7 @@ from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus
 from app.models.message import Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
-from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
+from app.models.session_reply_work_item import SessionReplySequence, SessionReplySourceType, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.models.user import User
 
@@ -26,6 +29,7 @@ UID = "terminal-auto-watch-owner"
 SESSION_ID = "terminal-auto-watch-chat"
 PROFILE_ID = 1
 TERMINAL_SESSION_ID = "terminal-auto-watch-session-0123456789abcdef"
+SECOND_TERMINAL_SESSION_ID = "terminal-auto-watch-session-fedcba9876543210"
 AFTER_OFFSET = 37
 
 
@@ -57,6 +61,17 @@ async def terminal_auto_watch_database(database_factory) -> AsyncIterator[async_
                         status=TerminalSessionStatus.RUNNING,
                         allowed_actions=[action.value for action in TerminalAction],
                     ),
+                    TerminalSession(
+                        terminal_session_id=SECOND_TERMINAL_SESSION_ID,
+                        uid=UID,
+                        session_id=SESSION_ID,
+                        original_tool_call_id="second-terminal-watch-call",
+                        profile_id=PROFILE_ID,
+                        command="test-terminal-command-second",
+                        working_directory="/tmp/terminal-auto-watch-second",
+                        status=TerminalSessionStatus.RUNNING,
+                        allowed_actions=[action.value for action in TerminalAction],
+                    ),
                 ]
             )
             await db.commit()
@@ -72,6 +87,28 @@ async def _terminal_watch_tasks(db: AsyncSession) -> list[BackgroundTask]:
         )
     )
     return list(result.scalars().all())
+
+
+async def _create_claimed_reply_work(db: AsyncSession, *, worker_id: str) -> SessionReplyWorkItem:
+    work = SessionReplyWorkItem(
+        uid=UID,
+        session_id=SESSION_ID,
+        profile_id=PROFILE_ID,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="terminal-auto-watch-origin-message",
+        dedupe_key=f"terminal-auto-watch-origin:{worker_id}",
+        status=SessionReplyWorkStatus.RUNNING,
+        locked_by=worker_id,
+        lock_until=2_000_000_000,
+        attempt_count=1,
+    )
+    db.add(work)
+    await db.flush()
+    assert work.id is not None
+    db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+    return work
 
 
 @pytest.mark.asyncio
@@ -167,6 +204,389 @@ async def test_terminal_auto_watch_registration_is_idempotent_and_preserves_manu
         )
         assert active_task is not None
         assert active_task.id in {manual_task_id, auto_task.id}
+
+
+@pytest.mark.asyncio
+async def test_terminal_auto_watch_registration_preserves_session_reply_work_origin(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+) -> None:
+    worker_id = "terminal-auto-watch-reply-worker"
+    async with terminal_auto_watch_database() as db:
+        work = await _create_claimed_reply_work(db, worker_id=worker_id)
+
+        await ensure_terminal_auto_watch(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            terminal_session_id=TERMINAL_SESSION_ID,
+            after_offset=AFTER_OFFSET,
+            session_status=TerminalSessionStatus.RUNNING,
+        )
+
+        tasks = await _terminal_watch_tasks(db)
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task.extra["origin_work_id"] == work.id
+        assert task.extra["origin_work_identity"] == work.dedupe_key
+        assert task.status == BackgroundTaskStatus.PENDING
+        assert task.reply_status == BackgroundTaskReplyStatus.PENDING
+
+        persisted_work = await db.get(SessionReplyWorkItem, work.id)
+        assert persisted_work is not None
+        assert persisted_work.status == SessionReplyWorkStatus.RUNNING
+        assert persisted_work.locked_by == worker_id
+
+
+@pytest.mark.parametrize("manual_status", [BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING])
+@pytest.mark.asyncio
+async def test_terminal_auto_watch_reply_is_suppressed_by_active_manual_watch(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    manual_status: BackgroundTaskStatus,
+) -> None:
+    monkeypatch.setattr(reply_trigger_module, "AsyncSessionLocal", terminal_auto_watch_database)
+
+    async with terminal_auto_watch_database() as db:
+        manual_task = await background_task_crud.create_task(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            tool_call_id="manual-terminal-watch-call",
+            tool_name=TERMINAL_WATCH_TOOL_NAME,
+            arguments={
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "after_offset": 0,
+                "condition": "process_exit",
+            },
+            auto_reply=False,
+            extra={"source": "model"},
+        )
+        manual_task.status = manual_status
+        if manual_status == BackgroundTaskStatus.RUNNING:
+            manual_task.locked_by = "manual-terminal-watch-worker"
+            manual_task.lock_until = 2_000_000_000
+        db.add(manual_task)
+        await db.commit()
+
+        await ensure_terminal_auto_watch(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            terminal_session_id=TERMINAL_SESSION_ID,
+            after_offset=AFTER_OFFSET,
+            session_status=TerminalSessionStatus.RUNNING,
+        )
+        auto_task = await background_task_crud.get_active_terminal_watch(
+            db,
+            UID,
+            SESSION_ID,
+            TERMINAL_SESSION_ID,
+            automatic_only=True,
+        )
+        assert auto_task is not None
+        assert auto_task.id is not None
+        auto_task_id = auto_task.id
+        manual_task_id = manual_task.id
+        assert manual_task_id is not None
+
+        claimed = await background_task_crud.try_claim(
+            db,
+            task_id=auto_task_id,
+            worker_id="terminal-auto-watch-task-worker",
+            lease_seconds=300,
+        )
+        assert claimed is not None
+        assert await background_task_crud.mark_succeeded(
+            db,
+            task_id=auto_task_id,
+            worker_id="terminal-auto-watch-task-worker",
+            result={
+                "status": "succeeded",
+                "tool_name": TERMINAL_WATCH_TOOL_NAME,
+                "content": {"event": "process_exit", "eof": True, "next_offset": AFTER_OFFSET},
+            },
+            auto_reply=True,
+        )
+
+    await reply_trigger_module.trigger_background_task_reply(auto_task_id)
+
+    async with terminal_auto_watch_database() as db:
+        persisted_manual = await db.get(BackgroundTask, manual_task_id)
+        persisted_auto = await db.get(BackgroundTask, auto_task_id)
+        result_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == SESSION_ID,
+                        Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        summary_work_items = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == SESSION_ID,
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert persisted_manual is not None
+    assert persisted_manual.status == manual_status
+    assert persisted_auto is not None
+    assert persisted_auto.status == BackgroundTaskStatus.SUCCEEDED
+    assert persisted_auto.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+    assert result_messages == []
+    assert summary_work_items == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_auto_watch_reply_is_not_suppressed_by_manual_watch_on_other_terminal(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reply_trigger_module, "AsyncSessionLocal", terminal_auto_watch_database)
+
+    async with terminal_auto_watch_database() as db:
+        manual_task = await background_task_crud.create_task(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            tool_call_id="manual-terminal-watch-call",
+            tool_name=TERMINAL_WATCH_TOOL_NAME,
+            arguments={
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "after_offset": 0,
+                "condition": "process_exit",
+            },
+            auto_reply=False,
+            extra={"source": "model"},
+        )
+        manual_task_id = manual_task.id
+        assert manual_task_id is not None
+        assert manual_task.status == BackgroundTaskStatus.PENDING
+
+        await ensure_terminal_auto_watch(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            terminal_session_id=SECOND_TERMINAL_SESSION_ID,
+            after_offset=AFTER_OFFSET,
+            session_status=TerminalSessionStatus.RUNNING,
+        )
+        auto_task = await background_task_crud.get_active_terminal_watch(
+            db,
+            UID,
+            SESSION_ID,
+            SECOND_TERMINAL_SESSION_ID,
+            automatic_only=True,
+        )
+        assert auto_task is not None
+        assert auto_task.id is not None
+        auto_task_id = auto_task.id
+        assert auto_task.status == BackgroundTaskStatus.PENDING
+        assert auto_task.extra.get("auto_terminal_watch") is True
+        assert auto_task.extra.get("terminal_session_id") == SECOND_TERMINAL_SESSION_ID
+
+        claimed = await background_task_crud.try_claim(
+            db,
+            task_id=auto_task_id,
+            worker_id="terminal-auto-watch-other-terminal-worker",
+            lease_seconds=300,
+        )
+        assert claimed is not None
+        assert await background_task_crud.mark_succeeded(
+            db,
+            task_id=auto_task_id,
+            worker_id="terminal-auto-watch-other-terminal-worker",
+            result={
+                "status": "succeeded",
+                "tool_name": TERMINAL_WATCH_TOOL_NAME,
+                "content": {
+                    "event": "process_exit",
+                    "eof": True,
+                    "next_offset": AFTER_OFFSET,
+                    "terminal_session_id": SECOND_TERMINAL_SESSION_ID,
+                },
+            },
+            auto_reply=True,
+        )
+        await db.refresh(auto_task)
+        assert auto_task.status == BackgroundTaskStatus.SUCCEEDED
+        assert auto_task.reply_status == BackgroundTaskReplyStatus.PENDING
+
+    await reply_trigger_module.trigger_background_task_reply(auto_task_id)
+
+    async with terminal_auto_watch_database() as db:
+        persisted_manual = await db.get(BackgroundTask, manual_task_id)
+        persisted_auto = await db.get(BackgroundTask, auto_task_id)
+        result_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == SESSION_ID,
+                        Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        summary_work_items = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == SESSION_ID,
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert persisted_manual is not None
+    assert persisted_manual.status == BackgroundTaskStatus.PENDING
+    assert persisted_auto is not None
+    assert persisted_auto.status == BackgroundTaskStatus.SUCCEEDED
+    assert persisted_auto.reply_status == BackgroundTaskReplyStatus.RUNNING
+    assert len(result_messages) == 1
+    result_message = result_messages[0]
+    assert result_message.type == MessageType.BACKGROUND_TASK_RESULT
+    assert len(summary_work_items) == 1
+    summary_work = summary_work_items[0]
+    assert summary_work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
+    assert summary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert summary_work.source_id == str(auto_task_id)
+
+
+@pytest.mark.asyncio
+async def test_terminal_auto_watch_replies_group_by_origin_work_across_terminals(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reply_trigger_module, "AsyncSessionLocal", terminal_auto_watch_database)
+    worker_id = "terminal-auto-watch-group-worker"
+
+    async with terminal_auto_watch_database() as db:
+        db.add(SessionReplySequence(session_id=SESSION_ID, next_sequence_no=3))
+        await db.commit()
+        work = await _create_claimed_reply_work(db, worker_id=worker_id)
+
+        for terminal_session_id in (TERMINAL_SESSION_ID, SECOND_TERMINAL_SESSION_ID):
+            await ensure_terminal_auto_watch(
+                db,
+                uid=UID,
+                session_id=SESSION_ID,
+                profile_id=PROFILE_ID,
+                terminal_session_id=terminal_session_id,
+                after_offset=AFTER_OFFSET,
+                session_status=TerminalSessionStatus.RUNNING,
+            )
+
+        auto_tasks = sorted(await _terminal_watch_tasks(db), key=lambda task: task.id or 0)
+        assert len(auto_tasks) == 2
+        assert {task.extra["terminal_session_id"] for task in auto_tasks} == {
+            TERMINAL_SESSION_ID,
+            SECOND_TERMINAL_SESSION_ID,
+        }
+        assert all(task.extra["origin_work_id"] == work.id for task in auto_tasks)
+        assert all(task.extra["origin_work_identity"] == work.dedupe_key for task in auto_tasks)
+
+        task_ids = [task.id for task in auto_tasks]
+        assert all(task_id is not None for task_id in task_ids)
+        for task in auto_tasks:
+            assert task.id is not None
+            claimed = await background_task_crud.try_claim(
+                db,
+                task_id=task.id,
+                worker_id="terminal-auto-watch-task-worker",
+                lease_seconds=300,
+            )
+            assert claimed is not None
+            assert await background_task_crud.mark_succeeded(
+                db,
+                task_id=task.id,
+                worker_id="terminal-auto-watch-task-worker",
+                result={
+                    "status": "succeeded",
+                    "tool_name": TERMINAL_WATCH_TOOL_NAME,
+                    "content": {
+                        "event": "process_exit",
+                        "eof": True,
+                        "next_offset": AFTER_OFFSET,
+                        "terminal_session_id": task.extra["terminal_session_id"],
+                    },
+                },
+                auto_reply=True,
+            )
+
+        first_task_id, second_task_id = task_ids
+        assert first_task_id is not None
+        assert second_task_id is not None
+        await reply_trigger_module.trigger_background_task_reply(first_task_id)
+        await reply_trigger_module.trigger_background_task_reply(second_task_id)
+        assert await prepare_terminal_auto_watch_resume(db, work, worker_id)
+
+    async with terminal_auto_watch_database() as db:
+        persisted_tasks = list((await db.execute(select(BackgroundTask).where(BackgroundTask.id.in_(task_ids)).order_by(BackgroundTask.id))).scalars().all())
+        summary_work_items = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == SESSION_ID,
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        result_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == SESSION_ID,
+                        Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        persisted_work = await db.get(SessionReplyWorkItem, work.id)
+
+    assert len(persisted_tasks) == 2
+    assert all(task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED for task in persisted_tasks)
+    assert all(task.extra["terminal_auto_watch_routed"] is True for task in persisted_tasks)
+    assert summary_work_items == []
+    assert len(result_messages) == 2
+    result_payloads = [json.loads(message.content) for message in result_messages]
+    assert all(payload["type"] == "background_tool_result" for payload in result_payloads)
+    assert all(payload["ui_only"] is True for payload in result_payloads)
+    assert {payload["task_id"] for payload in result_payloads} == set(task_ids)
+
+    assert persisted_work is not None
+    assert persisted_work.status == SessionReplyWorkStatus.RUNNING
+    checkpoint = (persisted_work.execution_state or {}).get("dispatcher_checkpoint") or {}
+    assert checkpoint["reload_history"] is True
+    external_resume_messages = checkpoint.get("external_resume_messages")
+    assert isinstance(external_resume_messages, list)
+    assert len(external_resume_messages) == 1
+    resume_payload = json.loads(external_resume_messages[0]["content"])
+    assert {item["task_id"] for item in resume_payload["tasks"]} == set(task_ids)
 
 
 @pytest.mark.parametrize(

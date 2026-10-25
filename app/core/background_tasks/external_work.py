@@ -15,6 +15,7 @@ from app.core.crud.task.interrupted import interrupt_background_tasks
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT, PROMPT_TOOL_INTERRUPTED, TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
+from app.core.terminal.schemas import TERMINAL_SESSION_FINAL_STATUSES, TerminalSessionStatus
 from app.core.utils.background_task_result import build_background_task_failure_result
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.time import get_local_time
@@ -34,6 +35,46 @@ def _unknown_error() -> str:
 
 def _is_positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_non_negative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _terminal_auto_watch_continuation(task: BackgroundTask) -> dict[str, Any] | None:
+    if task.tool_name != TERMINAL_WATCH_TOOL_NAME or _status_value(task.status) != BackgroundTaskStatus.SUCCEEDED.value:
+        return None
+    extra = task.extra if isinstance(task.extra, dict) else {}
+    if extra.get("auto_terminal_watch") is True:
+        return None
+    result = task.result if isinstance(task.result, dict) else None
+    content = result.get("content") if result is not None else None
+    if not isinstance(content, dict):
+        return None
+    terminal_session_id = content.get("terminal_session_id")
+    if not isinstance(terminal_session_id, str) or not terminal_session_id.strip():
+        return None
+    try:
+        session_status = TerminalSessionStatus(content.get("session_status"))
+    except (TypeError, ValueError):
+        return None
+    if session_status in TERMINAL_SESSION_FINAL_STATUSES:
+        return None
+    after_offset = content.get("next_offset")
+    if not _is_non_negative_int(after_offset):
+        arguments = task.arguments if isinstance(task.arguments, dict) else {}
+        after_offset = arguments.get("after_offset")
+    if not _is_non_negative_int(after_offset):
+        return None
+    return {
+        "uid": task.uid,
+        "session_id": task.session_id,
+        "profile_id": task.profile_id,
+        "terminal_session_id": terminal_session_id,
+        "after_offset": after_offset,
+        "origin_work_id": extra.get("origin_work_id"),
+        "origin_work_identity": extra.get("origin_work_identity"),
+    }
 
 
 def _slot(value: Any) -> tuple[int, str, str, int, str | None]:
@@ -288,6 +329,10 @@ async def resume_external_work_for_task(task_id: int) -> bool:
         if not _is_positive_int(work_id) or not isinstance(identity, str) or not identity.strip():
             return False
         uid, session_id = task.uid, task.session_id
+        continuation = _terminal_auto_watch_continuation(task)
+        if continuation is not None:
+            await background_task_crud.create_terminal_auto_watch(db, **continuation, commit=False)
+            await db.commit()
     return await _resume_waiting(work_id, uid, session_id, identity)
 
 

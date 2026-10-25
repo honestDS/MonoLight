@@ -130,6 +130,8 @@ async def _resume_external_task_if_bound(task: BackgroundTask) -> None:
         return
     if not isinstance(origin_work_id, int) or isinstance(origin_work_id, bool) or origin_work_id <= 0:
         return
+    if extra.get("auto_terminal_watch") is True:
+        return
     try:
         await resume_external_work_for_task(task_id)
     except Exception as exc:
