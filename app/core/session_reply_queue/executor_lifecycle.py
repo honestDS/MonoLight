@@ -3,6 +3,7 @@ import time
 from sqlalchemy import update
 
 from app.core.background_tasks.external_work import resume_external_work_for_task
+from app.core.background_tasks.terminal_watch_reply import prepare_terminal_auto_watch_resume
 from app.core.constants import (
     ERR_INTERNAL_SERVER_ERROR,
     ERR_LLM_UNEXPECTED_ERROR,
@@ -55,6 +56,10 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
             return
         db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
+
+        if isinstance(work.execution_state, dict) and work.execution_state.get("terminal_auto_resume") is True:
+            if not await prepare_terminal_auto_watch_resume(db, work, worker_id):
+                return
 
         persisted_result = await _get_persisted_result(db, work)
         if persisted_result is not None:
@@ -138,16 +143,37 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             )
             task = await background_task_crud.get(db, int(work.source_id))
             if task is not None and task.tool_name == TERMINAL_WATCH_TOOL_NAME and isinstance(task.extra, dict) and task.extra.get("auto_terminal_watch") is True:
-                await background_task_crud.create_terminal_auto_watch(
-                    db,
-                    uid=task.uid,
-                    session_id=task.session_id,
-                    profile_id=task.profile_id,
-                    terminal_session_id=task.arguments["terminal_session_id"],
-                    after_offset=task.arguments["after_offset"],
-                    previous_task_id=task.id,
-                    commit=False,
-                )
+                execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+                raw_task_ids = execution_state.get("terminal_auto_watch_task_ids")
+                if isinstance(raw_task_ids, list):
+                    task_ids: list[int] = []
+                    for task_id in raw_task_ids:
+                        if isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0 and task_id not in task_ids:
+                            task_ids.append(task_id)
+                else:
+                    task_ids = [task.id] if isinstance(task.id, int) and not isinstance(task.id, bool) and task.id > 0 else []
+
+                for task_id in task_ids:
+                    candidate = task if task_id == task.id else await background_task_crud.get(db, task_id)
+                    if candidate is None or candidate.uid != work.uid or candidate.session_id != work.session_id or candidate.profile_id != work.profile_id or candidate.tool_name != TERMINAL_WATCH_TOOL_NAME or not isinstance(candidate.extra, dict) or candidate.extra.get("auto_terminal_watch") is not True:
+                        continue
+                    arguments = candidate.arguments if isinstance(candidate.arguments, dict) else {}
+                    terminal_session_id = arguments.get("terminal_session_id")
+                    after_offset = arguments.get("after_offset")
+                    if not isinstance(terminal_session_id, str) or not terminal_session_id.strip() or not isinstance(after_offset, int) or isinstance(after_offset, bool) or after_offset < 0:
+                        continue
+                    await background_task_crud.create_terminal_auto_watch(
+                        db,
+                        uid=candidate.uid,
+                        session_id=candidate.session_id,
+                        profile_id=candidate.profile_id,
+                        terminal_session_id=terminal_session_id,
+                        after_offset=after_offset,
+                        previous_task_id=candidate.id,
+                        origin_work_id=candidate.extra.get("origin_work_id"),
+                        origin_work_identity=candidate.extra.get("origin_work_identity"),
+                        commit=False,
+                    )
         await db.commit()
 
 

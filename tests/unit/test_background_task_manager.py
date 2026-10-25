@@ -289,3 +289,301 @@ async def test_stop_cancels_running_background_tasks():
     assert reply_task.cancelled()
     assert manager._running_by_profile == {}
     assert manager._running_replies == set()
+
+
+@pytest.mark.parametrize(
+    "dispatch_kind",
+    [
+        pytest.param("task", id="task"),
+        pytest.param("observer", id="observer"),
+        pytest.param("reply", id="reply"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_deduplicates_running_ids_and_allows_reschedule(monkeypatch, dispatch_kind):
+    manager = BackgroundTaskManager()
+    task_id = 101
+    pending = SimpleNamespace(id=task_id)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+    list_calls = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return None
+
+    async def external_runner(received_task_id):
+        assert received_task_id == task_id
+        calls.append(received_task_id)
+        started.set()
+        await release.wait()
+
+    async def list_pending(db, *, profile_id, limit, observer):
+        assert profile_id == 9
+        list_calls.append(observer)
+        return [pending] if observer == (dispatch_kind == "observer") else []
+
+    async def list_pending_replies(db, *, limit):
+        list_calls.append(limit)
+        return [pending]
+
+    monkeypatch.setattr(manager_module, "AsyncSessionLocal", SessionContext)
+    profile = SimpleNamespace(
+        id=9,
+        configs={"tool": {"background_task_max_concurrency": 2}},
+    )
+
+    if dispatch_kind == "reply":
+        monkeypatch.setattr(manager_module, "BACKGROUND_TASK_REPLY_MAX_CONCURRENCY", 2)
+        monkeypatch.setattr(manager_module.background_task_crud, "list_pending_replies", list_pending_replies)
+        monkeypatch.setattr(manager_module, "trigger_background_task_reply", external_runner)
+
+        async def dispatch():
+            await manager.dispatch_pending_replies()
+
+        def active_tasks():
+            return manager._running_replies
+
+        running_ids = manager._running_reply_task_ids
+    else:
+        monkeypatch.setattr(manager_module.background_task_crud, "list_pending", list_pending)
+        monkeypatch.setattr(manager_module, "run_background_task", external_runner)
+        if dispatch_kind == "observer":
+            monkeypatch.setattr(manager_module, "TERMINAL_WATCH_MAX_CONCURRENCY", 2)
+
+        async def dispatch():
+            await manager.schedule(profile)
+
+        if dispatch_kind == "observer":
+
+            def active_tasks():
+                return manager._running_observers
+        else:
+
+            def active_tasks():
+                return manager._running_by_profile.get(profile.id, set())
+
+        running_ids = manager._running_execution_task_ids
+
+    await dispatch()
+    await started.wait()
+    first_task = next(iter(active_tasks()))
+
+    await dispatch()
+
+    assert calls == [task_id]
+    assert task_id in running_ids
+    assert len(active_tasks()) == 1
+    if dispatch_kind == "reply":
+        assert len(list_calls) == 2
+    else:
+        assert list_calls.count(dispatch_kind == "observer") == 2
+
+    release.set()
+    await first_task
+    assert task_id not in running_ids
+    assert not active_tasks()
+
+    started.clear()
+    release.clear()
+    await dispatch()
+    await started.wait()
+    assert calls == [task_id, task_id]
+    second_task = next(iter(active_tasks()))
+
+    release.set()
+    await second_task
+    assert task_id not in running_ids
+    assert not active_tasks()
+
+
+@pytest.mark.parametrize(
+    "dispatch_kind",
+    [
+        pytest.param("task", id="task"),
+        pytest.param("observer", id="observer"),
+        pytest.param("reply", id="reply"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_reclaims_ids_after_external_failure(monkeypatch, dispatch_kind):
+    manager = BackgroundTaskManager()
+    task_id = 202
+    pending = SimpleNamespace(id=task_id)
+    calls = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return None
+
+    async def external_runner(received_task_id):
+        assert received_task_id == task_id
+        calls.append(received_task_id)
+        if len(calls) == 1:
+            raise RuntimeError("background task failed")
+
+    async def list_pending(db, *, profile_id, limit, observer):
+        return [pending] if observer == (dispatch_kind == "observer") else []
+
+    async def list_pending_replies(db, *, limit):
+        return [pending]
+
+    monkeypatch.setattr(manager_module, "AsyncSessionLocal", SessionContext)
+    profile = SimpleNamespace(
+        id=9,
+        configs={"tool": {"background_task_max_concurrency": 2}},
+    )
+
+    if dispatch_kind == "reply":
+        monkeypatch.setattr(manager_module, "BACKGROUND_TASK_REPLY_MAX_CONCURRENCY", 2)
+        monkeypatch.setattr(manager_module.background_task_crud, "list_pending_replies", list_pending_replies)
+        monkeypatch.setattr(manager_module, "trigger_background_task_reply", external_runner)
+
+        async def dispatch():
+            await manager.dispatch_pending_replies()
+
+        def active_tasks():
+            return manager._running_replies
+
+        running_ids = manager._running_reply_task_ids
+    else:
+        monkeypatch.setattr(manager_module.background_task_crud, "list_pending", list_pending)
+        monkeypatch.setattr(manager_module, "run_background_task", external_runner)
+        if dispatch_kind == "observer":
+            monkeypatch.setattr(manager_module, "TERMINAL_WATCH_MAX_CONCURRENCY", 2)
+
+        async def dispatch():
+            await manager.schedule(profile)
+
+        if dispatch_kind == "observer":
+
+            def active_tasks():
+                return manager._running_observers
+        else:
+
+            def active_tasks():
+                return manager._running_by_profile.get(profile.id, set())
+
+        running_ids = manager._running_execution_task_ids
+
+    await dispatch()
+    first_task = next(iter(active_tasks()))
+    await first_task
+
+    assert not first_task.cancelled()
+    assert first_task.exception() is None
+    assert calls == [task_id]
+    assert task_id not in running_ids
+    assert not active_tasks()
+
+    await dispatch()
+    second_task = next(iter(active_tasks()))
+    await second_task
+
+    assert calls == [task_id, task_id]
+    assert task_id not in running_ids
+    assert not active_tasks()
+
+
+@pytest.mark.parametrize(
+    "dispatch_kind",
+    [
+        pytest.param("task", id="task"),
+        pytest.param("observer", id="observer"),
+        pytest.param("reply", id="reply"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_propagates_cancellation_and_reclaims_ids(monkeypatch, dispatch_kind):
+    manager = BackgroundTaskManager()
+    task_id = 303
+    pending = SimpleNamespace(id=task_id)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return None
+
+    async def external_runner(received_task_id):
+        assert received_task_id == task_id
+        calls.append(received_task_id)
+        started.set()
+        await release.wait()
+
+    async def list_pending(db, *, profile_id, limit, observer):
+        return [pending] if observer == (dispatch_kind == "observer") else []
+
+    async def list_pending_replies(db, *, limit):
+        return [pending]
+
+    monkeypatch.setattr(manager_module, "AsyncSessionLocal", SessionContext)
+    profile = SimpleNamespace(
+        id=9,
+        configs={"tool": {"background_task_max_concurrency": 2}},
+    )
+
+    if dispatch_kind == "reply":
+        monkeypatch.setattr(manager_module, "BACKGROUND_TASK_REPLY_MAX_CONCURRENCY", 2)
+        monkeypatch.setattr(manager_module.background_task_crud, "list_pending_replies", list_pending_replies)
+        monkeypatch.setattr(manager_module, "trigger_background_task_reply", external_runner)
+
+        async def dispatch():
+            await manager.dispatch_pending_replies()
+
+        def active_tasks():
+            return manager._running_replies
+
+        running_ids = manager._running_reply_task_ids
+    else:
+        monkeypatch.setattr(manager_module.background_task_crud, "list_pending", list_pending)
+        monkeypatch.setattr(manager_module, "run_background_task", external_runner)
+        if dispatch_kind == "observer":
+            monkeypatch.setattr(manager_module, "TERMINAL_WATCH_MAX_CONCURRENCY", 2)
+
+        async def dispatch():
+            await manager.schedule(profile)
+
+        if dispatch_kind == "observer":
+
+            def active_tasks():
+                return manager._running_observers
+        else:
+
+            def active_tasks():
+                return manager._running_by_profile.get(profile.id, set())
+
+        running_ids = manager._running_execution_task_ids
+
+    await dispatch()
+    await started.wait()
+    first_task = next(iter(active_tasks()))
+    first_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+
+    assert task_id not in running_ids
+    assert not active_tasks()
+
+    started.clear()
+    await dispatch()
+    await started.wait()
+    assert calls == [task_id, task_id]
+    second_task = next(iter(active_tasks()))
+
+    release.set()
+    await second_task
+    assert task_id not in running_ids
+    assert not active_tasks()

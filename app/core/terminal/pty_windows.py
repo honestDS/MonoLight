@@ -34,6 +34,18 @@ _TERMINATE_WAIT_SECONDS = 0.2
 _CLOSE_STATUS_POLL_INTERVAL_SECONDS = 0.02
 
 
+def _reset_console_ctrl_handler() -> None:
+    """Best-effort restore of normal CTRL+C handling before ConPTY spawn."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
+    except (AttributeError, OSError):
+        pass
+
+
 class WindowsPtyDriver(PtyDriver):
     """Drive a process through a Windows ConPTY instance."""
 
@@ -83,7 +95,16 @@ class WindowsPtyDriver(PtyDriver):
                     )
                 )
 
-            arguments = subprocess.list2cmdline(self.config.argv[1:])
+            argv = self.config.argv
+            if len(argv) >= 5 and argv[1:4] == ("/d", "/s", "/c") and isinstance(argv[4], str) and argv[4]:
+                command = argv[4]
+                if command.lstrip().startswith('"'):
+                    cmdline = f' /d /s /c "{command}"'
+                else:
+                    cmdline = f" /d /s /c {command}"
+            else:
+                arguments = subprocess.list2cmdline(argv[1:])
+                cmdline = f" {arguments}" if arguments else None
             environment = "\0".join(f"{key}={value}" for key, value in self.config.env.items()) + "\0"
 
             pty = await asyncio.to_thread(
@@ -94,10 +115,11 @@ class WindowsPtyDriver(PtyDriver):
             )
             self._pty = pty
             try:
+                _reset_console_ctrl_handler()
                 spawned = await asyncio.to_thread(
                     pty.spawn,
                     executable,
-                    cmdline=f" {arguments}" if arguments else None,
+                    cmdline=cmdline,
                     cwd=self.config.cwd,
                     env=environment,
                 )
