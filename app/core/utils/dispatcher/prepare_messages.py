@@ -16,6 +16,12 @@ from app.core.utils.dispatcher.markdown_instruction import (
     build_user_runtime_instructions,
     ensure_user_runtime_instructions,
 )
+from app.core.utils.dispatcher.terminal_watch_snapshot import (
+    append_terminal_watch_snapshot,
+    load_current_terminal_watch_snapshot,
+    measure_terminal_watch_snapshot_tokens,
+    strip_terminal_watch_snapshots,
+)
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
@@ -88,7 +94,13 @@ async def prepare_messages(
         uid=uid,
     )
     summary_message = summary_state.as_message()
-    reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions)
+    terminal_watch_snapshot = await load_current_terminal_watch_snapshot(
+        db,
+        uid=uid,
+        session_id=session_id,
+        profile_id=getattr(profile, "id", None),
+    )
+    reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions) + measure_terminal_watch_snapshot_tokens(terminal_watch_snapshot)
     if summary_message is not None:
         reserved_tokens += estimate_tokens(str(summary_message.content or ""))
 
@@ -111,6 +123,9 @@ async def prepare_messages(
         messages.insert(0, summary_message)
     if current_msg is not None:
         messages.append(current_msg)
+
+    messages = strip_terminal_watch_snapshots(messages)
+    messages = append_terminal_watch_snapshot(messages, terminal_watch_snapshot)
 
     # 动态组装含有附件的多模态消息（默认不启用多模态，由 dispatcher 在渠道选择后重新处理）
     for idx, m in enumerate(messages):

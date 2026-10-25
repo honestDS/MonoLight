@@ -3,6 +3,8 @@ import hashlib
 import json
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.constants import (
     ERR_TERMINAL_COMMAND_TIMEOUT,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
@@ -12,12 +14,14 @@ from app.core.constants import (
     TERMINAL_STATUS_TOOL_NAME,
     TERMINAL_WRITE_TOOL_NAME,
 )
+from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
 from app.core.i18n import t
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import (
     TerminalAction,
     TerminalActionReceipt,
     TerminalCloseRequest,
+    TerminalOutputReadStatus,
     TerminalReadRequest,
     TerminalReadResult,
     TerminalResizeRequest,
@@ -276,6 +280,17 @@ class TerminalReadExecutor(_TerminalExecutor):
 
     async def execute(self, terminal_session_id: str, offset: int = 0, max_bytes: int = 65_536) -> str:
         result = await self._read_once(terminal_session_id, offset, max_bytes)
+        profile_id = getattr(self.profile, "id", None)
+        if result.eof is True and result.read_status is not TerminalOutputReadStatus.EXPIRED and result.next_offset == result.latest_offset and isinstance(self.db, AsyncSession) and isinstance(profile_id, int) and not isinstance(profile_id, bool) and profile_id > 0:
+            await terminal_watch_reply_crud.record_terminal_read(
+                self.db,
+                uid=self.uid,
+                session_id=self.session_id,
+                profile_id=profile_id,
+                terminal_session_id=result.terminal_session_id,
+                start_offset=result.start_offset,
+                next_offset=result.next_offset,
+            )
         return self._dump_model(result)
 
 

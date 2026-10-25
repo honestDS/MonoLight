@@ -89,6 +89,31 @@ export function useChatHistory({
     let insertPosition = 0
     let changed = false
     const addMessage = message => {
+      const messageId = Number(message?.db_id)
+      const hasMessageId = Number.isSafeInteger(messageId) && messageId > 0
+      const messageCreatedAt = Number(message?.created_at)
+      const hasMessageCreatedAt = Number.isFinite(messageCreatedAt) && messageCreatedAt > 0
+      const laterPersistedIndex = hasMessageId
+        ? mergedMessages.findIndex(existing => {
+            const existingId = Number(existing?.db_id)
+            if (!Number.isSafeInteger(existingId) || existingId <= 0) return false
+
+            const existingCreatedAt = Number(existing?.created_at)
+            const hasExistingCreatedAt = Number.isFinite(existingCreatedAt) && existingCreatedAt > 0
+            if (hasMessageCreatedAt && hasExistingCreatedAt) {
+              return existingCreatedAt > messageCreatedAt
+                || (existingCreatedAt === messageCreatedAt && existingId > messageId)
+            }
+            return existingId > messageId
+          })
+        : -1
+
+      if (laterPersistedIndex !== -1) {
+        mergedMessages.splice(laterPersistedIndex, 0, message)
+        if (prepend && laterPersistedIndex <= insertPosition) insertPosition += 1
+        return
+      }
+
       if (prepend) {
         mergedMessages.splice(insertPosition, 0, message)
         insertPosition += 1

@@ -89,6 +89,32 @@ async def route_terminal_auto_watch_reply(db: AsyncSession, task: BackgroundTask
     if extra.get("auto_terminal_watch") is not True or "origin_work_id" not in extra:
         return False
 
+    watch = _watch_arguments(task)
+    result = task.result if isinstance(task.result, dict) else {}
+    result_content = result.get("content")
+    result_next_offset = result_content.get("next_offset") if isinstance(result_content, dict) else None
+    if (
+        watch is not None
+        and isinstance(result_next_offset, int)
+        and not isinstance(result_next_offset, bool)
+        and result_next_offset >= 0
+        and await terminal_watch_reply_crud.has_delivered_terminal_read(
+            db,
+            uid=task.uid,
+            session_id=task.session_id,
+            profile_id=task.profile_id,
+            terminal_session_id=watch[0],
+            start_offset=watch[1],
+            next_offset=result_next_offset,
+        )
+    ):
+        await _restore_reply_inbox(db, task)
+        consumed = await terminal_watch_reply_crud.consume_result(db, task)
+        if consumed and result_content.get("eof") is not True:
+            await _continue_watch(db, task)
+        await db.commit()
+        return True
+
     work = await terminal_watch_reply_crud.lock_origin(db, task)
     await db.refresh(task)
     task_status = _status_value(task.status)

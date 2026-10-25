@@ -238,6 +238,146 @@ async def test_terminal_auto_watch_registration_preserves_session_reply_work_ori
         assert persisted_work.locked_by == worker_id
 
 
+@pytest.mark.asyncio
+async def test_terminal_auto_watch_reply_is_suppressed_after_explicit_terminal_read(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reply_trigger_module, "AsyncSessionLocal", terminal_auto_watch_database)
+
+    async with terminal_auto_watch_database() as db:
+        assistant_message = Message(
+            session_id=SESSION_ID,
+            uid=UID,
+            profile_id=PROFILE_ID,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="terminal output already read",
+            is_processed=True,
+        )
+        db.add(assistant_message)
+        await db.flush()
+        assert assistant_message.id is not None
+        assistant_message_id = assistant_message.id
+
+        work = SessionReplyWorkItem(
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            sequence_no=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="explicit-terminal-read",
+            dedupe_key="terminal-auto-watch-explicit-read",
+            status=SessionReplyWorkStatus.SUCCEEDED,
+            result_message_id=assistant_message.id,
+            execution_state={
+                "terminal_reads": {
+                    TERMINAL_SESSION_ID: {
+                        "start_offset": 250,
+                        "next_offset": 300,
+                    }
+                }
+            },
+            event_sent=True,
+        )
+        db.add(work)
+        await db.flush()
+        assert work.id is not None
+        work_id = work.id
+
+        auto_task = await background_task_crud.create_task(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            tool_call_id="terminal-auto-watch-late-reply",
+            tool_name=TERMINAL_WATCH_TOOL_NAME,
+            arguments={
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "after_offset": 200,
+                "condition": "process_exit",
+            },
+            auto_reply=True,
+            extra={
+                "source": "terminal_auto_watch",
+                "auto_terminal_watch": True,
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "origin_work_id": work.id,
+                "origin_work_identity": work.dedupe_key,
+            },
+            commit=False,
+        )
+        assert auto_task.id is not None
+        auto_task_id = auto_task.id
+
+        worker_id = "terminal-auto-watch-late-reply-worker"
+        claimed = await background_task_crud.try_claim(
+            db,
+            task_id=auto_task.id,
+            worker_id=worker_id,
+            lease_seconds=300,
+        )
+        assert claimed is not None
+        assert await background_task_crud.mark_succeeded(
+            db,
+            task_id=auto_task.id,
+            worker_id=worker_id,
+            result={
+                "status": "succeeded",
+                "tool_name": TERMINAL_WATCH_TOOL_NAME,
+                "content": {
+                    "event": "process_exit",
+                    "eof": True,
+                    "next_offset": 300,
+                },
+            },
+            auto_reply=True,
+        )
+        await db.refresh(auto_task)
+        assert auto_task.status == BackgroundTaskStatus.SUCCEEDED
+        assert auto_task.reply_status == BackgroundTaskReplyStatus.PENDING
+
+    await reply_trigger_module.trigger_background_task_reply(auto_task_id)
+
+    async with terminal_auto_watch_database() as db:
+        persisted_auto = await db.get(BackgroundTask, auto_task_id)
+        persisted_work = await db.get(SessionReplyWorkItem, work_id)
+        result_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == SESSION_ID,
+                        Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        summary_work_items = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == SESSION_ID,
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert persisted_auto is not None
+    assert persisted_auto.status == BackgroundTaskStatus.SUCCEEDED
+    assert persisted_auto.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+    assert persisted_work is not None
+    assert persisted_work.status == SessionReplyWorkStatus.SUCCEEDED
+    assert persisted_work.result_message_id == assistant_message_id
+    assert result_messages == []
+    assert summary_work_items == []
+
+
 @pytest.mark.parametrize("manual_status", [BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING])
 @pytest.mark.asyncio
 async def test_terminal_auto_watch_reply_is_suppressed_by_active_manual_watch(
@@ -603,14 +743,54 @@ async def test_terminal_auto_watch_replies_group_by_origin_work_across_terminals
             id="timeout-renews",
         ),
         pytest.param(
+            {
+                "event": "output_gap",
+                "eof": False,
+                "next_offset": 19,
+                "observed_at": "2026-10-24T21:40:00",
+            },
+            19,
+            id="output-gap-renews",
+        ),
+        pytest.param(
+            {
+                "event": "observation_error",
+                "eof": False,
+                "next_offset": 19,
+                "observed_at": "2026-10-24T21:40:00",
+            },
+            19,
+            id="observation-error-renews",
+        ),
+        pytest.param(
             {"event": "process_exit", "eof": True, "next_offset": 19},
             None,
             id="process-exit-stops",
         ),
         pytest.param(
+            {"event": "output_gap", "eof": True, "next_offset": 19},
+            None,
+            id="output-gap-eof-stops",
+        ),
+        pytest.param(
+            {"event": "observation_error", "eof": True, "next_offset": 19},
+            None,
+            id="observation-error-eof-stops",
+        ),
+        pytest.param(
             {"event": "timeout", "eof": True, "next_offset": 19},
             None,
             id="eof-stops",
+        ),
+        pytest.param(
+            {
+                "event": "unknown",
+                "eof": False,
+                "next_offset": 19,
+                "observed_at": "2026-10-24T21:40:00",
+            },
+            None,
+            id="unknown-event-stops",
         ),
     ],
 )

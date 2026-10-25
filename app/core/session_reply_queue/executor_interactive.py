@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from functools import partial
+from types import SimpleNamespace
 from typing import Any
 
 from app.core.constants import (
@@ -40,24 +41,43 @@ class _InteractiveWorkStreamEventState:
     dequeued_request_ids: set[str]
     turn_end_content_by_response_id: dict[str, str]
     tool_names_by_response_id: dict[str, list[str]]
+    work_id: int | None = None
+    uid: str | None = None
+    session_id: str | None = None
+    work_sequence_no: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.work_id is None or self.uid is None or self.session_id is None or self.work_sequence_no is None:
+            work_id = self.work.id
+            uid = self.work.uid
+            session_id = self.work.session_id
+            work_sequence_no = self.work.sequence_no
+            if self.work_id is None:
+                self.work_id = work_id
+            if self.uid is None:
+                self.uid = uid
+            if self.session_id is None:
+                self.session_id = session_id
+            if self.work_sequence_no is None:
+                self.work_sequence_no = work_sequence_no
 
 
 async def _persist_interactive_work_stream_event(
     stream_state: _InteractiveWorkStreamEventState,
     event: dict[str, Any],
 ) -> dict[str, Any]:
-    work = stream_state.work
+    work_id = stream_state.work_id
     persisted_event = {
         **event,
-        "session_id": work.session_id,
-        "work_id": work.id,
-        "work_sequence_no": work.sequence_no,
+        "session_id": stream_state.session_id,
+        "work_id": work_id,
+        "work_sequence_no": stream_state.work_sequence_no,
         "event_sequence_no": stream_state.next_sequence,
     }
     async with AsyncSessionLocal() as event_db:
         updated = await session_reply_work_item_crud.update_claimed(
             event_db,
-            work_id=work.id,
+            work_id=work_id,
             worker_id=stream_state.worker_id,
             values={},
             commit=False,
@@ -67,20 +87,23 @@ async def _persist_interactive_work_stream_event(
             raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
         if persisted_event["type"] == "llm_request_metadata":
             persisted_event = _metadata_with_work_order(
-                work,
+                SimpleNamespace(
+                    id=work_id,
+                    sequence_no=stream_state.work_sequence_no,
+                ),
                 persisted_event,
                 event_sequence_no=stream_state.next_sequence,
             )
             await session_crud.update_llm_request_metadata(
                 event_db,
-                session_id=work.session_id,
-                uid=work.uid,
+                session_id=stream_state.session_id,
+                uid=stream_state.uid,
                 metadata=persisted_event,
                 commit=False,
             )
         await session_reply_stream_event_crud.publish(
             event_db,
-            work_id=work.id,
+            work_id=work_id,
             sequence_no=stream_state.next_sequence,
             event=persisted_event,
             commit=False,
@@ -93,9 +116,9 @@ async def _persist_interactive_work_stream_event(
 async def _publish_newly_dequeued_request_ids(
     stream_state: _InteractiveWorkStreamEventState,
 ) -> None:
-    work = stream_state.work
+    work_id = stream_state.work_id
     async with AsyncSessionLocal() as request_db:
-        work_snapshot = await session_reply_work_item_crud.get(request_db, work.id)
+        work_snapshot = await session_reply_work_item_crud.get(request_db, work_id)
         if work_snapshot is None:
             raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
         request_ids = [request_id for request_id in get_work_request_ids(work_snapshot) if request_id not in stream_state.dequeued_request_ids]
@@ -105,8 +128,8 @@ async def _publish_newly_dequeued_request_ids(
         stream_state,
         {
             "type": "input_dequeued",
-            "session_id": work.session_id,
-            "work_id": work.id,
+            "session_id": stream_state.session_id,
+            "work_id": work_id,
             "request_ids": request_ids,
         },
     )
@@ -117,7 +140,6 @@ async def _publish_interactive_work_stream_event(
     stream_state: _InteractiveWorkStreamEventState,
     event: dict[str, Any],
 ) -> None:
-    work = stream_state.work
     if event.get("type") == "agent_loop_start":
         await _publish_newly_dequeued_request_ids(stream_state)
     persisted_event = await _persist_interactive_work_stream_event(stream_state, event)
@@ -148,7 +170,7 @@ async def _publish_interactive_work_stream_event(
     content = stream_state.turn_end_content_by_response_id.pop(response_id, None)
     if content is not None:
         stream_event["content"] = content
-    await send_session_stream_event(work.uid, work.session_id, stream_event)
+    await send_session_stream_event(stream_state.uid, stream_state.session_id, stream_event)
 
 
 async def _fetch_additional_foreground_user_messages(
@@ -160,7 +182,7 @@ async def _fetch_additional_foreground_user_messages(
 ) -> UserInputBatch | None:
     batch = await session_reply_queue_manager.absorb_contiguous_foreground_messages(
         db,
-        work_id=work.id,
+        work_id=stream_state.work_id,
         worker_id=worker_id,
     )
     if batch is not None:
@@ -197,6 +219,11 @@ async def _save_interactive_work_execution_checkpoint(
 ) -> None:
     active_audit_execution_present = SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint
     active_audit_execution = checkpoint.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
+    await ensure_session_reply_work_claim(db)
+    await db.refresh(work)
+    work_id = work.id
+    if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0:
+        raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
     state = {
         **(work.execution_state or {}),
         "dispatcher_checkpoint": checkpoint,
@@ -208,12 +235,13 @@ async def _save_interactive_work_execution_checkpoint(
             state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
     updated = await session_reply_work_item_crud.update_claimed(
         db,
-        work_id=work.id,
+        work_id=work_id,
         worker_id=worker_id,
         values={"execution_state": state},
     )
     if not updated:
         raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
+    work.id = work_id
     work.execution_state = state
 
 
@@ -230,19 +258,35 @@ async def _dispatch_interactive_work(
     allow_additional_user_messages: bool,
     execution_resume_state: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    work_id = work.id
+    uid = work.uid
+    session_id = work.session_id
+    work_sequence_no = work.sequence_no
+    if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0 or not isinstance(uid, str) or not uid or not isinstance(session_id, str) or not session_id or not isinstance(work_sequence_no, int) or isinstance(work_sequence_no, bool) or work_sequence_no <= 0:
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     await ensure_session_reply_work_claim(db, commit=True)
     execution_state = work.execution_state or {}
     stream_requested = bool((work.execution_state or {}).get("stream_requested"))
     context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
-        next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work.id) + 1
+        next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work_id) + 1
     stream_state = _InteractiveWorkStreamEventState(
         work=work,
+        work_id=work_id,
+        uid=uid,
+        session_id=session_id,
+        work_sequence_no=work_sequence_no,
         worker_id=worker_id,
         next_sequence=next_stream_sequence,
         dequeued_request_ids=set(),
         turn_end_content_by_response_id={},
         tool_names_by_response_id={},
+    )
+    metadata_work = SimpleNamespace(
+        id=work_id,
+        uid=uid,
+        session_id=session_id,
+        sequence_no=work_sequence_no,
     )
 
     expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))
@@ -251,10 +295,10 @@ async def _dispatch_interactive_work(
     dispatch_kwargs = {
         "db": db,
         "message": message,
-        "uid": work.uid,
-        "actor_uid": execution_state.get("actor_uid") or work.uid,
+        "uid": uid,
+        "actor_uid": execution_state.get("actor_uid") or uid,
         "actor_username": execution_state.get("actor_username"),
-        "session_id": work.session_id,
+        "session_id": session_id,
         "attachments": attachments or None,
         "session_source": str(execution_state.get("message_source") or "queue"),
         "persisted_initial_message": initial_message,
@@ -284,9 +328,9 @@ async def _dispatch_interactive_work(
         ),
         "context_summary_work_validity_checker": partial(
             _check_interactive_work_validity,
-            work_id=work.id,
-            session_id=work.session_id,
-            uid=work.uid,
+            work_id=work_id,
+            session_id=session_id,
+            uid=uid,
             profile_id=work.profile_id,
             worker_id=worker_id,
         ),
@@ -308,11 +352,11 @@ async def _dispatch_interactive_work(
             else None,
         )
         if isinstance(response.get("llm_request_metadata"), dict):
-            response["llm_request_metadata"] = _metadata_with_work_order(work, response["llm_request_metadata"])
+            response["llm_request_metadata"] = _metadata_with_work_order(metadata_work, response["llm_request_metadata"])
             await session_crud.update_llm_request_metadata(
                 db,
-                session_id=work.session_id,
-                uid=work.uid,
+                session_id=session_id,
+                uid=uid,
                 metadata=response["llm_request_metadata"],
                 commit=False,
             )
