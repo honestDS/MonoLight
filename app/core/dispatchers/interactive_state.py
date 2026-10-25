@@ -135,7 +135,7 @@ def build_interactive_dispatch_state(
         raise ValueError(t(ERR_MEMORY_RECALL_STATUS_INVALID))
     if resumed_memory_recall_status is not None and resumed_memory_recall_boundary is None:
         raise ValueError(t(ERR_MEMORY_RECALL_STATUS_BOUNDARY_REQUIRED))
-    if initial_message_type == MessageType.AUDIT_DECISION:
+    if initial_message_type in {MessageType.AUDIT_DECISION, MessageType.BACKGROUND_TASK_RESULT}:
         initial_memory_recall_boundary = resumed_memory_recall_boundary if resumed_memory_recall_boundary != initial_message_boundary else None
     else:
         initial_memory_recall_boundary = initial_message_boundary

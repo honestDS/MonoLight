@@ -37,7 +37,7 @@ from app.core.terminal.schemas import (
     TerminalSessionStatus,
 )
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
-from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -955,12 +955,8 @@ def test_confirmed_execution_reaudits_legacy_file_snapshot_without_presence_stat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "work_type",
-    [SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.SCHEDULED_TASK_SUMMARY],
-)
-async def test_background_reply_persists_and_clears_audit_binding(work_type, monkeypatch):
-    """后台和定时总结在工具执行前后应持久化并清除审计绑定。"""
+async def test_scheduled_reply_persists_and_clears_audit_binding(monkeypatch):
+    """定时总结在工具执行前后应持久化并清除审计绑定。"""
     work = SimpleNamespace(
         id=12,
         source_id="8",
@@ -971,24 +967,10 @@ async def test_background_reply_persists_and_clears_audit_binding(work_type, mon
         created_at=datetime(2026, 7, 20, 0, 0, 0),
         execution_state={},
     )
-    task = SimpleNamespace(extra={}, result={"status": "succeeded"}, tool_call_id="call-1", status="succeeded", tool_name="safe_tool", error=None)
     persisted_states = []
-
-    async def get_task(db, task_id):
-        return task
 
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
-
-    async def get_result(db, dedupe_key):
-        assert dedupe_key == "background-task:8:result"
-        return SimpleNamespace(
-            id=9,
-            uid=work.uid,
-            session_id=work.session_id,
-            profile_id=work.profile_id,
-            type=MessageType.BACKGROUND_TASK_RESULT,
-        )
 
     async def update_claimed(db, **kwargs):
         state = kwargs["values"]["execution_state"]
@@ -1000,20 +982,15 @@ async def test_background_reply_persists_and_clears_audit_binding(work_type, mon
         callback = kwargs["audit_execution_binding_callback"]
         await callback({"audit_record_id": 42, "claim_token": "claim-token"})
         await callback(None)
-        return InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"), [], []
+        return InternalMessage(role=MessageRole.ASSISTANT, content="定时总结"), [], []
 
-    monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_replies_module.message_crud, "get_by_dedupe_key", get_result)
     monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
     monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
 
-    if work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
-        response = await executor_replies_module._execute_background(object(), work, "worker-1")
-    else:
-        response = await executor_replies_module._execute_scheduled(object(), work, "worker-1")
+    response = await executor_replies_module._execute_scheduled(object(), work, "worker-1")
 
-    assert response["content"] == "后台总结"
+    assert response["content"] == "定时总结"
     assert persisted_states[0][SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] == {
         "audit_record_id": 42,
         "claim_token": "claim-token",
@@ -1022,7 +999,7 @@ async def test_background_reply_persists_and_clears_audit_binding(work_type, mon
 
 
 @pytest.mark.asyncio
-async def test_execute_background_persists_llm_request_metadata_with_work_identity(monkeypatch):
+async def test_execute_background_preserves_main_dialogue_metadata(monkeypatch):
     work = SimpleNamespace(
         id=7,
         sequence_no=1,
@@ -1032,99 +1009,88 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
         profile_id=3,
         dedupe_key="reply-summary:8",
         created_at=datetime(2026, 7, 20, 0, 0, 0),
+        work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
         execution_state={},
     )
-    task = SimpleNamespace(extra={}, result={"status": "succeeded"}, tool_call_id="call-1", status="succeeded", tool_name="safe_tool", error=None)
+    task = SimpleNamespace(
+        id=8,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile_id=work.profile_id,
+        extra={},
+        result={"status": "succeeded"},
+        tool_call_id="call-1",
+        status="succeeded",
+        tool_name="safe_tool",
+        error=None,
+    )
     captured = {}
-    metadata_updates = []
+    marker = Message(
+        id=9,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile_id=work.profile_id,
+        role=MessageRole.USER,
+        type=MessageType.BACKGROUND_TASK_RESULT,
+        content="后台任务结果",
+        dedupe_key="background-task:8:result",
+    )
     request_metadata = {
         "type": "llm_request_metadata",
-        "input_tokens": 123,
-        "input_tokens_source": "provider",
-        "cached_tokens": 23,
-        "output_tokens": 7,
-        "context_window_tokens": 4096,
-        "max_output_tokens": 512,
-    }
-
-    second_request_metadata = {
-        "type": "llm_request_metadata",
+        "request_purpose": "main_dialogue",
         "input_tokens": 456,
         "input_tokens_source": "provider",
         "cached_tokens": 156,
         "output_tokens": 11,
         "context_window_tokens": 4096,
         "max_output_tokens": 512,
+        "total_output_tokens": 211,
+        "work_id": 7,
+        "work_sequence_no": 1,
+    }
+    interactive_response = {
+        **llm_response_payload(
+            "后台主循环回复",
+            history=[
+                {"role": "assistant", "content": "保留历史", "created_at": 0.0},
+                {"role": "tool", "content": "过滤工具结果", "tool_call_id": "call-1", "created_at": 0.0},
+            ],
+            files=[],
+        ),
+        "llm_request_metadata": request_metadata,
     }
 
-    class FakeDb:
-        async def execute(self, *args, **kwargs):
-            return None
-
     async def get_task(db, task_id):
+        assert task_id == 8
         return task
 
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
 
-    marker = SimpleNamespace(
-        id=9,
-        uid=work.uid,
-        session_id=work.session_id,
-        profile_id=work.profile_id,
-        type=MessageType.BACKGROUND_TASK_RESULT,
-    )
-
     async def get_result(db, dedupe_key):
         assert dedupe_key == "background-task:8:result"
         return marker
 
-    async def generate_reply(db, **kwargs):
+    async def dispatch_interactive_work(db, **kwargs):
         captured.update(kwargs)
-        await kwargs["request_metadata_callback"](request_metadata)
-        await kwargs["request_metadata_callback"](second_request_metadata)
-        return InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"), [], []
-
-    async def get_session(db, session_id):
-        assert session_id == "session-1"
-        return SimpleNamespace(
-            llm_request_metadata={
-                "total_output_tokens": 200,
-                "total_input_tokens": 1000,
-                "total_cached_tokens": 250,
-            }
-        )
-
-    async def update_request_metadata(db, **kwargs):
-        metadata_updates.append(kwargs)
-        return True
+        return interactive_response
 
     monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
     monkeypatch.setattr(executor_replies_module.message_crud, "get_by_dedupe_key", get_result)
-    monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
-    monkeypatch.setattr(executor_metadata_module.session_crud, "get_by_session_id", get_session)
-    monkeypatch.setattr(executor_metadata_module.session_crud, "update_llm_request_metadata", update_request_metadata)
+    monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", dispatch_interactive_work)
 
-    response = await executor_replies_module._execute_background(FakeDb(), work, "worker-1")
+    response = await executor_replies_module._execute_background(object(), work, "worker-1")
 
-    expected_request_metadata = {
-        **second_request_metadata,
-        "request_purpose": "background_summary",
-        "output_tokens": 18,
-        "total_output_tokens": 200,
-        "total_input_tokens": 1000,
-        "total_cached_tokens": 250,
-        "cache_hit_rate": 0.25,
-        "work_id": 7,
-        "work_sequence_no": 1,
-    }
-    assert callable(captured["request_metadata_callback"])
-    assert captured["history_before_id"] == marker.id + 1
-    assert response["llm_request_metadata"] == expected_request_metadata
-    assert response["llm_request_metadata"]["input_tokens"] == 456
-    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(0.25)
-    assert metadata_updates == []
+    assert response["content"] == "后台主循环回复"
+    assert response["history"] == [{"role": "assistant", "content": "保留历史", "created_at": 0.0}]
+    assert response["files"] == []
+    assert response["llm_request_metadata"] == request_metadata
+    assert response["llm_request_metadata"]["request_purpose"] == "main_dialogue"
+    assert response["llm_request_metadata"]["work_id"] == 7
+    assert response["llm_request_metadata"]["work_sequence_no"] == 1
+    assert captured["message"] == marker.content
+    assert captured["history_before_id"] == marker.id
 
 
 @pytest.mark.asyncio

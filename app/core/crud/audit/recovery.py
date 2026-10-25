@@ -1,10 +1,9 @@
 from datetime import timedelta
 
-from sqlalchemy import String, and_, cast, delete, exists, or_, update
+from sqlalchemy import and_, delete, exists, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.utils.time import get_local_time
 from app.models.audit import (
     AuditConfirmationClaim,
@@ -16,7 +15,6 @@ from app.models.audit import (
     AuditToolDetail,
     AuditToolResultVersion,
 )
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 
 __all__ = [
     "CRUDAuditRecovery",
@@ -76,7 +74,7 @@ class CRUDAuditRecovery:
             await db.commit()
         return True
 
-    async def cancel_unexecuted_interactive_by_session(
+    async def cancel_unexecuted_by_session(
         self,
         db: AsyncSession,
         *,
@@ -85,35 +83,6 @@ class CRUDAuditRecovery:
         error_reason: str,
         commit: bool = True,
     ) -> list[int]:
-        claim_exists = exists(
-            select(AuditConfirmationClaim.id).where(
-                AuditConfirmationClaim.audit_record_id == AuditRecord.id,
-                AuditConfirmationClaim.uid == uid,
-                AuditConfirmationClaim.session_id == session_id,
-            )
-        )
-        cancelled_work_exists = exists(
-            select(SessionReplyWorkItem.id).where(
-                SessionReplyWorkItem.uid == uid,
-                SessionReplyWorkItem.session_id == session_id,
-                SessionReplyWorkItem.status == SessionReplyWorkStatus.CANCELLED,
-                or_(
-                    and_(
-                        SessionReplyWorkItem.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
-                        SessionReplyWorkItem.source_id == cast(AuditRecord.id, String),
-                    ),
-                    and_(
-                        SessionReplyWorkItem.work_type.in_(
-                            [
-                                SessionReplyWorkType.FOREGROUND_REPLY,
-                                SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
-                            ]
-                        ),
-                        SessionReplyWorkItem.execution_state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY]["audit_record_id"].as_integer() == AuditRecord.id,
-                    ),
-                ),
-            )
-        )
         result = await db.execute(
             select(AuditRecord.id)
             .where(
@@ -127,7 +96,6 @@ class CRUDAuditRecovery:
                         AuditRecordStatus.EXECUTING,
                     ]
                 ),
-                or_(AuditRecord.source.in_(["http", "ws"]), claim_exists, cancelled_work_exists),
             )
             .with_for_update()
             .order_by(AuditRecord.id)

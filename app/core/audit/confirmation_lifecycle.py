@@ -7,6 +7,7 @@ from app.core.constants import (
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.models.audit import AuditRecordStatus
 
@@ -61,10 +62,15 @@ async def stop_interactive_reply(
             db,
             uid=uid,
             session_id=session_id,
-            interactive_only=True,
             commit=False,
         )
-        audit_record_ids = await audit_crud.cancel_unexecuted_interactive_by_session(
+        background_audit_record_ids = await background_task_crud.cancel_by_session(
+            db,
+            uid=uid,
+            session_id=session_id,
+            commit=False,
+        )
+        audit_record_ids = await audit_crud.cancel_unexecuted_by_session(
             db,
             uid=uid,
             session_id=session_id,
@@ -81,6 +87,7 @@ async def stop_interactive_reply(
                 feedback=cancellation_reason,
                 expected_statuses=(AuditRecordStatus.PENDING, AuditRecordStatus.EXECUTING),
             )
+        for audit_record_id in dict.fromkeys([*audit_record_ids, *background_audit_record_ids]):
             projection = await _sync_confirmation_message_status_projection(
                 db,
                 audit_record_id=audit_record_id,

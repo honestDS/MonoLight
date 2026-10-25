@@ -14,17 +14,23 @@ import app.core.background_tasks.reply_trigger as reply_trigger_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.session_reply_queue.consumer as consumer_module
+import app.core.session_reply_queue.executor_interactive as executor_interactive_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
 from app.api.v1.chat import router
 from app.core.background_tasks.manager import BackgroundTaskManager
-from app.core.constants import ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED
+from app.core.constants import (
+    END_SESSION_TOOL_NAME,
+    ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
+    MANAGE_TODO_TOOL_NAME,
+    SKILL_TOOL_NAME,
+)
 from app.core.i18n import t
 from app.core.prompts import (
-    BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT,
-    BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT,
-    BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
+    GOAL_MODE_FINAL_RESPONSE_PROMPT,
+    GOAL_MODE_SYSTEM_PROMPT,
+    TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
 )
 from app.core.security import get_current_user
 from app.core.tools.file_tool.read import read_file
@@ -313,19 +319,25 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         def provider_items(payload: dict) -> list[dict]:
             return payload["messages"] if protocol == "OPENAI" else payload["input"]
 
-        def find_guidance(items: list[dict]) -> tuple[int, dict]:
-            user_items = [(index, item) for index, item in enumerate(items) if item.get("role") == MessageRole.USER.value and isinstance(item.get("content"), str)]
-            assert user_items
-            guidance_items = []
-            for index, item in user_items:
-                assert item["content"].strip()
-                content = json.loads(item["content"])
-                if isinstance(content, dict) and content.get("user_message") is None:
-                    guidance_items.append((index, content))
-            assert len(guidance_items) == 1
-            guidance_index, guidance = guidance_items[0]
-            assert guidance_index == user_items[-1][0] == len(items) - 1
-            return guidance_index, guidance
+        def assert_no_appended_guidance(items: list[dict]) -> None:
+            for item in items:
+                if item.get("role") != MessageRole.USER.value or not isinstance(item.get("content"), str):
+                    continue
+                try:
+                    content = json.loads(item["content"])
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(content, dict):
+                    continue
+                assert content.get("user_message") is not None
+                assert "platform_guidance" not in content
+
+        def assert_phase_prompt(items: list[dict], request_index: int) -> None:
+            system_messages = [item for item in items if item.get("role") == MessageRole.SYSTEM.value]
+            expected_prompt = GOAL_MODE_SYSTEM_PROMPT if request_index < 2 else GOAL_MODE_FINAL_RESPONSE_PROMPT
+            unexpected_prompt = GOAL_MODE_FINAL_RESPONSE_PROMPT if request_index < 2 else GOAL_MODE_SYSTEM_PROMPT
+            assert any(item.get("content") == expected_prompt for item in system_messages)
+            assert all(item.get("content") != unexpected_prompt for item in system_messages)
 
         def find_tool_output(items: list[dict], call_id: str) -> dict:
             if protocol == "OPENAI":
@@ -384,6 +396,11 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 return next(tool_call for item in items if item.get("role") == MessageRole.ASSISTANT.value for tool_call in item.get("tool_calls") or [] if tool_call.get("function", {}).get("name") == "send_file_to_user")
             return next(item for item in items if item.get("type") == "function_call" and item.get("name") == "send_file_to_user")
 
+        def function_calls(items: list[dict]) -> list[dict]:
+            if protocol == "OPENAI":
+                return [tool_call for item in items if item.get("role") == MessageRole.ASSISTANT.value for tool_call in item.get("tool_calls") or []]
+            return [item for item in items if item.get("type") == "function_call"]
+
         def tool_names(payload: dict) -> list[str]:
             tools = payload.get("tools") or []
             if protocol == "OPENAI":
@@ -394,24 +411,13 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             payload = kwargs["payload"]
             provider_payloads.append(payload)
             items = provider_items(payload)
-            system_indexes = [index for index, item in enumerate(items) if item.get("role") == MessageRole.SYSTEM.value]
-            assert system_indexes == [0]
-            _guidance_index, guidance = find_guidance(items)
             request_index = len(provider_payloads) - 1
-            if request_index == 0:
-                assert guidance == {
-                    "user_message": None,
-                    "platform_guidance": BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
-                }
-            else:
-                expected_guidance = f"{BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT}\n\n{BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT}"
-                assert guidance == {
-                    "user_message": None,
-                    "platform_guidance": expected_guidance,
-                }
+            assert payload["tool_choice"] == "auto"
+            assert tool_names(payload) == [MANAGE_TODO_TOOL_NAME, END_SESSION_TOOL_NAME, SKILL_TOOL_NAME, "send_file_to_user"]
+            assert_phase_prompt(items, request_index)
+            assert_no_appended_guidance(items)
 
             if request_index == 0:
-                assert tool_names(payload) == ["send_file_to_user"]
                 background_result = find_background_result(items)
                 assert_background_result_payload(background_result)
                 assert not any((item.get("role") == MessageRole.TOOL.value and item.get("tool_call_id") == "generate-image-call") or (item.get("type") == "function_call_output" and item.get("call_id") == "generate-image-call") for item in items)
@@ -463,20 +469,69 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 }
 
             assert payload.get("tools") == provider_payloads[0].get("tools")
-            assert tool_names(payload) == ["send_file_to_user"]
-            assert payload["tool_choice"] == "auto"
             send_file_call = find_send_file_call(items)
             if protocol == "OPENAI":
                 send_file_call_id = send_file_call["id"]
                 send_file_arguments = json.loads(send_file_call["function"]["arguments"])
-                actual_function_calls = [call for item in items if item.get("role") == MessageRole.ASSISTANT.value for call in item.get("tool_calls") or []]
-                actual_call_ids = [call["id"] for call in actual_function_calls]
             else:
                 send_file_call_id = send_file_call["call_id"]
                 send_file_arguments = json.loads(send_file_call["arguments"])
-                actual_function_calls = [item for item in items if item.get("type") == "function_call"]
-                actual_call_ids = [call["call_id"] for call in actual_function_calls]
             assert send_file_arguments == {"files": [{"path": str(image_path)}]}
+
+            if request_index == 1:
+                actual_function_calls = function_calls(items)
+                assert [call["function"]["name"] if protocol == "OPENAI" else call["name"] for call in actual_function_calls] == ["send_file_to_user"]
+                send_file_result = find_tool_output(items, send_file_call_id)
+                assert send_file_result["type"] == "files_to_user"
+                assert send_file_result["status"] == "success"
+                assert len(send_file_result["files"]) == 1
+                if protocol == "OPENAI":
+                    return {
+                        "id": "chatcmpl-background-image-end-session",
+                        "object": "chat.completion",
+                        "model": MODEL_ID,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "end-session-call",
+                                            "type": "function",
+                                            "function": {
+                                                "name": END_SESSION_TOOL_NAME,
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    }
+                return {
+                    "id": "resp-background-image-end-session",
+                    "object": "response",
+                    "model": MODEL_ID,
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "end-session-call",
+                            "call_id": "end-session-call",
+                            "name": END_SESSION_TOOL_NAME,
+                            "arguments": "{}",
+                            "status": "completed",
+                        }
+                    ],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                }
+
+            actual_function_calls = function_calls(items)
+            actual_call_ids = [call["id"] if protocol == "OPENAI" else call["call_id"] for call in actual_function_calls]
 
             rejected_calls = [call for call, call_id in zip(actual_function_calls, actual_call_ids) if call_id != send_file_call_id]
             rejected_call_ids = [call_id for call_id in actual_call_ids if call_id != send_file_call_id]
@@ -489,14 +544,15 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 rejected_result = find_tool_output(items, call_id)
                 assert rejected_result["status"] == "rejected"
                 assert rejected_result["executed"] is False
-                assert rejected_result["instruction"] == BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT
+                assert rejected_result["type"] == "interactive_final_reply_tool_correction"
+                assert rejected_result["instruction"] == TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
                 assert rejected_result["tool_call"]["id"] == call_id
 
             send_file_result = find_tool_output(items, send_file_call_id)
             assert send_file_result["type"] == "files_to_user"
             assert send_file_result["status"] == "success"
             assert len(send_file_result["files"]) == 1
-            final_request_index = request_index - 1
+            final_request_index = request_index - 2
             if final_request_index < final_tool_violations:
                 round_number = final_request_index + 1
                 send_call_id = f"final-violation-{round_number}-send-file-call"
@@ -611,6 +667,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         transformer_cls = OpenAIChatCompletionsTransformer if protocol == "OPENAI" else OpenAIResponsesTransformer
         monkeypatch.setattr(transformer_cls, "_post_json", fake_post_json)
         monkeypatch.setattr(consumer_module, "AsyncSessionLocal", factory)
+        monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", factory)
@@ -626,22 +683,21 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             max_attempts=3,
         )
 
-        expected_request_count = 2 + min(final_tool_violations, 3)
+        expected_request_count = 3 + min(final_tool_violations, 3)
         assert len(provider_payloads) == expected_request_count
         first_items = provider_items(provider_payloads[0])
-        first_system = next(item for item in first_items if item.get("role") == MessageRole.SYSTEM.value)
+
+        def without_phase_system(items: list[dict]) -> list[dict]:
+            return [item for item in items if not (item.get("role") == MessageRole.SYSTEM.value and item.get("content") in {GOAL_MODE_SYSTEM_PROMPT, GOAL_MODE_FINAL_RESPONSE_PROMPT})]
+
+        first_prefix = without_phase_system(first_items)
         for payload in provider_payloads[1:]:
-            final_items = provider_items(payload)
-            final_system = next(item for item in final_items if item.get("role") == MessageRole.SYSTEM.value)
-            assert first_system["content"] == final_system["content"]
-        first_prefix = first_items[:-1]
-        for payload in provider_payloads[1:]:
-            final_prefix = provider_items(payload)[:-1]
+            final_prefix = without_phase_system(provider_items(payload))
             assert final_prefix[: len(first_prefix)] == first_prefix
 
         if final_tool_violations == 4:
             expected_error = t(ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED)
-            assert len(provider_payloads) == 5
+            assert len(provider_payloads) == 6
             assert len(events) == 1
             event_uid, event_session_id, event = events[0]
             assert (event_uid, event_session_id) == (UID, SESSION_ID)
@@ -681,9 +737,9 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 assert "generate_image" not in persisted_tool_dump
                 assert "final-violation-" not in persisted_dump
                 assert "伪成功正文" not in persisted_dump
-                assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in persisted_dump
-                assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in persisted_dump
-                assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in persisted_dump
+                assert GOAL_MODE_SYSTEM_PROMPT not in persisted_dump
+                assert GOAL_MODE_FINAL_RESPONSE_PROMPT not in persisted_dump
+                assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT not in persisted_dump
                 error_texts = [message for message in persisted_messages if message.role == MessageRole.ERR and message.type == MessageType.TEXT]
                 assert len(error_texts) == 1
                 assert error_texts[0].content == expected_error
@@ -692,7 +748,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 assert "assistant_files" not in persisted_dump
 
             await executor_lifecycle_module.execute_session_reply_work(work_id, "image-worker")
-            assert len(provider_payloads) == 5
+            assert len(provider_payloads) == 6
             assert len(events) == 1
             return
 
@@ -706,9 +762,9 @@ async def test_completed_background_image_message_is_returned_by_http_history(
         assert event["files"][0]["size"] == image_size
         assert send_file_to_user_module.resolve_file_token(event["files"][0]["id"]) == image_path.resolve()
         event_dump = json.dumps(event, ensure_ascii=False)
-        assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in event_dump
-        assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in event_dump
-        assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in event_dump
+        assert GOAL_MODE_SYSTEM_PROMPT not in event_dump
+        assert GOAL_MODE_FINAL_RESPONSE_PROMPT not in event_dump
+        assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT not in event_dump
         assert not any(item.get("role") == MessageRole.USER.value for item in event.get("history", []))
 
         async with factory() as db:
@@ -725,13 +781,27 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert "final-violation-" not in persisted_message_dump
             assert "伪成功正文" not in persisted_message_dump
             assert all(message.guidance_prompt is None for message in persisted_messages)
+            tool_calls = [message for message in persisted_messages if message.type == MessageType.TOOL_CALL]
+            tool_results = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
+            assert len(tool_calls) == 1
+            assert len(tool_results) == 1
+            persisted_tool_dump = json.dumps([message.content for message in [*tool_calls, *tool_results]], ensure_ascii=False)
+            persisted_send_call = InternalMessage.model_validate_json(tool_calls[0].content)
+            assert len(persisted_send_call.tool_calls or []) == 1
+            persisted_send_tool_call = persisted_send_call.tool_calls[0]
+            assert persisted_send_tool_call.name == "send_file_to_user"
+            persisted_send_result = InternalMessage.model_validate_json(tool_results[0].content)
+            assert persisted_send_result.tool_call_id == persisted_send_tool_call.id
+            assert json.loads(persisted_send_result.content or "{}")["status"] == "success"
+            assert END_SESSION_TOOL_NAME not in persisted_tool_dump
+            assert "generate_image" not in persisted_tool_dump
             persisted_response = (persisted_work.execution_state or {}).get("response")
             assert isinstance(persisted_response, dict)
             assert persisted_response["content"] == "后台图片已发送"
             persisted_response_dump = json.dumps(persisted_response, ensure_ascii=False)
-            assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in persisted_response_dump
-            assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in persisted_response_dump
-            assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in persisted_response_dump
+            assert GOAL_MODE_SYSTEM_PROMPT not in persisted_response_dump
+            assert GOAL_MODE_FINAL_RESPONSE_PROMPT not in persisted_response_dump
+            assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT not in persisted_response_dump
             assert not any(item.get("role") == MessageRole.USER.value for item in persisted_response.get("history", []))
             result_message_id = persisted_work.result_message_id
 
@@ -756,9 +826,9 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             reply_work_data = reply_work.json()["data"]
             assert reply_work_data["response"]["content"] == "后台图片已发送"
             reply_work_dump = json.dumps(reply_work_data, ensure_ascii=False)
-            assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in reply_work_dump
-            assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in reply_work_dump
-            assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in reply_work_dump
+            assert GOAL_MODE_SYSTEM_PROMPT not in reply_work_dump
+            assert GOAL_MODE_FINAL_RESPONSE_PROMPT not in reply_work_dump
+            assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT not in reply_work_dump
             assert not any(item.get("role") == MessageRole.USER.value for item in reply_work_data["response"].get("history", []))
             return history.json()["data"]
 
@@ -779,9 +849,9 @@ async def test_completed_background_image_message_is_returned_by_http_history(
 
         history_items = await request_history()
         history_dump = json.dumps(history_items, ensure_ascii=False)
-        assert BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT not in history_dump
-        assert BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT not in history_dump
-        assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT not in history_dump
+        assert GOAL_MODE_SYSTEM_PROMPT not in history_dump
+        assert GOAL_MODE_FINAL_RESPONSE_PROMPT not in history_dump
+        assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT not in history_dump
         background_history_items = [item for item in history_items if item.get("role") == MessageRole.USER.value and item.get("type") == MessageType.BACKGROUND_TASK_RESULT.value]
         assert len(background_history_items) == 1
         background_history_item = background_history_items[0]
@@ -1121,24 +1191,27 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
         async def fake_post_json(_transformer, **kwargs):
             payload = kwargs["payload"]
             provider_payloads.append(payload)
-            assert "tools" not in payload
-            assert payload["tool_choice"] == "none"
+            assert payload["tool_choice"] == "auto"
+            provided_tool_names = {tool.get("name") for tool in payload.get("tools", []) if isinstance(tool, dict) and isinstance(tool.get("name"), str)}
+            assert "file_tool" in provided_tool_names
+            assert "generate_image" not in provided_tool_names
             input_items = payload["input"]
             assert input_items
-            assert input_items[-1].get("role") == "user"
-            final_user_content = input_items[-1].get("content")
-            assert isinstance(final_user_content, str) and final_user_content.strip()
-            final_user_payload = json.loads(final_user_content)
-            assert final_user_payload["user_message"] is None
-            platform_guidance = final_user_payload["platform_guidance"]
-            expected_platform_guidance = f"{BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT}\n\n{BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT}"
-            assert platform_guidance == expected_platform_guidance
-            assert platform_guidance.count(BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT) == 1
-            assert platform_guidance.count(BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT) == 1
-            for item in input_items[:-1]:
+            system_contents = [item.get("content") for item in input_items if item.get("role") == "system"]
+            assert GOAL_MODE_SYSTEM_PROMPT in system_contents
+            assert GOAL_MODE_FINAL_RESPONSE_PROMPT not in system_contents
+            user_payloads = []
+            for item in input_items:
                 if item.get("role") != "user" or not isinstance(item.get("content"), str):
                     continue
-                assert "platform_guidance" not in json.loads(item["content"])
+                try:
+                    user_payload = json.loads(item["content"])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(user_payload, dict):
+                    user_payloads.append(user_payload)
+                    assert "platform_guidance" not in user_payload
+            assert not any(user_payload.get("user_message") is None for user_payload in user_payloads)
             pending_call_ids = set()
             function_calls = []
             function_call_outputs = []
@@ -1212,6 +1285,7 @@ async def test_background_image_summary_keeps_task_tool_results_paired(
 
         monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
         monkeypatch.setattr(OpenAIResponsesTransformer, "_post_json", fake_post_json)
+        monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", factory)
