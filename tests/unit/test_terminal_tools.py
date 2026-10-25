@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.core.terminal.watcher as terminal_watcher_module
 import app.core.tools.terminal as terminal_module
@@ -184,7 +185,7 @@ def test_get_handed_off_terminal_session_id_rejects_non_handoff_results(tool_res
     assert get_handed_off_terminal_session_id(tool_result) is None
 
 
-def _executor(executor_class, *, tool_timeout: float = 30.0):
+def _executor(executor_class, *, tool_timeout: float = 30.0, db=None):
     executor = executor_class(project_root=".", uid="u1")
     executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": tool_timeout}}))
     executor.set_runtime_context(
@@ -194,11 +195,108 @@ def _executor(executor_class, *, tool_timeout: float = 30.0):
             uid="u1",
             session_id="session-1",
             profile=_profile(["execute_shell"]),
-            db=object(),
+            db=db if db is not None else object(),
             tool_call_id="tool-call-1",
         )
     )
     return executor
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_records_completed_eof_after_awaiting_watch_reply(monkeypatch):
+    result = TerminalReadResult(
+        terminal_session_id=TERMINAL_SESSION_ID,
+        read_status=TerminalOutputReadStatus.OK,
+        requested_offset=0,
+        start_offset=0,
+        next_offset=4,
+        oldest_available_offset=0,
+        latest_offset=4,
+        sequence=1,
+        output="done",
+        eof=True,
+    )
+    recorded = []
+
+    async def read_once(*_args, **_kwargs):
+        return result
+
+    async def record_terminal_read(received_db, **kwargs):
+        await asyncio.sleep(0)
+        recorded.append((received_db, kwargs))
+
+    async with AsyncSession() as db:
+        executor = _executor(TerminalReadExecutor, db=db)
+        monkeypatch.setattr(executor, "_read_once", read_once)
+        monkeypatch.setattr(terminal_module.terminal_watch_reply_crud, "record_terminal_read", record_terminal_read)
+
+        payload = await executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=65_536)
+
+    assert json.loads(payload) == result.model_dump(mode="json")
+    assert recorded == [
+        (
+            db,
+            {
+                "uid": "u1",
+                "session_id": "session-1",
+                "profile_id": 7,
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "start_offset": 0,
+                "next_offset": 4,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        TerminalReadResult(
+            terminal_session_id=TERMINAL_SESSION_ID,
+            read_status=TerminalOutputReadStatus.EXPIRED,
+            requested_offset=8,
+            start_offset=8,
+            next_offset=8,
+            oldest_available_offset=8,
+            latest_offset=8,
+            sequence=0,
+            output="",
+            eof=True,
+        ),
+        TerminalReadResult(
+            terminal_session_id=TERMINAL_SESSION_ID,
+            read_status=TerminalOutputReadStatus.OK,
+            requested_offset=0,
+            start_offset=0,
+            next_offset=4,
+            oldest_available_offset=0,
+            latest_offset=8,
+            sequence=1,
+            output="done",
+            eof=True,
+        ),
+    ],
+    ids=["expired", "not-at-latest"],
+)
+async def test_terminal_read_does_not_record_expired_or_unread_latest_result(monkeypatch, result):
+    recorded = []
+
+    async def read_once(*_args, **_kwargs):
+        return result
+
+    async def record_terminal_read(received_db, **kwargs):
+        recorded.append((received_db, kwargs))
+
+    async with AsyncSession() as db:
+        executor = _executor(TerminalReadExecutor, db=db)
+        monkeypatch.setattr(executor, "_read_once", read_once)
+        monkeypatch.setattr(terminal_module.terminal_watch_reply_crud, "record_terminal_read", record_terminal_read)
+
+        payload = await executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=65_536)
+
+    assert json.loads(payload) == result.model_dump(mode="json")
+    assert recorded == []
 
 
 @pytest.mark.asyncio

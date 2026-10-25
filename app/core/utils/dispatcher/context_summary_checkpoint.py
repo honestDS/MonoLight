@@ -12,6 +12,12 @@ from app.core.utils.dispatcher.session_todo_snapshot import (
     measure_session_todo_snapshot_tokens,
     strip_session_todo_snapshots,
 )
+from app.core.utils.dispatcher.terminal_watch_snapshot import (
+    append_terminal_watch_snapshot,
+    load_current_terminal_watch_snapshot,
+    measure_terminal_watch_snapshot_tokens,
+    strip_terminal_watch_snapshots,
+)
 from app.core.utils.request_token_baseline import extract_confirmed_provider_input_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile, ProfileConfig
@@ -52,15 +58,23 @@ async def apply_context_summary_checkpoint(
     reserved_tokens: int = 0,
     force: bool = False,
 ) -> list[InternalMessage]:
+    terminal_watch_snapshot = None
     todo_snapshot = None
     if isinstance(db, AsyncSession):
+        terminal_watch_snapshot = await load_current_terminal_watch_snapshot(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=getattr(profile, "id", None),
+        )
         todo_snapshot = await load_current_session_todo_snapshot(
             db,
             uid=uid,
             session_id=session_id,
         )
-    summary_input_messages = strip_session_todo_snapshots(messages)
+    summary_input_messages = strip_terminal_watch_snapshots(strip_session_todo_snapshots(messages))
     todo_snapshot_tokens = measure_session_todo_snapshot_tokens(todo_snapshot)
+    terminal_watch_snapshot_tokens = measure_terminal_watch_snapshot_tokens(terminal_watch_snapshot)
 
     system_messages = [message.model_copy(deep=True) for message in summary_input_messages if message.role == MessageRole.SYSTEM]
     uncovered_messages = [
@@ -111,7 +125,7 @@ async def apply_context_summary_checkpoint(
         current_message="",
         context_window_k=context_window_k,
         max_tokens=max_tokens,
-        reserved_tokens=max(reserved_tokens, 0) + todo_snapshot_tokens,
+        reserved_tokens=max(reserved_tokens, 0) + todo_snapshot_tokens + terminal_watch_snapshot_tokens,
         tools=tools,
         trigger_mode=trigger_mode,
         fixed_upper_message_id=fixed_upper_message_id,
@@ -127,7 +141,10 @@ async def apply_context_summary_checkpoint(
 
     summary_message = state.as_message()
     if summary_message is None:
-        return messages
+        return append_terminal_watch_snapshot(
+            append_session_todo_snapshot(summary_input_messages, todo_snapshot),
+            terminal_watch_snapshot,
+        )
 
     retained_messages = [message for message in summary_input_messages if message.role != MessageRole.SYSTEM and not is_context_summary_message(message) and (message.id is None or message.id > (state.message_id or 0))]
     compacted_messages = [
@@ -135,4 +152,7 @@ async def apply_context_summary_checkpoint(
         summary_message,
         *retained_messages,
     ]
-    return append_session_todo_snapshot(compacted_messages, todo_snapshot)
+    return append_terminal_watch_snapshot(
+        append_session_todo_snapshot(compacted_messages, todo_snapshot),
+        terminal_watch_snapshot,
+    )

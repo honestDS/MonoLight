@@ -1,13 +1,16 @@
+import asyncio
 from typing import Any
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import TERMINAL_WATCH_TOOL_NAME
-from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.constants import ERR_SESSION_REPLY_LEASE_LOST, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
+from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
 from app.providers.database.time import get_database_timestamp
 
@@ -105,6 +108,106 @@ class CRUDTerminalWatchReply:
         )
         result = await db.execute(statement)
         return list(result.scalars().all())
+
+    async def list_watch_states(self, db: AsyncSession, *, uid: str, session_id: str, profile_id: int) -> list[dict]:
+        statement = (
+            select(
+                BackgroundTask.id,
+                BackgroundTask.tool_call_id,
+                BackgroundTask.arguments,
+                BackgroundTask.status,
+                BackgroundTask.reply_status,
+                BackgroundTask.auto_reply,
+                BackgroundTask.created_at,
+                BackgroundTask.extra["auto_terminal_watch"].as_boolean().label("auto_terminal_watch"),
+                BackgroundTask.result["content"]["event"].as_string().label("event"),
+            )
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.profile_id == profile_id,
+                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+            )
+            .order_by(BackgroundTask.id.asc())
+        )
+        result = await db.execute(statement)
+        return [dict(row) for row in result.mappings().all()]
+
+    async def record_terminal_read(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        terminal_session_id: str,
+        start_offset: int,
+        next_offset: int,
+    ) -> None:
+        claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+        if not isinstance(claim, tuple) or len(claim) != 2 or not _is_positive_int(claim[0]) or not isinstance(claim[1], str) or not claim[1].strip():
+            return
+
+        work_id, worker_id = claim
+        await ensure_session_reply_work_claim(db)
+        work = await session_reply_work_item_crud.get(db, work_id)
+        if work is None:
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
+        await db.refresh(work)
+        if work.uid != uid or work.session_id != session_id or work.profile_id != profile_id or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
+
+        state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+        terminal_reads = dict(state.get("terminal_reads")) if isinstance(state.get("terminal_reads"), dict) else {}
+        terminal_reads[terminal_session_id] = {
+            "start_offset": start_offset,
+            "next_offset": next_offset,
+        }
+        state["terminal_reads"] = terminal_reads
+        updated = await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=work_id,
+            worker_id=worker_id,
+            values={"execution_state": state},
+            commit=True,
+        )
+        if not updated:
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
+        work.execution_state = state
+
+    async def has_delivered_terminal_read(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        terminal_session_id: str,
+        start_offset: int,
+        next_offset: int,
+    ) -> bool:
+        statement = (
+            select(SessionReplyWorkItem.id)
+            .join(Message, Message.id == SessionReplyWorkItem.result_message_id)
+            .where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.profile_id == profile_id,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.SUCCEEDED,
+                SessionReplyWorkItem.event_sent.is_(True),
+                SessionReplyWorkItem.result_message_id.is_not(None),
+                SessionReplyWorkItem.execution_state["terminal_reads"][terminal_session_id]["start_offset"].as_integer() <= next_offset,
+                SessionReplyWorkItem.execution_state["terminal_reads"][terminal_session_id]["next_offset"].as_integer() >= next_offset,
+                Message.uid == uid,
+                Message.session_id == session_id,
+                Message.profile_id == profile_id,
+                Message.role == MessageRole.ASSISTANT,
+                Message.type == MessageType.TEXT,
+            )
+            .limit(1)
+        )
+        result = await db.execute(statement)
+        return result.scalar() is not None
 
     async def manual_watch_covers(self, db: AsyncSession, task: BackgroundTask) -> bool:
         arguments = task.arguments if isinstance(task.arguments, dict) else {}

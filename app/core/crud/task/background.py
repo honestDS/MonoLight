@@ -200,7 +200,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 or previous_task.auto_reply is not True
                 or previous_task.reply_status != BackgroundTaskReplyStatus.SUCCEEDED
                 or not isinstance(candidate_content, dict)
-                or candidate_content.get("event") != "timeout"
+                or candidate_content.get("event") not in {"timeout", "output_gap", "observation_error"}
                 or previous_extra.get("next_auto_watch_task_id") is not None
                 or candidate_content.get("eof") is True
                 or not isinstance(candidate_content.get("next_offset"), int)
