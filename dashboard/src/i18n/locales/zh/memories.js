@@ -68,7 +68,7 @@ export default {
   source_auto_organize: '自动整理',
   form_create_title: '新建长期记忆',
   form_edit_title: '编辑长期记忆',
-  memory_key_placeholder: '例如 project.monoligh.status',
+  memory_key_placeholder: '例如 project.monolight.status',
   content_placeholder: '输入需要长期保存的内容',
   change_evidence_placeholder: '可选，说明本次变更依据',
   suppress_current: '提交时暂停当前版本召回',

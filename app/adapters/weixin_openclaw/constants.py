@@ -1,7 +1,7 @@
 DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
 DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 DEFAULT_BOT_TYPE = "3"
-DEFAULT_CHANNEL_VERSION = "monoligh-openclaw"
+DEFAULT_CHANNEL_VERSION = "monolight-openclaw"
 DEFAULT_API_TIMEOUT_MS = 15_000
 DEFAULT_LONG_POLL_TIMEOUT_MS = 30_000
 DEFAULT_POLL_INTERVAL_MS = 1_000

@@ -401,7 +401,7 @@ async def test_configured_audit_skips_safe_tool_round_without_side_effects(monke
         cfg=_profile_config(),
         tool_calls=[
             InternalToolCall(id="call-1", name="manage_background_tasks", arguments={"operation": "list"}),
-            InternalToolCall(id="call-2", name="web_tool", arguments={"operation": "search", "query": "Monoligh"}),
+            InternalToolCall(id="call-2", name="web_tool", arguments={"operation": "search", "query": "Monolight"}),
         ],
         source_assistant_message_id=1,
         uid="u1",

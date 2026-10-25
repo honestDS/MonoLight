@@ -66,7 +66,7 @@ export default {
   source_auto_organize: 'Auto Organize',
   form_create_title: 'Create Memory',
   form_edit_title: 'Edit Memory',
-  memory_key_placeholder: 'e.g. project.monoligh.status',
+  memory_key_placeholder: 'e.g. project.monolight.status',
   content_placeholder: 'Enter content to retain long term',
   change_evidence_placeholder: 'Optional reason for this change',
   suppress_current: 'Pause current recall while processing',
