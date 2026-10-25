@@ -7,14 +7,19 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
+from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.constants import TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.task.background import background_task_crud
+from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
+from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.core.tools.terminal_watch import ensure_terminal_auto_watch
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.message import Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
-from app.models.terminal_session import TerminalSession
+from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
+from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.models.user import User
 
 UID = "terminal-auto-watch-owner"
@@ -276,3 +281,134 @@ async def test_terminal_auto_watch_renews_after_timeout_and_stops_at_eof(
         assert task.extra.get("next_auto_watch_task_id") == next_task.id
         tasks = await _terminal_watch_tasks(db)
         assert len(tasks) == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_auto_watch_stop_between_summary_delivery_and_renewal_preserves_terminal_session(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_id = "terminal-auto-watch-summary-worker"
+    async with terminal_auto_watch_database() as db:
+        task = BackgroundTask(
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            tool_call_id="terminal-auto-watch-stop-race-call",
+            tool_name=TERMINAL_WATCH_TOOL_NAME,
+            status=BackgroundTaskStatus.SUCCEEDED,
+            arguments={
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "after_offset": 0,
+                "condition": "process_exit",
+            },
+            result={
+                "status": "succeeded",
+                "tool_name": TERMINAL_WATCH_TOOL_NAME,
+                "content": {
+                    "event": "timeout",
+                    "eof": False,
+                    "next_offset": AFTER_OFFSET,
+                },
+            },
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.RUNNING,
+            extra={
+                "source": "terminal_auto_watch",
+                "auto_terminal_watch": True,
+                "terminal_session_id": TERMINAL_SESSION_ID,
+            },
+        )
+        db.add(task)
+        await db.flush()
+        assert task.id is not None
+
+        work = SessionReplyWorkItem(
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            sequence_no=1,
+            work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+            source_type=SessionReplySourceType.BACKGROUND_TASK,
+            source_id=str(task.id),
+            dedupe_key="terminal-auto-watch-stop-race-work",
+            status=SessionReplyWorkStatus.RUNNING,
+            locked_by=worker_id,
+            lock_until=2_000_000_000,
+            attempt_count=1,
+        )
+        db.add(work)
+        await db.flush()
+        assert work.id is not None
+        result_message = Message(
+            session_id=SESSION_ID,
+            uid=UID,
+            profile_id=PROFILE_ID,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="terminal watch summary",
+            is_processed=True,
+            dedupe_key=_result_message_dedupe_key(work),
+        )
+        db.add(result_message)
+        await db.commit()
+        work_id = work.id
+        task_id = task.id
+
+    event_reached = asyncio.Event()
+    release_event = asyncio.Event()
+
+    async def controlled_send_session_event(_uid: str, _session_id: str, event: dict) -> None:
+        assert event["type"] == "proactive_reply"
+        event_reached.set()
+        await release_event.wait()
+
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", terminal_auto_watch_database)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", controlled_send_session_event)
+
+    execution_task = asyncio.create_task(executor_lifecycle_module.execute_session_reply_work(work_id, worker_id))
+    try:
+        await asyncio.wait_for(event_reached.wait(), timeout=2)
+        async with terminal_auto_watch_database() as stop_db:
+            assert await stop_interactive_reply(stop_db, uid=UID, session_id=SESSION_ID) == 1
+        release_event.set()
+        await asyncio.wait_for(execution_task, timeout=2)
+    finally:
+        release_event.set()
+        if not execution_task.done():
+            execution_task.cancel()
+        await asyncio.gather(execution_task, return_exceptions=True)
+
+    async with terminal_auto_watch_database() as db:
+        work = await db.get(SessionReplyWorkItem, work_id)
+        task = await db.get(BackgroundTask, task_id)
+        terminal_session = await db.get(TerminalSession, TERMINAL_SESSION_ID)
+        close_commands = list(
+            (
+                await db.execute(
+                    select(TerminalControlCommand).where(
+                        TerminalControlCommand.terminal_session_id == TERMINAL_SESSION_ID,
+                        TerminalControlCommand.action == TerminalAction.CLOSE,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        tasks = await _terminal_watch_tasks(db)
+
+    assert work is not None
+    assert work.status == SessionReplyWorkStatus.CANCELLED
+    assert work.locked_by is None
+    assert task is not None
+    assert task.status == BackgroundTaskStatus.SUCCEEDED
+    assert task.auto_reply is False
+    assert task.reply_status == BackgroundTaskReplyStatus.NONE
+    assert task.extra.get("next_auto_watch_task_id") is None
+    assert [item.id for item in tasks] == [task_id]
+    assert terminal_session is not None
+    assert terminal_session.status == TerminalSessionStatus.RUNNING
+    assert close_commands == []
+
+    async with terminal_auto_watch_database() as stop_db:
+        assert await stop_interactive_reply(stop_db, uid=UID, session_id=SESSION_ID) == 0

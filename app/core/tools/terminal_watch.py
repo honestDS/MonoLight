@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from app.core import constants
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.terminal.schemas import TERMINAL_SESSION_FINAL_STATUSES, TerminalSessionStatus
@@ -61,6 +62,7 @@ async def ensure_terminal_auto_watch(
     if not callable(getattr(db, "execute", None)) or not callable(getattr(db, "commit", None)):
         return
 
+    await ensure_session_reply_work_claim(db)
     await background_task_crud.create_terminal_auto_watch(
         db,
         uid=uid,

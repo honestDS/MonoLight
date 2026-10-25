@@ -9,6 +9,7 @@ from sqlmodel import select
 
 from app.api.v1 import chat as chat_api
 from app.core import log as log_module
+from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.background_tasks import manager as manager_module
 from app.core.background_tasks import runner as runner_module
 from app.core.crud.audit.audit import audit_crud
@@ -19,7 +20,7 @@ from app.core.tools import send_file_to_user as send_file_to_user_module
 from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
 from app.core.tools.send_file_to_user import SendFileToUserExecutor
 from app.models.audit import AuditExecutionRecord, AuditExecutionStatus, AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail
-from app.models.background_task import BackgroundTask, BackgroundTaskResponse, BackgroundTaskStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskResponse, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.providers.database.time import get_database_timestamp
 
@@ -618,6 +619,131 @@ async def test_session_cleanup_does_not_rollback_running_close_when_pending_audi
     assert [execution.status for execution in stored_executions] == [AuditExecutionStatus.EXECUTION_UNKNOWN, AuditExecutionStatus.CANCELLED]
     assert all(task.status not in {BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING} for task in remaining_tasks)
     assert {task.status for task in remaining_tasks} == {BackgroundTaskStatus.CANCELLED}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_statuses", "expected_execution_statuses", "expected_record_status", "pre_finished_execution_index"),
+    [
+        pytest.param(
+            (BackgroundTaskStatus.PENDING, BackgroundTaskStatus.PENDING),
+            (AuditExecutionStatus.CANCELLED, AuditExecutionStatus.CANCELLED),
+            AuditRecordStatus.CANCELLED,
+            None,
+            id="pending_tasks",
+        ),
+        pytest.param(
+            (BackgroundTaskStatus.RUNNING, BackgroundTaskStatus.RUNNING),
+            (AuditExecutionStatus.EXECUTION_UNKNOWN, AuditExecutionStatus.EXECUTION_UNKNOWN),
+            AuditRecordStatus.EXECUTION_UNKNOWN,
+            None,
+            id="running_tasks",
+        ),
+        pytest.param(
+            (BackgroundTaskStatus.RUNNING, BackgroundTaskStatus.PENDING),
+            (AuditExecutionStatus.EXECUTION_UNKNOWN, AuditExecutionStatus.CANCELLED),
+            AuditRecordStatus.EXECUTION_UNKNOWN,
+            None,
+            id="running_then_pending",
+        ),
+        pytest.param(
+            (BackgroundTaskStatus.RUNNING, BackgroundTaskStatus.RUNNING),
+            (AuditExecutionStatus.SUCCEEDED, AuditExecutionStatus.EXECUTION_UNKNOWN),
+            AuditRecordStatus.EXECUTION_UNKNOWN,
+            0,
+            id="running_tasks_with_first_execution_succeeded",
+        ),
+    ],
+)
+async def test_stop_interactive_reply_closes_bound_tasks_and_audit_round_idempotently(
+    audit_task_database,
+    task_statuses,
+    expected_execution_statuses,
+    expected_record_status,
+    pre_finished_execution_index,
+):
+    record_id, tasks, executions = await _seed_bound_tasks(audit_task_database, count=2)
+    task_ids = [task.id for task in tasks]
+    execution_ids = [execution.id for execution in executions]
+
+    async with audit_task_database() as db:
+        for task_id, status in zip(task_ids, task_statuses):
+            await db.execute(
+                update(BackgroundTask)
+                .where(BackgroundTask.id == task_id)
+                .values(
+                    status=status,
+                    auto_reply=True,
+                    reply_status=BackgroundTaskReplyStatus.RUNNING,
+                    reply_locked_by=f"reply-worker-{task_id}",
+                    reply_lock_until=9_999_999_999,
+                    locked_by="worker-a" if status == BackgroundTaskStatus.RUNNING else None,
+                    lock_until=9_999_999_999 if status == BackgroundTaskStatus.RUNNING else None,
+                )
+            )
+        await db.commit()
+        if pre_finished_execution_index is not None:
+            assert await audit_crud.finish_execution_attempt(
+                db,
+                execution_record_id=execution_ids[pre_finished_execution_index],
+                status=AuditExecutionStatus.SUCCEEDED,
+                result_summary="already finished",
+            )
+
+    async def load_state(db):
+        task_result = await db.execute(select(BackgroundTask).where(BackgroundTask.id.in_(task_ids)).order_by(BackgroundTask.id).execution_options(populate_existing=True))
+        execution_result = await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.id.in_(execution_ids)).order_by(AuditExecutionRecord.id).execution_options(populate_existing=True))
+        return list(task_result.scalars().all()), list(execution_result.scalars().all()), await db.get(AuditRecord, record_id)
+
+    async with audit_task_database() as db:
+        assert await stop_interactive_reply(db, uid="user-1", session_id="session-1") == 0
+
+    async with audit_task_database() as db:
+        first_tasks, first_executions, first_record = await load_state(db)
+
+    assert first_record is not None
+    assert [task.status for task in first_tasks] == [BackgroundTaskStatus.CANCELLED, BackgroundTaskStatus.CANCELLED]
+    assert [execution.status for execution in first_executions] == list(expected_execution_statuses)
+    assert first_record.status == expected_record_status
+    assert [(task.session_id, task.audit_record_id, task.audit_execution_record_id) for task in first_tasks] == [("session-1", record_id, execution_id) for execution_id in execution_ids]
+    assert all(task.auto_reply is False and task.reply_status == BackgroundTaskReplyStatus.NONE and task.locked_by is None and task.lock_until is None and task.reply_locked_by is None and task.reply_lock_until is None for task in first_tasks)
+    for task, execution_id in zip(first_tasks, execution_ids):
+        assert task.extra["audit_binding"]["audit_record_id"] == record_id
+        assert task.extra["audit_binding"]["audit_execution_record_id"] == execution_id
+
+    first_task_snapshot = [task.model_dump() for task in first_tasks]
+    first_execution_snapshot = [(execution.id, execution.status, execution.error, execution.result_summary) for execution in first_executions]
+    first_record_snapshot = (first_record.status, first_record.error_reason, first_record.execution_claim_token)
+
+    async with audit_task_database() as db:
+        assert await stop_interactive_reply(db, uid="user-1", session_id="session-1") == 0
+
+    async with audit_task_database() as db:
+        second_tasks, second_executions, second_record = await load_state(db)
+        second_task_snapshot = [task.model_dump() for task in second_tasks]
+        second_execution_snapshot = [(execution.id, execution.status, execution.error, execution.result_summary) for execution in second_executions]
+        second_record_snapshot = (second_record.status, second_record.error_reason, second_record.execution_claim_token)
+
+        late_finishes = [
+            await audit_crud.finish_execution_attempt(
+                db,
+                execution_record_id=execution_id,
+                status=AuditExecutionStatus.SUCCEEDED,
+                result_summary="late success",
+            )
+            for execution_id in execution_ids
+        ]
+        final_tasks, final_executions, final_record = await load_state(db)
+
+    assert second_task_snapshot == first_task_snapshot
+    assert second_execution_snapshot == first_execution_snapshot
+    assert second_record_snapshot == first_record_snapshot
+    assert late_finishes == [False, False]
+    assert [task.status for task in final_tasks] == [BackgroundTaskStatus.CANCELLED, BackgroundTaskStatus.CANCELLED]
+    assert [execution.status for execution in final_executions] == list(expected_execution_statuses)
+    assert final_record is not None
+    assert final_record.status == expected_record_status
+    assert [(task.session_id, task.audit_record_id, task.audit_execution_record_id) for task in final_tasks] == [("session-1", record_id, execution_id) for execution_id in execution_ids]
 
 
 @pytest.mark.asyncio

@@ -1781,7 +1781,7 @@ async def test_session_list_loading_and_reply_running_follow_work_type_and_statu
 
     is_active = status in SESSION_REPLY_ACTIVE_STATUSES
     is_interactive = work_type in interactive_work_types
-    should_cancel = is_active and is_interactive
+    should_cancel = is_active
     auth_state: dict[str, object] = {"uid": "user-1", "is_superuser": False}
     app = _build_app(chat_session_database, auth_state)
 

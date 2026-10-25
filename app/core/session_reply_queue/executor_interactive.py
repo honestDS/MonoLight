@@ -257,7 +257,10 @@ async def _dispatch_interactive_work(
         "attachments": attachments or None,
         "session_source": str(execution_state.get("message_source") or "queue"),
         "persisted_initial_message": initial_message,
-        "initial_message_type": MessageType.AUDIT_DECISION if work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION else MessageType.TEXT,
+        "initial_message_type": {
+            SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY: MessageType.BACKGROUND_TASK_RESULT,
+            SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION: MessageType.AUDIT_DECISION,
+        }.get(work.work_type, MessageType.TEXT),
         "history_before_id": history_before_id,
         "frozen_user_message_ids": frozen_user_message_ids,
         "final_message_dedupe_key": _result_message_dedupe_key(work),

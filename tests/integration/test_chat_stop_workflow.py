@@ -12,7 +12,10 @@ from sqlmodel import select
 
 import app.providers.database as database_provider
 from app.api.v1 import chat as chat_api
+from app.core.background_tasks import runner as runner_module
+from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.security import get_current_user
 from app.core.session_reply_queue import consumer as consumer_module
@@ -20,9 +23,12 @@ from app.core.session_reply_queue import executor_audit as executor_audit_module
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
+from app.core.tools.terminal_watch import ensure_terminal_auto_watch
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.handler import register_handlers
 from app.models.audit import AuditConfirmationClaim, AuditRecord
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
@@ -35,6 +41,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
 
@@ -63,11 +70,14 @@ async def db_session(tmp_path) -> AsyncIterator[async_sessionmaker[AsyncSession]
             Profile.__table__,
             ChatSession.__table__,
             Message.__table__,
+            BackgroundTask.__table__,
             AuditRecord.__table__,
             AuditConfirmationClaim.__table__,
             SessionReplySequence.__table__,
             SessionReplyWorkItem.__table__,
             SessionReplyStreamEvent.__table__,
+            TerminalSession.__table__,
+            TerminalControlCommand.__table__,
         ],
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -195,6 +205,29 @@ async def _snapshot_state(session_factory: async_sessionmaker[AsyncSession]) -> 
         ],
         "sequences": [(item.session_id, item.next_sequence_no) for item in sequences],
         "stream_events": [(item.id, item.work_id, item.sequence_no, item.event) for item in stream_events],
+    }
+
+
+async def _snapshot_stop_entities(session_factory: async_sessionmaker[AsyncSession]) -> dict[str, object]:
+    async with session_factory() as db:
+        sessions = list((await db.execute(select(ChatSession).order_by(ChatSession.session_id))).scalars().all())
+        messages = list((await db.execute(select(Message).order_by(Message.id))).scalars().all())
+        works = list((await db.execute(select(SessionReplyWorkItem).order_by(SessionReplyWorkItem.id))).scalars().all())
+        sequences = list((await db.execute(select(SessionReplySequence).order_by(SessionReplySequence.session_id))).scalars().all())
+        stream_events = list((await db.execute(select(SessionReplyStreamEvent).order_by(SessionReplyStreamEvent.id))).scalars().all())
+        background_tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
+        terminal_sessions = list((await db.execute(select(TerminalSession).order_by(TerminalSession.terminal_session_id))).scalars().all())
+        terminal_commands = list((await db.execute(select(TerminalControlCommand).order_by(TerminalControlCommand.id))).scalars().all())
+
+    return {
+        "sessions": {item.session_id: item.model_dump() for item in sessions},
+        "messages": {item.id: dict(item) for item in messages if item.id is not None},
+        "works": {item.id: item.model_dump() for item in works if item.id is not None},
+        "sequences": {item.session_id: item.model_dump() for item in sequences},
+        "stream_events": {item.id: item.model_dump() for item in stream_events if item.id is not None},
+        "background_tasks": {item.id: item.model_dump() for item in background_tasks if item.id is not None},
+        "terminal_sessions": {item.terminal_session_id: item.model_dump() for item in terminal_sessions},
+        "terminal_commands": {item.id: item.model_dump() for item in terminal_commands if item.id is not None},
     }
 
 
@@ -348,13 +381,304 @@ async def _seed_stop_case(session_factory: async_sessionmaker[AsyncSession]) -> 
         }
 
 
+async def _seed_full_stop_case(session_factory: async_sessionmaker[AsyncSession]) -> dict[str, object]:
+    target_session_id = "stop-regression-target"
+    other_session_id = "stop-regression-other-session"
+    other_user_session_id = "stop-regression-other-user"
+    terminal_session_id = "stop-regression-terminal-0123456789abcdef"
+    lease_until = 2_000_000_000
+
+    async with session_factory() as db:
+        target_history_user = Message(
+            session_id=target_session_id,
+            uid="owner",
+            profile_id=1,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="historical request",
+            is_processed=True,
+        )
+        target_history_assistant = Message(
+            session_id=target_session_id,
+            uid="owner",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="historical response",
+            is_processed=True,
+        )
+        terminal = TerminalSession(
+            terminal_session_id=terminal_session_id,
+            uid="owner",
+            session_id=target_session_id,
+            original_tool_call_id="stop-regression-terminal-call",
+            profile_id=1,
+            command="printf terminal-output",
+            working_directory="/tmp/stop-regression",
+            status=TerminalSessionStatus.RUNNING,
+            allowed_actions=[action.value for action in TerminalAction],
+            process_identity={"pid": 701, "start_time": "stop-regression"},
+            output_capacity_bytes=4096,
+            oldest_output_offset=11,
+            next_output_offset=42,
+            oldest_output_sequence=3,
+            next_output_sequence=7,
+            locked_by="terminal-worker",
+            lock_until=lease_until,
+        )
+        existing_command = TerminalControlCommand(
+            terminal_session_id=terminal_session_id,
+            request_id="stop-regression-existing-request",
+            action=TerminalAction.WRITE,
+            payload={"data": "prior command"},
+            payload_hash="stop-regression-existing-hash",
+            status=TerminalControlCommandStatus.SUCCEEDED,
+            result={"bytes_written": 13, "read_offset": 11},
+        )
+        db.add_all(
+            [
+                ChatSession(session_id=target_session_id, uid="owner", profile_id=1, source="http", reply_target_source="http"),
+                ChatSession(session_id=other_session_id, uid="owner", profile_id=1, source="http", reply_target_source="http"),
+                ChatSession(session_id=other_user_session_id, uid="other", profile_id=2, source="http", reply_target_source="http"),
+            ]
+        )
+        await db.flush()
+        db.add_all([target_history_user, target_history_assistant, terminal])
+        await db.flush()
+        db.add(existing_command)
+        await db.commit()
+
+        await ensure_terminal_auto_watch(
+            db,
+            uid="owner",
+            session_id=target_session_id,
+            profile_id=1,
+            terminal_session_id=terminal_session_id,
+            after_offset=42,
+            session_status=TerminalSessionStatus.RUNNING,
+        )
+        auto_watch = await background_task_crud.get_active_terminal_watch(
+            db,
+            "owner",
+            target_session_id,
+            terminal_session_id,
+            automatic_only=True,
+        )
+        assert auto_watch is not None
+        assert auto_watch.id is not None
+
+        manual_watch = BackgroundTask(
+            uid="owner",
+            session_id=target_session_id,
+            profile_id=1,
+            tool_call_id="stop-regression-manual-watch",
+            tool_name=TERMINAL_WATCH_TOOL_NAME,
+            status=BackgroundTaskStatus.RUNNING,
+            arguments={
+                "terminal_session_id": terminal_session_id,
+                "after_offset": 17,
+                "condition": "output_contains",
+                "text": "ready",
+            },
+            auto_reply=False,
+            reply_status=BackgroundTaskReplyStatus.NONE,
+            locked_by="manual-watch-worker",
+            lock_until=lease_until,
+            attempt_count=1,
+            extra={"source": "model", "terminal_session_id": terminal_session_id},
+        )
+        ordinary_task = BackgroundTask(
+            uid="owner",
+            session_id=target_session_id,
+            profile_id=1,
+            tool_call_id="stop-regression-ordinary-task",
+            tool_name="ordinary_background_tool",
+            status=BackgroundTaskStatus.RUNNING,
+            arguments={"value": "ordinary"},
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.PENDING,
+            locked_by="ordinary-worker",
+            lock_until=lease_until,
+            attempt_count=1,
+            extra={"execution_state": "running"},
+        )
+        completed_success = BackgroundTask(
+            uid="owner",
+            session_id=target_session_id,
+            profile_id=1,
+            tool_call_id="stop-regression-completed-success",
+            tool_name="completed_background_tool",
+            status=BackgroundTaskStatus.SUCCEEDED,
+            arguments={"value": "success"},
+            result={"content": "completed success", "value": 1},
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.PENDING,
+            attempt_count=1,
+            extra={"execution_state": "succeeded"},
+        )
+        completed_failed = BackgroundTask(
+            uid="owner",
+            session_id=target_session_id,
+            profile_id=1,
+            tool_call_id="stop-regression-completed-failed",
+            tool_name="completed_background_tool",
+            status=BackgroundTaskStatus.FAILED,
+            arguments={"value": "failed"},
+            result={"content": "completed failure", "value": 2},
+            error="background failure",
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.RUNNING,
+            reply_locked_by="completed-reply-worker",
+            reply_lock_until=lease_until,
+            attempt_count=2,
+            extra={"execution_state": "failed"},
+        )
+        other_session_task = BackgroundTask(
+            uid="owner",
+            session_id=other_session_id,
+            profile_id=1,
+            tool_call_id="stop-regression-other-session-task",
+            tool_name="other_background_tool",
+            status=BackgroundTaskStatus.RUNNING,
+            arguments={"value": "other session"},
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.PENDING,
+            locked_by="other-session-worker",
+            lock_until=lease_until,
+        )
+        other_user_task = BackgroundTask(
+            uid="other",
+            session_id=other_user_session_id,
+            profile_id=2,
+            tool_call_id="stop-regression-other-user-task",
+            tool_name="other_user_background_tool",
+            status=BackgroundTaskStatus.PENDING,
+            arguments={"value": "other user"},
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.PENDING,
+        )
+        db.add_all(
+            [
+                manual_watch,
+                ordinary_task,
+                completed_success,
+                completed_failed,
+                other_session_task,
+                other_user_task,
+            ]
+        )
+        await db.flush()
+
+        waiting_work = _make_work(
+            session_id=target_session_id,
+            uid="owner",
+            profile_id=1,
+            sequence_no=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id=str(target_history_user.id),
+            dedupe_key="stop-regression-waiting-work",
+            status=SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+            request_id="stop-regression-waiting-request",
+            attempt_count=1,
+        )
+        waiting_work.execution_state = {
+            "external_resume_pending": True,
+            "request_ids": ["stop-regression-waiting-request"],
+        }
+        running_work = _make_work(
+            session_id=target_session_id,
+            uid="owner",
+            profile_id=1,
+            sequence_no=2,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id=str(target_history_user.id),
+            dedupe_key="stop-regression-running-work",
+            status=SessionReplyWorkStatus.RUNNING,
+            locked_by="foreground-worker",
+            lock_until=lease_until,
+            request_id="stop-regression-running-request",
+            attempt_count=1,
+        )
+        background_summary_work = _make_work(
+            session_id=target_session_id,
+            uid="owner",
+            profile_id=1,
+            sequence_no=3,
+            work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+            source_type=SessionReplySourceType.BACKGROUND_TASK,
+            source_id=str(ordinary_task.id),
+            dedupe_key="stop-regression-background-summary",
+            status=SessionReplyWorkStatus.RUNNING,
+            locked_by="background-summary-worker",
+            lock_until=lease_until,
+            request_id="stop-regression-background-summary-request",
+            attempt_count=1,
+        )
+        other_session_work = _make_work(
+            session_id=other_session_id,
+            uid="owner",
+            profile_id=1,
+            sequence_no=1,
+            work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+            source_type=SessionReplySourceType.BACKGROUND_TASK,
+            source_id=str(other_session_task.id),
+            dedupe_key="stop-regression-other-session-work",
+            status=SessionReplyWorkStatus.RUNNING,
+            locked_by="other-session-reply-worker",
+            lock_until=lease_until,
+            request_id="stop-regression-other-session-request",
+            attempt_count=1,
+        )
+        other_user_work = _make_work(
+            session_id=other_user_session_id,
+            uid="other",
+            profile_id=2,
+            sequence_no=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="stop-regression-other-user-source",
+            dedupe_key="stop-regression-other-user-work",
+            status=SessionReplyWorkStatus.READY_FOR_LLM,
+            request_id="stop-regression-other-user-request",
+        )
+        db.add_all(
+            [
+                waiting_work,
+                running_work,
+                background_summary_work,
+                other_session_work,
+                other_user_work,
+                SessionReplySequence(session_id=target_session_id, next_sequence_no=4),
+                SessionReplySequence(session_id=other_session_id, next_sequence_no=2),
+                SessionReplySequence(session_id=other_user_session_id, next_sequence_no=2),
+            ]
+        )
+        await db.commit()
+
+        return {
+            "target_session_id": target_session_id,
+            "other_session_id": other_session_id,
+            "other_user_session_id": other_user_session_id,
+            "terminal_session_id": terminal_session_id,
+            "target_active_work_ids": [waiting_work.id, running_work.id, background_summary_work.id],
+            "late_work_id": running_work.id,
+            "active_task_ids": [auto_watch.id, manual_watch.id, ordinary_task.id],
+            "target_completed_task_ids": [completed_success.id, completed_failed.id],
+            "isolated_work_ids": [other_session_work.id, other_user_work.id],
+            "isolated_task_ids": [other_session_task.id, other_user_task.id],
+            "late_task_id": ordinary_task.id,
+        }
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("uid", "is_superuser"),
     [("owner", False), ("other", True)],
     ids=["owner", "superuser"],
 )
-async def test_owner_stop_cancels_only_interactive_work_and_allows_new_claim(
+async def test_owner_stop_cancels_target_session_work_and_allows_new_claim(
     db_session,
     uid: str,
     is_superuser: bool,
@@ -435,6 +759,119 @@ async def test_owner_stop_cancels_only_interactive_work_and_allows_new_claim(
     assert claimed.id == new_work.id
     assert claimed.status == SessionReplyWorkStatus.RUNNING
     assert claimed.locked_by == "new-worker"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("uid", "is_superuser"),
+    [("owner", False), ("admin", True)],
+    ids=["owner", "admin"],
+)
+async def test_stop_cancels_all_target_async_activity_and_preserves_terminal(
+    db_session,
+    uid: str,
+    is_superuser: bool,
+) -> None:
+    seeded = await _seed_full_stop_case(db_session)
+    before = await _snapshot_stop_entities(db_session)
+    app = _build_app(db_session, {"uid": uid, "is_superuser": is_superuser})
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        stopped = await client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": seeded["target_session_id"]},
+        )
+        assert stopped.status_code == 200
+        assert stopped.json()["code"] == 200
+        assert stopped.json()["data"] == {
+            "session_id": seeded["target_session_id"],
+            "cancelled_count": len(seeded["target_active_work_ids"]),
+        }
+
+        repeated = await client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": seeded["target_session_id"]},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json()["code"] == 200
+        assert repeated.json()["data"] == {
+            "session_id": seeded["target_session_id"],
+            "cancelled_count": 0,
+        }
+
+    after_stop = await _snapshot_stop_entities(db_session)
+    for work_id in seeded["target_active_work_ids"]:
+        work = after_stop["works"][work_id]
+        assert work["status"] == SessionReplyWorkStatus.CANCELLED
+        assert work["locked_by"] is None
+        assert work["lock_until"] is None
+
+    for task_id in seeded["active_task_ids"]:
+        task = after_stop["background_tasks"][task_id]
+        assert task["status"] == BackgroundTaskStatus.CANCELLED
+        assert task["auto_reply"] is False
+        assert task["reply_status"] == BackgroundTaskReplyStatus.NONE
+        assert task["locked_by"] is None
+        assert task["lock_until"] is None
+        assert task["reply_locked_by"] is None
+        assert task["reply_lock_until"] is None
+
+    for task_id in seeded["target_completed_task_ids"]:
+        before_task = before["background_tasks"][task_id]
+        after_task = after_stop["background_tasks"][task_id]
+        assert before_task["status"] in {BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED}
+        assert after_task["status"] == before_task["status"]
+        assert after_task["result"] == before_task["result"]
+        assert after_task["error"] == before_task["error"]
+        assert after_task["extra"] == before_task["extra"]
+        assert after_task["attempt_count"] == before_task["attempt_count"]
+        assert after_task["started_at"] == before_task["started_at"]
+        assert after_task["finished_at"] == before_task["finished_at"]
+        assert after_task["auto_reply"] is False
+        assert after_task["reply_status"] == BackgroundTaskReplyStatus.NONE
+        assert after_task["reply_locked_by"] is None
+        assert after_task["reply_lock_until"] is None
+
+    for work_id in seeded["isolated_work_ids"]:
+        assert after_stop["works"][work_id] == before["works"][work_id]
+    for task_id in seeded["isolated_task_ids"]:
+        assert after_stop["background_tasks"][task_id] == before["background_tasks"][task_id]
+
+    assert after_stop["sessions"] == before["sessions"]
+    assert after_stop["messages"] == before["messages"]
+    assert after_stop["sequences"] == before["sequences"]
+    assert after_stop["stream_events"] == before["stream_events"]
+    assert after_stop["terminal_sessions"][seeded["terminal_session_id"]] == before["terminal_sessions"][seeded["terminal_session_id"]]
+    assert after_stop["terminal_commands"] == before["terminal_commands"]
+    assert all(command["action"] != TerminalAction.CLOSE for command in after_stop["terminal_commands"].values())
+
+    async with db_session() as db:
+        late_marked = await background_task_crud.mark_succeeded(
+            db,
+            task_id=seeded["late_task_id"],
+            worker_id="ordinary-worker",
+            result={"content": "late success must be rejected"},
+            auto_reply=True,
+        )
+    assert late_marked is False
+    after_late_mark = await _snapshot_stop_entities(db_session)
+    assert after_late_mark == after_stop
+
+    async with db_session() as db:
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (seeded["late_work_id"], "foreground-worker")
+        with pytest.raises(asyncio.CancelledError):
+            await ensure_terminal_auto_watch(
+                db,
+                uid="owner",
+                session_id=seeded["target_session_id"],
+                profile_id=1,
+                terminal_session_id=seeded["terminal_session_id"],
+                after_offset=42,
+                session_status=TerminalSessionStatus.RUNNING,
+            )
+
+    after_guard = await _snapshot_stop_entities(db_session)
+    assert after_guard == after_late_mark
 
 
 async def _seed_invalid_stop_case(session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -776,3 +1213,121 @@ async def test_consumer_cancels_http_stopped_claim_without_retry(
     else:
         assert stream_events == []
     assert not set(event_types) & {"done", "error", "content"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_name",
+    [TERMINAL_WATCH_TOOL_NAME, "ordinary_background_tool"],
+    ids=["terminal-watch", "ordinary-background"],
+)
+async def test_http_stop_cancels_running_background_runner(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    _work_id, _message_id, session_id = await _seed_reply_work(
+        db_session,
+        session_id=f"background-runner-stop-{tool_name}",
+        status=SessionReplyWorkStatus.RUNNING,
+        worker_id="reply-worker",
+    )
+    arguments = (
+        {
+            "terminal_session_id": "background-runner-stop-terminal",
+            "after_offset": 0,
+            "condition": "process_exit",
+        }
+        if tool_name == TERMINAL_WATCH_TOOL_NAME
+        else {"value": "blocking"}
+    )
+    async with db_session() as db:
+        task = await background_task_crud.create_task(
+            db,
+            uid="owner",
+            session_id=session_id,
+            profile_id=1,
+            tool_call_id=f"{session_id}-tool-call",
+            tool_name=tool_name,
+            arguments=arguments,
+            auto_reply=True,
+            extra={"source": "test"},
+        )
+    assert task.id is not None
+    assert task.status == BackgroundTaskStatus.PENDING
+    assert task.reply_status == BackgroundTaskReplyStatus.PENDING
+    task_id = task.id
+
+    execution_started = asyncio.Event()
+    execution_cancelled = asyncio.Event()
+    release_execution = asyncio.Event()
+
+    class BlockingExecutor:
+        requires_audit = False
+
+        def __init__(self, project_root: str, uid: str = "default") -> None:
+            self.project_root = project_root
+            self.uid = uid
+
+        def set_config(self, _cfg) -> None:
+            pass
+
+        def set_runtime_context(self, **_kwargs) -> None:
+            pass
+
+        async def execute(self, **_kwargs):
+            execution_started.set()
+            try:
+                await release_execution.wait()
+            except asyncio.CancelledError:
+                execution_cancelled.set()
+                raise
+            return {"content": "unexpected completion"}
+
+    monkeypatch.setattr(runner_module, "AsyncSessionLocal", db_session)
+    monkeypatch.setitem(runner_module.TOOL_EXECUTOR_MAP, tool_name, BlockingExecutor)
+    runner_task = asyncio.create_task(runner_module.run_background_task(task_id, worker_id="background-worker"))
+    try:
+        await asyncio.wait_for(execution_started.wait(), timeout=5)
+        app = _build_app(db_session, {"uid": "owner", "is_superuser": False})
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            stopped = await client.post(
+                "/api/v1/chat/sessions/stop",
+                params={"session_id": session_id},
+            )
+        assert stopped.status_code == 200
+        assert stopped.json()["code"] == 200
+        assert stopped.json()["data"] == {
+            "session_id": session_id,
+            "cancelled_count": 1,
+        }
+        await asyncio.wait_for(execution_cancelled.wait(), timeout=5)
+        await asyncio.wait_for(runner_task, timeout=5)
+    finally:
+        if not runner_task.done():
+            runner_task.cancel()
+        await asyncio.gather(runner_task, return_exceptions=True)
+
+    async with db_session() as db:
+        cancelled_task = await db.get(BackgroundTask, task_id)
+        late_claim = await background_task_crud.try_claim(
+            db,
+            task_id=task_id,
+            worker_id="late-worker",
+        )
+    assert late_claim is None
+    assert cancelled_task is not None
+    assert cancelled_task.status == BackgroundTaskStatus.CANCELLED
+    assert cancelled_task.auto_reply is False
+    assert cancelled_task.reply_status == BackgroundTaskReplyStatus.NONE
+    assert cancelled_task.locked_by is None
+    assert cancelled_task.lock_until is None
+    assert cancelled_task.reply_locked_by is None
+    assert cancelled_task.reply_lock_until is None
+    assert cancelled_task.result is None
+
+    async with db_session() as db:
+        tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
+    assert len(tasks) == 1
+    assert tasks[0].id == task_id
+    assert tasks[0].result is None

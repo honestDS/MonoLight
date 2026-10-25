@@ -505,6 +505,78 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             await db.commit()
         return retained_count + (delete_result.rowcount or 0)
 
+    async def cancel_by_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        commit: bool = True,
+    ) -> list[int]:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
+            )
+            .order_by(BackgroundTask.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        tasks = list(result.scalars().all())
+        pending_tasks = [task for task in tasks if task.status == BackgroundTaskStatus.PENDING]
+        running_tasks = [task for task in tasks if task.status == BackgroundTaskStatus.RUNNING]
+        audit_ids: list[int] = []
+        audit_id_set: set[int] = set()
+
+        for task in pending_tasks:
+            cancelled = await self._cancel_task_conditionally(db, task, require_unexpired_lease=False)
+            if not cancelled:
+                continue
+            audit_marked = await self._mark_audit_cancelled(db, task, error_reason=t(ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION))
+            if audit_marked and task.audit_record_id is not None and task.audit_record_id not in audit_id_set:
+                audit_id_set.add(task.audit_record_id)
+                audit_ids.append(task.audit_record_id)
+
+        marked_running_audit_ids: set[int] = set()
+        for task in running_tasks:
+            cancelled = await self._cancel_task_conditionally(db, task, require_unexpired_lease=False)
+            if not cancelled:
+                continue
+            if task.audit_record_id is None or task.audit_record_id in marked_running_audit_ids:
+                continue
+            audit_marked = await self._mark_audit_unknown(db, task, error_reason=t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+            if audit_marked:
+                marked_running_audit_ids.add(task.audit_record_id)
+                if task.audit_record_id not in audit_id_set:
+                    audit_id_set.add(task.audit_record_id)
+                    audit_ids.append(task.audit_record_id)
+
+        await db.execute(
+            update(BackgroundTask)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED]),
+                BackgroundTask.auto_reply.is_(True),
+                BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
+            )
+            .values(
+                auto_reply=False,
+                reply_status=BackgroundTaskReplyStatus.NONE,
+                reply_locked_by=None,
+                reply_lock_until=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return audit_ids
+
     async def list_active_user_tasks(self, db: AsyncSession, *, uid: str, session_id: str | None = None, skip: int = 0, limit: int = 100) -> list[BackgroundTask]:
         stmt = select(BackgroundTask).where(BackgroundTask.uid == uid).where(BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING])).order_by(BackgroundTask.created_at.desc()).offset(skip).limit(limit)
         if session_id:

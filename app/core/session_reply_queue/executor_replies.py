@@ -18,7 +18,7 @@ from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue.executor_audit import _persist_work_audit_execution_binding
-from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
+from app.core.session_reply_queue.executor_common import _response_content, _result_message_dedupe_key
 from app.core.session_reply_queue.executor_interactive import (
     _dispatch_interactive_work,
     _save_interactive_work_execution_checkpoint,
@@ -32,7 +32,7 @@ from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, MessageRole, MessageType, decode_message_content
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
-from app.models.session_reply_work_item import SessionReplyWorkItem
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkType
 
 __all__ = []
 
@@ -287,6 +287,9 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
 
 
 async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: str) -> dict[str, Any]:
+    if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
+        return await _execute_background(db, work, worker_id)
+
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
     checkpoint = execution_state.get("dispatcher_checkpoint")
     if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
@@ -339,10 +342,12 @@ async def _persist_work_audit_execution_binding_callback(
 
 
 async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
-    """生成后台任务总结并绑定可恢复的审计执行状态。"""
+    """使用主对话循环处理后台任务结果并绑定可恢复的执行状态。"""
     task = await background_task_crud.get(db, int(work.source_id))
     if task is None:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_NOT_FOUND))
+    if task.uid != work.uid or task.session_id != work.session_id or task.profile_id != work.profile_id:
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     profile = await profile_crud.get_with_relations(db, work.profile_id)
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
@@ -350,37 +355,55 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
     result_event = await message_crud.get_by_dedupe_key(db, f"background-task:{int(work.source_id)}:result")
     if result_event is None or result_event.id is None or result_event.uid != work.uid or result_event.session_id != work.session_id or result_event.profile_id != work.profile_id or result_event.type != MessageType.BACKGROUND_TASK_RESULT:
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-    extra = task.extra if isinstance(task.extra, dict) else {}
-    ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
-        db,
-        work=work,
-        request_purpose=SessionReplyProviderRequestPurpose.BACKGROUND_SUMMARY,
-        uid=work.uid,
-        session_id=work.session_id,
-        profile=profile,
-        call_context="session_reply_background_summary",
-        allow_tools=True,
-        initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
-        history_before_id=result_event.id + 1,
-        initial_fixed_upper_message_id=result_event.id,
-        restrict_tools_to_background_allowlist=extra.get("auto_terminal_watch") is not True,
-        reply_source="background_task",
-        final_message_dedupe_key=_result_message_dedupe_key(work),
-        audit_execution_binding_callback=partial(
-            _persist_work_audit_execution_binding_callback,
-            db=db,
+
+    parsed_events = parse_db_messages_to_internal([result_event])
+    initial_message = next((message for message in parsed_events if message.role == MessageRole.USER), None)
+    if initial_message is None:
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+
+    execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+    resume_state = execution_state.get("dispatcher_checkpoint")
+    if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
+        resume_state = {
+            "messages": [],
+            "turn_messages": [],
+            "reload_history": True,
+            "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
+            "context_summary_fixed_upper_message_id": result_event.id,
+        }
+    elif resume_state.get("reload_history") is not True:
+        resume_state = await _restore_foreground_tool_replies(
+            db,
             work=work,
             worker_id=worker_id,
-        ),
+            checkpoint=resume_state,
+        )
+
+    interactive_response = await _dispatch_interactive_work(
+        db,
+        work=work,
+        worker_id=worker_id,
+        message=initial_message.content or "",
+        initial_message=initial_message,
+        history_before_id=result_event.id,
+        frozen_user_message_ids=[result_event.id],
+        attachments=initial_message.attachments,
+        allow_additional_user_messages=False,
+        execution_resume_state=resume_state,
     )
-    content = parse_assistant_files_content(ai_msg.content)
+
+    if interactive_response.get("status") == "waiting_external_work":
+        return interactive_response
+
+    history = interactive_response.get("history")
+    history_messages = [InternalMessage.model_validate(message) for message in history] if isinstance(history, list) else []
     response = {
-        "content": content,
-        "history": dump_background_proactive_history(turn_messages),
-        "files": files,
+        "content": parse_assistant_files_content(_response_content(interactive_response)),
+        "history": dump_background_proactive_history(history_messages),
+        "files": interactive_response.get("files") or [],
     }
-    if llm_request_metadata is not None:
-        response["llm_request_metadata"] = llm_request_metadata
+    if interactive_response.get("llm_request_metadata") is not None:
+        response["llm_request_metadata"] = interactive_response["llm_request_metadata"]
     return response
 
 
