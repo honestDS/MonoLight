@@ -16,6 +16,7 @@ __all__ = [
     "append_terminal_watch_snapshot",
     "load_current_terminal_watch_snapshot",
     "measure_terminal_watch_snapshot_tokens",
+    "strip_terminal_watch_snapshot",
     "strip_terminal_watch_snapshots",
 ]
 
@@ -182,7 +183,7 @@ def _valid_snapshot_payload(snapshot: str) -> bool:
     return isinstance(payload, dict) and payload.get("type") == "terminal_watch_state" and isinstance(payload.get("terminals"), list)
 
 
-def _strip_terminal_watch_snapshot(content: str | None) -> str | None:
+def strip_terminal_watch_snapshot(content: str | None) -> str | None:
     if not isinstance(content, str) or not content.endswith(_SNAPSHOT_CLOSE):
         return content
 
@@ -207,7 +208,7 @@ def strip_terminal_watch_snapshots(messages: list[InternalMessage]) -> list[Inte
             stripped.append(
                 message.model_copy(
                     deep=True,
-                    update={"content": _strip_terminal_watch_snapshot(message.content)},
+                    update={"content": strip_terminal_watch_snapshot(message.content)},
                 )
             )
         else:

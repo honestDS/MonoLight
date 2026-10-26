@@ -2,6 +2,7 @@ import copy
 import json
 
 import pytest
+from loguru import logger as loguru_logger
 from sqlmodel import select
 
 import app.core.background_tasks.external_work as external_work_module
@@ -36,6 +37,8 @@ from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.core.tools.terminal_watch import ensure_terminal_auto_watch
 from app.core.utils.background_task_result import build_background_task_success_result
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
@@ -440,6 +443,556 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                 assert outbox_items == []
 
         assert len(provider_payloads) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
+async def test_external_work_repeated_resumes_append_history_and_resume_logs(
+    database_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+) -> None:
+    initial_request = "run shell-1, then shell-2"
+    first_progress_user = "查看进度"
+    first_progress_assistant = "仍在运行"
+    second_progress_user = "第二次查看进度"
+    second_progress_assistant = "第二次仍在运行"
+    long_stdout = "SHELL_ONE_LONG_STDOUT_" + "|".join(f"unique-line-{index:04d}" for index in range(300))
+    assert len(long_stdout) > 2000
+
+    provider_payloads: list[dict] = []
+    captured_logs: list[dict] = []
+
+    def provider_items(payload: dict) -> list[dict]:
+        return payload["messages"] if protocol == "OPENAI" else payload["input"]
+
+    def provider_user_text(item: dict) -> str | None:
+        if item.get("role") != "user":
+            return None
+        content = item.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(part["text"] for part in content if isinstance(part, dict) and part.get("type") == "input_text" and isinstance(part.get("text"), str))
+        return None
+
+    def provider_user_message_text(item: dict) -> str | None:
+        content = provider_user_text(item)
+        if content is None:
+            return None
+        try:
+            envelope = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(envelope, dict):
+            return None
+        user_message = envelope.get("user_message")
+        if isinstance(user_message, str):
+            return user_message
+        if isinstance(user_message, list):
+            return "".join(part.get("text", "") for part in user_message if isinstance(part, dict) and isinstance(part.get("text"), str))
+        return None
+
+    def provider_assistant_message_text(item: dict) -> str | None:
+        if item.get("role") != "assistant":
+            return None
+        content = item.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(part.get("text", "") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str) and part.get("type") in {"text", "input_text", "output_text"})
+        return None
+
+    def provider_message_text(item: dict) -> tuple[str, str] | None:
+        role = item.get("role")
+        if role == "user":
+            text = provider_user_message_text(item)
+        elif role == "assistant":
+            text = provider_assistant_message_text(item)
+        else:
+            return None
+        return (role, text) if isinstance(text, str) else None
+
+    def background_marker(item: dict) -> dict | None:
+        text = provider_user_text(item)
+        if text is None:
+            return None
+        try:
+            envelope = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(envelope, dict):
+            return None
+        raw_marker = envelope.get("user_message")
+        if not isinstance(raw_marker, str):
+            return None
+        try:
+            marker = json.loads(raw_marker)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(marker, dict):
+            return None
+        if marker.get("type") == "background_tool_result":
+            return marker
+        if marker.get("type") != "external_work_resume":
+            return None
+        tasks = marker.get("tasks")
+        if not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict):
+            return None
+        task = tasks[0]
+        return task if task.get("type") == "background_tool_result" else None
+
+    def provider_marker_task_ids(items: list[dict]) -> list[int]:
+        return [marker["task_id"] for item in items if (marker := background_marker(item)) is not None]
+
+    def provider_tool_calls(items: list[dict]) -> list[tuple[str, dict, str]]:
+        calls: list[tuple[str, dict, str]] = []
+        if protocol == "OPENAI":
+            for item in items:
+                if item.get("role") != "assistant":
+                    continue
+                for call in item.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    calls.append((function["name"], json.loads(function["arguments"]), call["id"]))
+            return calls
+        for item in items:
+            if item.get("type") != "function_call":
+                continue
+            call_id = item.get("call_id") or item.get("id")
+            calls.append((item["name"], json.loads(item["arguments"]), call_id))
+        return calls
+
+    def provider_tool_result_ids(items: list[dict]) -> list[str]:
+        if protocol == "OPENAI":
+            return [item["tool_call_id"] for item in items if item.get("role") == "tool"]
+        return [item["call_id"] for item in items if item.get("type") == "function_call_output"]
+
+    def provider_response(request_number: int, tool_call: tuple[str, dict, str] | None = None, content: str | None = None) -> dict:
+        if tool_call is None:
+            assert content is not None
+            openai_message = {"role": "assistant", "content": content}
+            responses_output = [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": content}],
+                }
+            ]
+            finish_reason = "stop"
+        else:
+            name, arguments, call_id = tool_call
+            serialized_arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+            openai_message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": serialized_arguments},
+                    }
+                ],
+            }
+            responses_output = [
+                {
+                    "type": "function_call",
+                    "id": call_id,
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": serialized_arguments,
+                    "status": "completed",
+                }
+            ]
+            finish_reason = "tool_calls"
+
+        if protocol == "OPENAI":
+            return {
+                "id": f"chatcmpl-repeated-resume-{request_number}",
+                "object": "chat.completion",
+                "model": MODEL_ID,
+                "choices": [{"index": 0, "message": openai_message, "finish_reason": finish_reason}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            }
+        return {
+            "id": f"resp-repeated-resume-{request_number}",
+            "object": "response",
+            "model": MODEL_ID,
+            "status": "completed",
+            "output": responses_output,
+            "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        }
+
+    async def fake_post_json(_transformer, **kwargs):
+        payload = kwargs["payload"]
+        provider_payloads.append(copy.deepcopy(payload))
+        request_number = len(provider_payloads)
+        assert payload["model"] == MODEL_ID
+        assert payload["stream"] is False
+        assert kwargs["url"].endswith("/chat/completions" if protocol == "OPENAI" else "/responses")
+        if request_number == 1:
+            return provider_response(
+                request_number,
+                (SHELL_TOOL_NAME, {"command": "shell-1", "execution_mode": "non_interactive"}, "shell-call-1"),
+            )
+        if request_number == 2:
+            return provider_response(request_number, (MANAGE_TODO_TOOL_NAME, {"operation": "read"}, "todo-call"))
+        if request_number == 3:
+            return provider_response(
+                request_number,
+                (SHELL_TOOL_NAME, {"command": "shell-2", "execution_mode": "non_interactive"}, "shell-call-2"),
+            )
+        assert request_number == 4
+        return provider_response(request_number, content="both external shells completed")
+
+    async def save_progress_messages(user_content: str, assistant_content: str) -> None:
+        async with factory() as db:
+            await save_message(
+                db,
+                SESSION_ID,
+                UID,
+                MessageRole.USER,
+                MessageType.TEXT,
+                InternalMessage.from_user_input(content=user_content),
+                PROFILE_ID,
+                is_processed=True,
+                commit=False,
+            )
+            await save_message(
+                db,
+                SESSION_ID,
+                UID,
+                MessageRole.ASSISTANT,
+                MessageType.TEXT,
+                InternalMessage(role=MessageRole.ASSISTANT, content=assistant_content),
+                PROFILE_ID,
+                is_processed=True,
+                commit=False,
+            )
+            await db.commit()
+
+    async def claim_and_execute(work_id: int) -> None:
+        async with factory() as db:
+            claimed_work = await session_reply_work_item_crud.claim_next(
+                db,
+                worker_id=WORKER_ID,
+                lease_seconds=300,
+            )
+            assert claimed_work is not None
+            assert claimed_work.id == work_id
+        await executor_lifecycle_module.execute_session_reply_work(work_id, WORKER_ID)
+
+    async def complete_task_and_resume(task_id: int, result: dict) -> None:
+        async with factory() as db:
+            claimed_task = await background_task_crud.try_claim(
+                db,
+                task_id=task_id,
+                worker_id=TASK_WORKER_ID,
+                lease_seconds=300,
+            )
+            assert claimed_task is not None
+            assert claimed_task.status == BackgroundTaskStatus.RUNNING
+            assert await background_task_crud.mark_succeeded(
+                db,
+                task_id=task_id,
+                worker_id=TASK_WORKER_ID,
+                result=result,
+                auto_reply=False,
+            )
+        assert await resume_external_work_for_task(task_id) is True
+
+    async with database_factory(
+        foreign_keys=True,
+        wal=True,
+        name=f"external-work-repeated-resume-{protocol.lower()}.sqlite3",
+    ) as factory:
+        channel = ModelChannel(
+            id=1,
+            name="external-repeated-resume-channel",
+            api_key="enc:v1:stored-test-key",
+            base_url="https://llm.invalid",
+            model_ids=[
+                {
+                    "model_id": MODEL_ID,
+                    "usage": "CHAT",
+                    "protocol": protocol,
+                    "context_window_k": 32,
+                    "max_tokens": 512,
+                }
+            ],
+        )
+        profile = Profile(
+            id=PROFILE_ID,
+            uid=UID,
+            name="external-repeated-resume-profile",
+            configs=ProfileConfig.model_validate(
+                {
+                    "channel": {
+                        "chat_channel": {
+                            "rules": [
+                                {
+                                    "channel_id": 1,
+                                    "model_id": MODEL_ID,
+                                    "priority": 1,
+                                    "weight": 1,
+                                }
+                            ]
+                        }
+                    },
+                    "security": {"audit_threshold": 0},
+                    "tool": {"enabled_tools": [SHELL_TOOL_NAME]},
+                    "other": {},
+                    "memory": {"enabled": False},
+                }
+            ).model_dump(mode="json"),
+        )
+        user = User(uid=UID, username="external-repeated-resume-user")
+        session = ChatSession(
+            session_id=SESSION_ID,
+            uid=UID,
+            profile_id=PROFILE_ID,
+            source="http",
+            goal_mode=False,
+            max_turns=10,
+            stream_llm_request=False,
+            show_tool_calls=True,
+        )
+
+        async with factory() as db:
+            db.add_all([channel, profile, user, session])
+            await db.commit()
+
+        for module in (
+            database_provider,
+            dispatcher_module,
+            background_dispatcher_module,
+            executor_interactive_module,
+            executor_lifecycle_module,
+            executor_metadata_module,
+            channel_cursor_module,
+            external_work_module,
+            reply_trigger_module,
+            notifier_module,
+        ):
+            monkeypatch.setattr(module, "AsyncSessionLocal", factory)
+        monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
+        transformer_cls = OpenAIChatCompletionsTransformer if protocol == "OPENAI" else OpenAIResponsesTransformer
+        monkeypatch.setattr(transformer_cls, "_post_json", fake_post_json)
+
+        async def noop_transport(*_args, **_kwargs) -> None:
+            return None
+
+        monkeypatch.setattr(executor_lifecycle_module, "send_session_event", noop_transport)
+        monkeypatch.setattr(notifier_module, "send_session_event", noop_transport)
+
+        def capture_log(message) -> None:
+            record = message.record
+            captured_logs.append(
+                {
+                    "level": record["level"].name,
+                    "message": record["message"],
+                    "extra": copy.deepcopy(record["extra"]),
+                }
+            )
+
+        sink_id = loguru_logger.add(capture_log, level="INFO")
+        try:
+            async with factory() as db:
+                persisted_profile = await db.get(Profile, PROFILE_ID)
+                assert persisted_profile is not None
+                _message, work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+                    db,
+                    uid=UID,
+                    session_id=SESSION_ID,
+                    profile=persisted_profile,
+                    message=initial_request,
+                    attachments=None,
+                    source="http",
+                    stream_requested=False,
+                    context_summary_events_requested=False,
+                    request_id="external-repeated-resume-request",
+                )
+                assert submission_status == "accepted"
+                assert work.id is not None
+                work_id = work.id
+
+            await claim_and_execute(work_id)
+
+            async with factory() as db:
+                waiting_work = await db.get(SessionReplyWorkItem, work_id)
+                tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
+                assert waiting_work is not None
+                assert waiting_work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+                assert len(tasks) == 1
+                task1_id = tasks[0].id
+                assert task1_id is not None
+                assert tasks[0].tool_name == SHELL_TOOL_NAME
+                assert tasks[0].status == BackgroundTaskStatus.PENDING
+
+            await save_progress_messages(first_progress_user, first_progress_assistant)
+            await complete_task_and_resume(
+                task1_id,
+                {"content": {"stdout": long_stdout, "stderr": "", "exit_code": 0}},
+            )
+            await claim_and_execute(work_id)
+
+            async with factory() as db:
+                waiting_work = await db.get(SessionReplyWorkItem, work_id)
+                tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
+                assert waiting_work is not None
+                assert waiting_work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+                assert len(tasks) == 2
+                assert tasks[0].id == task1_id
+                assert tasks[0].status == BackgroundTaskStatus.SUCCEEDED
+                task2_id = tasks[1].id
+                assert task2_id is not None
+                assert task2_id != task1_id
+                assert tasks[1].tool_name == SHELL_TOOL_NAME
+                assert tasks[1].status == BackgroundTaskStatus.PENDING
+
+            assert len(provider_payloads) == 3
+            await save_progress_messages(second_progress_user, second_progress_assistant)
+            await complete_task_and_resume(
+                task2_id,
+                {"content": {"stdout": "shell-2-complete", "stderr": "", "exit_code": 0}},
+            )
+            await claim_and_execute(work_id)
+
+            assert len(provider_payloads) == 4
+            request_items = [provider_items(payload) for payload in provider_payloads]
+            assert request_items[2][: len(request_items[1])] == request_items[1]
+            assert request_items[3][: len(request_items[2])] == request_items[2]
+            assert provider_marker_task_ids(request_items[0]) == []
+            assert provider_marker_task_ids(request_items[1]) == [task1_id]
+            assert provider_marker_task_ids(request_items[2]) == [task1_id]
+            assert provider_marker_task_ids(request_items[3]) == [task1_id, task2_id]
+            assert long_stdout in json.dumps(request_items[3], ensure_ascii=False)
+            assert sum(provider_message_text(item) == ("user", first_progress_user) for item in request_items[3]) == 1
+            assert sum(provider_message_text(item) == ("assistant", first_progress_assistant) for item in request_items[3]) == 1
+            assert sum(provider_message_text(item) == ("user", second_progress_user) for item in request_items[3]) == 1
+            assert sum(provider_message_text(item) == ("assistant", second_progress_assistant) for item in request_items[3]) == 1
+
+            expected_calls = [
+                (SHELL_TOOL_NAME, {"command": "shell-1", "execution_mode": "non_interactive"}),
+                (MANAGE_TODO_TOOL_NAME, {"operation": "read"}),
+                (SHELL_TOOL_NAME, {"command": "shell-2", "execution_mode": "non_interactive"}),
+            ]
+            assert [(name, arguments) for name, arguments, _call_id in provider_tool_calls(request_items[0])] == []
+            assert [(name, arguments) for name, arguments, _call_id in provider_tool_calls(request_items[1])] == expected_calls[:1]
+            assert [(name, arguments) for name, arguments, _call_id in provider_tool_calls(request_items[2])] == expected_calls[:2]
+            assert [(name, arguments) for name, arguments, _call_id in provider_tool_calls(request_items[3])] == expected_calls
+            for items in request_items:
+                call_ids = [call_id for _name, _arguments, call_id in provider_tool_calls(items)]
+                result_ids = provider_tool_result_ids(items)
+                assert all(isinstance(call_id, str) and call_id for call_id in call_ids)
+                assert all(isinstance(result_id, str) and result_id for result_id in result_ids)
+                assert len(call_ids) == len(set(call_ids))
+                assert len(result_ids) == len(set(result_ids))
+                assert call_ids == result_ids
+
+            async with factory() as db:
+                final_work = await db.get(SessionReplyWorkItem, work_id)
+                tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
+                persisted_messages = list((await db.execute(select(Message).where(Message.session_id == SESSION_ID).order_by(Message.id))).scalars().all())
+                assert final_work is not None
+                assert final_work.status == SessionReplyWorkStatus.SUCCEEDED
+                assert len(tasks) == 2
+                assert [task.id for task in tasks] == [task1_id, task2_id]
+                assert all(task.status == BackgroundTaskStatus.SUCCEEDED for task in tasks)
+                assert tasks[0].result == {"content": {"stdout": long_stdout, "stderr": "", "exit_code": 0}}
+                assert tasks[1].result == {"content": {"stdout": "shell-2-complete", "stderr": "", "exit_code": 0}}
+                assert tasks[0].tool_call_id == provider_tool_calls(request_items[1])[0][2]
+                assert tasks[1].tool_call_id == provider_tool_calls(request_items[3])[-1][2]
+                assert sum(message.content == first_progress_user for message in persisted_messages) == 1
+                assert sum(message.content == first_progress_assistant for message in persisted_messages) == 1
+                assert sum(message.content == second_progress_user for message in persisted_messages) == 1
+                assert sum(message.content == second_progress_assistant for message in persisted_messages) == 1
+                markers = [message for message in persisted_messages if message.type == MessageType.BACKGROUND_TASK_RESULT]
+                assert len(markers) == 2
+                marker_payloads = [json.loads(message.content or "{}") for message in markers]
+                assert {payload["task_id"] for payload in marker_payloads} == {task1_id, task2_id}
+                assert all(payload["ui_only"] is True for payload in marker_payloads)
+                marker_by_task = {payload["task_id"]: payload for payload in marker_payloads}
+                assert marker_by_task[task1_id]["task"]["stdout"] == long_stdout
+                assert marker_by_task[task2_id]["task"]["stdout"] == "shell-2-complete"
+                marker_id_by_task = {payload["task_id"]: message.id for message, payload in zip(markers, marker_payloads, strict=True)}
+                assert all(marker_id_by_task[task_id] is not None for task_id in (task1_id, task2_id))
+                result_message = await db.get(Message, final_work.result_message_id)
+                assert result_message is not None
+                assert result_message.role == MessageRole.ASSISTANT
+                assert result_message.type == MessageType.TEXT
+                assert result_message.content == "both external shells completed"
+
+            before_duplicate_resume = (len(persisted_messages), len(tasks), [message.content for message in markers])
+            assert await resume_external_work_for_task(task1_id) is False
+            assert await resume_external_work_for_task(task2_id) is False
+            async with factory() as db:
+                after_messages = list((await db.execute(select(Message).where(Message.session_id == SESSION_ID).order_by(Message.id))).scalars().all())
+                after_tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
+                assert (len(after_messages), len(after_tasks), [message.content for message in after_messages if message.type == MessageType.BACKGROUND_TASK_RESULT]) == before_duplicate_resume
+
+                persisted_profile = await db.get(Profile, PROFILE_ID)
+                assert persisted_profile is not None
+                cfg = ProfileConfig.model_validate(persisted_profile.configs)
+                restored_messages = await prepare_messages(
+                    db,
+                    SESSION_ID,
+                    UID,
+                    persisted_profile,
+                    cfg,
+                    None,
+                    "",
+                    False,
+                    context_window_k=32,
+                    max_tokens=512,
+                    tools=[],
+                    processed_only=True,
+                )
+                restored_provider = transformer_cls.to_provider(
+                    materialize_user_environment_prompts(restored_messages),
+                    model_id=MODEL_ID,
+                    channel_id=1,
+                )
+                assert restored_provider[: len(request_items[3])] == request_items[3]
+                assert len(restored_provider[len(request_items[3]) :]) <= 1
+                if len(restored_provider) > len(request_items[3]):
+                    assert restored_provider[-1].get("role") == "assistant"
+
+            resume_prefix = "External work resume notice in model request: "
+            resume_records = [record for record in captured_logs if record["extra"].get("resume_message_id") is not None]
+            assert len(resume_records) == 2
+            logged_task_ids: list[int] = []
+            for record in resume_records:
+                assert record["level"] == "INFO"
+                assert record["message"].startswith(resume_prefix)
+                logged_message = json.loads(record["message"][len(resume_prefix) :])
+                assert set(logged_message) == {"role", "content"}
+                assert logged_message["role"] == "user"
+                logged_content = logged_message["content"]
+                assert isinstance(logged_content, str)
+                logged_marker = background_marker({"role": "user", "content": logged_content})
+                assert logged_marker is not None
+                task_id = logged_marker["task_id"]
+                logged_task_ids.append(task_id)
+                assert task_id in marker_id_by_task
+                assert record["extra"]["resume_message_id"] == marker_id_by_task[task_id]
+                if task_id == task1_id:
+                    assert logged_marker["task"]["stdout"] == long_stdout
+                    assert long_stdout in record["message"]
+                else:
+                    assert task_id == task2_id
+                    assert logged_marker["task"]["stdout"] == "shell-2-complete"
+                assert "api_key" not in record["message"]
+                assert "test-key" not in record["message"]
+                assert '"messages"' not in record["message"]
+                assert '"input"' not in record["message"]
+                matching_http_messages = [item for payload in provider_payloads for item in provider_items(payload) if provider_user_text(item) == logged_content]
+                assert matching_http_messages
+                assert all(item.get("role") == logged_message["role"] and provider_user_text(item) == logged_content for item in matching_http_messages)
+            assert sorted(logged_task_ids) == sorted([task1_id, task2_id])
+            assert len(set(logged_task_ids)) == 2
+        finally:
+            loguru_logger.remove(sink_id)
 
 
 @pytest.mark.asyncio

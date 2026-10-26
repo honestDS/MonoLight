@@ -147,6 +147,7 @@ class _ExecutionCheckpointState:
     session_total_cached_tokens: int = 0
     session_total_output_tokens: int | None = None
     execution_phase: str = GOAL_EXECUTION_PHASE_RUNNING
+    pending_resume_message_ids: list[int] = field(default_factory=list)
 
 
 def _is_valid_memory_recall_boundary(value: Any) -> bool:
@@ -192,6 +193,8 @@ async def _save_execution_checkpoint(
     }
     if state.session_total_output_tokens is not None:
         checkpoint["session_total_output_tokens"] = state.session_total_output_tokens
+    if state.pending_resume_message_ids:
+        checkpoint["pending_resume_message_ids"] = list(state.pending_resume_message_ids)
     if _is_valid_memory_recall_boundary(state.memory_recall_boundary_message_id):
         checkpoint["memory_recall_boundary_message_id"] = state.memory_recall_boundary_message_id
         checkpoint["memory_recall_status"] = state.memory_recall_status

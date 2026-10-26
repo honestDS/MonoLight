@@ -143,6 +143,7 @@ def build_interactive_dispatch_state(
         callback=execution_checkpoint_callback,
         turn_messages=turn_messages,
         files_to_user=files_to_user,
+        pending_resume_message_ids=list(execution_resume_state.get("pending_resume_message_ids", [])) if execution_resume_state else [],
         upper_message_id=min(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id,
         memory_recall_boundary_message_id=initial_memory_recall_boundary,
         memory_recall_status=(resumed_memory_recall_status if resumed_memory_recall_boundary == initial_memory_recall_boundary else None),

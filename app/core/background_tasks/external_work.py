@@ -291,13 +291,20 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 files = extract_files_to_user([InternalMessage(role=MessageRole.TOOL, tool_call_id=original_call_id, content=result_text)])
                 if files:
                     checkpoint["files_to_user"] = merge_assistant_files(checkpoint.get("files_to_user", []), files)
-            resume_instruction = TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT if marker_payloads and all(marker["instruction"] == TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT for marker in marker_payloads) else EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
+            checkpoint.pop("external_resume_messages", None)
+            checkpoint["pending_resume_message_ids"] = list(
+                dict.fromkeys(
+                    [
+                        *checkpoint.get("pending_resume_message_ids", []),
+                        *(entry[-1] for entry in result_entries),
+                    ]
+                )
+            )
             checkpoint.update(
                 {
                     "messages": [],
                     "turn_messages": [],
                     "reload_history": True,
-                    "external_resume_messages": [InternalMessage(role=MessageRole.USER, id=None, content=json.dumps({"type": "external_work_resume", "instruction": resume_instruction, "tasks": marker_payloads}, ensure_ascii=False)).model_dump(mode="json")],
                     "context_summary_trigger_mode": "user_message",
                     "context_summary_fixed_upper_message_id": latest_marker_id,
                 }

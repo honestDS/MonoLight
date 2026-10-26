@@ -17,6 +17,7 @@ from app.core.session_reply_queue import executor_lifecycle as executor_lifecycl
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.core.tools.terminal_watch import ensure_terminal_auto_watch
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
 from app.models.profile import Profile
@@ -722,11 +723,16 @@ async def test_terminal_auto_watch_replies_group_by_origin_work_across_terminals
     assert persisted_work.status == SessionReplyWorkStatus.RUNNING
     checkpoint = (persisted_work.execution_state or {}).get("dispatcher_checkpoint") or {}
     assert checkpoint["reload_history"] is True
-    external_resume_messages = checkpoint.get("external_resume_messages")
-    assert isinstance(external_resume_messages, list)
-    assert len(external_resume_messages) == 1
-    resume_payload = json.loads(external_resume_messages[0]["content"])
-    assert {item["task_id"] for item in resume_payload["tasks"]} == set(task_ids)
+    assert "external_resume_messages" not in checkpoint
+    assert checkpoint["pending_resume_message_ids"] == [message.id for message in result_messages]
+    resume_messages = parse_db_messages_to_internal(result_messages)
+    assert len(resume_messages) == 2
+    assert all(message.role == MessageRole.USER for message in resume_messages)
+    assert [message.id for message in resume_messages] == [message.id for message in result_messages]
+    resume_payloads = [json.loads(message.content) for message in resume_messages]
+    assert all(payload["type"] == "external_work_resume" for payload in resume_payloads)
+    assert {task["task_id"] for payload in resume_payloads for task in payload["tasks"]} == set(task_ids)
+    assert [payload["tasks"] for payload in resume_payloads] == [[json.loads(message.content)] for message in result_messages]
 
 
 @pytest.mark.parametrize(

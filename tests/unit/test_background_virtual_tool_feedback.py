@@ -92,20 +92,162 @@ def test_ui_only_background_task_result_marker_is_not_parsed_as_internal_message
     assert parse_db_messages_to_internal([marker]) == []
 
 
-def test_external_wait_response_accepts_queued_tool_result_with_todo_snapshot_suffix():
+@pytest.mark.parametrize(
+    "task",
+    [
+        {"status": "succeeded", "tool_name": "generate_image"},
+        "background task completed",
+        None,
+    ],
+)
+def test_ui_only_background_task_result_is_projected_to_external_work_resume(task):
+    marker_payload = {
+        "type": "background_tool_result",
+        "ui_only": True,
+        "task_id": 42,
+        "instruction": "Resume the background task.",
+        "task": task,
+    }
+    marker = Message(
+        id=7,
+        session_id="s1",
+        uid="u1",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.BACKGROUND_TASK_RESULT,
+        content=json.dumps(marker_payload, ensure_ascii=False),
+        environment_prompt="environment prompt",
+        guidance_prompt="guidance prompt",
+        attachments=["attachment.png"],
+        is_processed=True,
+    )
+    marker_before = marker.model_dump(mode="json")
+
+    parsed_once = parse_db_messages_to_internal([marker])
+    parsed_twice = parse_db_messages_to_internal([marker])
+
+    assert len(parsed_once) == len(parsed_twice) == 1
+    assert parsed_once[0].role == MessageRole.USER
+    assert parsed_once[0].id == marker.id
+    assert [(message.role, message.id, message.content) for message in parsed_twice] == [(message.role, message.id, message.content) for message in parsed_once]
+    assert marker.model_dump(mode="json") == marker_before
+
+    parsed_message = parsed_once[0]
+    assert json.loads(parsed_message.content) == {
+        "type": "external_work_resume",
+        "instruction": marker_payload["instruction"],
+        "tasks": [marker_payload],
+    }
+    assert parsed_message.environment_prompt == marker.environment_prompt
+    assert parsed_message.guidance_prompt == marker.guidance_prompt
+    assert parsed_message.attachments == marker.attachments
+
+
+@pytest.mark.parametrize(
+    "marker_payload",
+    [
+        {
+            "type": "background_tool_result",
+            "ui_only": True,
+            "task_id": True,
+            "instruction": "Resume the background task.",
+            "task": {},
+        },
+        {
+            "type": "background_tool_result",
+            "ui_only": True,
+            "task_id": 0,
+            "instruction": "Resume the background task.",
+            "task": {},
+        },
+        {
+            "type": "background_tool_result",
+            "ui_only": True,
+            "task_id": -1,
+            "instruction": "Resume the background task.",
+            "task": {},
+        },
+        {
+            "type": "background_tool_result",
+            "ui_only": True,
+            "task_id": "42",
+            "instruction": "Resume the background task.",
+            "task": {},
+        },
+        {
+            "type": "background_tool_result",
+            "ui_only": True,
+            "task_id": 42,
+            "instruction": None,
+            "task": {},
+        },
+        {
+            "type": "background_tool_result",
+            "ui_only": True,
+            "task_id": 42,
+            "instruction": "",
+            "task": {},
+        },
+        {
+            "type": "background_tool_result",
+            "ui_only": True,
+            "task_id": 42,
+            "instruction": "Resume the background task.",
+        },
+        {
+            "type": "other_background_result",
+            "ui_only": True,
+            "task_id": 42,
+            "instruction": "Resume the background task.",
+            "task": {},
+        },
+    ],
+)
+def test_invalid_ui_only_background_task_result_marker_is_filtered(marker_payload):
+    marker = Message(
+        id=8,
+        session_id="s1",
+        uid="u1",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.BACKGROUND_TASK_RESULT,
+        content=json.dumps(marker_payload, ensure_ascii=False),
+        is_processed=True,
+    )
+
+    assert parse_db_messages_to_internal([marker]) == []
+
+
+@pytest.mark.parametrize(
+    ("include_todo", "include_watch"),
+    [
+        (False, False),
+        (True, False),
+        (False, True),
+        (True, True),
+    ],
+)
+def test_external_wait_response_accepts_queued_tool_result_with_todo_snapshot_suffix(include_todo, include_watch):
     tool_call = InternalToolCall(
         id="call-external",
         name="execute_shell",
         arguments={"command": "echo fixture"},
     )
     todo_snapshot = '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"finish","status":"in_progress"}]}</current_session_todo_snapshot>'
+    watch_snapshot = '<current_terminal_watch_snapshot>{"type":"terminal_watch_state","terminals":[]}</current_terminal_watch_snapshot>'
     queued_content = json.dumps({"status": "queued", "task_id": 42})
+    snapshots = []
+    if include_todo:
+        snapshots.append(todo_snapshot)
+    if include_watch:
+        snapshots.append(watch_snapshot)
     tool_result = InternalMessage(
         id=17,
         role=MessageRole.TOOL,
         tool_call_id=tool_call.id,
-        content=f"{queued_content}\n\n{todo_snapshot}",
+        content="\n\n".join([queued_content, *snapshots]),
     )
+    tool_result_before = tool_result.model_dump(mode="json")
 
     response = build_external_wait_response(
         [tool_call],
@@ -113,6 +255,7 @@ def test_external_wait_response_accepts_queued_tool_result_with_todo_snapshot_su
         response_id="response-1",
     )
 
+    assert tool_result.model_dump(mode="json") == tool_result_before
     assert response == {
         "status": "waiting_external_work",
         "pending_tools": [

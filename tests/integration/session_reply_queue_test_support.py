@@ -5,6 +5,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem
+from app.models.background_task import BackgroundTask
 from app.models.message import Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
@@ -15,6 +16,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
     SessionReplyWorkType,
 )
+from app.models.session_todo import SessionTodoPlan
 
 
 @pytest_asyncio.fixture
@@ -24,6 +26,8 @@ async def db_session(database_factory) -> AsyncGenerator[AsyncSession]:
             Profile.__table__,
             Message.__table__,
             ChatSession.__table__,
+            SessionTodoPlan.__table__,
+            BackgroundTask.__table__,
             SessionReplySequence.__table__,
             SessionReplyWorkItem.__table__,
             SessionReplyStreamEvent.__table__,
@@ -44,6 +48,8 @@ async def concurrent_session_factory(
             Profile.__table__,
             Message.__table__,
             ChatSession.__table__,
+            SessionTodoPlan.__table__,
+            BackgroundTask.__table__,
             SessionReplySequence.__table__,
             SessionReplyWorkItem.__table__,
             SessionReplyStreamEvent.__table__,

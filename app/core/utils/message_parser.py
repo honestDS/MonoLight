@@ -14,6 +14,25 @@ from app.models.message import (
 
 
 def _parse_background_task_result_message(msg: Message, content: str) -> list[InternalMessage]:
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        payload = None
+
+    if isinstance(payload, dict) and payload.get("ui_only") is True:
+        task_id = payload.get("task_id")
+        instruction = payload.get("instruction")
+        if payload.get("type") != "background_tool_result" or not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0 or not isinstance(instruction, str) or not instruction or "task" not in payload:
+            return []
+        content = json.dumps(
+            {
+                "type": "external_work_resume",
+                "instruction": instruction,
+                "tasks": [payload],
+            },
+            ensure_ascii=False,
+        )
+
     return [
         InternalMessage(
             id=msg.id,
@@ -48,12 +67,6 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             if m_type in {MessageType.AUDIT_CONFIRMATION, MessageType.AUDIT_DECISION}:
                 continue
             if m_type == MessageType.BACKGROUND_TASK_RESULT:
-                try:
-                    payload = json.loads(content)
-                except (json.JSONDecodeError, TypeError):
-                    payload = None
-                if isinstance(payload, dict) and payload.get("ui_only") is True:
-                    continue
                 parsed_history.extend(_parse_background_task_result_message(msg, content))
                 continue
             elif m_type == MessageType.SCHEDULED_TASK_TRIGGER:

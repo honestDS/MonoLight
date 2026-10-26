@@ -6,10 +6,11 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateTable
 
+from app.core.constants import TERMINAL_WATCH_TOOL_NAME
 from app.core.dispatchers.context import DispatchContext
 from app.core.prompts import SESSION_TODO_SYSTEM_PROMPT
 from app.core.tools import (
@@ -20,18 +21,27 @@ from app.core.tools import (
     tool_requires_audit,
 )
 from app.core.tools.todo import validate_manage_todo_arguments
+from app.core.utils.context_summary import ContextSummaryTriggerMode
+from app.core.utils.context_summary import service as service_module
+from app.core.utils.context_summary.stage import GeneratedSummaryResult
+from app.core.utils.context_summary.user_message_block import split_covered_user_message
 from app.core.utils.dispatcher import inject_system_prompt as inject_system_prompt_module
+from app.core.utils.dispatcher import prepare_messages as prepare_messages_module
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
+from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.helpers import dump_output_history
+from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
     persist_session_todo_snapshot_on_tool_results,
 )
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.background_task import BackgroundTask, BackgroundTaskStatus
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
+from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
 @pytest_asyncio.fixture
@@ -600,3 +610,611 @@ async def test_todo_snapshot_escapes_wrapper_delimiters_inside_todo_content(db_s
     assert snapshot.count("</current_session_todo_snapshot>") == 1
     assert "\\u003c/current_session_todo_snapshot\\u003e" in snapshot
     assert "\\u003cfake\\u003e" in snapshot
+
+
+@pytest.mark.parametrize(
+    "transformer",
+    [OpenAIResponsesTransformer, OpenAIChatCompletionsTransformer],
+    ids=["responses", "chat-completions"],
+)
+@pytest.mark.asyncio
+async def test_tool_snapshot_history_stays_stable_across_requests_checkpoint_and_reload(
+    db_session: AsyncSession,
+    monkeypatch,
+    transformer,
+):
+    uid = "user-1"
+    session_id = "session-1"
+    profile_id = 1
+    await _create_sessions(db_session, (uid, session_id))
+
+    async with db_session.bind.begin() as connection:
+        await connection.run_sync(lambda sync_connection: BackgroundTask.__table__.create(sync_connection, checkfirst=True))
+
+    executor = _executor(db_session, uid=uid, session_id=session_id)
+    profile = _profile(uid=uid, profile_id=profile_id)
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": []}})
+
+    boundary_row = Message(
+        session_id=session_id,
+        uid=uid,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="fixed user boundary",
+        is_processed=True,
+        profile_id=profile_id,
+    )
+    db_session.add(boundary_row)
+    await db_session.commit()
+    await db_session.refresh(boundary_row)
+    assert boundary_row.id is not None
+
+    history = [
+        InternalMessage(
+            id=boundary_row.id,
+            role=MessageRole.USER,
+            content=boundary_row.content,
+        )
+    ]
+    stored_results: list[Message] = []
+    raw_results: list[str] = []
+
+    async def append_tool_round(tool_call: InternalToolCall, raw_result: str) -> tuple[InternalMessage, Message]:
+        assistant = InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[tool_call],
+        )
+        assistant_row = Message(
+            session_id=session_id,
+            uid=uid,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TOOL_CALL,
+            content=assistant.model_dump_json(),
+            is_processed=True,
+            profile_id=profile_id,
+        )
+        db_session.add(assistant_row)
+        await db_session.commit()
+        await db_session.refresh(assistant_row)
+        assistant.id = assistant_row.id
+        history.append(assistant)
+
+        tool_result = InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content=raw_result,
+        )
+        stored_tool_result = await save_tool_response(
+            db_session,
+            session_id=session_id,
+            uid=uid,
+            profile_id=profile_id,
+            tool_res=tool_result,
+            messages=history,
+            turn_messages=[],
+        )
+        await persist_session_todo_snapshot_on_tool_results(
+            db_session,
+            uid=uid,
+            session_id=session_id,
+            tool_results=[stored_tool_result],
+        )
+        stored_row = await db_session.get(Message, stored_tool_result.id)
+        assert stored_row is not None
+        await db_session.refresh(stored_row)
+        stored_results.append(stored_row)
+        raw_results.append(raw_result)
+        return stored_tool_result, stored_row
+
+    fixed_system = "fixed system prompt"
+    system_message = InternalMessage(role=MessageRole.SYSTEM, content=fixed_system)
+
+    def provider_request() -> list[dict]:
+        return transformer.to_provider(
+            [system_message, *history],
+            channel_id=1,
+            model_id="snapshot-regression-model",
+        )
+
+    round1_call = InternalToolCall(
+        id="todo-call-1",
+        name=MANAGE_TODO_TOOL_NAME,
+        arguments={"operation": "read"},
+    )
+    round1_raw = await executor.execute("read")
+    round1_result, round1_row = await append_tool_round(round1_call, round1_raw)
+    assert round1_row.model_context_suffix == ""
+    assert round1_result.content == round1_raw
+    round1_request = provider_request()
+
+    round2_todos = [
+        {"content": "inspect implementation", "status": "in_progress"},
+        {"content": "verify behavior", "status": "pending"},
+    ]
+    round2_call = InternalToolCall(
+        id="todo-call-2",
+        name=MANAGE_TODO_TOOL_NAME,
+        arguments={"operation": "write", "todos": round2_todos, "expected_revision": 0},
+    )
+    round2_raw = await executor.execute("write", todos=round2_todos, expected_revision=0)
+    watch = BackgroundTask(
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+        tool_call_id="watch-call-2",
+        tool_name=TERMINAL_WATCH_TOOL_NAME,
+        arguments={
+            "terminal_session_id": "terminal-1",
+            "condition": "output_contains",
+            "after_offset": 0,
+        },
+        status=BackgroundTaskStatus.PENDING,
+        result={"content": {"event": "output_contains"}},
+    )
+    db_session.add(watch)
+    await db_session.commit()
+    await db_session.refresh(watch)
+
+    round1_content = round1_result.content
+    round1_suffix = round1_row.model_context_suffix
+    await persist_session_todo_snapshot_on_tool_results(
+        db_session,
+        uid=uid,
+        session_id=session_id,
+        tool_results=[round1_result],
+    )
+    await db_session.refresh(round1_row)
+    assert round1_result.content == round1_content
+    assert round1_row.model_context_suffix == round1_suffix == ""
+
+    round2_result, round2_row = await append_tool_round(round2_call, round2_raw)
+    assert round2_row.model_context_suffix is not None
+    assert '<current_session_todo_snapshot>{"revision":1' in round2_row.model_context_suffix
+    assert "<current_terminal_watch_snapshot>" in round2_row.model_context_suffix
+    assert '"status":"pending"' in round2_row.model_context_suffix
+    assert '"revision":1' in round2_result.content
+    round2_request = provider_request()
+    assert round2_request[: len(round1_request)] == round1_request
+
+    round3_todos = [
+        {"content": "inspect implementation", "status": "completed"},
+        {"content": "verify behavior", "status": "in_progress"},
+    ]
+    round3_call = InternalToolCall(
+        id="todo-call-3",
+        name=MANAGE_TODO_TOOL_NAME,
+        arguments={"operation": "write", "todos": round3_todos, "expected_revision": 1},
+    )
+    round3_raw = await executor.execute("write", todos=round3_todos, expected_revision=1)
+    watch.status = BackgroundTaskStatus.SUCCEEDED
+    watch.result = {"content": {"event": "output_contains"}}
+    await db_session.commit()
+    await db_session.refresh(watch)
+
+    round2_content = round2_result.content
+    round2_suffix = round2_row.model_context_suffix
+    await persist_session_todo_snapshot_on_tool_results(
+        db_session,
+        uid=uid,
+        session_id=session_id,
+        tool_results=[round2_result],
+    )
+    await db_session.refresh(round2_row)
+    assert round2_result.content == round2_content
+    assert round2_row.model_context_suffix == round2_suffix
+    assert '"status":"succeeded"' not in (round2_row.model_context_suffix or "")
+
+    round3_result, round3_row = await append_tool_round(round3_call, round3_raw)
+    assert round3_row.model_context_suffix is not None
+    assert '<current_session_todo_snapshot>{"revision":2' in round3_row.model_context_suffix
+    assert "<current_terminal_watch_snapshot>" in round3_row.model_context_suffix
+    assert '"status":"succeeded"' in round3_row.model_context_suffix
+    assert '"revision":2' in round3_result.content
+    round3_request = provider_request()
+    assert round3_request[: len(round2_request)] == round2_request
+    assert round1_result.content == round1_content
+    assert round1_row.model_context_suffix == round1_suffix == ""
+    assert round2_result.content == round2_content
+    assert round2_row.model_context_suffix == round2_suffix
+
+    history_contents_before_checkpoint = [message.content for message in history]
+    checkpoint_source = [system_message, *history]
+    checkpoint_contents = [message.content for message in checkpoint_source]
+    checkpointed = await apply_context_summary_checkpoint(
+        db_session,
+        session_id=session_id,
+        uid=uid,
+        profile=profile,
+        cfg=cfg,
+        messages=checkpoint_source,
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=boundary_row.id,
+        context_window_k=64,
+        max_tokens=256,
+        tools=None,
+    )
+    assert [message.content for message in checkpoint_source] == checkpoint_contents
+    assert [message.content for message in checkpointed] == checkpoint_contents
+    assert [message.content for message in history] == history_contents_before_checkpoint
+
+    checkpoint_json = [message.model_dump(mode="json") for message in checkpointed]
+    restored_checkpoint_source = [InternalMessage.model_validate(payload) for payload in checkpoint_json]
+    restored_checkpoint_contents = [message.content for message in restored_checkpoint_source]
+    restored_checkpointed = await apply_context_summary_checkpoint(
+        db_session,
+        session_id=session_id,
+        uid=uid,
+        profile=profile,
+        cfg=cfg,
+        messages=restored_checkpoint_source,
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=boundary_row.id,
+        context_window_k=64,
+        max_tokens=256,
+        tools=None,
+    )
+    assert [message.content for message in restored_checkpoint_source] == restored_checkpoint_contents
+    assert [message.content for message in restored_checkpointed] == restored_checkpoint_contents
+    assert [message.content for message in history] == history_contents_before_checkpoint
+    assert transformer.to_provider(checkpointed, channel_id=1, model_id="snapshot-regression-model") == round3_request
+    assert transformer.to_provider(restored_checkpointed, channel_id=1, model_id="snapshot-regression-model") == round3_request
+
+    async def fixed_system_prompt(*_args, **_kwargs) -> str:
+        return fixed_system
+
+    monkeypatch.setattr(prepare_messages_module, "build_system_prompt", fixed_system_prompt)
+    session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    async with session_factory() as reload_db:
+        reloaded_messages = await prepare_messages_module.prepare_messages(
+            reload_db,
+            session_id=session_id,
+            uid=uid,
+            profile=profile,
+            cfg=cfg,
+            initial_msg=None,
+            message="",
+            is_first_iter=False,
+            context_window_k=64,
+            max_tokens=256,
+            processed_only=True,
+        )
+    assert transformer.to_provider(reloaded_messages, channel_id=1, model_id="snapshot-regression-model") == round3_request
+
+    history_before_dump = [message.model_dump(mode="json") for message in history]
+    visible_history = dump_output_history(history, show_tool_calls=True)
+    assert [message.model_dump(mode="json") for message in history] == history_before_dump
+    assert [message["content"] for message in visible_history if message.get("role") == MessageRole.TOOL] == raw_results
+
+    for stored_row, raw_result in zip(stored_results, raw_results):
+        await db_session.refresh(stored_row)
+        assert stored_row.content is not None
+        assert "<current_session_todo_snapshot>" not in stored_row.content
+        assert "<current_terminal_watch_snapshot>" not in stored_row.content
+        assert json.loads(stored_row.content)["content"] == raw_result
+
+
+@pytest.mark.asyncio
+async def test_context_summary_persists_todo_and_watch_snapshots_across_reload_and_recompression(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    uid = "user-1"
+    session_id = "session-1"
+    profile_id = 1
+    await _create_sessions(db_session, (uid, session_id))
+
+    async with db_session.bind.begin() as connection:
+        await connection.run_sync(lambda sync_connection: BackgroundTask.__table__.create(sync_connection, checkfirst=True))
+
+    session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    monkeypatch.setattr(service_module, "AsyncSessionLocal", session_factory)
+
+    existing_summaries: list[str | None] = []
+
+    async def fake_generate_snapshot_summary_result(_db, *, existing_summary, **_kwargs):
+        existing_summaries.append(existing_summary)
+        return GeneratedSummaryResult(
+            content="short model summary",
+            message_count=3,
+            completed_stage=SimpleNamespace(stage_key="test-stage"),
+        )
+
+    async def noop_cleanup(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service_module, "generate_snapshot_summary_result", fake_generate_snapshot_summary_result)
+    monkeypatch.setattr(service_module, "cleanup_context_summary_work_safely", noop_cleanup)
+
+    profile = _profile(uid=uid, profile_id=profile_id)
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": []}})
+    executor = _executor(db_session, uid=uid, session_id=session_id)
+    todo_v1 = [{"content": "implement snapshot persistence", "status": "in_progress"}]
+    todo_v2 = [{"content": "implement snapshot persistence", "status": "completed"}]
+    assert json.loads(await executor.execute("write", todos=todo_v1, expected_revision=0))["revision"] == 1
+
+    watch = BackgroundTask(
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+        tool_call_id="watch-call-1",
+        tool_name=TERMINAL_WATCH_TOOL_NAME,
+        arguments={
+            "terminal_session_id": "terminal-1",
+            "condition": "output_contains",
+            "after_offset": 0,
+        },
+        status=BackgroundTaskStatus.PENDING,
+        result={"content": {"event": "output_contains"}},
+    )
+    db_session.add(watch)
+    await db_session.commit()
+    await db_session.refresh(watch)
+    assert watch.id is not None
+    watch_id = watch.id
+
+    async def append_tool_round(
+        db: AsyncSession,
+        *,
+        user_content: str,
+        call_id: str,
+        result_content: str,
+    ) -> tuple[Message, InternalMessage, Message]:
+        user_row = Message(
+            session_id=session_id,
+            uid=uid,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content=user_content,
+            is_processed=True,
+            profile_id=profile_id,
+        )
+        db.add(user_row)
+        await db.commit()
+        await db.refresh(user_row)
+        assert user_row.id is not None
+
+        tool_call = InternalToolCall(
+            id=call_id,
+            name=MANAGE_TODO_TOOL_NAME,
+            arguments={"operation": "read"},
+        )
+        assistant = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call])
+        assistant_row = Message(
+            session_id=session_id,
+            uid=uid,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TOOL_CALL,
+            content=assistant.model_dump_json(),
+            is_processed=True,
+            profile_id=profile_id,
+        )
+        db.add(assistant_row)
+        await db.commit()
+        await db.refresh(assistant_row)
+        assistant.id = assistant_row.id
+
+        history = [
+            InternalMessage(id=user_row.id, role=MessageRole.USER, content=user_content),
+            assistant,
+        ]
+        tool_result = InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=call_id,
+            content=result_content,
+        )
+        stored_result = await save_tool_response(
+            db,
+            session_id=session_id,
+            uid=uid,
+            profile_id=profile_id,
+            tool_res=tool_result,
+            messages=history,
+            turn_messages=[],
+        )
+        await persist_session_todo_snapshot_on_tool_results(
+            db,
+            uid=uid,
+            session_id=session_id,
+            tool_results=[stored_result],
+        )
+        result_row = await db.get(Message, stored_result.id)
+        assert result_row is not None
+        await db.refresh(result_row)
+        return user_row, stored_result, result_row
+
+    first_user = "first round user detail " * 1000
+    first_user_row, first_tool_result, first_tool_row = await append_tool_round(
+        db_session,
+        user_content=first_user,
+        call_id="todo-call-1",
+        result_content="first round tool output " * 6000,
+    )
+    assert first_tool_result.id is not None
+    first_tool_suffix = first_tool_row.model_context_suffix
+    assert first_tool_suffix is not None
+    assert first_tool_suffix.count("<current_session_todo_snapshot>") == 1
+    assert first_tool_suffix.count("<current_terminal_watch_snapshot>") == 1
+    assert '"revision":1' in first_tool_suffix
+    assert '"status":"pending"' in first_tool_suffix
+
+    first_state = await service_module.ensure_context_summary(
+        db_session,
+        session_id=session_id,
+        uid=uid,
+        profile=profile,
+        cfg=cfg,
+        before_id=first_tool_result.id + 1,
+        current_message="",
+        context_window_k=64,
+        max_tokens=256,
+        reserved_tokens=0,
+        tools=None,
+        trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
+        fixed_upper_message_id=first_tool_result.id,
+        force=True,
+    )
+    assert first_state.content is not None
+    assert first_state.message_id == first_tool_result.id
+    assert first_state.content.count("<current_session_todo_snapshot>") == 1
+    assert first_state.content.count("</current_session_todo_snapshot>") == 1
+    assert first_state.content.count("<current_terminal_watch_snapshot>") == 1
+    assert first_state.content.count("</current_terminal_watch_snapshot>") == 1
+    assert '"revision":1' in first_state.content
+    assert '"status":"pending"' in first_state.content
+    assert first_state.content.endswith("</covered_user_message>")
+    first_model_summary, first_covered_user = split_covered_user_message(first_state.content)
+    assert first_model_summary is not None
+    assert first_covered_user is not None
+    assert first_covered_user.message_id == first_user_row.id
+    assert first_covered_user.content == first_user
+    await db_session.rollback()
+
+    async with session_factory() as reload_db:
+        reloaded_state = await service_module.get_context_summary_state(
+            reload_db,
+            session_id=session_id,
+            uid=uid,
+        )
+    assert reloaded_state.content == first_state.content
+
+    for transformer in (OpenAIResponsesTransformer, OpenAIChatCompletionsTransformer):
+        first_summary_message = first_state.as_message()
+        reloaded_summary_message = reloaded_state.as_message()
+        assert first_summary_message is not None
+        assert reloaded_summary_message is not None
+        assert transformer.to_provider(
+            [first_summary_message],
+            channel_id=1,
+            model_id="snapshot-regression-model",
+        ) == transformer.to_provider(
+            [reloaded_summary_message],
+            channel_id=1,
+            model_id="snapshot-regression-model",
+        )
+
+    async with session_factory() as update_db:
+        update_executor = _executor(update_db, uid=uid, session_id=session_id)
+        assert json.loads(await update_executor.execute("write", todos=todo_v2, expected_revision=1))["revision"] == 2
+        updated_watch = await update_db.get(BackgroundTask, watch_id)
+        assert updated_watch is not None
+        updated_watch.status = BackgroundTaskStatus.SUCCEEDED
+        await update_db.commit()
+
+    async with session_factory() as unchanged_db:
+        unchanged_state = await service_module.ensure_context_summary(
+            unchanged_db,
+            session_id=session_id,
+            uid=uid,
+            profile=profile,
+            cfg=cfg,
+            before_id=None,
+            current_message="",
+            context_window_k=64,
+            max_tokens=256,
+            reserved_tokens=0,
+            tools=None,
+        )
+        unchanged_tool_row = await unchanged_db.get(Message, first_tool_result.id)
+        assert unchanged_tool_row is not None
+        assert unchanged_tool_row.model_context_suffix == first_tool_suffix
+    assert unchanged_state.content == first_state.content
+    assert existing_summaries == [None]
+
+    for transformer in (OpenAIResponsesTransformer, OpenAIChatCompletionsTransformer):
+        unchanged_summary_message = unchanged_state.as_message()
+        first_summary_message = first_state.as_message()
+        assert unchanged_summary_message is not None
+        assert first_summary_message is not None
+        assert transformer.to_provider(
+            [unchanged_summary_message],
+            channel_id=1,
+            model_id="snapshot-regression-model",
+        ) == transformer.to_provider(
+            [first_summary_message],
+            channel_id=1,
+            model_id="snapshot-regression-model",
+        )
+
+    second_user = "second round user detail " * 1000
+    async with session_factory() as second_round_db:
+        second_user_row, second_tool_result, second_tool_row = await append_tool_round(
+            second_round_db,
+            user_content=second_user,
+            call_id="todo-call-2",
+            result_content="second round tool output " * 6000,
+        )
+    assert second_tool_result.id is not None
+    second_tool_suffix = second_tool_row.model_context_suffix
+    assert second_tool_suffix is not None
+    assert second_tool_suffix.count("<current_session_todo_snapshot>") == 1
+    assert second_tool_suffix.count("<current_terminal_watch_snapshot>") == 1
+    assert '"revision":2' in second_tool_suffix
+    assert '"status":"succeeded"' in second_tool_suffix
+
+    async with session_factory() as second_compression_db:
+        second_state = await service_module.ensure_context_summary(
+            second_compression_db,
+            session_id=session_id,
+            uid=uid,
+            profile=profile,
+            cfg=cfg,
+            before_id=second_tool_result.id + 1,
+            current_message="",
+            context_window_k=64,
+            max_tokens=256,
+            reserved_tokens=0,
+            tools=None,
+            trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
+            fixed_upper_message_id=second_tool_result.id,
+            force=True,
+        )
+
+    assert second_state.content is not None
+    assert second_state.message_id == second_tool_result.id
+    assert second_state.content.count("<current_session_todo_snapshot>") == 1
+    assert second_state.content.count("</current_session_todo_snapshot>") == 1
+    assert second_state.content.count("<current_terminal_watch_snapshot>") == 1
+    assert second_state.content.count("</current_terminal_watch_snapshot>") == 1
+    assert '"revision":2' in second_state.content
+    assert '"status":"succeeded"' in second_state.content
+    assert '"revision":1' not in second_state.content
+    assert '"status":"pending"' not in second_state.content
+    assert existing_summaries == [None, "short model summary"]
+    assert second_state.content.endswith("</covered_user_message>")
+    second_model_summary, second_covered_user = split_covered_user_message(second_state.content)
+    assert second_model_summary is not None
+    assert second_model_summary.startswith("short model summary")
+    assert "<current_session_todo_snapshot>" in second_model_summary
+    assert "<current_terminal_watch_snapshot>" in second_model_summary
+    assert second_covered_user is not None
+    assert second_covered_user.message_id == second_user_row.id
+    assert second_covered_user.content == second_user
+
+    async with session_factory() as final_reload_db:
+        final_state = await service_module.get_context_summary_state(
+            final_reload_db,
+            session_id=session_id,
+            uid=uid,
+        )
+        final_first_tool_row = await final_reload_db.get(Message, first_tool_result.id)
+        final_second_tool_row = await final_reload_db.get(Message, second_tool_result.id)
+        assert final_first_tool_row is not None
+        assert final_second_tool_row is not None
+        assert final_first_tool_row.model_context_suffix == first_tool_suffix
+        assert final_second_tool_row.model_context_suffix == second_tool_suffix
+    assert final_state.content == second_state.content
+
+    for transformer in (OpenAIResponsesTransformer, OpenAIChatCompletionsTransformer):
+        second_summary_message = second_state.as_message()
+        final_summary_message = final_state.as_message()
+        assert second_summary_message is not None
+        assert final_summary_message is not None
+        assert transformer.to_provider(
+            [second_summary_message],
+            channel_id=1,
+            model_id="snapshot-regression-model",
+        ) == transformer.to_provider(
+            [final_summary_message],
+            channel_id=1,
+            model_id="snapshot-regression-model",
+        )
