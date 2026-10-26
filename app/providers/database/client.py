@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.paths import SQLITE_DB_PATH, TEST_SESSION_DB_PATH, ensure_data_dirs
+from app.providers.database.diagnostics import install_sqlite_diagnostics, observe_sqlite_session
 
 load_dotenv()
 
@@ -32,6 +33,10 @@ async def _await_cancellation_safe[ResultT](awaitable: Awaitable[ResultT]) -> Re
 
 
 class CancellationSafeAsyncSession(AsyncSession):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        observe_sqlite_session(self)
+
     async def commit(self) -> None:
         await _await_cancellation_safe(super().commit())
 
@@ -73,6 +78,9 @@ if DATABASE_URL.startswith("sqlite+"):
             cursor.execute("PRAGMA foreign_keys=ON")
         finally:
             cursor.close()
+
+
+install_sqlite_diagnostics(engine)
 
 
 AsyncSessionLocal = async_sessionmaker(bind=engine, class_=CancellationSafeAsyncSession, expire_on_commit=False)
