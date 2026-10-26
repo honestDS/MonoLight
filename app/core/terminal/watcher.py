@@ -81,6 +81,7 @@ async def watch_terminal(
     first_output_time: datetime | None = None
     last_change_time: datetime | None = None
     suffix = ""
+    output_truncated = False
     deadline = deadline.replace(tzinfo=None)
     while True:
         async with AsyncSessionLocal() as db:
@@ -104,9 +105,12 @@ async def watch_terminal(
         previous_seen = after_offset if last_seen_offset is None else last_seen_offset
         latest_offset = max(previous_seen, bounds.next_offset)
         new_output = bounds.next_offset > previous_seen
+        if bounds.oldest_offset > cursor:
+            output_truncated = True
+            cursor = bounds.oldest_offset
+            suffix = ""
         last_seen_offset = latest_offset
         event: str | None = None
-        output_truncated = False
         read_offset: int | None = None
         scan_page = False
         read_result: TerminalReadResult | None = None
@@ -114,12 +118,8 @@ async def watch_terminal(
         match_context: str | None = None
         if snapshot.status in TERMINAL_SESSION_FINAL_STATUSES:
             event = "process_exit" if snapshot.status is TerminalSessionStatus.EXITED else "terminal_error"
-            output_truncated = bounds.oldest_offset > cursor
         if event is None and now >= deadline:
             event = "timeout"
-        if event is None and bounds.oldest_offset > cursor:
-            event = "output_gap"
-            output_truncated = True
         if event is None and request.condition == "output":
             if new_output and first_output_time is None:
                 first_output_time = now
@@ -162,9 +162,9 @@ async def watch_terminal(
                     TerminalOutputReadStatus.EXPIRED,
                 }
                 if read_gap:
-                    event = "output_gap"
                     output_truncated = True
-                if not read_gap and scan_page:
+                    suffix = ""
+                if scan_page:
                     text = request.text or ""
                     combined = suffix + read_result.output
                     if text in combined:

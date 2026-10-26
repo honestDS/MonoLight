@@ -38,7 +38,6 @@ from app.core.tools.terminal import (
     TerminalCloseExecutor,
     TerminalReadExecutor,
     TerminalResizeExecutor,
-    TerminalStatusExecutor,
     TerminalWriteExecutor,
 )
 from app.core.tools.terminal_watch import TerminalWatchExecutor, ensure_terminal_auto_watch
@@ -70,7 +69,12 @@ def _profile(enabled_tools: list[str]) -> Profile:
     )
 
 
-def _snapshot(*, next_offset: int = 0, status: TerminalSessionStatus = TerminalSessionStatus.RUNNING) -> TerminalSessionSnapshot:
+def _snapshot(
+    *,
+    next_offset: int = 0,
+    status: TerminalSessionStatus = TerminalSessionStatus.RUNNING,
+    exit_code: int | None = None,
+) -> TerminalSessionSnapshot:
     return TerminalSessionSnapshot(
         terminal_session_id=TERMINAL_SESSION_ID,
         status=status,
@@ -89,6 +93,7 @@ def _snapshot(*, next_offset: int = 0, status: TerminalSessionStatus = TerminalS
             oldest_sequence=1,
             next_sequence=1 if next_offset == 0 else 2,
         ),
+        exit_code=0 if status is TerminalSessionStatus.EXITED and exit_code is None else exit_code,
     )
 
 
@@ -204,6 +209,7 @@ def _executor(executor_class, *, tool_timeout: float = 30.0, db=None):
 
 @pytest.mark.asyncio
 async def test_terminal_read_records_completed_eof_after_awaiting_watch_reply(monkeypatch):
+    snapshot = _snapshot(status=TerminalSessionStatus.EXITED)
     result = TerminalReadResult(
         terminal_session_id=TERMINAL_SESSION_ID,
         read_status=TerminalOutputReadStatus.OK,
@@ -221,6 +227,9 @@ async def test_terminal_read_records_completed_eof_after_awaiting_watch_reply(mo
     async def read_once(*_args, **_kwargs):
         return result
 
+    async def get_snapshot(*_args, **_kwargs):
+        return snapshot
+
     async def record_terminal_read(received_db, **kwargs):
         await asyncio.sleep(0)
         recorded.append((received_db, kwargs))
@@ -228,11 +237,12 @@ async def test_terminal_read_records_completed_eof_after_awaiting_watch_reply(mo
     async with AsyncSession() as db:
         executor = _executor(TerminalReadExecutor, db=db)
         monkeypatch.setattr(executor, "_read_once", read_once)
+        monkeypatch.setattr(executor, "_get_snapshot", get_snapshot)
         monkeypatch.setattr(terminal_module.terminal_watch_reply_crud, "record_terminal_read", record_terminal_read)
 
-        payload = await executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=65_536)
+        payload = await executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=16_384)
 
-    assert json.loads(payload) == result.model_dump(mode="json")
+    assert json.loads(payload) == {**snapshot.model_dump(mode="json"), **result.model_dump(mode="json")}
     assert recorded == [
         (
             db,
@@ -280,10 +290,14 @@ async def test_terminal_read_records_completed_eof_after_awaiting_watch_reply(mo
     ids=["expired", "not-at-latest"],
 )
 async def test_terminal_read_does_not_record_expired_or_unread_latest_result(monkeypatch, result):
+    snapshot = _snapshot(status=TerminalSessionStatus.EXITED)
     recorded = []
 
     async def read_once(*_args, **_kwargs):
         return result
+
+    async def get_snapshot(*_args, **_kwargs):
+        return snapshot
 
     async def record_terminal_read(received_db, **kwargs):
         recorded.append((received_db, kwargs))
@@ -291,11 +305,12 @@ async def test_terminal_read_does_not_record_expired_or_unread_latest_result(mon
     async with AsyncSession() as db:
         executor = _executor(TerminalReadExecutor, db=db)
         monkeypatch.setattr(executor, "_read_once", read_once)
+        monkeypatch.setattr(executor, "_get_snapshot", get_snapshot)
         monkeypatch.setattr(terminal_module.terminal_watch_reply_crud, "record_terminal_read", record_terminal_read)
 
-        payload = await executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=65_536)
+        payload = await executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=16_384)
 
-    assert json.loads(payload) == result.model_dump(mode="json")
+    assert json.loads(payload) == {**snapshot.model_dump(mode="json"), **result.model_dump(mode="json")}
     assert recorded == []
 
 
@@ -573,7 +588,7 @@ async def test_get_tools_for_profile_exposes_shell_companions_only_with_shell():
 
 def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
     expected = {
-        "terminal_status": {
+        "terminal_read": {
             "required": ["terminal_session_id"],
             "properties": {
                 "terminal_session_id": {},
@@ -583,14 +598,9 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
                     "maxLength": 128,
                     "pattern": r"^[A-Za-z0-9_-]+$",
                 },
-            },
-        },
-        "terminal_read": {
-            "required": ["terminal_session_id"],
-            "properties": {
-                "terminal_session_id": {},
                 "offset": {"minimum": 0, "default": 0},
-                "max_bytes": {"minimum": 1, "maximum": 1_048_576, "default": 65_536},
+                "max_bytes": {"minimum": 1, "maximum": 16_384, "default": 16_384},
+                "read_output": {"type": "boolean", "default": True},
             },
         },
         "terminal_write": {
@@ -635,6 +645,7 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
     }
 
     assert "terminal_signal" not in {schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS}
+    assert "terminal_status" not in {schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS}
     for schema in SHELL_COMPANION_TOOL_SCHEMAS:
         name = schema["function"]["name"]
         parameters = schema["function"]["parameters"]
@@ -668,9 +679,10 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     command_kinds = {}
     wait_timeouts = []
     write_result_payload = _write_command_result(bytes_written=5, output_offset_before_write=8)
+    snapshot = _snapshot(next_offset=14)
 
     async def get_snapshot(*args, **kwargs):
-        return _snapshot(next_offset=14)
+        return snapshot
 
     async def enqueue_read(*args, **kwargs):
         request = args[3]
@@ -722,13 +734,15 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", enqueue_control)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "wait_for_command_result", wait_for_command_result)
 
-    status_result = json.loads(await _executor(TerminalStatusExecutor).execute(TERMINAL_SESSION_ID))
-    assert TerminalSessionSnapshot.model_validate(status_result).status is TerminalSessionStatus.RUNNING
-
     read_executor = _executor(TerminalReadExecutor)
-    standalone_read_payload = json.loads(await read_executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=65_536))
-    standalone_read_result = TerminalReadResult.model_validate(standalone_read_payload)
+    status_result = json.loads(await read_executor.execute(TERMINAL_SESSION_ID, read_output=False))
+    status_snapshot = TerminalSessionSnapshot.model_validate({field: status_result[field] for field in TerminalSessionSnapshot.model_fields})
+    assert status_snapshot.status is TerminalSessionStatus.RUNNING
+
+    standalone_read_payload = json.loads(await read_executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=16_384))
+    standalone_read_result = TerminalReadResult.model_validate({field: standalone_read_payload[field] for field in TerminalReadResult.model_fields})
     assert standalone_read_result.requested_offset == 0
+    assert standalone_read_payload == {**snapshot.model_dump(mode="json"), **command_results[101]}
 
     write_executor = _executor(TerminalWriteExecutor, tool_timeout=5.0)
     write_payload = json.loads(await write_executor.execute(terminal_session_id=TERMINAL_SESSION_ID, data="input"))
@@ -778,7 +792,7 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
         assert repeated_receipt.model_dump(mode="json") == receipt.model_dump(mode="json")
 
     assert len(set(request_ids.values())) == len(request_ids)
-    all_action_request_ids = {action: _executor(TerminalStatusExecutor)._derive_request_id(action) for action in TerminalAction}
+    all_action_request_ids = {action: _executor(TerminalReadExecutor)._derive_request_id(action) for action in TerminalAction}
     assert all(len(request_id) == 64 for request_id in all_action_request_ids.values())
     assert len(set(all_action_request_ids.values())) == len(all_action_request_ids)
     write_requests = [request for request in control_requests if request.action is TerminalAction.WRITE]
@@ -814,8 +828,22 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     ],
     ids=["pending", "succeeded"],
 )
-async def test_terminal_status_returns_write_request_status_without_enqueuing(monkeypatch, write_request):
+@pytest.mark.parametrize("read_output", [False, True], ids=["query", "read"])
+async def test_terminal_read_returns_write_request_status_without_enqueuing(monkeypatch, write_request, read_output):
     snapshot = _snapshot(next_offset=14)
+    read_result = TerminalReadResult(
+        terminal_session_id=TERMINAL_SESSION_ID,
+        read_status=TerminalOutputReadStatus.OK,
+        requested_offset=0,
+        start_offset=0,
+        next_offset=4,
+        oldest_available_offset=0,
+        latest_offset=8,
+        sequence=1,
+        output="done",
+        eof=False,
+    )
+    read_calls = []
 
     async def get_snapshot(*args, **kwargs):
         return snapshot
@@ -824,27 +852,45 @@ async def test_terminal_status_returns_write_request_status_without_enqueuing(mo
         return write_request
 
     async def unexpected_enqueue(*args, **kwargs):
-        raise AssertionError("terminal_status must not enqueue terminal commands")
+        raise AssertionError("terminal_read must not enqueue terminal commands in this test")
+
+    async def read_once(*args, **kwargs):
+        read_calls.append((args, kwargs))
+        if not read_output:
+            raise AssertionError("terminal_read query must not read output")
+        return read_result
+
+    async def unexpected_auto_watch(*args, **kwargs):
+        raise AssertionError("terminal_read must not register an automatic watch")
 
     monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "get_write_status", get_write_status)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", unexpected_enqueue)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_read", unexpected_enqueue)
+    monkeypatch.setattr(terminal_module, "ensure_terminal_auto_watch", unexpected_auto_watch)
+
+    executor = _executor(TerminalReadExecutor)
+    monkeypatch.setattr(executor, "_read_once", read_once)
 
     result = json.loads(
-        await _executor(TerminalStatusExecutor).execute(
+        await executor.execute(
             TERMINAL_SESSION_ID,
             request_id=write_request["request_id"],
+            read_output=read_output,
         )
     )
 
-    assert result == {**snapshot.model_dump(mode="json"), "write_request": write_request}
+    expected = {**snapshot.model_dump(mode="json"), "write_request": write_request}
+    if read_output:
+        expected.update(read_result.model_dump(mode="json"))
+    assert result == expected
+    assert bool(read_calls) is read_output
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_id", ["", "short", "x" * 129, "invalid/request"])
-@pytest.mark.parametrize("executor_class", [TerminalStatusExecutor, TerminalWriteExecutor], ids=["status", "write"])
-async def test_terminal_status_and_write_reject_invalid_request_ids_without_enqueue(
+@pytest.mark.parametrize("executor_class", [TerminalReadExecutor, TerminalWriteExecutor], ids=["read", "write"])
+async def test_terminal_read_and_write_reject_invalid_request_ids_without_enqueue(
     monkeypatch,
     executor_class,
     request_id,
@@ -862,7 +908,7 @@ async def test_terminal_status_and_write_reject_invalid_request_ids_without_enqu
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", enqueue_control)
 
     with pytest.raises(ValidationError):
-        if executor_class is TerminalStatusExecutor:
+        if executor_class is TerminalReadExecutor:
             await _executor(executor_class).execute(TERMINAL_SESSION_ID, request_id=request_id)
         else:
             await _executor(executor_class).execute(

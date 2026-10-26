@@ -333,11 +333,15 @@ def test_prevalidate_tool_round_accepts_companion_tools_when_shell_is_enabled():
     cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
     session_id = "t" * 32
     tool_calls = [
-        SimpleNamespace(id="status", name="terminal_status", arguments={"terminal_session_id": session_id}),
+        SimpleNamespace(
+            id="status",
+            name="terminal_read",
+            arguments={"terminal_session_id": session_id, "read_output": False},
+        ),
         SimpleNamespace(
             id="read",
             name="terminal_read",
-            arguments={"terminal_session_id": session_id, "offset": 0, "max_bytes": 65_536},
+            arguments={"terminal_session_id": session_id, "offset": 0, "max_bytes": 16_384},
         ),
         SimpleNamespace(
             id="write",
@@ -395,13 +399,37 @@ def test_prevalidate_tool_round_rejects_removed_terminal_signal_companion():
     assert json.loads(errors[tool_call.id])["status"] == "failed"
 
 
+def test_prevalidate_tool_round_rejects_removed_terminal_status_as_disabled_tool():
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(
+        id="terminal-status",
+        name="terminal_status",
+        arguments={"terminal_session_id": "t" * 32},
+    )
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=[SHELL_TOOL_SCHEMA, *SHELL_COMPANION_TOOL_SCHEMAS],
+    )
+
+    payload = json.loads(errors[tool_call.id])
+    assert payload == {
+        "error": t(ERR_TOOL_NOT_ENABLED, tool_name="terminal_status"),
+        "tool_name": "terminal_status",
+        "status": "failed",
+    }
+
+
 @pytest.mark.parametrize(
     ("tool_name", "arguments", "expected_detail"),
     [
-        ("terminal_status", {"terminal_session_id": "t" * 31}, "shorter than 32"),
+        ("terminal_read", {"terminal_session_id": "t" * 31}, "shorter than 32"),
         ("terminal_read", {"terminal_session_id": "t" * 32, "offset": -1}, "at least 0"),
-        ("terminal_read", {"terminal_session_id": "t" * 32, "max_bytes": 1_048_577}, "at most 1048576"),
-        ("terminal_status", {"terminal_session_id": "t" * 32, "extra": True}, "extra"),
+        ("terminal_read", {"terminal_session_id": "t" * 32, "max_bytes": 16_385}, "at most 16384"),
+        ("terminal_read", {"terminal_session_id": "t" * 32, "request_id": "invalid request id"}, "does not match pattern"),
+        ("terminal_read", {"terminal_session_id": "t" * 32, "read_output": "false"}, "must be boolean"),
+        ("terminal_read", {"terminal_session_id": "t" * 32, "extra": True}, "extra"),
     ],
 )
 def test_prevalidate_tool_round_rejects_companion_schema_boundaries(tool_name, arguments, expected_detail):
@@ -417,3 +445,42 @@ def test_prevalidate_tool_round_rejects_companion_schema_boundaries(tool_name, a
     payload = json.loads(errors[tool_call.id])
     assert payload["status"] == "failed"
     assert expected_detail in payload["error"]
+
+
+def test_prevalidate_tool_round_accepts_terminal_read_request_id_query():
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(
+        id="terminal-status-query",
+        name="terminal_read",
+        arguments={
+            "terminal_session_id": "t" * 32,
+            "request_id": "r" * 16,
+            "read_output": False,
+        },
+    )
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=SHELL_COMPANION_TOOL_SCHEMAS,
+    )
+
+    assert errors == {}
+
+
+@pytest.mark.parametrize("max_bytes", [16_384, 1])
+def test_prevalidate_tool_round_accepts_terminal_read_page_sizes(max_bytes):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(
+        id="terminal-read-page",
+        name="terminal_read",
+        arguments={"terminal_session_id": "t" * 32, "max_bytes": max_bytes},
+    )
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=SHELL_COMPANION_TOOL_SCHEMAS,
+    )
+
+    assert errors == {}
