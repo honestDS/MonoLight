@@ -29,6 +29,7 @@ from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, MessageRole, MessageType, decode_message_content
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
@@ -140,6 +141,7 @@ async def _restore_foreground_tool_replies(
             cursor = page[-1].id
 
     # 全部区间扫描完成后再生成未知结果，避免后续区间误认新写入行。
+    newly_created_tool_results: list[InternalMessage] = []
     for group in groups:
         for call_index, tool_call in group["missing"]:
             result_key = (group["identity"], call_index)
@@ -175,6 +177,15 @@ async def _restore_foreground_tool_replies(
             tool_result.id = saved.id
             tool_result.created_at = saved.created_at
             restored_results[result_key] = tool_result
+            newly_created_tool_results.append(tool_result)
+
+    await persist_session_todo_snapshot_on_tool_results(
+        db,
+        uid=work.uid,
+        session_id=work.session_id,
+        tool_results=newly_created_tool_results,
+        commit=False,
+    )
 
     def insert_results(raw_messages: list[Any]) -> list[Any]:
         parsed_messages = [InternalMessage.model_validate(message) for message in raw_messages]

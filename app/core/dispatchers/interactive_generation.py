@@ -1,3 +1,4 @@
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -248,6 +249,23 @@ async def generate_interactive_turn(
                     }
                 )
                 emitted_agent_loop_start = True
+
+            pending_ids = set(getattr(state.checkpoint_state, "pending_resume_message_ids", []))
+            if pending_ids:
+                for message in request_messages:
+                    if message.id in pending_ids:
+                        resume_message = json.dumps(
+                            message.model_dump(mode="json", include={"role", "content"}, exclude_none=True),
+                            ensure_ascii=False,
+                        )
+                        state.dispatch_logger.bind(
+                            uid=state.uid,
+                            session_id=state.session_id,
+                            turn=state.current_turn,
+                            response_id=response_id,
+                            resume_message_id=message.id,
+                        ).info(f"External work resume notice in model request: {resume_message}")
+                state.checkpoint_state.pending_resume_message_ids.clear()
 
             if upstream_streaming:
                 response = await LLMClient.generate_with_stream_callback(

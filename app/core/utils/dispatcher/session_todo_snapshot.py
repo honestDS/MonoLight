@@ -5,8 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.todo import session_todo_crud
 from app.core.utils.context_messages import is_context_summary_message
+from app.core.utils.dispatcher import terminal_watch_snapshot
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.session_todo import SessionTodoPlan
 
 __all__ = [
@@ -120,7 +121,7 @@ def strip_session_todo_snapshots(messages: list[InternalMessage]) -> list[Intern
             stripped.append(
                 message.model_copy(
                     deep=True,
-                    update={"content": strip_session_todo_snapshot(message.content)},
+                    update={"content": strip_session_todo_snapshot(terminal_watch_snapshot.strip_terminal_watch_snapshot(message.content))},
                 )
             )
         else:
@@ -163,6 +164,7 @@ async def persist_session_todo_snapshot_on_tool_results(
     uid: str,
     session_id: str,
     tool_results: list[InternalMessage],
+    commit: bool = True,
 ) -> str | None:
     target = next(
         (message for message in reversed(tool_results) if message.role == MessageRole.TOOL and isinstance(message.id, int) and not isinstance(message.id, bool) and isinstance(message.content, str)),
@@ -171,21 +173,46 @@ async def persist_session_todo_snapshot_on_tool_results(
     if target is None:
         return None
 
-    snapshot = await load_current_session_todo_snapshot(
-        db,
-        uid=uid,
-        session_id=session_id,
-    )
-    await message_crud.update_model_context_suffix(
-        db,
-        message_id=target.id,
-        uid=uid,
-        session_id=session_id,
-        model_context_suffix=snapshot,
-        commit=False,
-    )
-    await db.commit()
+    stored = await message_crud.get(db, target.id)
+    if stored is None:
+        return None
+    await db.refresh(stored)
+    if stored.uid != uid or stored.session_id != session_id or stored.role != MessageRole.TOOL or stored.type != MessageType.TOOL_RESULT:
+        return None
 
-    base_content = strip_session_todo_snapshot(target.content) or ""
-    target.content = f"{base_content}\n\n{snapshot}" if snapshot else base_content
-    return snapshot
+    if stored.model_context_suffix is None:
+        todo_snapshot = await load_current_session_todo_snapshot(
+            db,
+            uid=uid,
+            session_id=session_id,
+        )
+        watch_snapshot = await terminal_watch_snapshot.load_current_terminal_watch_snapshot(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=stored.profile_id,
+        )
+        suffix = "\n\n".join(snapshot for snapshot in (todo_snapshot, watch_snapshot) if snapshot)
+        await message_crud.update_model_context_suffix(
+            db,
+            message_id=stored.id,
+            uid=uid,
+            session_id=session_id,
+            model_context_suffix=suffix,
+            only_if_unset=True,
+            commit=False,
+        )
+        if commit:
+            await db.commit()
+        await db.refresh(stored)
+
+    from app.core.utils.message_parser import parse_db_messages_to_internal
+
+    parsed_messages = parse_db_messages_to_internal([stored])
+    if not parsed_messages:
+        return None
+    target.content = parsed_messages[0].content
+
+    suffix = stored.model_context_suffix
+    todo_snapshot = suffix.split("\n\n", 1)[0] if isinstance(suffix, str) else None
+    return todo_snapshot if parse_session_todo_snapshot(todo_snapshot) is not None else None

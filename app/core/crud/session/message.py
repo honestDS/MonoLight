@@ -219,6 +219,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         uid: str,
         session_id: str,
         model_context_suffix: str | None,
+        only_if_unset: bool = False,
         commit: bool = True,
     ) -> bool:
         suffix_changed = (
@@ -229,17 +230,15 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 Message.model_context_suffix != model_context_suffix,
             )
         )
-        result = await db.execute(
-            update(Message)
-            .where(
-                Message.id == message_id,
-                Message.uid == uid,
-                Message.session_id == session_id,
-                suffix_changed,
-            )
-            .values(model_context_suffix=model_context_suffix)
-            .execution_options(synchronize_session=False)
+        stmt = update(Message).where(
+            Message.id == message_id,
+            Message.uid == uid,
+            Message.session_id == session_id,
+            suffix_changed,
         )
+        if only_if_unset:
+            stmt = stmt.where(Message.model_context_suffix.is_(None))
+        result = await db.execute(stmt.values(model_context_suffix=model_context_suffix).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         else:

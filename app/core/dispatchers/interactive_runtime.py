@@ -226,7 +226,6 @@ async def dispatch_interactive(
                             additional_system_prompt=additional_system_prompt,
                             processed_only=True,
                         )
-                        state.messages.extend(InternalMessage.model_validate(item) for item in resume_state.get("external_resume_messages", []))
                     else:
                         state.messages = [InternalMessage.model_validate(item) for item in resume_state.get("messages", [])]
                     state.current_turn = int(resume_state.get("current_turn", 0))

@@ -14,7 +14,7 @@ from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.prompts import TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
-from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
 
 __all__ = ["route_terminal_auto_watch_reply", "prepare_terminal_auto_watch_resume"]
@@ -246,25 +246,16 @@ async def prepare_terminal_auto_watch_resume(
     if payloads:
         raw_checkpoint = state.get("dispatcher_checkpoint")
         checkpoint = dict(raw_checkpoint) if isinstance(raw_checkpoint, dict) else {}
-        checkpoint.update({"messages": [], "turn_messages": [], "reload_history": True})
-        resume_message = InternalMessage(
-            role=MessageRole.USER,
-            content=json.dumps(
-                {
-                    "type": "external_work_resume",
-                    "instruction": TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT,
-                    "tasks": payloads,
-                },
-                ensure_ascii=False,
-            ),
+        checkpoint.pop("external_resume_messages", None)
+        checkpoint["pending_resume_message_ids"] = list(
+            dict.fromkeys(
+                [
+                    *checkpoint.get("pending_resume_message_ids", []),
+                    *marker_ids,
+                ]
+            )
         )
-        existing_messages = checkpoint.get("external_resume_messages")
-        if not isinstance(existing_messages, list):
-            existing_messages = []
-        checkpoint["external_resume_messages"] = [
-            *existing_messages,
-            resume_message.model_dump(mode="json"),
-        ]
+        checkpoint.update({"messages": [], "turn_messages": [], "reload_history": True})
         checkpoint["context_summary_trigger_mode"] = "user_message"
         old_upper = checkpoint.get("context_summary_fixed_upper_message_id")
         upper_bounds = [*marker_ids, old_upper] if _positive_int(old_upper) else marker_ids

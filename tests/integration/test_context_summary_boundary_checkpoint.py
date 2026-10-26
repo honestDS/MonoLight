@@ -23,6 +23,7 @@ from app.core.utils.context_summary.user_message_block import (
 from app.core.utils.dispatcher import context_summary_checkpoint as checkpoint_module
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session import ChatSession
+from app.models.session_todo import SessionTodoPlan
 
 
 def _message(
@@ -309,28 +310,26 @@ async def test_checkpoint_uses_fixed_upper_and_preserves_messages_after_new_summ
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_excludes_todo_from_summary_input_and_reattaches_latest_snapshot(monkeypatch, db_session: AsyncSession):
+async def test_checkpoint_reuses_persisted_snapshot_and_preserves_bounded_tool_body(monkeypatch, db_session: AsyncSession):
     captured = {}
     todo_snapshot = '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"verify","status":"in_progress"}]}</current_session_todo_snapshot>'
-
-    async def load_snapshot(_db, *, uid, session_id):
-        assert uid == "user-1"
-        assert session_id == "session-1"
-        return todo_snapshot
+    watch_snapshot = '<current_terminal_watch_snapshot>{"type":"terminal_watch_state","terminals":[{"terminal_session_id":"term-1"}]}</current_terminal_watch_snapshot>'
+    retained_tool_content = f"result\n\n{todo_snapshot}\n\n{watch_snapshot}"
 
     async def ensure_summary(_db, **kwargs):
         captured.update(kwargs)
-        return ContextSummaryState(content="compacted", message_id=3)
+        return ContextSummaryState(content=f"compacted\n\n{todo_snapshot}", message_id=3)
 
-    monkeypatch.setattr(checkpoint_module, "load_current_session_todo_snapshot", load_snapshot)
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="system"),
         InternalMessage(id=1, role=MessageRole.USER, content="old"),
-        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="tooling"),
-        InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content=f"result\n\n{todo_snapshot}"),
-        InternalMessage(id=4, role=MessageRole.USER, content="current"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="tool call"),
+        InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content="boundary result"),
+        InternalMessage(id=4, role=MessageRole.ASSISTANT, content="next tool call"),
+        InternalMessage(id=5, role=MessageRole.TOOL, tool_call_id="call-2", content=retained_tool_content),
     ]
+    original_messages = [message.model_copy(deep=True) for message in messages]
 
     result = await checkpoint_module.apply_context_summary_checkpoint(
         db_session,
@@ -339,18 +338,20 @@ async def test_checkpoint_excludes_todo_from_summary_input_and_reattaches_latest
         profile=object(),
         cfg=object(),
         messages=messages,
-        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
-        fixed_upper_message_id=4,
+        trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
+        fixed_upper_message_id=3,
         context_window_k=8,
         max_tokens=512,
         tools=None,
     )
 
-    assert all("current_session_todo_snapshot" not in str(message.content) for message in captured["fixed_request_messages"])
-    assert captured["reserved_tokens"] > 0
-    assert sum("current_session_todo_snapshot" in str(message.content) for message in result) == 1
     summary_message = next(message for message in result if isinstance(message.content, str) and message.content.startswith("<conversation_summary "))
     assert todo_snapshot in summary_message.content
+    retained_tool = next(message for message in result if message.role == MessageRole.TOOL)
+    fixed_tool = next(message for message in captured["fixed_request_messages"] if message.role == MessageRole.TOOL)
+    assert retained_tool.content == retained_tool_content
+    assert fixed_tool.content == retained_tool_content
+    assert messages == original_messages
 
 
 @pytest.mark.asyncio
@@ -366,17 +367,19 @@ async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(
     db_session.add(session)
     await db_session.commit()
 
-    async def load_snapshot(_db, *, uid, session_id):
-        assert uid == "user-1"
-        assert session_id == "session-1"
-        return todo_snapshot
-
     async def ensure_summary(_db, **kwargs):
         captured.update(kwargs)
         return ContextSummaryState(content=None, message_id=None)
 
-    monkeypatch.setattr(checkpoint_module, "load_current_session_todo_snapshot", load_snapshot)
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
+    tool_content = f"result\n\n{todo_snapshot}"
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(id=1, role=MessageRole.USER, content="old"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="answer"),
+        InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content=tool_content),
+        InternalMessage(id=4, role=MessageRole.USER, content="current"),
+    ]
 
     previous_metadata = {
         "channel_id": 9,
@@ -387,19 +390,13 @@ async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(
         "context_summary_revision": 1,
         "context_content_revision": 0,
     }
-    await checkpoint_module.apply_context_summary_checkpoint(
+    result = await checkpoint_module.apply_context_summary_checkpoint(
         db_session,
         session_id="session-1",
         uid="user-1",
         profile=object(),
         cfg=object(),
-        messages=[
-            InternalMessage(role=MessageRole.SYSTEM, content="system"),
-            InternalMessage(id=1, role=MessageRole.USER, content="old"),
-            InternalMessage(id=2, role=MessageRole.ASSISTANT, content="answer"),
-            InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content=f"result\n\n{todo_snapshot}"),
-            InternalMessage(id=4, role=MessageRole.USER, content="current"),
-        ],
+        messages=messages,
         trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
         fixed_upper_message_id=4,
         context_window_k=250,
@@ -412,8 +409,14 @@ async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(
     )
 
     assert captured["confirmed_input_tokens"] == 344_000
-    assert captured["reserved_tokens"] > 0
-    assert all("current_session_todo_snapshot" not in str(message.content) for message in captured["fixed_request_messages"])
+    assert captured["reserved_tokens"] == 0
+    assert [(message.id, message.content) for message in captured["fixed_request_messages"]] == [
+        (None, "system"),
+        (4, "current"),
+    ]
+    assert [(message.id, message.content) for message in result] == [(message.id, message.content) for message in messages]
+    retained_tool = next(message for message in result if message.role == MessageRole.TOOL)
+    assert retained_tool.content == tool_content
 
 
 @pytest.mark.asyncio
@@ -636,6 +639,8 @@ async def test_persist_context_summary_rejects_stale_content_revision_then_accep
 
 @pytest.mark.asyncio
 async def test_context_summary_lease_loss_after_candidate_generation_never_persists_old_result(db_session: AsyncSession, monkeypatch):
+    connection = await db_session.connection()
+    await connection.run_sync(SessionTodoPlan.__table__.create, checkfirst=True)
     session = ChatSession(
         session_id="session-lease",
         uid="user-1",

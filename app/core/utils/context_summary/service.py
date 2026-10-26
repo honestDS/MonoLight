@@ -56,6 +56,16 @@ from app.core.utils.context_summary.user_message_block import (
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.dispatcher.session_todo_snapshot import (
+    load_current_session_todo_snapshot,
+    measure_session_todo_snapshot_tokens,
+    strip_session_todo_snapshot,
+)
+from app.core.utils.dispatcher.terminal_watch_snapshot import (
+    load_current_terminal_watch_snapshot,
+    measure_terminal_watch_snapshot_tokens,
+    strip_terminal_watch_snapshot,
+)
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile, ProfileConfig
@@ -302,6 +312,24 @@ async def _ensure_context_summary(
         return state
 
     existing_model_summary, existing_user_message = split_covered_user_message(state.content)
+    existing_model_summary = strip_session_todo_snapshot(strip_terminal_watch_snapshot(existing_model_summary))
+    todo_snapshot = None
+    watch_snapshot = None
+    if isinstance(db, AsyncSession) and isinstance(profile.id, int) and not isinstance(profile.id, bool) and profile.id > 0:
+        todo_snapshot = await load_current_session_todo_snapshot(
+            db,
+            uid=uid,
+            session_id=session_id,
+        )
+        watch_snapshot = await load_current_terminal_watch_snapshot(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile.id,
+        )
+    fixed_snapshot = "\n\n".join(snapshot for snapshot in (todo_snapshot, watch_snapshot) if snapshot)
+    reserved_tokens += measure_session_todo_snapshot_tokens(todo_snapshot)
+    reserved_tokens += measure_terminal_watch_snapshot_tokens(watch_snapshot)
     model_excluded_message_ids = [boundary.covered_user_message_id] if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT and boundary.covered_user_message_id is not None else None
     snapshot = await build_context_summary_snapshot(
         db,
@@ -638,6 +666,8 @@ async def _ensure_context_summary(
             model_id=model_id,
             protocol=protocol,
         )
+    if fixed_snapshot:
+        candidate_summary = f"{candidate_summary}\n\n{fixed_snapshot}" if candidate_summary else fixed_snapshot
     if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT:
         candidate_summary = append_covered_user_message(
             candidate_summary,

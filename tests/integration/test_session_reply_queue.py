@@ -8,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.util import await_only
 from sqlmodel import select
 
-from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import (
+    SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    TERMINAL_WATCH_TOOL_NAME,
+)
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
@@ -18,6 +22,7 @@ from app.core.session_reply_queue import executor_replies as executor_replies_mo
 from app.core.session_reply_queue.manager import SessionReplyQueueManager
 from app.core.terminal.schemas import ShellNonInteractiveCompletedResult
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
@@ -29,6 +34,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.session_todo import SessionTodoPlan
 from app.models.user import User
 from app.providers.database.client import CancellationSafeAsyncSession
 from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransformer
@@ -767,7 +773,7 @@ async def test_failed_reply_reuses_persisted_message_id_across_notification_hist
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "scenario",
-    ["missing_single", "persisted_result", "parallel", "complete_checkpoint"],
+    ["missing_single", "missing_with_snapshots", "persisted_result", "parallel", "complete_checkpoint"],
 )
 async def test_foreground_reply_restores_tool_results_before_dispatch(db_session: AsyncSession, monkeypatch, scenario: str):
     session_id, uid, worker_id, profile_id = "session-1", "user-1", "worker-1", 1
@@ -779,6 +785,7 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
     )
     call_ids = {
         "missing_single": ["call-1"],
+        "missing_with_snapshots": ["call-1"],
         "persisted_result": ["call-1"],
         "parallel": ["call-1", "call-2", "call-3"],
         "complete_checkpoint": ["call-1", "call-2", "call-3"],
@@ -830,6 +837,25 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
     initial_checkpoint = copy.deepcopy(checkpoint)
 
     db_session.add(ChatSession(session_id=session_id, uid=uid, profile_id=profile_id))
+    todo_plan = None
+    watch_task = None
+    if scenario == "missing_with_snapshots":
+        await db_session.flush()
+        todo_plan = SessionTodoPlan(
+            session_id=session_id,
+            uid=uid,
+            revision=3,
+            todos=[{"content": "restore todo", "status": "in_progress"}],
+        )
+        watch_task = BackgroundTask(
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            tool_call_id="watch-call-1",
+            tool_name=TERMINAL_WATCH_TOOL_NAME,
+            arguments={"terminal_session_id": "terminal-session-1", "condition": "output"},
+        )
+        db_session.add_all([todo_plan, watch_task])
     message_fields = {"uid": uid, "session_id": session_id, "profile_id": profile_id, "is_processed": True}
     db_session.add_all(
         [
@@ -913,10 +939,18 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
 
     monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
     initial_message_count = len(await load_messages())
-    expected_new_results = {"missing_single": 1, "persisted_result": 0, "parallel": 1, "complete_checkpoint": 0}[scenario]
+    expected_new_results = {"missing_single": 1, "missing_with_snapshots": 1, "persisted_result": 0, "parallel": 1, "complete_checkpoint": 0}[scenario]
     result_snapshots, message_counts, checkpoint_snapshots = [], [], []
+    fixed_model_context_suffix = None
+    fixed_model_content = None
 
-    for _ in range(2):
+    for iteration in range(2):
+        if scenario == "missing_with_snapshots" and iteration == 1:
+            assert todo_plan is not None and watch_task is not None
+            todo_plan.revision = 4
+            watch_task.status = BackgroundTaskStatus.SUCCEEDED
+            await db_session.commit()
+
         assert await executor_replies_module._execute_foreground(db_session, work, worker_id) == expected_response
         await db_session.refresh(work)
         saved_work_result = await db_session.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work.id).execution_options(populate_existing=True))
@@ -964,8 +998,34 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
             unknown = {"status": "execution_unknown", "error": PROMPT_TOOL_INTERRUPTED}
             assert json.loads(stored.content or "{}") == unknown and stored.tool_execution_status == "execution_unknown"
             recovered = checkpoint_tool_maps[0][call_id]
-            assert recovered.id == row_id and json.loads(recovered.content or "{}") == unknown
+            assert recovered.id == row_id
+            if scenario != "missing_with_snapshots":
+                assert json.loads(recovered.content or "{}") == unknown
             assert recovered.tool_execution_status == "execution_unknown"
+
+        if scenario == "missing_with_snapshots":
+            result = await db_session.execute(select(Message).where(Message.session_id == session_id, Message.uid == uid, Message.type == MessageType.TOOL_RESULT).order_by(Message.id).execution_options(populate_existing=True))
+            tool_rows = list(result.scalars().all())
+            assert len(tool_rows) == 1
+            real_row = tool_rows[0]
+            parsed_db_result = parse_db_messages_to_internal([real_row])[0]
+            assert json.loads(persisted["call-1"][1].content or "{}") == {
+                "status": "execution_unknown",
+                "error": PROMPT_TOOL_INTERRUPTED,
+            }
+            assert isinstance(real_row.model_context_suffix, str) and real_row.model_context_suffix
+            assert "<current_session_todo_snapshot>" in real_row.model_context_suffix
+            assert '"revision":3' in real_row.model_context_suffix
+            assert '"status":"in_progress"' in real_row.model_context_suffix
+            assert "<current_terminal_watch_snapshot>" in real_row.model_context_suffix
+            assert '"status":"pending"' in real_row.model_context_suffix
+            assert all(tool_map["call-1"].content == parsed_db_result.content for tool_map in checkpoint_tool_maps)
+            if iteration == 0:
+                fixed_model_context_suffix = real_row.model_context_suffix
+                fixed_model_content = parsed_db_result.content
+            else:
+                assert real_row.model_context_suffix == fixed_model_context_suffix
+                assert parsed_db_result.content == fixed_model_content
 
         result_snapshots.append({call_id: (row_id, result.content, result.tool_execution_status) for call_id, (row_id, result) in persisted.items()})
         message_counts.append(len(await load_messages()))
