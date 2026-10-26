@@ -1,7 +1,7 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, delete, exists, func, or_, true, update
@@ -652,6 +652,64 @@ class CRUDSessionReplyWorkItem:
         if commit:
             await db.commit()
         return result.rowcount or 0
+
+    async def cancel_background_tool_summaries(
+        self,
+        db: AsyncSession,
+        *,
+        error: str,
+        before: datetime | None = None,
+        commit: bool = True,
+    ) -> int:
+        snapshot_conditions = [
+            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+            SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
+        ]
+        if before is not None:
+            snapshot_conditions.append(SessionReplyWorkItem.created_at <= before)
+        snapshot_result = await db.execute(select(SessionReplyWorkItem.id).where(*snapshot_conditions).order_by(SessionReplyWorkItem.id.asc()))
+        snapshot_ids = [work_id for work_id in snapshot_result.scalars().all() if work_id is not None]
+        cancelled_count = 0
+        if snapshot_ids:
+            result = await db.execute(
+                update(SessionReplyWorkItem)
+                .where(
+                    SessionReplyWorkItem.id.in_(snapshot_ids),
+                    SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
+                )
+                .values(
+                    status=SessionReplyWorkStatus.CANCELLED,
+                    locked_by=None,
+                    lock_until=None,
+                    error=error,
+                    updated_at=get_local_time(),
+                )
+            )
+            cancelled_count = result.rowcount or 0
+        if commit:
+            await db.commit()
+        return cancelled_count
+
+    async def list_startup_cancellation_work_items(
+        self,
+        db: AsyncSession,
+        *,
+        before: datetime | None = None,
+    ) -> list[SessionReplyWorkItem]:
+        snapshot_conditions = [
+            or_(
+                and_(
+                    SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
+                ),
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+            )
+        ]
+        if before is not None:
+            snapshot_conditions.append(SessionReplyWorkItem.created_at <= before)
+        result = await db.execute(select(SessionReplyWorkItem).where(*snapshot_conditions).order_by(SessionReplyWorkItem.id.asc()).execution_options(populate_existing=True))
+        return list(result.scalars().all())
 
     async def recover_expired(self, db: AsyncSession) -> tuple[int, list[tuple[int, str, str]]]:
         now = int(time.time())

@@ -23,6 +23,7 @@ from app.workers.signals import install_shutdown_signal_handlers
 
 async def run_general_worker() -> None:
     shared_stop_event = asyncio.Event()
+    startup_ready = asyncio.Event()
     install_shutdown_signal_handlers(shared_stop_event)
 
     await create_database_tables()
@@ -33,7 +34,32 @@ async def run_general_worker() -> None:
         finally:
             shared_stop_event.set()
 
+    async def run_background_task_role() -> None:
+        async def run_owned_background_task(owned_stop_event: asyncio.Event) -> None:
+            await run_owned_background_task_worker(
+                owned_stop_event,
+                startup_ready=startup_ready,
+            )
+
+        try:
+            await run_with_worker_lease(
+                BACKGROUND_TASK_WORKER_NAME,
+                shared_stop_event,
+                run_owned_background_task,
+            )
+        finally:
+            startup_ready.set()
+            shared_stop_event.set()
+
+    async def run_session_reply_role(owned_stop_event: asyncio.Event) -> None:
+        await run_owned_session_reply_worker(
+            owned_stop_event,
+            startup_cleaned=True,
+        )
+
     async with asyncio.TaskGroup() as task_group:
+        task_group.create_task(run_background_task_role())
+        await startup_ready.wait()
         task_group.create_task(
             run_role(
                 MESSAGE_PLATFORM_WORKER_NAME,
@@ -42,14 +68,8 @@ async def run_general_worker() -> None:
         )
         task_group.create_task(
             run_role(
-                BACKGROUND_TASK_WORKER_NAME,
-                run_owned_background_task_worker,
-            )
-        )
-        task_group.create_task(
-            run_role(
                 SESSION_REPLY_WORKER_NAME,
-                run_owned_session_reply_worker,
+                run_session_reply_role,
             )
         )
 

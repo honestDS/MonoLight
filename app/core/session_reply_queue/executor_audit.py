@@ -52,11 +52,13 @@ async def _mark_audit_execution_unknown_reliably(
     audit_record_id: int,
     claim_token: str,
     error_reason: str,
+    commit: bool = True,
 ) -> bool:
     round_status = await audit_crud.finish_execution_round_if_complete(
         db,
         audit_record_id=audit_record_id,
         claim_token=claim_token,
+        commit=commit,
     )
     if round_status is not None:
         marked = True
@@ -67,6 +69,7 @@ async def _mark_audit_execution_unknown_reliably(
             audit_record_id=audit_record_id,
             claim_token=claim_token,
             error_reason=error_reason,
+            commit=commit,
         )
         if not marked:
             marked = await audit_crud.finish_execution_round(
@@ -75,6 +78,7 @@ async def _mark_audit_execution_unknown_reliably(
                 claim_token=claim_token,
                 status=AuditRecordStatus.EXECUTION_UNKNOWN,
                 error_reason=error_reason,
+                commit=commit,
             )
         execution_unknown = marked
     if marked:
@@ -89,9 +93,14 @@ async def _mark_audit_execution_unknown_reliably(
                 feedback=error_reason,
                 expected_statuses=(AuditRecordStatus.PENDING, AuditRecordStatus.EXECUTING),
             )
-            await db.commit()
-        status_updated = await update_confirmation_message_status(db, audit_record_id=audit_record_id)
-        if status_updated is False and updated_tool_results:
+            if commit:
+                await db.commit()
+        status_updated = await update_confirmation_message_status(
+            db,
+            audit_record_id=audit_record_id,
+            commit=commit,
+        )
+        if commit and status_updated is False and updated_tool_results:
             await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
     return marked
 

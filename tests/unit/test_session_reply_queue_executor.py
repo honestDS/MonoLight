@@ -1187,22 +1187,26 @@ async def test_confirmed_binding_failure_marks_new_audit_unknown(monkeypatch, fa
             raise RuntimeError("lease update failed")
         raise asyncio.CancelledError
 
-    async def mark_execution_unknown(db, **kwargs):
-        update_calls.append(kwargs)
+    async def mark_execution_unknown(db, *, commit: bool, **kwargs):
+        assert commit is True
+        update_calls.append({**kwargs, "commit": commit})
         return False
 
-    async def finish_execution_round(db, **kwargs):
-        finish_calls.append(kwargs)
+    async def finish_execution_round(db, *, commit: bool, **kwargs):
+        assert commit is True
+        finish_calls.append({**kwargs, "commit": commit})
         return True
 
-    async def finish_execution_round_if_complete(db, **kwargs):
+    async def finish_execution_round_if_complete(db, *, commit: bool, **kwargs):
+        assert commit is True
         return None
 
     async def update_confirmation_tool_results(db, **kwargs):
         return 0
 
-    async def update_confirmation(db, *, audit_record_id):
+    async def update_confirmation(db, *, audit_record_id, commit: bool):
         assert audit_record_id == 99
+        assert commit is True
 
     monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
     monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
@@ -1225,9 +1229,11 @@ async def test_confirmed_binding_failure_marks_new_audit_unknown(monkeypatch, fa
         assert str(exc_info.value) == "lease update failed"
     assert update_calls[0]["audit_record_id"] == 99
     assert update_calls[0]["claim_token"] == "new-token"
+    assert update_calls[0]["commit"] is True
     assert finish_calls[0]["audit_record_id"] == 99
     assert finish_calls[0]["claim_token"] == "new-token"
     assert finish_calls[0]["status"] == AuditRecordStatus.EXECUTION_UNKNOWN
+    assert finish_calls[0]["commit"] is True
 
 
 @pytest.mark.asyncio
@@ -1235,7 +1241,8 @@ async def test_confirmed_binding_cleanup_does_not_mask_update_exception(monkeypa
     async def update_claimed(db, **kwargs):
         raise RuntimeError("original update failure")
 
-    async def mark_execution_unknown(db, **kwargs):
+    async def mark_execution_unknown(db, *, commit: bool, **kwargs):
+        assert commit is True
         raise RuntimeError("cleanup failure")
 
     monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
@@ -1283,22 +1290,26 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
     async def list_active_audit_execution_record_ids(*args, **kwargs):
         return set()
 
-    async def mark_execution_unknown(db, **kwargs):
+    async def mark_execution_unknown(db, *, commit: bool, **kwargs):
+        assert commit is True
         assert kwargs["audit_record_id"] == 99
         assert kwargs["claim_token"] == "new-token"
         return False
 
-    async def finish_execution_round(db, **kwargs):
-        finish_calls.append(kwargs)
+    async def finish_execution_round(db, *, commit: bool, **kwargs):
+        assert commit is True
+        finish_calls.append({**kwargs, "commit": commit})
         return True
 
-    async def finish_execution_round_if_complete(db, **kwargs):
+    async def finish_execution_round_if_complete(db, *, commit: bool, **kwargs):
+        assert commit is True
         return None
 
     async def update_confirmation_tool_results(db, **kwargs):
         return 0
 
-    async def update_confirmation(db, *, audit_record_id):
+    async def update_confirmation(db, *, audit_record_id, commit: bool):
+        assert commit is True
         confirmation_calls.append(audit_record_id)
 
     monkeypatch.setattr(executor_audit_module, "AsyncSessionLocal", SessionContext)
@@ -1323,6 +1334,7 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
             "claim_token": "new-token",
             "status": AuditRecordStatus.EXECUTION_UNKNOWN,
             "error_reason": "interrupted",
+            "commit": True,
         }
     ]
     assert confirmation_calls == [99]
@@ -1383,7 +1395,8 @@ async def test_mark_work_audit_execution_unknown_preserves_active_handoffs(
         unknown_except_calls.append(kwargs)
         return True
 
-    async def mark_execution_unknown(db, **kwargs):
+    async def mark_execution_unknown(db, *, commit: bool, **kwargs):
+        assert commit is True
         mark_execution_unknown_calls.append(kwargs)
         return True
 
@@ -1391,7 +1404,8 @@ async def test_mark_work_audit_execution_unknown_preserves_active_handoffs(
         reliable_unknown_calls.append(kwargs)
         return True
 
-    async def finish_execution_round(db, **kwargs):
+    async def finish_execution_round(db, *, commit: bool, **kwargs):
+        assert commit is True
         finish_round_calls.append(kwargs)
         return True
 

@@ -2,11 +2,12 @@ import asyncio
 import os
 
 import app.warning_filters  # noqa: F401
+from app.core.background_tasks.recovery import clear_background_tasks_on_startup
 from app.core.log import LogManager, get_logger
 from app.core.paths import DEFAULT_LOG_FILE_PATH
 from app.core.session_reply_queue.consumer import session_reply_consumer
 from app.providers.database.bootstrap import create_database_tables
-from app.workers.lease import run_with_worker_lease
+from app.workers.lease import run_startup_cleanup, run_with_worker_lease
 from app.workers.signals import install_shutdown_signal_handlers
 
 logger = get_logger(__name__)
@@ -14,7 +15,18 @@ logger = get_logger(__name__)
 SESSION_REPLY_WORKER_NAME = "session_reply"
 
 
-async def run_owned_session_reply_worker(owned_stop_event: asyncio.Event) -> None:
+async def run_owned_session_reply_worker(
+    owned_stop_event: asyncio.Event,
+    *,
+    startup_cleaned: bool = False,
+) -> None:
+    if not startup_cleaned:
+        await run_startup_cleanup(
+            owned_stop_event,
+            worker_name="session_reply",
+            other_worker_name="background_task",
+            cleanup=clear_background_tasks_on_startup,
+        )
     session_reply_consumer.start()
     logger.info("Session reply worker started")
     try:

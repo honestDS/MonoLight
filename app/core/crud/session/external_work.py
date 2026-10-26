@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -220,6 +221,58 @@ class CRUDExternalWork:
             .execution_options(populate_existing=True)
         )
         return list(result.scalars().all())
+
+    async def cancel_all_waiting(
+        self,
+        db: AsyncSession,
+        *,
+        error: str,
+        before: datetime | None = None,
+        commit: bool = True,
+    ) -> int:
+        max_id_statement = select(func.max(SessionReplyWorkItem.id)).where(SessionReplyWorkItem.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK)
+        if before is not None:
+            max_id_statement = max_id_statement.where(SessionReplyWorkItem.created_at <= before)
+        result = await db.execute(max_id_statement)
+        max_id = result.scalar()
+        if max_id is None:
+            if commit:
+                await db.commit()
+            return 0
+
+        cancelled = 0
+        after_id = 0
+        while True:
+            waiting_statement = (
+                select(SessionReplyWorkItem)
+                .where(
+                    SessionReplyWorkItem.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                    SessionReplyWorkItem.id > after_id,
+                    SessionReplyWorkItem.id <= max_id,
+                )
+                .order_by(SessionReplyWorkItem.id.asc())
+                .limit(100)
+                .execution_options(populate_existing=True)
+            )
+            if before is not None:
+                waiting_statement = waiting_statement.where(SessionReplyWorkItem.created_at <= before)
+            result = await db.execute(waiting_statement)
+            waiting = list(result.scalars().all())
+            if not waiting:
+                break
+            for work in waiting:
+                after_id = work.id or after_id
+                if await self.interrupt_waiting(
+                    db,
+                    work=work,
+                    execution_state=dict(work.execution_state) if isinstance(work.execution_state, dict) else {},
+                    error=error,
+                    commit=False,
+                ):
+                    cancelled += 1
+        if commit:
+            await db.commit()
+        return cancelled
 
 
 external_work_crud = CRUDExternalWork()

@@ -7,9 +7,13 @@ from typing import NoReturn
 
 from sqlalchemy.exc import OperationalError
 
+from app.core.constants import STARTUP_CLEANUP_OWNER_KEY
+from app.core.crud.system.setting import system_setting_crud
 from app.core.crud.worker.lease import worker_lease_crud
 from app.core.log import get_logger
+from app.models.system_setting import SystemSetting
 from app.providers.database import AsyncSessionLocal
+from app.providers.database.time import get_database_timestamp
 
 logger = get_logger(__name__)
 
@@ -22,6 +26,7 @@ WORKER_FORCED_EXIT_CODE = 1
 WORKER_LEASE_LOCK_RETRY_INTERVAL_SECONDS = 1
 WORKER_LEASE_RENEW_SAFETY_SECONDS = 5
 WORKER_EVENT_LOOP_LAG_DEBUG_THRESHOLD_SECONDS = 1
+STARTUP_CLEANUP_WORKER_NAME = "startup_cleanup"
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
@@ -245,3 +250,48 @@ async def run_with_worker_lease(
 
         if should_stop_process:
             return
+
+
+async def run_startup_cleanup(
+    shutdown_event: asyncio.Event,
+    *,
+    worker_name: str,
+    other_worker_name: str,
+    cleanup: Callable[[], Awaitable[None]],
+) -> None:
+    async def callback(_owned_stop_event: asyncio.Event) -> None:
+        async with AsyncSessionLocal() as db:
+            current_lease = await worker_lease_crud.get_by_name(db, worker_name)
+            other_lease = await worker_lease_crud.get_by_name(db, other_worker_name)
+            cleanup_owner = await system_setting_crud.get_by_key(db, STARTUP_CLEANUP_OWNER_KEY)
+            current_owner_id = current_lease.owner_id if current_lease is not None else None
+            if current_lease is not None and other_lease is not None and cleanup_owner is not None:
+                now = await get_database_timestamp(db)
+                other_lease_is_valid = other_lease.lease_until >= now
+                # The persisted marker coordinates startup cleanup across independent workers.
+                if other_lease_is_valid and cleanup_owner.value == other_lease.owner_id:
+                    return
+
+        await cleanup()
+        if current_owner_id is None:
+            return
+
+        async with AsyncSessionLocal() as db:
+            cleanup_owner = await system_setting_crud.get_by_key(db, STARTUP_CLEANUP_OWNER_KEY)
+            if cleanup_owner is None:
+                db.add(
+                    SystemSetting(
+                        key=STARTUP_CLEANUP_OWNER_KEY,
+                        value=current_owner_id,
+                    )
+                )
+            else:
+                cleanup_owner.value = current_owner_id
+                db.add(cleanup_owner)
+            await db.commit()
+
+    await run_with_worker_lease(
+        STARTUP_CLEANUP_WORKER_NAME,
+        shutdown_event,
+        callback,
+    )

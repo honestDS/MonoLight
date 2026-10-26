@@ -2,9 +2,8 @@ import asyncio
 import os
 
 import app.warning_filters  # noqa: F401
-from app.core.background_tasks.external_work import recover_interrupted_external_work
 from app.core.background_tasks.manager import background_task_manager
-from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
+from app.core.background_tasks.recovery import clear_background_tasks_on_startup
 from app.core.log import LogManager, get_logger
 from app.core.paths import DEFAULT_LOG_FILE_PATH
 from app.core.utils.context_summary.cleanup import (
@@ -12,7 +11,7 @@ from app.core.utils.context_summary.cleanup import (
 )
 from app.providers.database.bootstrap import create_database_tables
 from app.tasks import background_log_cleaner, background_temp_cleaner
-from app.workers.lease import run_with_worker_lease
+from app.workers.lease import run_startup_cleanup, run_with_worker_lease
 from app.workers.signals import install_shutdown_signal_handlers
 
 logger = get_logger(__name__)
@@ -20,10 +19,19 @@ logger = get_logger(__name__)
 BACKGROUND_TASK_WORKER_NAME = "background_task"
 
 
-async def run_owned_background_task_worker(owned_stop_event: asyncio.Event) -> None:
-    await recover_interrupted_external_work()
-    await recover_pending_background_tasks()
-    await recover_pending_background_task_replies()
+async def run_owned_background_task_worker(
+    owned_stop_event: asyncio.Event,
+    *,
+    startup_ready: asyncio.Event | None = None,
+) -> None:
+    await run_startup_cleanup(
+        owned_stop_event,
+        worker_name="background_task",
+        other_worker_name="session_reply",
+        cleanup=clear_background_tasks_on_startup,
+    )
+    if startup_ready is not None:
+        startup_ready.set()
 
     background_task_manager.start()
     cleaner_tasks = [

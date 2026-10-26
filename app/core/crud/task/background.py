@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import String, and_, case, cast, delete, not_, or_, update
@@ -604,6 +605,88 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         else:
             await db.flush()
         return audit_ids
+
+    async def list_startup_audit_record_ids(self, db: AsyncSession, *, before: datetime | None = None) -> set[int]:
+        conditions = [
+            BackgroundTask.audit_record_id.is_not(None),
+            or_(
+                BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
+                and_(
+                    BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED]),
+                    BackgroundTask.auto_reply.is_(True),
+                    BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
+                ),
+            ),
+        ]
+        if before is not None:
+            conditions.append(BackgroundTask.created_at <= before)
+        result = await db.execute(select(BackgroundTask.audit_record_id).where(*conditions).distinct())
+        return {audit_record_id for audit_record_id in result.scalars().all() if audit_record_id is not None}
+
+    async def clear_all_for_startup(self, db: AsyncSession, *, before: datetime | None = None, commit: bool = True) -> int:
+        conditions = [
+            or_(
+                BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
+                and_(
+                    BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED]),
+                    BackgroundTask.auto_reply.is_(True),
+                    BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
+                ),
+            )
+        ]
+        if before is not None:
+            conditions.append(BackgroundTask.created_at <= before)
+        result = await db.execute(select(BackgroundTask).where(*conditions).order_by(BackgroundTask.id).with_for_update().execution_options(populate_existing=True))
+        tasks = list(result.scalars().all())
+        snapshot_ids = [task.id for task in tasks if task.id is not None and task.status in [BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED] and task.auto_reply is True and task.reply_status in [BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]]
+        pending_tasks = [task for task in tasks if task.status == BackgroundTaskStatus.PENDING]
+        running_tasks = [task for task in tasks if task.status == BackgroundTaskStatus.RUNNING]
+        cleared_count = 0
+
+        for task in pending_tasks:
+            cancelled = await self._cancel_task_conditionally(db, task, require_unexpired_lease=False)
+            if not cancelled:
+                continue
+            cleared_count += 1
+            if task.audit_execution_record_id is not None:
+                await self._mark_audit_cancelled(db, task, error_reason=t(ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION))
+
+        marked_running_audit_ids: set[int] = set()
+        for task in running_tasks:
+            cancelled = await self._cancel_task_conditionally(db, task, require_unexpired_lease=False)
+            if not cancelled:
+                continue
+            cleared_count += 1
+            if task.audit_record_id is None or task.audit_record_id in marked_running_audit_ids:
+                continue
+            audit_marked = await self._mark_audit_unknown(db, task, error_reason=t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+            if audit_marked:
+                marked_running_audit_ids.add(task.audit_record_id)
+
+        if snapshot_ids:
+            reply_result = await db.execute(
+                update(BackgroundTask)
+                .where(
+                    BackgroundTask.id.in_(snapshot_ids),
+                    BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED]),
+                    BackgroundTask.auto_reply.is_(True),
+                    BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
+                )
+                .values(
+                    auto_reply=False,
+                    reply_status=BackgroundTaskReplyStatus.NONE,
+                    reply_locked_by=None,
+                    reply_lock_until=None,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            cleared_count += reply_result.rowcount or 0
+
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return cleared_count
 
     async def list_active_user_tasks(self, db: AsyncSession, *, uid: str, session_id: str | None = None, skip: int = 0, limit: int = 100) -> list[BackgroundTask]:
         stmt = select(BackgroundTask).where(BackgroundTask.uid == uid).where(BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING])).order_by(BackgroundTask.created_at.desc()).offset(skip).limit(limit)
