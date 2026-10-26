@@ -188,7 +188,6 @@ def test_legacy_tool_message_status_falls_back_to_content(content, expected_stat
     [
         ("web_tool", {"operation": "scrape", "url": "https://example.com"}),
         ("web_tool", {"operation": "search", "query": "timeout regression"}),
-        ("terminal_status", {"terminal_session_id": "t" * 32}),
         ("future_test_tool", {}),
     ],
 )

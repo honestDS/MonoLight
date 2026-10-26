@@ -349,15 +349,16 @@ def test_mutating_request_id_boundaries_are_enforced(request_id: str):
 
 
 def test_read_write_and_resize_boundaries_are_enforced():
-    assert TerminalReadRequest(terminal_session_id=TERMINAL_SESSION_ID).max_bytes == 65_536
+    assert TerminalReadRequest(terminal_session_id=TERMINAL_SESSION_ID).max_bytes == 16_384
     assert (
         TerminalReadRequest(
             terminal_session_id=TERMINAL_SESSION_ID,
-            offset=0,
-            max_bytes=1_048_576,
+            offset=7,
+            max_bytes=16_384,
         ).offset
-        == 0
+        == 7
     )
+    assert TerminalReadRequest(terminal_session_id=TERMINAL_SESSION_ID, max_bytes=1).max_bytes == 1
     assert TerminalWriteRequest(
         terminal_session_id=TERMINAL_SESSION_ID,
         request_id=REQUEST_ID,
@@ -376,7 +377,7 @@ def test_read_write_and_resize_boundaries_are_enforced():
     for payload in [
         {"terminal_session_id": TERMINAL_SESSION_ID, "offset": -1},
         {"terminal_session_id": TERMINAL_SESSION_ID, "max_bytes": 0},
-        {"terminal_session_id": TERMINAL_SESSION_ID, "max_bytes": 1_048_577},
+        {"terminal_session_id": TERMINAL_SESSION_ID, "max_bytes": 16_385},
     ]:
         with pytest.raises(ValidationError):
             TerminalReadRequest(**payload)

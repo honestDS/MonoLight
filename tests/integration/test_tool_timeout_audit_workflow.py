@@ -764,9 +764,13 @@ async def test_terminal_write_timeout_recovers_unknown_audit_and_late_command_re
             cfg.tool.tool_timeout = 10
             status_result = await process_single_tool(
                 InternalToolCall(
-                    id="terminal-status-after-timeout",
-                    name="terminal_status",
-                    arguments={"terminal_session_id": terminal_session_id, "request_id": request_id},
+                    id="terminal-read-after-timeout",
+                    name="terminal_read",
+                    arguments={
+                        "terminal_session_id": terminal_session_id,
+                        "request_id": request_id,
+                        "read_output": False,
+                    },
                 ),
                 db,
                 profile,

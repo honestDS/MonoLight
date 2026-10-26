@@ -13,17 +13,20 @@ from app.core.background_tasks import reply_trigger as reply_trigger_module
 from app.core.background_tasks.terminal_watch_reply import prepare_terminal_auto_watch_resume
 from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.task.background import background_task_crud
+from app.core.dispatchers.context import DispatchContext
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
-from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
+from app.core.terminal.manager import terminal_session_manager
+from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus, TerminalWriteRequest
+from app.core.tools.terminal import TerminalReadExecutor
 from app.core.tools.terminal_watch import ensure_terminal_auto_watch
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
-from app.models.profile import Profile
+from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import SessionReplySequence, SessionReplySourceType, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
-from app.models.terminal_session import TerminalControlCommand, TerminalSession
+from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.models.user import User
 
 UID = "terminal-auto-watch-owner"
@@ -755,8 +758,8 @@ async def test_terminal_auto_watch_replies_group_by_origin_work_across_terminals
                 "next_offset": 19,
                 "observed_at": "2026-10-24T21:40:00",
             },
-            19,
-            id="output-gap-renews",
+            None,
+            id="removed-output-gap-does-not-renew",
         ),
         pytest.param(
             {
@@ -1018,3 +1021,122 @@ async def test_terminal_auto_watch_stop_between_summary_delivery_and_renewal_pre
 
     async with terminal_auto_watch_database() as stop_db:
         assert await stop_interactive_reply(stop_db, uid=UID, session_id=SESSION_ID) == 0
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_status_query_does_not_restart_cancelled_auto_watch_without_worker(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+) -> None:
+    write_request_id = "terminal-write-status-pending"
+
+    async with terminal_auto_watch_database() as db:
+        await ensure_terminal_auto_watch(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            terminal_session_id=TERMINAL_SESSION_ID,
+            after_offset=0,
+            session_status=TerminalSessionStatus.RUNNING,
+        )
+        auto_task = await background_task_crud.get_active_terminal_watch(
+            db,
+            UID,
+            SESSION_ID,
+            TERMINAL_SESSION_ID,
+            automatic_only=True,
+        )
+        assert auto_task is not None
+        assert auto_task.id is not None
+        auto_task_id = auto_task.id
+
+        cancelled_task = await background_task_crud.cancel_user_task(db, task_id=auto_task_id, uid=UID)
+        assert cancelled_task is not None
+        assert cancelled_task.status == BackgroundTaskStatus.CANCELLED
+
+        write_request = TerminalWriteRequest(
+            terminal_session_id=TERMINAL_SESSION_ID,
+            request_id=write_request_id,
+            data="pending terminal input",
+        )
+        write_command, created = await terminal_session_manager.enqueue_control(
+            db,
+            UID,
+            SESSION_ID,
+            write_request,
+        )
+        assert created
+        assert write_command.id is not None
+        assert write_command.status == TerminalControlCommandStatus.PENDING
+
+        profile = await db.get(Profile, PROFILE_ID)
+        assert profile is not None
+        executor = TerminalReadExecutor(project_root=".", uid=UID)
+        executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 0.05}}))
+        executor.set_runtime_context(
+            dispatch_context=DispatchContext(
+                mode="interactive",
+                source="test",
+                uid=UID,
+                session_id=SESSION_ID,
+                profile=profile,
+                db=db,
+                tool_call_id="terminal-read-status-query",
+            )
+        )
+
+        response = json.loads(
+            await asyncio.wait_for(
+                executor.execute(
+                    terminal_session_id=TERMINAL_SESSION_ID,
+                    request_id=write_request_id,
+                    read_output=False,
+                ),
+                timeout=1,
+            )
+        )
+
+        assert response["status"] == TerminalSessionStatus.RUNNING.value
+        assert response["output_buffer"] == {
+            "capacity_bytes": 1_048_576,
+            "oldest_offset": 0,
+            "next_offset": 0,
+            "oldest_sequence": 1,
+            "next_sequence": 1,
+        }
+        assert response["write_request"] == {
+            "request_id": write_request_id,
+            "command_status": TerminalControlCommandStatus.PENDING.value,
+            "result": None,
+            "error": None,
+        }
+        assert "output" not in response
+
+        tasks = await _terminal_watch_tasks(db)
+        commands = list(
+            (
+                await db.execute(
+                    select(TerminalControlCommand).where(
+                        TerminalControlCommand.terminal_session_id == TERMINAL_SESSION_ID,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        active_task = await background_task_crud.get_active_terminal_watch(
+            db,
+            UID,
+            SESSION_ID,
+            TERMINAL_SESSION_ID,
+        )
+
+    assert len(tasks) == 1
+    assert tasks[0].id == auto_task_id
+    assert tasks[0].status == BackgroundTaskStatus.CANCELLED
+    assert len(commands) == 1
+    assert commands[0].id == write_command.id
+    assert commands[0].action == TerminalAction.WRITE
+    assert commands[0].request_id == write_request_id
+    assert commands[0].status == TerminalControlCommandStatus.PENDING
+    assert active_task is None

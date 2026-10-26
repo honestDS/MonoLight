@@ -10,6 +10,7 @@ from pathlib import Path
 
 import psutil
 import pytest
+from pydantic import ValidationError
 
 import app.core.terminal.session_runtime_commands as terminal_runtime_commands_module
 import app.core.terminal.session_runtime_core as terminal_runtime_core_module
@@ -39,7 +40,6 @@ from app.core.tools.terminal import (
     TerminalCloseExecutor,
     TerminalReadExecutor,
     TerminalResizeExecutor,
-    TerminalStatusExecutor,
     TerminalWriteExecutor,
 )
 from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
@@ -130,6 +130,11 @@ def _configure_executor(executor, db, *, uid: str, session_id: str, tool_call_id
     return executor
 
 
+def _parse_read_result(content: str) -> TerminalReadResult:
+    payload = json.loads(content)
+    return TerminalReadResult.model_validate({field: payload[field] for field in TerminalReadResult.model_fields})
+
+
 @pytest.mark.asyncio
 async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path):
     uid = TEST_UID
@@ -204,13 +209,13 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
 
         async with AsyncSessionLocal() as db:
             status_executor = _configure_executor(
-                TerminalStatusExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id="shell-workflow-status-tool-call",
             )
-            status_result = TerminalSessionSnapshot.model_validate(json.loads(await status_executor.execute(handoff.terminal_session_id)))
+            status_result = TerminalSessionSnapshot.model_validate(json.loads(await status_executor.execute(handoff.terminal_session_id, read_output=False)))
         assert status_result.status is TerminalSessionStatus.RUNNING
 
         async with AsyncSessionLocal() as db:
@@ -278,13 +283,11 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
                     session_id=session_id,
                     tool_call_id=f"shell-workflow-read-after-write-{read_attempt}",
                 )
-                return TerminalReadResult.model_validate(
-                    json.loads(
-                        await read_executor.execute(
-                            handoff.terminal_session_id,
-                            offset=write_result.read_offset,
-                            max_bytes=65_536,
-                        )
+                return _parse_read_result(
+                    await read_executor.execute(
+                        handoff.terminal_session_id,
+                        offset=write_result.read_offset,
+                        max_bytes=16_384,
                     )
                 )
 
@@ -320,13 +323,11 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
                 session_id=session_id,
                 tool_call_id="shell-workflow-read-after-exit",
             )
-            retained_read = TerminalReadResult.model_validate(
-                json.loads(
-                    await retained_read_executor.execute(
-                        handoff.terminal_session_id,
-                        offset=0,
-                        max_bytes=65_536,
-                    )
+            retained_read = _parse_read_result(
+                await retained_read_executor.execute(
+                    handoff.terminal_session_id,
+                    offset=0,
+                    max_bytes=16_384,
                 )
             )
         assert retained_read.eof is True
@@ -351,6 +352,129 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
             )
         assert repeated_close.action is TerminalAction.CLOSE
         assert repeated_close.session_status is TerminalSessionStatus.EXITED
+    finally:
+        await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_requires_ai_selected_pagination(tmp_path):
+    uid = TEST_UID
+    session_id = TEST_SESSION_ID
+    marker = "TERMINAL_READ_PAGING_EOF_MARKER"
+    script_path = (tmp_path / "terminal_read_paging.py").resolve()
+    script_content = f'import sys\nimport time\nfor index in range(128):\n    chunk = "".join(f"{{index:03d}}:{{offset:03d}}:Ab9Xy7" for offset in range(36))\n    sys.stdout.write(chunk + "\\n")\n    sys.stdout.flush()\n    time.sleep(0.01)\nprint("{marker}", flush=True)\nsys.stdin.readline()\n'
+    await asyncio.to_thread(
+        script_path.write_text,
+        script_content,
+        encoding="utf-8",
+    )
+    command = _interactive_python_command(script_path)
+    coordinator = TerminalWorkerCoordinator()
+
+    try:
+        async with AsyncSessionLocal() as db:
+            shell_executor = _configure_executor(
+                ShellExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="shell-read-paging-tool-call",
+            )
+            handoff = ShellInteractiveHandoffResult.model_validate(json.loads(await shell_executor.execute(command=command, execution_mode="interactive")))
+
+        coordinator.start()
+        running_snapshot = await _wait_until(
+            lambda: _get_snapshot(handoff.terminal_session_id, uid, session_id),
+            lambda snapshot: snapshot.status is TerminalSessionStatus.RUNNING and snapshot.output_buffer.next_offset >= 49_152,
+        )
+        assert running_snapshot.status is TerminalSessionStatus.RUNNING
+        assert running_snapshot.output_buffer.next_offset >= 49_152
+
+        async with AsyncSessionLocal() as db:
+            write_executor = _configure_executor(
+                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                db,
+                uid=uid,
+                session_id=session_id,
+                tool_call_id="shell-read-paging-exit-handshake",
+            )
+            TerminalWriteResult.model_validate(json.loads(await write_executor.execute(handoff.terminal_session_id, data="\n")))
+
+        exited_snapshot = await _wait_until(
+            lambda: _get_snapshot(handoff.terminal_session_id, uid, session_id),
+            lambda snapshot: snapshot.status is TerminalSessionStatus.EXITED and snapshot.output_buffer.next_offset > 32_768,
+        )
+        assert exited_snapshot.status is TerminalSessionStatus.EXITED
+        assert exited_snapshot.exit_code == 0
+        latest_offset = exited_snapshot.output_buffer.next_offset
+
+        async def read_page(tool_call_id: str, **kwargs):
+            async with AsyncSessionLocal() as db:
+                read_executor = _configure_executor(
+                    TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                )
+                payload = json.loads(await read_executor.execute(handoff.terminal_session_id, **kwargs))
+            return payload, TerminalReadResult.model_validate({field: payload[field] for field in TerminalReadResult.model_fields})
+
+        async def persisted_commands():
+            async with AsyncSessionLocal() as db:
+                return await terminal_control_command_crud.list_by_session(db, handoff.terminal_session_id)
+
+        commands = await persisted_commands()
+        assert len(commands) == 1
+        assert commands[0].action is TerminalAction.WRITE
+
+        first_payload, first_page = await read_page("ai-read-page-0")
+        assert first_payload["status"] == TerminalSessionStatus.EXITED.value
+        assert first_payload["exit_code"] == 0
+        assert first_page.requested_offset == first_page.start_offset == 0
+        assert first_page.eof is True
+        assert first_page.next_offset - first_page.start_offset == 16_384
+        assert first_page.next_offset < latest_offset
+        commands = await persisted_commands()
+        assert len(commands) == 2
+        assert sum(item.action is TerminalAction.READ for item in commands) == 1
+        assert sum(item.action is TerminalAction.WRITE for item in commands) == 1
+
+        selected_payload, selected_page = await read_page(
+            "ai-read-page-32768",
+            offset=32_768,
+            max_bytes=512,
+        )
+        selected_bytes = selected_page.output.encode("utf-8")
+        assert selected_payload["status"] == TerminalSessionStatus.EXITED.value
+        assert selected_page.requested_offset == selected_page.start_offset == 32_768
+        assert selected_page.next_offset == 32_768 + len(selected_bytes) == 33_280
+        commands = await persisted_commands()
+        assert len(selected_bytes) == 512
+        assert len(commands) == 3
+        assert sum(item.action is TerminalAction.READ for item in commands) == 2
+        assert sum(item.action is TerminalAction.WRITE for item in commands) == 1
+
+        _, repeated_page = await read_page(
+            "ai-read-page-32768-repeat",
+            offset=32_768,
+            max_bytes=512,
+        )
+        assert repeated_page.requested_offset == selected_page.requested_offset
+        assert repeated_page.start_offset == selected_page.start_offset
+        assert repeated_page.next_offset == selected_page.next_offset
+        assert repeated_page.output == selected_page.output
+        commands = await persisted_commands()
+        assert len(commands) == 4
+        assert sum(item.action is TerminalAction.READ for item in commands) == 3
+        assert sum(item.action is TerminalAction.WRITE for item in commands) == 1
+
+        with pytest.raises(ValidationError):
+            await read_page("ai-read-page-over-limit", offset=32_768, max_bytes=16_385)
+        commands = await persisted_commands()
+        assert len(commands) == 4
+        assert sum(item.action is TerminalAction.READ for item in commands) == 3
+        assert sum(item.action is TerminalAction.WRITE for item in commands) == 1
     finally:
         await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)
 
@@ -424,7 +548,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             pending_status_executor = _configure_executor(
-                TerminalStatusExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -434,6 +558,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
                 await pending_status_executor.execute(
                     handoff.terminal_session_id,
                     request_id=unknown_result["request_id"],
+                    read_output=False,
                 )
             )
         assert pending_status["status"] == TerminalSessionStatus.STARTING.value
@@ -515,7 +640,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             completed_status_executor = _configure_executor(
-                TerminalStatusExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -525,6 +650,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
                 await completed_status_executor.execute(
                     handoff.terminal_session_id,
                     request_id=unknown_result["request_id"],
+                    read_output=False,
                 )
             )
         completed_status_write = completed_status["write_request"]

@@ -9,9 +9,9 @@ from app.core.constants import (
     ERR_TERMINAL_COMMAND_TIMEOUT,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
     TERMINAL_CLOSE_TOOL_NAME,
+    TERMINAL_READ_MAX_BYTES,
     TERMINAL_READ_TOOL_NAME,
     TERMINAL_RESIZE_TOOL_NAME,
-    TERMINAL_STATUS_TOOL_NAME,
     TERMINAL_WRITE_TOOL_NAME,
 )
 from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
@@ -48,34 +48,33 @@ _TERMINAL_REQUEST_ID_SCHEMA = {
 }
 
 
-TERMINAL_STATUS_TOOL_SCHEMA = {
+TERMINAL_READ_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": TERMINAL_STATUS_TOOL_NAME,
-        "description": ("Get the current status, output bounds, and exit result of an interactive terminal session. When request_id is provided, also return the nested write_request status for that original WRITE request; this is submission status, not CLI task completion."),
+        "name": TERMINAL_READ_TOOL_NAME,
+        "description": (
+            "Each response includes terminal status, exit/failure result, and output-buffer bounds. When request_id "
+            "is provided, it is the original WRITE request ID; write_request reports only write submission/receipt "
+            "status, not CLI task completion. Read one page of retained merged output from an interactive terminal "
+            "session by absolute byte offset. "
+            "This does not paginate automatically; continue with next_offset, and next_offset < latest_offset means "
+            "output remains unread. eof only means the terminal has ended. Set read_output=false to query the "
+            "database status and optional write_request without enqueueing a terminal read, waiting for the Worker, "
+            "or registering an automatic watch."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
                 "request_id": _TERMINAL_REQUEST_ID_SCHEMA,
-            },
-            "required": ["terminal_session_id"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-TERMINAL_READ_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": TERMINAL_READ_TOOL_NAME,
-        "description": "Read retained merged output from an interactive terminal session by byte offset.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
                 "offset": {"type": "integer", "minimum": 0, "default": 0},
-                "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1_048_576, "default": 65_536},
+                "max_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": TERMINAL_READ_MAX_BYTES,
+                    "default": TERMINAL_READ_MAX_BYTES,
+                },
+                "read_output": {"type": "boolean", "default": True},
             },
             "required": ["terminal_session_id"],
             "additionalProperties": False,
@@ -92,9 +91,9 @@ TERMINAL_WRITE_TOOL_SCHEMA = {
             "output, CLI processing, or task completion. Use '\\n' to submit a line; the service handles "
             f"platform-specific newline conversion. Read output separately with {TERMINAL_READ_TOOL_NAME} from "
             "read_offset. On the first submission, omitting request_id keeps automatic ID derivation. A timeout "
-            "means the write result is unknown; first query terminal_status with the original request_id. To reuse "
-            "the same operation, submit again with that original request_id, never a new ID; do not automatically "
-            "resubmit."
+            f"means the write result is unknown; first query {TERMINAL_READ_TOOL_NAME} with the original request_id "
+            "and read_output=false. To reuse the same operation, submit again with that original request_id, never "
+            "a new ID; do not automatically resubmit."
         ),
         "parameters": {
             "type": "object",
@@ -146,7 +145,6 @@ TERMINAL_CLOSE_TOOL_SCHEMA = {
 
 
 SHELL_COMPANION_TOOL_SCHEMAS = [
-    TERMINAL_STATUS_TOOL_SCHEMA,
     TERMINAL_READ_TOOL_SCHEMA,
     TERMINAL_WRITE_TOOL_SCHEMA,
     TERMINAL_RESIZE_TOOL_SCHEMA,
@@ -244,54 +242,44 @@ class _TerminalExecutor(BaseExecutor):
         return self._dump_model(receipt)
 
 
-class TerminalStatusExecutor(_TerminalExecutor):
-    requires_audit = False
-
-    async def execute(self, terminal_session_id: str, request_id: str | None = None) -> str:
-        request = TerminalStatusRequest(terminal_session_id=terminal_session_id, request_id=request_id)
-        db, session_id, _ = self._require_runtime_context()
-        snapshot = await self._get_snapshot(request.terminal_session_id)
-        await ensure_terminal_auto_watch(
-            self.db,
-            uid=self.uid,
-            session_id=session_id,
-            profile_id=getattr(self.profile, "id", None),
-            terminal_session_id=request.terminal_session_id,
-            after_offset=snapshot.output_buffer.next_offset,
-            session_status=snapshot.status,
-        )
-        if request.request_id is None:
-            return self._dump_model(snapshot)
-        write_request = await terminal_session_manager.get_write_status(
-            db,
-            request.terminal_session_id,
-            self.uid,
-            session_id,
-            request.request_id,
-        )
-        return json.dumps(
-            {**snapshot.model_dump(mode="json"), "write_request": write_request},
-            ensure_ascii=False,
-        )
-
-
 class TerminalReadExecutor(_TerminalExecutor):
     requires_audit = False
 
-    async def execute(self, terminal_session_id: str, offset: int = 0, max_bytes: int = 65_536) -> str:
-        result = await self._read_once(terminal_session_id, offset, max_bytes)
-        profile_id = getattr(self.profile, "id", None)
-        if result.eof is True and result.read_status is not TerminalOutputReadStatus.EXPIRED and result.next_offset == result.latest_offset and isinstance(self.db, AsyncSession) and isinstance(profile_id, int) and not isinstance(profile_id, bool) and profile_id > 0:
-            await terminal_watch_reply_crud.record_terminal_read(
-                self.db,
-                uid=self.uid,
-                session_id=self.session_id,
-                profile_id=profile_id,
-                terminal_session_id=result.terminal_session_id,
-                start_offset=result.start_offset,
-                next_offset=result.next_offset,
+    async def execute(
+        self,
+        terminal_session_id: str,
+        offset: int = 0,
+        max_bytes: int = TERMINAL_READ_MAX_BYTES,
+        request_id: str | None = None,
+        read_output: bool = True,
+    ) -> str:
+        status_request = TerminalStatusRequest(terminal_session_id=terminal_session_id, request_id=request_id)
+        result = await self._read_once(status_request.terminal_session_id, offset, max_bytes) if read_output else None
+        snapshot = await self._get_snapshot(status_request.terminal_session_id)
+        response = snapshot.model_dump(mode="json")
+        if status_request.request_id is not None:
+            db, session_id, _ = self._require_runtime_context()
+            response["write_request"] = await terminal_session_manager.get_write_status(
+                db,
+                status_request.terminal_session_id,
+                self.uid,
+                session_id,
+                status_request.request_id,
             )
-        return self._dump_model(result)
+        if result is not None:
+            response.update(result.model_dump(mode="json"))
+            profile_id = getattr(self.profile, "id", None)
+            if result.eof is True and result.read_status is not TerminalOutputReadStatus.EXPIRED and result.next_offset == result.latest_offset and isinstance(self.db, AsyncSession) and isinstance(profile_id, int) and not isinstance(profile_id, bool) and profile_id > 0:
+                await terminal_watch_reply_crud.record_terminal_read(
+                    self.db,
+                    uid=self.uid,
+                    session_id=self.session_id,
+                    profile_id=profile_id,
+                    terminal_session_id=result.terminal_session_id,
+                    start_offset=result.start_offset,
+                    next_offset=result.next_offset,
+                )
+        return json.dumps(response, ensure_ascii=False)
 
 
 class TerminalWriteExecutor(_TerminalExecutor):
@@ -384,12 +372,10 @@ __all__ = [
     "TERMINAL_CLOSE_TOOL_SCHEMA",
     "TERMINAL_READ_TOOL_SCHEMA",
     "TERMINAL_RESIZE_TOOL_SCHEMA",
-    "TERMINAL_STATUS_TOOL_SCHEMA",
     "TERMINAL_WRITE_TOOL_SCHEMA",
     "TERMINAL_WATCH_TOOL_SCHEMA",
     "TerminalCloseExecutor",
     "TerminalReadExecutor",
     "TerminalResizeExecutor",
-    "TerminalStatusExecutor",
     "TerminalWriteExecutor",
 ]

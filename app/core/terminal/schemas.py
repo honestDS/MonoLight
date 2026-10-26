@@ -29,6 +29,7 @@ from app.core.constants import (
     ERR_TERMINAL_STATUS_TARGET_INVALID,
     ERR_TERMINAL_STATUS_TRANSITION_INVALID,
     ERR_TOOL_SHELL_EXECUTION_MODE_INVALID,
+    TERMINAL_READ_MAX_BYTES,
 )
 from app.core.i18n import t
 
@@ -185,7 +186,7 @@ class TerminalReadRequest(TerminalProtocolModel):
     action: Literal[TerminalAction.READ] = TerminalAction.READ
     terminal_session_id: TerminalSessionId
     offset: int = Field(default=0, ge=0)
-    max_bytes: int = Field(default=65_536, ge=1, le=1_048_576)
+    max_bytes: int = Field(default=TERMINAL_READ_MAX_BYTES, ge=1, le=TERMINAL_READ_MAX_BYTES)
 
 
 class TerminalWriteRequest(TerminalProtocolModel):

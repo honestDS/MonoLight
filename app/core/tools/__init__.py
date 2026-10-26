@@ -47,12 +47,10 @@ from .terminal import (
     TERMINAL_CLOSE_TOOL_SCHEMA,
     TERMINAL_READ_TOOL_SCHEMA,
     TERMINAL_RESIZE_TOOL_SCHEMA,
-    TERMINAL_STATUS_TOOL_SCHEMA,
     TERMINAL_WRITE_TOOL_SCHEMA,
     TerminalCloseExecutor,
     TerminalReadExecutor,
     TerminalResizeExecutor,
-    TerminalStatusExecutor,
     TerminalWriteExecutor,
 )
 from .terminal_watch import TERMINAL_WATCH_TOOL_SCHEMA, TerminalWatchExecutor
@@ -118,7 +116,6 @@ TOOL_EXECUTOR_MAP = {
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME: LongTermMemoryExecutor,
-    TERMINAL_STATUS_TOOL_SCHEMA["function"]["name"]: TerminalStatusExecutor,
     TERMINAL_READ_TOOL_SCHEMA["function"]["name"]: TerminalReadExecutor,
     TERMINAL_WRITE_TOOL_SCHEMA["function"]["name"]: TerminalWriteExecutor,
     TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
