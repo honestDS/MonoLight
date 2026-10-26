@@ -283,17 +283,20 @@ async def test_consumer_marks_background_or_scheduled_audit_unknown_when_cancell
     async def list_active_audit_execution_record_ids(*args, **kwargs):
         return set()
 
-    async def mark_execution_unknown(db, **kwargs) -> bool:
+    async def mark_execution_unknown(db, *, commit: bool, **kwargs) -> bool:
+        assert commit is True
         unknown_calls.append(kwargs)
         return True
 
-    async def finish_execution_round_if_complete(db, **kwargs) -> None:
+    async def finish_execution_round_if_complete(db, *, commit: bool, **kwargs) -> None:
+        assert commit is True
         return None
 
     async def update_confirmation_tool_results(db, **kwargs) -> int:
         return 0
 
-    async def update_confirmation(db, *, audit_record_id: int) -> None:
+    async def update_confirmation(db, *, audit_record_id: int, commit: bool) -> None:
+        assert commit is True
         unknown_calls.append({"confirmation_audit_record_id": audit_record_id})
 
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
@@ -355,17 +358,20 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
     async def list_active_audit_execution_record_ids(*args, **kwargs):
         return set()
 
-    async def mark_execution_unknown(db, **kwargs) -> bool:
+    async def mark_execution_unknown(db, *, commit: bool, **kwargs) -> bool:
+        assert commit is True
         unknown_calls.append(kwargs)
         return True
 
-    async def finish_execution_round_if_complete(db, **kwargs) -> None:
+    async def finish_execution_round_if_complete(db, *, commit: bool, **kwargs) -> None:
+        assert commit is True
         return None
 
     async def update_confirmation_tool_results(db, **kwargs) -> int:
         return 0
 
-    async def update_confirmation(db, *, audit_record_id: int) -> None:
+    async def update_confirmation(db, *, audit_record_id: int, commit: bool) -> None:
+        assert commit is True
         unknown_calls.append({"confirmation_audit_record_id": audit_record_id})
 
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)

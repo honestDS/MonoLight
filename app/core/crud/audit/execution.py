@@ -249,6 +249,7 @@ class CRUDAuditExecution:
         claim_token: str,
         status: AuditRecordStatus,
         error_reason: str | None = None,
+        commit: bool = True,
     ) -> bool:
         if status not in _FINAL_EXECUTION_STATUSES:
             raise ValueError(t(ERR_AUDIT_ROUND_EXECUTION_STATUS_INVALID))
@@ -283,7 +284,8 @@ class CRUDAuditExecution:
             )
             .execution_options(synchronize_session=False)
         )
-        await db.commit()
+        if commit:
+            await db.commit()
         return (result.rowcount or 0) == 1
 
     async def mark_execution_unknown(
