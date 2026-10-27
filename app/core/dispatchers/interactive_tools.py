@@ -26,7 +26,7 @@ from app.core.exceptions import ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
-from app.core.utils.dispatcher.external_work import build_external_wait_response
+from app.core.utils.dispatcher.external_work import build_terminal_wait_response
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import dump_output_history, extract_files_to_user
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
@@ -745,5 +745,13 @@ async def handle_interactive_tool_round(
 
     await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
     if getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY) is not None:
-        return build_external_wait_response(ai_msg.tool_calls, stored_tool_results, response_id)
+        return await build_terminal_wait_response(
+            state.db,
+            uid=state.uid,
+            session_id=state.session_id,
+            profile_id=state.profile.id,
+            tool_calls=ai_msg.tool_calls,
+            tool_results=stored_tool_results,
+            response_id=response_id,
+        )
     return None

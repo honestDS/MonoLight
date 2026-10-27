@@ -1484,6 +1484,9 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
     pending_message = SimpleNamespace(id=2, content="pending")
 
     class FakeDb:
+        def __init__(self):
+            self.info = {}
+
         async def get(self, model, item_id):
             assert item_id == 1
             return source_message
@@ -1761,6 +1764,9 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
     event_order = []
 
     class FakeDb:
+        def __init__(self):
+            self.info = {}
+
         async def get(self, model, item_id):
             assert item_id == 1
             return source_message
@@ -2000,6 +2006,9 @@ async def test_confirmed_execution_rejects_mismatched_decision_message_boundary(
     interactive_dispatch_calls = []
 
     class FakeDb:
+        def __init__(self):
+            self.info = {}
+
         async def get(self, model, item_id):
             assert item_id == 1
             return source_message
@@ -2098,6 +2107,9 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
     complete_calls = []
 
     class FakeDb:
+        def __init__(self):
+            self.info = {}
+
         async def get(self, model, item_id):
             assert item_id == 1
             return source_message
@@ -2223,6 +2235,9 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
     created_attempts = [SimpleNamespace(id=101), None]
 
     class FakeDb:
+        def __init__(self):
+            self.info = {}
+
         async def get(self, model, item_id):
             assert item_id == 1
             return source_message

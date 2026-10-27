@@ -7,7 +7,8 @@ from typing import Any
 
 from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.background_tasks.external_work import resume_external_work_for_task
-from app.core.constants import BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED
+from app.core.background_tasks.terminal_watch_coordinator import complete_terminal_watch_round
+from app.core.constants import BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.task.background import background_task_crud
@@ -290,8 +291,12 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             return False
 
         binding = _audit_binding(task)
+        extra = task.extra if isinstance(task.extra, dict) else {}
+        auto_terminal_watch = task.tool_name == TERMINAL_WATCH_TOOL_NAME and extra.get("auto_terminal_watch") is True
         execute_invoked = False
         force_unknown = False
+        observation_in_progress = False
+        terminal_watch_completion_in_progress = False
         try:
             profile = await profile_crud.get(db, task.profile_id)
             if not profile or profile.uid != task.uid:
@@ -343,13 +348,33 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             else:
                 await db.commit()
             execute_invoked = True
+            observation_in_progress = True
             raw_result = await instance.execute(**args)
+            observation_in_progress = False
             await db.refresh(task)
             if task.status == BackgroundTaskStatus.CANCELLED:
                 log.info(t("LOG_BACKGROUND_TASK_CANCELLED"))
                 await db.commit()
                 await _resume_external_task_if_bound(task)
                 return False
+            if auto_terminal_watch:
+                parsed_result = raw_result
+                if isinstance(parsed_result, str):
+                    try:
+                        parsed_result = json.loads(parsed_result)
+                    except (TypeError, ValueError):
+                        parsed_result = {}
+                if not isinstance(parsed_result, dict):
+                    parsed_result = {}
+                terminal_watch_completion_in_progress = True
+                completed = await complete_terminal_watch_round(
+                    db,
+                    task=task,
+                    worker_id=worker,
+                    content=parsed_result,
+                )
+                terminal_watch_completion_in_progress = False
+                return completed
             if binding is None:
                 tool_succeeded = _tool_result_succeeded(raw_result)
                 if tool_succeeded:
@@ -442,6 +467,8 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             log.info(t("LOG_BACKGROUND_TASK_SUCCEEDED") if execution_status == AuditExecutionStatus.SUCCEEDED else t("LOG_BACKGROUND_TASK_FAILED", error=result_summary))
             return True
         except Exception as exc:
+            if terminal_watch_completion_in_progress:
+                raise
             if binding is not None and (execute_invoked or force_unknown):
                 await _mark_bound_execution_unknown(db, task, worker, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
                 return False
@@ -451,6 +478,23 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
                 await db.commit()
                 await _resume_external_task_if_bound(task)
                 return False
+            if binding is None and auto_terminal_watch and observation_in_progress:
+                error_message = _safe_exception_message(exc)
+                after_offset = args.get("after_offset")
+                terminal_watch_error = {
+                    "terminal_session_id": args.get("terminal_session_id"),
+                    "after_offset": after_offset,
+                    "next_offset": after_offset,
+                    "event": "observation_error",
+                    "eof": False,
+                    "error": error_message,
+                }
+                return await complete_terminal_watch_round(
+                    db,
+                    task=task,
+                    worker_id=worker,
+                    content=terminal_watch_error,
+                )
             error_message = _safe_exception_message(exc)
             log.error(t("LOG_BACKGROUND_TASK_FAILED", error=error_message), exc_info=True)
             if binding is not None:
