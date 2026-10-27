@@ -9,7 +9,6 @@ from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
-    TERMINAL_WATCH_TOOL_NAME,
 )
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
@@ -36,7 +35,7 @@ from app.core.session_reply_queue.manager import build_identified_work_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkStatus, SessionReplyWorkType
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -47,6 +46,36 @@ __all__ = [
     "retry_delay_seconds",
     "lease_deadline",
 ]
+
+
+async def _resume_pending_terminal_results(work: SessionReplyWorkItem) -> None:
+    try:
+        async with AsyncSessionLocal() as db:
+            pending_results = await background_task_crud.list_pending_terminal_watch_results(
+                db,
+                uid=work.uid,
+                session_id=work.session_id,
+                profile_id=work.profile_id,
+                origin_work_id=work.id,
+                origin_work_identity=work.dedupe_key,
+            )
+            task_ids: list[int] = []
+            seen_task_ids: set[int] = set()
+            for task in pending_results:
+                task_id = task.id
+                if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0 or task_id in seen_task_ids:
+                    continue
+                seen_task_ids.add(task_id)
+                task_ids.append(task_id)
+    except Exception:
+        logger.exception("Failed to list pending terminal results for work {}", work.id)
+        return
+
+    for task_id in task_ids:
+        try:
+            await resume_external_work_for_task(task_id)
+        except Exception:
+            logger.exception("Failed to resume external work for task {}", task_id)
 
 
 async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
@@ -95,6 +124,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                     await resume_external_work_for_task(task_id)
                 except Exception:
                     logger.exception("Failed to resume external work for task {}", task_id)
+            await _resume_pending_terminal_results(work)
             return
 
         result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
@@ -141,40 +171,9 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                     reply_lock_until=None,
                 )
             )
-            task = await background_task_crud.get(db, int(work.source_id))
-            if task is not None and task.tool_name == TERMINAL_WATCH_TOOL_NAME and isinstance(task.extra, dict) and task.extra.get("auto_terminal_watch") is True:
-                execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
-                raw_task_ids = execution_state.get("terminal_auto_watch_task_ids")
-                if isinstance(raw_task_ids, list):
-                    task_ids: list[int] = []
-                    for task_id in raw_task_ids:
-                        if isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0 and task_id not in task_ids:
-                            task_ids.append(task_id)
-                else:
-                    task_ids = [task.id] if isinstance(task.id, int) and not isinstance(task.id, bool) and task.id > 0 else []
-
-                for task_id in task_ids:
-                    candidate = task if task_id == task.id else await background_task_crud.get(db, task_id)
-                    if candidate is None or candidate.uid != work.uid or candidate.session_id != work.session_id or candidate.profile_id != work.profile_id or candidate.tool_name != TERMINAL_WATCH_TOOL_NAME or not isinstance(candidate.extra, dict) or candidate.extra.get("auto_terminal_watch") is not True:
-                        continue
-                    arguments = candidate.arguments if isinstance(candidate.arguments, dict) else {}
-                    terminal_session_id = arguments.get("terminal_session_id")
-                    after_offset = arguments.get("after_offset")
-                    if not isinstance(terminal_session_id, str) or not terminal_session_id.strip() or not isinstance(after_offset, int) or isinstance(after_offset, bool) or after_offset < 0:
-                        continue
-                    await background_task_crud.create_terminal_auto_watch(
-                        db,
-                        uid=candidate.uid,
-                        session_id=candidate.session_id,
-                        profile_id=candidate.profile_id,
-                        terminal_session_id=terminal_session_id,
-                        after_offset=after_offset,
-                        previous_task_id=candidate.id,
-                        origin_work_id=candidate.extra.get("origin_work_id"),
-                        origin_work_identity=candidate.extra.get("origin_work_identity"),
-                        commit=False,
-                    )
         await db.commit()
+
+    await _resume_pending_terminal_results(work)
 
 
 async def fail_session_reply_work(

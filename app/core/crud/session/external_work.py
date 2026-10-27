@@ -5,13 +5,17 @@ from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.log import get_logger
 from app.core.utils.time import get_local_time
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
 from app.providers.database.time import get_database_timestamp
 
 __all__ = ["CRUDExternalWork", "external_work_crud"]
+
+logger = get_logger(__name__)
 
 
 def _request_ids(state: dict[str, Any]) -> list[str]:
@@ -52,7 +56,46 @@ class CRUDExternalWork:
                 seen_message_ids.add(message_id)
                 external_tool_result_message_ids.append(message_id)
         state["external_tool_result_message_ids"] = external_tool_result_message_ids
-        state["pending_tools"] = pending_tools
+
+        terminal_watch_slots: list[dict] = []
+        current_pending_tools: list[dict] = []
+        for slot in pending_tools:
+            if slot.get("terminal_watch") is True or slot.get("tool_name") == TERMINAL_WATCH_TOOL_NAME:
+                terminal_watch_slots.append(slot)
+            else:
+                current_pending_tools.append(slot)
+
+        pending_tools_by_task_id: dict[Any, dict] = {}
+        previous_pending_tools = state.get("pending_tools")
+        if isinstance(previous_pending_tools, list):
+            for slot in previous_pending_tools:
+                if not isinstance(slot, dict):
+                    continue
+                if slot.get("terminal_watch") is True or slot.get("tool_name") == TERMINAL_WATCH_TOOL_NAME:
+                    continue
+                pending_tools_by_task_id[slot.get("task_id")] = slot
+        for slot in current_pending_tools:
+            pending_tools_by_task_id[slot.get("task_id")] = slot
+        pending_tool_waits = list(pending_tools_by_task_id.values())
+
+        terminal_watch_waits_by_key: dict[tuple[Any, Any], dict] = {}
+        previous_terminal_watch_waits = state.get("terminal_watch_waits")
+        if isinstance(previous_terminal_watch_waits, list):
+            for slot in previous_terminal_watch_waits:
+                if isinstance(slot, dict):
+                    key = (slot.get("task_id"), slot.get("tool_call_id"))
+                    terminal_watch_waits_by_key[key] = slot
+
+        current_terminal_session_ids = {slot.get("terminal_session_id") for slot in terminal_watch_slots if slot.get("terminal_session_id") is not None}
+        if current_terminal_session_ids:
+            terminal_watch_waits_by_key = {key: slot for key, slot in terminal_watch_waits_by_key.items() if not (slot.get("terminal_auto_watch") is True and slot.get("terminal_session_id") in current_terminal_session_ids)}
+        for slot in terminal_watch_slots:
+            key = (slot.get("task_id"), slot.get("tool_call_id"))
+            terminal_watch_waits_by_key[key] = slot
+        terminal_watch_waits = list(terminal_watch_waits_by_key.values())
+
+        state["terminal_watch_waits"] = terminal_watch_waits
+        state["pending_tools"] = pending_tool_waits
         state["external_resume_pending"] = False
         state.pop("resume_trigger_message_id", None)
 
@@ -89,6 +132,12 @@ class CRUDExternalWork:
         )
         if commit:
             await db.commit()
+        logger.bind(
+            work_id=work.id,
+            session_id=work.session_id,
+            terminal_watch_count=len(terminal_watch_waits),
+            pending_tool_count=len(pending_tool_waits),
+        ).info("Session reply suspended for external work")
         return True
 
     async def lock_waiting(

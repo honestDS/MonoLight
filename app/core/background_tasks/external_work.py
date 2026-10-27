@@ -9,18 +9,19 @@ from app.core.crud.session.event import session_event_crud
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.interrupted import interrupt_background_tasks
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT, PROMPT_TOOL_INTERRUPTED, TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
-from app.core.terminal.schemas import TERMINAL_SESSION_FINAL_STATUSES, TerminalSessionStatus
 from app.core.utils.background_task_result import build_background_task_failure_result
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.time import get_local_time
-from app.models.background_task import BackgroundTask, BackgroundTaskStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.session_reply_work_item import SessionReplyWorkStatus
 from app.providers.database import AsyncSessionLocal
 
 __all__ = ["resume_external_work_for_task", "reconcile_external_work", "recover_interrupted_external_work"]
@@ -37,46 +38,6 @@ def _is_positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def _is_non_negative_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
-def _terminal_auto_watch_continuation(task: BackgroundTask) -> dict[str, Any] | None:
-    if task.tool_name != TERMINAL_WATCH_TOOL_NAME or _status_value(task.status) != BackgroundTaskStatus.SUCCEEDED.value:
-        return None
-    extra = task.extra if isinstance(task.extra, dict) else {}
-    if extra.get("auto_terminal_watch") is True:
-        return None
-    result = task.result if isinstance(task.result, dict) else None
-    content = result.get("content") if result is not None else None
-    if not isinstance(content, dict):
-        return None
-    terminal_session_id = content.get("terminal_session_id")
-    if not isinstance(terminal_session_id, str) or not terminal_session_id.strip():
-        return None
-    try:
-        session_status = TerminalSessionStatus(content.get("session_status"))
-    except (TypeError, ValueError):
-        return None
-    if session_status in TERMINAL_SESSION_FINAL_STATUSES:
-        return None
-    after_offset = content.get("next_offset")
-    if not _is_non_negative_int(after_offset):
-        arguments = task.arguments if isinstance(task.arguments, dict) else {}
-        after_offset = arguments.get("after_offset")
-    if not _is_non_negative_int(after_offset):
-        return None
-    return {
-        "uid": task.uid,
-        "session_id": task.session_id,
-        "profile_id": task.profile_id,
-        "terminal_session_id": terminal_session_id,
-        "after_offset": after_offset,
-        "origin_work_id": extra.get("origin_work_id"),
-        "origin_work_identity": extra.get("origin_work_identity"),
-    }
-
-
 def _slot(value: Any) -> tuple[int, str, str, int, str | None]:
     if not isinstance(value, dict):
         raise ValueError(_unknown_error())
@@ -88,6 +49,18 @@ def _slot(value: Any) -> tuple[int, str, str, int, str | None]:
 
 def _status_value(status: Any) -> Any:
     return getattr(status, "value", status)
+
+
+def _remove_consumed_slots(state: dict[str, Any], consumed_slot_keys: set[tuple[int, str]]) -> None:
+    for state_key in ("pending_tools", "terminal_watch_waits"):
+        raw_state_slots = state.get(state_key)
+        if not isinstance(raw_state_slots, list):
+            continue
+        remaining_slots = [slot for slot in raw_state_slots if not (isinstance(slot, dict) and (slot.get("task_id"), slot.get("tool_call_id")) in consumed_slot_keys)]
+        if remaining_slots:
+            state[state_key] = remaining_slots
+        else:
+            state.pop(state_key, None)
 
 
 def _build_result(task: BackgroundTask) -> tuple[Any, str, str]:
@@ -123,11 +96,18 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             if session is None or session.uid != uid or session.profile_id != work.profile_id:
                 raise ValueError(_unknown_error())
             state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
-            pending_tools = state.get("pending_tools")
-            if not isinstance(pending_tools, list) or not pending_tools:
+            pending_tools = state.get("pending_tools", [])
+            terminal_watch_waits = state.get("terminal_watch_waits")
+            pending_tools = pending_tools if isinstance(pending_tools, list) else []
+            terminal_watch_waits = terminal_watch_waits if isinstance(terminal_watch_waits, list) else []
+            raw_slots = [*pending_tools, *[item for item in terminal_watch_waits if not (isinstance(item, dict) and item.get("terminal_auto_watch") is True)]]
+            if not raw_slots:
+                if terminal_watch_waits:
+                    await db.rollback()
+                    return False
                 raise ValueError(_unknown_error())
 
-            slots = [_slot(item) for item in pending_tools]
+            slots = [_slot(item) for item in raw_slots]
             seen_task_ids: set[int] = set()
             seen_call_ids: set[str] = set()
             task_entries: list[tuple[tuple[int, str, str, int, str | None], BackgroundTask]] = []
@@ -145,6 +125,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             if any(_status_value(task.status) in _PENDING_STATUSES for _slot_data, task in task_entries):
                 await db.rollback()
                 return False
+            consumed_slot_keys = {(slot[0], slot[1]) for slot, _task in task_entries}
             interrupted = any(isinstance(task.extra, dict) and task.extra.get("restart_interrupted") is True for _slot_data, task in task_entries)
 
             marker_payloads: list[dict[str, Any]] = []
@@ -270,7 +251,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 )
 
             if interrupted:
-                state.pop("pending_tools", None)
+                _remove_consumed_slots(state, consumed_slot_keys)
                 state.pop("dispatcher_checkpoint", None)
                 state.pop("active_audit_execution", None)
                 state.pop("external_resume_context", None)
@@ -310,7 +291,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 }
             )
             state["dispatcher_checkpoint"] = checkpoint
-            state.pop("pending_tools", None)
+            _remove_consumed_slots(state, consumed_slot_keys)
             state.pop("active_audit_execution", None)
             state["external_resume_pending"] = True
             state["external_resume_context"] = marker_payloads
@@ -326,6 +307,22 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             raise
 
 
+async def _origin_work_status(
+    db: Any,
+    *,
+    work_id: int,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    identity: str,
+) -> Any:
+    work = await session_reply_work_item_crud.get(db, work_id)
+    if work is None or work.uid != uid or work.session_id != session_id or work.profile_id != profile_id or work.dedupe_key != identity:
+        return None
+    await db.refresh(work)
+    return _status_value(work.status)
+
+
 async def resume_external_work_for_task(task_id: int) -> bool:
     async with AsyncSessionLocal() as db:
         task = await background_task_crud.get(db, task_id)
@@ -335,11 +332,44 @@ async def resume_external_work_for_task(task_id: int) -> bool:
         work_id, identity = extra.get("origin_work_id"), extra.get("origin_work_identity")
         if not _is_positive_int(work_id) or not isinstance(identity, str) or not identity.strip():
             return False
-        uid, session_id = task.uid, task.session_id
-        continuation = _terminal_auto_watch_continuation(task)
-        if continuation is not None:
-            await background_task_crud.create_terminal_auto_watch(db, **continuation, commit=False)
-            await db.commit()
+        uid, session_id, profile_id = task.uid, task.session_id, task.profile_id
+
+        if extra.get("auto_terminal_watch") is True:
+            if (
+                _status_value(task.status) not in {BackgroundTaskStatus.SUCCEEDED.value, BackgroundTaskStatus.FAILED.value}
+                or task.auto_reply is not True
+                or _status_value(task.reply_status)
+                not in {
+                    BackgroundTaskReplyStatus.PENDING.value,
+                    BackgroundTaskReplyStatus.RUNNING.value,
+                }
+            ):
+                return False
+            from app.core.background_tasks.terminal_watch_reply import route_terminal_auto_watch_reply
+
+            before_status = await _origin_work_status(db, work_id=work_id, uid=uid, session_id=session_id, profile_id=profile_id, identity=identity)
+            await route_terminal_auto_watch_reply(db, task)
+            after_status = await _origin_work_status(db, work_id=work_id, uid=uid, session_id=session_id, profile_id=profile_id, identity=identity)
+            return before_status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value and after_status == SessionReplyWorkStatus.READY_FOR_LLM.value
+
+        if extra.get("terminal_watch_subscription") is True:
+            from app.core.background_tasks.terminal_watch_reply import route_terminal_auto_watch_reply
+
+            pending_results = await background_task_crud.list_pending_terminal_watch_results(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile_id,
+                origin_work_id=work_id,
+                origin_work_identity=identity,
+            )
+            if not (_status_value(task.status) in {BackgroundTaskStatus.CANCELLED.value, BackgroundTaskStatus.FAILED.value} and not pending_results):
+                before_status = await _origin_work_status(db, work_id=work_id, uid=uid, session_id=session_id, profile_id=profile_id, identity=identity)
+                for pending_result in pending_results:
+                    await route_terminal_auto_watch_reply(db, pending_result)
+                after_status = await _origin_work_status(db, work_id=work_id, uid=uid, session_id=session_id, profile_id=profile_id, identity=identity)
+                return before_status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value and after_status == SessionReplyWorkStatus.READY_FOR_LLM.value
+
     return await _resume_waiting(work_id, uid, session_id, identity)
 
 
@@ -385,7 +415,27 @@ async def reconcile_external_work() -> int:
                 continue
             after_id = max(after_id, work.id)
             try:
-                resumed_count += int(await _resume_waiting(work.id, work.uid, work.session_id, work.dedupe_key))
+                state = work.execution_state if isinstance(work.execution_state, dict) else {}
+                task_ids: list[int] = []
+                seen_task_ids: set[int] = set()
+                for state_key in ("pending_tools", "terminal_watch_waits"):
+                    raw_slots = state.get(state_key)
+                    if not isinstance(raw_slots, list):
+                        continue
+                    for slot in raw_slots:
+                        task_id = slot.get("task_id") if isinstance(slot, dict) else None
+                        if _is_positive_int(task_id) and task_id not in seen_task_ids:
+                            seen_task_ids.add(task_id)
+                            task_ids.append(task_id)
+                for task_id in task_ids:
+                    try:
+                        resumed = await resume_external_work_for_task(task_id)
+                    except Exception:
+                        logger.bind(work_id=work.id, task_id=task_id, uid=work.uid, session_id=work.session_id).exception("External work task reconciliation failed")
+                        continue
+                    if resumed:
+                        resumed_count += 1
+                        break
             except Exception:
                 logger.bind(work_id=work.id, uid=work.uid, session_id=work.session_id).exception("External work reconciliation failed")
         if len(works) < 100:

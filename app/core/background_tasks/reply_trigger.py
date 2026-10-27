@@ -37,18 +37,6 @@ def _get_terminal_auto_watch_origin(task: BackgroundTask) -> tuple[int, str] | N
     return origin_work_id, origin_work_identity
 
 
-def _get_terminal_session_id(task: BackgroundTask) -> str | None:
-    extra = task.extra if isinstance(task.extra, dict) else {}
-    terminal_session_id = extra.get("terminal_session_id")
-    if isinstance(terminal_session_id, str) and terminal_session_id.strip():
-        return terminal_session_id
-    arguments = task.arguments if isinstance(task.arguments, dict) else {}
-    terminal_session_id = arguments.get("terminal_session_id")
-    if isinstance(terminal_session_id, str) and terminal_session_id.strip():
-        return terminal_session_id
-    return None
-
-
 def _build_background_tool_result_payload(task: BackgroundTask) -> dict[str, Any]:
     extra = task.extra if isinstance(task.extra, dict) else {}
     task_result = task.result or {"status": task.status, "tool_name": task.tool_name, "error": task.error}
@@ -258,23 +246,6 @@ async def trigger_background_task_reply(task_id: int) -> None:
                 origin_work_id=origin[0],
                 origin_work_identity=origin[1],
             )
-
-        if auto_terminal_watch:
-            terminal_session_id = _get_terminal_session_id(task)
-            if terminal_session_id is not None:
-                active_manual_watch = await background_task_crud.get_active_terminal_watch(
-                    db,
-                    task.uid,
-                    task.session_id,
-                    terminal_session_id,
-                    manual_only=True,
-                )
-                if active_manual_watch is not None:
-                    if not await _mark_reply_succeeded(db, task_id):
-                        await db.rollback()
-                        return
-                    await db.commit()
-                    return
 
         if grouped_work is not None:
             if not await _merge_terminal_auto_watch_reply(db, task=task, work=grouped_work):

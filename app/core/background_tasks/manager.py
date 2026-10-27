@@ -10,14 +10,26 @@ from app.core.background_tasks.external_work import reconcile_external_work
 from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
 from app.core.background_tasks.reply_trigger import trigger_background_task_reply
 from app.core.background_tasks.runner import run_background_task
-from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_MAX_CONCURRENCY
+from app.core.background_tasks.terminal_watch_coordinator import create_terminal_watch_subscription
+from app.core.constants import (
+    ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN,
+    ERR_TERMINAL_ACTION_NOT_ALLOWED,
+    ERR_TERMINAL_READ_OFFSET_AHEAD,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    TERMINAL_WATCH_MAX_CONCURRENCY,
+    TERMINAL_WATCH_TOOL_NAME,
+)
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
+from app.core.exceptions import ForbiddenException, ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.terminal.manager import terminal_session_manager
+from app.core.terminal.schemas import TerminalAction
+from app.core.terminal.watch_schema import TerminalWatchRequest
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask
 from app.models.message import InternalMessage, MessageRole, MessageType
@@ -151,19 +163,47 @@ class BackgroundTaskManager:
                 }
         origin_work = claim_info is not None
         try:
-            task = await background_task_crud.create_task(
-                db,
-                uid=uid,
-                session_id=session_id,
-                profile_id=profile.id,
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                auto_reply=not origin_work,
-                extra=extra_payload,
-                audit_record_id=audit_record_id,
-                audit_execution_record_id=audit_execution_record_id,
-            )
+            if tool_name == TERMINAL_WATCH_TOOL_NAME:
+                request = TerminalWatchRequest.model_validate(arguments)
+                snapshot = await terminal_session_manager.get_snapshot(
+                    db,
+                    request.terminal_session_id,
+                    uid,
+                    session_id,
+                )
+                if not snapshot.permission_scope.permits(uid, session_id, TerminalAction.READ):
+                    raise ForbiddenException(
+                        ERR_TERMINAL_ACTION_NOT_ALLOWED,
+                        terminal_session_id=request.terminal_session_id,
+                        action=TerminalAction.READ.value,
+                    )
+                if request.after_offset > snapshot.output_buffer.next_offset:
+                    raise ParameterException(ERR_TERMINAL_READ_OFFSET_AHEAD)
+                task = await create_terminal_watch_subscription(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile.id,
+                    tool_call_id=tool_call_id,
+                    arguments=arguments,
+                    extra=extra_payload,
+                )
+                if task is None:
+                    raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+            else:
+                task = await background_task_crud.create_task(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile.id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    auto_reply=not origin_work,
+                    extra=extra_payload,
+                    audit_record_id=audit_record_id,
+                    audit_execution_record_id=audit_execution_record_id,
+                )
         except Exception:
             if audit_record_id is not None and audit_execution_record_id is not None:
                 await audit_crud.mark_execution_unknown(

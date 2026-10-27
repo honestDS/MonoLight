@@ -1,4 +1,3 @@
-import hashlib
 from datetime import datetime
 from typing import Any
 
@@ -10,8 +9,8 @@ from sqlmodel import select
 from app.core.constants import ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.base import CRUDBase
+from app.core.crud.session.terminal_watch import terminal_watch_pending_delivery_condition
 from app.core.i18n import t
-from app.core.terminal.schemas import TerminalSessionStatus
 from app.core.utils.background_task_result import build_background_task_failure_result
 from app.core.utils.time import get_local_time
 from app.models.audit import AUDIT_TERMINAL_STATUSES, AuditRecord, AuditRecordStatus
@@ -104,15 +103,6 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             return None
         active_statuses = [BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]
         status_condition = BackgroundTask.status.in_(active_statuses)
-        if automatic_only:
-            status_condition = or_(
-                status_condition,
-                and_(
-                    BackgroundTask.status == BackgroundTaskStatus.SUCCEEDED,
-                    BackgroundTask.auto_reply.is_(True),
-                    BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
-                ),
-            )
         result = await db.execute(
             select(BackgroundTask)
             .where(
@@ -145,7 +135,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 return task
         return None
 
-    async def create_terminal_auto_watch(
+    async def lock_terminal_watch(
         self,
         db: AsyncSession,
         *,
@@ -153,128 +143,178 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         session_id: str,
         profile_id: int,
         terminal_session_id: str,
-        after_offset: int,
-        previous_task_id: int | None = None,
-        origin_work_id: int | None = None,
-        origin_work_identity: str | None = None,
-        commit: bool = True,
-    ) -> BackgroundTask | None:
-        lock_result = await db.execute(
+    ) -> bool:
+        result = await db.execute(
             update(TerminalSession)
             .where(
                 TerminalSession.terminal_session_id == terminal_session_id,
                 TerminalSession.uid == uid,
                 TerminalSession.session_id == session_id,
                 TerminalSession.profile_id == profile_id,
-                TerminalSession.status.in_([TerminalSessionStatus.STARTING, TerminalSessionStatus.RUNNING]),
             )
             .values(next_output_offset=TerminalSession.next_output_offset)
             .execution_options(synchronize_session=False)
         )
-        if lock_result.rowcount != 1:
-            if commit:
-                await db.commit()
-            else:
-                await db.flush()
+        return result.rowcount == 1
+
+    async def get_terminal_watch_session(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        terminal_session_id: str,
+    ) -> TerminalSession | None:
+        result = await db.execute(
+            select(TerminalSession)
+            .where(
+                TerminalSession.terminal_session_id == terminal_session_id,
+                TerminalSession.uid == uid,
+                TerminalSession.session_id == session_id,
+                TerminalSession.profile_id == profile_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
+    async def get_terminal_watch_by_call_id(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        tool_call_id: str,
+    ) -> BackgroundTask | None:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.profile_id == profile_id,
+                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                BackgroundTask.tool_call_id == tool_call_id,
+            )
+            .order_by(BackgroundTask.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
+    async def get_latest_terminal_watch_final_result(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        terminal_session_id: str,
+    ) -> BackgroundTask | None:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.profile_id == profile_id,
+                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                BackgroundTask.extra["auto_terminal_watch"].as_boolean().is_(True),
+                BackgroundTask.arguments["terminal_session_id"].as_string() == terminal_session_id,
+                BackgroundTask.status == BackgroundTaskStatus.SUCCEEDED,
+                BackgroundTask.result["content"]["event"].as_string().in_(["process_exit", "terminal_error"]),
+                BackgroundTask.result["content"]["eof"].as_boolean().is_(True),
+            )
+            .order_by(BackgroundTask.id.desc())
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
+    async def list_pending_terminal_watch_results(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        origin_work_id: int,
+        origin_work_identity: str,
+    ) -> list[BackgroundTask]:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.profile_id == profile_id,
+                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                BackgroundTask.extra["auto_terminal_watch"].as_boolean().is_(True),
+                BackgroundTask.auto_reply.is_(True),
+                BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED]),
+                BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
+                terminal_watch_pending_delivery_condition(origin_work_id, origin_work_identity),
+            )
+            .order_by(BackgroundTask.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    async def list_terminal_watch_subscriptions(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        terminal_session_id: str,
+    ) -> list[BackgroundTask]:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.profile_id == profile_id,
+                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
+                BackgroundTask.extra["terminal_watch_subscription"].as_boolean().is_(True),
+                BackgroundTask.arguments["terminal_session_id"].as_string() == terminal_session_id,
+            )
+            .order_by(BackgroundTask.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    async def finish_terminal_watch_subscription(
+        self,
+        db: AsyncSession,
+        *,
+        task_id: int,
+        result: dict[str, Any],
+    ) -> BackgroundTask | None:
+        finished_at = await get_database_time(db)
+        update_result = await db.execute(
+            update(BackgroundTask)
+            .where(
+                BackgroundTask.id == task_id,
+                BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
+                BackgroundTask.extra["terminal_watch_subscription"].as_boolean().is_(True),
+            )
+            .values(
+                status=BackgroundTaskStatus.SUCCEEDED,
+                result=result,
+                error=None,
+                auto_reply=False,
+                reply_status=BackgroundTaskReplyStatus.NONE,
+                finished_at=finished_at,
+                locked_by=None,
+                lock_until=None,
+                reply_locked_by=None,
+                reply_lock_until=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (update_result.rowcount or 0) != 1:
             return None
-
-        previous_task: BackgroundTask | None = None
-        previous_content: dict[str, Any] | None = None
-        previous_extra: dict[str, Any] = {}
-        if previous_task_id is not None:
-            previous_result = await db.execute(select(BackgroundTask).where(BackgroundTask.id == previous_task_id).execution_options(populate_existing=True))
-            previous_task = previous_result.scalars().first()
-            previous_extra = previous_task.extra if previous_task is not None and isinstance(previous_task.extra, dict) else {}
-            previous_arguments = previous_task.arguments if previous_task is not None and isinstance(previous_task.arguments, dict) else {}
-            previous_result_data = previous_task.result if previous_task is not None and isinstance(previous_task.result, dict) else {}
-            candidate_content = previous_result_data.get("content")
-            if (
-                previous_task is None
-                or previous_task.uid != uid
-                or previous_task.session_id != session_id
-                or previous_task.profile_id != profile_id
-                or previous_task.tool_name != TERMINAL_WATCH_TOOL_NAME
-                or previous_extra.get("terminal_session_id") != terminal_session_id
-                or previous_arguments.get("terminal_session_id") != terminal_session_id
-                or previous_extra.get("auto_terminal_watch") is not True
-                or previous_task.status != BackgroundTaskStatus.SUCCEEDED
-                or previous_task.auto_reply is not True
-                or previous_task.reply_status != BackgroundTaskReplyStatus.SUCCEEDED
-                or not isinstance(candidate_content, dict)
-                or candidate_content.get("event") not in {"timeout", "observation_error"}
-                or previous_extra.get("next_auto_watch_task_id") is not None
-                or candidate_content.get("eof") is True
-                or not isinstance(candidate_content.get("next_offset"), int)
-                or isinstance(candidate_content.get("next_offset"), bool)
-                or candidate_content.get("next_offset") < 0
-            ):
-                if commit:
-                    await db.commit()
-                else:
-                    await db.flush()
-                return None
-            previous_content = candidate_content
-
-        if origin_work_id is None:
-            origin_work_id = previous_extra.get("origin_work_id")
-        if origin_work_identity is None:
-            origin_work_identity = previous_extra.get("origin_work_identity")
-
-        active_watch = await self.get_active_terminal_watch(
-            db,
-            uid,
-            session_id,
-            terminal_session_id,
-            automatic_only=True,
-        )
-        if active_watch is not None:
-            if commit:
-                await db.commit()
-            else:
-                await db.flush()
-            return active_watch
-
-        cursor = after_offset if previous_content is None else previous_content["next_offset"]
-        digest = hashlib.sha256(f"{terminal_session_id}:{cursor}:{previous_task_id}".encode()).hexdigest()[:32]
-        extra: dict[str, Any] = {
-            "source": "terminal_auto_watch",
-            "auto_terminal_watch": True,
-            "terminal_session_id": terminal_session_id,
-        }
-        if previous_content is not None and isinstance(previous_content.get("observed_at"), str):
-            extra["observation_started_at"] = previous_content["observed_at"]
-        if isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0:
-            extra["origin_work_id"] = origin_work_id
-        if isinstance(origin_work_identity, str) and origin_work_identity.strip():
-            extra["origin_work_identity"] = origin_work_identity
-        task = await self.create_task(
-            db,
-            uid=uid,
-            session_id=session_id,
-            profile_id=profile_id,
-            tool_call_id=f"terminal-auto-watch:{digest}",
-            tool_name=TERMINAL_WATCH_TOOL_NAME,
-            arguments={
-                "terminal_session_id": terminal_session_id,
-                "after_offset": cursor,
-                "condition": "process_exit",
-            },
-            auto_reply=True,
-            extra=extra,
-            commit=False,
-        )
-        if previous_task is not None:
-            previous_task.extra = {
-                **(previous_task.extra if isinstance(previous_task.extra, dict) else {}),
-                "next_auto_watch_task_id": task.id,
-            }
-            db.add(previous_task)
-            await db.flush()
-        if commit:
-            await db.commit()
-        else:
-            await db.flush()
-        return task
+        await db.flush()
+        refreshed_result = await db.execute(select(BackgroundTask).where(BackgroundTask.id == task_id).execution_options(populate_existing=True))
+        return refreshed_result.scalars().first()
 
     async def list_by_audit_record(self, db: AsyncSession, audit_record_id: int) -> list[BackgroundTask]:
         result = await db.execute(select(BackgroundTask).where(BackgroundTask.audit_record_id == audit_record_id).order_by(BackgroundTask.id).execution_options(populate_existing=True))
@@ -285,7 +325,14 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         if profile_id is not None:
             stmt = stmt.where(BackgroundTask.profile_id == profile_id)
         if observer is not None:
-            stmt = stmt.where(BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME if observer else BackgroundTask.tool_name != TERMINAL_WATCH_TOOL_NAME)
+            if observer:
+                subscription_flag = BackgroundTask.extra["terminal_watch_subscription"].as_boolean()
+                stmt = stmt.where(
+                    BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                    or_(BackgroundTask.extra.is_(None), subscription_flag.is_not(True)),
+                )
+            else:
+                stmt = stmt.where(BackgroundTask.tool_name != TERMINAL_WATCH_TOOL_NAME)
         result = await db.execute(stmt)
         return list(result.scalars().all())
 

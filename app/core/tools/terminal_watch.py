@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from app.core import constants
@@ -22,8 +22,12 @@ TERMINAL_WATCH_TOOL_SCHEMA = {
     "function": {
         "name": constants.TERMINAL_WATCH_TOOL_NAME,
         "description": (
-            "Perform a one-shot background observation of an interactive terminal session. "
+            "Subscribe an interactive terminal session to the single shared observation loop. "
             "The system suspends the task while observing instead of polling the LLM. "
+            "This active subscription does not replace the automatic no-output, exit, or error fallback observer. "
+            "process_exit is allowed but expresses intent only. "
+            "tool_timeout is the continuous no-output threshold, not the command's total runtime. "
+            "After calling, work remains suspended; on an ordinary timeout, inspect the terminal and continue the authorized task without summarizing unless needed. "
             "Use manage_background_tasks to cancel the task. "
             "output_contains uses raw literal matching, not a regular expression. "
             "quiet/output only report observed terminal output timing and do not prove business completion. "
@@ -43,7 +47,7 @@ async def ensure_terminal_auto_watch(
     terminal_session_id: str,
     after_offset: int,
     session_status: Any,
-) -> None:
+) -> Any | None:
     if db is None or not isinstance(uid, str) or not uid.strip() or len(uid) > 100 or not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 100 or not isinstance(profile_id, int) or isinstance(profile_id, bool) or profile_id <= 0:
         return
 
@@ -82,7 +86,9 @@ async def ensure_terminal_auto_watch(
         create_kwargs["origin_work_id"] = work.id
         create_kwargs["origin_work_identity"] = work.dedupe_key
 
-    await background_task_crud.create_terminal_auto_watch(db, **create_kwargs)
+    from app.core.background_tasks.terminal_watch_coordinator import create_terminal_auto_watch
+
+    return await create_terminal_auto_watch(db, **create_kwargs)
 
 
 class TerminalWatchExecutor(BaseExecutor):
@@ -112,15 +118,9 @@ class TerminalWatchExecutor(BaseExecutor):
         tool_timeout = self._tool_timeout()
         extra = task.extra if isinstance(task.extra, dict) else {}
         auto_watch = extra.get("auto_terminal_watch") is True
-        if auto_watch:
-            observation_started_at = task.created_at
-            if isinstance(extra.get("observation_started_at"), str):
-                observation_started_at = datetime.fromisoformat(extra["observation_started_at"])
-            deadline = observation_started_at + timedelta(seconds=tool_timeout)
-        else:
-            deadline = task.created_at + timedelta(seconds=tool_timeout)
 
         await self.db.commit()
+        deadline = get_local_time() + timedelta(seconds=tool_timeout)
         if auto_watch:
             result = await watch_terminal(
                 task_id=task_id,
@@ -129,8 +129,10 @@ class TerminalWatchExecutor(BaseExecutor):
                 request=request,
                 deadline=deadline,
                 read_on_timeout=True,
+                idle_timeout=tool_timeout,
+                subscription_profile_id=task.profile_id,
+                subscription_states=extra.get("watch_states"),
             )
-            result["observed_at"] = get_local_time().isoformat()
         else:
             result = await watch_terminal(
                 task_id=task_id,

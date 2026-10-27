@@ -18,6 +18,7 @@ import app.core.tools.terminal as terminal_tool_module
 import app.providers.database as database_provider
 from app.core.background_tasks.external_work import resume_external_work_for_task
 from app.core.background_tasks.reply_trigger import trigger_background_task_reply
+from app.core.background_tasks.terminal_watch_coordinator import complete_terminal_watch_round
 from app.core.constants import (
     END_SESSION_TOOL_NAME,
     MANAGE_BACKGROUND_TASKS_TOOL_NAME,
@@ -47,7 +48,7 @@ from app.models.message import InternalMessage, InternalToolCall, Message, Messa
 from app.models.message_platform_outbox import MessagePlatformOutbox
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.models.user import User
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
@@ -443,6 +444,197 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                 assert outbox_items == []
 
         assert len(provider_payloads) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
+async def test_interactive_shell_auto_watch_suspends_before_another_model_request(
+    database_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+) -> None:
+    command = "echo terminal-watch-fixture"
+    provider_call_id = "interactive-shell-call"
+    provider_payloads: list[dict] = []
+
+    async def fake_post_json(_transformer, **kwargs):
+        payload = kwargs["payload"]
+        provider_payloads.append(copy.deepcopy(payload))
+        assert len(provider_payloads) == 1, "interactive shell must suspend before a second model request"
+        assert payload["model"] == MODEL_ID
+        assert payload["stream"] is False
+        assert kwargs["url"].endswith("/chat/completions" if protocol == "OPENAI" else "/responses")
+        serialized_arguments = json.dumps({"command": command, "execution_mode": "interactive"}, ensure_ascii=False)
+        if protocol == "OPENAI":
+            return {
+                "id": "chatcmpl-interactive-shell-auto-watch",
+                "object": "chat.completion",
+                "model": MODEL_ID,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": None, "tool_calls": [{"id": provider_call_id, "type": "function", "function": {"name": SHELL_TOOL_NAME, "arguments": serialized_arguments}}]}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            }
+        return {
+            "id": "resp-interactive-shell-auto-watch",
+            "object": "response",
+            "model": MODEL_ID,
+            "status": "completed",
+            "output": [{"type": "function_call", "id": provider_call_id, "call_id": provider_call_id, "name": SHELL_TOOL_NAME, "arguments": serialized_arguments, "status": "completed"}],
+            "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        }
+
+    async with database_factory(foreign_keys=True, wal=True, name=f"interactive-shell-auto-watch-{protocol.lower()}.sqlite3") as factory:
+        channel = ModelChannel(
+            id=1,
+            name="interactive-shell-auto-watch-channel",
+            api_key="enc:v1:stored-test-key",
+            base_url="https://llm.invalid",
+            model_ids=[{"model_id": MODEL_ID, "usage": "CHAT", "protocol": protocol, "context_window_k": 32, "max_tokens": 512}],
+        )
+        profile = Profile(
+            id=PROFILE_ID,
+            uid=UID,
+            name="interactive-shell-auto-watch-profile",
+            configs=ProfileConfig.model_validate(
+                {
+                    "channel": {"chat_channel": {"rules": [{"channel_id": 1, "model_id": MODEL_ID, "priority": 1, "weight": 1}]}},
+                    "security": {"audit_threshold": 0},
+                    "tool": {"enabled_tools": [SHELL_TOOL_NAME]},
+                    "other": {},
+                    "memory": {"enabled": False},
+                }
+            ).model_dump(mode="json"),
+        )
+        user = User(uid=UID, username="interactive-shell-auto-watch-user")
+        session = ChatSession(session_id=SESSION_ID, uid=UID, profile_id=PROFILE_ID, source="http", goal_mode=False, stream_llm_request=False, show_tool_calls=True)
+
+        async with factory() as db:
+            db.add_all([channel, profile, user, session])
+            await db.commit()
+
+        for module in (database_provider, dispatcher_module, executor_interactive_module, executor_lifecycle_module, executor_metadata_module, channel_cursor_module, external_work_module, reply_trigger_module, notifier_module):
+            monkeypatch.setattr(module, "AsyncSessionLocal", factory)
+        monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
+        transformer_cls = OpenAIChatCompletionsTransformer if protocol == "OPENAI" else OpenAIResponsesTransformer
+        monkeypatch.setattr(transformer_cls, "_post_json", fake_post_json)
+
+        async def noop_transport(*_args, **_kwargs) -> None:
+            return None
+
+        monkeypatch.setattr(executor_lifecycle_module, "send_session_event", noop_transport)
+        monkeypatch.setattr(notifier_module, "send_session_event", noop_transport)
+
+        async with factory() as db:
+            persisted_profile = await db.get(Profile, PROFILE_ID)
+            assert persisted_profile is not None
+            _message, work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+                db,
+                uid=UID,
+                session_id=SESSION_ID,
+                profile=persisted_profile,
+                message="start the interactive fixture",
+                attachments=None,
+                source="http",
+                stream_requested=False,
+                context_summary_events_requested=False,
+                request_id="interactive-shell-auto-watch-request",
+            )
+            assert submission_status == "accepted"
+            assert work.id is not None
+            work_id = work.id
+
+        async with factory() as db:
+            claimed_work = await session_reply_work_item_crud.claim_next(db, worker_id=WORKER_ID, lease_seconds=300)
+            assert claimed_work is not None
+            assert claimed_work.id == work_id
+        await executor_lifecycle_module.execute_session_reply_work(work_id, WORKER_ID)
+
+        async with factory() as db:
+            waiting_work = await db.get(SessionReplyWorkItem, work_id)
+            works = list((await db.execute(select(SessionReplyWorkItem).order_by(SessionReplyWorkItem.id))).scalars().all())
+            tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
+            messages = list((await db.execute(select(Message).where(Message.session_id == SESSION_ID).order_by(Message.id))).scalars().all())
+            assert waiting_work is not None
+            assert len(works) == 1 and works[0].work_type != SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
+            assert waiting_work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK and waiting_work.result_message_id is None
+            assert len(tasks) == 1
+            auto_task = tasks[0]
+            assert auto_task.tool_name == TERMINAL_WATCH_TOOL_NAME and auto_task.status == BackgroundTaskStatus.PENDING
+            assert auto_task.auto_reply is True and auto_task.reply_status == BackgroundTaskReplyStatus.PENDING
+            assert auto_task.extra["auto_terminal_watch"] is True
+            assert auto_task.extra["origin_work_id"] == work_id
+            assert auto_task.extra["origin_work_identity"] == waiting_work.dedupe_key
+            assert auto_task.extra.get("terminal_watch_subscription") is not True
+            terminal_session_id = auto_task.extra["terminal_session_id"]
+            terminal_session = await db.get(TerminalSession, terminal_session_id)
+            assert terminal_session is not None
+            assert terminal_session.status == TerminalSessionStatus.STARTING
+            assert terminal_session.command == command
+            tool_call_messages = [message for message in messages if message.type == MessageType.TOOL_CALL]
+            assert len(tool_call_messages) == 1
+            persisted_tool_call = InternalMessage.model_validate_json(tool_call_messages[0].content or "{}")
+            assert persisted_tool_call.role == MessageRole.ASSISTANT
+            assert persisted_tool_call.tool_calls is not None and len(persisted_tool_call.tool_calls) == 1
+            persisted_shell_call = persisted_tool_call.tool_calls[0]
+            assert persisted_shell_call.name == SHELL_TOOL_NAME
+            assert persisted_shell_call.arguments == {"command": command, "execution_mode": "interactive"}
+            internal_tool_call_id = persisted_shell_call.id
+            assert isinstance(internal_tool_call_id, str) and internal_tool_call_id
+            tool_results = [message for message in messages if message.type == MessageType.TOOL_RESULT]
+            assert len(tool_results) == 1
+            assert tool_results[0].id is not None
+            tool_result = InternalMessage.model_validate_json(tool_results[0].content or "{}")
+            handoff = json.loads(tool_result.content or "{}")
+            assert tool_result.tool_call_id == internal_tool_call_id and tool_result.tool_execution_status == "succeeded"
+            assert handoff["terminal_session_id"] == terminal_session_id and handoff["status"] == TerminalSessionStatus.STARTING.value
+            assert handoff["output_stream"] == "merged_stdout_stderr"
+            assert "queued" not in json.dumps(handoff, ensure_ascii=False)
+            execution_state = waiting_work.execution_state or {}
+            assert execution_state["pending_tools"] == []
+            waits = execution_state["terminal_watch_waits"]
+            assert len(waits) == 1
+            wait = waits[0]
+            assert wait["task_id"] == auto_task.id and wait["tool_call_id"] == internal_tool_call_id
+            assert wait["tool_name"] == SHELL_TOOL_NAME and wait["tool_result_message_id"] == tool_results[0].id
+            assert wait["terminal_watch"] is True and wait["terminal_auto_watch"] is True
+            assert wait["terminal_session_id"] == terminal_session_id
+            auto_task_id = auto_task.id
+            assert auto_task_id is not None
+            assert len(provider_payloads) == 1
+            assert not any(message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT for message in messages)
+            assert not any(message.type == MessageType.BACKGROUND_TASK_RESULT for message in messages)
+            assert list((await db.execute(select(MessagePlatformOutbox))).scalars().all()) == []
+
+        timeout_content = {"terminal_session_id": terminal_session_id, "event": "timeout", "after_offset": 0, "session_status": "running", "exit_code": None, "failure_reason": None, "output": "", "start_offset": 0, "next_offset": 0, "latest_offset": 0, "output_truncated": False, "eof": False}
+        async with factory() as db:
+            claimed_auto = await background_task_crud.try_claim(db, task_id=auto_task_id, worker_id=TASK_WORKER_ID, lease_seconds=300)
+            assert claimed_auto is not None
+            assert await complete_terminal_watch_round(
+                db,
+                task=claimed_auto,
+                worker_id=TASK_WORKER_ID,
+                content=timeout_content,
+            )
+            completed_auto = await db.get(BackgroundTask, auto_task_id)
+            assert completed_auto is not None
+            assert completed_auto.result["content"] == timeout_content
+            next_task_id = completed_auto.extra.get("next_auto_watch_task_id")
+            assert isinstance(next_task_id, int)
+            next_task = await db.get(BackgroundTask, next_task_id)
+            assert next_task is not None
+            assert next_task.status == BackgroundTaskStatus.PENDING
+            assert next_task.extra["origin_work_id"] == work_id
+            assert next_task.extra["origin_work_identity"] == waiting_work.dedupe_key
+
+        assert await resume_external_work_for_task(auto_task_id) is True
+        assert len(provider_payloads) == 1
+
+        async with factory() as db:
+            resumed_work = await db.get(SessionReplyWorkItem, work_id)
+            assert resumed_work is not None
+            assert resumed_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+            assert len(list((await db.execute(select(SessionReplyWorkItem))).scalars().all())) == 1
+            assert not any(message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT for message in (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all())
+            assert not any(work_item.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY for work_item in (await db.execute(select(SessionReplyWorkItem))).scalars().all())
 
 
 @pytest.mark.asyncio
@@ -1248,13 +1440,37 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
             )
             assert claimed_task is not None
             assert claimed_task.status == BackgroundTaskStatus.RUNNING
-            assert await background_task_crud.mark_succeeded(
+            assert await complete_terminal_watch_round(
                 db,
-                task_id=task_id,
+                task=claimed_task,
                 worker_id=TASK_WORKER_ID,
-                result=expected_task_result,
-                auto_reply=True,
+                content=observed_result,
             )
+
+            completed_auto_watch_tasks = list(
+                (
+                    await db.execute(
+                        select(BackgroundTask)
+                        .where(
+                            BackgroundTask.session_id == SESSION_ID,
+                            BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                        )
+                        .order_by(BackgroundTask.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            completed_auto_watch_tasks = [task for task in completed_auto_watch_tasks if task.extra.get("auto_terminal_watch") is True]
+            if event == "timeout":
+                assert len(completed_auto_watch_tasks) == 2
+                next_task = next(task for task in completed_auto_watch_tasks if task.id != task_id)
+                assert next_task.status == BackgroundTaskStatus.PENDING
+                assert next_task.reply_status == BackgroundTaskReplyStatus.PENDING
+                assert next_task.arguments["after_offset"] == observed_result["next_offset"]
+            else:
+                assert event == "process_exit"
+                assert len(completed_auto_watch_tasks) == 1
 
         await trigger_background_task_reply(task_id)
         await trigger_background_task_reply(task_id)
@@ -1536,11 +1752,12 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
     assert len(terminal_session_id) >= 32
     observed_result = {
         "terminal_session_id": terminal_session_id,
-        "event": "timeout",
+        "event": "observation_error",
         "after_offset": 0,
         "session_status": "running",
         "exit_code": None,
         "failure_reason": None,
+        "error": "terminal output read timed out",
         "output": "",
         "start_offset": 0,
         "next_offset": 0,
@@ -1877,14 +2094,15 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             assert len(provider_payloads) == 2
             assert not any(message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT for message in (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all())
             tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
-            followup_candidates = [task for task in tasks if task.id != seed_task_id and task.tool_name == TERMINAL_WATCH_TOOL_NAME and isinstance(task.extra, dict) and task.extra.get("origin_work_id") == work_id]
+            followup_candidates = [task for task in tasks if task.id != seed_task_id and task.tool_name == TERMINAL_WATCH_TOOL_NAME and isinstance(task.extra, dict) and task.extra.get("terminal_watch_subscription") is True and task.extra.get("origin_work_id") == work_id]
             assert len(followup_candidates) == 1
             followup_task = followup_candidates[0]
             assert followup_task.id is not None
-            followup_task_id = followup_task.id
+            followup_subscription_id = followup_task.id
             assert followup_task.auto_reply is False
             assert followup_task.status == BackgroundTaskStatus.PENDING
             assert followup_task.reply_status == BackgroundTaskReplyStatus.NONE
+            assert followup_task.extra["terminal_watch_subscription"] is True
             assert followup_task.extra["origin_work_identity"] == waiting_work.dedupe_key
             assert followup_task.arguments == {
                 "terminal_session_id": terminal_session_id,
@@ -1892,29 +2110,71 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
                 "condition": "process_exit",
             }
 
-        followup_result = build_background_task_success_result(TERMINAL_WATCH_TOOL_NAME, observed_result)
-        async with factory() as db:
-            claimed_followup = await background_task_crud.try_claim(
+            automatic_candidates = [
+                task
+                for task in tasks
+                if task.id != seed_task_id
+                and task.tool_name == TERMINAL_WATCH_TOOL_NAME
+                and isinstance(task.extra, dict)
+                and task.extra.get("auto_terminal_watch") is True
+                and task.extra.get("origin_work_id") == work_id
+                and task.extra.get("origin_work_identity") == waiting_work.dedupe_key
+                and task.status == BackgroundTaskStatus.PENDING
+            ]
+            assert len(automatic_candidates) == 1
+            automatic_task = automatic_candidates[0]
+            assert automatic_task.id is not None
+            automatic_task_id = automatic_task.id
+            assert automatic_task.auto_reply is True
+            assert automatic_task.reply_status == BackgroundTaskReplyStatus.PENDING
+            observer_tasks = await background_task_crud.list_pending(
                 db,
-                task_id=followup_task_id,
+                profile_id=PROFILE_ID,
+                observer=True,
+            )
+            assert [task.id for task in observer_tasks] == [automatic_task_id]
+            assert followup_subscription_id not in {task.id for task in observer_tasks}
+
+        followup_content = {
+            **observed_result,
+            "condition": "process_exit",
+            "matched": False,
+        }
+        followup_result = build_background_task_success_result(TERMINAL_WATCH_TOOL_NAME, followup_content)
+        automatic_result = build_background_task_success_result(
+            TERMINAL_WATCH_TOOL_NAME,
+            {**observed_result, "completed_watch_task_ids": [followup_subscription_id]},
+        )
+        async with factory() as db:
+            claimed_automatic = await background_task_crud.try_claim(
+                db,
+                task_id=automatic_task_id,
                 worker_id=TASK_WORKER_ID,
                 lease_seconds=300,
             )
-            assert claimed_followup is not None
-            assert await background_task_crud.mark_succeeded(
+            assert claimed_automatic is not None
+            assert await complete_terminal_watch_round(
                 db,
-                task_id=followup_task_id,
+                task=claimed_automatic,
                 worker_id=TASK_WORKER_ID,
-                result=followup_result,
-                auto_reply=False,
+                content=observed_result,
             )
+            completed_subscription = await db.get(BackgroundTask, followup_subscription_id)
+            assert completed_subscription is not None
+            assert completed_subscription.status == BackgroundTaskStatus.SUCCEEDED
+            assert completed_subscription.reply_status == BackgroundTaskReplyStatus.NONE
+            assert completed_subscription.attempt_count == 0
+            assert completed_subscription.result == followup_result
 
-        assert await resume_external_work_for_task(followup_task_id) is True
+        assert await resume_external_work_for_task(followup_subscription_id) is True
 
         async with factory() as db:
             resumed_work = await db.get(SessionReplyWorkItem, work_id)
             assert resumed_work is not None
             assert resumed_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+            summary_work_items = list((await db.execute(select(SessionReplyWorkItem).order_by(SessionReplyWorkItem.id))).scalars().all())
+            assert len(summary_work_items) == 1
+            assert summary_work_items[0].id == work_id
             resumed_claim = await session_reply_work_item_crud.claim_next(
                 db,
                 worker_id=WORKER_ID,
@@ -1927,12 +2187,12 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
 
         assert len(provider_payloads) == 5
         assert len(terminal_wait_calls) == 1
-        assert all(str(followup_task_id) in json.dumps(payload, ensure_ascii=False) for payload in provider_payloads[2:])
+        assert all(str(followup_subscription_id) in json.dumps(payload, ensure_ascii=False) for payload in provider_payloads[2:])
 
         async with factory() as db:
             final_work = await db.get(SessionReplyWorkItem, work_id)
             seed_task = await db.get(BackgroundTask, seed_task_id)
-            followup_task = await db.get(BackgroundTask, followup_task_id)
+            followup_task = await db.get(BackgroundTask, followup_subscription_id)
             terminal_session = await db.get(TerminalSession, terminal_session_id)
             assert final_work is not None
             assert final_work.status == SessionReplyWorkStatus.SUCCEEDED
@@ -1945,35 +2205,40 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             assert followup_task is not None
             assert followup_task.status == BackgroundTaskStatus.SUCCEEDED
             assert followup_task.reply_status == BackgroundTaskReplyStatus.NONE
-            assert followup_task.attempt_count == 1
+            assert followup_task.attempt_count == 0
             assert followup_task.result == followup_result
             assert terminal_session is not None
             assert terminal_session.status == TerminalSessionStatus.EXITED
             assert terminal_session.exit_code == 0
 
             persisted_tasks = list((await db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
-            assert len(persisted_tasks) == (2 if source_auto else 3)
+            assert len(persisted_tasks) == 3
             assert len([task for task in persisted_tasks if task.id == seed_task_id]) == 1
+            auto_watch_tasks = [task for task in persisted_tasks if task.extra.get("auto_terminal_watch") is True]
+            assert len(auto_watch_tasks) == (2 if source_auto else 1)
+            current_auto_task = await db.get(BackgroundTask, automatic_task_id)
+            assert current_auto_task is not None
+            assert current_auto_task.id != seed_task_id
+            assert current_auto_task.status == BackgroundTaskStatus.SUCCEEDED
+            assert current_auto_task.auto_reply is True
+            assert current_auto_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+            assert current_auto_task.attempt_count == 1
+            assert current_auto_task.result == automatic_result
+            assert current_auto_task.result["content"]["event"] == "observation_error"
+            assert current_auto_task.result["content"]["error"] == "terminal output read timed out"
+            assert "next_auto_watch_task_id" not in current_auto_task.extra
+            assert current_auto_task.extra["origin_work_id"] == work_id
+            assert current_auto_task.extra["origin_work_identity"] == final_work.dedupe_key
+            assert current_auto_task.extra["terminal_session_id"] == terminal_session_id
+            assert current_auto_task.arguments == {
+                "terminal_session_id": terminal_session_id,
+                "after_offset": observed_result["next_offset"],
+                "condition": "process_exit",
+            }
             if source_auto:
-                auto_watch_tasks = [task for task in persisted_tasks if task.extra.get("auto_terminal_watch") is True]
-                assert len(auto_watch_tasks) == 1
-                assert auto_watch_tasks[0].id == seed_task_id
+                assert seed_task.id == seed_task_id
+                assert seed_task.extra["auto_terminal_watch"] is True
                 assert "next_auto_watch_task_id" not in seed_task.extra
-            else:
-                auto_watch_tasks = [task for task in persisted_tasks if task.extra.get("auto_terminal_watch") is True]
-                assert len(auto_watch_tasks) == 1
-                auto_watch_task = auto_watch_tasks[0]
-                assert auto_watch_task.id != seed_task_id
-                assert auto_watch_task.status == BackgroundTaskStatus.PENDING
-                assert auto_watch_task.auto_reply is True
-                assert auto_watch_task.reply_status == BackgroundTaskReplyStatus.PENDING
-                assert auto_watch_task.extra["origin_work_id"] == work_id
-                assert auto_watch_task.extra["terminal_session_id"] == terminal_session_id
-                assert auto_watch_task.arguments == {
-                    "terminal_session_id": terminal_session_id,
-                    "after_offset": observed_result["next_offset"],
-                    "condition": "process_exit",
-                }
 
             work_items = list((await db.execute(select(SessionReplyWorkItem).order_by(SessionReplyWorkItem.id))).scalars().all())
             assert len(work_items) == 1
@@ -2001,7 +2266,7 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             assert todo_result["status"] == "success"
             watch_result = json.loads(result_by_call_id[tool_calls[1].tool_calls[0].id].content or "{}")
             assert watch_result["status"] == "queued"
-            assert watch_result["task_id"] == followup_task_id
+            assert watch_result["task_id"] == followup_subscription_id
             close_result = json.loads(result_by_call_id[tool_calls[2].tool_calls[0].id].content or "{}")
             assert close_result["action"] == TerminalAction.CLOSE.value
             assert close_result["session_status"] == TerminalSessionStatus.EXITED.value
@@ -2012,9 +2277,9 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             initial_payload = json.loads(next(message for message in result_events if message.dedupe_key == f"background-task:{seed_task_id}:result").content or "{}")
             assert initial_payload["task_id"] == seed_task_id
             assert initial_payload["task"] == seed_result
-            marker_message = next(message for message in result_events if message.dedupe_key == f"background-task:{followup_task_id}:result")
+            marker_message = next(message for message in result_events if message.dedupe_key == f"background-task:{followup_subscription_id}:result")
             marker_payload = json.loads(marker_message.content or "{}")
-            assert marker_payload["task_id"] == followup_task_id
+            assert marker_payload["task_id"] == followup_subscription_id
             assert marker_payload["tool_name"] == TERMINAL_WATCH_TOOL_NAME
             assert marker_payload["execution_status"] == "succeeded"
             assert marker_payload["task"] == followup_result["content"]
