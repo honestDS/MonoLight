@@ -1,6 +1,7 @@
 import os
 import platform
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -8,8 +9,11 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+import app.core.terminal.audit_lifecycle as terminal_audit_lifecycle_module
+from app.core.constants import ERR_SESSION_DELETE_FAILED, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
+from app.core.exceptions import ServerException
 from app.core.session.cleanup import delete_session_data
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.models.audit import AuditConfirmationClaim, AuditRecord, AuditRecordStatus
@@ -397,3 +401,148 @@ async def test_delete_session_data_allows_admin_to_delete_another_users_session(
     assert deleted is True
     assert await db_session.get(ChatSession, "admin-session") is None
     assert await db_session.get(SessionTodoPlan, "admin-session") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_count", [1, 2])
+async def test_delete_session_data_retries_terminal_process_cleanup_once(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_count: int,
+):
+    session_id = f"cleanup-retry-session-{fail_count}"
+    uid = "cleanup-retry-user"
+    terminal_session_id = f"cleanup-retry-terminal-{fail_count}"
+    root_pid = os.getpid() + 100_000 + fail_count
+    process_identity = {
+        "platform": platform.system(),
+        "boot_time": psutil.boot_time(),
+        "root_pid": root_pid,
+        "root_create_time": 10.0,
+        "process_group_id": None,
+        "known_processes": {str(root_pid): 10.0},
+    }
+    terminal_session = TerminalSession(
+        terminal_session_id=terminal_session_id,
+        uid=uid,
+        session_id=session_id,
+        original_tool_call_id="cleanup-retry-call",
+        profile_id=1,
+        command="python -i",
+        working_directory="/workspace",
+        status=TerminalSessionStatus.RUNNING,
+        allowed_actions=[TerminalAction.CLOSE.value],
+        process_identity=process_identity,
+    )
+    command = TerminalControlCommand(
+        terminal_session_id=terminal_session_id,
+        request_id="cleanup-retry-request",
+        action=TerminalAction.CLOSE,
+        payload={"force": True},
+        payload_hash="c" * 64,
+        status=TerminalControlCommandStatus.PENDING,
+    )
+    watch = BackgroundTask(
+        uid=uid,
+        session_id=session_id,
+        profile_id=1,
+        tool_call_id="cleanup-retry-watch-call",
+        tool_name=TERMINAL_WATCH_TOOL_NAME,
+        status=BackgroundTaskStatus.PENDING,
+        arguments={
+            "terminal_session_id": terminal_session_id,
+            "after_offset": 0,
+            "condition": "process_exit",
+        },
+        auto_reply=False,
+        reply_status=BackgroundTaskReplyStatus.NONE,
+        extra={"terminal_session_id": terminal_session_id},
+    )
+    message = Message(
+        uid=uid,
+        session_id=session_id,
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="cleanup retry",
+        is_processed=False,
+    )
+    db_session.add_all(
+        [
+            ChatSession(session_id=session_id, uid=uid, profile_id=1),
+            message,
+            terminal_session,
+            command,
+            watch,
+        ]
+    )
+    await db_session.commit()
+    message_id = message.id
+    command_id = command.id
+    watch_id = watch.id
+    assert message_id is not None
+    assert command_id is not None
+    assert watch_id is not None
+
+    cleanup_calls = 0
+
+    async def cleanup_process_identity(_identity):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        if cleanup_calls <= fail_count:
+            return SimpleNamespace(errors=("process did not terminate",))
+        return SimpleNamespace(errors=())
+
+    monkeypatch.setattr(
+        terminal_audit_lifecycle_module,
+        "cleanup_terminal_process_identity",
+        cleanup_process_identity,
+    )
+
+    if fail_count == 1:
+        deleted = await delete_session_data(
+            db_session,
+            session_id=session_id,
+            uid=uid,
+            is_admin=False,
+        )
+        await db_session.commit()
+        db_session.expunge_all()
+
+        assert deleted is True
+        assert cleanup_calls == 2
+        assert await db_session.get(ChatSession, session_id) is None
+        assert await db_session.get(Message, message_id) is None
+        assert await db_session.get(TerminalSession, terminal_session_id) is None
+        assert await db_session.get(TerminalControlCommand, command_id) is None
+        assert await db_session.get(BackgroundTask, watch_id) is None
+        return
+
+    with pytest.raises(ServerException) as exc_info:
+        await delete_session_data(
+            db_session,
+            session_id=session_id,
+            uid=uid,
+            is_admin=False,
+        )
+
+    assert exc_info.value.message == ERR_SESSION_DELETE_FAILED
+    assert cleanup_calls == 2
+    await db_session.rollback()
+    db_session.expunge_all()
+
+    retained_session = await db_session.get(ChatSession, session_id)
+    retained_message = await db_session.get(Message, message_id)
+    retained_terminal = await db_session.get(TerminalSession, terminal_session_id)
+    retained_command = await db_session.get(TerminalControlCommand, command_id)
+    retained_watch = await db_session.get(BackgroundTask, watch_id)
+    assert retained_session is not None
+    assert retained_message is not None
+    assert retained_terminal is not None
+    assert retained_terminal.status is TerminalSessionStatus.RUNNING
+    assert retained_terminal.process_identity == process_identity
+    assert retained_command is not None
+    assert retained_command.status is TerminalControlCommandStatus.PENDING
+    assert retained_watch is not None
+    assert retained_watch.status is BackgroundTaskStatus.PENDING
+    assert retained_watch.session_id == session_id

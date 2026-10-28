@@ -3,6 +3,7 @@ MESSAGES = {
     "MSG_SESSION_TODO_SUCCESS": "Session todo list retrieved successfully",
     "MSG_SESSION_GUIDANCE_CREATED": "Guidance message added",
     "ERR_SESSION_NOT_FOUND": "Session not found or deleted",
+    "ERR_SESSION_DELETE_FAILED": "Session deletion failed because some terminal resources could not be closed. The session has been retained.",
     "MSG_SESSION_CLEARED": "Successfully cleared all history for session {session_id}",
     "ERR_SESSION_NO_PERMISSION": "No permission to operate on this session",
     "ERR_SESSION_GUIDANCE_EXTERNAL_ONLY": "Guidance can only be added to external message platform sessions",

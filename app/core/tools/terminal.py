@@ -15,6 +15,7 @@ from app.core.constants import (
     TERMINAL_WRITE_TOOL_NAME,
 )
 from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
+from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import t
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import (
@@ -25,10 +26,12 @@ from app.core.terminal.schemas import (
     TerminalReadRequest,
     TerminalReadResult,
     TerminalResizeRequest,
+    TerminalSessionSnapshot,
     TerminalStatusRequest,
     TerminalWriteRequest,
     TerminalWriteResult,
 )
+from app.providers.database import AsyncSessionLocal
 
 from .base import BaseExecutor
 from .terminal_watch import TERMINAL_WATCH_TOOL_SCHEMA, ensure_terminal_auto_watch
@@ -60,7 +63,9 @@ TERMINAL_READ_TOOL_SCHEMA = {
             "This does not paginate automatically; continue with next_offset, and next_offset < latest_offset means "
             "output remains unread. eof only means the terminal has ended. Set read_output=false to query the "
             "database status and optional write_request without enqueueing a terminal read, waiting for the Worker, "
-            "or registering an automatic watch."
+            "or registering an automatic watch. Pagination is available only while the terminal is running; after "
+            "the command ends, final output is delivered by this tool or an observation result, and a reclaimed "
+            "terminal cannot be read again."
         ),
         "parameters": {
             "type": "object",
@@ -130,7 +135,7 @@ TERMINAL_CLOSE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": TERMINAL_CLOSE_TOOL_NAME,
-        "description": "Close an interactive terminal session, optionally forcing process termination.",
+        "description": "Close an interactive terminal session, optionally forcing process termination. Reclaim all terminal resources and return the final bounded output.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -155,6 +160,10 @@ SHELL_COMPANION_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in 
 
 
 class _TerminalExecutor(BaseExecutor):
+    def __init__(self, project_root: str, uid: str = "default"):
+        super().__init__(project_root, uid)
+        self._completed_snapshot: TerminalSessionSnapshot | None = None
+
     def _require_runtime_context(self) -> tuple[Any, str, str]:
         tool_call_id = self.dispatch_context.tool_call_id if self.dispatch_context is not None else None
         if self.db is None or not self.session_id or not tool_call_id:
@@ -187,6 +196,7 @@ class _TerminalExecutor(BaseExecutor):
             db,
             command.id,
             self._tool_timeout() if timeout_seconds is None else timeout_seconds,
+            terminal_session_id=command.terminal_session_id,
         )
 
     async def _get_snapshot(self, terminal_session_id: str):
@@ -217,7 +227,38 @@ class _TerminalExecutor(BaseExecutor):
             request,
             self._derive_request_id(TerminalAction.READ),
         )
-        return TerminalReadResult.model_validate(await self._wait_for_command(command))
+        result = await self._wait_for_command(command)
+        snapshot = result.pop("_terminal_snapshot", None)
+        self._completed_snapshot = TerminalSessionSnapshot.model_validate(snapshot) if snapshot is not None else None
+        return TerminalReadResult.model_validate(result)
+
+    async def _wait_for_resource_release(self, terminal_session_id: str, command_id: int) -> None:
+        _, session_id, _ = self._require_runtime_context()
+        timeout_seconds = self._tool_timeout()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            try:
+                async with AsyncSessionLocal() as status_db:
+                    await terminal_session_manager.get_owned_session(
+                        status_db,
+                        terminal_session_id,
+                        self.uid,
+                        session_id,
+                    )
+            except ResourceNotFoundException:
+                return
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    t(
+                        ERR_TERMINAL_COMMAND_TIMEOUT,
+                        command_id=command_id,
+                        timeout=timeout_seconds,
+                    )
+                )
+            await asyncio.sleep(min(0.05, remaining))
 
     async def _build_action_receipt(
         self,
@@ -230,8 +271,13 @@ class _TerminalExecutor(BaseExecutor):
             session_id,
             request,
         )
-        await self._wait_for_command(command)
-        snapshot = await self._get_snapshot(request.terminal_session_id)
+        result = await self._wait_for_command(command)
+        snapshot_data = result.pop("_terminal_snapshot", None)
+        if snapshot_data is not None:
+            snapshot = TerminalSessionSnapshot.model_validate(snapshot_data)
+            self._completed_snapshot = snapshot
+        else:
+            snapshot = await self._get_snapshot(request.terminal_session_id)
         receipt = TerminalActionReceipt(
             terminal_session_id=request.terminal_session_id,
             request_id=request.request_id,
@@ -239,7 +285,22 @@ class _TerminalExecutor(BaseExecutor):
             duplicate=not created,
             session_status=snapshot.status,
         )
-        return self._dump_model(receipt)
+        response = receipt.model_dump(mode="json")
+        if request.action is TerminalAction.CLOSE:
+            await self._wait_for_resource_release(request.terminal_session_id, command.id)
+            response.update(
+                {
+                    "exit_code": result.get("exit_code"),
+                    "failure_reason": result.get("failure_reason"),
+                    "output": result.get("output", ""),
+                    "start_offset": result.get("start_offset"),
+                    "next_offset": result.get("next_offset"),
+                    "latest_offset": result.get("latest_offset"),
+                    "output_truncated": result.get("output_truncated", False),
+                    "resources_released": True,
+                }
+            )
+        return json.dumps(response, ensure_ascii=False)
 
 
 class TerminalReadExecutor(_TerminalExecutor):
@@ -255,7 +316,7 @@ class TerminalReadExecutor(_TerminalExecutor):
     ) -> str:
         status_request = TerminalStatusRequest(terminal_session_id=terminal_session_id, request_id=request_id)
         result = await self._read_once(status_request.terminal_session_id, offset, max_bytes) if read_output else None
-        snapshot = await self._get_snapshot(status_request.terminal_session_id)
+        snapshot = self._completed_snapshot or await self._get_snapshot(status_request.terminal_session_id)
         response = snapshot.model_dump(mode="json")
         if status_request.request_id is not None:
             db, session_id, _ = self._require_runtime_context()
@@ -316,9 +377,14 @@ class TerminalWriteExecutor(_TerminalExecutor):
                 },
                 ensure_ascii=False,
             )
+        snapshot_data = write_result.pop("_terminal_snapshot", None)
+        if snapshot_data is not None:
+            latest_snapshot = TerminalSessionSnapshot.model_validate(snapshot_data)
+            self._completed_snapshot = latest_snapshot
+        else:
+            latest_snapshot = await self._get_snapshot(terminal_session_id)
         bytes_written = write_result["bytes_written"]
         output_offset_before_write = write_result.get("output_offset_before_write")
-        latest_snapshot = await self._get_snapshot(terminal_session_id)
         if not isinstance(output_offset_before_write, int) or isinstance(output_offset_before_write, bool) or output_offset_before_write < 0:
             output_offset_before_write = latest_snapshot.output_buffer.next_offset
         await ensure_terminal_auto_watch(

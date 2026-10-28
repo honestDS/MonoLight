@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import ERR_SESSION_DELETE_FAILED
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.message_platform.outbox import message_platform_outbox_crud
 from app.core.crud.session.event import session_event_crud
@@ -9,6 +10,8 @@ from app.core.crud.session.session import session_crud
 from app.core.crud.session.todo import session_todo_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
+from app.core.crud.terminal.session import terminal_session_crud
+from app.core.exceptions import ServerException
 from app.core.terminal.manager import cleanup_terminal_sessions_by_chat_session
 
 
@@ -22,6 +25,23 @@ async def delete_session_data(
     session = await session_crud.get_by_session_id(db, session_id)
     if session is None or (not is_admin and session.uid != uid):
         return False
+
+    if await terminal_session_crud.lock_chat_session(db, uid=session.uid, session_id=session_id) is None:
+        return False
+
+    for attempt in range(2):
+        try:
+            async with db.begin_nested():
+                await cleanup_terminal_sessions_by_chat_session(
+                    db,
+                    session_id=session_id,
+                    uid=session.uid,
+                )
+            break
+        except Exception as exc:
+            if attempt == 1:
+                await db.rollback()
+                raise ServerException(message=ERR_SESSION_DELETE_FAILED) from exc
 
     await session_reply_work_item_crud.cancel_session(
         db,
@@ -41,11 +61,6 @@ async def delete_session_data(
         session_id=session_id,
         error_reason="会话已删除，待确认审计已取消",
         commit=False,
-    )
-    await cleanup_terminal_sessions_by_chat_session(
-        db,
-        session_id=session_id,
-        uid=session.uid,
     )
     await session_reply_work_item_crud.delete_by_session(
         db,

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +16,8 @@ from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
+from app.core.session_reply_queue import consumer as consumer_module
+from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue.manager_result import SessionReplyResult
 from app.core.utils.dispatcher.external_work import build_external_wait_response
 from app.core.utils.dispatcher.save_message import save_message
@@ -349,6 +352,271 @@ def _assert_background_result_marker(marker: Message, *, task: Any, execution_st
 
 def _messages_of_type(snapshot: dict[str, Any], message_type: MessageType) -> list[Message]:
     return [message for message in snapshot["messages"] if message.type == message_type]
+
+
+@pytest.mark.asyncio
+async def test_consumer_does_not_cancel_reply_during_external_resume_handoff(
+    external_work_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _create_case(external_work_database, suspend=False)
+    completed_content = "completed-during-resume-handoff"
+    await _complete_task(case, "call-1", completed_content)
+
+    queued_snapshot = await _snapshot(case)
+    queued_result = _tool_result(queued_snapshot, case.result_message_ids["call-1"])
+    queued_result.id = case.result_message_ids["call-1"]
+    wait_response = build_external_wait_response(
+        list(case.tool_calls),
+        [queued_result],
+        response_id="external-handoff-response",
+    )
+    assert wait_response is not None
+
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", external_work_database)
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", external_work_database)
+
+    async def execute_foreground(_db, _work, _worker_id):
+        return wait_response
+
+    monkeypatch.setattr(executor_lifecycle_module, "_execute_foreground", execute_foreground)
+
+    resume_started = asyncio.Event()
+    release_resume = asyncio.Event()
+    original_get_session = external_work_module.session_crud.get_by_session_id
+
+    async def wait_after_lock(db, session_id):
+        resume_started.set()
+        await release_resume.wait()
+        return await original_get_session(db, session_id)
+
+    monkeypatch.setattr(external_work_module.session_crud, "get_by_session_id", wait_after_lock)
+
+    consumer = consumer_module.SessionReplyConsumer()
+    consumer_after_cancel_check = asyncio.Event()
+
+    async def runtime_settings(_db):
+        consumer_after_cancel_check.set()
+        consumer._stop_event.set()
+        return SimpleNamespace(session_reply_max_concurrency=0)
+
+    async def skip_recovery():
+        return None
+
+    async def skip_cleanup(_now):
+        return None
+
+    monkeypatch.setattr(consumer_module.system_setting_crud, "get_runtime_settings", runtime_settings)
+    monkeypatch.setattr(consumer, "_recover_expired", skip_recovery)
+    monkeypatch.setattr(consumer, "_cleanup_terminal_items_if_due", skip_cleanup)
+
+    reply_task: asyncio.Task | None = None
+    consumer_task: asyncio.Task | None = None
+    try:
+        reply_task = asyncio.create_task(executor_lifecycle_module.execute_session_reply_work(case.work_id, case.worker_id))
+        await asyncio.wait_for(resume_started.wait(), timeout=2)
+
+        loop = asyncio.get_running_loop()
+        consumer._last_lease_renewal_at = loop.time()
+        consumer._running[case.work_id] = (reply_task, case.worker_id)
+        consumer_task = asyncio.create_task(consumer._run())
+        await asyncio.wait_for(consumer_after_cancel_check.wait(), timeout=2)
+        await asyncio.wait_for(consumer_task, timeout=2)
+
+        release_resume.set()
+        await asyncio.gather(reply_task, return_exceptions=True)
+
+        assert not reply_task.cancelled()
+        snapshot = await _snapshot(case)
+        assert snapshot["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+        assert snapshot["work"].execution_state["external_resume_pending"] is True
+        _assert_queued_tool_result(snapshot, case, "call-1")
+
+        markers = _messages_of_type(snapshot, MessageType.BACKGROUND_TASK_RESULT)
+        assert len(markers) == 1
+        _assert_background_result_marker(
+            markers[0],
+            task=completed_content,
+            execution_status="succeeded",
+        )
+
+        result_manager = SessionReplyResult()
+        async with external_work_database() as db:
+            status = await result_manager.get_work_status(db, case.work_id, uid=case.uid)
+        assert status["status"] == SessionReplyWorkStatus.READY_FOR_LLM.value
+        queried_message = status["session_events"][0]["messages"][0]
+        assert queried_message["id"] == markers[0].id
+        assert json.loads(queried_message["content"])["task"] == completed_content
+
+        async with external_work_database() as db:
+            lock_probe = Message(
+                session_id=case.session_id,
+                uid=case.uid,
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content="lock-probe",
+                profile_id=case.profile_id,
+            )
+            db.add(lock_probe)
+            await db.commit()
+            assert lock_probe.id is not None
+    finally:
+        release_resume.set()
+        if consumer_task is not None and not consumer_task.done():
+            consumer_task.cancel()
+        if reply_task is not None and not reply_task.done():
+            reply_task.cancel()
+        pending_tasks = [task for task in (consumer_task, reply_task) if task is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        consumer._running.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalidation",
+    ["cancelled", "deleted", "taken-over"],
+    ids=["user-stop", "session-delete", "worker-takeover"],
+)
+async def test_consumer_cancels_reply_after_claim_is_invalidated(
+    external_work_database,
+    monkeypatch: pytest.MonkeyPatch,
+    invalidation: str,
+) -> None:
+    case = await _create_case(external_work_database, suspend=False)
+    before = await _snapshot(case)
+    queued_before = _assert_queued_tool_result(before, case, "call-1")
+
+    llm_started = asyncio.Event()
+    release_llm = asyncio.Event()
+
+    async def controlled_foreground(_db, _work, _worker_id):
+        llm_started.set()
+        await release_llm.wait()
+        return {
+            "choices": [
+                {
+                    "message": {"role": MessageRole.ASSISTANT, "content": "must not persist"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "history": [],
+            "files": None,
+        }
+
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", external_work_database)
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", external_work_database)
+    monkeypatch.setattr(executor_lifecycle_module, "_execute_foreground", controlled_foreground)
+
+    reply_finished = asyncio.Event()
+    consumer_checked_claim = asyncio.Event()
+    consumer = consumer_module.SessionReplyConsumer()
+    reply_task: asyncio.Task | None = None
+    consumer_task: asyncio.Task | None = None
+
+    async def runtime_settings(_db):
+        consumer_checked_claim.set()
+        consumer._stop_event.set()
+        return SimpleNamespace(session_reply_max_concurrency=0)
+
+    async def skip_recovery():
+        return None
+
+    async def skip_cleanup(_now):
+        return None
+
+    monkeypatch.setattr(consumer_module.system_setting_crud, "get_runtime_settings", runtime_settings)
+    monkeypatch.setattr(consumer, "_recover_expired", skip_recovery)
+    monkeypatch.setattr(consumer, "_cleanup_terminal_items_if_due", skip_cleanup)
+
+    try:
+        reply_task = asyncio.create_task(executor_lifecycle_module.execute_session_reply_work(case.work_id, case.worker_id))
+        reply_task.add_done_callback(lambda _task: reply_finished.set())
+        await asyncio.wait_for(llm_started.wait(), timeout=2)
+
+        async with external_work_database() as db:
+            if invalidation == "cancelled":
+                assert (
+                    await session_reply_work_item_crud.cancel_session(
+                        db,
+                        session_id=case.session_id,
+                        uid=case.uid,
+                    )
+                    == 1
+                )
+            elif invalidation == "deleted":
+                assert (
+                    await session_reply_work_item_crud.delete_by_session(
+                        db,
+                        session_id=case.session_id,
+                        uid=case.uid,
+                    )
+                    == 1
+                )
+            else:
+                work = await db.get(SessionReplyWorkItem, case.work_id)
+                assert work is not None
+                work.status = SessionReplyWorkStatus.RUNNING
+                work.locked_by = "other-worker"
+                await db.commit()
+
+        loop = asyncio.get_running_loop()
+        consumer._last_lease_renewal_at = loop.time()
+        consumer._running[case.work_id] = (reply_task, case.worker_id)
+        consumer_task = asyncio.create_task(consumer._run())
+        await asyncio.wait_for(consumer_checked_claim.wait(), timeout=2)
+        await asyncio.wait_for(consumer_task, timeout=2)
+        await asyncio.wait_for(reply_finished.wait(), timeout=2)
+        assert reply_task.cancelled()
+
+        async with external_work_database() as db:
+            work = await db.get(SessionReplyWorkItem, case.work_id)
+            task = await db.get(BackgroundTask, case.task_ids["call-1"])
+            queued_row = await db.get(Message, case.result_message_ids["call-1"])
+            messages = list((await db.execute(select(Message).where(Message.session_id == case.session_id, Message.uid == case.uid).order_by(Message.id))).scalars().all())
+            stream_events = list((await db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == case.work_id))).scalars().all())
+            session_events = list(
+                (
+                    await db.execute(
+                        select(SessionEvent).where(
+                            SessionEvent.session_id == case.session_id,
+                            SessionEvent.uid == case.uid,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        if invalidation == "deleted":
+            assert work is None
+        else:
+            assert work is not None
+            assert work.status == (SessionReplyWorkStatus.CANCELLED if invalidation == "cancelled" else SessionReplyWorkStatus.RUNNING)
+            assert work.locked_by == (None if invalidation == "cancelled" else "other-worker")
+
+        assert task is not None
+        assert task.status == BackgroundTaskStatus.PENDING
+        assert task.result is None
+        assert queued_row is not None
+        queued_after = InternalMessage.model_validate_json(queued_row.content or "{}")
+        assert queued_after.model_dump() == queued_before.model_dump()
+        assert not _messages_of_type(
+            {"messages": messages},
+            MessageType.BACKGROUND_TASK_RESULT,
+        )
+        assert stream_events == []
+        assert session_events == []
+    finally:
+        release_llm.set()
+        if consumer_task is not None and not consumer_task.done():
+            consumer_task.cancel()
+        if reply_task is not None and not reply_task.done():
+            reply_task.cancel()
+        pending_tasks = [task for task in (consumer_task, reply_task) if task is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        consumer._running.clear()
 
 
 @pytest.mark.asyncio

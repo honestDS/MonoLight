@@ -1,7 +1,7 @@
 import asyncio
 from typing import Any
 
-from sqlalchemy import and_, or_, update
+from sqlalchemy import String, and_, cast, func, inspect, literal, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -12,6 +12,7 @@ from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.terminal_session import TerminalSession
 from app.providers.database.time import get_database_timestamp
 
 __all__ = [
@@ -274,6 +275,37 @@ class CRUDTerminalWatchReply:
         return replaced
 
     async def list_watch_states(self, db: AsyncSession, *, uid: str, session_id: str, profile_id: int) -> list[dict]:
+        terminal_session_table_exists = await db.run_sync(lambda sync_session: inspect(sync_session.connection()).has_table(TerminalSession.__tablename__))
+        if not terminal_session_table_exists:
+            statement = (
+                select(
+                    BackgroundTask.id,
+                    BackgroundTask.tool_call_id,
+                    BackgroundTask.arguments,
+                    BackgroundTask.status,
+                    BackgroundTask.reply_status,
+                    BackgroundTask.auto_reply,
+                    BackgroundTask.created_at,
+                    BackgroundTask.extra["auto_terminal_watch"].as_boolean().label("auto_terminal_watch"),
+                    BackgroundTask.result["content"]["event"].as_string().label("event"),
+                    literal(None).label("terminal_status"),
+                    literal(None).label("command"),
+                    literal(None).label("working_directory"),
+                    literal(None).label("next_output_offset"),
+                    literal(None).label("request_context"),
+                    literal(None).label("purpose"),
+                )
+                .where(
+                    BackgroundTask.uid == uid,
+                    BackgroundTask.session_id == session_id,
+                    BackgroundTask.profile_id == profile_id,
+                    BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                )
+                .order_by(BackgroundTask.id.asc())
+            )
+            result = await db.execute(statement)
+            return [dict(row) for row in result.mappings().all()]
+
         statement = (
             select(
                 BackgroundTask.id,
@@ -285,6 +317,29 @@ class CRUDTerminalWatchReply:
                 BackgroundTask.created_at,
                 BackgroundTask.extra["auto_terminal_watch"].as_boolean().label("auto_terminal_watch"),
                 BackgroundTask.result["content"]["event"].as_string().label("event"),
+                func.lower(
+                    cast(
+                        func.coalesce(
+                            TerminalSession.status,
+                            BackgroundTask.result["content"]["session_status"].as_string(),
+                        ),
+                        String,
+                    )
+                ).label("terminal_status"),
+                TerminalSession.command.label("command"),
+                TerminalSession.working_directory.label("working_directory"),
+                TerminalSession.next_output_offset.label("next_output_offset"),
+                BackgroundTask.extra["request_context"].label("request_context"),
+                BackgroundTask.extra["purpose"].label("purpose"),
+            )
+            .outerjoin(
+                TerminalSession,
+                and_(
+                    TerminalSession.terminal_session_id == BackgroundTask.arguments["terminal_session_id"].as_string(),
+                    TerminalSession.uid == BackgroundTask.uid,
+                    TerminalSession.session_id == BackgroundTask.session_id,
+                    TerminalSession.profile_id == BackgroundTask.profile_id,
+                ),
             )
             .where(
                 BackgroundTask.uid == uid,

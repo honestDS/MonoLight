@@ -8,7 +8,9 @@ from app.core.constants import (
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
+from app.core.crud.terminal.session import terminal_session_crud
 from app.core.i18n import t
+from app.core.terminal.audit_lifecycle import stop_terminal_sessions
 from app.models.audit import AuditRecordStatus
 
 from .confirmation_events import _broadcast_confirmation_status_update
@@ -56,8 +58,14 @@ async def stop_interactive_reply(
     locale: str | None = None,
 ) -> int:
     cancellation_reason = t(MSG_AUDIT_STATUS_CANCELLED, locale=locale)
+    terminal_sessions = []
     status_updates = []
     try:
+        terminal_sessions = await terminal_session_crud.list_by_chat_session(
+            db,
+            session_id=session_id,
+            uid=uid,
+        )
         count = await session_reply_work_item_crud.cancel_session(
             db,
             uid=uid,
@@ -101,6 +109,31 @@ async def stop_interactive_reply(
         raise
 
     for status_update in status_updates:
+        await _broadcast_confirmation_status_update(db, status_update=status_update)
+
+    terminal_status_updates = []
+    try:
+        terminal_audit_record_ids = await stop_terminal_sessions(
+            db,
+            uid=uid,
+            session_id=session_id,
+            terminal_sessions=terminal_sessions,
+            failure_reason=cancellation_reason,
+        )
+        for audit_record_id in terminal_audit_record_ids:
+            projection = await _sync_confirmation_message_status_projection(
+                db,
+                audit_record_id=audit_record_id,
+                commit=False,
+            )
+            if projection is not None and projection.status_update is not None:
+                terminal_status_updates.append(projection.status_update)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    for status_update in terminal_status_updates:
         await _broadcast_confirmation_status_update(db, status_update=status_update)
     return count
 

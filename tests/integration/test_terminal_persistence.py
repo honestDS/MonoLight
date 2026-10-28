@@ -633,25 +633,9 @@ async def test_terminal_lost_session_completes_unowned_commands_idempotently():
             read_request,
             "lost-read-request",
         )
-        read_result = TerminalReadResult.model_validate(await terminal_session_manager.wait_for_command_result(db, read_command.id, 1))
-
-        close_request = TerminalCloseRequest(
-            terminal_session_id=terminal_session.terminal_session_id,
-            request_id="lost-close-request",
-        )
-        close_command, close_created = await terminal_session_manager.enqueue_control(
-            db,
-            "user-1",
-            "chat-session-1",
-            close_request,
-        )
-        repeated_close_command, repeated_close_created = await terminal_session_manager.enqueue_control(
-            db,
-            "user-1",
-            "chat-session-1",
-            close_request,
-        )
-        close_result = await terminal_session_manager.wait_for_command_result(db, close_command.id, 1)
+        read_result_payload = await terminal_session_manager.wait_for_command_result(db, read_command.id, 1)
+        read_snapshot = read_result_payload.pop("_terminal_snapshot")
+        read_result = TerminalReadResult.model_validate(read_result_payload)
 
         write_request = TerminalWriteRequest(
             terminal_session_id=terminal_session.terminal_session_id,
@@ -673,12 +657,51 @@ async def test_terminal_lost_session_completes_unowned_commands_idempotently():
         with pytest.raises(RuntimeError) as command_error:
             await terminal_session_manager.wait_for_command_result(db, write_command.id, 1)
 
+        close_request = TerminalCloseRequest(
+            terminal_session_id=terminal_session.terminal_session_id,
+            request_id="lost-close-request",
+        )
+        close_command, close_created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            close_request,
+        )
+        close_command_id = close_command.id
+        assert close_command_id is not None
+        close_result = await terminal_session_manager.wait_for_command_result(
+            db,
+            close_command_id,
+            1,
+            terminal_session_id=terminal_session.terminal_session_id,
+        )
+        close_snapshot = close_result.pop("_terminal_snapshot")
         persisted_session = await terminal_session_crud.get(db, terminal_session.terminal_session_id)
         commands = await terminal_control_command_crud.list_by_session(db, terminal_session.terminal_session_id)
+
+        with pytest.raises(ResourceNotFoundException):
+            await terminal_session_manager.enqueue_read(
+                db,
+                "user-1",
+                "chat-session-1",
+                read_request,
+                "lost-read-after-close-request",
+            )
+        with pytest.raises(ResourceNotFoundException):
+            await terminal_session_manager.enqueue_control(
+                db,
+                "user-1",
+                "chat-session-1",
+                TerminalCloseRequest(
+                    terminal_session_id=terminal_session.terminal_session_id,
+                    request_id="lost-close-after-close-request",
+                ),
+            )
 
     assert read_created is True
     assert repeated_read_created is False
     assert repeated_read_command.id == read_command.id
+    assert read_snapshot["status"] == TerminalSessionStatus.LOST.value
     assert read_result.read_status is TerminalOutputReadStatus.EXPIRED
     assert read_result.requested_offset == 0
     assert read_result.next_offset == 4
@@ -686,21 +709,19 @@ async def test_terminal_lost_session_completes_unowned_commands_idempotently():
     assert read_result.output == ""
     assert read_result.eof is True
     assert close_created is True
-    assert repeated_close_created is False
-    assert repeated_close_command.id == close_command.id
-    assert close_result == {"status": TerminalSessionStatus.LOST.value}
+    assert close_result["status"] == TerminalSessionStatus.LOST.value
+    assert close_result["output"] == ""
+    assert close_result["start_offset"] == 4
+    assert close_result["next_offset"] == 4
+    assert close_result["latest_offset"] == 4
+    assert close_result["output_truncated"] is True
+    assert close_snapshot["status"] == TerminalSessionStatus.LOST.value
     assert write_created is True
     assert repeated_write_created is False
     assert repeated_write_command.id == write_command.id
     assert str(command_error.value) == t(ERR_TERMINAL_COMMAND_FAILED, error=t(ERR_TERMINAL_PTY_CLOSED))
-    assert persisted_session is not None
-    assert persisted_session.status is TerminalSessionStatus.LOST
-    assert persisted_session.failure_reason == failure_reason
-    assert {command.action: command.status for command in commands} == {
-        TerminalAction.READ: TerminalControlCommandStatus.SUCCEEDED,
-        TerminalAction.CLOSE: TerminalControlCommandStatus.SUCCEEDED,
-        TerminalAction.WRITE: TerminalControlCommandStatus.FAILED,
-    }
+    assert persisted_session is None
+    assert commands == []
 
 
 @pytest.mark.asyncio

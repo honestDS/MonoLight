@@ -330,6 +330,9 @@ async def test_watch_terminal_read_on_timeout_isolated_from_default(
         async def commit(self):
             return None
 
+    async def get_background_task(*args, **kwargs):
+        return None
+
     async def get_snapshot(*args, **kwargs):
         return snapshot
 
@@ -352,6 +355,7 @@ async def test_watch_terminal_read_on_timeout_isolated_from_default(
         )
 
     monkeypatch.setattr(terminal_watcher_module, "AsyncSessionLocal", FakeAsyncSessionLocal)
+    monkeypatch.setattr(terminal_watcher_module.background_task_crud, "get", get_background_task)
     monkeypatch.setattr(terminal_watcher_module.terminal_session_manager, "get_snapshot", get_snapshot)
     monkeypatch.setattr(terminal_watcher_module, "_read", read)
     monkeypatch.setattr(terminal_watcher_module, "get_local_time", lambda: fixed_now)
@@ -526,37 +530,64 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
             eof=False,
         )
         command_results[command_id] = read_result.model_dump(mode="json")
+        command_results[command_id]["_terminal_snapshot"] = snapshot.model_dump(mode="json")
         command_kinds[command_id] = "read"
-        return SimpleNamespace(id=command_id, kind="read"), len(read_requests) == 1
+        return SimpleNamespace(id=command_id, kind="read", terminal_session_id=TERMINAL_SESSION_ID), len(read_requests) == 1
 
     async def enqueue_control(*args, **kwargs):
         request = args[3]
         control_requests.append(request)
         command_id = 200 + len(control_requests)
         if request.action is TerminalAction.WRITE:
-            command_results[command_id] = write_result_payload
+            command_results[command_id] = {
+                **write_result_payload,
+                "_terminal_snapshot": snapshot.model_dump(mode="json"),
+            }
             command_kinds[command_id] = "write"
             created = sum(item.action is TerminalAction.WRITE for item in control_requests) == 1
         elif request.action is TerminalAction.RESIZE:
-            command_results[command_id] = {"columns": request.columns, "rows": request.rows}
+            command_results[command_id] = {
+                "columns": request.columns,
+                "rows": request.rows,
+                "_terminal_snapshot": snapshot.model_dump(mode="json"),
+            }
             command_kinds[command_id] = "resize"
             created = False
         else:
-            command_results[command_id] = {"status": "exited"}
+            close_output = "final output"
+            closed_snapshot = _snapshot(
+                next_offset=len(close_output.encode("ascii")),
+                status=TerminalSessionStatus.EXITED,
+                exit_code=0,
+            )
+            command_results[command_id] = {
+                "_terminal_snapshot": closed_snapshot.model_dump(mode="json"),
+                "exit_code": 0,
+                "failure_reason": None,
+                "output": close_output,
+                "start_offset": 0,
+                "next_offset": len(close_output.encode("ascii")),
+                "latest_offset": len(close_output.encode("ascii")),
+                "output_truncated": False,
+            }
             command_kinds[command_id] = "close"
             created = False
-        return SimpleNamespace(id=command_id, kind=request.action), created
+        return SimpleNamespace(id=command_id, kind=request.action, terminal_session_id=TERMINAL_SESSION_ID), created
 
-    async def wait_for_command_result(*args, **kwargs):
+    async def wait_for_command_result(*args, terminal_session_id=None, **kwargs):
         command_id = args[1]
         timeout_seconds = args[2]
         wait_timeouts.append((command_kinds[command_id], timeout_seconds))
-        return command_results[command_id]
+        return dict(command_results[command_id])
+
+    async def get_owned_session(*args, **kwargs):
+        raise terminal_module.ResourceNotFoundException()
 
     monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_read", enqueue_read)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", enqueue_control)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "wait_for_command_result", wait_for_command_result)
+    monkeypatch.setattr(terminal_module.terminal_session_manager, "get_owned_session", get_owned_session)
 
     read_executor = _executor(TerminalReadExecutor)
     status_result = json.loads(await read_executor.execute(TERMINAL_SESSION_ID, read_output=False))
@@ -566,7 +597,9 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     standalone_read_payload = json.loads(await read_executor.execute(TERMINAL_SESSION_ID, offset=0, max_bytes=16_384))
     standalone_read_result = TerminalReadResult.model_validate({field: standalone_read_payload[field] for field in TerminalReadResult.model_fields})
     assert standalone_read_result.requested_offset == 0
-    assert standalone_read_payload == {**snapshot.model_dump(mode="json"), **command_results[101]}
+    expected_read_result = {field: value for field, value in command_results[101].items() if field != "_terminal_snapshot"}
+    assert standalone_read_payload == {**snapshot.model_dump(mode="json"), **expected_read_result}
+    assert "_terminal_snapshot" not in standalone_read_payload
 
     write_executor = _executor(TerminalWriteExecutor, tool_timeout=5.0)
     write_payload = json.loads(await write_executor.execute(terminal_session_id=TERMINAL_SESSION_ID, data="input"))
@@ -607,13 +640,27 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
         executor = _executor(executor_class)
         request_ids[action] = executor._derive_request_id(action)
         assert len(request_ids[action]) == 64
-        receipt = TerminalActionReceipt.model_validate(json.loads(await executor.execute(**arguments)))
+        payload = json.loads(await executor.execute(**arguments))
+        receipt = TerminalActionReceipt.model_validate({field: payload[field] for field in TerminalActionReceipt.model_fields})
         assert receipt.action is action
         assert receipt.duplicate is True
         assert receipt.request_id == request_ids[action]
 
-        repeated_receipt = TerminalActionReceipt.model_validate(json.loads(await executor.execute(**arguments)))
-        assert repeated_receipt.model_dump(mode="json") == receipt.model_dump(mode="json")
+        if action is TerminalAction.CLOSE:
+            assert payload["session_status"] == TerminalSessionStatus.EXITED.value
+            assert payload["exit_code"] == 0
+            assert payload["failure_reason"] is None
+            assert payload["output"] == "final output"
+            assert payload["start_offset"] == 0
+            assert payload["next_offset"] == len("final output")
+            assert payload["latest_offset"] == len("final output")
+            assert payload["output_truncated"] is False
+            assert payload["resources_released"] is True
+            assert "_terminal_snapshot" not in payload
+        else:
+            repeated_payload = json.loads(await executor.execute(**arguments))
+            repeated_receipt = TerminalActionReceipt.model_validate({field: repeated_payload[field] for field in TerminalActionReceipt.model_fields})
+            assert repeated_receipt.model_dump(mode="json") == receipt.model_dump(mode="json")
 
     assert len(set(request_ids.values())) == len(request_ids)
     all_action_request_ids = {action: _executor(TerminalReadExecutor)._derive_request_id(action) for action in TerminalAction}
@@ -633,7 +680,6 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
         TerminalAction.WRITE,
         TerminalAction.RESIZE,
         TerminalAction.RESIZE,
-        TerminalAction.CLOSE,
         TerminalAction.CLOSE,
     ]
 
@@ -726,7 +772,7 @@ async def test_terminal_read_and_write_reject_invalid_request_ids_without_enqueu
 
     async def enqueue_control(*args, **kwargs):
         control_requests.append(args[3])
-        return SimpleNamespace(id=201), True
+        return SimpleNamespace(id=201, terminal_session_id=TERMINAL_SESSION_ID), True
 
     monkeypatch.setattr(terminal_module.terminal_session_manager, "get_snapshot", get_snapshot)
     monkeypatch.setattr(terminal_module.terminal_session_manager, "enqueue_control", enqueue_control)
@@ -772,7 +818,7 @@ async def test_terminal_write_waits_for_confirmation_without_waiting_for_output(
     async def enqueue_control(*args, **kwargs):
         request = args[3]
         control_requests.append(request)
-        return SimpleNamespace(id=201), True
+        return SimpleNamespace(id=201, terminal_session_id=TERMINAL_SESSION_ID), True
 
     async def enqueue_read(*args, **kwargs):
         read_requests.append(args[3])
@@ -845,7 +891,7 @@ async def test_terminal_write_confirmation_failure_or_timeout_is_not_retried(
     async def enqueue_control(*args, **kwargs):
         request = args[3]
         control_requests.append(request)
-        return SimpleNamespace(id=201, kind=request.action), True
+        return SimpleNamespace(id=201, kind=request.action, terminal_session_id=TERMINAL_SESSION_ID), True
 
     async def enqueue_read(*args, **kwargs):
         read_requests.append(args[3])

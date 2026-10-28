@@ -4,18 +4,25 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import TERMINAL_WATCH_TOOL_NAME
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.terminal_watch import get_terminal_watch_deliveries, terminal_watch_reply_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
 from app.core.terminal.schemas import TERMINAL_SESSION_FINAL_STATUSES
 from app.core.utils.background_task_result import build_background_task_success_result
+from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem
+from app.models.terminal_session import TerminalSession
 
 __all__ = [
     "complete_terminal_watch_round",
     "create_terminal_auto_watch",
     "create_terminal_watch_subscription",
+    "persist_terminal_completion",
 ]
 
 
@@ -24,6 +31,70 @@ _CONTINUABLE_EVENTS = frozenset({"timeout", "output", "output_contains", "quiet_
 
 def _is_non_negative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _serialize_terminal_request_message(message: InternalMessage) -> dict[str, Any]:
+    serialized = message.model_dump(mode="json", exclude_none=True)
+    return {key: serialized[key] for key in ("id", "role", "content", "attachments") if key in serialized}
+
+
+async def _build_terminal_watch_background(
+    db: AsyncSession,
+    *,
+    terminal_session: TerminalSession,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    origin_work_id: int | None,
+    origin_work_identity: str | None,
+) -> tuple[list[dict[str, Any]], Any]:
+    request_context: list[dict[str, Any]] = []
+    if isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0 and isinstance(origin_work_identity, str) and origin_work_identity.strip():
+        origin_work = await session_reply_work_item_crud.get(db, origin_work_id)
+        if origin_work is not None and origin_work.uid == uid and origin_work.session_id == session_id and origin_work.profile_id == profile_id and origin_work.dedupe_key == origin_work_identity:
+            for message_id in origin_work.input_message_ids or []:
+                if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
+                    continue
+                message = await message_crud.get(db, message_id)
+                if message is None or message.uid != uid or message.session_id != session_id or message.profile_id != profile_id or message.role != MessageRole.USER or message.type != MessageType.TEXT:
+                    continue
+                parsed_messages = parse_db_messages_to_internal([message])
+                if parsed_messages and parsed_messages[0].role == MessageRole.USER:
+                    request_context.append(_serialize_terminal_request_message(parsed_messages[0]))
+
+    history = await message_crud.get_history_backward_by_id(
+        db,
+        session_id=session_id,
+        uid=uid,
+        limit=200,
+    )
+    parsed_history = parse_db_messages_to_internal(history)
+    tool_call_message = next(
+        (message for message in parsed_history if message.role == MessageRole.ASSISTANT and message.tool_calls and any(tool_call.id == terminal_session.original_tool_call_id for tool_call in message.tool_calls)),
+        None,
+    )
+    purpose = tool_call_message.content if tool_call_message is not None else None
+    if not request_context and tool_call_message is not None and isinstance(tool_call_message.id, int) and not isinstance(tool_call_message.id, bool):
+        preceding_user = max(
+            (
+                message
+                for message in history
+                if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id < tool_call_message.id and message.uid == uid and message.session_id == session_id and message.profile_id == profile_id and message.role == MessageRole.USER and message.type == MessageType.TEXT
+            ),
+            key=lambda message: message.id,
+            default=None,
+        )
+        if preceding_user is not None:
+            parsed_messages = parse_db_messages_to_internal([preceding_user])
+            if parsed_messages and parsed_messages[0].role == MessageRole.USER:
+                request_context.append(_serialize_terminal_request_message(parsed_messages[0]))
+    return request_context, purpose
+
+
+def _inherit_terminal_watch_background(extra: Any) -> tuple[list[dict[str, Any]], Any]:
+    source = extra if isinstance(extra, dict) else {}
+    request_context = source.get("request_context")
+    return (list(request_context) if isinstance(request_context, list) else [], source.get("purpose"))
 
 
 async def create_terminal_auto_watch(
@@ -154,6 +225,20 @@ async def create_terminal_auto_watch(
         "auto_terminal_watch": True,
         "terminal_session_id": terminal_session_id,
     }
+    if previous_task is not None:
+        request_context, purpose = _inherit_terminal_watch_background(previous_extra)
+    else:
+        request_context, purpose = await _build_terminal_watch_background(
+            db,
+            terminal_session=terminal_session,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            origin_work_id=origin_work_id,
+            origin_work_identity=origin_work_identity,
+        )
+    extra["request_context"] = request_context
+    extra["purpose"] = purpose
     if previous_content is not None and isinstance(previous_content.get("watch_states"), dict):
         extra["watch_states"] = previous_content["watch_states"]
     if isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0:
@@ -507,6 +592,126 @@ async def _complete_terminal_watch_subscriptions(
     return completed
 
 
+async def persist_terminal_completion(
+    db: AsyncSession,
+    *,
+    terminal_session: TerminalSession,
+    content: dict[str, Any],
+    command_results: dict[str, Any],
+) -> BackgroundTask | None:
+    terminal_session_id = terminal_session.terminal_session_id
+    active_task = await background_task_crud.get_active_terminal_watch(
+        db,
+        terminal_session.uid,
+        terminal_session.session_id,
+        terminal_session_id,
+        automatic_only=True,
+    )
+    if active_task is None:
+        final_task = await background_task_crud.get_latest_terminal_watch_final_result(
+            db,
+            uid=terminal_session.uid,
+            session_id=terminal_session.session_id,
+            profile_id=terminal_session.profile_id,
+            terminal_session_id=terminal_session_id,
+        )
+        if final_task is not None:
+            final_extra = dict(final_task.extra) if isinstance(final_task.extra, dict) else {}
+            terminal_command_results = final_extra.get("terminal_command_results")
+            merged_command_results = dict(terminal_command_results) if isinstance(terminal_command_results, dict) else {}
+            merged_command_results.update({str(command_id): value for command_id, value in command_results.items()})
+            final_extra["terminal_command_results"] = merged_command_results
+            final_task.extra = final_extra
+            db.add(final_task)
+            await db.flush()
+            return final_task
+
+        history = await background_task_crud.list_terminal_watches(
+            db,
+            uid=terminal_session.uid,
+            session_id=terminal_session.session_id,
+            terminal_session_id=terminal_session_id,
+        )
+        has_cancelled_watch = any(task.tool_name == TERMINAL_WATCH_TOOL_NAME and task.status == BackgroundTaskStatus.CANCELLED and isinstance(task.extra, dict) and task.extra.get("auto_terminal_watch") is True for task in history)
+        inherited_request_context, inherited_purpose = _inherit_terminal_watch_background(history[-1].extra if history else None)
+
+        active_task = await background_task_crud.create_task(
+            db,
+            uid=terminal_session.uid,
+            session_id=terminal_session.session_id,
+            profile_id=terminal_session.profile_id,
+            tool_call_id=f"terminal-final:{terminal_session_id}",
+            tool_name=TERMINAL_WATCH_TOOL_NAME,
+            arguments={
+                "terminal_session_id": terminal_session_id,
+                "after_offset": content["after_offset"],
+                "condition": "process_exit",
+            },
+            auto_reply=not has_cancelled_watch,
+            extra={
+                "source": "terminal_auto_watch",
+                "auto_terminal_watch": True,
+                "terminal_session_id": terminal_session_id,
+                "request_context": inherited_request_context,
+                "purpose": inherited_purpose,
+            },
+            commit=False,
+        )
+
+    result = build_background_task_success_result(active_task.tool_name, content)
+    active_task.status = BackgroundTaskStatus.SUCCEEDED
+    active_task.result = result
+    active_task.error = None
+    active_task.finished_at = get_local_time()
+    active_task.locked_by = None
+    active_task.lock_until = None
+    active_task.reply_status = BackgroundTaskReplyStatus.PENDING if active_task.auto_reply else BackgroundTaskReplyStatus.NONE
+    active_task.reply_locked_by = None
+    active_task.reply_lock_until = None
+    task_extra = dict(active_task.extra) if isinstance(active_task.extra, dict) else {}
+    task_extra["terminal_command_results"] = {str(command_id): value for command_id, value in command_results.items()}
+    active_task.extra = task_extra
+    db.add(active_task)
+    await db.flush()
+
+    subscriptions = await background_task_crud.list_terminal_watch_subscriptions(
+        db,
+        uid=terminal_session.uid,
+        session_id=terminal_session.session_id,
+        profile_id=terminal_session.profile_id,
+        terminal_session_id=terminal_session_id,
+    )
+    completed = await _complete_terminal_watch_subscriptions(
+        db,
+        subscriptions=subscriptions,
+        content=content,
+    )
+    completed_ids = [subscription.id for subscription in completed if subscription.id is not None]
+    if completed_ids:
+        completed_content = {**content, "completed_watch_task_ids": completed_ids}
+        active_task.result = {**result, "content": completed_content}
+
+    waiting_work = await terminal_watch_reply_crud.list_terminal_watch_waiting_work(
+        db,
+        uid=terminal_session.uid,
+        session_id=terminal_session.session_id,
+        profile_id=terminal_session.profile_id,
+    )
+    deliveries = _build_terminal_watch_deliveries(
+        active_task,
+        subscriptions,
+        waiting_work,
+        terminal_session_id=terminal_session_id,
+    )
+    if deliveries:
+        task_extra["terminal_watch_deliveries"] = deliveries
+    active_task.extra = task_extra
+    db.add(active_task)
+    await db.flush()
+    await terminal_watch_reply_crud.supersede_pending_timeouts(db, active_task)
+    return active_task
+
+
 async def complete_terminal_watch_round(
     db: AsyncSession,
     *,
@@ -514,6 +719,13 @@ async def complete_terminal_watch_round(
     worker_id: str,
     content: dict[str, Any],
 ) -> bool:
+    await db.refresh(task)
+    persisted_result = task.result if isinstance(task.result, dict) else {}
+    persisted_content = persisted_result.get("content") if isinstance(persisted_result, dict) else None
+    if task.status == BackgroundTaskStatus.SUCCEEDED and isinstance(persisted_content, dict) and persisted_content.get("event") in {"process_exit", "terminal_error"} and persisted_content.get("eof") is True:
+        await db.commit()
+        return True
+
     arguments = task.arguments if isinstance(task.arguments, dict) else {}
     terminal_session_id = arguments.get("terminal_session_id")
     if not await background_task_crud.lock_terminal_watch(
