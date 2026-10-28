@@ -1,14 +1,19 @@
+import asyncio
 import json
 import time
 from types import SimpleNamespace
 
 import pytest
+from sqlmodel import select
 
+import app.core.audit.confirmation_events as confirmation_events_module
 import app.core.terminal.audit_lifecycle as terminal_audit_lifecycle_module
 import app.core.terminal.session_runtime_commands as terminal_runtime_commands_module
 import app.core.terminal.session_runtime_core as terminal_runtime_core_module
 import app.core.terminal.session_runtime_state as terminal_runtime_state_module
 import app.core.terminal.worker_coordinator as terminal_worker_module
+from app.core.audit.confirmation_lifecycle import stop_interactive_reply
+from app.core.audit.storage import write_audit_json
 from app.core.crud.audit.audit import audit_crud
 from app.core.exceptions import ServerException
 from app.core.terminal.manager import cleanup_terminal_sessions_by_chat_session
@@ -21,7 +26,10 @@ from app.models.audit import (
     AuditRecordStatus,
     AuditToolConclusion,
     AuditToolDetail,
+    AuditToolResultVersion,
 )
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from app.models.session import ChatSession
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 
 
@@ -532,3 +540,237 @@ async def test_runtime_snapshot_finalization_is_idempotent(terminal_audit_databa
     assert stored_terminal is not None and stored_terminal.status is TerminalSessionStatus.EXITED
     assert stored_execution is not None and stored_execution.status is AuditExecutionStatus.SUCCEEDED
     assert stored_record is not None and stored_record.status is AuditRecordStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_lifecycle", ["running", "exited"], ids=["running", "exited"])
+async def test_stop_interactive_reply_deletes_terminal_index_and_preserves_audit_history(
+    terminal_audit_database,
+    tmp_path,
+    monkeypatch,
+    terminal_lifecycle,
+):
+    notifications = []
+
+    async def cleanup_process_identity(_identity):
+        return SimpleNamespace(errors=())
+
+    async def record_session_event(uid, session_id, event):
+        notifications.append((uid, session_id, event))
+
+    monkeypatch.setattr(terminal_audit_lifecycle_module, "cleanup_terminal_process_identity", cleanup_process_identity)
+    monkeypatch.setattr(confirmation_events_module, "send_session_event", record_session_event)
+    _patch_terminal_session_factory(monkeypatch, terminal_audit_database)
+
+    audit_record_id, runtimes = await _seed_audit_execution(terminal_audit_database, tmp_path)
+    execution_id, terminal_session = runtimes[0]
+    audit_root = tmp_path / "audit-root"
+    audit_payload = {
+        "audit_record_id": audit_record_id,
+        "summary": "historical audit context",
+        "tool_call_id": "original-call-0",
+    }
+    audit_file_path = await write_audit_json(
+        uid="user-1",
+        audit_record_id=audit_record_id,
+        payload=audit_payload,
+        audit_root=audit_root,
+    )
+
+    source_message_content = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[
+            InternalToolCall(
+                id="original-call-0",
+                name="execute_shell",
+                arguments={"command": "python -i"},
+            )
+        ],
+    ).model_dump_json(exclude_none=True)
+    tool_result_content = InternalMessage(
+        role=MessageRole.TOOL,
+        content=json.dumps(
+            {"status": "succeeded", "summary": "historical tool result"},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        tool_call_id="original-call-0",
+        tool_execution_status="succeeded",
+    ).model_dump_json(exclude_none=True)
+    confirmation_content = json.dumps(
+        {
+            "audit_record_id": audit_record_id,
+            "status": AuditRecordStatus.EXECUTING.value,
+            "summary": "historical audit summary",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    async with terminal_audit_database() as db:
+        db.add(ChatSession(session_id="chat-session-1", uid="user-1", profile_id=1))
+        source_message = Message(
+            id=1,
+            session_id="chat-session-1",
+            uid="user-1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content=source_message_content,
+            is_processed=True,
+        )
+        tool_result_message = Message(
+            session_id="chat-session-1",
+            uid="user-1",
+            profile_id=1,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=tool_result_content,
+            audit_record_id=audit_record_id,
+            audit_tool_call_id="original-call-0",
+            is_processed=True,
+        )
+        confirmation_message = Message(
+            session_id="chat-session-1",
+            uid="user-1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.AUDIT_CONFIRMATION,
+            content=confirmation_content,
+            is_processed=True,
+        )
+        db.add_all([source_message, tool_result_message, confirmation_message])
+        await db.flush()
+        assert source_message.id is not None
+        assert tool_result_message.id is not None
+        assert confirmation_message.id is not None
+        source_message_id = source_message.id
+        tool_result_message_id = tool_result_message.id
+        confirmation_message_id = confirmation_message.id
+        db.add(
+            AuditToolResultVersion(
+                uid="user-1",
+                session_id="chat-session-1",
+                audit_record_id=audit_record_id,
+                source_assistant_message_id=source_message_id,
+                original_tool_call_id="original-call-0",
+                message_id=tool_result_message_id,
+                version_no=0,
+                content=tool_result_message.content or "",
+            )
+        )
+        db.add(
+            TerminalControlCommand(
+                terminal_session_id=terminal_session.terminal_session_id,
+                request_id="stop-audit-history-request",
+                action="close",
+                payload={"force": True},
+                payload_hash="d" * 64,
+                status=TerminalControlCommandStatus.PENDING,
+            )
+        )
+        audit_record = await db.get(AuditRecord, audit_record_id)
+        assert audit_record is not None
+        audit_record.context_file_path = str(audit_file_path)
+        await db.commit()
+
+    if terminal_lifecycle == "exited":
+        await _TerminalSessionRuntime(terminal_session, WORKER_ID)._update_runtime_snapshot(
+            TerminalSessionStatus.EXITED,
+            output_buffer=_output_buffer(),
+            exit_code=0,
+        )
+
+    async def read_audit_state():
+        async with terminal_audit_database() as db:
+            stored_terminal = await db.get(TerminalSession, terminal_session.terminal_session_id)
+            stored_execution = await db.get(AuditExecutionRecord, execution_id)
+            stored_record = await db.get(AuditRecord, audit_record_id)
+            assert stored_execution is not None
+            assert stored_record is not None
+            stored_detail = await db.get(AuditToolDetail, stored_execution.audit_tool_detail_id)
+            stored_source_message = await db.get(Message, source_message_id)
+            stored_tool_result = await db.get(Message, tool_result_message_id)
+            stored_confirmation = await db.get(Message, confirmation_message_id)
+            version_result = await db.execute(
+                select(AuditToolResultVersion).where(
+                    AuditToolResultVersion.audit_record_id == audit_record_id,
+                    AuditToolResultVersion.original_tool_call_id == "original-call-0",
+                )
+            )
+            stored_version = version_result.scalar_one()
+            command_result = await db.execute(
+                select(TerminalControlCommand).where(
+                    TerminalControlCommand.terminal_session_id == terminal_session.terminal_session_id,
+                )
+            )
+            stored_command = command_result.scalars().first()
+            return {
+                "terminal": stored_terminal.model_dump() if stored_terminal is not None else None,
+                "command": stored_command.model_dump() if stored_command is not None else None,
+                "record": stored_record.model_dump(),
+                "execution": stored_execution.model_dump(),
+                "detail": stored_detail.model_dump() if stored_detail is not None else None,
+                "version": stored_version.model_dump(),
+                "source_message": dict(stored_source_message) if stored_source_message is not None else None,
+                "tool_result": dict(stored_tool_result) if stored_tool_result is not None else None,
+                "confirmation": dict(stored_confirmation) if stored_confirmation is not None else None,
+            }
+
+    before = await read_audit_state()
+    audit_file_before = await asyncio.to_thread(audit_file_path.read_text, encoding="utf-8")
+    assert json.loads(audit_file_before) == audit_payload
+    assert before["terminal"] is not None
+    assert before["command"] is not None
+    assert before["record"]["context_file_path"] == str(audit_file_path)
+    assert before["detail"] is not None
+    assert before["version"] is not None
+    assert before["tool_result"] is not None
+    assert before["confirmation"] is not None
+
+    async with terminal_audit_database() as db:
+        assert await stop_interactive_reply(db, uid="user-1", session_id="chat-session-1", locale="en") == 0
+    after = await read_audit_state()
+    audit_file_after = await asyncio.to_thread(audit_file_path.read_text, encoding="utf-8")
+
+    async with terminal_audit_database() as db:
+        assert await stop_interactive_reply(db, uid="user-1", session_id="chat-session-1", locale="en") == 0
+    repeated = await read_audit_state()
+    audit_file_repeated = await asyncio.to_thread(audit_file_path.read_text, encoding="utf-8")
+
+    expected_execution_status = AuditExecutionStatus.EXECUTION_UNKNOWN if terminal_lifecycle == "running" else AuditExecutionStatus.SUCCEEDED
+    assert after["terminal"] is None
+    assert after["command"] is None
+    assert repeated["terminal"] is None
+    assert repeated["command"] is None
+    assert after["execution"]["status"] == expected_execution_status
+    assert after["detail"] is not None
+    assert after["version"] is not None
+    assert after["tool_result"] is not None
+    assert after["confirmation"] is not None
+    assert after["record"]["status"] == (AuditRecordStatus.EXECUTION_UNKNOWN if terminal_lifecycle == "running" else AuditRecordStatus.SUCCEEDED)
+    assert json.loads(after["confirmation"]["content"])["audit_record_id"] == audit_record_id
+    assert json.loads(after["confirmation"]["content"])["status"] == after["record"]["status"].value
+    assert json.loads(after["confirmation"]["content"])["summary"] == "historical audit summary"
+    assert after["record"]["context_file_path"] == before["record"]["context_file_path"] == str(audit_file_path)
+    assert after["detail"] == before["detail"]
+    assert after["version"] == before["version"]
+    assert after["source_message"] == before["source_message"]
+    assert after["tool_result"] == before["tool_result"]
+    if terminal_lifecycle == "running":
+        assert after["execution"]["result_summary"] is not None
+        assert after["execution"]["error"] == after["execution"]["result_summary"]
+    else:
+        assert after["execution"]["result_summary"] == before["execution"]["result_summary"]
+        assert after["execution"]["finished_at"] == before["execution"]["finished_at"]
+        assert after["record"]["updated_at"] == before["record"]["updated_at"]
+        assert after["record"]["completed_at"] == before["record"]["completed_at"]
+    assert repeated == after
+    assert audit_file_after == audit_file_before == audit_file_repeated
+    assert json.loads(audit_file_after) == audit_payload
+
+    status_events = [event for uid, session_id, event in notifications if uid == "user-1" and session_id == "chat-session-1" and event.get("type") == "audit_confirmation_status" and event.get("audit_record_id") == audit_record_id]
+    assert status_events
+    assert status_events[-1]["status"] == after["record"]["status"].value

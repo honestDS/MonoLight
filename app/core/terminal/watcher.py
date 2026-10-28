@@ -13,7 +13,7 @@ from app.core.constants import (
     TERMINAL_WATCH_POLL_INTERVAL_SECONDS,
 )
 from app.core.crud.task.background import background_task_crud
-from app.core.exceptions import ForbiddenException, ParameterException
+from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
 from app.core.i18n import t
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import (
@@ -27,6 +27,7 @@ from app.core.terminal.schemas import (
 )
 from app.core.terminal.watch_schema import TerminalWatchRequest
 from app.core.utils.time import get_local_time
+from app.models.background_task import BackgroundTaskStatus
 from app.providers.database import AsyncSessionLocal
 
 __all__ = ["watch_terminal"]
@@ -83,7 +84,9 @@ async def _read(
                 db,
                 command.id,
                 timeout_seconds,
+                terminal_session_id=terminal_session_id,
             )
+            result.pop("_terminal_snapshot", None)
             return TerminalReadResult.model_validate(result)
         finally:
             await db.commit()
@@ -130,6 +133,16 @@ def _serialize_state(state: _WatchState) -> dict[str, Any]:
         "output_truncated": state.output_truncated,
         "last_seen_offset": state.last_seen_offset,
     }
+
+
+def _completed_task_content(task: Any, *, uid: str, session_id: str) -> dict[str, Any] | None:
+    if task is None or task.uid != uid or task.session_id != session_id or task.status != BackgroundTaskStatus.SUCCEEDED:
+        return None
+    task_result = task.result if isinstance(task.result, dict) else None
+    content = task_result.get("content") if task_result is not None else None
+    if not isinstance(content, dict) or content.get("event") not in ("process_exit", "terminal_error") or content.get("eof") is not True:
+        return None
+    return dict(content)
 
 
 def _observe_snapshot(state: _WatchState, snapshot: TerminalSessionSnapshot) -> bool:
@@ -321,12 +334,25 @@ async def watch_terminal(
 
     while True:
         async with AsyncSessionLocal() as db:
-            snapshot: TerminalSessionSnapshot = await terminal_session_manager.get_snapshot(
-                db,
-                request.terminal_session_id,
-                uid,
-                session_id,
-            )
+            task = await background_task_crud.get(db, task_id)
+            completed_content = _completed_task_content(task, uid=uid, session_id=session_id)
+            if completed_content is not None:
+                await db.commit()
+                return completed_content
+            try:
+                snapshot: TerminalSessionSnapshot = await terminal_session_manager.get_snapshot(
+                    db,
+                    request.terminal_session_id,
+                    uid,
+                    session_id,
+                )
+            except ResourceNotFoundException:
+                task = await background_task_crud.get(db, task_id)
+                completed_content = _completed_task_content(task, uid=uid, session_id=session_id)
+                if completed_content is not None:
+                    await db.commit()
+                    return completed_content
+                raise
             if not snapshot.permission_scope.permits(uid, session_id, TerminalAction.READ):
                 raise ForbiddenException(
                     ERR_TERMINAL_ACTION_NOT_ALLOWED,

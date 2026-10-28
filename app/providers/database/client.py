@@ -2,9 +2,11 @@ import asyncio
 import os
 import sys
 from collections.abc import Awaitable
+from typing import Any
 
 from dotenv import load_dotenv
 from sqlalchemy import event
+from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -36,6 +38,12 @@ class CancellationSafeAsyncSession(AsyncSession):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         observe_sqlite_session(self)
+
+    async def execute(self, statement: Any, params: Any = None, **kwargs: Any) -> Result[Any]:
+        return await _await_cancellation_safe(super().execute(statement, params, **kwargs))
+
+    async def scalar(self, statement: Any, params: Any = None, **kwargs: Any) -> Any:
+        return await _await_cancellation_safe(super().scalar(statement, params, **kwargs))
 
     async def commit(self) -> None:
         await _await_cancellation_safe(super().commit())

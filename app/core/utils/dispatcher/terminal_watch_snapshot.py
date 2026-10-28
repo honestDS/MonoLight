@@ -81,6 +81,12 @@ def _new_terminal_state(terminal_session_id: str) -> dict[str, Any]:
         "pending_result_task_ids": [],
         "latest_manual": None,
         "latest_automatic": None,
+        "status": None,
+        "command": None,
+        "working_directory": None,
+        "next_output_offset": None,
+        "request_context": [],
+        "purpose": None,
     }
 
 
@@ -115,7 +121,8 @@ async def load_current_terminal_watch_snapshot(
             profile_id=profile_id,
         )
     except OperationalError as exc:
-        if "no such table: background_task" in str(exc).lower():
+        error_message = str(exc).lower()
+        if "no such table: background_task" in error_message or "no such table: terminal_session" in error_message:
             return None
         raise
     if not rows:
@@ -135,6 +142,20 @@ async def load_current_terminal_watch_snapshot(
             continue
 
         state = terminals.setdefault(terminal_session_id, _new_terminal_state(terminal_session_id))
+        for field in ("command", "working_directory", "next_output_offset"):
+            value = row.get(field)
+            if value is not None:
+                state[field] = value
+        terminal_status = row.get("terminal_status")
+        if terminal_status is not None:
+            state["status"] = _enum_value(terminal_status)
+        request_context = row.get("request_context")
+        if isinstance(request_context, list) and request_context:
+            state["request_context"] = request_context
+        purpose = row.get("purpose")
+        if purpose:
+            state["purpose"] = purpose
+
         automatic = row.get("auto_terminal_watch") is True
         task_id = row.get("id")
         event = row.get("event")

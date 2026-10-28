@@ -6,12 +6,16 @@ from app.core.constants import (
 )
 from app.core.crud.terminal.session import (
     terminal_control_command_crud,
+    terminal_session_crud,
 )
 from app.core.i18n import t
 from app.core.terminal.process_config import build_interactive_shell_argv, build_subprocess_env
 from app.core.terminal.pty_base import PtyDriver, PtyProcessConfig
 from app.core.terminal.pty_factory import create_pty_driver
-from app.core.terminal.recovery import capture_terminal_process_identity
+from app.core.terminal.recovery import (
+    capture_terminal_process_identity,
+    cleanup_terminal_process_identity,
+)
 from app.core.terminal.schemas import (
     TERMINAL_SESSION_FINAL_STATUSES,
     TerminalSessionStatus,
@@ -81,21 +85,60 @@ class TerminalSessionRuntimeCore:
             )
         finally:
             close_cancelled = False
+            force_close_failed = False
             try:
                 await self.force_close()
             except asyncio.CancelledError:
                 close_cancelled = True
-            except Exception:
+            except Exception as exc:
+                force_close_failed = True
+                self.request_stop(str(exc))
                 logger.exception(
                     "Terminal session driver force close failed",
                     extra={"terminal_session_id": self.terminal_session_id},
                 )
-            finally:
                 try:
-                    await self._await_wait_task()
+                    cleanup_result = await cleanup_terminal_process_identity(self._process_identity)
                 except asyncio.CancelledError:
                     close_cancelled = True
-            await self._finalize_after_run()
+                except Exception:
+                    logger.exception(
+                        "Terminal session process cleanup failed",
+                        extra={"terminal_session_id": self.terminal_session_id},
+                    )
+                else:
+                    if cleanup_result.errors:
+                        logger.error(
+                            "Terminal session process cleanup reported errors",
+                            extra={
+                                "terminal_session_id": self.terminal_session_id,
+                                "errors": cleanup_result.errors,
+                            },
+                        )
+                    else:
+                        try:
+                            await self.force_close()
+                        except asyncio.CancelledError:
+                            close_cancelled = True
+                        except Exception:
+                            logger.exception(
+                                "Terminal session driver force close retry failed",
+                                extra={"terminal_session_id": self.terminal_session_id},
+                            )
+                        else:
+                            force_close_failed = False
+            finally:
+                if not force_close_failed:
+                    try:
+                        await self._await_wait_task()
+                    except asyncio.CancelledError:
+                        close_cancelled = True
+            try:
+                await self._finalize_after_run(process_closed=not force_close_failed)
+            finally:
+                if not force_close_failed:
+                    self._driver = None
+                    self._wait_task = None
             if close_cancelled:
                 raise asyncio.CancelledError
 
@@ -108,20 +151,57 @@ class TerminalSessionRuntimeCore:
 
     async def _initialize(self) -> bool:
         try:
-            config = PtyProcessConfig(
-                argv=build_interactive_shell_argv(self.terminal_session.command),
-                cwd=self.terminal_session.working_directory,
-                env=build_subprocess_env(),
-                output_capacity_bytes=self.terminal_session.output_capacity_bytes,
-            )
-            self._driver = create_pty_driver(config)
-            await self._driver.start()
-            process_identity = await capture_terminal_process_identity(self._driver.pid, self._process_identity) if self._driver.pid is not None else None
-            if process_identity is not None:
-                self._process_identity = process_identity
-            self._last_process_identity_refresh_at = asyncio.get_running_loop().time()
-            self._wait_task = asyncio.create_task(self._driver.wait())
+            async with AsyncSessionLocal() as db:
+                try:
+                    terminal_session = await terminal_session_crud.lock_session(
+                        db,
+                        self.terminal_session_id,
+                        worker_id=self.worker_id,
+                    )
+                    if terminal_session is None:
+                        self._lease_lost_confirmed = True
+                        return False
+
+                    config = PtyProcessConfig(
+                        argv=build_interactive_shell_argv(self.terminal_session.command),
+                        cwd=self.terminal_session.working_directory,
+                        env=build_subprocess_env(),
+                        output_capacity_bytes=self.terminal_session.output_capacity_bytes,
+                    )
+                    self._driver = create_pty_driver(config)
+                    await self._driver.start()
+                    process_identity = await capture_terminal_process_identity(self._driver.pid, self._process_identity) if self._driver.pid is not None else None
+                    if process_identity is not None:
+                        self._process_identity = process_identity
+                    self._last_process_identity_refresh_at = asyncio.get_running_loop().time()
+                    self._wait_task = asyncio.create_task(self._driver.wait())
+                    updated = await terminal_session_crud.update_runtime_snapshot(
+                        db,
+                        self.terminal_session_id,
+                        self.worker_id,
+                        TerminalSessionStatus.RUNNING,
+                        output_buffer=self._get_output_buffer(),
+                        process_identity=self._process_identity,
+                        commit=False,
+                    )
+                    if not updated:
+                        await db.rollback()
+                        raise _TerminalLeaseLost
+                    await db.commit()
+                except asyncio.CancelledError:
+                    raise
+                except _TerminalLeaseLost:
+                    raise
+                except Exception:
+                    await db.rollback()
+                    raise
+            self._status = TerminalSessionStatus.RUNNING
+            if self._stop_event.is_set():
+                return False
+            return True
         except asyncio.CancelledError:
+            raise
+        except _TerminalLeaseLost:
             raise
         except Exception as exc:
             logger.exception(
@@ -139,7 +219,7 @@ class TerminalSessionRuntimeCore:
                         "Terminal session startup cleanup failed",
                         extra={"terminal_session_id": self.terminal_session_id},
                     )
-                finally:
+                else:
                     self._driver = None
             try:
                 await self._update_runtime_snapshot(
@@ -149,23 +229,14 @@ class TerminalSessionRuntimeCore:
                 )
             except _TerminalLeaseLost:
                 return False
-            return True
+            return False
         finally:
             self._driver_start_finished.set()
 
-        if self._stop_event.is_set():
-            return False
-        try:
-            await self._update_runtime_snapshot(
-                TerminalSessionStatus.RUNNING,
-                output_buffer=self._get_output_buffer(),
-            )
-        except _TerminalLeaseLost:
-            return False
-        return True
-
     async def _serve(self) -> None:
         while not self._stop_event.is_set():
+            if self._status in TERMINAL_SESSION_FINAL_STATUSES:
+                break
             driver = self._driver
             if driver is None:
                 if self._status not in TERMINAL_SESSION_FINAL_STATUSES:
@@ -191,6 +262,8 @@ class TerminalSessionRuntimeCore:
                     )
 
             if self._stop_event.is_set():
+                break
+            if self._status in TERMINAL_SESSION_FINAL_STATUSES:
                 break
             command = await self._claim_next_command()
             if command is not None:

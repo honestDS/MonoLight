@@ -1,9 +1,13 @@
 import asyncio
 import uuid
+from datetime import timedelta
 
 from app.core.constants import (
+    ERR_TERMINAL_PTY_CLOSED,
     ERR_TERMINAL_SESSION_LEASE_LOST,
     ERR_TERMINAL_WORKER_STOPPED,
+    TERMINAL_SESSION_IDLE_CLEANUP_INTERVAL_SECONDS,
+    TERMINAL_SESSION_IDLE_TIMEOUT_SECONDS,
 )
 from app.core.crud.terminal.session import (
     terminal_session_crud,
@@ -13,10 +17,15 @@ from app.core.terminal.recovery import cleanup_terminal_process_identity
 from app.core.terminal.schemas import (
     TerminalSessionStatus,
 )
+from app.core.utils.time import get_local_time
 from app.models.terminal_session import TerminalSession
 from app.providers.database import AsyncSessionLocal
 
-from .audit_lifecycle import _update_terminal_confirmation_status, finalize_terminal_session_audit
+from .audit_lifecycle import (
+    _update_terminal_confirmation_status,
+    cleanup_terminal_session,
+    finalize_terminal_session_audit,
+)
 from .manager_common import (
     TERMINAL_FINAL_CLAIM_CLEANUP_INTERVAL_SECONDS,
     TERMINAL_SESSION_LEASE_RENEW_INTERVAL_SECONDS,
@@ -45,6 +54,8 @@ class TerminalWorkerCoordinator:
         self._runtimes: dict[str, _TerminalSessionRuntime] = {}
         self._last_lease_renewal_at = 0.0
         self._last_final_claim_cleanup_at = 0.0
+        self._last_idle_cleanup_at = 0.0
+        self._idle_cleanup_task: asyncio.Task[None] | None = None
 
     @property
     def worker_id(self) -> str:
@@ -75,6 +86,11 @@ class TerminalWorkerCoordinator:
                 claimed = None
                 recoverable = None
                 try:
+                    if self._idle_cleanup_task is not None and self._idle_cleanup_task.done():
+                        idle_cleanup_task = self._idle_cleanup_task
+                        self._idle_cleanup_task = None
+                        idle_cleanup_task.result()
+
                     now = loop.time()
                     if now - self._last_lease_renewal_at >= TERMINAL_SESSION_LEASE_RENEW_INTERVAL_SECONDS:
                         for terminal_session_id in tuple(self._owned_session_ids):
@@ -127,6 +143,10 @@ class TerminalWorkerCoordinator:
                             await terminal_session_crud.cleanup_expired_final_claims(db)
                         self._last_final_claim_cleanup_at = now
 
+                    if self._idle_cleanup_task is None and now - self._last_idle_cleanup_at >= TERMINAL_SESSION_IDLE_CLEANUP_INTERVAL_SECONDS:
+                        self._idle_cleanup_task = asyncio.create_task(self._cleanup_inactive_sessions())
+                        self._last_idle_cleanup_at = now
+
                     async with AsyncSessionLocal() as db:
                         recoverable = await terminal_session_crud.claim_next_recoverable(
                             db,
@@ -164,7 +184,53 @@ class TerminalWorkerCoordinator:
                     except TimeoutError:
                         pass
         finally:
+            idle_cleanup_task = self._idle_cleanup_task
+            self._idle_cleanup_task = None
+            if idle_cleanup_task is not None:
+                idle_cleanup_task.cancel()
+                await asyncio.gather(idle_cleanup_task, return_exceptions=True)
             await self._shutdown_runtimes()
+
+    async def _cleanup_inactive_sessions(self) -> None:
+        before = get_local_time() - timedelta(seconds=TERMINAL_SESSION_IDLE_TIMEOUT_SECONDS)
+        async with AsyncSessionLocal() as db:
+            inactive_sessions = await terminal_session_crud.list_inactive_chat_sessions(db, before=before)
+
+        for chat_session in inactive_sessions:
+            try:
+                async with AsyncSessionLocal() as db:
+                    terminal_sessions = await terminal_session_crud.list_by_chat_session(
+                        db,
+                        session_id=chat_session.session_id,
+                        uid=chat_session.uid,
+                    )
+
+                for terminal_session in terminal_sessions:
+                    async with AsyncSessionLocal() as db:
+                        locked_chat_session = await terminal_session_crud.lock_chat_session(
+                            db,
+                            uid=chat_session.uid,
+                            session_id=chat_session.session_id,
+                            inactive_before=before,
+                        )
+                        if locked_chat_session is None:
+                            break
+                        await cleanup_terminal_session(
+                            db,
+                            terminal_session=terminal_session,
+                            failure_reason=t(ERR_TERMINAL_PTY_CLOSED),
+                        )
+                        await db.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Inactive terminal session cleanup failed",
+                    extra={
+                        "session_id": chat_session.session_id,
+                        "uid": chat_session.uid,
+                    },
+                )
 
     async def _run_session(self, runtime: _TerminalSessionRuntime) -> None:
         try:

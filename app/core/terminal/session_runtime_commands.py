@@ -7,6 +7,7 @@ from app.core.constants import (
     ERR_TERMINAL_PTY_EXIT_CODE_MISSING,
     ERR_TERMINAL_PTY_NOT_STARTED,
     ERR_TERMINAL_PTY_STATE_INVALID,
+    TERMINAL_READ_MAX_BYTES,
 )
 from app.core.crud.terminal.session import (
     terminal_control_command_crud,
@@ -61,6 +62,7 @@ class TerminalSessionRuntimeCommands:
                     extra={"terminal_session_id": self.terminal_session_id, "command_id": command.id},
                 )
                 raise _TerminalLeaseLost
+            self._last_completed_command_id = command.id
             return
 
         async with AsyncSessionLocal() as db:
@@ -77,6 +79,7 @@ class TerminalSessionRuntimeCommands:
                 extra={"terminal_session_id": self.terminal_session_id, "command_id": command.id},
             )
             raise _TerminalLeaseLost
+        self._last_completed_command_id = command.id
 
     async def _execute_command(self, command: TerminalControlCommand) -> dict[str, Any]:
         try:
@@ -215,4 +218,31 @@ class TerminalSessionRuntimeCommands:
         result: dict[str, Any] = {"status": self._status.value}
         if self._exit_code is not None:
             result["exit_code"] = self._exit_code
+        if self._failure_reason is not None:
+            result["failure_reason"] = self._failure_reason
+
+        driver = self._driver
+        output_buffer = self._get_output_buffer() if driver is None else driver.resource_snapshot().output_buffer
+        latest_offset = output_buffer.next_offset
+        start_offset = max(output_buffer.oldest_offset, latest_offset - TERMINAL_READ_MAX_BYTES)
+        next_offset = start_offset
+        output = ""
+        output_truncated = start_offset > 0 or next_offset < latest_offset
+        if driver is not None and start_offset < latest_offset:
+            output_read = driver.read_output(start_offset, TERMINAL_READ_MAX_BYTES)
+            output = output_read.data.decode("utf-8", errors="replace")
+            start_offset = output_read.start_offset
+            next_offset = output_read.next_offset
+            latest_offset = output_read.latest_offset
+            output_truncated = output_read.start_offset > 0 or output_read.next_offset < output_read.latest_offset
+
+        result.update(
+            {
+                "output": output,
+                "start_offset": start_offset,
+                "next_offset": next_offset,
+                "latest_offset": latest_offset,
+                "output_truncated": output_truncated,
+            }
+        )
         return result

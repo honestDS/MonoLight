@@ -19,7 +19,7 @@ from app.core.session_reply_queue.executor import (
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.models.profile import ProfileConfig
-from app.models.session_reply_work_item import SessionReplyWorkType
+from app.models.session_reply_work_item import SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -75,6 +75,7 @@ class SessionReplyConsumer:
                 now = loop.time()
                 claims = {work_id: worker_id for work_id, (_task, worker_id) in self._running.items()}
                 if claims:
+                    claims_to_cancel: list[tuple[int, str]] = []
                     async with AsyncSessionLocal() as db:
                         if now - self._last_lease_renewal_at >= SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS:
                             active_claims = await session_reply_work_item_crud.renew_active_claims(
@@ -85,11 +86,26 @@ class SessionReplyConsumer:
                             self._last_lease_renewal_at = now
                         else:
                             active_claims = await session_reply_work_item_crud.get_active_claims(db, claims)
-                    for work_id, worker_id in claims.items():
-                        if (work_id, worker_id) not in active_claims:
-                            task_entry = self._running.get(work_id)
-                            if task_entry is not None and not task_entry[0].done():
-                                task_entry[0].cancel()
+                        for work_id, worker_id in claims.items():
+                            if (work_id, worker_id) in active_claims:
+                                continue
+                            work = await session_reply_work_item_crud.get(db, work_id)
+                            if (
+                                work is not None
+                                and work.locked_by is None
+                                and work.status
+                                in {
+                                    SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                                    SessionReplyWorkStatus.READY_FOR_LLM,
+                                    SessionReplyWorkStatus.SUCCEEDED,
+                                }
+                            ):
+                                continue
+                            claims_to_cancel.append((work_id, worker_id))
+                    for work_id, _worker_id in claims_to_cancel:
+                        task_entry = self._running.get(work_id)
+                        if task_entry is not None and not task_entry[0].done():
+                            task_entry[0].cancel()
 
                 if now - self._last_recovery_at >= SESSION_REPLY_RECOVERY_INTERVAL_SECONDS:
                     await self._recover_expired()

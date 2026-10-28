@@ -42,6 +42,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkType,
 )
 from app.models.session_todo import SessionTodoPlan
+from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.models.user import User
 from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
@@ -78,6 +79,8 @@ async def chat_session_database(tmp_path) -> AsyncGenerator[AsyncSession]:
             SessionReplySequence.__table__,
             SessionReplyWorkItem.__table__,
             BackgroundTask.__table__,
+            TerminalSession.__table__,
+            TerminalControlCommand.__table__,
         ],
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

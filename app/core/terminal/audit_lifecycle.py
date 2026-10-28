@@ -7,6 +7,7 @@ from app.core.constants import (
     ERR_TERMINAL_SESSION_DELETED,
 )
 from app.core.crud.audit.audit import audit_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.crud.terminal.session import (
     terminal_session_crud,
 )
@@ -27,7 +28,9 @@ from .manager_common import (
 
 __all__ = [
     "finalize_terminal_session_audit",
+    "cleanup_terminal_session",
     "cleanup_terminal_sessions_by_chat_session",
+    "stop_terminal_sessions",
 ]
 
 
@@ -35,6 +38,49 @@ async def _update_terminal_confirmation_status(db: AsyncSession, *, audit_record
     from app.core.audit.confirmation import update_confirmation_message_status
 
     await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+
+
+async def _cleanup_terminal_session_process(
+    terminal_session: TerminalSession,
+    *,
+    session_id: str,
+    uid: str,
+    skip_unidentified_starting: bool = False,
+) -> None:
+    skip_process_cleanup = terminal_session.process_identity is None and (terminal_session.status in TERMINAL_SESSION_FINAL_STATUSES or (terminal_session.status is TerminalSessionStatus.STARTING and (skip_unidentified_starting or terminal_session.locked_by is None)))
+    if skip_process_cleanup:
+        return
+
+    try:
+        cleanup_result = await cleanup_terminal_process_identity(terminal_session.process_identity)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Terminal session process cleanup failed",
+            extra={
+                "terminal_session_id": terminal_session.terminal_session_id,
+                "session_id": session_id,
+                "uid": uid,
+                "error": str(exc),
+            },
+        )
+        raise ServerException(message=ERR_TERMINAL_COMMAND_FAILED, error=str(exc)) from exc
+    cleanup_errors = cleanup_result.errors
+    if cleanup_errors:
+        logger.error(
+            "Terminal session process cleanup reported errors",
+            extra={
+                "terminal_session_id": terminal_session.terminal_session_id,
+                "session_id": session_id,
+                "uid": uid,
+                "errors": cleanup_errors,
+            },
+        )
+        raise ServerException(
+            message=ERR_TERMINAL_COMMAND_FAILED,
+            error="; ".join(cleanup_errors),
+        )
 
 
 async def finalize_terminal_session_audit(
@@ -164,6 +210,73 @@ async def finalize_terminal_session_audit(
     return audit_record_id if round_status is not None else None
 
 
+async def cleanup_terminal_session(
+    db: AsyncSession,
+    *,
+    terminal_session: TerminalSession,
+    failure_reason: str,
+    worker_id: str | None = None,
+    process_closed: bool = False,
+    cancel_watch: bool = True,
+) -> int | None:
+    uid = terminal_session.uid
+    session_id = terminal_session.session_id
+    terminal_session_id = terminal_session.terminal_session_id
+    terminal_session = await terminal_session_crud.lock_session(
+        db,
+        terminal_session_id,
+        worker_id=worker_id,
+    )
+    if terminal_session is None:
+        return None
+    if terminal_session.uid != uid or terminal_session.session_id != session_id:
+        error = f"terminal session owner mismatch: {terminal_session_id}"
+        logger.error(
+            "Terminal session owner mismatch",
+            extra={
+                "terminal_session_id": terminal_session_id,
+                "session_id": session_id,
+                "uid": uid,
+                "current_session_id": terminal_session.session_id,
+                "current_uid": terminal_session.uid,
+            },
+        )
+        raise ServerException(message=ERR_TERMINAL_COMMAND_FAILED, error=error)
+
+    if not process_closed:
+        await _cleanup_terminal_session_process(
+            terminal_session,
+            session_id=session_id,
+            uid=uid,
+            skip_unidentified_starting=True,
+        )
+    if cancel_watch:
+        await background_task_crud.cancel_terminal_watches(
+            db,
+            uid=uid,
+            session_id=session_id,
+            terminal_session_id=terminal_session_id,
+        )
+
+    audit_record_id = None
+    if terminal_session.status not in TERMINAL_SESSION_FINAL_STATUSES:
+        audit_record_id = await finalize_terminal_session_audit(
+            db,
+            terminal_session,
+            status=TerminalSessionStatus.LOST,
+            exit_code=None,
+            failure_reason=failure_reason,
+        )
+
+    await terminal_session_crud.delete_session(
+        db,
+        terminal_session_id,
+        worker_id=worker_id,
+        commit=False,
+    )
+    return audit_record_id
+
+
 async def cleanup_terminal_sessions_by_chat_session(
     db: AsyncSession,
     *,
@@ -177,50 +290,74 @@ async def cleanup_terminal_sessions_by_chat_session(
     )
     failure_reason = t(ERR_TERMINAL_SESSION_DELETED)
     for terminal_session in terminal_sessions:
-        skip_process_cleanup = terminal_session.process_identity is None and (terminal_session.status in TERMINAL_SESSION_FINAL_STATUSES or (terminal_session.status is TerminalSessionStatus.STARTING and terminal_session.locked_by is None))
-        if not skip_process_cleanup:
-            try:
-                cleanup_result = await cleanup_terminal_process_identity(terminal_session.process_identity)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.exception(
-                    "Terminal session process cleanup failed",
-                    extra={
-                        "terminal_session_id": terminal_session.terminal_session_id,
-                        "session_id": session_id,
-                        "uid": uid,
-                        "error": str(exc),
-                    },
-                )
-                raise ServerException(message=ERR_TERMINAL_COMMAND_FAILED, error=str(exc)) from exc
-            if cleanup_result.errors:
-                logger.error(
-                    "Terminal session process cleanup reported errors",
-                    extra={
-                        "terminal_session_id": terminal_session.terminal_session_id,
-                        "session_id": session_id,
-                        "uid": uid,
-                        "errors": cleanup_result.errors,
-                    },
-                )
-                raise ServerException(
-                    message=ERR_TERMINAL_COMMAND_FAILED,
-                    error="; ".join(cleanup_result.errors),
-                )
+        await cleanup_terminal_session(
+            db,
+            terminal_session=terminal_session,
+            failure_reason=failure_reason,
+        )
 
-        if terminal_session.status not in TERMINAL_SESSION_FINAL_STATUSES:
-            await finalize_terminal_session_audit(
-                db,
-                terminal_session,
-                status=TerminalSessionStatus.LOST,
-                exit_code=None,
-                failure_reason=failure_reason,
+    return len(terminal_sessions)
+
+
+async def stop_terminal_sessions(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    terminal_sessions: list[TerminalSession],
+    failure_reason: str,
+) -> list[int]:
+    if not terminal_sessions:
+        return []
+
+    for terminal_session in terminal_sessions:
+        if terminal_session.uid != uid or terminal_session.session_id != session_id:
+            error = f"terminal session snapshot is outside requested scope: {terminal_session.terminal_session_id}"
+            logger.error(
+                "Terminal session snapshot scope mismatch",
+                extra={
+                    "terminal_session_id": terminal_session.terminal_session_id,
+                    "session_id": session_id,
+                    "uid": uid,
+                    "snapshot_session_id": terminal_session.session_id,
+                    "snapshot_uid": terminal_session.uid,
+                },
             )
+            raise ServerException(message=ERR_TERMINAL_COMMAND_FAILED, error=error)
 
-    return await terminal_session_crud.delete_by_chat_session(
-        db,
-        session_id=session_id,
-        uid=uid,
-        commit=False,
-    )
+    cleaned_terminal_sessions: list[TerminalSession] = []
+    for terminal_session in terminal_sessions:
+        latest_terminal_session = await terminal_session_crud.get(
+            db,
+            terminal_session.terminal_session_id,
+        )
+        if latest_terminal_session is not None and latest_terminal_session.status is TerminalSessionStatus.STARTING and latest_terminal_session.locked_by is not None:
+            latest_terminal_session = await terminal_session_crud.lock_session(
+                db,
+                latest_terminal_session.terminal_session_id,
+                worker_id=latest_terminal_session.locked_by,
+            )
+        await db.commit()
+        if latest_terminal_session is None:
+            continue
+
+        await _cleanup_terminal_session_process(
+            latest_terminal_session,
+            session_id=session_id,
+            uid=uid,
+            skip_unidentified_starting=True,
+        )
+        cleaned_terminal_sessions.append(latest_terminal_session)
+
+    audit_record_ids: list[int] = []
+    for terminal_session in cleaned_terminal_sessions:
+        audit_record_id = await cleanup_terminal_session(
+            db,
+            terminal_session=terminal_session,
+            failure_reason=failure_reason,
+            process_closed=True,
+        )
+        if audit_record_id is not None:
+            audit_record_ids.append(audit_record_id)
+
+    return audit_record_ids

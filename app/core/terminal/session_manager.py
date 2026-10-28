@@ -21,6 +21,7 @@ from app.core.constants import (
     ERR_TERMINAL_SESSION_NOT_FOUND,
     ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED,
 )
+from app.core.crud.task.background import background_task_crud
 from app.core.crud.terminal.session import (
     terminal_control_command_crud,
     terminal_session_crud,
@@ -230,8 +231,13 @@ class TerminalSessionManager:
         terminal_session_id: str,
         uid: str,
         session_id: str,
+        *,
+        lock: bool = False,
     ) -> TerminalSession:
-        terminal_session = await terminal_session_crud.get(db, terminal_session_id)
+        if lock:
+            terminal_session = await terminal_session_crud.lock_session(db, terminal_session_id)
+        else:
+            terminal_session = await terminal_session_crud.get(db, terminal_session_id)
         if terminal_session is None:
             raise ResourceNotFoundException(
                 ERR_TERMINAL_SESSION_NOT_FOUND,
@@ -348,6 +354,10 @@ class TerminalSessionManager:
                 terminal_session_id=terminal_session_id,
                 action=TerminalAction.STATUS.value,
             )
+        return self._build_terminal_snapshot(terminal_session)
+
+    @staticmethod
+    def _build_terminal_snapshot(terminal_session: TerminalSession) -> TerminalSessionSnapshot:
         permission_scope = TerminalPermissionScope(
             owner_uid=terminal_session.uid,
             owner_session_id=terminal_session.session_id,
@@ -433,7 +443,13 @@ class TerminalSessionManager:
         if not isinstance(request, _TERMINAL_MUTATING_REQUEST_TYPES):
             raise ParameterException(ERR_TERMINAL_MUTATING_REQUEST_REQUIRED)
 
-        terminal_session = await self.get_owned_session(db, request.terminal_session_id, uid, session_id)
+        terminal_session = await self.get_owned_session(
+            db,
+            request.terminal_session_id,
+            uid,
+            session_id,
+            lock=True,
+        )
         if request.action.value not in terminal_session.allowed_actions:
             raise ForbiddenException(
                 ERR_TERMINAL_ACTION_NOT_ALLOWED,
@@ -457,6 +473,7 @@ class TerminalSessionManager:
         if existing is not None:
             self._validate_request_identity(existing, request.action, payload_hash, request.terminal_session_id, request.request_id)
             await self._complete_unowned_terminal_command(db, terminal_session, existing)
+            await db.commit()
             return existing, False
 
         command, created = await terminal_control_command_crud.enqueue(
@@ -480,7 +497,13 @@ class TerminalSessionManager:
         request: TerminalReadRequest,
         request_id: str,
     ) -> tuple[TerminalControlCommand, bool]:
-        terminal_session = await self.get_owned_session(db, request.terminal_session_id, uid, session_id)
+        terminal_session = await self.get_owned_session(
+            db,
+            request.terminal_session_id,
+            uid,
+            session_id,
+            lock=True,
+        )
         if request.action.value not in terminal_session.allowed_actions:
             raise ForbiddenException(
                 ERR_TERMINAL_ACTION_NOT_ALLOWED,
@@ -504,6 +527,7 @@ class TerminalSessionManager:
         if existing is not None:
             self._validate_request_identity(existing, request.action, payload_hash, request.terminal_session_id, request_id)
             await self._complete_unowned_terminal_command(db, terminal_session, existing)
+            await db.commit()
             return existing, False
 
         command, created = await terminal_control_command_crud.enqueue(
@@ -563,15 +587,68 @@ class TerminalSessionManager:
             return
 
         if action is TerminalAction.CLOSE:
-            result: dict[str, Any] = {"status": terminal_session.status.value}
-            if terminal_session.exit_code is not None:
-                result["exit_code"] = terminal_session.exit_code
-            await terminal_control_command_crud.complete_unowned_pending(
+            next_offset = terminal_session.next_output_offset
+            result: dict[str, Any] = {
+                "status": terminal_session.status.value,
+                "exit_code": terminal_session.exit_code,
+                "failure_reason": terminal_session.failure_reason,
+                "output": "",
+                "start_offset": next_offset,
+                "next_offset": next_offset,
+                "latest_offset": next_offset,
+                "output_truncated": next_offset > 0,
+            }
+            completed = await terminal_control_command_crud.complete_unowned_pending(
                 db,
                 terminal_session.terminal_session_id,
                 command.id,
                 result=result,
+                commit=False,
             )
+            if completed:
+                from app.core.background_tasks.terminal_watch_coordinator import persist_terminal_completion
+
+                from .audit_lifecycle import cleanup_terminal_session
+
+                session_status = terminal_session.status.value
+                process_exited = session_status == "exited"
+                await persist_terminal_completion(
+                    db,
+                    terminal_session=terminal_session,
+                    content={
+                        "terminal_session_id": terminal_session.terminal_session_id,
+                        "event": "process_exit" if process_exited else "terminal_error",
+                        "after_offset": next_offset,
+                        "session_status": session_status,
+                        "exit_code": terminal_session.exit_code,
+                        "failure_reason": terminal_session.failure_reason,
+                        "output": "",
+                        "start_offset": next_offset,
+                        "next_offset": next_offset,
+                        "latest_offset": next_offset,
+                        "output_truncated": next_offset > 0,
+                        "eof": True,
+                        "condition": "process_exit",
+                        "matched": process_exited,
+                        "watch_results": {},
+                    },
+                    command_results={
+                        str(command.id): {
+                            "status": TerminalControlCommandStatus.SUCCEEDED.value,
+                            "result": result,
+                            "error": None,
+                            "snapshot": self._build_terminal_snapshot(terminal_session).model_dump(mode="json"),
+                        }
+                    },
+                )
+                await cleanup_terminal_session(
+                    db,
+                    terminal_session=terminal_session,
+                    failure_reason=terminal_session.failure_reason or t(ERR_TERMINAL_PTY_CLOSED),
+                    cancel_watch=False,
+                    process_closed=False,
+                )
+                await db.commit()
             return
 
         await terminal_control_command_crud.complete_unowned_pending(
@@ -587,14 +664,16 @@ class TerminalSessionManager:
         command_id: int,
         timeout_seconds: float,
         poll_interval_seconds: float = 0.05,
+        *,
+        terminal_session_id: str | None = None,
     ) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
+        known_terminal_session_id = terminal_session_id
         while True:
             command = await terminal_control_command_crud.get(db, command_id)
             if command is not None:
-                if command.status == TerminalControlCommandStatus.SUCCEEDED:
-                    return command.result or {}
+                known_terminal_session_id = command.terminal_session_id
                 if command.status == TerminalControlCommandStatus.FAILED:
                     raise RuntimeError(
                         t(
@@ -602,6 +681,31 @@ class TerminalSessionManager:
                             error=command.error or "",
                         )
                     )
+                if command.status == TerminalControlCommandStatus.SUCCEEDED:
+                    terminal_session = await terminal_session_crud.get(db, known_terminal_session_id)
+                    if terminal_session is not None:
+                        result = dict(command.result or {})
+                        result["_terminal_snapshot"] = self._build_terminal_snapshot(terminal_session).model_dump(mode="json")
+                        return result
+
+            if known_terminal_session_id is not None:
+                entry = await background_task_crud.get_terminal_command_result(
+                    db,
+                    terminal_session_id=known_terminal_session_id,
+                    command_id=command_id,
+                )
+                if entry is not None:
+                    if entry.get("status") == TerminalControlCommandStatus.SUCCEEDED.value:
+                        result = dict(entry.get("result") or {})
+                        result["_terminal_snapshot"] = entry["snapshot"]
+                        return result
+                    if entry.get("status") == TerminalControlCommandStatus.FAILED.value:
+                        raise RuntimeError(
+                            t(
+                                ERR_TERMINAL_COMMAND_FAILED,
+                                error=entry.get("error") or "",
+                            )
+                        )
 
             remaining = deadline - loop.time()
             if remaining <= 0:

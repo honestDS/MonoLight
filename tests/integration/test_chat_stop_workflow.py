@@ -10,6 +10,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
+import app.core.terminal.audit_lifecycle as terminal_audit_lifecycle_module
 import app.providers.database as database_provider
 from app.api.v1 import chat as chat_api
 from app.core.background_tasks import runner as runner_module
@@ -776,14 +777,20 @@ async def test_owner_stop_cancels_target_session_work_and_allows_new_claim(
     [("owner", False), ("admin", True)],
     ids=["owner", "admin"],
 )
-async def test_stop_cancels_all_target_async_activity_and_preserves_terminal(
+async def test_stop_cancels_all_target_async_activity_and_closes_terminal_and_cleans_index(
     db_session,
     uid: str,
     is_superuser: bool,
+    monkeypatch,
 ) -> None:
     seeded = await _seed_full_stop_case(db_session)
     before = await _snapshot_stop_entities(db_session)
     app = _build_app(db_session, {"uid": uid, "is_superuser": is_superuser})
+
+    async def cleanup_without_processes(_identity):
+        return SimpleNamespace(errors=())
+
+    monkeypatch.setattr(terminal_audit_lifecycle_module, "cleanup_terminal_process_identity", cleanup_without_processes)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         stopped = await client.post(
@@ -850,9 +857,8 @@ async def test_stop_cancels_all_target_async_activity_and_preserves_terminal(
     assert after_stop["messages"] == before["messages"]
     assert after_stop["sequences"] == before["sequences"]
     assert after_stop["stream_events"] == before["stream_events"]
-    assert after_stop["terminal_sessions"][seeded["terminal_session_id"]] == before["terminal_sessions"][seeded["terminal_session_id"]]
-    assert after_stop["terminal_commands"] == before["terminal_commands"]
-    assert all(command["action"] != TerminalAction.CLOSE for command in after_stop["terminal_commands"].values())
+    assert seeded["terminal_session_id"] not in after_stop["terminal_sessions"]
+    assert after_stop["terminal_commands"] == {}
 
     async with db_session() as db:
         late_marked = await background_task_crud.mark_succeeded(
@@ -881,6 +887,216 @@ async def test_stop_cancels_all_target_async_activity_and_preserves_terminal(
 
     after_guard = await _snapshot_stop_entities(db_session)
     assert after_guard == after_late_mark
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["reported-errors", "runtime-error"],
+    ids=["cleanup-reported-errors", "cleanup-runtime-error"],
+)
+async def test_http_stop_retries_after_terminal_cleanup_failure(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    seeded = await _seed_full_stop_case(db_session)
+    before = await _snapshot_stop_entities(db_session)
+    app = _build_app(db_session, {"uid": "owner", "is_superuser": False})
+
+    async def cleanup_failed(_identity):
+        if failure_mode == "reported-errors":
+            return SimpleNamespace(errors=("process cleanup failed",))
+        raise RuntimeError("process cleanup failed")
+
+    async def cleanup_succeeded(_identity):
+        return SimpleNamespace(errors=())
+
+    monkeypatch.setattr(terminal_audit_lifecycle_module, "cleanup_terminal_process_identity", cleanup_failed)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        failed = await client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": seeded["target_session_id"]},
+        )
+        assert failed.status_code == 500
+        assert failed.json()["code"] == 500
+
+    after_failure = await _snapshot_stop_entities(db_session)
+    assert after_failure["terminal_sessions"] == before["terminal_sessions"]
+    assert after_failure["terminal_commands"] == before["terminal_commands"]
+    for work_id in seeded["target_active_work_ids"]:
+        work = after_failure["works"][work_id]
+        assert work["status"] == SessionReplyWorkStatus.CANCELLED
+        assert work["locked_by"] is None
+        assert work["lock_until"] is None
+    for task_id in seeded["active_task_ids"]:
+        task = after_failure["background_tasks"][task_id]
+        assert task["status"] == BackgroundTaskStatus.CANCELLED
+        assert task["auto_reply"] is False
+        assert task["reply_status"] == BackgroundTaskReplyStatus.NONE
+        assert task["locked_by"] is None
+        assert task["lock_until"] is None
+        assert task["reply_locked_by"] is None
+        assert task["reply_lock_until"] is None
+    for task_id in seeded["target_completed_task_ids"]:
+        before_task = before["background_tasks"][task_id]
+        after_task = after_failure["background_tasks"][task_id]
+        assert after_task["status"] == before_task["status"]
+        assert after_task["result"] == before_task["result"]
+        assert after_task["error"] == before_task["error"]
+        assert after_task["extra"] == before_task["extra"]
+        assert after_task["attempt_count"] == before_task["attempt_count"]
+        assert after_task["auto_reply"] is False
+        assert after_task["reply_status"] == BackgroundTaskReplyStatus.NONE
+        assert after_task["reply_locked_by"] is None
+        assert after_task["reply_lock_until"] is None
+    assert after_failure["sessions"] == before["sessions"]
+    assert after_failure["messages"] == before["messages"]
+    assert after_failure["sequences"] == before["sequences"]
+    assert after_failure["stream_events"] == before["stream_events"]
+    for work_id in seeded["isolated_work_ids"]:
+        assert after_failure["works"][work_id] == before["works"][work_id]
+    for task_id in seeded["isolated_task_ids"]:
+        assert after_failure["background_tasks"][task_id] == before["background_tasks"][task_id]
+
+    monkeypatch.setattr(terminal_audit_lifecycle_module, "cleanup_terminal_process_identity", cleanup_succeeded)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        retried = await client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": seeded["target_session_id"]},
+        )
+        assert retried.status_code == 200
+        assert retried.json()["code"] == 200
+        assert retried.json()["data"] == {
+            "session_id": seeded["target_session_id"],
+            "cancelled_count": 0,
+        }
+
+        repeated = await client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": seeded["target_session_id"]},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json()["code"] == 200
+        assert repeated.json()["data"] == {
+            "session_id": seeded["target_session_id"],
+            "cancelled_count": 0,
+        }
+
+    after_retry = await _snapshot_stop_entities(db_session)
+    assert after_retry["terminal_sessions"] == {}
+    assert after_retry["terminal_commands"] == {}
+    assert after_retry["sessions"] == after_failure["sessions"]
+    assert after_retry["messages"] == after_failure["messages"]
+    assert after_retry["sequences"] == after_failure["sequences"]
+    assert after_retry["stream_events"] == after_failure["stream_events"]
+    for work_id in seeded["target_active_work_ids"]:
+        work = after_retry["works"][work_id]
+        assert work["status"] == SessionReplyWorkStatus.CANCELLED
+        assert work["locked_by"] is None
+        assert work["lock_until"] is None
+    for task_id in seeded["active_task_ids"]:
+        task = after_retry["background_tasks"][task_id]
+        assert task["status"] == BackgroundTaskStatus.CANCELLED
+        assert task["auto_reply"] is False
+        assert task["reply_status"] == BackgroundTaskReplyStatus.NONE
+        assert task["locked_by"] is None
+        assert task["lock_until"] is None
+        assert task["reply_locked_by"] is None
+        assert task["reply_lock_until"] is None
+    for task_id in seeded["target_completed_task_ids"]:
+        assert after_retry["background_tasks"][task_id]["status"] == after_failure["background_tasks"][task_id]["status"]
+        assert after_retry["background_tasks"][task_id]["result"] == after_failure["background_tasks"][task_id]["result"]
+        assert after_retry["background_tasks"][task_id]["error"] == after_failure["background_tasks"][task_id]["error"]
+        assert after_retry["background_tasks"][task_id]["auto_reply"] is False
+        assert after_retry["background_tasks"][task_id]["reply_status"] == BackgroundTaskReplyStatus.NONE
+    for work_id in seeded["isolated_work_ids"]:
+        assert after_retry["works"][work_id] == before["works"][work_id]
+    for task_id in seeded["isolated_task_ids"]:
+        assert after_retry["background_tasks"][task_id] == before["background_tasks"][task_id]
+
+
+@pytest.mark.asyncio
+async def test_stop_cleanup_releases_write_lock_and_preserves_terminal_created_during_cleanup(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded = await _seed_full_stop_case(db_session)
+    before = await _snapshot_stop_entities(db_session)
+    new_terminal_session_id = "stop-regression-new-terminal-0123456789abcdef"
+    new_request_id = "stop-regression-new-write-request"
+    created_entities: dict[str, dict] = {}
+
+    async def cleanup_and_create_new_terminal(_identity):
+        async with db_session() as db:
+            new_terminal = TerminalSession(
+                terminal_session_id=new_terminal_session_id,
+                uid="owner",
+                session_id=seeded["target_session_id"],
+                original_tool_call_id="stop-regression-new-terminal-call",
+                profile_id=1,
+                command="printf new-terminal-output",
+                working_directory="/tmp/stop-regression",
+                status=TerminalSessionStatus.STARTING,
+                allowed_actions=[action.value for action in TerminalAction],
+                process_identity=None,
+                output_capacity_bytes=4096,
+            )
+            new_command = TerminalControlCommand(
+                terminal_session_id=new_terminal_session_id,
+                request_id=new_request_id,
+                action=TerminalAction.WRITE,
+                payload={"data": "new command"},
+                payload_hash="stop-regression-new-write-hash",
+                status=TerminalControlCommandStatus.PENDING,
+            )
+            db.add(new_terminal)
+
+            async def persist_new_terminal() -> None:
+                await db.flush()
+                db.add(new_command)
+                await db.commit()
+
+            await asyncio.wait_for(persist_new_terminal(), timeout=2)
+            cancelled_work = await db.get(SessionReplyWorkItem, seeded["target_active_work_ids"][0])
+            assert cancelled_work is not None
+            assert cancelled_work.status == SessionReplyWorkStatus.CANCELLED
+            await db.refresh(new_terminal)
+            await db.refresh(new_command)
+            created_entities["terminal"] = new_terminal.model_dump()
+            created_entities["command"] = new_command.model_dump()
+        return SimpleNamespace(errors=())
+
+    monkeypatch.setattr(terminal_audit_lifecycle_module, "cleanup_terminal_process_identity", cleanup_and_create_new_terminal)
+    app = _build_app(db_session, {"uid": "owner", "is_superuser": False})
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        stopped = await client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": seeded["target_session_id"]},
+        )
+
+    assert stopped.status_code == 200
+    assert stopped.json()["code"] == 200
+    assert stopped.json()["data"] == {
+        "session_id": seeded["target_session_id"],
+        "cancelled_count": len(seeded["target_active_work_ids"]),
+    }
+
+    after_stop = await _snapshot_stop_entities(db_session)
+    assert after_stop["sessions"] == before["sessions"]
+    assert after_stop["messages"] == before["messages"]
+    assert seeded["terminal_session_id"] not in after_stop["terminal_sessions"]
+    old_command_ids = {command_id for command_id, command in before["terminal_commands"].items() if command["terminal_session_id"] == seeded["terminal_session_id"]}
+    assert old_command_ids.isdisjoint(after_stop["terminal_commands"])
+    assert after_stop["terminal_sessions"][new_terminal_session_id] == created_entities["terminal"]
+    new_command = next(command for command in after_stop["terminal_commands"].values() if command["terminal_session_id"] == new_terminal_session_id)
+    assert new_command == created_entities["command"]
+
+    original_watch = after_stop["background_tasks"][seeded["active_task_ids"][0]]
+    assert original_watch["tool_name"] == TERMINAL_WATCH_TOOL_NAME
+    assert original_watch["status"] == BackgroundTaskStatus.CANCELLED
 
 
 async def _seed_invalid_stop_case(session_factory: async_sessionmaker[AsyncSession]) -> None:

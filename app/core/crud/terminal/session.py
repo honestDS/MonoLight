@@ -1,13 +1,15 @@
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, or_, update
+from sqlalchemy import and_, delete, exists, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import ERR_TERMINAL_COMMAND_RESULT_ERROR_EXCLUSIVE, ERR_TERMINAL_PTY_CLOSED
+from app.core.constants import ERR_SESSION_NOT_FOUND, ERR_TERMINAL_COMMAND_RESULT_ERROR_EXCLUSIVE, ERR_TERMINAL_PTY_CLOSED
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
+from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import t
 from app.core.terminal.schemas import (
     TERMINAL_SESSION_FINAL_STATUSES,
@@ -17,6 +19,7 @@ from app.core.terminal.schemas import (
     generate_terminal_session_id,
     validate_terminal_status_transition,
 )
+from app.models.session import ChatSession
 from app.models.terminal_session import (
     TerminalControlCommand,
     TerminalControlCommandStatus,
@@ -26,6 +29,50 @@ from app.providers.database.time import get_database_time, get_database_timestam
 
 
 class CRUDTerminalSession:
+    async def lock_session(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        *,
+        worker_id: str | None = None,
+    ) -> TerminalSession | None:
+        conditions = [TerminalSession.terminal_session_id == terminal_session_id]
+        if worker_id is not None:
+            conditions.append(TerminalSession.locked_by == worker_id)
+        result = await db.execute(update(TerminalSession).where(*conditions).values(next_output_offset=TerminalSession.next_output_offset).execution_options(synchronize_session=False))
+        if result.rowcount != 1:
+            return None
+        result = await db.execute(select(TerminalSession).where(*conditions).with_for_update().execution_options(populate_existing=True))
+        return result.scalars().first()
+
+    async def list_inactive_chat_sessions(self, db: AsyncSession, *, before: datetime) -> list[ChatSession]:
+        last_active = func.coalesce(ChatSession.last_message_at, ChatSession.created_at)
+        terminal_session_exists = exists(
+            select(TerminalSession.terminal_session_id).where(
+                TerminalSession.session_id == ChatSession.session_id,
+                TerminalSession.uid == ChatSession.uid,
+            )
+        )
+        result = await db.execute(select(ChatSession).where(terminal_session_exists, last_active < before))
+        return list(result.scalars().all())
+
+    async def lock_chat_session(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        inactive_before: datetime | None = None,
+    ) -> ChatSession | None:
+        conditions = [ChatSession.uid == uid, ChatSession.session_id == session_id]
+        if inactive_before is not None:
+            conditions.append(func.coalesce(ChatSession.last_message_at, ChatSession.created_at) < inactive_before)
+        result = await db.execute(update(ChatSession).where(*conditions).values(last_message_at=ChatSession.last_message_at).execution_options(synchronize_session=False))
+        if result.rowcount != 1:
+            return None
+        result = await db.execute(select(ChatSession).where(*conditions).with_for_update().execution_options(populate_existing=True))
+        return result.scalars().first()
+
     async def get(self, db: AsyncSession, terminal_session_id: str) -> TerminalSession | None:
         result = await db.execute(select(TerminalSession).where(TerminalSession.terminal_session_id == terminal_session_id).execution_options(populate_existing=True))
         return result.scalars().first()
@@ -54,13 +101,15 @@ class CRUDTerminalSession:
         session_id: str,
         uid: str,
         commit: bool = True,
+        terminal_session_ids: list[str] | None = None,
     ) -> int:
-        session_ids_result = await db.execute(
-            select(TerminalSession.terminal_session_id).where(
-                TerminalSession.session_id == session_id,
-                TerminalSession.uid == uid,
-            )
-        )
+        session_filters = [
+            TerminalSession.session_id == session_id,
+            TerminalSession.uid == uid,
+        ]
+        if terminal_session_ids is not None:
+            session_filters.append(TerminalSession.terminal_session_id.in_(terminal_session_ids))
+        session_ids_result = await db.execute(select(TerminalSession.terminal_session_id).where(*session_filters))
         terminal_session_ids = list(session_ids_result.scalars().all())
         if not terminal_session_ids:
             return 0
@@ -75,6 +124,26 @@ class CRUDTerminalSession:
             )
             .execution_options(synchronize_session=False)
         )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return result.rowcount or 0
+
+    async def delete_session(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        *,
+        worker_id: str | None = None,
+        commit: bool = True,
+    ) -> int:
+        locked_session = await self.lock_session(db, terminal_session_id, worker_id=worker_id)
+        if locked_session is None:
+            return 0
+
+        await db.execute(delete(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id == locked_session.terminal_session_id).execution_options(synchronize_session=False))
+        result = await db.execute(delete(TerminalSession).where(TerminalSession.terminal_session_id == locked_session.terminal_session_id).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         else:
@@ -152,6 +221,8 @@ class CRUDTerminalSession:
         commit: bool = True,
     ) -> TerminalSession:
         await ensure_session_reply_work_claim(db)
+        if await self.lock_chat_session(db, uid=uid, session_id=session_id) is None:
+            raise ResourceNotFoundException(ERR_SESSION_NOT_FOUND)
         normalized_allowed_actions = sorted({TerminalAction(action).value for action in allowed_actions})
         terminal_session = TerminalSession(
             terminal_session_id=terminal_session_id if terminal_session_id is not None else generate_terminal_session_id(),
@@ -573,6 +644,8 @@ class CRUDTerminalControlCommand:
         action: TerminalAction,
         payload: dict[str, Any],
         payload_hash: str,
+        *,
+        commit: bool = True,
     ) -> tuple[TerminalControlCommand, bool]:
         existing = await self.get_by_session_request(db, terminal_session_id, request_id)
         if existing is not None:
@@ -588,7 +661,10 @@ class CRUDTerminalControlCommand:
         )
         db.add(command)
         try:
-            await db.commit()
+            if commit:
+                await db.commit()
+            else:
+                await db.flush()
         except IntegrityError:
             await db.rollback()
             existing = await self.get_by_session_request(db, terminal_session_id, request_id)
@@ -728,6 +804,8 @@ class CRUDTerminalControlCommand:
         command_id: int,
         worker_id: str,
         result: dict[str, Any],
+        *,
+        commit: bool = True,
     ) -> bool:
         now = await get_database_timestamp(db)
         finished_at = await get_database_time(db)
@@ -752,7 +830,10 @@ class CRUDTerminalControlCommand:
             )
             .execution_options(synchronize_session=False)
         )
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         return update_result.rowcount == 1
 
     async def mark_failed(

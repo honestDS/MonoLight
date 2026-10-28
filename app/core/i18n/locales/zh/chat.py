@@ -3,6 +3,7 @@ MESSAGES = {
     "MSG_SESSION_TODO_SUCCESS": "会话任务清单获取成功",
     "MSG_SESSION_GUIDANCE_CREATED": "引导消息已添加",
     "ERR_SESSION_NOT_FOUND": "会话未找到或已删除",
+    "ERR_SESSION_DELETE_FAILED": "会话删除失败，终端资源未能全部关闭，会话已保留",
     "MSG_SESSION_CLEARED": "已成功清理会话 {session_id} 的全部历史记录",
     "ERR_SESSION_NO_PERMISSION": "无权操作此会话",
     "ERR_SESSION_GUIDANCE_EXTERNAL_ONLY": "只有外部消息平台会话可添加引导",

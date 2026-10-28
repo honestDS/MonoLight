@@ -135,6 +135,106 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 return task
         return None
 
+    async def list_terminal_watches(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        terminal_session_id: str,
+    ) -> list[BackgroundTask]:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                BackgroundTask.arguments["terminal_session_id"].as_string() == terminal_session_id,
+            )
+            .order_by(BackgroundTask.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    async def get_terminal_command_result(
+        self,
+        db: AsyncSession,
+        *,
+        terminal_session_id: str,
+        command_id: int,
+    ) -> dict[str, Any] | None:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                BackgroundTask.status == BackgroundTaskStatus.SUCCEEDED,
+                BackgroundTask.extra["auto_terminal_watch"].as_boolean().is_(True),
+                BackgroundTask.arguments["terminal_session_id"].as_string() == terminal_session_id,
+            )
+            .order_by(BackgroundTask.id.desc())
+            .execution_options(populate_existing=True)
+        )
+        command_key = str(command_id)
+        for task in result.scalars():
+            extra = task.extra if isinstance(task.extra, dict) else {}
+            command_results = extra.get("terminal_command_results")
+            if not isinstance(command_results, dict):
+                continue
+            command_result = command_results.get(command_key)
+            if isinstance(command_result, dict) and command_result:
+                return command_result
+        return None
+
+    async def cancel_terminal_watches(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        terminal_session_id: str,
+    ) -> None:
+        terminal_conditions = (
+            BackgroundTask.uid == uid,
+            BackgroundTask.session_id == session_id,
+            BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+            BackgroundTask.arguments["terminal_session_id"].as_string() == terminal_session_id,
+        )
+        await db.execute(
+            update(BackgroundTask)
+            .where(
+                *terminal_conditions,
+                BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
+            )
+            .values(
+                status=BackgroundTaskStatus.CANCELLED,
+                auto_reply=False,
+                reply_status=BackgroundTaskReplyStatus.NONE,
+                finished_at=get_local_time(),
+                locked_by=None,
+                lock_until=None,
+                reply_locked_by=None,
+                reply_lock_until=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.execute(
+            update(BackgroundTask)
+            .where(
+                *terminal_conditions,
+                BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED]),
+                BackgroundTask.auto_reply.is_(True),
+                BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
+            )
+            .values(
+                auto_reply=False,
+                reply_status=BackgroundTaskReplyStatus.NONE,
+                reply_locked_by=None,
+                reply_lock_until=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.flush()
+
     async def lock_terminal_watch(
         self,
         db: AsyncSession,

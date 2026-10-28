@@ -30,6 +30,7 @@ from app.core.constants import (
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
+from app.core.exceptions import ResourceNotFoundException
 from app.core.prompts import (
     BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT,
     TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT,
@@ -1777,6 +1778,8 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
     }
     provider_payloads: list[dict] = []
     terminal_wait_calls: list[tuple[int, float]] = []
+    resources_released = False
+    original_get_owned_session = terminal_tool_module.terminal_session_manager.get_owned_session
     tool_rounds = [
         (MANAGE_TODO_TOOL_NAME, {"operation": "read"}, "chain-todo-read"),
         (
@@ -1867,7 +1870,13 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
         assert request_number == len(tool_rounds)
         return provider_response(request_number)
 
-    async def fake_wait_for_command_result(db, command_id: int, timeout_seconds: float) -> dict:
+    async def fake_wait_for_command_result(
+        db,
+        command_id: int,
+        timeout_seconds: float,
+        terminal_session_id: str | None = None,
+    ) -> dict:
+        nonlocal resources_released
         terminal_wait_calls.append((command_id, timeout_seconds))
         command = await db.get(TerminalControlCommand, command_id)
         assert command is not None
@@ -1877,8 +1886,19 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
         assert terminal_session is not None
         assert terminal_session.status is TerminalSessionStatus.RUNNING
         now = get_local_time()
+        next_offset = terminal_session.next_output_offset
+        close_result = {
+            "status": TerminalSessionStatus.EXITED.value,
+            "exit_code": 0,
+            "failure_reason": None,
+            "output": "",
+            "start_offset": next_offset,
+            "next_offset": next_offset,
+            "latest_offset": next_offset,
+            "output_truncated": next_offset > 0,
+        }
         command.status = TerminalControlCommandStatus.SUCCEEDED
-        command.result = {"status": TerminalSessionStatus.EXITED.value, "exit_code": 0}
+        command.result = close_result
         command.updated_at = now
         command.finished_at = now
         terminal_session.status = TerminalSessionStatus.EXITED
@@ -1887,7 +1907,16 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
         terminal_session.finished_at = now
         db.add_all([command, terminal_session])
         await db.commit()
-        return dict(command.result)
+        resources_released = True
+        return {
+            **close_result,
+            "_terminal_snapshot": terminal_tool_module.terminal_session_manager._build_terminal_snapshot(terminal_session).model_dump(mode="json"),
+        }
+
+    async def fake_get_owned_session(db, requested_terminal_session_id, uid, session_id, *, lock: bool = False):
+        if resources_released and requested_terminal_session_id == terminal_session_id:
+            raise ResourceNotFoundException()
+        return await original_get_owned_session(db, requested_terminal_session_id, uid, session_id, lock=lock)
 
     async with database_factory(
         foreign_keys=True,
@@ -1994,6 +2023,7 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
         monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
         monkeypatch.setattr(OpenAIChatCompletionsTransformer if protocol == "OPENAI" else OpenAIResponsesTransformer, "_post_json", fake_post_json)
         monkeypatch.setattr(terminal_tool_module.terminal_session_manager, "wait_for_command_result", fake_wait_for_command_result)
+        monkeypatch.setattr(terminal_tool_module.terminal_session_manager, "get_owned_session", fake_get_owned_session)
 
         async def noop_transport(*_args, **_kwargs) -> None:
             return None
@@ -2248,7 +2278,16 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             assert len(commands) == 1
             assert TerminalAction(commands[0].action) is TerminalAction.CLOSE
             assert commands[0].status == TerminalControlCommandStatus.SUCCEEDED
-            assert commands[0].result == {"status": "exited", "exit_code": 0}
+            assert commands[0].result == {
+                "status": TerminalSessionStatus.EXITED.value,
+                "exit_code": 0,
+                "failure_reason": None,
+                "output": "",
+                "start_offset": 0,
+                "next_offset": 0,
+                "latest_offset": 0,
+                "output_truncated": False,
+            }
 
             persisted_messages = list((await db.execute(select(Message).where(Message.session_id == SESSION_ID).order_by(Message.id))).scalars().all())
             tool_call_messages = [message for message in persisted_messages if message.type == MessageType.TOOL_CALL]

@@ -1,8 +1,10 @@
 import asyncio
 import copy
 import json
+from collections.abc import AsyncGenerator
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.util import await_only
@@ -29,22 +31,45 @@ from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
+    SessionReplySequence,
     SessionReplySourceType,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
 from app.models.session_todo import SessionTodoPlan
+from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.models.user import User
 from app.providers.database.client import CancellationSafeAsyncSession
 from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransformer
 from tests.integration.session_reply_queue_fixture import concurrent_session_factory as _concurrent_session_factory
-from tests.integration.session_reply_queue_fixture import db_session as _db_session
 from tests.integration.session_reply_queue_test_support import AsyncBarrier, enqueue
 from tests.integration.stream_event_test_support import dispatcher_stream_event
 from tests.unit.response_test_support import llm_response_payload
 
-db_session = _db_session
+
+@pytest_asyncio.fixture
+async def db_session(database_factory) -> AsyncGenerator[AsyncSession]:
+    async with database_factory(
+        tables=[
+            Profile.__table__,
+            Message.__table__,
+            ChatSession.__table__,
+            SessionTodoPlan.__table__,
+            BackgroundTask.__table__,
+            SessionReplySequence.__table__,
+            SessionReplyWorkItem.__table__,
+            SessionReplyStreamEvent.__table__,
+            TerminalSession.__table__,
+            TerminalControlCommand.__table__,
+        ],
+    ) as session_factory:
+        async with session_factory() as session:
+            session.add(Profile(id=1, uid="user-1", name="queue-test", configs={}))
+            await session.commit()
+            yield session
+
+
 concurrent_session_factory = _concurrent_session_factory
 
 

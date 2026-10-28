@@ -2,12 +2,14 @@ import asyncio
 import copy
 import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
+import app.core.terminal.audit_lifecycle as terminal_audit_lifecycle_module
 import app.core.terminal.watcher as watcher_module
 from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.background_tasks import reply_trigger as reply_trigger_module
@@ -37,8 +39,11 @@ from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus, TerminalWriteRequest
 from app.core.tools.terminal import TerminalReadExecutor
 from app.core.tools.terminal_watch import ensure_terminal_auto_watch
+from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.dispatcher.external_work import build_terminal_wait_response
+from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
+from app.core.utils.dispatcher.terminal_watch_snapshot import append_terminal_watch_snapshot, load_current_terminal_watch_snapshot
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
@@ -84,6 +89,7 @@ async def terminal_auto_watch_database(database_factory) -> AsyncIterator[async_
                         working_directory="/tmp/terminal-auto-watch",
                         status=TerminalSessionStatus.RUNNING,
                         allowed_actions=[action.value for action in TerminalAction],
+                        process_identity={"pid": 1},
                     ),
                     TerminalSession(
                         terminal_session_id=SECOND_TERMINAL_SESSION_ID,
@@ -95,6 +101,7 @@ async def terminal_auto_watch_database(database_factory) -> AsyncIterator[async_
                         working_directory="/tmp/terminal-auto-watch-second",
                         status=TerminalSessionStatus.RUNNING,
                         allowed_actions=[action.value for action in TerminalAction],
+                        process_identity={"pid": 2},
                     ),
                 ]
             )
@@ -364,6 +371,154 @@ async def test_terminal_auto_watch_registration_preserves_session_reply_work_ori
         assert persisted_work is not None
         assert persisted_work.status == SessionReplyWorkStatus.RUNNING
         assert persisted_work.locked_by == worker_id
+
+
+@pytest.mark.asyncio
+async def test_terminal_auto_watch_background_survives_snapshot_and_renewal(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+) -> None:
+    request_content = "Run the terminal command and keep watching it."
+    later_request_content = "A later unrelated request must not replace the terminal context."
+    purpose = "Keep watching this terminal until the process exits."
+    expected_snapshot_open = "<current_terminal_watch_snapshot>"
+    expected_snapshot_close = "</current_terminal_watch_snapshot>"
+
+    async with terminal_auto_watch_database() as db:
+        request_message = await save_message(
+            db,
+            SESSION_ID,
+            UID,
+            MessageRole.USER,
+            MessageType.TEXT,
+            InternalMessage.from_user_input(content=request_content),
+            PROFILE_ID,
+        )
+        assert request_message.id is not None
+
+        assistant_message = await save_message(
+            db,
+            SESSION_ID,
+            UID,
+            MessageRole.ASSISTANT,
+            MessageType.TOOL_CALL,
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content=purpose,
+                tool_calls=[
+                    InternalToolCall(
+                        id="initial-terminal-watch-call",
+                        name=SHELL_TOOL_NAME,
+                        arguments={"command": "test-terminal-command", "execution_mode": "interactive"},
+                    )
+                ],
+            ),
+            PROFILE_ID,
+        )
+        assert assistant_message.id is not None
+
+        worker_id = "terminal-auto-watch-background-worker"
+        work = await _create_claimed_reply_work(db, worker_id=worker_id)
+        work.input_message_ids = [request_message.id]
+        db.add(work)
+        await db.flush()
+        assert work.input_message_ids == [request_message.id]
+
+        task = await ensure_terminal_auto_watch(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            terminal_session_id=TERMINAL_SESSION_ID,
+            after_offset=0,
+            session_status=TerminalSessionStatus.RUNNING,
+        )
+        assert task is not None
+        assert task.id is not None
+        expected_request_context = [{"id": request_message.id, "role": MessageRole.USER.value, "content": request_content}]
+        assert task.extra["request_context"] == expected_request_context
+        assert task.extra["purpose"] == purpose
+
+        snapshot = await load_current_terminal_watch_snapshot(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+        )
+        assert snapshot is not None
+        snapshot_payload = json.loads(snapshot[len(expected_snapshot_open) : -len(expected_snapshot_close)])
+        terminal = next(item for item in snapshot_payload["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
+        assert terminal["terminal_session_id"] == TERMINAL_SESSION_ID
+        assert terminal["status"] == TerminalSessionStatus.RUNNING.value
+        assert terminal["command"] == "test-terminal-command"
+        assert terminal["working_directory"] == "/tmp/terminal-auto-watch"
+        assert terminal["next_output_offset"] == 0
+        assert terminal["request_context"] == expected_request_context
+        assert terminal["purpose"] == purpose
+
+        claimed_task = await background_task_crud.try_claim(
+            db,
+            task_id=task.id,
+            worker_id=worker_id,
+            lease_seconds=300,
+        )
+        assert claimed_task is not None
+
+        later_request = await save_message(
+            db,
+            SESSION_ID,
+            UID,
+            MessageRole.USER,
+            MessageType.TEXT,
+            InternalMessage.from_user_input(content=later_request_content),
+            PROFILE_ID,
+        )
+        assert later_request.id is not None
+
+        assert await complete_terminal_watch_round(
+            db,
+            task=claimed_task,
+            worker_id=worker_id,
+            content={"event": "timeout", "output": "", "next_offset": 37, "eof": False},
+        )
+
+        tasks = await _terminal_watch_tasks(db)
+        assert len(tasks) == 2
+        next_task = next(candidate for candidate in tasks if candidate.id != task.id)
+        assert next_task.arguments["after_offset"] == 37
+        assert next_task.extra["request_context"] == expected_request_context
+        assert next_task.extra["purpose"] == purpose
+        assert later_request.id not in [item["id"] for item in next_task.extra["request_context"]]
+        assert later_request_content not in json.dumps(next_task.extra, ensure_ascii=False)
+
+        renewed_snapshot = await load_current_terminal_watch_snapshot(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+        )
+        assert renewed_snapshot is not None
+        renewed_payload = json.loads(renewed_snapshot[len(expected_snapshot_open) : -len(expected_snapshot_close)])
+        renewed_terminal = next(item for item in renewed_payload["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
+        assert renewed_terminal["request_context"] == expected_request_context
+        assert renewed_terminal["purpose"] == purpose
+        assert later_request_content not in json.dumps(renewed_terminal, ensure_ascii=False)
+
+        summary_base = '<conversation_summary id="terminal-background-summary">compressed history</conversation_summary>'
+        summary_message = InternalMessage(role=MessageRole.ASSISTANT, content=summary_base)
+        original_request_snapshot = request_message.model_dump(mode="json")
+        compressed_messages = append_terminal_watch_snapshot([request_message, summary_message], renewed_snapshot)
+        assert is_context_summary_message(summary_message)
+        assert is_context_summary_message(compressed_messages[1])
+        assert compressed_messages[0].content == request_content
+        assert request_message.model_dump(mode="json") == original_request_snapshot
+        assert summary_message.content == summary_base
+        assert compressed_messages[1].content == f"{summary_base}\n\n{renewed_snapshot}"
+
+        compressed_snapshot = compressed_messages[1].content[len(summary_base) + 2 :]
+        compressed_payload = json.loads(compressed_snapshot[len(expected_snapshot_open) : -len(expected_snapshot_close)])
+        compressed_terminal = next(item for item in compressed_payload["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
+        assert compressed_terminal["request_context"] == expected_request_context
+        assert compressed_terminal["purpose"] == purpose
 
 
 @pytest.mark.asyncio
@@ -2283,6 +2438,8 @@ async def test_terminal_auto_watch_renews_after_timeout_and_stops_at_eof(
             "source": "terminal_auto_watch",
             "auto_terminal_watch": True,
             "terminal_session_id": TERMINAL_SESSION_ID,
+            "request_context": [],
+            "purpose": None,
         }
         assert "observation_started_at" not in next_task.extra
         assert next_task.created_at != task.created_at
@@ -2663,7 +2820,7 @@ async def test_terminal_auto_watch_final_terminal_events_do_not_renew(
 
 
 @pytest.mark.asyncio
-async def test_terminal_auto_watch_stop_between_summary_delivery_and_renewal_preserves_terminal_session(
+async def test_terminal_auto_watch_stop_between_summary_delivery_and_renewal_deletes_terminal_session_and_control_command_index(
     terminal_auto_watch_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2742,6 +2899,9 @@ async def test_terminal_auto_watch_stop_between_summary_delivery_and_renewal_pre
         event_reached.set()
         await release_event.wait()
 
+    async def cleanup_terminal_process_identity(_process_identity: dict | None) -> SimpleNamespace:
+        return SimpleNamespace(errors=())
+
     monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", terminal_auto_watch_database)
     monkeypatch.setattr(executor_lifecycle_module, "send_session_event", controlled_send_session_event)
 
@@ -2749,6 +2909,11 @@ async def test_terminal_auto_watch_stop_between_summary_delivery_and_renewal_pre
     try:
         await asyncio.wait_for(event_reached.wait(), timeout=2)
         async with terminal_auto_watch_database() as stop_db:
+            monkeypatch.setattr(
+                terminal_audit_lifecycle_module,
+                "cleanup_terminal_process_identity",
+                cleanup_terminal_process_identity,
+            )
             assert await stop_interactive_reply(stop_db, uid=UID, session_id=SESSION_ID) == 1
         release_event.set()
         await asyncio.wait_for(execution_task, timeout=2)
@@ -2762,6 +2927,17 @@ async def test_terminal_auto_watch_stop_between_summary_delivery_and_renewal_pre
         work = await db.get(SessionReplyWorkItem, work_id)
         task = await db.get(BackgroundTask, task_id)
         terminal_session = await db.get(TerminalSession, TERMINAL_SESSION_ID)
+        control_commands = list(
+            (
+                await db.execute(
+                    select(TerminalControlCommand).where(
+                        TerminalControlCommand.terminal_session_id == TERMINAL_SESSION_ID,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
         close_commands = list(
             (
                 await db.execute(
@@ -2785,8 +2961,8 @@ async def test_terminal_auto_watch_stop_between_summary_delivery_and_renewal_pre
     assert task.reply_status == BackgroundTaskReplyStatus.NONE
     assert task.extra.get("next_auto_watch_task_id") is None
     assert [item.id for item in tasks] == [task_id]
-    assert terminal_session is not None
-    assert terminal_session.status == TerminalSessionStatus.RUNNING
+    assert terminal_session is None
+    assert control_commands == []
     assert close_commands == []
 
     async with terminal_auto_watch_database() as stop_db:
