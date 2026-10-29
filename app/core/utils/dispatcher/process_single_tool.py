@@ -16,6 +16,9 @@ from sqlalchemy.ext.asyncio import (
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_BACKGROUND_TASK_UNSUPPORTED,
+    ERR_TERMINAL_PTY_DIMENSIONS_INVALID,
+    ERR_TERMINAL_PTY_INPUT_INVALID,
+    ERR_TERMINAL_TOOL_OPERATION_INVALID,
     ERR_TOOL_ARGUMENT_SCHEMA_INVALID,
     ERR_TOOL_EXECUTION_TIMEOUT,
     ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
@@ -25,6 +28,8 @@ from app.core.constants import (
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
     SHELL_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
+    TERMINAL_TOOL_OPERATIONS,
     TERMINAL_WATCH_TOOL_NAME,
     TOOL_TIMEOUT_EXCLUDED_TOOL_NAMES,
 )
@@ -282,6 +287,21 @@ def _validate_terminal_watch_arguments(args: dict[str, Any]) -> list[str]:
     return []
 
 
+def _validate_terminal_tool_arguments(args: dict[str, Any]) -> list[str]:
+    operation = args.get("operation")
+    if operation not in TERMINAL_TOOL_OPERATIONS:
+        return [t(ERR_TERMINAL_TOOL_OPERATION_INVALID, operation=operation)]
+    if operation == "write":
+        if "data" not in args or not isinstance(args["data"], str) or not args["data"]:
+            return [t(ERR_TERMINAL_PTY_INPUT_INVALID, field="data")]
+    elif operation == "resize":
+        columns = args.get("columns")
+        rows = args.get("rows")
+        if columns is None or not isinstance(columns, int) or isinstance(columns, bool) or columns < 1 or columns > 1000 or rows is None or not isinstance(rows, int) or isinstance(rows, bool) or rows < 1 or rows > 1000:
+            return [t(ERR_TERMINAL_PTY_DIMENSIONS_INVALID)]
+    return []
+
+
 def prevalidate_tool_round_protocol(
     tool_calls: list[Any],
     cfg: ProfileConfig,
@@ -342,6 +362,8 @@ def prevalidate_tool_round(
             errors[tool_call.id] = _build_schema_validation_result(tool_name, schema_errors)
         elif tool_name == TERMINAL_WATCH_TOOL_NAME and (schema_errors := _validate_terminal_watch_arguments(args)):
             errors[tool_call.id] = _build_schema_validation_result(tool_name, schema_errors)
+        elif tool_name == TERMINAL_TOOL_NAME and (schema_errors := _validate_terminal_tool_arguments(args)):
+            errors[tool_call.id] = _build_schema_validation_result(tool_name, schema_errors)
         elif tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
             _, validation_error = validate_longterm_memory_arguments(args)
             if validation_error:
@@ -396,6 +418,8 @@ async def process_single_tool(
     elif unsupported_arguments:
         tool_result = _build_unsupported_arguments_result(tool_name, unsupported_arguments)
     elif tool_name == TERMINAL_WATCH_TOOL_NAME and (schema_errors := _validate_terminal_watch_arguments(args)):
+        tool_result = _build_schema_validation_result(tool_name, schema_errors)
+    elif tool_name == TERMINAL_TOOL_NAME and (schema_errors := _validate_terminal_tool_arguments(args)):
         tool_result = _build_schema_validation_result(tool_name, schema_errors)
     elif run_in_background and not allow_background_submission:
         tool_result = _build_background_task_unsupported_result(tool_name)

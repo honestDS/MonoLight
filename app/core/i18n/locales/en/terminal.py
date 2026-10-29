@@ -1,4 +1,5 @@
 MESSAGES = {
+    "ERR_TERMINAL_TOOL_OPERATION_INVALID": "Invalid terminal tool operation: {operation}",
     "ERR_TERMINAL_STATUS_TARGET_INVALID": "Invalid terminal session target status: {target}",
     "ERR_TERMINAL_STATUS_TRANSITION_INVALID": "Invalid terminal session status transition: {current} -> {target}",
     "ERR_TERMINAL_WATCH_CONDITION_INVALID": "Invalid terminal watch condition: {detail}",

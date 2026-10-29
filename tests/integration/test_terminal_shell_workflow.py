@@ -38,12 +38,7 @@ from app.core.terminal import (
 )
 from app.core.terminal.manager import TerminalWorkerCoordinator, terminal_session_manager
 from app.core.tools.shell import ShellExecutor
-from app.core.tools.terminal import (
-    TerminalCloseExecutor,
-    TerminalReadExecutor,
-    TerminalResizeExecutor,
-    TerminalWriteExecutor,
-)
+from app.core.tools.terminal import TerminalToolExecutor
 from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole
@@ -218,31 +213,48 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
 
         async with AsyncSessionLocal() as db:
             status_executor = _configure_executor(
-                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id="shell-workflow-status-tool-call",
             )
-            status_result = TerminalSessionSnapshot.model_validate(json.loads(await status_executor.execute(handoff.terminal_session_id, read_output=False)))
+            status_result = TerminalSessionSnapshot.model_validate(
+                json.loads(
+                    await status_executor.execute(
+                        "read",
+                        terminal_session_id=handoff.terminal_session_id,
+                        read_output=False,
+                    )
+                )
+            )
         assert status_result.status is TerminalSessionStatus.RUNNING
 
         async with AsyncSessionLocal() as db:
             resize_executor = _configure_executor(
-                TerminalResizeExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id="shell-workflow-resize-tool-call",
             )
-            resize_result = TerminalActionReceipt.model_validate(json.loads(await resize_executor.execute(handoff.terminal_session_id, columns=100, rows=40)))
+            resize_result = TerminalActionReceipt.model_validate(
+                json.loads(
+                    await resize_executor.execute(
+                        "resize",
+                        terminal_session_id=handoff.terminal_session_id,
+                        columns=100,
+                        rows=40,
+                    )
+                )
+            )
         assert resize_result.action is TerminalAction.RESIZE
         assert resize_result.session_status is TerminalSessionStatus.RUNNING
 
         write_data = "TERMINAL_WORKFLOW_INPUT\n"
         async with AsyncSessionLocal() as db:
             write_executor = _configure_executor(
-                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -251,7 +263,8 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
             write_result = TerminalWriteResult.model_validate(
                 json.loads(
                     await write_executor.execute(
-                        handoff.terminal_session_id,
+                        "write",
+                        terminal_session_id=handoff.terminal_session_id,
                         data=write_data,
                     )
                 )
@@ -286,7 +299,7 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
             read_attempt += 1
             async with AsyncSessionLocal() as db:
                 read_executor = _configure_executor(
-                    TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                    TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                     db,
                     uid=uid,
                     session_id=session_id,
@@ -294,7 +307,8 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
                 )
                 return _parse_read_result(
                     await read_executor.execute(
-                        handoff.terminal_session_id,
+                        "read",
+                        terminal_session_id=handoff.terminal_session_id,
                         offset=write_result.read_offset,
                         max_bytes=16_384,
                     )
@@ -309,13 +323,19 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
 
         async with AsyncSessionLocal() as db:
             close_executor = _configure_executor(
-                TerminalCloseExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id="shell-workflow-close-tool-call",
             )
-            close_result = json.loads(await close_executor.execute(handoff.terminal_session_id, force=True))
+            close_result = json.loads(
+                await close_executor.execute(
+                    "close",
+                    terminal_session_id=handoff.terminal_session_id,
+                    force=True,
+                )
+            )
         assert close_result["action"] == TerminalAction.CLOSE.value
         assert close_result["terminal_session_id"] == handoff.terminal_session_id
         assert close_result["session_status"] == TerminalSessionStatus.EXITED.value
@@ -353,7 +373,7 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
 
         async with AsyncSessionLocal() as db:
             read_after_close = _configure_executor(
-                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -361,20 +381,25 @@ async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path)
             )
             with pytest.raises(ResourceNotFoundException):
                 await read_after_close.execute(
-                    handoff.terminal_session_id,
+                    "read",
+                    terminal_session_id=handoff.terminal_session_id,
                     offset=0,
                     max_bytes=16_384,
                 )
 
             close_after_close = _configure_executor(
-                TerminalCloseExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id="shell-workflow-close-after-close",
             )
             with pytest.raises(ResourceNotFoundException):
-                await close_after_close.execute(handoff.terminal_session_id, force=True)
+                await close_after_close.execute(
+                    "close",
+                    terminal_session_id=handoff.terminal_session_id,
+                    force=True,
+                )
     finally:
         await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)
 
@@ -562,13 +587,19 @@ async def test_terminal_read_requires_ai_selected_pagination(tmp_path):
         async def read_page(tool_call_id: str, **kwargs):
             async with AsyncSessionLocal() as db:
                 read_executor = _configure_executor(
-                    TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                    TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                     db,
                     uid=uid,
                     session_id=session_id,
                     tool_call_id=tool_call_id,
                 )
-                payload = json.loads(await read_executor.execute(handoff.terminal_session_id, **kwargs))
+                payload = json.loads(
+                    await read_executor.execute(
+                        "read",
+                        terminal_session_id=handoff.terminal_session_id,
+                        **kwargs,
+                    )
+                )
             return payload, TerminalReadResult.model_validate({field: payload[field] for field in TerminalReadResult.model_fields})
 
         async def persisted_commands():
@@ -666,14 +697,18 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             write_executor = _configure_executor(
-                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
             )
             write_executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 0.05}}))
-            unknown_content = await write_executor.execute(handoff.terminal_session_id, data=write_data)
+            unknown_content = await write_executor.execute(
+                "write",
+                terminal_session_id=handoff.terminal_session_id,
+                data=write_data,
+            )
 
         unknown_result = json.loads(unknown_content)
         assert set(unknown_result) == {
@@ -685,7 +720,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
             "error",
         }
         assert unknown_result["status"] == "execution_unknown"
-        assert unknown_result["tool_name"] == "terminal_write"
+        assert unknown_result["tool_name"] == "terminal_tool"
         assert unknown_result["terminal_session_id"] == handoff.terminal_session_id
         assert unknown_result["error_code"] == ERR_TERMINAL_COMMAND_TIMEOUT
         assert isinstance(unknown_result["error"], str) and unknown_result["error"]
@@ -698,7 +733,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             pending_status_executor = _configure_executor(
-                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -706,7 +741,8 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
             )
             pending_status = json.loads(
                 await pending_status_executor.execute(
-                    handoff.terminal_session_id,
+                    "read",
+                    terminal_session_id=handoff.terminal_session_id,
                     request_id=unknown_result["request_id"],
                     read_output=False,
                 )
@@ -742,7 +778,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             pending_retry_executor = _configure_executor(
-                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -750,7 +786,8 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
             )
             pending_retry_executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 0.05}}))
             pending_retry_content = await pending_retry_executor.execute(
-                handoff.terminal_session_id,
+                "write",
+                terminal_session_id=handoff.terminal_session_id,
                 data=write_data,
                 request_id=unknown_result["request_id"],
             )
@@ -790,7 +827,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             completed_status_executor = _configure_executor(
-                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -798,7 +835,8 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
             )
             completed_status = json.loads(
                 await completed_status_executor.execute(
-                    handoff.terminal_session_id,
+                    "read",
+                    terminal_session_id=handoff.terminal_session_id,
                     request_id=unknown_result["request_id"],
                     read_output=False,
                 )
@@ -811,7 +849,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             replay_executor = _configure_executor(
-                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -820,7 +858,8 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
             replay_result = TerminalWriteResult.model_validate(
                 json.loads(
                     await replay_executor.execute(
-                        handoff.terminal_session_id,
+                        "write",
+                        terminal_session_id=handoff.terminal_session_id,
                         data=write_data,
                         request_id=unknown_result["request_id"],
                     )
@@ -834,7 +873,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             conflict_executor = _configure_executor(
-                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -842,7 +881,8 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
             )
             with pytest.raises(ParameterException) as conflict_error:
                 await conflict_executor.execute(
-                    handoff.terminal_session_id,
+                    "write",
+                    terminal_session_id=handoff.terminal_session_id,
                     data="different input\n",
                     request_id=unknown_result["request_id"],
                 )
@@ -869,7 +909,7 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
 
         async with AsyncSessionLocal() as db:
             fresh_write_executor = _configure_executor(
-                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -878,7 +918,8 @@ async def test_terminal_write_timeout_preserves_pending_command_for_idempotent_c
             fresh_write = TerminalWriteResult.model_validate(
                 json.loads(
                     await fresh_write_executor.execute(
-                        handoff.terminal_session_id,
+                        "write",
+                        terminal_session_id=handoff.terminal_session_id,
                         data=write_data,
                     )
                 )
@@ -1053,7 +1094,7 @@ async def test_stop_interactive_reply_deletes_real_terminal_and_releases_runtime
             read_attempt += 1
             async with AsyncSessionLocal() as db:
                 read_executor = _configure_executor(
-                    TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                    TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                     db,
                     uid=uid,
                     session_id=session_id,
@@ -1061,7 +1102,8 @@ async def test_stop_interactive_reply_deletes_real_terminal_and_releases_runtime
                 )
                 return _parse_read_result(
                     await read_executor.execute(
-                        terminal_session_id,
+                        "read",
+                        terminal_session_id=terminal_session_id,
                         offset=0,
                         max_bytes=16_384,
                     )
@@ -1107,14 +1149,18 @@ async def test_stop_interactive_reply_deletes_real_terminal_and_releases_runtime
             )
 
             read_after_stop = _configure_executor(
-                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id=f"shell-stop-{terminal_state}-read-after-stop",
             )
             with pytest.raises(ResourceNotFoundException):
-                await read_after_stop.execute(terminal_session_id, read_output=False)
+                await read_after_stop.execute(
+                    "read",
+                    terminal_session_id=terminal_session_id,
+                    read_output=False,
+                )
 
         root_process = None
         try:
@@ -1201,13 +1247,21 @@ async def test_terminal_natural_exit_persists_final_output_and_releases_runtime(
 
         async with AsyncSessionLocal() as db:
             write_executor = _configure_executor(
-                TerminalWriteExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id=f"shell-natural-exit-{exit_code}-write-tool-call",
             )
-            write_result = TerminalWriteResult.model_validate(json.loads(await write_executor.execute(terminal_session_id, data="\n")))
+            write_result = TerminalWriteResult.model_validate(
+                json.loads(
+                    await write_executor.execute(
+                        "write",
+                        terminal_session_id=terminal_session_id,
+                        data="\n",
+                    )
+                )
+            )
         assert write_result.bytes_written == 1
 
         async def final_result():
@@ -1261,13 +1315,17 @@ async def test_terminal_natural_exit_persists_final_output_and_releases_runtime(
             assert await db.get(TerminalSession, terminal_session_id) is None
             assert await terminal_control_command_crud.list_by_session(db, terminal_session_id) == []
             read_after_exit = _configure_executor(
-                TerminalReadExecutor(project_root=os.getcwd(), uid=uid),
+                TerminalToolExecutor(project_root=os.getcwd(), uid=uid),
                 db,
                 uid=uid,
                 session_id=session_id,
                 tool_call_id=f"shell-natural-exit-{exit_code}-read-after-exit",
             )
             with pytest.raises(ResourceNotFoundException):
-                await read_after_exit.execute(terminal_session_id, read_output=False)
+                await read_after_exit.execute(
+                    "read",
+                    terminal_session_id=terminal_session_id,
+                    read_output=False,
+                )
     finally:
         await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)

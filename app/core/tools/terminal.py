@@ -7,18 +7,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     ERR_TERMINAL_COMMAND_TIMEOUT,
+    ERR_TERMINAL_TOOL_OPERATION_INVALID,
+    ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
-    TERMINAL_CLOSE_TOOL_NAME,
     TERMINAL_READ_MAX_BYTES,
-    TERMINAL_READ_TOOL_NAME,
-    TERMINAL_RESIZE_TOOL_NAME,
-    TERMINAL_WRITE_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
+    TERMINAL_TOOL_OPERATIONS,
 )
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
 from app.core.crud.task.background import background_task_crud
-from app.core.exceptions import ResourceNotFoundException
+from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.i18n import t
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import (
@@ -54,98 +54,83 @@ _TERMINAL_REQUEST_ID_SCHEMA = {
 }
 
 
-TERMINAL_READ_TOOL_SCHEMA = {
+TERMINAL_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": TERMINAL_READ_TOOL_NAME,
+        "name": TERMINAL_TOOL_NAME,
         "description": (
-            "Each response includes terminal status, exit/failure result, and output-buffer bounds. When request_id "
-            "is provided, it is the original WRITE request ID; write_request reports only write submission/receipt "
-            "status, not CLI task completion. Read one page of retained merged output from an interactive terminal "
-            "session by absolute byte offset. "
-            "This does not paginate automatically; continue with next_offset, and next_offset < latest_offset means "
-            "output remains unread. eof only means the terminal has ended. Set read_output=false to query the "
-            "database status and optional write_request without enqueueing a terminal read, waiting for the Worker, "
-            "or registering an automatic watch. Pagination is available only while the terminal is running; after "
-            "the command ends, final output is delivered by this tool or an observation result, and a reclaimed "
-            "terminal cannot be read again."
+            "Perform actions on an interactive terminal session: read output/status, write input, resize, or close. "
+            "Set operation to 'read', 'write', 'resize', or 'close'. "
+            "For 'read': read one page of retained merged output by absolute byte offset. "
+            "This does not paginate automatically; continue with next_offset, and next_offset < latest_offset means output remains unread. "
+            "eof only means the terminal has ended. When request_id is provided, write_request reports only the original WRITE submission/receipt status, "
+            "not CLI task completion. Set read_output=false to query database status and optional write_request without enqueueing a read command, waiting for the Worker, "
+            "or registering an automatic watch. Pagination is available only while the terminal is running; after the process ends, only bounded final output is delivered by this tool or an observation result, "
+            "and a reclaimed terminal cannot be read again. "
+            "For 'write': wait only for the PTY write and a successful receipt; do not wait for output, CLI processing, or task completion. "
+            "Use '\\n' to submit a line; the service handles platform-specific newline conversion. Read output separately with operation='read' from read_offset. "
+            "On the first submission, request_id may be omitted for automatic ID derivation. A timeout means the write result is unknown; "
+            "first query operation='read' with the original request_id and read_output=false. To retry the same operation, reuse that original request_id; "
+            "never use a new ID or automatically resubmit. "
+            "For 'resize': resize terminal dimensions (columns and rows). "
+            "For 'close': close the session, optionally forcing process termination, reclaim all resources, and return the final bounded output."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": list(TERMINAL_TOOL_OPERATIONS),
+                    "description": "Terminal operation: read, write, resize, or close.",
+                },
                 "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
-                "request_id": _TERMINAL_REQUEST_ID_SCHEMA,
-                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "data": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65_536,
+                    "description": "write only. Input data to send to the terminal PTY. Use '\\n' to submit a line.",
+                },
+                "request_id": {
+                    **_TERMINAL_REQUEST_ID_SCHEMA,
+                    "description": "write and read only. Use the same ID for idempotent write submission and reuse it on read to query that original WRITE submission/receipt; reuse it for any retry, never a new ID.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "read only. Absolute byte offset to read from.",
+                },
                 "max_bytes": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": TERMINAL_READ_MAX_BYTES,
                     "default": TERMINAL_READ_MAX_BYTES,
+                    "description": "read only. Maximum bytes to read.",
                 },
-                "read_output": {"type": "boolean", "default": True},
+                "read_output": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "read only. Set false to query status without reading output.",
+                },
+                "columns": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1_000,
+                    "description": "resize only. Terminal width in columns.",
+                },
+                "rows": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1_000,
+                    "description": "resize only. Terminal height in rows.",
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "close only. Force process termination if true.",
+                },
             },
-            "required": ["terminal_session_id"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-TERMINAL_WRITE_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": TERMINAL_WRITE_TOOL_NAME,
-        "description": (
-            "Return only after the Worker completes the PTY write and saves a successful receipt. Does not wait for "
-            "output, CLI processing, or task completion. Use '\\n' to submit a line; the service handles "
-            f"platform-specific newline conversion. Read output separately with {TERMINAL_READ_TOOL_NAME} from "
-            "read_offset. On the first submission, omitting request_id keeps automatic ID derivation. A timeout "
-            f"means the write result is unknown; first query {TERMINAL_READ_TOOL_NAME} with the original request_id "
-            "and read_output=false. To reuse the same operation, submit again with that original request_id, never "
-            "a new ID; do not automatically resubmit."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
-                "data": {"type": "string", "minLength": 1, "maxLength": 65_536},
-                "request_id": _TERMINAL_REQUEST_ID_SCHEMA,
-            },
-            "required": ["terminal_session_id", "data"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-TERMINAL_RESIZE_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": TERMINAL_RESIZE_TOOL_NAME,
-        "description": "Resize an interactive terminal session.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
-                "columns": {"type": "integer", "minimum": 1, "maximum": 1_000},
-                "rows": {"type": "integer", "minimum": 1, "maximum": 1_000},
-            },
-            "required": ["terminal_session_id", "columns", "rows"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-TERMINAL_CLOSE_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": TERMINAL_CLOSE_TOOL_NAME,
-        "description": "Close an interactive terminal session, optionally forcing process termination. Reclaim all terminal resources and return the final bounded output.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
-                "force": {"type": "boolean", "default": False},
-            },
-            "required": ["terminal_session_id"],
+            "required": ["operation", "terminal_session_id"],
             "additionalProperties": False,
         },
     },
@@ -153,10 +138,7 @@ TERMINAL_CLOSE_TOOL_SCHEMA = {
 
 
 SHELL_COMPANION_TOOL_SCHEMAS = [
-    TERMINAL_READ_TOOL_SCHEMA,
-    TERMINAL_WRITE_TOOL_SCHEMA,
-    TERMINAL_RESIZE_TOOL_SCHEMA,
-    TERMINAL_CLOSE_TOOL_SCHEMA,
+    TERMINAL_TOOL_SCHEMA,
     TERMINAL_WATCH_TOOL_SCHEMA,
 ]
 SHELL_COMPANION_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS)
@@ -317,10 +299,10 @@ class _TerminalExecutor(BaseExecutor):
         return json.dumps(response, ensure_ascii=False)
 
 
-class TerminalReadExecutor(_TerminalExecutor):
-    requires_audit = False
+class TerminalToolExecutor(_TerminalExecutor):
+    requires_audit = True
 
-    async def execute(
+    async def _execute_read(
         self,
         terminal_session_id: str,
         offset: int = 0,
@@ -356,11 +338,12 @@ class TerminalReadExecutor(_TerminalExecutor):
                 )
         return json.dumps(response, ensure_ascii=False)
 
-
-class TerminalWriteExecutor(_TerminalExecutor):
-    requires_audit = True
-
-    async def execute(self, terminal_session_id: str, data: str, request_id: str | None = None) -> str:
+    async def _execute_write(
+        self,
+        terminal_session_id: str,
+        data: str,
+        request_id: str | None = None,
+    ) -> str:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._tool_timeout()
         await self._get_snapshot(terminal_session_id)
@@ -383,7 +366,7 @@ class TerminalWriteExecutor(_TerminalExecutor):
             return json.dumps(
                 {
                     "status": "execution_unknown",
-                    "tool_name": TERMINAL_WRITE_TOOL_NAME,
+                    "tool_name": TERMINAL_TOOL_NAME,
                     "terminal_session_id": terminal_session_id,
                     "request_id": request_id,
                     "error_code": ERR_TERMINAL_COMMAND_TIMEOUT,
@@ -420,11 +403,12 @@ class TerminalWriteExecutor(_TerminalExecutor):
         )
         return self._dump_model(result)
 
-
-class TerminalResizeExecutor(_TerminalExecutor):
-    requires_audit = False
-
-    async def execute(self, terminal_session_id: str, columns: int, rows: int) -> str:
+    async def _execute_resize(
+        self,
+        terminal_session_id: str,
+        columns: int,
+        rows: int,
+    ) -> str:
         request = TerminalResizeRequest(
             terminal_session_id=terminal_session_id,
             request_id=self._derive_request_id(TerminalAction.RESIZE),
@@ -433,11 +417,11 @@ class TerminalResizeExecutor(_TerminalExecutor):
         )
         return await self._build_action_receipt(request)
 
-
-class TerminalCloseExecutor(_TerminalExecutor):
-    requires_audit = True
-
-    async def execute(self, terminal_session_id: str, force: bool = False) -> str:
+    async def _execute_close(
+        self,
+        terminal_session_id: str,
+        force: bool = False,
+    ) -> str:
         request = TerminalCloseRequest(
             terminal_session_id=terminal_session_id,
             request_id=self._derive_request_id(TerminalAction.CLOSE),
@@ -445,17 +429,62 @@ class TerminalCloseExecutor(_TerminalExecutor):
         )
         return await self._build_action_receipt(request)
 
+    async def execute(
+        self,
+        operation: str,
+        terminal_session_id: str,
+        *,
+        data: str | None = None,
+        offset: int = 0,
+        max_bytes: int = TERMINAL_READ_MAX_BYTES,
+        request_id: str | None = None,
+        read_output: bool = True,
+        columns: int | None = None,
+        rows: int | None = None,
+        force: bool = False,
+        **kwargs,
+    ) -> str:
+        if operation == "read":
+            return await self._execute_read(
+                terminal_session_id=terminal_session_id,
+                offset=offset,
+                max_bytes=max_bytes,
+                request_id=request_id,
+                read_output=read_output,
+            )
+        elif operation == "write":
+            if data is None:
+                raise ParameterException(ERR_TOOL_MISSING_REQUIRED_ARGUMENTS, fields="data")
+            return await self._execute_write(
+                terminal_session_id=terminal_session_id,
+                data=data,
+                request_id=request_id,
+            )
+        elif operation == "resize":
+            missing_fields = [field for field, value in (("columns", columns), ("rows", rows)) if value is None]
+            if missing_fields:
+                raise ParameterException(
+                    ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
+                    fields=", ".join(missing_fields),
+                )
+            return await self._execute_resize(
+                terminal_session_id=terminal_session_id,
+                columns=columns,
+                rows=rows,
+            )
+        elif operation == "close":
+            return await self._execute_close(
+                terminal_session_id=terminal_session_id,
+                force=force,
+            )
+        else:
+            raise ParameterException(ERR_TERMINAL_TOOL_OPERATION_INVALID, operation=operation)
+
 
 __all__ = [
     "SHELL_COMPANION_TOOL_NAMES",
     "SHELL_COMPANION_TOOL_SCHEMAS",
-    "TERMINAL_CLOSE_TOOL_SCHEMA",
-    "TERMINAL_READ_TOOL_SCHEMA",
-    "TERMINAL_RESIZE_TOOL_SCHEMA",
-    "TERMINAL_WRITE_TOOL_SCHEMA",
+    "TERMINAL_TOOL_SCHEMA",
     "TERMINAL_WATCH_TOOL_SCHEMA",
-    "TerminalCloseExecutor",
-    "TerminalReadExecutor",
-    "TerminalResizeExecutor",
-    "TerminalWriteExecutor",
+    "TerminalToolExecutor",
 ]

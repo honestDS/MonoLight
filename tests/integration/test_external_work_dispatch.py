@@ -25,7 +25,7 @@ from app.core.constants import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
     MANAGE_TODO_TOOL_NAME,
     SHELL_TOOL_NAME,
-    TERMINAL_CLOSE_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
     TERMINAL_WATCH_TOOL_NAME,
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
@@ -2086,7 +2086,7 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
         MANAGE_BACKGROUND_TASKS_TOOL_NAME,
         MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
         SHELL_TOOL_NAME,
-        TERMINAL_CLOSE_TOOL_NAME,
+        TERMINAL_TOOL_NAME,
         TERMINAL_WATCH_TOOL_NAME,
     }
     provider_payloads: list[dict] = []
@@ -2105,8 +2105,8 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             "chain-terminal-watch",
         ),
         (
-            TERMINAL_CLOSE_TOOL_NAME,
-            {"terminal_session_id": terminal_session_id, "force": True},
+            TERMINAL_TOOL_NAME,
+            {"terminal_session_id": terminal_session_id, "force": True, "operation": "close"},
             "chain-terminal-close",
         ),
         (END_SESSION_TOOL_NAME, {}, "chain-end-session"),
@@ -2627,7 +2627,7 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             assert [tool_call.name for message in tool_calls for tool_call in message.tool_calls or []] == [
                 MANAGE_TODO_TOOL_NAME,
                 TERMINAL_WATCH_TOOL_NAME,
-                TERMINAL_CLOSE_TOOL_NAME,
+                TERMINAL_TOOL_NAME,
             ]
             tool_result_messages = [message for message in non_control_messages if message.type == MessageType.TOOL_RESULT]
             tool_results = [InternalMessage.model_validate_json(message.content or "{}") for message in tool_result_messages]

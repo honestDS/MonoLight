@@ -18,12 +18,31 @@ from app.models.profile import Profile, ProfileConfig
 
 def test_registered_tools_explicitly_declare_audit_requirement():
     assert all(isinstance(executor_class.requires_audit, bool) for executor_class in TOOL_EXECUTOR_MAP.values())
-    audited_tools = {"execute_shell", "file_tool", "terminal_write", "terminal_close", "manage_scheduled_tasks"}
+    audited_tools = {"execute_shell", "file_tool", "terminal_tool", "manage_scheduled_tasks"}
     assert {tool_name for tool_name in TOOL_EXECUTOR_MAP if tool_requires_audit(tool_name)} == audited_tools
+    assert tool_requires_audit("terminal_tool") is True
     assert "read_multimodal_file" in TOOL_EXECUTOR_MAP
     assert tool_requires_audit("read_multimodal_file") is False
     assert all(not tool_requires_audit(tool_name) for tool_name in TOOL_EXECUTOR_MAP if tool_name not in audited_tools)
     assert tool_requires_audit("unknown_tool") is False
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_audit"),
+    [
+        ({"operation": "read"}, False),
+        ({"operation": "resize"}, False),
+        ({"operation": "write"}, True),
+        ({"operation": "close"}, True),
+        ({"operation": "unknown"}, True),
+        ({}, True),
+        ({"operation": None}, True),
+        ({"operation": []}, True),
+        ({"operation": {}}, True),
+    ],
+)
+def test_terminal_tool_audit_requirement_depends_on_operation(arguments, expected_audit):
+    assert tool_requires_audit("terminal_tool", arguments) is expected_audit
 
 
 def test_confirmed_tool_result_budget_reuses_last_model_context_window():
@@ -283,10 +302,10 @@ async def test_regular_tool_timeout_uses_profile_value(monkeypatch, _isolated_to
     [
         ("execute_shell", {"command": "echo test", "execution_mode": "interactive"}),
         ("execute_shell", {"command": "echo test", "execution_mode": "non_interactive"}),
-        ("terminal_read", {"terminal_session_id": "t" * 32}),
-        ("terminal_write", {"terminal_session_id": "t" * 32, "data": "input"}),
-        ("terminal_resize", {"terminal_session_id": "t" * 32, "columns": 80, "rows": 24}),
-        ("terminal_close", {"terminal_session_id": "t" * 32, "force": False}),
+        ("terminal_tool", {"operation": "read", "terminal_session_id": "t" * 32}),
+        ("terminal_tool", {"operation": "write", "terminal_session_id": "t" * 32, "data": "input"}),
+        ("terminal_tool", {"operation": "resize", "terminal_session_id": "t" * 32, "columns": 80, "rows": 24}),
+        ("terminal_tool", {"operation": "close", "terminal_session_id": "t" * 32, "force": False}),
     ],
 )
 async def test_self_managed_tool_calls_are_not_wrapped_in_public_timeout(

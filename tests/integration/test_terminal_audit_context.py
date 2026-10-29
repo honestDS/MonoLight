@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
 from app.core.audit.persistence import persist_prepared_audit_round
@@ -12,7 +13,7 @@ from app.core.crud.terminal.session import terminal_control_command_crud, termin
 from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
-from app.models.audit import AuditRecordStatus, AuditToolConclusion
+from app.models.audit import AuditRecord, AuditRecordStatus, AuditToolConclusion
 from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
@@ -57,7 +58,7 @@ def _audit_config(tmp_path: Path, *, threshold: int = 0) -> ProfileConfig:
                 "protect_system_directories": True,
             },
             "tool": {
-                "enabled_tools": ["terminal_write"],
+                "enabled_tools": ["execute_shell"],
                 "allowed_operation_dirs": [str(tmp_path)],
             },
             "other": {},
@@ -316,8 +317,8 @@ async def test_terminal_write_scoring_and_summary_share_read_only_context(
     original_data = "echo should wait for confirmation\n"
     tool_call = InternalToolCall(
         id="pending-terminal-write",
-        name="terminal_write",
-        arguments={"terminal_session_id": TERMINAL_SESSION_ID, "data": original_data},
+        name="terminal_tool",
+        arguments={"terminal_session_id": TERMINAL_SESSION_ID, "operation": "write", "data": original_data},
     )
     generate_calls: list[dict[str, Any]] = []
 
@@ -394,8 +395,8 @@ async def test_external_terminal_session_context_fails_before_model_call(
     )
     tool_call = InternalToolCall(
         id="external-terminal-write",
-        name="terminal_write",
-        arguments={"terminal_session_id": TERMINAL_SESSION_ID, "data": "echo private evidence"},
+        name="terminal_tool",
+        arguments={"terminal_session_id": TERMINAL_SESSION_ID, "operation": "write", "data": "echo private evidence"},
     )
     generate_calls: list[dict[str, Any]] = []
 
@@ -426,3 +427,97 @@ async def test_external_terminal_session_context_fails_before_model_call(
 
     assert len(controls) == 1
     assert terminal_session is not None and terminal_session.status is TerminalSessionStatus.RUNNING
+
+
+@pytest.mark.parametrize(
+    ("case_id", "arguments", "requires_audit"),
+    [
+        (
+            "read-output",
+            {"operation": "read", "terminal_session_id": TERMINAL_SESSION_ID},
+            False,
+        ),
+        (
+            "read-status",
+            {
+                "operation": "read",
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "read_output": False,
+                "request_id": "terminal-read-status-request",
+            },
+            False,
+        ),
+        (
+            "resize",
+            {"operation": "resize", "terminal_session_id": TERMINAL_SESSION_ID, "columns": 80, "rows": 24},
+            False,
+        ),
+        (
+            "write",
+            {"operation": "write", "terminal_session_id": TERMINAL_SESSION_ID, "data": "input\n"},
+            True,
+        ),
+        (
+            "close",
+            {"operation": "close", "terminal_session_id": TERMINAL_SESSION_ID, "force": True},
+            True,
+        ),
+    ],
+    ids=["read-output", "read-status", "resize", "write", "close"],
+)
+@pytest.mark.asyncio
+async def test_terminal_tool_audit_service_failure_behavior(
+    audit_database,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case_id: str,
+    arguments: dict[str, Any],
+    requires_audit: bool,
+) -> None:
+    await _seed_audit_channel(audit_database)
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
+    _patch_audit_root(monkeypatch, tmp_path / "audit")
+    await _seed_terminal_session(audit_database)
+
+    generate_calls: list[dict[str, Any]] = []
+
+    async def unavailable_generate(**kwargs: Any) -> InternalResponse:
+        generate_calls.append(kwargs)
+        raise RuntimeError("simulated audit outage")
+
+    monkeypatch.setattr(audit_service_module.LLMClient, "generate", unavailable_generate)
+    tool_call = InternalToolCall(
+        id=f"terminal-tool-{case_id}",
+        name="terminal_tool",
+        arguments=arguments,
+    )
+
+    async with audit_database() as db:
+        result = await _audit_round(
+            db,
+            cfg=_audit_config(tmp_path),
+            tool_call=tool_call,
+            working_directory=tmp_path,
+        )
+
+    async with audit_database() as db:
+        audit_records = list((await db.execute(select(AuditRecord))).scalars().all())
+        terminal_commands = list((await db.execute(select(TerminalControlCommand))).scalars().all())
+        terminal_session = await terminal_session_crud.get(db, TERMINAL_SESSION_ID)
+
+    assert len(generate_calls) == (1 if requires_audit else 0)
+    assert terminal_commands == []
+    assert terminal_session is not None and terminal_session.status is TerminalSessionStatus.RUNNING
+
+    if not requires_audit:
+        assert result is None
+        assert audit_records == []
+        return
+
+    assert result is not None
+    assert result.status is AuditRecordStatus.AUDIT_FAILED
+    assert result.may_execute is False
+    assert len(audit_records) == 1
+    assert audit_records[0].id == result.audit_record_id
+    assert audit_records[0].status is AuditRecordStatus.AUDIT_FAILED
+    assert audit_records[0].error_reason == "simulated audit outage"
