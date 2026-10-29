@@ -89,6 +89,11 @@ def _filter_tool_output_messages(messages: list[InternalMessage]) -> list[Intern
     return filtered_messages
 
 
+def _is_end_session_control_message(message: InternalMessage) -> bool:
+    provider_metadata = message.provider_metadata
+    return isinstance(provider_metadata, dict) and provider_metadata.get("internal_control") == "end_session"
+
+
 async def process_single_tool_with_isolated_db(
     tool_call: InternalToolCall,
     profile,
@@ -147,7 +152,7 @@ def dump_output_history(
     *,
     show_tool_calls: bool = True,
 ) -> list[dict[str, Any]]:
-    output_messages = messages if show_tool_calls else [message for message in messages if message.role != MessageRole.TOOL and not (message.role == MessageRole.ASSISTANT and message.tool_calls)]
+    output_messages = [message for message in (messages if show_tool_calls else [message for message in messages if message.role != MessageRole.TOOL and not (message.role == MessageRole.ASSISTANT and message.tool_calls)]) if not _is_end_session_control_message(message)]
     visible_messages: list[InternalMessage] = []
     for message in output_messages:
         if message.role == MessageRole.TOOL and isinstance(message.content, str):
@@ -159,7 +164,7 @@ def dump_output_history(
 
 
 def dump_background_proactive_history(messages: list[InternalMessage]) -> list[dict[str, Any]]:
-    return [message.model_dump(exclude_none=True) for message in _filter_tool_output_messages(messages)]
+    return [message.model_dump(exclude_none=True) for message in _filter_tool_output_messages(messages) if not _is_end_session_control_message(message)]
 
 
 def _get_tool_schema_name(schema: dict[str, Any]) -> str | None:

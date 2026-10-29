@@ -1,7 +1,7 @@
 import json
 
 from app.core.audit.visibility import obscure_audit_tool_result
-from app.core.prompts import SCHEDULED_TASK_TRIGGER_PROMPT
+from app.core.prompts import EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT, SCHEDULED_TASK_TRIGGER_PROMPT
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import (
     InternalMessage,
@@ -29,6 +29,15 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
                 "type": "external_work_resume",
                 "instruction": instruction,
                 "tasks": [payload],
+                "reply_guidance": EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT,
+            },
+            ensure_ascii=False,
+        )
+    elif isinstance(payload, dict) and payload.get("type") == "background_tool_result":
+        content = json.dumps(
+            {
+                **payload,
+                "reply_guidance": EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT,
             },
             ensure_ascii=False,
         )

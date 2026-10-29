@@ -5,7 +5,7 @@ from sqlalchemy import and_, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
+from app.core.constants import GOAL_EXECUTION_PHASE_RUNNING, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.session.terminal_watch import get_terminal_watch_deliveries
@@ -122,6 +122,128 @@ class CRUDExternalWork:
             .execution_options(populate_existing=True)
         )
         return tasks, list(candidate_result.scalars().all())
+
+    async def list_result_source_works(
+        self,
+        db: AsyncSession,
+        *,
+        work: SessionReplyWorkItem,
+    ) -> list[SessionReplyWorkItem]:
+        result = await db.execute(
+            select(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.uid == work.uid,
+                SessionReplyWorkItem.session_id == work.session_id,
+                SessionReplyWorkItem.profile_id == work.profile_id,
+                SessionReplyWorkItem.work_type.in_(
+                    [
+                        SessionReplyWorkType.FOREGROUND_REPLY,
+                        SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    ]
+                ),
+                SessionReplyWorkItem.status.in_(
+                    [
+                        SessionReplyWorkStatus.READY_FOR_LLM,
+                        SessionReplyWorkStatus.RUNNING,
+                        SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                    ]
+                ),
+            )
+            .order_by(SessionReplyWorkItem.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    async def list_completed_reply_tasks(
+        self,
+        db: AsyncSession,
+        *,
+        work: SessionReplyWorkItem,
+        task_ids: list[int],
+    ) -> list[BackgroundTask]:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.uid == work.uid,
+                BackgroundTask.session_id == work.session_id,
+                BackgroundTask.profile_id == work.profile_id,
+                BackgroundTask.status.in_(
+                    [
+                        BackgroundTaskStatus.SUCCEEDED,
+                        BackgroundTaskStatus.FAILED,
+                        BackgroundTaskStatus.CANCELLED,
+                    ]
+                ),
+                or_(
+                    BackgroundTask.id.in_(task_ids),
+                    and_(
+                        BackgroundTask.auto_reply.is_(True),
+                        BackgroundTask.reply_status.in_(
+                            [
+                                BackgroundTaskReplyStatus.PENDING,
+                                BackgroundTaskReplyStatus.RUNNING,
+                            ]
+                        ),
+                    ),
+                    BackgroundTask.extra["reply_owner"]["status"].as_string() == "received",
+                ),
+            )
+            .order_by(BackgroundTask.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    async def finish_received_results(
+        self,
+        db: AsyncSession,
+        *,
+        work: SessionReplyWorkItem,
+        commit: bool = False,
+    ) -> None:
+        execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+        received_task_ids = {task_id for task_id in execution_state.get("received_external_task_ids", []) if isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0}
+        if not received_task_ids:
+            return
+
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.id.in_(received_task_ids),
+                BackgroundTask.uid == work.uid,
+                BackgroundTask.session_id == work.session_id,
+                BackgroundTask.profile_id == work.profile_id,
+            )
+            .order_by(BackgroundTask.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        tasks = list(result.scalars().all())
+        changed = False
+        for task in tasks:
+            extra = task.extra if isinstance(task.extra, dict) else {}
+            reply_owner = extra.get("reply_owner")
+            if not isinstance(reply_owner, dict) or (reply_owner.get("work_id") != work.id or reply_owner.get("identity") != work.dedupe_key or reply_owner.get("sequence_no") != work.sequence_no or reply_owner.get("status") != "received"):
+                continue
+
+            updated_extra = dict(extra)
+            updated_reply_owner = dict(reply_owner)
+            updated_reply_owner["status"] = "handled"
+            updated_extra["reply_owner"] = updated_reply_owner
+            task.extra = updated_extra
+            if task.auto_reply is True:
+                task.reply_status = BackgroundTaskReplyStatus.SUCCEEDED
+                task.reply_locked_by = None
+                task.reply_lock_until = None
+            db.add(task)
+            changed = True
+
+        if changed:
+            await db.flush()
+        if commit:
+            await db.commit()
 
     async def update_active_reply(
         self,
@@ -318,6 +440,65 @@ class CRUDExternalWork:
         if commit:
             await db.commit()
         return (result.rowcount or 0) == 1
+
+    async def reopen_completed_waiting(
+        self,
+        db: AsyncSession,
+        *,
+        work: SessionReplyWorkItem,
+    ) -> bool:
+        if work.status != SessionReplyWorkStatus.SUCCEEDED:
+            return False
+
+        state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+        state.pop("response", None)
+        state.pop("external_resume_context", None)
+        state.pop("external_resume_pending", None)
+        state.pop("terminal_auto_resume", None)
+        state.pop("received_external_task_ids", None)
+
+        checkpoint = state.get("dispatcher_checkpoint")
+        checkpoint = dict(checkpoint) if isinstance(checkpoint, dict) else {}
+        checkpoint.pop("files_to_user", None)
+        checkpoint.pop("reply_skipped", None)
+        checkpoint.pop("deferred_external_results", None)
+        checkpoint.pop("pending_resume_message_ids", None)
+        checkpoint["messages"] = []
+        checkpoint["turn_messages"] = []
+        checkpoint["reload_history"] = True
+        checkpoint["execution_phase"] = GOAL_EXECUTION_PHASE_RUNNING
+        checkpoint["current_turn"] = 0
+        state["dispatcher_checkpoint"] = checkpoint
+
+        generation = state.get("terminal_resume_generation")
+        state["terminal_resume_generation"] = generation + 1 if isinstance(generation, int) and not isinstance(generation, bool) else 1
+
+        result = await db.execute(
+            update(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.id == work.id,
+                SessionReplyWorkItem.uid == work.uid,
+                SessionReplyWorkItem.session_id == work.session_id,
+                SessionReplyWorkItem.profile_id == work.profile_id,
+                SessionReplyWorkItem.dedupe_key == work.dedupe_key,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.SUCCEEDED,
+            )
+            .values(
+                status=SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                result_message_id=None,
+                event_sent=False,
+                locked_by=None,
+                lock_until=None,
+                error=None,
+                attempt_count=0,
+                execution_state=state,
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        updated = (result.rowcount or 0) == 1
+        await db.flush()
+        return updated
 
     async def wake_waiting(
         self,

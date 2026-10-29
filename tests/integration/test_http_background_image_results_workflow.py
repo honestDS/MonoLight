@@ -391,6 +391,31 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert_background_result_payload(payload)
             return background_result
 
+        def assert_persisted_end_session_control(messages: list[Message]) -> tuple[int, int]:
+            control_messages = [message for message in messages if isinstance(message.provider_metadata, dict) and message.provider_metadata.get("internal_control") == END_SESSION_TOOL_NAME]
+            assert len(control_messages) == 2
+            control_call_messages = [message for message in control_messages if message.type == MessageType.TOOL_CALL]
+            control_result_messages = [message for message in control_messages if message.type == MessageType.TOOL_RESULT]
+            assert len(control_call_messages) == 1
+            assert len(control_result_messages) == 1
+            control_call_message = control_call_messages[0]
+            control_result_message = control_result_messages[0]
+            assert control_call_message.id is not None
+            assert control_result_message.id is not None
+            assert control_call_message.id < control_result_message.id
+            control_call = InternalMessage.model_validate_json(control_call_message.content or "{}")
+            assert control_call.tool_calls is not None
+            assert len(control_call.tool_calls) == 1
+            control_tool_call = control_call.tool_calls[0]
+            assert control_tool_call.name == END_SESSION_TOOL_NAME
+            assert control_tool_call.arguments == {}
+            control_result = InternalMessage.model_validate_json(control_result_message.content or "{}")
+            assert control_result.tool_call_id == control_tool_call.id
+            control_result_payload = json.loads(control_result.content or "{}")
+            assert control_result_payload["status"] == "completed"
+            assert control_result_payload["skip_reply"] is False
+            return control_call_message.id, control_result_message.id
+
         def find_send_file_call(items: list[dict]) -> dict:
             if protocol == "OPENAI":
                 return next(tool_call for item in items if item.get("role") == MessageRole.ASSISTANT.value for tool_call in item.get("tool_calls") or [] if tool_call.get("function", {}).get("name") == "send_file_to_user")
@@ -533,8 +558,23 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             actual_function_calls = function_calls(items)
             actual_call_ids = [call["id"] if protocol == "OPENAI" else call["call_id"] for call in actual_function_calls]
 
-            rejected_calls = [call for call, call_id in zip(actual_function_calls, actual_call_ids) if call_id != send_file_call_id]
-            rejected_call_ids = [call_id for call_id in actual_call_ids if call_id != send_file_call_id]
+            end_session_calls = [call for call in actual_function_calls if (call["function"]["name"] if protocol == "OPENAI" else call["name"]) == END_SESSION_TOOL_NAME]
+            assert len(end_session_calls) == 1
+            end_session_call = end_session_calls[0]
+            if protocol == "OPENAI":
+                end_session_call_id = end_session_call["id"]
+                end_session_arguments = json.loads(end_session_call["function"]["arguments"])
+            else:
+                end_session_call_id = end_session_call["call_id"]
+                end_session_arguments = json.loads(end_session_call["arguments"])
+            assert end_session_arguments == {}
+            end_session_result = find_tool_output(items, end_session_call_id)
+            assert end_session_result["status"] == "completed"
+            assert end_session_result["skip_reply"] is False
+
+            control_call_ids = {send_file_call_id, end_session_call_id}
+            rejected_calls = [call for call, call_id in zip(actual_function_calls, actual_call_ids) if call_id not in control_call_ids]
+            rejected_call_ids = [call_id for call_id in actual_call_ids if call_id not in control_call_ids]
             violation_rounds = len(invalid_tool_call_ids) // 2
             assert len(rejected_calls) == len(invalid_tool_call_ids)
             rejected_names = [call["function"]["name"] if protocol == "OPENAI" else call["name"] for call in rejected_calls]
@@ -721,8 +761,10 @@ async def test_completed_background_image_message_is_returned_by_http_history(
                 assert len(persisted_tasks) == 1
                 persisted_messages = (await db.execute(select(Message).where(Message.session_id == SESSION_ID))).scalars().all()
                 assert_persisted_background_result(persisted_messages)
-                tool_calls = [message for message in persisted_messages if message.type == MessageType.TOOL_CALL]
-                tool_results = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
+                end_session_call_message_id, end_session_result_message_id = assert_persisted_end_session_control(persisted_messages)
+                end_session_message_ids = {end_session_call_message_id, end_session_result_message_id}
+                tool_calls = [message for message in persisted_messages if message.id not in end_session_message_ids and message.type == MessageType.TOOL_CALL]
+                tool_results = [message for message in persisted_messages if message.id not in end_session_message_ids and message.type == MessageType.TOOL_RESULT]
                 assert len(tool_calls) == 1
                 assert len(tool_results) == 1
                 persisted_dump = json.dumps([message.content for message in persisted_messages], ensure_ascii=False)
@@ -781,8 +823,10 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             assert "final-violation-" not in persisted_message_dump
             assert "伪成功正文" not in persisted_message_dump
             assert all(message.guidance_prompt is None for message in persisted_messages)
-            tool_calls = [message for message in persisted_messages if message.type == MessageType.TOOL_CALL]
-            tool_results = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
+            end_session_call_message_id, end_session_result_message_id = assert_persisted_end_session_control(persisted_messages)
+            end_session_message_ids = {end_session_call_message_id, end_session_result_message_id}
+            tool_calls = [message for message in persisted_messages if message.id not in end_session_message_ids and message.type == MessageType.TOOL_CALL]
+            tool_results = [message for message in persisted_messages if message.id not in end_session_message_ids and message.type == MessageType.TOOL_RESULT]
             assert len(tool_calls) == 1
             assert len(tool_results) == 1
             persisted_tool_dump = json.dumps([message.content for message in [*tool_calls, *tool_results]], ensure_ascii=False)
@@ -848,6 +892,7 @@ async def test_completed_background_image_message_is_returned_by_http_history(
             return matches
 
         history_items = await request_history()
+        assert not any(isinstance(item.get("provider_metadata"), dict) and item["provider_metadata"].get("internal_control") == END_SESSION_TOOL_NAME for item in history_items)
         history_dump = json.dumps(history_items, ensure_ascii=False)
         assert GOAL_MODE_SYSTEM_PROMPT not in history_dump
         assert GOAL_MODE_FINAL_RESPONSE_PROMPT not in history_dump

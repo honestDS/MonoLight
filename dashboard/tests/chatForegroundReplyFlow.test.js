@@ -164,6 +164,28 @@ const createDone = ({
   }
 })
 
+const createSkipReplyDone = ({
+  requestId,
+  workId,
+  eventSequenceNo,
+  history = []
+}) => ({
+  type: 'done',
+  session_id: SESSION_ID,
+  request_id: requestId,
+  request_ids: [requestId],
+  work_id: workId,
+  response_id: `session-reply-work:${workId}`,
+  event_sequence_no: eventSequenceNo,
+  response: {
+    skip_reply: true,
+    choices: [],
+    history,
+    files: null,
+    work_id: workId
+  }
+})
+
 const assistantMessages = harness => harness.chat.messages.value
   .filter(message => message.role === 'assistant')
 
@@ -514,6 +536,179 @@ test('resume displays done content without turn_end or changed history', async t
   assert.equal(harness.chat.loading.value, false)
   assert.deepEqual(historyRows, [])
 })
+
+for (const callbacks of CALLBACKS) {
+  test(`${callbacks} skips an empty reply without clearing other messages`, async t => {
+    const workId = `${callbacks}-skip-reply`
+    const existingAssistantId = 10001
+    const historyRows = [{
+      id: existingAssistantId,
+      role: 'assistant',
+      content: '历史普通答复',
+      created_at: 1700000000
+    }]
+    const { harness, requestId } = await prepareCallbacks(t, callbacks, {
+      sessionsHistory: () => historyRows,
+      workId
+    })
+    const otherRequestId = `${callbacks}-other-request`
+    const otherWorkId = `${callbacks}-other-work`
+
+    await receiveEvent(harness, {
+      type: 'agent_loop_start',
+      session_id: SESSION_ID,
+      request_id: requestId,
+      request_ids: [requestId],
+      work_id: workId,
+      response_id: `response-${workId}`,
+      turn: 1,
+      event_sequence_no: 1
+    })
+    await receiveEvent(harness, {
+      type: 'agent_loop_start',
+      session_id: SESSION_ID,
+      request_id: otherRequestId,
+      request_ids: [otherRequestId],
+      work_id: otherWorkId,
+      response_id: `response-${otherWorkId}`,
+      turn: 1,
+      event_sequence_no: 1
+    })
+
+    const done = createSkipReplyDone({
+      requestId,
+      workId,
+      eventSequenceNo: 2
+    })
+    await receiveEvent(harness, done)
+
+    const replies = assistantMessages(harness)
+    assert.equal(replies.length, 1)
+    assert.equal(String(replies[0].db_id), String(existingAssistantId))
+    assert.equal(replies[0].content, '历史普通答复')
+    assert.equal(errorMessages(harness).length, 0)
+    assert.equal(
+      harness.chat.messages.value.some(message => (
+        message.role === 'assistant' && (
+          message.request_id === requestId || message.work_id === workId
+        )
+      )),
+      false
+    )
+    assert.equal(
+      harness.chat.messages.value.some(message => (
+        message.role === 'thinking' && (
+          message.request_id === requestId || message.work_id === workId
+        )
+      )),
+      false
+    )
+    assert.equal(
+      harness.chat.messages.value.some(message => (
+        message.role === 'thinking' && (
+          message.request_id === otherRequestId || message.work_id === otherWorkId
+        )
+      )),
+      true
+    )
+    assert.equal(harness.chat.loading.value, true)
+
+    const messageCount = harness.chat.messages.value.length
+    await receiveEvent(harness, { ...done })
+    assert.equal(harness.chat.messages.value.length, messageCount)
+    assert.equal(errorMessages(harness).length, 0)
+
+    await receiveEvent(harness, createSkipReplyDone({
+      requestId: otherRequestId,
+      workId: otherWorkId,
+      eventSequenceNo: 2
+    }))
+    await completeResume(harness, callbacks)
+    assert.equal(harness.chat.loading.value, false)
+    assert.equal(assistantMessages(harness).length, 1)
+    assert.equal(String(assistantMessages(harness)[0].db_id), String(existingAssistantId))
+  })
+}
+
+for (const callbacks of CALLBACKS) {
+  test(`${callbacks} preserves tool history for a skipped reply`, async t => {
+    const workId = `${callbacks}-skip-tool-history`
+    const toolCallId = `${callbacks}-tool-call`
+    const toolCallMessageId = 10101
+    const toolResultMessageId = 10102
+    const historyRows = [
+      {
+        id: toolCallMessageId,
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: toolCallId,
+          type: 'function',
+          function: {
+            name: 'lookup',
+            arguments: '{"query":"历史"}'
+          }
+        }],
+        created_at: 1700000000
+      },
+      {
+        id: toolResultMessageId,
+        role: 'tool',
+        content: '工具结果',
+        tool_call_id: toolCallId,
+        created_at: 1700000001
+      }
+    ]
+    const { harness, requestId } = await prepareCallbacks(t, callbacks, { workId })
+
+    await receiveEvent(harness, {
+      type: 'agent_loop_start',
+      session_id: SESSION_ID,
+      request_id: requestId,
+      request_ids: [requestId],
+      work_id: workId,
+      response_id: `response-${workId}`,
+      turn: 1,
+      event_sequence_no: 1
+    })
+    await receiveEvent(harness, createSkipReplyDone({
+      requestId,
+      workId,
+      eventSequenceNo: 2,
+      history: historyRows
+    }))
+
+    const messages = harness.chat.messages.value
+    const toolCallMessage = messages.find(message => (
+      String(message.db_id) === String(toolCallMessageId)
+    ))
+    const toolResultMessage = messages.find(message => (
+      String(message.db_id) === String(toolResultMessageId)
+    ))
+    assert.ok(toolCallMessage)
+    assert.equal(toolCallMessage.role, 'assistant')
+    assert.deepEqual(toolCallMessage.tool_calls, historyRows[0].tool_calls)
+    assert.ok(toolResultMessage)
+    assert.equal(toolResultMessage.role, 'tool')
+    const toolResult = JSON.parse(toolResultMessage.content)
+    assert.equal(toolResult.content, '工具结果')
+    assert.equal(toolResult.tool_call_id, toolCallId)
+    assert.equal(
+      messages.filter(message => message.role === 'assistant').length,
+      1
+    )
+    assert.equal(errorMessages(harness).length, 0)
+    assert.equal(
+      messages.some(message => (
+        message.role === 'thinking' && message.request_id === requestId
+      )),
+      false
+    )
+
+    await completeResume(harness, callbacks)
+    assert.equal(harness.chat.loading.value, false)
+  })
+}
 
 for (const callbacks of CALLBACKS) {
   for (const source of BACKGROUND_SOURCES) {

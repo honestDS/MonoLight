@@ -11,6 +11,7 @@ from sqlmodel import select
 
 from app.core.background_tasks import external_work as external_work_module
 from app.core.background_tasks.manager import BackgroundTaskManager
+from app.core.background_tasks.result_delivery import receive_pending_external_results
 from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
@@ -24,6 +25,7 @@ from app.core.session_reply_queue.manager_result import SessionReplyResult
 from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
 from app.core.utils.dispatcher.external_work import build_external_wait_response
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
@@ -331,6 +333,109 @@ async def _prepare_claimed_external_resume(case: ExternalWorkCase, worker_id: st
         await db.commit()
 
 
+async def _create_target_work(case: ExternalWorkCase, content: str) -> tuple[int, int, str]:
+    async with case.factory() as db:
+        message = await save_message(
+            db,
+            case.session_id,
+            case.uid,
+            MessageRole.USER,
+            MessageType.TEXT,
+            InternalMessage.from_user_input(content=content),
+            case.profile_id,
+        )
+        assert message.id is not None
+        worker_id = f"target-worker-{message.id}"
+        target, created = await session_reply_work_item_crud.enqueue(
+            db,
+            uid=case.uid,
+            session_id=case.session_id,
+            profile_id=case.profile_id,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id=message.id,
+            dedupe_key=f"external-target:{case.work_id}:{message.id}",
+            commit=False,
+        )
+        assert created and target.id is not None
+        claimed = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id=worker_id,
+            lease_seconds=3600,
+        )
+        assert claimed is not None and claimed.id == target.id
+        checkpoint = {
+            "messages": [message.model_dump(mode="json", exclude_none=True)],
+            "turn_messages": [],
+        }
+        assert await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=claimed.id,
+            worker_id=worker_id,
+            values={
+                "input_message_ids": [message.id],
+                "execution_state": {
+                    "dispatcher_checkpoint": checkpoint,
+                    "request_ids": [f"target-request-{message.id}"],
+                    "show_tool_calls": True,
+                },
+            },
+        )
+        await db.commit()
+        return claimed.id, message.id, worker_id
+
+
+async def _save_received_results_checkpoint(
+    db: AsyncSession,
+    *,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+    user_message_id: int,
+    received: list[InternalMessage],
+) -> dict[str, Any]:
+    checkpoint = await _build_received_results_checkpoint(
+        db,
+        user_message_id=user_message_id,
+        received=received,
+    )
+    await executor_interactive_module._save_interactive_work_execution_checkpoint(
+        db,
+        checkpoint,
+        work=work,
+        worker_id=worker_id,
+    )
+    return checkpoint
+
+
+async def _build_received_results_checkpoint(
+    db: AsyncSession,
+    *,
+    user_message_id: int,
+    received: list[InternalMessage],
+) -> dict[str, Any]:
+    user_row = await db.get(Message, user_message_id)
+    assert user_row is not None
+    user_message = parse_db_messages_to_internal([user_row])[0]
+    return {
+        "messages": [
+            user_message.model_dump(mode="json", exclude_none=True),
+            *[message.model_dump(mode="json", exclude_none=True) for message in received],
+        ],
+        "turn_messages": [],
+        "pending_resume_message_ids": [message.id for message in received if message.id is not None],
+    }
+
+
+async def _make_work_ready_for_claim(session_factory: async_sessionmaker[AsyncSession], work_id: int) -> None:
+    async with session_factory() as db:
+        work = await db.get(SessionReplyWorkItem, work_id)
+        assert work is not None
+        work.status = SessionReplyWorkStatus.READY_FOR_LLM
+        work.locked_by = None
+        work.lock_until = None
+        await db.commit()
+
+
 async def _enqueue_followup(case: ExternalWorkCase) -> tuple[int, int]:
     async with case.factory() as db:
         message = await save_message(
@@ -401,6 +506,17 @@ def _assert_background_result_marker(marker: Message, *, task: Any, execution_st
 
 def _messages_of_type(snapshot: dict[str, Any], message_type: MessageType) -> list[Message]:
     return [message for message in snapshot["messages"] if message.type == message_type]
+
+
+def _result_payloads(content: str) -> list[dict[str, Any]]:
+    payload = json.loads(content or "{}")
+    if payload.get("type") == "external_work_resume":
+        tasks = payload.get("tasks")
+        assert isinstance(tasks, list)
+        return [task for task in tasks if isinstance(task, dict)]
+    assert isinstance(payload, dict)
+    assert "task" in payload
+    return [payload]
 
 
 @pytest.mark.asyncio
@@ -966,48 +1082,359 @@ async def test_reconcile_external_work_completes_task_before_suspension(external
 
 
 @pytest.mark.asyncio
-async def test_external_resume_waits_for_all_tasks_in_one_round(external_work_database):
+async def test_external_resume_delivers_ready_tasks_one_by_one(external_work_database):
     case = await _create_case(external_work_database, call_ids=("call-1", "call-2"))
     await _complete_task(case, "call-1", "first-result")
 
-    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-1"]) is False
+    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-1"]) is True
     partial = await _snapshot(case)
-    assert partial["work"].status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    assert partial["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
     assert not _messages_of_type(partial, MessageType.BACKGROUND_TASK_RESULT)
-    assert not [event for event in partial["stream_events"] if event.event.get("type") == "tool_end"]
-    assert not [event for event in partial["session_events"] if event.event.get("type") == "work_ready"]
+    partial_context = partial["work"].execution_state["external_resume_context"]
+    assert len(partial_context) == 1
+    assert {(payload["task"], payload["execution_status"]) for payload in partial_context} == {("first-result", "succeeded")}
+    assert {slot["task_id"] for slot in partial["work"].execution_state["pending_tools"]} == {case.task_ids["call-2"]}
+    assert len([event for event in partial["session_events"] if event.event.get("type") == "work_ready"]) == 1
     _assert_queued_tool_result(partial, case, "call-1")
 
     await _complete_task(case, "call-2", "second-result")
-    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-2"]) is True
+    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-2"]) is False
     assert await external_work_module.resume_external_work_for_task(case.task_ids["call-1"]) is False
 
-    complete = await _snapshot(case)
-    assert complete["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
-    _assert_queued_tool_result(complete, case, "call-1")
-    _assert_queued_tool_result(complete, case, "call-2")
-    markers = _messages_of_type(complete, MessageType.BACKGROUND_TASK_RESULT)
-    assert not markers
-    resume_context = complete["work"].execution_state["external_resume_context"]
-    assert len(resume_context) == 2
-    assert {(payload["task"], payload["execution_status"]) for payload in resume_context} == {
-        ("first-result", "succeeded"),
-        ("second-result", "succeeded"),
-    }
+    still_ready = await _snapshot(case)
+    assert still_ready["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    still_ready_context = still_ready["work"].execution_state["external_resume_context"]
+    assert len(still_ready_context) == 1
+    assert {(payload["task"], payload["execution_status"]) for payload in still_ready_context} == {("first-result", "succeeded")}
+    assert {slot["task_id"] for slot in still_ready["work"].execution_state["pending_tools"]} == {case.task_ids["call-2"]}
+    _assert_queued_tool_result(still_ready, case, "call-1")
+    _assert_queued_tool_result(still_ready, case, "call-2")
 
     await _prepare_claimed_external_resume(case)
+    async with external_work_database() as db:
+        work = await db.get(SessionReplyWorkItem, case.work_id)
+        assert work is not None
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (case.work_id, "external-resume-worker")
+        received = await receive_pending_external_results(
+            db,
+            uid=case.uid,
+            session_id=case.session_id,
+            profile_id=case.profile_id,
+        )
+        assert {payload["task"] for message in received for payload in _result_payloads(message.content or "{}")} == {
+            "first-result",
+            "second-result",
+        }
+        checkpoint = await _save_received_results_checkpoint(
+            db,
+            work=work,
+            worker_id="external-resume-worker",
+            user_message_id=case.user_message_id,
+            received=received,
+        )
+        assert len(checkpoint["messages"]) == 3
+        assert {payload["task"] for message in checkpoint["messages"][1:] for payload in _result_payloads(message["content"])} == {
+            "first-result",
+            "second-result",
+        }
+        await db.commit()
+
     materialized = await _snapshot(case)
     assert materialized["work"].status == SessionReplyWorkStatus.RUNNING
+    assert not materialized["work"].execution_state.get("pending_tools")
+    assert not materialized["work"].execution_state.get("external_resume_context")
     _assert_queued_tool_result(materialized, case, "call-1")
     _assert_queued_tool_result(materialized, case, "call-2")
     markers = _messages_of_type(materialized, MessageType.BACKGROUND_TASK_RESULT)
     assert len(markers) == 2
-    assert {(json.loads(marker.content or "{}")["task"], json.loads(marker.content or "{}")["execution_status"]) for marker in markers} == {
+    assert {(payload["task"], payload["execution_status"]) for marker in markers for payload in _result_payloads(marker.content or "{}")} == {
         ("first-result", "succeeded"),
         ("second-result", "succeeded"),
     }
-    assert len([event for event in materialized["stream_events"] if event.event.get("type") == "tool_end"]) == 2
-    assert len([event for event in materialized["session_events"] if event.event.get("type") == "work_ready"]) == 1
+    for call_id in ("call-1", "call-2"):
+        task = next(task for task in materialized["tasks"] if task.id == case.task_ids[call_id])
+        owner = task.extra["reply_owner"]
+        expected_task = "first-result" if call_id == "call-1" else "second-result"
+        assert owner["work_id"] == case.work_id
+        assert owner["identity"] == case.dedupe_key
+        assert owner["sequence_no"] == materialized["work"].sequence_no
+        assert owner["status"] == "received"
+        assert owner["marker_id"] == next(marker.id for marker in markers if any(payload["task"] == expected_task for payload in _result_payloads(marker.content or "{}")))
+    tool_end_events = [event for event in materialized["stream_events"] if event.event.get("type") == "tool_end"]
+    assert len(tool_end_events) == 1
+    assert tool_end_events[0].event["tool_call_id"] == "call-1"
+    result_update_events = [event for event in materialized["session_events"] if event.event.get("type") == "tool_results_update"]
+    assert result_update_events
+
+    async with external_work_database() as db:
+        work = await db.get(SessionReplyWorkItem, case.work_id)
+        assert work is not None
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (case.work_id, "external-resume-worker")
+        assert (
+            await receive_pending_external_results(
+                db,
+                uid=case.uid,
+                session_id=case.session_id,
+                profile_id=case.profile_id,
+            )
+            == []
+        )
+        await db.rollback()
+
+    repeated = await _snapshot(case)
+    assert len(_messages_of_type(repeated, MessageType.BACKGROUND_TASK_RESULT)) == 2
+    assert len([event for event in repeated["stream_events"] if event.event.get("type") == "tool_end"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_result_delivery_rolls_back_partial_claim_and_preserves_source_waits(external_work_database):
+    source = await _create_case(
+        external_work_database,
+        call_ids=("partial-call-1", "partial-call-2"),
+    )
+    await _complete_task(source, "partial-call-1", "partial-result")
+    target_id, target_user_id, target_worker = await _create_target_work(source, "你应该查一下")
+    source_before_delivery = await _snapshot(source)
+
+    async with external_work_database() as db:
+        target = await db.get(SessionReplyWorkItem, target_id)
+        assert target is not None
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_id, target_worker)
+        received = await receive_pending_external_results(
+            db,
+            uid=source.uid,
+            session_id=source.session_id,
+            profile_id=source.profile_id,
+        )
+        assert {payload["task"] for message in received for payload in _result_payloads(message.content or "{}")} == {"partial-result"}
+        checkpoint = await _build_received_results_checkpoint(
+            db,
+            user_message_id=target_user_id,
+            received=received,
+        )
+        assert len(checkpoint["messages"]) == 2
+        assert {payload["task"] for payload in _result_payloads(checkpoint["messages"][1]["content"])} == {"partial-result"}
+        await db.rollback()
+
+    rolled_back = await _snapshot(source)
+    assert rolled_back["work"].status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    assert rolled_back["work"].merged_into_id is None
+    assert rolled_back["work"].execution_state["pending_tools"] == source_before_delivery["work"].execution_state["pending_tools"]
+    assert rolled_back["work"].execution_state.get("external_resume_context") == source_before_delivery["work"].execution_state.get("external_resume_context")
+    assert not _messages_of_type(rolled_back, MessageType.BACKGROUND_TASK_RESULT)
+    partial_task = next(task for task in rolled_back["tasks"] if task.id == source.task_ids["partial-call-1"])
+    assert "reply_owner" not in partial_task.extra
+    remaining_task = next(task for task in rolled_back["tasks"] if task.id == source.task_ids["partial-call-2"])
+    assert remaining_task.status == BackgroundTaskStatus.PENDING
+    async with external_work_database() as db:
+        target = await db.get(SessionReplyWorkItem, target_id)
+        assert target is not None
+        assert target.input_message_ids == [target_user_id]
+        assert "received_external_task_ids" not in target.execution_state
+        assert len(target.execution_state["dispatcher_checkpoint"]["messages"]) == 1
+
+    await _make_work_ready_for_claim(external_work_database, target_id)
+    assert await _claim_next(external_work_database, target_worker) == target_id
+
+    async with external_work_database() as db:
+        target = await db.get(SessionReplyWorkItem, target_id)
+        assert target is not None
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_id, target_worker)
+        received = await receive_pending_external_results(
+            db,
+            uid=source.uid,
+            session_id=source.session_id,
+            profile_id=source.profile_id,
+        )
+        assert {payload["task"] for message in received for payload in _result_payloads(message.content or "{}")} == {"partial-result"}
+        checkpoint = await _save_received_results_checkpoint(
+            db,
+            work=target,
+            worker_id=target_worker,
+            user_message_id=target_user_id,
+            received=received,
+        )
+        assert [message["role"] for message in checkpoint["messages"]] == [MessageRole.USER.value, MessageRole.USER.value]
+        assert {payload["task"] for payload in _result_payloads(checkpoint["messages"][1]["content"])} == {"partial-result"}
+        await db.commit()
+
+    delivered = await _snapshot(source)
+    assert delivered["work"].status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    assert delivered["work"].merged_into_id is None
+    assert {slot["task_id"] for slot in delivered["work"].execution_state["pending_tools"]} == {source.task_ids["partial-call-2"]}
+    assert len(_messages_of_type(delivered, MessageType.BACKGROUND_TASK_RESULT)) == 1
+
+    async with external_work_database() as db:
+        target = await db.get(SessionReplyWorkItem, target_id)
+        assert target is not None
+        assert target.input_message_ids == [target_user_id]
+        assert target.execution_state["received_external_task_ids"] == [source.task_ids["partial-call-1"]]
+        partial_task = await db.get(BackgroundTask, source.task_ids["partial-call-1"])
+        assert partial_task is not None
+        assert partial_task.extra["reply_owner"]["status"] == "received"
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_id, target_worker)
+        await external_work_crud.finish_received_results(db, work=target, commit=False)
+        await db.commit()
+
+    finished = await _snapshot(source)
+    partial_task = next(task for task in finished["tasks"] if task.id == source.task_ids["partial-call-1"])
+    assert partial_task.extra["reply_owner"]["status"] == "handled"
+    remaining_task = next(task for task in finished["tasks"] if task.id == source.task_ids["partial-call-2"])
+    assert "reply_owner" not in remaining_task.extra
+
+    await _complete_task(source, "partial-call-2", "remaining-result")
+    assert await external_work_module.resume_external_work_for_task(source.task_ids["partial-call-2"]) is True
+    resumed = await _snapshot(source)
+    assert resumed["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    resumed_context = resumed["work"].execution_state["external_resume_context"]
+    assert len(resumed_context) == 1
+    assert {(payload["task"], payload["execution_status"]) for payload in resumed_context} == {("remaining-result", "succeeded")}
+    remaining_task = next(task for task in resumed["tasks"] if task.id == source.task_ids["partial-call-2"])
+    assert remaining_task.status == BackgroundTaskStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_external_result_delivery_reuses_markers_after_failed_target(external_work_database):
+    source_one = await _create_case(external_work_database, call_ids=("merge-call-1",))
+    source_two = await _create_case(external_work_database, call_ids=("merge-call-2",))
+    await _complete_task(source_one, "merge-call-1", "merge-result-1")
+    await _complete_task(source_two, "merge-call-2", "merge-result-2")
+
+    async with external_work_database() as db:
+        for source, request_id in (
+            (source_one, "source-request-1"),
+            (source_two, "source-request-2"),
+        ):
+            work = await db.get(SessionReplyWorkItem, source.work_id)
+            assert work is not None
+            state = dict(work.execution_state or {})
+            state["request_ids"] = [request_id]
+            work.execution_state = state
+        await db.commit()
+
+    target_id, target_user_id, target_worker = await _create_target_work(source_one, "合并这些结果")
+    async with external_work_database() as db:
+        target = await db.get(SessionReplyWorkItem, target_id)
+        assert target is not None
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_id, target_worker)
+        received = await receive_pending_external_results(
+            db,
+            uid=source_one.uid,
+            session_id=source_one.session_id,
+            profile_id=source_one.profile_id,
+        )
+        assert {payload["task"] for message in received for payload in _result_payloads(message.content or "{}")} == {
+            "merge-result-1",
+            "merge-result-2",
+        }
+        checkpoint = await _save_received_results_checkpoint(
+            db,
+            work=target,
+            worker_id=target_worker,
+            user_message_id=target_user_id,
+            received=received,
+        )
+        assert len(checkpoint["messages"]) == 3
+        assert {payload["task"] for message in checkpoint["messages"][1:] for payload in _result_payloads(message["content"])} == {
+            "merge-result-1",
+            "merge-result-2",
+        }
+        await db.commit()
+
+    first_snapshot = await _snapshot(source_one)
+    first_marker_ids = {payload["task"]: marker.id for marker in _messages_of_type(first_snapshot, MessageType.BACKGROUND_TASK_RESULT) for payload in _result_payloads(marker.content or "{}")}
+    source_one_work = first_snapshot["work"]
+    assert source_one_work.status == SessionReplyWorkStatus.MERGED
+    assert source_one_work.merged_into_id == target_id
+    source_two_snapshot = await _snapshot(source_two)
+    source_two_work = source_two_snapshot["work"]
+    assert source_two_work.status == SessionReplyWorkStatus.MERGED
+    assert source_two_work.merged_into_id == target_id
+
+    async with external_work_database() as db:
+        target = await db.get(SessionReplyWorkItem, target_id)
+        assert target is not None
+        assert target.input_message_ids == [target_user_id]
+        assert set(target.execution_state["request_ids"]) >= {
+            "target-request-" + str(target_user_id),
+            "source-request-1",
+            "source-request-2",
+        }
+        for task_id in (source_one.task_ids["merge-call-1"], source_two.task_ids["merge-call-2"]):
+            task = await db.get(BackgroundTask, task_id)
+            assert task is not None
+            assert task.extra["reply_owner"]["work_id"] == target_id
+            assert task.extra["reply_owner"]["status"] == "received"
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_id, target_worker)
+        assert (
+            await receive_pending_external_results(
+                db,
+                uid=source_one.uid,
+                session_id=source_one.session_id,
+                profile_id=source_one.profile_id,
+            )
+            == []
+        )
+        await db.rollback()
+
+    assert len(_messages_of_type(first_snapshot, MessageType.BACKGROUND_TASK_RESULT)) == 2
+
+    async with external_work_database() as db:
+        target = await db.get(SessionReplyWorkItem, target_id)
+        assert target is not None
+        target.status = SessionReplyWorkStatus.FAILED
+        target.locked_by = None
+        target.lock_until = None
+        await db.commit()
+
+    target_two_id, target_two_user_id, target_two_worker = await _create_target_work(source_one, "再次接收已有结果")
+    async with external_work_database() as db:
+        target_two = await db.get(SessionReplyWorkItem, target_two_id)
+        assert target_two is not None
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_two_id, target_two_worker)
+        received_again = await receive_pending_external_results(
+            db,
+            uid=source_one.uid,
+            session_id=source_one.session_id,
+            profile_id=source_one.profile_id,
+        )
+        assert {payload["task"] for message in received_again for payload in _result_payloads(message.content or "{}")} == {
+            "merge-result-1",
+            "merge-result-2",
+        }
+        checkpoint_two = await _save_received_results_checkpoint(
+            db,
+            work=target_two,
+            worker_id=target_two_worker,
+            user_message_id=target_two_user_id,
+            received=received_again,
+        )
+        assert len(checkpoint_two["messages"]) == 3
+        assert {payload["task"] for message in checkpoint_two["messages"][1:] for payload in _result_payloads(message["content"])} == {
+            "merge-result-1",
+            "merge-result-2",
+        }
+        await db.commit()
+
+    second_snapshot = await _snapshot(source_one)
+    assert len(_messages_of_type(second_snapshot, MessageType.BACKGROUND_TASK_RESULT)) == 2
+    assert {payload["task"]: marker.id for marker in _messages_of_type(second_snapshot, MessageType.BACKGROUND_TASK_RESULT) for payload in _result_payloads(marker.content or "{}")} == first_marker_ids
+    assert second_snapshot["work"].status == SessionReplyWorkStatus.MERGED
+    assert second_snapshot["work"].merged_into_id == target_id
+
+    async with external_work_database() as db:
+        target_two = await db.get(SessionReplyWorkItem, target_two_id)
+        assert target_two is not None
+        assert target_two.input_message_ids == [target_two_user_id]
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_two_id, target_two_worker)
+        await external_work_crud.finish_received_results(db, work=target_two, commit=False)
+        await db.commit()
+
+    final_snapshot = await _snapshot(source_one)
+    for task_id in (source_one.task_ids["merge-call-1"], source_two.task_ids["merge-call-2"]):
+        task = next(task for task in final_snapshot["tasks"] if task.id == task_id)
+        assert task.extra["reply_owner"]["work_id"] == target_two_id
+        assert task.extra["reply_owner"]["status"] == "handled"
 
 
 @pytest.mark.asyncio
@@ -1314,3 +1741,263 @@ async def test_cancel_completed_external_work_waits_for_stop_reply_delivery(
     resumed = await _snapshot(case)
     assert resumed["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
     _assert_queued_tool_result(resumed, case, "call-1")
+
+
+@pytest.mark.asyncio
+async def test_ordinary_result_completed_during_reply_delivery_is_requeued_after_completion(
+    external_work_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _create_case(external_work_database, call_ids=("call-first", "call-late"))
+    await _complete_task(case, "call-first", "first result delivered")
+    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-first"]) is True
+    assert await _claim_next(external_work_database, "delivery-window-worker") == case.work_id
+    before_delivery = await _snapshot(case)
+    assert before_delivery["work"].status == SessionReplyWorkStatus.RUNNING
+    delivery_sequence_no = before_delivery["work"].sequence_no
+
+    external_resume_calls = 0
+
+    async def execute_external_resume(db, work, worker_id):
+        nonlocal external_resume_calls
+        external_resume_calls += 1
+        assert work.id == case.work_id
+        assert worker_id == "delivery-window-worker"
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (case.work_id, worker_id)
+        received = await receive_pending_external_results(
+            db,
+            uid=case.uid,
+            session_id=case.session_id,
+            profile_id=case.profile_id,
+        )
+        assert {payload["task"] for message in received for payload in _result_payloads(message.content or "{}")} == {"first result delivered"}
+        checkpoint = await _save_received_results_checkpoint(
+            db,
+            work=work,
+            worker_id=worker_id,
+            user_message_id=case.user_message_id,
+            received=received,
+        )
+        assert {payload["task"] for payload in _result_payloads(checkpoint["messages"][1]["content"])} == {"first result delivered"}
+        await save_message(
+            db,
+            work.session_id,
+            work.uid,
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content="first result delivered"),
+            work.profile_id,
+            dedupe_key=executor_common_module._result_message_dedupe_key(work),
+            commit=False,
+        )
+        return {
+            "choices": [
+                {
+                    "message": {"role": MessageRole.ASSISTANT, "content": "first result delivered"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "history": [],
+            "files": None,
+        }
+
+    delivered_events: list[dict[str, Any]] = []
+    late_resume_result: bool | None = None
+
+    async def capture_session_event(_uid: str, _session_id: str, event: dict[str, Any]) -> None:
+        nonlocal late_resume_result
+        delivered_events.append(event)
+        await _complete_task(case, "call-late", "late result delivered")
+        late_resume_result = await external_work_module.resume_external_work_for_task(case.task_ids["call-late"])
+        assert late_resume_result is False
+        during_delivery = await _snapshot(case)
+        assert during_delivery["work"].status == SessionReplyWorkStatus.RUNNING
+
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", external_work_database)
+    monkeypatch.setattr(executor_lifecycle_module, "_execute_external_resume", execute_external_resume)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
+
+    await executor_lifecycle_module.execute_session_reply_work(case.work_id, "delivery-window-worker")
+
+    after = await _snapshot(case)
+    assert after["work"].id == case.work_id
+    assert after["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert after["work"].sequence_no > delivery_sequence_no
+    assert external_resume_calls == 1
+    assert late_resume_result is False
+
+    resume_context = after["work"].execution_state["external_resume_context"]
+    assert len(resume_context) == 1
+    assert {(payload["task"], payload["execution_status"]) for payload in resume_context} == {("late result delivered", "succeeded")}
+    _assert_queued_tool_result(after, case, "call-first")
+    _assert_queued_tool_result(after, case, "call-late")
+
+    first_task = next(task for task in after["tasks"] if task.id == case.task_ids["call-first"])
+    late_task = next(task for task in after["tasks"] if task.id == case.task_ids["call-late"])
+    assert first_task.status == BackgroundTaskStatus.SUCCEEDED
+    assert first_task.result == {"content": "first result delivered"}
+    assert first_task.extra["reply_owner"]["status"] == "handled"
+    assert late_task.status == BackgroundTaskStatus.SUCCEEDED
+    assert late_task.result == {"content": "late result delivered"}
+    assert "reply_owner" not in late_task.extra
+
+    assistant_texts = [message for message in after["messages"] if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+    assert len(assistant_texts) == 1
+    assert assistant_texts[0].content == "first result delivered"
+    assert len(delivered_events) == 1
+    assert delivered_events[0]["work_id"] == case.work_id
+
+    async with external_work_database() as db:
+        works = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == case.session_id,
+                        SessionReplyWorkItem.uid == case.uid,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [work.id for work in works] == [case.work_id]
+
+    ready_count = len([event for event in after["session_events"] if event.event.get("type") == "work_ready"])
+    marker_count = len(_messages_of_type(after, MessageType.BACKGROUND_TASK_RESULT))
+    tool_end_count = len([event for event in after["stream_events"] if event.event.get("type") == "tool_end"])
+    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-late"]) is False
+    repeated = await _snapshot(case)
+    assert len([event for event in repeated["session_events"] if event.event.get("type") == "work_ready"]) == ready_count
+    assert len(_messages_of_type(repeated, MessageType.BACKGROUND_TASK_RESULT)) == marker_count
+    assert len([event for event in repeated["stream_events"] if event.event.get("type") == "tool_end"]) == tool_end_count
+    assert len(delivered_events) == 1
+    assert await _claim_next(external_work_database, "post-delivery-worker") == case.work_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_has_file", [False, True], ids=["without-file", "with-file"])
+async def test_reopened_completed_work_keeps_only_new_result_files(
+    external_work_database,
+    late_has_file: bool,
+) -> None:
+    case = await _create_case(external_work_database, call_ids=("call-delivered", "call-late"))
+    old_file = {"id": "already-delivered-file", "name": "old.txt", "mime_type": "text/plain"}
+    new_file = {"id": "new-result-file", "name": "new.txt", "mime_type": "text/plain"}
+    delivered_content = json.dumps({"type": "files_to_user", "files": [old_file]})
+    late_content = json.dumps({"type": "files_to_user", "files": [new_file]}) if late_has_file else "late result without file"
+
+    await _complete_task(case, "call-delivered", delivered_content)
+    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-delivered"]) is True
+    await _prepare_claimed_external_resume(case)
+
+    old_history_content = json.dumps({"type": "assistant_files", "text": "", "files": [old_file]})
+    resume_worker = "external-resume-worker"
+    async with external_work_database() as db:
+        work = await db.get(SessionReplyWorkItem, case.work_id)
+        assert work is not None
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (case.work_id, resume_worker)
+        received = await receive_pending_external_results(
+            db,
+            uid=case.uid,
+            session_id=case.session_id,
+            profile_id=case.profile_id,
+        )
+        assert {payload["task"] for message in received for payload in _result_payloads(message.content or "{}")} == {delivered_content}
+        checkpoint = await _save_received_results_checkpoint(
+            db,
+            work=work,
+            worker_id=resume_worker,
+            user_message_id=case.user_message_id,
+            received=received,
+        )
+        checkpoint["files_to_user"] = [old_file]
+        state = dict(work.execution_state)
+        state["dispatcher_checkpoint"] = checkpoint
+        work.execution_state = state
+        assert await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=case.work_id,
+            worker_id=resume_worker,
+            values={"execution_state": state},
+            commit=False,
+        )
+        old_history = await save_message(
+            db,
+            case.session_id,
+            case.uid,
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content=old_history_content),
+            case.profile_id,
+            dedupe_key=executor_common_module._result_message_dedupe_key(work),
+            commit=False,
+        )
+        assert old_history.id is not None
+        assert await session_reply_work_item_crud.mark_terminal(
+            db,
+            work_id=case.work_id,
+            worker_id=resume_worker,
+            status=SessionReplyWorkStatus.SUCCEEDED,
+            result_message_id=old_history.id,
+            event_sent=True,
+            commit=False,
+        )
+        await external_work_crud.finish_received_results(db, work=work, commit=False)
+        await db.commit()
+
+    delivered = await _snapshot(case)
+    assert delivered["work"].status == SessionReplyWorkStatus.SUCCEEDED
+    assert delivered["work"].event_sent is True
+    assert delivered["work"].result_message_id == old_history.id
+    assert delivered["work"].execution_state["dispatcher_checkpoint"]["files_to_user"] == [old_file]
+    assert {slot["task_id"] for slot in delivered["work"].execution_state["pending_tools"]} == {case.task_ids["call-late"]}
+    late_task_before = next(task for task in delivered["tasks"] if task.id == case.task_ids["call-late"])
+    assert late_task_before.status == BackgroundTaskStatus.PENDING
+    delivered_history = next(message for message in delivered["messages"] if message.id == old_history.id)
+    assert delivered_history.content == old_history_content
+
+    await _complete_task(case, "call-late", late_content)
+    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-late"]) is True
+
+    after = await _snapshot(case)
+    assert after["work"].id == case.work_id
+    assert after["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    expected_files = [new_file] if late_has_file else []
+    assert after["work"].execution_state["dispatcher_checkpoint"].get("files_to_user", []) == expected_files
+
+    preserved_history = next(message for message in after["messages"] if message.id == old_history.id)
+    assert preserved_history.id == old_history.id
+    assert preserved_history.content == old_history_content
+    assert len([message for message in after["messages"] if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT and message.content == old_history_content]) == 1
+
+    delivered_task = next(task for task in after["tasks"] if task.id == case.task_ids["call-delivered"])
+    late_task = next(task for task in after["tasks"] if task.id == case.task_ids["call-late"])
+    assert delivered_task.status == BackgroundTaskStatus.SUCCEEDED
+    assert delivered_task.result == {"content": delivered_content}
+    assert delivered_task.extra["reply_owner"]["status"] == "handled"
+    assert late_task.status == BackgroundTaskStatus.SUCCEEDED
+    assert late_task.result == {"content": late_content}
+
+    async with external_work_database() as db:
+        works = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == case.session_id,
+                        SessionReplyWorkItem.uid == case.uid,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [work.id for work in works] == [case.work_id]
+
+    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-late"]) is False
+    repeated = await _snapshot(case)
+    assert repeated["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert repeated["work"].execution_state["dispatcher_checkpoint"].get("files_to_user", []) == expected_files
+    repeated_history = next(message for message in repeated["messages"] if message.id == old_history.id)
+    assert repeated_history.id == old_history.id
+    assert repeated_history.content == old_history_content
+    assert len([message for message in repeated["messages"] if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT and message.content == old_history_content]) == 1

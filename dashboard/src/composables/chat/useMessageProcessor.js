@@ -357,6 +357,11 @@ export function useMessageProcessor() {
       aiMessagesToInsert.push(...historyMessages)
     }
 
+    if (response.skip_reply === true) {
+      _insertAiMessagesByThinking(messagesRef, aiMessagesToInsert, thinkingId, requestId, workId)
+      return
+    }
+
     const tempMsg = { content: aiContent }
     let finalAiMsg = null
     let auditConfirmation = null

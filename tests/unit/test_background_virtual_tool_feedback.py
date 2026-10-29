@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app.core.context import ContextManager
+from app.core.prompts import EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT
 from app.core.utils.dispatcher.external_work import build_external_wait_response
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -54,6 +55,7 @@ def test_background_task_result_is_preserved_as_new_user_trigger():
             is_processed=True,
         ),
     ]
+    result_message_before = raw_messages[0].model_dump(mode="json")
 
     parsed = parse_db_messages_to_internal(raw_messages)
     audited = ContextManager.audit_tool_chain(
@@ -67,7 +69,18 @@ def test_background_task_result_is_preserved_as_new_user_trigger():
         MessageRole.ASSISTANT,
         MessageRole.USER,
     ]
-    assert audited[-1].content == result_content
+    assert audited[-1].id == raw_messages[0].id
+    assert json.loads(audited[-1].content) == {
+        "type": "background_tool_result",
+        "instruction": "Proactively reply to the user.",
+        "task": {
+            "status": "succeeded",
+            "tool_name": "generate_image",
+            "files": ["generated.png"],
+        },
+        "reply_guidance": EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT,
+    }
+    assert raw_messages[0].model_dump(mode="json") == result_message_before
 
 
 def test_ui_only_background_task_result_marker_is_not_parsed_as_internal_message():
@@ -137,6 +150,7 @@ def test_ui_only_background_task_result_is_projected_to_external_work_resume(tas
         "type": "external_work_resume",
         "instruction": marker_payload["instruction"],
         "tasks": [marker_payload],
+        "reply_guidance": EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT,
     }
     assert parsed_message.environment_prompt == marker.environment_prompt
     assert parsed_message.guidance_prompt == marker.guidance_prompt

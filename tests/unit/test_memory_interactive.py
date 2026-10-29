@@ -1,5 +1,6 @@
 import copy
 import json
+from itertools import groupby
 from types import SimpleNamespace
 
 import pytest
@@ -291,14 +292,15 @@ async def test_memory_recall_precheck_is_checkpointed_before_formal_non_stream_g
 
     assert precheck_calls == [10]
     assert event_log == ["precheck", "generate"]
-    assert [(item["memory_recall_boundary_message_id"], item["memory_recall_status"]) for item in checkpoints] == [
+    memory_recall_states = [(item["memory_recall_boundary_message_id"], item["memory_recall_status"]) for item in checkpoints]
+    assert [state for state, _ in groupby(memory_recall_states)] == [
         (10, "pending"),
         (10, "completed"),
     ]
-    assert [item["current_turn"] for item in checkpoints] == [0, 0]
+    assert checkpoints[0]["current_turn"] == 0
     formal_messages = request_log[0]["messages"]
-    assert any(message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id == "recall-10" for message in formal_messages)
-    assert any(message.role == MessageRole.TOOL and message.tool_call_id == "recall-10" for message in formal_messages)
+    assert sum(1 for message in formal_messages if message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id == "recall-10") == 1
+    assert sum(1 for message in formal_messages if message.role == MessageRole.TOOL and message.tool_call_id == "recall-10") == 1
     assert response["choices"][0]["message"]["content"] == "formal answer"
 
 
@@ -409,12 +411,14 @@ async def test_memory_recall_resume_completed_reuses_checkpoint_and_pending_retr
 
     assert precheck_calls == ([] if resume_status == "completed" else [10])
     if resume_status == "pending":
-        assert [checkpoint["memory_recall_status"] for checkpoint in checkpoints] == ["pending", "completed"]
+        memory_recall_states = [(checkpoint["memory_recall_boundary_message_id"], checkpoint["memory_recall_status"]) for checkpoint in checkpoints]
+        assert [state for state, _ in groupby(memory_recall_states)] == [(10, "pending"), (10, "completed")]
     else:
-        assert checkpoints == []
+        assert checkpoints
+        assert all(checkpoint["memory_recall_boundary_message_id"] == 10 and checkpoint["memory_recall_status"] == "completed" for checkpoint in checkpoints)
     formal_messages = request_log[0]["messages"]
-    assert any(message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id == "recall-10" for message in formal_messages)
-    assert any(message.role == MessageRole.TOOL and message.tool_call_id == "recall-10" for message in formal_messages)
+    assert sum(1 for message in formal_messages if message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id == "recall-10") == 1
+    assert sum(1 for message in formal_messages if message.role == MessageRole.TOOL and message.tool_call_id == "recall-10") == 1
 
 
 @pytest.mark.asyncio
@@ -892,7 +896,8 @@ async def test_audit_decision_resume_recall_boundary_ignores_initial_message(
         assert any(message.role == MessageRole.ASSISTANT and message.tool_calls and message.tool_calls[0].id == "recall-20" for message in formal_messages)
         assert any(message.role == MessageRole.TOOL and message.tool_call_id == "recall-20" for message in formal_messages)
     elif resume_boundary == 20 and resume_status == "pending":
-        assert [(checkpoint["memory_recall_boundary_message_id"], checkpoint["memory_recall_status"]) for checkpoint in checkpoints] == [(20, "pending"), (20, "completed")]
+        memory_recall_states = [(checkpoint["memory_recall_boundary_message_id"], checkpoint["memory_recall_status"]) for checkpoint in checkpoints]
+        assert [state for state, _ in groupby(memory_recall_states)] == [(20, "pending"), (20, "completed")]
 
 
 @pytest.mark.asyncio

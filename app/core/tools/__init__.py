@@ -297,7 +297,7 @@ async def get_tools_for_profile(
     并会注入运行时知识库白名单；该工具不受 enabled_tools 控制。
     """
     enabled_tool_names = _get_enabled_tool_names(profile)
-    base_tools = [copy.deepcopy(schema) for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS if schema["function"]["name"] != END_SESSION_TOOL_NAME or goal_mode is True]
+    base_tools = [copy.deepcopy(schema) for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS]
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
         if schema["function"]["name"] in enabled_tool_names:
             tool_schema = copy.deepcopy(schema)

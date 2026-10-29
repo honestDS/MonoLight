@@ -12,7 +12,7 @@ from sqlmodel import (
     select,
 )
 
-from app.core.constants import ERR_VALUE_MUST_BE_BETWEEN
+from app.core.constants import END_SESSION_TOOL_NAME, ERR_VALUE_MUST_BE_BETWEEN
 from app.core.crud.base import CRUDBase
 from app.core.i18n import t
 from app.models.message import (
@@ -444,7 +444,19 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         用于前端加载会话历史记录。
         after_id 为空时按倒序偏移分页；提供 after_id 时按消息编号正序增量读取。
         """
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
+        stmt = (
+            select(Message)
+            .where(Message.session_id == session_id)
+            .where(Message.uid == uid)
+            .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
+            .where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
+            .where(
+                or_(
+                    Message.provider_metadata["internal_control"].as_string().is_(None),
+                    Message.provider_metadata["internal_control"].as_string() != END_SESSION_TOOL_NAME,
+                )
+            )
+        )
         if not include_tool_messages:
             stmt = stmt.where(Message.type.notin_((MessageType.TOOL_CALL, MessageType.TOOL_RESULT)))
         if after_id is not None:

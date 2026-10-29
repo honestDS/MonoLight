@@ -124,6 +124,7 @@ async def _route_terminal_auto_watch_delivery(
         SessionReplyWorkStatus.READY_FOR_LLM.value,
         SessionReplyWorkStatus.RUNNING.value,
         SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value,
+        SessionReplyWorkStatus.MERGED.value,
     }
     if invalid_work:
         await _consume_and_commit(db, task, work_id=work_id, identity=identity)
@@ -133,6 +134,60 @@ async def _route_terminal_auto_watch_delivery(
     if session is None or session.uid != task.uid or session.profile_id != task.profile_id:
         await _consume_and_commit(db, task, work_id=work_id, identity=identity)
         return True
+
+    if work_status == SessionReplyWorkStatus.MERGED.value:
+        target = await session_reply_work_item_crud.resolve_merged_target(db, work_id)
+        source_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+        target_state = target.execution_state if target is not None and isinstance(target.execution_state, dict) else {}
+        source_actor_uid = source_state.get("actor_uid") or work.uid
+        target_actor_uid = None
+        if target is not None:
+            target_actor_uid = target_state.get("actor_uid") or target.uid
+        target_status = _status_value(target.status) if target is not None else None
+        if (
+            target is None
+            or target.uid != work.uid
+            or target.session_id != work.session_id
+            or target.profile_id != work.profile_id
+            or target_actor_uid != source_actor_uid
+            or target_status
+            not in {
+                SessionReplyWorkStatus.SUCCEEDED.value,
+                SessionReplyWorkStatus.READY_FOR_LLM.value,
+                SessionReplyWorkStatus.RUNNING.value,
+                SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value,
+            }
+        ):
+            await _consume_and_commit(db, task, work_id=work_id, identity=identity)
+            return True
+
+        extra = task.extra if isinstance(task.extra, dict) else {}
+        updated_extra = dict(extra)
+        updated_deliveries = {key: dict(value) for key, value in get_terminal_watch_deliveries(task).items()}
+        updated_deliveries[str(work_id)] = {"identity": identity, "consumed": True, "routed": True}
+        target_key = str(target.id)
+        existing_target_delivery = updated_deliveries.get(target_key)
+        if not (isinstance(existing_target_delivery, dict) and existing_target_delivery.get("identity") == target.dedupe_key and existing_target_delivery.get("consumed") is True):
+            updated_deliveries[target_key] = {
+                "identity": target.dedupe_key,
+                "consumed": False,
+                "routed": False,
+            }
+        updated_extra["terminal_watch_deliveries"] = updated_deliveries
+        updated_extra["terminal_auto_watch_routed"] = all(candidate["routed"] or candidate["consumed"] for candidate in updated_deliveries.values())
+        task.extra = updated_extra
+        task.reply_status = BackgroundTaskReplyStatus.PENDING
+        task.reply_locked_by = None
+        task.reply_lock_until = None
+        db.add(task)
+        await db.flush()
+        await db.commit()
+        return await _route_terminal_auto_watch_delivery(
+            db,
+            task,
+            work_id=target.id,
+            identity=target.dedupe_key,
+        )
 
     watch = _watch_arguments(task)
     result = task.result if isinstance(task.result, dict) else {}
