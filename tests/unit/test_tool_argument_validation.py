@@ -6,8 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_TOOL_NOT_ENABLED
-from app.core.i18n import t
+from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    ERR_TERMINAL_PTY_DIMENSIONS_INVALID,
+    ERR_TERMINAL_PTY_INPUT_INVALID,
+    ERR_TOOL_NOT_ENABLED,
+)
+from app.core.i18n import get_current_locale, set_current_locale, t
+from app.core.i18n.context import reset_current_locale
 from app.core.tools import (
     IMAGE_GENERATION_TOOL_SCHEMA,
     MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA,
@@ -329,35 +335,31 @@ def test_prevalidate_tool_round_accepts_valid_shell_execution_modes(execution_mo
     assert errors == {}
 
 
-def test_prevalidate_tool_round_accepts_companion_tools_when_shell_is_enabled():
+@pytest.mark.parametrize(
+    ("operation", "extra_arguments"),
+    [
+        ("read", {}),
+        ("read", {"read_output": False}),
+        ("write", {"data": "input"}),
+        ("resize", {"columns": 80, "rows": 24}),
+        ("close", {"force": True}),
+    ],
+)
+def test_prevalidate_tool_round_accepts_terminal_tool_operations_when_shell_is_enabled(operation, extra_arguments):
     cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
     session_id = "t" * 32
-    tool_calls = [
-        SimpleNamespace(
-            id="status",
-            name="terminal_read",
-            arguments={"terminal_session_id": session_id, "read_output": False},
-        ),
-        SimpleNamespace(
-            id="read",
-            name="terminal_read",
-            arguments={"terminal_session_id": session_id, "offset": 0, "max_bytes": 16_384},
-        ),
-        SimpleNamespace(
-            id="write",
-            name="terminal_write",
-            arguments={"terminal_session_id": session_id, "data": "input"},
-        ),
-        SimpleNamespace(
-            id="resize",
-            name="terminal_resize",
-            arguments={"terminal_session_id": session_id, "columns": 80, "rows": 24},
-        ),
-        SimpleNamespace(id="close", name="terminal_close", arguments={"terminal_session_id": session_id}),
-    ]
+    tool_call = SimpleNamespace(
+        id=f"terminal-{operation}",
+        name="terminal_tool",
+        arguments={
+            "operation": operation,
+            "terminal_session_id": session_id,
+            **extra_arguments,
+        },
+    )
 
     errors = process_single_tool_module.prevalidate_tool_round(
-        tool_calls,
+        [tool_call],
         cfg,
         tool_schemas=[SHELL_TOOL_SCHEMA, *SHELL_COMPANION_TOOL_SCHEMAS],
     )
@@ -365,13 +367,34 @@ def test_prevalidate_tool_round_accepts_companion_tools_when_shell_is_enabled():
     assert errors == {}
 
 
-def test_prevalidate_tool_round_rejects_companion_tools_when_shell_is_disabled():
+def test_prevalidate_tool_round_rejects_terminal_tool_when_shell_is_disabled():
     cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": []}})
     tool_call = SimpleNamespace(
-        id="terminal-read",
-        name="terminal_read",
-        arguments={"terminal_session_id": "t" * 32},
+        id="terminal-tool",
+        name="terminal_tool",
+        arguments={"operation": "read", "terminal_session_id": "t" * 32},
     )
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=[SHELL_TOOL_SCHEMA, *SHELL_COMPANION_TOOL_SCHEMAS],
+    )
+
+    payload = json.loads(errors[tool_call.id])
+    assert payload["error"] == t(ERR_TOOL_NOT_ENABLED, tool_name="terminal_tool")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_missing"),
+    [
+        ({"terminal_session_id": "t" * 32}, ["operation"]),
+        ({"operation": "read"}, ["terminal_session_id"]),
+    ],
+)
+def test_prevalidate_tool_round_rejects_terminal_tool_missing_required_arguments(arguments, expected_missing):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(id="terminal-missing", name="terminal_tool", arguments=arguments)
 
     errors = process_single_tool_module.prevalidate_tool_round(
         [tool_call],
@@ -380,7 +403,90 @@ def test_prevalidate_tool_round_rejects_companion_tools_when_shell_is_disabled()
     )
 
     payload = json.loads(errors[tool_call.id])
-    assert payload["error"] == t(ERR_TOOL_NOT_ENABLED, tool_name="terminal_read")
+    assert payload["status"] == "failed"
+    assert payload["tool_name"] == "terminal_tool"
+    assert payload["missing_arguments"] == expected_missing
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"operation": "write", "terminal_session_id": "t" * 32},
+        {"operation": "write", "terminal_session_id": "t" * 32, "data": ""},
+        {"operation": "write", "terminal_session_id": "t" * 32, "data": 123},
+    ],
+)
+def test_prevalidate_tool_round_rejects_terminal_write_without_valid_data(arguments):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(id="terminal-write-invalid", name="terminal_tool", arguments=arguments)
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=SHELL_COMPANION_TOOL_SCHEMAS,
+    )
+
+    payload = json.loads(errors[tool_call.id])
+    assert payload["status"] == "failed"
+    assert payload["tool_name"] == "terminal_tool"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"operation": "resize", "terminal_session_id": "t" * 32, "rows": 24},
+        {"operation": "resize", "terminal_session_id": "t" * 32, "columns": 80},
+        {"operation": "resize", "terminal_session_id": "t" * 32, "columns": True, "rows": 24},
+        {"operation": "resize", "terminal_session_id": "t" * 32, "columns": 80, "rows": False},
+        {"operation": "resize", "terminal_session_id": "t" * 32, "columns": 0, "rows": 24},
+        {"operation": "resize", "terminal_session_id": "t" * 32, "columns": 80, "rows": 1_001},
+    ],
+)
+def test_prevalidate_tool_round_rejects_terminal_resize_without_valid_dimensions(arguments):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(id="terminal-resize-invalid", name="terminal_tool", arguments=arguments)
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=SHELL_COMPANION_TOOL_SCHEMAS,
+    )
+
+    payload = json.loads(errors[tool_call.id])
+    assert payload["status"] == "failed"
+    assert payload["tool_name"] == "terminal_tool"
+
+
+@pytest.mark.parametrize(
+    ("locale", "operation", "error_key", "error_params"),
+    [
+        ("zh", "write", ERR_TERMINAL_PTY_INPUT_INVALID, {"field": "data"}),
+        ("en", "write", ERR_TERMINAL_PTY_INPUT_INVALID, {"field": "data"}),
+        ("zh", "resize", ERR_TERMINAL_PTY_DIMENSIONS_INVALID, {}),
+        ("en", "resize", ERR_TERMINAL_PTY_DIMENSIONS_INVALID, {}),
+    ],
+)
+def test_prevalidate_terminal_conditional_validation_details_follow_locale(locale, operation, error_key, error_params):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(
+        id="terminal-conditional-invalid",
+        name="terminal_tool",
+        arguments={"operation": operation, "terminal_session_id": "t" * 32},
+    )
+    previous_locale = get_current_locale()
+    locale_token = set_current_locale(locale)
+    try:
+        errors = process_single_tool_module.prevalidate_tool_round(
+            [tool_call],
+            cfg,
+            tool_schemas=SHELL_COMPANION_TOOL_SCHEMAS,
+        )
+        payload = json.loads(errors[tool_call.id])
+    finally:
+        reset_current_locale(locale_token)
+
+    assert get_current_locale() == previous_locale
+    assert t(error_key, locale=locale, **error_params) in payload["error"]
 
 
 def test_prevalidate_tool_round_rejects_removed_terminal_signal_companion():
@@ -424,12 +530,12 @@ def test_prevalidate_tool_round_rejects_removed_terminal_status_as_disabled_tool
 @pytest.mark.parametrize(
     ("tool_name", "arguments", "expected_detail"),
     [
-        ("terminal_read", {"terminal_session_id": "t" * 31}, "shorter than 32"),
-        ("terminal_read", {"terminal_session_id": "t" * 32, "offset": -1}, "at least 0"),
-        ("terminal_read", {"terminal_session_id": "t" * 32, "max_bytes": 16_385}, "at most 16384"),
-        ("terminal_read", {"terminal_session_id": "t" * 32, "request_id": "invalid request id"}, "does not match pattern"),
-        ("terminal_read", {"terminal_session_id": "t" * 32, "read_output": "false"}, "must be boolean"),
-        ("terminal_read", {"terminal_session_id": "t" * 32, "extra": True}, "extra"),
+        ("terminal_tool", {"operation": "read", "terminal_session_id": "t" * 31}, "shorter than 32"),
+        ("terminal_tool", {"operation": "read", "terminal_session_id": "t" * 32, "offset": -1}, "at least 0"),
+        ("terminal_tool", {"operation": "read", "terminal_session_id": "t" * 32, "max_bytes": 16_385}, "at most 16384"),
+        ("terminal_tool", {"operation": "read", "terminal_session_id": "t" * 32, "request_id": "invalid request id"}, "does not match pattern"),
+        ("terminal_tool", {"operation": "read", "terminal_session_id": "t" * 32, "read_output": "false"}, "must be boolean"),
+        ("terminal_tool", {"operation": "read", "terminal_session_id": "t" * 32, "extra": True}, "extra"),
     ],
 )
 def test_prevalidate_tool_round_rejects_companion_schema_boundaries(tool_name, arguments, expected_detail):
@@ -451,8 +557,9 @@ def test_prevalidate_tool_round_accepts_terminal_read_request_id_query():
     cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
     tool_call = SimpleNamespace(
         id="terminal-status-query",
-        name="terminal_read",
+        name="terminal_tool",
         arguments={
+            "operation": "read",
             "terminal_session_id": "t" * 32,
             "request_id": "r" * 16,
             "read_output": False,
@@ -473,8 +580,12 @@ def test_prevalidate_tool_round_accepts_terminal_read_page_sizes(max_bytes):
     cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
     tool_call = SimpleNamespace(
         id="terminal-read-page",
-        name="terminal_read",
-        arguments={"terminal_session_id": "t" * 32, "max_bytes": max_bytes},
+        name="terminal_tool",
+        arguments={
+            "operation": "read",
+            "terminal_session_id": "t" * 32,
+            "max_bytes": max_bytes,
+        },
     )
 
     errors = process_single_tool_module.prevalidate_tool_round(
@@ -484,3 +595,31 @@ def test_prevalidate_tool_round_accepts_terminal_read_page_sizes(max_bytes):
     )
 
     assert errors == {}
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("terminal_read", {"terminal_session_id": "t" * 32}),
+        ("terminal_write", {"terminal_session_id": "t" * 32, "data": "input"}),
+        ("terminal_resize", {"terminal_session_id": "t" * 32, "columns": 80, "rows": 24}),
+        ("terminal_close", {"terminal_session_id": "t" * 32}),
+    ],
+)
+def test_prevalidate_tool_round_rejects_removed_terminal_tools_when_shell_is_enabled(tool_name, arguments):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(id=f"removed-{tool_name}", name=tool_name, arguments=arguments)
+
+    assert tool_name not in {schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS}
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=[SHELL_TOOL_SCHEMA, *SHELL_COMPANION_TOOL_SCHEMAS],
+    )
+
+    payload = json.loads(errors[tool_call.id])
+    assert payload == {
+        "error": t(ERR_TOOL_NOT_ENABLED, tool_name=tool_name),
+        "tool_name": tool_name,
+        "status": "failed",
+    }

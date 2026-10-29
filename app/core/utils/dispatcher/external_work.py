@@ -4,9 +4,8 @@ from app.core.constants import (
     ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     SHELL_TOOL_NAME,
-    TERMINAL_READ_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
     TERMINAL_WATCH_TOOL_NAME,
-    TERMINAL_WRITE_TOOL_NAME,
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
@@ -85,11 +84,15 @@ async def build_terminal_wait_response(
     terminal_candidates: dict[str, tuple[InternalToolCall, InternalMessage]] = {}
     for tool_result in tool_results:
         tool_call = tool_calls_by_id.get(tool_result.tool_call_id)
-        if tool_call is None or tool_call.name not in {
-            SHELL_TOOL_NAME,
-            TERMINAL_WRITE_TOOL_NAME,
-            TERMINAL_READ_TOOL_NAME,
-        }:
+        if (
+            tool_call is None
+            or tool_call.name
+            not in {
+                SHELL_TOOL_NAME,
+                TERMINAL_TOOL_NAME,
+            }
+            or (tool_call.name == TERMINAL_TOOL_NAME and tool_call.arguments.get("operation") not in ("read", "write"))
+        ):
             continue
 
         content = strip_session_todo_snapshot(strip_terminal_watch_snapshot(tool_result.content))

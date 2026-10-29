@@ -564,7 +564,7 @@ app/core/tools/
 ├── read_multimodal_file.py # 多模态文件读取工具
 ├── send_file_to_user.py    # 文件发送工具
 ├── skill.py                # 全局共享技能包只读目录访问工具
-├── terminal.py             # 交互终端工具
+├── terminal.py             # 交互终端工具（terminal_tool，集成 read/write/resize/close 操作）
 ├── todo.py                 # 当前会话 Todo 计划工具
 └── shell.py                # Shell 工具
 

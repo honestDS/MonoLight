@@ -31,7 +31,7 @@ TERMINAL_WATCH_TOOL_SCHEMA = {
             "Use manage_background_tasks to cancel the task. "
             "output_contains uses raw literal matching, not a regular expression. "
             "quiet/output only report observed terminal output timing and do not prove business completion. "
-            "Set after_offset from terminal_write.read_offset or terminal_read.next_offset."
+            "Set after_offset from terminal_tool operation='write' read_offset or operation='read' next_offset."
         ),
         "parameters": TerminalWatchRequest.model_json_schema(),
     },

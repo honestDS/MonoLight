@@ -121,7 +121,7 @@ async def _seed_pending_confirmation(
             arguments=_tool_arguments(operation),
         )
     cfg = _profile_config(tmp_path)
-    if tool_call.name == "terminal_write":
+    if tool_call.name == "terminal_tool":
         cfg.tool.enabled_tools = ["execute_shell"]
     integrity = build_tool_round_integrity_snapshot(
         tool_calls=[{"id": tool_call.id, "name": tool_call.name, "arguments": tool_call.arguments}],
@@ -550,8 +550,8 @@ async def test_terminal_write_timeout_recovers_unknown_audit_and_late_command_re
     command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
     source_tool_call = InternalToolCall(
         id="original-terminal-call",
-        name="terminal_write",
-        arguments={"terminal_session_id": terminal_session_id, "data": data},
+        name="terminal_tool",
+        arguments={"operation": "write", "terminal_session_id": terminal_session_id, "data": data},
     )
     audit_record_id = await _seed_pending_confirmation(
         tool_timeout_session_factory,
@@ -613,7 +613,7 @@ async def test_terminal_write_timeout_recovers_unknown_audit_and_late_command_re
         assert get_tool_execution_status(tool_result) == "execution_unknown"
         payload = json.loads(tool_result.content or "{}")
         assert payload["status"] == "execution_unknown"
-        assert payload["tool_name"] == "terminal_write"
+        assert payload["tool_name"] == "terminal_tool"
         assert payload["terminal_session_id"] == terminal_session_id
         assert payload["error_code"] == ERR_TERMINAL_COMMAND_TIMEOUT
         assert isinstance(payload["error"], str) and payload["error"]
@@ -765,8 +765,9 @@ async def test_terminal_write_timeout_recovers_unknown_audit_and_late_command_re
             status_result = await process_single_tool(
                 InternalToolCall(
                     id="terminal-read-after-timeout",
-                    name="terminal_read",
+                    name="terminal_tool",
                     arguments={
+                        "operation": "read",
                         "terminal_session_id": terminal_session_id,
                         "request_id": request_id,
                         "read_output": False,

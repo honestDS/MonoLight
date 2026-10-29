@@ -93,7 +93,7 @@ def _audit_config(
             },
             "security": security,
             "tool": {
-                "enabled_tools": ["execute_shell", "file_tool", "terminal_write"],
+                "enabled_tools": ["execute_shell", "file_tool"],
                 "allowed_operation_dirs": (allowed_operation_dirs if allowed_operation_dirs is not None else [str(tmp_path)]),
             },
             "other": {},
@@ -224,7 +224,7 @@ async def _seed_terminal_history(session_factory, working_directory: Path) -> No
     [
         ("execute_shell", "non_interactive"),
         ("execute_shell", "interactive"),
-        ("terminal_write", None),
+        ("terminal_tool", None),
     ],
     ids=["shell-non-interactive", "shell-interactive", "terminal-write"],
 )
@@ -265,9 +265,10 @@ async def test_model_denial_blocks_entire_tool_round_and_cannot_be_claimed(
     target_file.parent.mkdir(parents=True)
     target_file.write_text("sentinel", encoding="utf-8")
     command = f'echo changed > "{target_file}"'
-    if tool_name == "terminal_write":
+    if tool_name == "terminal_tool":
         await _seed_terminal_history(audit_database, workspace)
         arguments = {
+            "operation": "write",
             "terminal_session_id": TERMINAL_SESSION_ID,
             "data": f"{command}\n",
         }
@@ -321,7 +322,7 @@ async def test_model_denial_blocks_entire_tool_round_and_cannot_be_claimed(
     assert all(json.loads(message.content or "{}")["status"] == AuditRecordStatus.BLOCKED.value for message in result.tool_results)
     assert target_file.read_text(encoding="utf-8") == "sentinel"
 
-    if tool_name == "terminal_write":
+    if tool_name == "terminal_tool":
         request_payload = json.loads(generate_calls[0]["messages"][1].content)
         terminal_context = request_payload["tool_calls"][0]["terminal_context"]
         assert terminal_context["status"] == TerminalSessionStatus.RUNNING.value
@@ -386,7 +387,7 @@ async def test_model_denial_blocks_entire_tool_round_and_cannot_be_claimed(
         assert persisted_record.status is AuditRecordStatus.BLOCKED
         assert claims_after_attempts == []
         assert executions_after_attempts == []
-        if tool_name == "terminal_write":
+        if tool_name == "terminal_tool":
             terminal_session = await db.get(TerminalSession, TERMINAL_SESSION_ID)
             terminal_commands = list((await db.execute(select(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id == TERMINAL_SESSION_ID))).scalars().all())
             assert terminal_session is not None
@@ -543,7 +544,7 @@ async def test_invalid_audit_batch_retries_once_then_fails_closed_without_leakin
         ("file_tool", None),
         ("execute_shell", "non_interactive"),
         ("execute_shell", "interactive"),
-        ("terminal_write", None),
+        ("terminal_tool", None),
     ],
     ids=["file-read", "shell-non-interactive", "shell-interactive", "terminal-write"],
 )
@@ -582,9 +583,9 @@ async def test_read_only_audit_passes_outside_write_policy(
             "start_line": 1,
             "end_line": 5,
         }
-    elif tool_name == "terminal_write":
+    elif tool_name == "terminal_tool":
         await _seed_terminal_history(audit_database, workspace)
-        arguments = {"terminal_session_id": TERMINAL_SESSION_ID, "data": f"{command}\n"}
+        arguments = {"operation": "write", "terminal_session_id": TERMINAL_SESSION_ID, "data": f"{command}\n"}
     else:
         arguments = {"command": command, "execution_mode": execution_mode}
 
@@ -630,7 +631,7 @@ async def test_read_only_audit_passes_outside_write_policy(
         assert len(details) == 1
         assert details[0].conclusion is AuditToolConclusion.PASSED
         assert details[0].score == 0
-        if tool_name == "terminal_write":
+        if tool_name == "terminal_tool":
             terminal_session = await db.get(TerminalSession, TERMINAL_SESSION_ID)
             terminal_commands = list((await db.execute(select(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id == TERMINAL_SESSION_ID))).scalars().all())
             assert terminal_session is not None

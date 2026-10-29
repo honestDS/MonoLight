@@ -44,14 +44,8 @@ from .skill import SKILL_TOOL_SCHEMA, SkillExecutor
 from .terminal import SHELL_COMPANION_TOOL_NAMES as SHELL_COMPANION_TOOL_NAMES
 from .terminal import (
     SHELL_COMPANION_TOOL_SCHEMAS,
-    TERMINAL_CLOSE_TOOL_SCHEMA,
-    TERMINAL_READ_TOOL_SCHEMA,
-    TERMINAL_RESIZE_TOOL_SCHEMA,
-    TERMINAL_WRITE_TOOL_SCHEMA,
-    TerminalCloseExecutor,
-    TerminalReadExecutor,
-    TerminalResizeExecutor,
-    TerminalWriteExecutor,
+    TERMINAL_TOOL_SCHEMA,
+    TerminalToolExecutor,
 )
 from .terminal_watch import TERMINAL_WATCH_TOOL_SCHEMA, TerminalWatchExecutor
 from .todo import MANAGE_TODO_TOOL_NAME, MANAGE_TODO_TOOL_SCHEMA, ManageTodoExecutor
@@ -116,10 +110,7 @@ TOOL_EXECUTOR_MAP = {
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME: LongTermMemoryExecutor,
-    TERMINAL_READ_TOOL_SCHEMA["function"]["name"]: TerminalReadExecutor,
-    TERMINAL_WRITE_TOOL_SCHEMA["function"]["name"]: TerminalWriteExecutor,
-    TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
-    TERMINAL_CLOSE_TOOL_SCHEMA["function"]["name"]: TerminalCloseExecutor,
+    TERMINAL_TOOL_SCHEMA["function"]["name"]: TerminalToolExecutor,
     TERMINAL_WATCH_TOOL_SCHEMA["function"]["name"]: TerminalWatchExecutor,
     MANAGE_TODO_TOOL_NAME: ManageTodoExecutor,
     SKILL_TOOL_SCHEMA["function"]["name"]: SkillExecutor,
@@ -138,9 +129,12 @@ def get_tool_round_execution_policy(tool_name: str) -> str:
     return getattr(executor_class, "round_execution_policy", "parallel")
 
 
-def tool_requires_audit(tool_name: str) -> bool:
+def tool_requires_audit(tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
     executor_class = TOOL_EXECUTOR_MAP.get(tool_name)
-    return bool(executor_class is not None and executor_class.requires_audit)
+    requires_audit = bool(executor_class is not None and executor_class.requires_audit)
+    if not requires_audit or tool_name != TERMINAL_TOOL_SCHEMA["function"]["name"] or arguments is None:
+        return requires_audit
+    return arguments.get("operation") not in ("read", "resize")
 
 
 def get_registered_tool_names():

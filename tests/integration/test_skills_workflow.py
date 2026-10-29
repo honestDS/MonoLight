@@ -17,7 +17,7 @@ from app.core.constants import (
     SHELL_TOOL_NAME,
     SKILL_TOOL_NAME,
     SKILLS_DIRECTORY,
-    TERMINAL_WRITE_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.paths import get_user_temp_dir
@@ -307,7 +307,15 @@ async def test_legacy_profile_can_use_shared_skills_without_enabling_shell(
                 name=SHELL_TOOL_NAME,
                 arguments={"command": "echo unauthorized", "execution_mode": "non_interactive"},
             ),
-            InternalToolCall(id="disabled-terminal-write", name=TERMINAL_WRITE_TOOL_NAME, arguments={}),
+            InternalToolCall(
+                id="disabled-terminal-write",
+                name=TERMINAL_TOOL_NAME,
+                arguments={
+                    "operation": "write",
+                    "terminal_session_id": "t" * 32,
+                    "data": "input",
+                },
+            ),
         ]
         disabled = prevalidate_tool_round(disabled_calls, cfg)
         assert set(disabled) == {call.id for call in disabled_calls}

@@ -1,4 +1,5 @@
 MESSAGES = {
+    "ERR_TERMINAL_TOOL_OPERATION_INVALID": "终端工具操作无效：{operation}",
     "ERR_TERMINAL_STATUS_TARGET_INVALID": "终端会话目标状态无效：{target}",
     "ERR_TERMINAL_STATUS_TRANSITION_INVALID": "终端会话状态迁移无效：{current} -> {target}",
     "ERR_TERMINAL_OUTPUT_OFFSET_ORDER_INVALID": "next_offset 不得早于 oldest_offset",

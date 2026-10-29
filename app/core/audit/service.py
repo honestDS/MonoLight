@@ -46,7 +46,7 @@ from app.core.constants import (
     MSG_AUDIT_STATUS_CANCELLED,
     READ_TEXT_FILE_TOOL_NAME,
     SHELL_TOOL_NAME,
-    TERMINAL_WRITE_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel.channel import channel_crud
@@ -779,7 +779,7 @@ async def audit_tool_round(
 ) -> AuditRoundResult | None:
     if not is_audit_configured(cfg):
         return None
-    audited_tool_calls = [item for item in tool_calls if tool_requires_audit(item.name)]
+    audited_tool_calls = [item for item in tool_calls if tool_requires_audit(item.name, item.arguments)]
     if not audited_tool_calls:
         return None
     audited_tool_call_ids = [item.id for item in audited_tool_calls]
@@ -872,7 +872,8 @@ async def audit_tool_round(
             else:
                 terminal_contexts: dict[str, dict[str, Any]] = {}
                 for tool_call_payload in request_payload["tool_calls"]:
-                    if tool_call_payload["tool_name"] != TERMINAL_WRITE_TOOL_NAME:
+                    is_terminal_write = tool_call_payload["tool_name"] == TERMINAL_TOOL_NAME and (tool_call_payload.get("arguments") or {}).get("operation") == "write"
+                    if not is_terminal_write:
                         continue
                     terminal_session_id = tool_call_payload["arguments"].get("terminal_session_id")
                     if terminal_session_id not in terminal_contexts:
@@ -970,7 +971,8 @@ async def audit_tool_round(
         if status == AuditRecordStatus.PENDING:
             summary_tool_calls = _tool_payload(audited_tool_calls)
             for tool_call_payload in summary_tool_calls:
-                if tool_call_payload["name"] == TERMINAL_WRITE_TOOL_NAME:
+                is_terminal_write = tool_call_payload["name"] == TERMINAL_TOOL_NAME and (tool_call_payload.get("arguments") or {}).get("operation") == "write"
+                if is_terminal_write:
                     terminal_session_id = tool_call_payload["arguments"].get("terminal_session_id")
                     tool_call_payload["terminal_context"] = terminal_contexts[terminal_session_id]
             intent_summary, summary_context = await _summarize_pending(

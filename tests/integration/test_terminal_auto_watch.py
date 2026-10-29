@@ -25,9 +25,8 @@ from app.core.background_tasks.terminal_watch_reply import prepare_terminal_auto
 from app.core.constants import (
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     SHELL_TOOL_NAME,
-    TERMINAL_READ_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
     TERMINAL_WATCH_TOOL_NAME,
-    TERMINAL_WRITE_TOOL_NAME,
 )
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
@@ -38,7 +37,7 @@ from app.core.session_reply_queue import executor_lifecycle as executor_lifecycl
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus, TerminalWriteRequest
-from app.core.tools.terminal import TerminalCloseExecutor, TerminalReadExecutor
+from app.core.tools.terminal import TerminalToolExecutor
 from app.core.tools.terminal_watch import ensure_terminal_auto_watch
 from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.dispatcher.external_work import build_terminal_wait_response
@@ -941,13 +940,13 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_manual_watch_on_ot
             id="shell",
         ),
         pytest.param(
-            TERMINAL_WRITE_TOOL_NAME,
-            {"terminal_session_id": TERMINAL_SESSION_ID, "data": "input\n"},
+            TERMINAL_TOOL_NAME,
+            {"operation": "write", "terminal_session_id": TERMINAL_SESSION_ID, "data": "input\n"},
             id="write",
         ),
         pytest.param(
-            TERMINAL_READ_TOOL_NAME,
-            {"terminal_session_id": TERMINAL_SESSION_ID, "offset": 0, "read_output": True},
+            TERMINAL_TOOL_NAME,
+            {"operation": "read", "terminal_session_id": TERMINAL_SESSION_ID, "offset": 0, "read_output": True},
             id="read",
         ),
     ],
@@ -1060,7 +1059,7 @@ async def test_terminal_sync_receipts_suspend_claimed_work_without_rewriting_too
             == []
         )
 
-        if tool_name != TERMINAL_READ_TOOL_NAME:
+        if arguments.get("operation") != "read":
             return
 
         cancelled_auto = await background_task_crud.cancel_user_task(db, task_id=auto_task.id, uid=UID)
@@ -3039,7 +3038,7 @@ async def test_terminal_read_status_query_does_not_restart_cancelled_auto_watch_
 
         profile = await db.get(Profile, PROFILE_ID)
         assert profile is not None
-        executor = TerminalReadExecutor(project_root=".", uid=UID)
+        executor = TerminalToolExecutor(project_root=".", uid=UID)
         executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 0.05}}))
         executor.set_runtime_context(
             dispatch_context=DispatchContext(
@@ -3056,6 +3055,7 @@ async def test_terminal_read_status_query_does_not_restart_cancelled_auto_watch_
         response = json.loads(
             await asyncio.wait_for(
                 executor.execute(
+                    operation="read",
                     terminal_session_id=TERMINAL_SESSION_ID,
                     request_id=write_request_id,
                     read_output=False,
@@ -3625,7 +3625,7 @@ async def test_terminal_close_reply_delivery_cancels_origin_or_preserves_watch_f
     async def execute_foreground(db, work, _worker_id):
         profile = await db.get(Profile, PROFILE_ID)
         assert profile is not None
-        close_executor = TerminalCloseExecutor(project_root=".", uid=work.uid)
+        close_executor = TerminalToolExecutor(project_root=".", uid=work.uid)
         close_executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 1}}))
         close_executor.set_runtime_context(
             dispatch_context=DispatchContext(
@@ -3638,7 +3638,12 @@ async def test_terminal_close_reply_delivery_cancels_origin_or_preserves_watch_f
                 tool_call_id="terminal-close-stop-tool-call",
             )
         )
-        close_response = json.loads(await close_executor.execute(TERMINAL_SESSION_ID))
+        close_response = json.loads(
+            await close_executor.execute(
+                operation="close",
+                terminal_session_id=TERMINAL_SESSION_ID,
+            )
+        )
         assert close_response["action"] == TerminalAction.CLOSE.value
         assert close_response["terminal_session_id"] == TERMINAL_SESSION_ID
         assert close_response["session_status"] == TerminalSessionStatus.EXITED.value
@@ -3933,7 +3938,7 @@ async def test_terminal_close_replies_clear_only_the_closed_terminal_watch_slot(
         async def execute_foreground(db, work, _worker_id):
             profile = await db.get(Profile, PROFILE_ID)
             assert profile is not None
-            close_executor = TerminalCloseExecutor(project_root=".", uid=work.uid)
+            close_executor = TerminalToolExecutor(project_root=".", uid=work.uid)
             close_executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": 1}}))
             close_executor.set_runtime_context(
                 dispatch_context=DispatchContext(
@@ -3946,7 +3951,12 @@ async def test_terminal_close_replies_clear_only_the_closed_terminal_watch_slot(
                     tool_call_id=tool_call_id,
                 )
             )
-            close_response = json.loads(await close_executor.execute(terminal_session_id))
+            close_response = json.loads(
+                await close_executor.execute(
+                    operation="close",
+                    terminal_session_id=terminal_session_id,
+                )
+            )
             assert close_response["action"] == TerminalAction.CLOSE.value
             assert close_response["terminal_session_id"] == terminal_session_id
             assert close_response["session_status"] == TerminalSessionStatus.EXITED.value
