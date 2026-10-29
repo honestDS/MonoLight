@@ -86,26 +86,11 @@ class CRUDExternalWork:
         for task in tasks:
             if task.id is None:
                 continue
-            delivery_conditions = [
-                and_(
-                    SessionReplyWorkItem.id == int(delivery_work_id),
-                    SessionReplyWorkItem.dedupe_key == delivery["identity"],
-                )
-                for delivery_work_id, delivery in get_terminal_watch_deliveries(task).items()
-            ]
             work_conditions.append(
                 and_(
                     SessionReplyWorkItem.uid == task.uid,
                     SessionReplyWorkItem.session_id == task.session_id,
                     SessionReplyWorkItem.profile_id == task.profile_id,
-                    or_(
-                        *delivery_conditions,
-                        and_(
-                            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
-                            SessionReplyWorkItem.source_type == SessionReplySourceType.BACKGROUND_TASK,
-                            SessionReplyWorkItem.source_id == str(task.id),
-                        ),
-                    ),
                 )
             )
 
@@ -121,7 +106,38 @@ class CRUDExternalWork:
             )
             .execution_options(populate_existing=True)
         )
-        return tasks, list(candidate_result.scalars().all())
+        candidates = list(candidate_result.scalars().all())
+        matching_works: list[SessionReplyWorkItem] = []
+        for work in candidates:
+            for task in tasks:
+                if task.id is None or work.uid != task.uid or work.session_id != task.session_id or work.profile_id != task.profile_id:
+                    continue
+
+                matched = any(work.id == int(delivery_work_id) and work.dedupe_key == delivery["identity"] for delivery_work_id, delivery in get_terminal_watch_deliveries(task).items())
+                if not matched:
+                    matched = work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY and work.source_type == SessionReplySourceType.BACKGROUND_TASK and work.source_id == str(task.id)
+                if not matched and work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK and task.tool_name == TERMINAL_WATCH_TOOL_NAME:
+                    state = work.execution_state if isinstance(work.execution_state, dict) else {}
+                    matched = any(
+                        isinstance(slot, dict)
+                        and (
+                            (isinstance(slot.get("task_id"), int) and not isinstance(slot.get("task_id"), bool) and slot["task_id"] > 0 and slot["task_id"] == task.id)
+                            or (
+                                state_key == "external_resume_context"
+                                and any(
+                                    isinstance(nested_slot, dict) and isinstance(nested_slot.get("task_id"), int) and not isinstance(nested_slot.get("task_id"), bool) and nested_slot["task_id"] > 0 and nested_slot["task_id"] == task.id
+                                    for nested_slot in (slot.get("tasks") if isinstance(slot.get("tasks"), list) else [])
+                                )
+                            )
+                        )
+                        for state_key in ("pending_tools", "terminal_watch_waits", "external_resume_context")
+                        for slot in (state.get(state_key) if isinstance(state.get(state_key), list) else [])
+                    )
+                if matched:
+                    matching_works.append(work)
+                    break
+
+        return tasks, matching_works
 
     async def list_result_source_works(
         self,
