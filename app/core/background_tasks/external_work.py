@@ -1,6 +1,8 @@
 import json
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.audit.confirmation_results import replace_pending_tool_result
 from app.core.constants import ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, TERMINAL_WATCH_TOOL_NAME
@@ -11,6 +13,7 @@ from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
+from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.interrupted import interrupt_background_tasks
 from app.core.i18n import t
@@ -24,7 +27,7 @@ from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkStatus
 from app.providers.database import AsyncSessionLocal
 
-__all__ = ["resume_external_work_for_task", "reconcile_external_work", "recover_interrupted_external_work"]
+__all__ = ["resume_external_work_for_task", "reconcile_external_work", "recover_interrupted_external_work", "complete_stopped_task_replies"]
 
 logger = get_logger(__name__)
 _PENDING_STATUSES = {BackgroundTaskStatus.PENDING.value, BackgroundTaskStatus.RUNNING.value}
@@ -61,6 +64,75 @@ def _remove_consumed_slots(state: dict[str, Any], consumed_slot_keys: set[tuple[
             state[state_key] = remaining_slots
         else:
             state.pop(state_key, None)
+
+
+async def complete_stopped_task_replies(db: AsyncSession, *, work_id: int) -> None:
+    work = await session_reply_work_item_crud.get(db, work_id)
+    if work is None:
+        return
+    await db.refresh(work)
+    if _status_value(work.status) != SessionReplyWorkStatus.SUCCEEDED.value or work.event_sent is not True or work.result_message_id is None or work.id is None:
+        return
+
+    state = work.execution_state if isinstance(work.execution_state, dict) else {}
+    raw_stopped_task_ids = state.get("stopped_task_ids")
+    if not isinstance(raw_stopped_task_ids, list):
+        return
+    stopped_task_ids = list(dict.fromkeys(task_id for task_id in raw_stopped_task_ids if _is_positive_int(task_id)))
+    if not stopped_task_ids:
+        return
+
+    tasks, candidates = await external_work_crud.list_stopped_task_replies(
+        db,
+        uid=work.uid,
+        task_ids=stopped_task_ids,
+        exclude_work_id=work.id,
+    )
+    actual_task_ids = list(dict.fromkeys(task.id for task in tasks if _is_positive_int(task.id)))
+    if not actual_task_ids:
+        return
+    delivered_task_ids = set(actual_task_ids)
+
+    for candidate in candidates:
+        candidate_state = dict(candidate.execution_state) if isinstance(candidate.execution_state, dict) else {}
+        has_other_wait = False
+        for state_key in ("pending_tools", "terminal_watch_waits", "external_resume_context"):
+            raw_slots = candidate_state.get(state_key)
+            if not isinstance(raw_slots, list):
+                continue
+            remaining_slots = []
+            for slot in raw_slots:
+                task_id = slot.get("task_id") if isinstance(slot, dict) else slot
+                if _is_positive_int(task_id):
+                    if task_id in delivered_task_ids:
+                        continue
+                    has_other_wait = True
+                remaining_slots.append(slot)
+            if remaining_slots:
+                candidate_state[state_key] = remaining_slots
+            else:
+                candidate_state.pop(state_key, None)
+
+        values: dict[str, Any] = {"execution_state": candidate_state}
+        if has_other_wait:
+            pending_results = await terminal_watch_reply_crud.list_pending_results(db, candidate)
+            if not any(_is_positive_int(task.id) and task.id not in delivered_task_ids for task in pending_results):
+                candidate_state.pop("terminal_auto_resume", None)
+                if not candidate_state.get("external_resume_context") and _status_value(candidate.status) == SessionReplyWorkStatus.READY_FOR_LLM.value:
+                    values.update(
+                        {
+                            "status": SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                            "locked_by": None,
+                            "lock_until": None,
+                        }
+                    )
+                    candidate_state["external_resume_pending"] = False
+        if not has_other_wait:
+            values.update({"status": SessionReplyWorkStatus.CANCELLED, "locked_by": None, "lock_until": None})
+        await external_work_crud.update_active_reply(db, work=candidate, values=values)
+
+    await external_work_crud.mark_stopped_results_delivered(db, uid=work.uid, task_ids=actual_task_ids)
+    await db.flush()
 
 
 def _build_result(task: BackgroundTask) -> tuple[Any, str, str]:

@@ -11,6 +11,7 @@ from app.core.constants import (
     MSG_BACKGROUND_TASK_CANCELLED,
     MSG_BACKGROUND_TASK_LIST_SUCCESS,
 )
+from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.models.background_task import BackgroundTaskResponse, BackgroundTaskStatus
@@ -156,6 +157,13 @@ class ManageBackgroundTasksExecutor(BaseExecutor):
             from app.core.audit.confirmation import update_confirmation_message_status
 
             await update_confirmation_message_status(self.db, audit_record_id=task.audit_record_id)
+
+        if task.status in {
+            BackgroundTaskStatus.SUCCEEDED,
+            BackgroundTaskStatus.FAILED,
+            BackgroundTaskStatus.CANCELLED,
+        }:
+            await external_work_crud.record_stopped_tasks(self.db, task_ids=[task.id])
 
         return json.dumps(
             {
