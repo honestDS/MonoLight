@@ -2,7 +2,11 @@ import time
 
 from sqlalchemy import update
 
-from app.core.background_tasks.external_work import complete_stopped_task_replies, resume_external_work_for_task
+from app.core.background_tasks.external_work import (
+    complete_stopped_task_replies,
+    prepare_external_work_resume,
+    resume_external_work_for_task,
+)
 from app.core.background_tasks.terminal_watch_reply import prepare_terminal_auto_watch_resume
 from app.core.constants import (
     ERR_INTERNAL_SERVER_ERROR,
@@ -190,6 +194,16 @@ async def fail_session_reply_work(
         work = await session_reply_work_item_crud.get(db, work_id)
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
             return
+        checkpoint = (work.execution_state or {}).get("dispatcher_checkpoint")
+        if isinstance(checkpoint, dict) and checkpoint.get("deferred_external_results") is True:
+            db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
+            await prepare_external_work_resume(
+                db,
+                uid=work.uid,
+                session_id=work.session_id,
+                profile_id=work.profile_id,
+                checkpoint=checkpoint,
+            )
         error_content = user_error or t(ERR_LLM_UNEXPECTED_ERROR)
         error_message = await save_message(
             db,

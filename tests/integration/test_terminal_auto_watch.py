@@ -771,22 +771,28 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_active_manual_watc
     assert persisted_auto is not None
     assert persisted_auto.status == BackgroundTaskStatus.SUCCEEDED
     assert persisted_auto.reply_status == BackgroundTaskReplyStatus.RUNNING
-    assert len(result_messages) == 1
-    result_message = result_messages[0]
-    assert result_message.type == MessageType.BACKGROUND_TASK_RESULT
-    marker_payload = json.loads(result_message.content)
-    assert marker_payload["task_id"] == auto_task_id
-    assert marker_payload["task"]["content"] == {
-        "event": "process_exit",
-        "eof": True,
-        "next_offset": AFTER_OFFSET,
-    }
-    assert json.loads(marker_payload["tool_result"]["content"]) == persisted_auto.result
+    assert len(result_messages) == 0
     assert len(summary_work_items) == 1
     summary_work = summary_work_items[0]
     assert summary_work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
     assert summary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
     assert summary_work.source_id == str(auto_task_id)
+    summary_state = dict(summary_work.execution_state or {})
+    external_resume_context = summary_state.get("external_resume_context")
+    assert isinstance(external_resume_context, list)
+    assert len(external_resume_context) == 1
+    resume_payload = external_resume_context[0]
+    assert isinstance(resume_payload, dict)
+    assert resume_payload["task_id"] == auto_task_id
+    assert resume_payload["task"]["content"] == {
+        "event": "process_exit",
+        "eof": True,
+        "next_offset": AFTER_OFFSET,
+    }
+    assert json.loads(resume_payload["tool_result"]["content"]) == persisted_auto.result
+    checkpoint = dict(summary_state.get("dispatcher_checkpoint") or {})
+    assert checkpoint["reload_history"] is True
+    assert checkpoint["deferred_external_results"] is True
 
 
 @pytest.mark.asyncio
@@ -901,14 +907,29 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_manual_watch_on_ot
     assert persisted_auto is not None
     assert persisted_auto.status == BackgroundTaskStatus.SUCCEEDED
     assert persisted_auto.reply_status == BackgroundTaskReplyStatus.RUNNING
-    assert len(result_messages) == 1
-    result_message = result_messages[0]
-    assert result_message.type == MessageType.BACKGROUND_TASK_RESULT
+    assert len(result_messages) == 0
     assert len(summary_work_items) == 1
     summary_work = summary_work_items[0]
     assert summary_work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
     assert summary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
     assert summary_work.source_id == str(auto_task_id)
+    summary_state = dict(summary_work.execution_state or {})
+    external_resume_context = summary_state.get("external_resume_context")
+    assert isinstance(external_resume_context, list)
+    assert len(external_resume_context) == 1
+    resume_payload = external_resume_context[0]
+    assert isinstance(resume_payload, dict)
+    assert resume_payload["task_id"] == auto_task_id
+    assert resume_payload["task"]["content"] == {
+        "event": "process_exit",
+        "eof": True,
+        "next_offset": AFTER_OFFSET,
+        "terminal_session_id": SECOND_TERMINAL_SESSION_ID,
+    }
+    assert json.loads(resume_payload["tool_result"]["content"]) == persisted_auto.result
+    checkpoint = dict(summary_state.get("dispatcher_checkpoint") or {})
+    assert checkpoint["reload_history"] is True
+    assert checkpoint["deferred_external_results"] is True
 
 
 @pytest.mark.parametrize(

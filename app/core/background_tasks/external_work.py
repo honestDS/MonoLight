@@ -5,13 +5,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.audit.confirmation_results import replace_pending_tool_result
-from app.core.constants import ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, TERMINAL_WATCH_TOOL_NAME
+from app.core.constants import (
+    ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION,
+    ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    TERMINAL_WATCH_TOOL_NAME,
+)
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.event import session_event_crud
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
-from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
 from app.core.crud.task.background import background_task_crud
@@ -24,10 +29,16 @@ from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkStatus
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
 from app.providers.database import AsyncSessionLocal
 
-__all__ = ["resume_external_work_for_task", "reconcile_external_work", "recover_interrupted_external_work", "complete_stopped_task_replies"]
+__all__ = [
+    "resume_external_work_for_task",
+    "reconcile_external_work",
+    "recover_interrupted_external_work",
+    "complete_stopped_task_replies",
+    "prepare_external_work_resume",
+]
 
 logger = get_logger(__name__)
 _PENDING_STATUSES = {BackgroundTaskStatus.PENDING.value, BackgroundTaskStatus.RUNNING.value}
@@ -157,6 +168,171 @@ def _build_result(task: BackgroundTask) -> tuple[Any, str, str]:
     return payload, payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False), execution_status
 
 
+async def _persist_external_work_markers(
+    db: AsyncSession,
+    *,
+    work: SessionReplyWorkItem,
+    state: dict[str, Any],
+    payloads: list[dict[str, Any]],
+) -> list[int]:
+    session = await session_crud.get_by_session_id(db, work.session_id)
+    if session is None or session.uid != work.uid or session.profile_id != work.profile_id:
+        raise ValueError(_unknown_error())
+    if not _is_positive_int(work.id):
+        raise ValueError(_unknown_error())
+
+    marker_ids: list[int] = []
+    ui_only_marker_ids: list[int] = []
+    message_snapshots: list[dict[str, Any]] = []
+    original_message_ids: set[int] = set()
+    for payload in payloads:
+        if not isinstance(payload, dict) or not _is_positive_int(payload.get("task_id")):
+            raise ValueError(_unknown_error())
+        if "original_tool_result_message_id" in payload:
+            original_message_id = payload["original_tool_result_message_id"]
+            if not _is_positive_int(original_message_id):
+                raise ValueError(_unknown_error())
+            original_message_ids.add(original_message_id)
+        marker = await save_message(
+            db,
+            work.session_id,
+            work.uid,
+            MessageRole.USER,
+            MessageType.BACKGROUND_TASK_RESULT,
+            json.dumps(payload, ensure_ascii=False),
+            work.profile_id,
+            is_processed=True,
+            dedupe_key=f"background-task:{payload['task_id']}:result",
+            commit=False,
+        )
+        if not _is_positive_int(marker.id):
+            raise ValueError(_unknown_error())
+        marker_ids.append(marker.id)
+        if payload.get("ui_only") is not True:
+            continue
+        ui_only_marker_ids.append(marker.id)
+        marker_content = marker.content if isinstance(marker.content, str) else json.dumps(payload, ensure_ascii=False)
+        message_snapshots.append(
+            {
+                "id": marker.id,
+                "db_id": marker.id,
+                "role": "assistant",
+                "type": MessageType.BACKGROUND_TASK_RESULT.value,
+                "content": marker_content,
+                "created_at": marker.created_at,
+            }
+        )
+
+    if ui_only_marker_ids:
+        existing_message_ids = state.get("external_tool_result_message_ids")
+        external_tool_result_message_ids: list[int] = []
+        seen_message_ids: set[int] = set()
+        if isinstance(existing_message_ids, list):
+            for message_id in existing_message_ids:
+                if _is_positive_int(message_id) and message_id not in original_message_ids and message_id not in seen_message_ids:
+                    seen_message_ids.add(message_id)
+                    external_tool_result_message_ids.append(message_id)
+        for marker_id in ui_only_marker_ids:
+            if marker_id not in seen_message_ids:
+                seen_message_ids.add(marker_id)
+                external_tool_result_message_ids.append(marker_id)
+        state["external_tool_result_message_ids"] = external_tool_result_message_ids
+
+    if ui_only_marker_ids and bool(state.get("show_tool_calls", True)) and session.show_tool_calls:
+        latest_marker_id = max(ui_only_marker_ids)
+        results_event_id = f"external-work-results:{work.id}:{latest_marker_id}"
+        await session_event_crud.publish(
+            db,
+            dedupe_key=results_event_id,
+            uid=work.uid,
+            session_id=work.session_id,
+            event={
+                "type": "tool_results_update",
+                "event_id": results_event_id,
+                "session_id": work.session_id,
+                "work_id": work.id,
+                "messages": message_snapshots,
+            },
+            commit=False,
+        )
+    return marker_ids
+
+
+async def prepare_external_work_resume(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    if checkpoint.get("deferred_external_results") is not True:
+        return checkpoint
+
+    claim_info = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+    if not isinstance(claim_info, (tuple, list)) or len(claim_info) != 2 or not _is_positive_int(claim_info[0]) or not isinstance(claim_info[1], str) or not claim_info[1].strip():
+        raise ValueError(_unknown_error())
+    work_id, worker_id = claim_info
+    await ensure_session_reply_work_claim(db)
+    work = await session_reply_work_item_crud.get(db, work_id)
+    if work is None:
+        raise ValueError(_unknown_error())
+    await db.refresh(work)
+    if work.uid != uid or work.session_id != session_id or work.profile_id != profile_id or _status_value(work.status) != SessionReplyWorkStatus.RUNNING.value or work.locked_by != worker_id:
+        raise ValueError(_unknown_error())
+
+    state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+    payloads = state.get("external_resume_context")
+    if not isinstance(payloads, list) or not payloads:
+        raise ValueError(_unknown_error())
+    for payload in payloads:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("type") != "background_tool_result"
+            or not _is_positive_int(payload.get("task_id"))
+            or "task" not in payload
+            or not isinstance(payload.get("instruction"), str)
+            or not payload["instruction"].strip()
+            or (payload.get("ui_only") is True and not _is_positive_int(payload.get("original_tool_result_message_id")))
+        ):
+            raise ValueError(_unknown_error())
+        tool_call = payload.get("tool_call")
+        if not isinstance(tool_call, dict) or not isinstance(tool_call.get("id"), str) or not tool_call["id"].strip() or not isinstance(tool_call.get("name"), str) or not tool_call["name"].strip() or not isinstance(tool_call.get("arguments"), dict):
+            raise ValueError(_unknown_error())
+
+    marker_ids = await _persist_external_work_markers(db, work=work, state=state, payloads=payloads)
+    if not marker_ids:
+        raise ValueError(_unknown_error())
+    new_checkpoint = dict(checkpoint)
+    new_checkpoint.pop("deferred_external_results", None)
+    new_checkpoint["pending_resume_message_ids"] = list(
+        dict.fromkeys(
+            [
+                *new_checkpoint.get("pending_resume_message_ids", []),
+                *marker_ids,
+            ]
+        )
+    )
+    new_checkpoint.update(
+        {
+            "context_summary_trigger_mode": "user_message",
+            "context_summary_fixed_upper_message_id": max(marker_ids),
+        }
+    )
+    state["dispatcher_checkpoint"] = new_checkpoint
+    updated = await session_reply_work_item_crud.update_claimed(
+        db,
+        work_id=work_id,
+        worker_id=worker_id,
+        values={"execution_state": state},
+        commit=False,
+    )
+    if not updated:
+        raise ValueError(_unknown_error())
+    work.execution_state = state
+    return new_checkpoint
+
+
 async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str) -> bool:
     async with AsyncSessionLocal() as db:
         try:
@@ -201,8 +377,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             interrupted = any(isinstance(task.extra, dict) and task.extra.get("restart_interrupted") is True for _slot_data, task in task_entries)
 
             marker_payloads: list[dict[str, Any]] = []
-            message_snapshots: list[dict[str, Any]] = []
-            result_entries: list[tuple[tuple[int, str, str, int, str | None], str, Any, str, int]] = []
+            result_entries: list[tuple[tuple[int, str, str, int, str | None], str, Any, str]] = []
             for slot, task in task_entries:
                 message_id = slot[3]
                 pending_message = await message_crud.get(db, message_id)
@@ -261,41 +436,12 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                     "request_context": extra.get("request_context") if isinstance(extra.get("request_context"), list) else [],
                     "purpose": extra.get("purpose"),
                 }
-                marker = await save_message(db, session_id, uid, MessageRole.USER, MessageType.BACKGROUND_TASK_RESULT, json.dumps(marker_payload, ensure_ascii=False), work.profile_id, is_processed=True, dedupe_key=f"background-task:{task.id}:result", commit=False)
-                if not _is_positive_int(marker.id):
-                    raise ValueError(_unknown_error())
-                marker_content = marker.content if isinstance(marker.content, str) else json.dumps(marker_payload, ensure_ascii=False)
-                message_snapshots.append(
-                    {
-                        "id": marker.id,
-                        "db_id": marker.id,
-                        "role": "assistant",
-                        "type": MessageType.BACKGROUND_TASK_RESULT.value,
-                        "content": marker_content,
-                        "created_at": marker.created_at if marker.created_at is not None else None,
-                    }
-                )
                 marker_payloads.append(marker_payload)
-                result_entries.append((slot, stored.tool_call_id, payload, result_text, marker.id))
+                result_entries.append((slot, stored.tool_call_id, payload, result_text))
 
-            pending_message_ids = {slot[3] for slot, _task in task_entries}
-            existing_message_ids = state.get("external_tool_result_message_ids")
-            external_tool_result_message_ids: list[int] = []
-            seen_message_ids: set[int] = set()
-            if isinstance(existing_message_ids, list):
-                for message_id in existing_message_ids:
-                    if _is_positive_int(message_id) and message_id not in pending_message_ids and message_id not in seen_message_ids:
-                        seen_message_ids.add(message_id)
-                        external_tool_result_message_ids.append(message_id)
-            for _slot_data, _call_id, _payload, _result_text, marker_id in result_entries:
-                if marker_id not in seen_message_ids:
-                    seen_message_ids.add(marker_id)
-                    external_tool_result_message_ids.append(marker_id)
-            state["external_tool_result_message_ids"] = external_tool_result_message_ids
-            latest_marker_id = max(marker_id for _slot_data, _call_id, _payload, _result, marker_id in result_entries)
             if bool(state.get("show_tool_calls")):
                 sequence_no = await session_reply_stream_event_crud.get_latest_sequence(db, work_id=work.id)
-                for slot, original_call_id, _payload, result_text, _marker_id in result_entries:
+                for slot, original_call_id, _payload, result_text in result_entries:
                     sequence_no += 1
                     await session_reply_stream_event_crud.publish(
                         db,
@@ -305,24 +451,9 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                         commit=False,
                     )
 
-            if bool(state.get("show_tool_calls", True)) and session.show_tool_calls:
-                results_event_id = f"external-work-results:{work.id}:{latest_marker_id}"
-                await session_event_crud.publish(
-                    db,
-                    dedupe_key=results_event_id,
-                    uid=uid,
-                    session_id=session_id,
-                    event={
-                        "type": "tool_results_update",
-                        "event_id": results_event_id,
-                        "session_id": session_id,
-                        "work_id": work.id,
-                        "messages": message_snapshots,
-                    },
-                    commit=False,
-                )
-
             if interrupted:
+                marker_ids = await _persist_external_work_markers(db, work=work, state=state, payloads=marker_payloads)
+                latest_marker_id = max(marker_ids)
                 _remove_consumed_slots(state, consumed_slot_keys)
                 state.pop("dispatcher_checkpoint", None)
                 state.pop("active_audit_execution", None)
@@ -340,26 +471,17 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             from app.core.utils.assistant_files import merge_assistant_files
             from app.core.utils.dispatcher.helpers import extract_files_to_user
 
-            for _slot_data, original_call_id, _payload, result_text, _marker_id in result_entries:
+            for _slot_data, original_call_id, _payload, result_text in result_entries:
                 files = extract_files_to_user([InternalMessage(role=MessageRole.TOOL, tool_call_id=original_call_id, content=result_text)])
                 if files:
                     checkpoint["files_to_user"] = merge_assistant_files(checkpoint.get("files_to_user", []), files)
             checkpoint.pop("external_resume_messages", None)
-            checkpoint["pending_resume_message_ids"] = list(
-                dict.fromkeys(
-                    [
-                        *checkpoint.get("pending_resume_message_ids", []),
-                        *(entry[-1] for entry in result_entries),
-                    ]
-                )
-            )
             checkpoint.update(
                 {
                     "messages": [],
                     "turn_messages": [],
                     "reload_history": True,
-                    "context_summary_trigger_mode": "user_message",
-                    "context_summary_fixed_upper_message_id": latest_marker_id,
+                    "deferred_external_results": True,
                 }
             )
             state["dispatcher_checkpoint"] = checkpoint
@@ -371,7 +493,8 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             if not await external_work_crud.wake_waiting(db, work=work, execution_state=state, commit=False):
                 await db.rollback()
                 return False
-            await session_event_crud.publish(db, dedupe_key=f"external-work-ready:{work.id}:{latest_marker_id}", uid=uid, session_id=session_id, event={"type": "work_ready", "session_id": session_id, "work_id": work.id}, commit=False)
+            latest_task_id = max(slot[0] for slot, _call_id, _payload, _result_text in result_entries)
+            await session_event_crud.publish(db, dedupe_key=f"external-work-ready:{work.id}:{latest_task_id}", uid=uid, session_id=session_id, event={"type": "work_ready", "session_id": session_id, "work_id": work.id}, commit=False)
             await db.commit()
             return True
         except Exception:

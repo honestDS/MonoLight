@@ -30,15 +30,16 @@ from app.core.constants import (
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
-from app.core.exceptions import ResourceNotFoundException
+from app.core.exceptions import ResourceNotFoundException, ServerException
 from app.core.prompts import (
     BACKGROUND_PROACTIVE_FINAL_REPLY_GUIDANCE_PROMPT,
+    EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT,
     TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT,
 )
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.core.tools.terminal_watch import ensure_terminal_auto_watch
-from app.core.utils.background_task_result import build_background_task_success_result
+from app.core.utils.background_task_result import build_background_task_failure_result, build_background_task_success_result
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_message import save_message
@@ -64,10 +65,14 @@ TASK_WORKER_ID = "external-task-worker"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["http", "external-test"])
+@pytest.mark.parametrize("scenario", ["result-last", "assistant-last", "timeout-assistant-last", "assistant-last-retry", "checkpoint-save-failure"])
+@pytest.mark.parametrize("stream_requested", [False, True], ids=["buffered", "stream-events"])
 async def test_shell_external_work_resumes_same_work_with_latest_processed_history(
     database_factory,
     monkeypatch: pytest.MonkeyPatch,
     source: str,
+    scenario: str,
+    stream_requested: bool,
 ) -> None:
     async with database_factory(
         foreign_keys=True,
@@ -137,9 +142,21 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             executor_metadata_module,
             channel_cursor_module,
             external_work_module,
+            notifier_module,
         ):
             monkeypatch.setattr(module, "AsyncSessionLocal", factory)
         monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
+        original_save_checkpoint = executor_interactive_module._save_interactive_work_execution_checkpoint
+        checkpoint_save_failure_triggered = False
+
+        async def save_checkpoint_with_failure(db, checkpoint, *, work, worker_id):
+            nonlocal checkpoint_save_failure_triggered
+            if scenario == "checkpoint-save-failure" and not checkpoint_save_failure_triggered and checkpoint.get("pending_resume_message_ids"):
+                checkpoint_save_failure_triggered = True
+                raise RuntimeError("fixture checkpoint save failure")
+            return await original_save_checkpoint(db, checkpoint, work=work, worker_id=worker_id)
+
+        monkeypatch.setattr(executor_interactive_module, "_save_interactive_work_execution_checkpoint", save_checkpoint_with_failure)
 
         async def noop_transport(*_args, **_kwargs) -> None:
             return None
@@ -147,14 +164,24 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
         if source == "http":
             monkeypatch.setattr(executor_lifecycle_module, "send_session_event", noop_transport)
         else:
-            monkeypatch.setattr(notifier_module, "AsyncSessionLocal", factory)
             monkeypatch.setattr(executor_lifecycle_module, "send_session_event", notifier_module.send_session_event)
 
         provider_payloads: list[dict] = []
         original_tool_result_message_id: int | None = None
+        original_tool_result_content: str | None = None
+        background_result_message_id: int | None = None
+        background_result_content: str | None = None
         queued_tool_payload: dict = {}
+        latest_user_content = "latest user message: do not rerun the command; only report its existing result"
+        latest_assistant_content = "latest assistant reply"
+        expected_task_result: dict = {}
+        expected_execution_status = "failed" if scenario == "timeout-assistant-last" else "succeeded"
+        expected_reply_content = "external shell timed out" if scenario == "timeout-assistant-last" else "external shell completed"
+        retry_assistant_content = "assistant written after failed recovery"
 
         async def fake_post_json(_transformer, **kwargs):
+            nonlocal background_result_message_id, background_result_content
+
             payload = kwargs["payload"]
             provider_payloads.append(copy.deepcopy(payload))
             request_number = len(provider_payloads)
@@ -193,8 +220,14 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                     "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
                 }
 
-            assert request_number == 2
+            if request_number == 3:
+                assert scenario == "assistant-last-retry"
+                assert payload["messages"] == provider_payloads[1]["messages"]
+                assert payload["tools"] == provider_payloads[1]["tools"]
+            else:
+                assert request_number == 2
             messages = payload["messages"]
+            assert messages[-1]["role"] == "user"
             first_payload = provider_payloads[0]
             assert messages[: len(first_payload["messages"])] == first_payload["messages"]
             assert payload["tools"] == first_payload["tools"]
@@ -211,8 +244,10 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                     return any(isinstance(parsed_content.get(field), str) and expected in parsed_content[field] for field in ("user_message", "content"))
                 return expected in content
 
-            assert any(item.get("role") == "user" and contains_expected_content(item, "latest user message") for item in messages)
-            assert any(item.get("role") == "assistant" and contains_expected_content(item, "latest assistant reply") for item in messages)
+            latest_user_indices = [index for index, item in enumerate(messages) if item.get("role") == "user" and contains_expected_content(item, latest_user_content)]
+            latest_assistant_indices = [index for index, item in enumerate(messages) if item.get("role") == "assistant" and contains_expected_content(item, latest_assistant_content)]
+            assert len(latest_user_indices) == 1
+            assert len(latest_assistant_indices) == 1
 
             tool_messages = [item for item in messages if item.get("role") == "tool"]
             assert len(tool_messages) == 1
@@ -221,9 +256,15 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             assert isinstance(tool_call_id, str)
             assert original_tool_result_message_id is not None
             assert json.loads(tool_result["content"]) == queued_tool_payload
+            tool_call_messages = [item for item in messages if item.get("role") == "assistant" and item.get("tool_calls")]
+            assert len(tool_call_messages) == 1
+            assert tool_call_messages[0]["tool_calls"][0]["id"] == tool_call_id
+            assert messages.index(tool_call_messages[0]) < messages.index(tool_result)
+            assert messages.index(tool_result) < latest_user_indices[0]
 
             resume_payload = None
-            for item in messages:
+            resume_indices: list[int] = []
+            for index, item in enumerate(messages):
                 content = item.get("content")
                 if item.get("role") != "user" or not isinstance(content, str):
                     continue
@@ -242,8 +283,14 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                     continue
                 if isinstance(candidate, dict) and candidate.get("type") == "external_work_resume":
                     resume_payload = candidate
-                    break
+                    resume_indices.append(index)
             assert resume_payload is not None
+            assert len(resume_indices) == 1
+            resume_index = resume_indices[0]
+            assert resume_payload["tasks"][0]["instruction"] == EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
+            assert latest_user_indices[0] < resume_index
+            assert latest_user_indices[0] < latest_assistant_indices[0] < resume_index
+            assert resume_index == len(messages) - 1
             assert any(item.get("role") == "user" and item.get("content") == "run the fixture shell command" for item in resume_payload["tasks"][0]["request_context"])
             assert resume_payload["tasks"] == [
                 {
@@ -252,9 +299,9 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                     "original_tool_result_message_id": original_tool_result_message_id,
                     "task_id": task_id,
                     "tool_name": "execute_shell",
-                    "execution_status": "succeeded",
+                    "execution_status": expected_execution_status,
                     "instruction": resume_payload["tasks"][0]["instruction"],
-                    "task": {"stdout": "fixture", "exit_code": 0},
+                    "task": expected_task_result,
                     "tool_call": {
                         "id": tool_call_id,
                         "name": "execute_shell",
@@ -273,6 +320,49 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                     "purpose": resume_payload["tasks"][0]["purpose"],
                 }
             ]
+            assert latest_assistant is not None and latest_assistant.id is not None
+            async with factory() as inspection_db:
+                persisted_background_results = list(
+                    (
+                        await inspection_db.execute(
+                            select(Message)
+                            .where(
+                                Message.session_id == SESSION_ID,
+                                Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                            )
+                            .order_by(Message.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert len(persisted_background_results) == 1
+                background_result_message = persisted_background_results[0]
+                assert background_result_message.id is not None
+                assert background_result_message.id > latest_assistant.id
+                assert background_result_message.role == MessageRole.USER
+                assert background_result_message.content is not None
+                if background_result_message_id is None:
+                    background_result_message_id = background_result_message.id
+                    background_result_content = background_result_message.content
+                else:
+                    assert background_result_message.id == background_result_message_id
+                    assert background_result_message.content == background_result_content
+                assert background_result_content is not None
+                assert json.loads(background_result_content) == resume_payload["tasks"][0]
+
+                persisted_work = await inspection_db.get(SessionReplyWorkItem, work_id)
+                assert persisted_work is not None
+                checkpoint = dict((persisted_work.execution_state or {}).get("dispatcher_checkpoint") or {})
+                assert "reload_history" not in checkpoint
+                checkpoint_messages = checkpoint.get("messages")
+                assert isinstance(checkpoint_messages, list)
+                checkpoint_message_ids = [item.get("id") for item in checkpoint_messages if isinstance(item, dict)]
+                assert background_result_message_id in checkpoint_message_ids
+                assert checkpoint_message_ids[-1] == background_result_message_id
+
+            if scenario == "assistant-last-retry" and request_number == 2:
+                raise RuntimeError("fixture provider failure")
             return {
                 "id": "chatcmpl-external-final",
                 "object": "chat.completion",
@@ -280,7 +370,7 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "external shell completed"},
+                        "message": {"role": "assistant", "content": expected_reply_content},
                         "finish_reason": "stop",
                     }
                 ],
@@ -300,7 +390,7 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                 message="run the fixture shell command",
                 attachments=None,
                 source=source,
-                stream_requested=False,
+                stream_requested=stream_requested,
                 context_summary_events_requested=False,
                 request_id="external-shell-request",
             )
@@ -336,12 +426,14 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             queued_tool_message = queued_tool_messages[0]
             assert queued_tool_message.id is not None
             original_tool_result_message_id = queued_tool_message.id
+            original_tool_result_content = queued_tool_message.content
             stored_queued_tool_result = InternalMessage.model_validate_json(queued_tool_message.content or "{}")
             queued_tool_payload = json.loads(stored_queued_tool_result.content or "{}")
             assert queued_tool_payload["status"] == "queued"
             assert queued_tool_payload["task_id"] == tasks[0].id
         assert len(provider_payloads) == 1
 
+        latest_assistant: Message | None = None
         async with factory() as db:
             latest_user = await save_message(
                 db,
@@ -349,25 +441,25 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                 UID,
                 MessageRole.USER,
                 MessageType.TEXT,
-                InternalMessage.from_user_input(content="latest user message"),
+                InternalMessage.from_user_input(content=latest_user_content),
                 PROFILE_ID,
                 is_processed=True,
                 commit=False,
             )
-            latest_assistant = await save_message(
-                db,
-                SESSION_ID,
-                UID,
-                MessageRole.ASSISTANT,
-                MessageType.TEXT,
-                InternalMessage(role=MessageRole.ASSISTANT, content="latest assistant reply"),
-                PROFILE_ID,
-                is_processed=True,
-                commit=False,
-            )
+            if scenario == "result-last":
+                latest_assistant = await save_message(
+                    db,
+                    SESSION_ID,
+                    UID,
+                    MessageRole.ASSISTANT,
+                    MessageType.TEXT,
+                    InternalMessage(role=MessageRole.ASSISTANT, content=latest_assistant_content),
+                    PROFILE_ID,
+                    is_processed=True,
+                    commit=False,
+                )
             await db.commit()
             assert latest_user.id is not None
-            assert latest_assistant.id is not None
 
         async with factory() as db:
             task = (await db.execute(select(BackgroundTask).where(BackgroundTask.session_id == SESSION_ID))).scalars().one()
@@ -379,13 +471,27 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                 lease_seconds=300,
             )
             assert claimed_task is not None
-            assert await background_task_crud.mark_succeeded(
-                db,
-                task_id=task.id,
-                worker_id=TASK_WORKER_ID,
-                result={"content": {"stdout": "fixture", "exit_code": 0}},
-                auto_reply=False,
-            )
+            if scenario == "timeout-assistant-last":
+                timeout_error = "command timed out after 60 seconds"
+                expected_task_result = build_background_task_failure_result(SHELL_TOOL_NAME, timeout_error)
+                assert await background_task_crud.mark_failed(
+                    db,
+                    task_id=task.id,
+                    worker_id=TASK_WORKER_ID,
+                    error=timeout_error,
+                    result=expected_task_result,
+                    auto_reply=False,
+                )
+            else:
+                task_result = {"content": {"stdout": "fixture", "exit_code": 0}}
+                expected_task_result = task_result["content"]
+                assert await background_task_crud.mark_succeeded(
+                    db,
+                    task_id=task.id,
+                    worker_id=TASK_WORKER_ID,
+                    result=task_result,
+                    auto_reply=False,
+                )
             task_id = task.id
 
         assert await resume_external_work_for_task(task_id) is True
@@ -395,8 +501,132 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             assert resumed_work is not None
             assert resumed_work.id == work_id
             assert resumed_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+            execution_state = dict(resumed_work.execution_state or {})
+            external_resume_context = execution_state.get("external_resume_context")
+            assert isinstance(external_resume_context, list)
+            assert len(external_resume_context) == 1
+            assert external_resume_context[0]["task_id"] == task_id
+            assert external_resume_context[0]["task"] == expected_task_result
+            background_result_messages = list(
+                (
+                    await db.execute(
+                        select(Message)
+                        .where(
+                            Message.session_id == SESSION_ID,
+                            Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                        )
+                        .order_by(Message.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(background_result_messages) == 0
             outbox_items = list((await db.execute(select(MessagePlatformOutbox))).scalars().all())
             assert outbox_items == []
+
+        if scenario != "result-last":
+            async with factory() as db:
+                latest_assistant = await save_message(
+                    db,
+                    SESSION_ID,
+                    UID,
+                    MessageRole.ASSISTANT,
+                    MessageType.TEXT,
+                    InternalMessage(role=MessageRole.ASSISTANT, content=latest_assistant_content),
+                    PROFILE_ID,
+                    is_processed=True,
+                    commit=False,
+                )
+                await db.commit()
+
+        assert latest_user.id is not None
+        assert latest_assistant is not None and latest_assistant.id is not None
+
+        retry_assistant: Message | None = None
+        if scenario == "assistant-last-retry":
+            async with factory() as db:
+                retry_claim = await session_reply_work_item_crud.claim_next(
+                    db,
+                    worker_id=WORKER_ID,
+                    lease_seconds=300,
+                )
+            assert retry_claim is not None
+            assert retry_claim.id == work_id
+            with pytest.raises(ServerException):
+                await executor_lifecycle_module.execute_session_reply_work(work_id, WORKER_ID)
+
+            async with factory() as db:
+                retry_assistant = await save_message(
+                    db,
+                    SESSION_ID,
+                    UID,
+                    MessageRole.ASSISTANT,
+                    MessageType.TEXT,
+                    InternalMessage(role=MessageRole.ASSISTANT, content=retry_assistant_content),
+                    PROFILE_ID,
+                    is_processed=True,
+                    commit=False,
+                )
+                await db.commit()
+                assert retry_assistant.id is not None
+
+            async with factory() as db:
+                assert await session_reply_work_item_crud.release_for_retry(
+                    db,
+                    work_id=work_id,
+                    worker_id=WORKER_ID,
+                    error="fixture provider failure",
+                    delay_seconds=0,
+                )
+        elif scenario == "checkpoint-save-failure":
+            async with factory() as db:
+                failed_claim = await session_reply_work_item_crud.claim_next(
+                    db,
+                    worker_id=WORKER_ID,
+                    lease_seconds=300,
+                )
+            assert failed_claim is not None
+            assert failed_claim.id == work_id
+            with pytest.raises(ServerException):
+                await executor_lifecycle_module.execute_session_reply_work(work_id, WORKER_ID)
+            assert checkpoint_save_failure_triggered is True
+
+            async with factory() as db:
+                failed_task = await db.get(BackgroundTask, task_id)
+                failed_work = await db.get(SessionReplyWorkItem, work_id)
+                failed_result_messages = list(
+                    (
+                        await db.execute(
+                            select(Message).where(
+                                Message.session_id == SESSION_ID,
+                                Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert failed_task is not None
+                assert failed_task.result == {"content": expected_task_result}
+                assert failed_work is not None
+                assert failed_work.status == SessionReplyWorkStatus.RUNNING
+                failed_checkpoint = dict((failed_work.execution_state or {}).get("dispatcher_checkpoint") or {})
+                assert failed_checkpoint.get("deferred_external_results") is True
+                assert failed_checkpoint.get("reload_history") is True
+                assert failed_result_messages == []
+                assert len(provider_payloads) == 1
+
+            async with factory() as db:
+                assert await session_reply_work_item_crud.release_for_retry(
+                    db,
+                    work_id=work_id,
+                    worker_id=WORKER_ID,
+                    error="fixture checkpoint save failure",
+                    delay_seconds=0,
+                )
+
+        async with factory() as db:
             resumed_claim = await session_reply_work_item_crud.claim_next(
                 db,
                 worker_id=WORKER_ID,
@@ -416,35 +646,67 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             assert final_work.status == SessionReplyWorkStatus.SUCCEEDED
             assert len(list((await db.execute(select(SessionReplyWorkItem))).scalars().all())) == 1
             assert len(persisted_tasks) == 1
-            assert persisted_tasks[0].status == BackgroundTaskStatus.SUCCEEDED
+            expected_task_status = BackgroundTaskStatus.FAILED if scenario == "timeout-assistant-last" else BackgroundTaskStatus.SUCCEEDED
+            assert persisted_tasks[0].status == expected_task_status
             assert persisted_tasks[0].auto_reply is False
-            assert persisted_tasks[0].result == {"content": {"stdout": "fixture", "exit_code": 0}}
-            assert len([message for message in persisted_messages if message.type == MessageType.BACKGROUND_TASK_RESULT]) == 1
+            assert persisted_tasks[0].result == (expected_task_result if scenario == "timeout-assistant-last" else {"content": expected_task_result})
+            if scenario == "timeout-assistant-last":
+                assert persisted_tasks[0].error == "command timed out after 60 seconds"
+            else:
+                assert persisted_tasks[0].error is None
             persisted_tool_results = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
             assert len(persisted_tool_results) == 1
             assert persisted_tool_results[0].id == original_tool_result_message_id
+            assert persisted_tool_results[0].content == original_tool_result_content
             persisted_tool_result = InternalMessage.model_validate_json(persisted_tool_results[0].content or "{}")
             assert json.loads(persisted_tool_result.content or "{}") == queued_tool_payload
+            persisted_background_results = [message for message in persisted_messages if message.type == MessageType.BACKGROUND_TASK_RESULT]
+            assert len(persisted_background_results) == 1
+            assert persisted_background_results[0].id == background_result_message_id
+            assert persisted_background_results[0].role == MessageRole.USER
+            assert persisted_background_results[0].content == background_result_content
+            assert latest_user.id is not None and latest_assistant is not None and latest_assistant.id is not None
+            persisted_latest_user = await db.get(Message, latest_user.id)
+            persisted_latest_assistant = await db.get(Message, latest_assistant.id)
+            assert persisted_latest_user is not None
+            assert persisted_latest_user.role == MessageRole.USER
+            assert persisted_latest_user.type == MessageType.TEXT
+            assert persisted_latest_user.content == latest_user_content
+            assert persisted_latest_assistant is not None
+            assert persisted_latest_assistant.role == MessageRole.ASSISTANT
+            assert persisted_latest_assistant.type == MessageType.TEXT
+            assert persisted_latest_assistant.content == latest_assistant_content
+            message_positions = {message.id: index for index, message in enumerate(persisted_messages) if message.id is not None}
+            assert message_positions[original_tool_result_message_id] < message_positions[latest_user.id] < message_positions[latest_assistant.id] < message_positions[background_result_message_id]
+            if retry_assistant is not None:
+                assert retry_assistant.id is not None
+                persisted_retry_assistant = await db.get(Message, retry_assistant.id)
+                assert persisted_retry_assistant is not None
+                assert persisted_retry_assistant.role == MessageRole.ASSISTANT
+                assert persisted_retry_assistant.type == MessageType.TEXT
+                assert persisted_retry_assistant.content == retry_assistant_content
+                assert message_positions[background_result_message_id] < message_positions[retry_assistant.id]
+            assert not any(message.role == MessageRole.USER and message.type == MessageType.TEXT and message.content == EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT for message in persisted_messages)
             assert final_work.result_message_id is not None
             result_message = await db.get(Message, final_work.result_message_id)
             assert result_message is not None
             assert result_message.role == MessageRole.ASSISTANT
             assert result_message.type == MessageType.TEXT
-            assert result_message.content == "external shell completed"
+            assert result_message.content == expected_reply_content
             if source == "external-test":
                 assert len(outbox_items) == 1
                 outbound_event = outbox_items[0].event
                 assert outbox_items[0].source == source
                 assert outbound_event["type"] == "proactive_reply"
                 assert outbound_event["source"] == "foreground"
-                assert outbound_event["content"] == "external shell completed"
+                assert outbound_event["content"] == expected_reply_content
                 serialized_event = json.dumps(outbound_event, ensure_ascii=False)
                 assert "background_tool_result" not in serialized_event
                 assert "instruction" not in serialized_event
             else:
                 assert outbox_items == []
 
-        assert len(provider_payloads) == 2
+        assert len(provider_payloads) == (3 if scenario == "assistant-last-retry" else 2)
 
 
 @pytest.mark.asyncio
@@ -1473,6 +1735,8 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
                 assert event == "process_exit"
                 assert len(completed_auto_watch_tasks) == 1
 
+        result_event_id: int | None = None
+        future_assistant_id: int | None = None
         await trigger_background_task_reply(task_id)
         await trigger_background_task_reply(task_id)
 
@@ -1491,11 +1755,12 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
                 .scalars()
                 .all()
             )
-            assert len(result_events) == 1
-            result_event = result_events[0]
-            assert result_event.role == MessageRole.USER
-            assert result_event.id is not None
-            result_event_id = result_event.id
+            assert len(result_events) == 0
+
+            persisted_task = await db.get(BackgroundTask, task_id)
+            assert persisted_task is not None
+            assert persisted_task.status == BackgroundTaskStatus.SUCCEEDED
+            assert persisted_task.result == expected_task_result
 
             summary_work_items = list(
                 (
@@ -1515,39 +1780,85 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
             assert summary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
             assert summary_work.id is not None
             work_id = summary_work.id
+            summary_state = dict(summary_work.execution_state or {})
+            external_resume_context = summary_state.get("external_resume_context")
+            assert isinstance(external_resume_context, list)
+            assert len(external_resume_context) == 1
+            assert external_resume_context[0]["task_id"] == task_id
+            assert external_resume_context[0]["task"] == expected_task_result
+            deferred_checkpoint = dict(summary_state.get("dispatcher_checkpoint") or {})
+            assert deferred_checkpoint.get("deferred_external_results") is True
 
-            db.add_all(
-                [
-                    Message(
-                        session_id=SESSION_ID,
-                        uid=UID,
-                        profile_id=PROFILE_ID,
-                        role=MessageRole.USER,
-                        type=MessageType.TEXT,
-                        content="future-user-sentinel",
-                        is_processed=False,
-                    ),
-                    Message(
-                        session_id=SESSION_ID,
-                        uid=UID,
-                        profile_id=PROFILE_ID,
-                        role=MessageRole.ASSISTANT,
-                        type=MessageType.TEXT,
-                        content="future-assistant-sentinel",
-                        is_processed=True,
-                    ),
-                ]
+            future_user = Message(
+                session_id=SESSION_ID,
+                uid=UID,
+                profile_id=PROFILE_ID,
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content="future-user-sentinel",
+                is_processed=False,
             )
+            future_assistant = Message(
+                session_id=SESSION_ID,
+                uid=UID,
+                profile_id=PROFILE_ID,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content="future-assistant-sentinel",
+                is_processed=True,
+            )
+            db.add_all([future_user, future_assistant])
             await db.commit()
+            assert future_user.id is not None
+            assert future_assistant.id is not None
+            assert future_user.id < future_assistant.id
+            future_assistant_id = future_assistant.id
 
         provider_payloads: list[dict] = []
 
         async def fake_post_json(_transformer, **kwargs):
+            nonlocal result_event_id
+
             payload = kwargs["payload"]
-            provider_payloads.append(payload)
+            provider_payloads.append(copy.deepcopy(payload))
             assert payload["model"] == MODEL_ID
             assert payload["stream"] is False
             assert kwargs["url"].endswith("/chat/completions" if protocol == "OPENAI" else "/responses")
+            provider_items = payload["messages"] if protocol == "OPENAI" else payload["input"]
+            assert provider_items[-1]["role"] == "user"
+            assert future_assistant_id is not None
+            async with factory() as inspection_db:
+                persisted_result_events = list(
+                    (
+                        await inspection_db.execute(
+                            select(Message)
+                            .where(
+                                Message.session_id == SESSION_ID,
+                                Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                            )
+                            .order_by(Message.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert len(persisted_result_events) == 1
+                result_event = persisted_result_events[0]
+                assert result_event.role == MessageRole.USER
+                assert result_event.id is not None
+                assert result_event.id > future_assistant_id
+                result_event_id = result_event.id
+
+                persisted_work = await inspection_db.get(SessionReplyWorkItem, work_id)
+                assert persisted_work is not None
+                checkpoint = dict((persisted_work.execution_state or {}).get("dispatcher_checkpoint") or {})
+                assert "reload_history" not in checkpoint
+                assert "deferred_external_results" not in checkpoint
+                checkpoint_messages = checkpoint.get("messages")
+                assert isinstance(checkpoint_messages, list)
+                checkpoint_message_ids = [item.get("id") for item in checkpoint_messages if isinstance(item, dict)]
+                assert result_event_id in checkpoint_message_ids
+                assert checkpoint_message_ids[-1] == result_event_id
             if protocol == "OPENAI":
                 return {
                     "id": "chatcmpl-terminal-auto-watch",
@@ -1600,8 +1911,10 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
         await executor_lifecycle_module.execute_session_reply_work(work_id, WORKER_ID)
 
         assert len(provider_payloads) == 1
+        assert result_event_id is not None
         provider_payload = provider_payloads[0]
         provider_items = provider_payload["messages"] if protocol == "OPENAI" else provider_payload["input"]
+        assert provider_items[-1]["role"] == "user"
         provider_dump = json.dumps(provider_payload, ensure_ascii=False)
         assert "submission_context" not in provider_dump
         assert "obsolete-snapshot-sentinel" not in provider_dump

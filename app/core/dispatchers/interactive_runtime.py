@@ -207,9 +207,24 @@ async def dispatch_interactive(
                 state.chat_params = resolve_chat_params(state.model_entry, state.chat_channel)
                 state.tools, state.allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, goal_mode=state.goal_mode)
 
+                reload_history = False
                 if state.execution_resume_state is not None:
                     resume_state = state.execution_resume_state
                     if resume_state.get("reload_history") is True:
+                        reload_history = True
+                        from app.core.background_tasks.external_work import prepare_external_work_resume
+
+                        resume_state = await prepare_external_work_resume(
+                            db,
+                            uid=uid,
+                            session_id=session_id,
+                            profile_id=profile.id,
+                            checkpoint=resume_state,
+                        )
+                        state.checkpoint_state.pending_resume_message_ids = list(resume_state.get("pending_resume_message_ids", []))
+                        upper_message_id = resume_state.get("context_summary_fixed_upper_message_id")
+                        if isinstance(upper_message_id, int) and not isinstance(upper_message_id, bool) and upper_message_id > 0:
+                            state.checkpoint_state.upper_message_id = upper_message_id
                         state.messages = await prepare_messages(
                             db,
                             session_id,
@@ -259,6 +274,9 @@ async def dispatch_interactive(
                             is_history=is_history,
                             tool_config=state.cfg.tool,
                         )
+
+                if reload_history:
+                    await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
 
                 max_turns = state.max_turns
                 goal_mode = state.goal_mode
