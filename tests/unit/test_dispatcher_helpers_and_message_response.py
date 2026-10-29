@@ -361,3 +361,57 @@ async def test_channel_call_context_length_error_is_returned_when_no_fallback_ch
     assert exc_info.value.code == 400
     assert exc_info.value.message == ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH
     assert exc_info.value.provider_message == "context length exceeded"
+
+
+def test_dump_output_history_filters_out_end_session_control_messages():
+    from app.core.constants import END_SESSION_TOOL_NAME
+    from app.models.message import InternalToolCall
+
+    messages = [
+        InternalMessage(role=MessageRole.USER, content="hello"),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-end", name=END_SESSION_TOOL_NAME, arguments={})],
+            provider_metadata={"internal_control": END_SESSION_TOOL_NAME},
+        ),
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="call-end",
+            content='{"status": "completed"}',
+            provider_metadata={"internal_control": END_SESSION_TOOL_NAME},
+        ),
+        InternalMessage(role=MessageRole.ASSISTANT, content="final response"),
+    ]
+
+    output = helpers.dump_output_history(messages, show_tool_calls=True)
+    assert len(output) == 2
+    assert output[0]["role"] == MessageRole.USER
+    assert output[0]["content"] == "hello"
+    assert output[1]["role"] == MessageRole.ASSISTANT
+    assert output[1]["content"] == "final response"
+
+
+def test_dump_background_proactive_history_filters_out_end_session_control_messages():
+    from app.core.constants import END_SESSION_TOOL_NAME
+    from app.models.message import InternalToolCall
+
+    messages = [
+        InternalMessage(role=MessageRole.USER, content="proactive trigger"),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-end", name=END_SESSION_TOOL_NAME, arguments={})],
+            provider_metadata={"internal_control": END_SESSION_TOOL_NAME},
+        ),
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="call-end",
+            content='{"status": "completed"}',
+            provider_metadata={"internal_control": END_SESSION_TOOL_NAME},
+        ),
+        InternalMessage(role=MessageRole.ASSISTANT, content="proactive reply"),
+    ]
+
+    output = helpers.dump_background_proactive_history(messages)
+    assert len(output) == 2
+    assert output[0]["role"] == MessageRole.USER
+    assert output[1]["role"] == MessageRole.ASSISTANT

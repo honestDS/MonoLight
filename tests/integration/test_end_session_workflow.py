@@ -1954,3 +1954,103 @@ async def test_queue_skip_reply_completes_silently_and_is_idempotent_on_reclaim(
     assert not [message for message in retried_messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
     assert not [message for message in retried_messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} and message.id not in retried_control_ids]
     assert notifier_events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+async def test_end_session_context_is_loaded_for_model_in_subsequent_turn_while_hidden_from_frontend(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = f"end-session-context-{int(stream)}"
+    initial_message = await _seed_conversation(session_factory, session_id)
+
+    calls = _patch_llm(
+        monkeypatch,
+        [
+            _end_session_response(
+                call_id="turn1-end-session",
+                arguments={"skip_reply": True},
+            ),
+            _final_response("第二轮模型回复"),
+        ],
+        stream=stream,
+    )
+
+    result_turn1 = await _dispatch(
+        session_factory,
+        initial_message,
+        session_id=session_id,
+        stream=stream,
+        show_tool_calls=True,
+    )
+    response_turn1 = _response_from_dispatch_result(result_turn1, stream=stream)
+
+    assert response_turn1["skip_reply"] is True
+    _assert_no_control_history(response_turn1["history"], forbidden_texts=("turn1-end-session",))
+    if stream:
+        _assert_no_control_history(result_turn1, forbidden_texts=("turn1-end-session",))
+        assert not [event for event in result_turn1 if event.get("name") == END_SESSION_TOOL_NAME]
+
+    async with session_factory() as db:
+        visible_history_turn1 = await message_crud.get_history_paged(
+            db,
+            session_id=session_id,
+            uid=UID,
+            limit=100,
+            include_tool_messages=True,
+        )
+    assert all(not _is_end_session_control_message(message) for message in visible_history_turn1)
+
+    async with session_factory() as db:
+        second_message = Message(
+            session_id=session_id,
+            uid=UID,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="第二轮用户提问",
+            profile_id=PROFILE_ID,
+            is_processed=False,
+        )
+        db.add(second_message)
+        await db.commit()
+        await db.refresh(second_message)
+        second_internal_message = InternalMessage(
+            id=second_message.id,
+            role=MessageRole.USER,
+            content=second_message.content,
+            created_at=second_message.created_at.timestamp(),
+        )
+
+    result_turn2 = await _dispatch(
+        session_factory,
+        second_internal_message,
+        session_id=session_id,
+        stream=stream,
+        show_tool_calls=True,
+    )
+    response_turn2 = _response_from_dispatch_result(result_turn2, stream=stream)
+
+    assert len(calls) == 2
+    model_turn2_messages = calls[1]["messages"]
+    _assert_end_session_model_pair(
+        model_turn2_messages,
+        skip_reply=True,
+        call_id="turn1-end-session",
+        call_arguments={"skip_reply": True},
+    )
+
+    assert response_turn2["choices"][0]["message"]["content"] == "第二轮模型回复"
+    _assert_no_control_history(response_turn2["history"], forbidden_texts=("turn1-end-session",))
+
+    async with session_factory() as db:
+        visible_history_all = await message_crud.get_history_paged(
+            db,
+            session_id=session_id,
+            uid=UID,
+            limit=100,
+            include_tool_messages=True,
+        )
+    assert all(not _is_end_session_control_message(message) for message in visible_history_all)
