@@ -2,7 +2,7 @@ import time
 
 from sqlalchemy import update
 
-from app.core.background_tasks.external_work import resume_external_work_for_task
+from app.core.background_tasks.external_work import complete_stopped_task_replies, resume_external_work_for_task
 from app.core.background_tasks.terminal_watch_reply import prepare_terminal_auto_watch_resume
 from app.core.constants import (
     ERR_INTERNAL_SERVER_ERROR,
@@ -157,6 +157,9 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         if not updated:
             await db.rollback()
             return
+
+        if (work.execution_state or {}).get("stopped_task_ids"):
+            await complete_stopped_task_replies(db, work_id=work_id)
 
         if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
             await db.execute(

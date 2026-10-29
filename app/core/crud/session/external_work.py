@@ -1,16 +1,24 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, update
+from sqlalchemy import and_, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import TERMINAL_WATCH_TOOL_NAME
+from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
-from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
+from app.core.crud.session.terminal_watch import get_terminal_watch_deliveries
 from app.core.log import get_logger
 from app.core.utils.time import get_local_time
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.session_reply_work_item import (
+    SESSION_REPLY_ACTIVE_STATUSES,
+    SessionReplySourceType,
+    SessionReplyWorkItem,
+    SessionReplyWorkStatus,
+    SessionReplyWorkType,
+)
 from app.providers.database.time import get_database_timestamp
 
 __all__ = ["CRUDExternalWork", "external_work_crud"]
@@ -33,6 +41,131 @@ def _request_ids(state: dict[str, Any]) -> list[str]:
 
 
 class CRUDExternalWork:
+    async def record_stopped_tasks(
+        self,
+        db: AsyncSession,
+        *,
+        task_ids: list[int],
+    ) -> None:
+        if not task_ids:
+            return
+
+        claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+        if not claim:
+            return
+
+        await ensure_session_reply_work_claim(db)
+        work_id, _ = claim
+        work = await session_reply_work_item_crud.get(db, work_id)
+        await db.refresh(work)
+
+        state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+        existing_task_ids = state.get("stopped_task_ids")
+        existing_task_ids = existing_task_ids if isinstance(existing_task_ids, list) else []
+        state["stopped_task_ids"] = list(dict.fromkeys([*existing_task_ids, *task_ids]))
+        work.execution_state = state
+        await db.commit()
+
+    async def list_stopped_task_replies(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        task_ids: list[int],
+        exclude_work_id: int,
+    ) -> tuple[list[BackgroundTask], list[SessionReplyWorkItem]]:
+        if not task_ids:
+            return [], []
+
+        task_result = await db.execute(select(BackgroundTask).where(BackgroundTask.id.in_(task_ids), BackgroundTask.uid == uid).execution_options(populate_existing=True))
+        tasks = list(task_result.scalars().all())
+        if not tasks:
+            return [], []
+
+        work_conditions = []
+        for task in tasks:
+            if task.id is None:
+                continue
+            delivery_conditions = [
+                and_(
+                    SessionReplyWorkItem.id == int(delivery_work_id),
+                    SessionReplyWorkItem.dedupe_key == delivery["identity"],
+                )
+                for delivery_work_id, delivery in get_terminal_watch_deliveries(task).items()
+            ]
+            work_conditions.append(
+                and_(
+                    SessionReplyWorkItem.uid == task.uid,
+                    SessionReplyWorkItem.session_id == task.session_id,
+                    SessionReplyWorkItem.profile_id == task.profile_id,
+                    or_(
+                        *delivery_conditions,
+                        and_(
+                            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                            SessionReplyWorkItem.source_type == SessionReplySourceType.BACKGROUND_TASK,
+                            SessionReplyWorkItem.source_id == str(task.id),
+                        ),
+                    ),
+                )
+            )
+
+        if not work_conditions:
+            return tasks, []
+
+        candidate_result = await db.execute(
+            select(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.id != exclude_work_id,
+                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+                or_(*work_conditions),
+            )
+            .execution_options(populate_existing=True)
+        )
+        return tasks, list(candidate_result.scalars().all())
+
+    async def update_active_reply(
+        self,
+        db: AsyncSession,
+        *,
+        work: SessionReplyWorkItem,
+        values: dict[str, Any],
+    ) -> bool:
+        result = await db.execute(
+            update(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.id == work.id,
+                SessionReplyWorkItem.uid == work.uid,
+                SessionReplyWorkItem.session_id == work.session_id,
+                SessionReplyWorkItem.profile_id == work.profile_id,
+                SessionReplyWorkItem.dedupe_key == work.dedupe_key,
+                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+            )
+            .values(**{**values, "updated_at": get_local_time()})
+            .execution_options(synchronize_session=False)
+        )
+        return (result.rowcount or 0) == 1
+
+    async def mark_stopped_results_delivered(self, db: AsyncSession, *, uid: str, task_ids: list[int]) -> None:
+        if not task_ids:
+            return
+
+        await db.execute(
+            update(BackgroundTask)
+            .where(
+                BackgroundTask.id.in_(task_ids),
+                BackgroundTask.uid == uid,
+                BackgroundTask.auto_reply.is_(True),
+                BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED]),
+                BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
+            )
+            .values(
+                reply_status=BackgroundTaskReplyStatus.SUCCEEDED,
+                reply_locked_by=None,
+                reply_lock_until=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+
     async def suspend_claimed(
         self,
         db: AsyncSession,

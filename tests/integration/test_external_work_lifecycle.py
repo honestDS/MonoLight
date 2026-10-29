@@ -17,8 +17,10 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue import consumer as consumer_module
+from app.core.session_reply_queue import executor_common as executor_common_module
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue.manager_result import SessionReplyResult
+from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
 from app.core.utils.dispatcher.external_work import build_external_wait_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
@@ -265,6 +267,28 @@ async def _complete_task(case: ExternalWorkCase, call_id: str, content: str | No
             task_id=task_id,
             worker_id=task_worker,
             result={"content": content or f"completed-{call_id}"},
+            auto_reply=False,
+        )
+
+
+async def _fail_task(case: ExternalWorkCase, call_id: str, *, error: str, content: str) -> None:
+    task_id = case.task_ids[call_id]
+    task_worker = f"external-task-worker-{task_id}"
+    async with case.factory() as db:
+        claimed = await background_task_crud.try_claim(
+            db,
+            task_id=task_id,
+            worker_id=task_worker,
+            lease_seconds=3600,
+        )
+        assert claimed is not None
+        assert claimed.status == BackgroundTaskStatus.RUNNING
+        assert await background_task_crud.mark_failed(
+            db,
+            task_id=task_id,
+            worker_id=task_worker,
+            error=error,
+            result={"content": content},
             auto_reply=False,
         )
 
@@ -889,3 +913,227 @@ async def test_external_resume_rejects_owner_or_origin_mismatch(external_work_da
     assert not _messages_of_type(after, MessageType.BACKGROUND_TASK_RESULT)
     assert not [event for event in after["stream_events"] if event.event.get("type") == "tool_end"]
     assert not [event for event in after["session_events"] if event.event.get("type") == "work_ready"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_status", "resume_before_delivery", "remaining_task"),
+    [
+        ("running", False, False),
+        ("failed", False, False),
+        ("failed", True, False),
+        ("succeeded", False, False),
+        ("succeeded", True, False),
+        ("succeeded", False, True),
+    ],
+    ids=[
+        "running-not-resumed",
+        "failed-not-resumed",
+        "failed-resumed",
+        "succeeded-not-resumed",
+        "succeeded-resumed",
+        "succeeded-with-remaining-task",
+    ],
+)
+async def test_cancel_reply_delivery_cancels_original_external_work(
+    external_work_database,
+    monkeypatch: pytest.MonkeyPatch,
+    task_status: str,
+    resume_before_delivery: bool,
+    remaining_task: bool,
+) -> None:
+    case = await _create_case(external_work_database, call_ids=("call-1", "call-remaining") if remaining_task else ("call-1",))
+    unrelated_case = await _create_case(external_work_database, call_ids=("call-2",))
+    task_id = case.task_ids["call-1"]
+
+    if task_status == "running":
+        async with external_work_database() as db:
+            claimed = await background_task_crud.try_claim(
+                db,
+                task_id=task_id,
+                worker_id=f"external-task-worker-{task_id}",
+                lease_seconds=3600,
+            )
+            assert claimed is not None
+            assert claimed.status == BackgroundTaskStatus.RUNNING
+    elif task_status == "failed":
+        await _fail_task(case, "call-1", error="failed-before-cancel", content="failed-result-before-cancel")
+    else:
+        await _complete_task(case, "call-1", "succeeded-result-before-cancel")
+
+    before = await _snapshot(case)
+    before_task = next(task for task in before["tasks"] if task.id == task_id)
+    before_task_result = before_task.result
+    before_task_error = before_task.error
+    before_remaining_task = next((task for task in before["tasks"] if task.id == case.task_ids.get("call-remaining")), None)
+    assert before["work"].status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    if remaining_task:
+        assert before_remaining_task is not None
+        assert before_remaining_task.status == BackgroundTaskStatus.PENDING
+
+    stop_work_id, _ = await _enqueue_followup(case)
+    assert await _claim_next(external_work_database, "stop-worker") == stop_work_id
+
+    if resume_before_delivery:
+        assert task_status != "running"
+        assert await external_work_module.resume_external_work_for_task(task_id) is (not remaining_task)
+        resumed_before_delivery = await _snapshot(case)
+        assert resumed_before_delivery["work"].status == (SessionReplyWorkStatus.WAITING_EXTERNAL_WORK if remaining_task else SessionReplyWorkStatus.READY_FOR_LLM)
+
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", external_work_database)
+
+    async def execute_foreground(db, work, _worker_id):
+        cancel_executor = ManageBackgroundTasksExecutor(project_root=".", uid=work.uid)
+        cancel_executor.set_runtime_context(db=db, session_id=work.session_id)
+        cancel_response = json.loads(await cancel_executor.execute(operation="cancel", task_id=task_id))
+        assert cancel_response["status"] == "success"
+        assert cancel_response["operation"] == "cancel"
+        await save_message(
+            db,
+            work.session_id,
+            work.uid,
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content="stop response"),
+            work.profile_id,
+            dedupe_key=executor_common_module._result_message_dedupe_key(work),
+            commit=False,
+        )
+        return {
+            "choices": [
+                {
+                    "message": {"role": MessageRole.ASSISTANT, "content": "stop response"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "history": [],
+            "files": None,
+        }
+
+    delivered_events: list[dict[str, Any]] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event: dict[str, Any]) -> None:
+        delivered_events.append(event)
+
+    monkeypatch.setattr(executor_lifecycle_module, "_execute_foreground", execute_foreground)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
+
+    await executor_lifecycle_module.execute_session_reply_work(stop_work_id, "stop-worker")
+
+    assert delivered_events and delivered_events[-1]["work_id"] == stop_work_id
+    after = await _snapshot(case)
+    assert after["work"].status == (SessionReplyWorkStatus.WAITING_EXTERNAL_WORK if remaining_task else SessionReplyWorkStatus.CANCELLED)
+    assert await _claim_next(external_work_database, "must-not-claim") is None
+    assert await external_work_module.resume_external_work_for_task(task_id) is False
+
+    task = next(task for task in after["tasks"] if task.id == task_id)
+    expected_task_status = BackgroundTaskStatus.CANCELLED if task_status == "running" else BackgroundTaskStatus(task_status)
+    assert task.status == expected_task_status
+    assert task.result == before_task_result
+    assert task.error == before_task_error
+    _assert_queued_tool_result(after, case, "call-1")
+    if remaining_task:
+        remaining_task_row = next(task for task in after["tasks"] if task.id == case.task_ids["call-remaining"])
+        assert remaining_task_row.status == BackgroundTaskStatus.PENDING
+        assert remaining_task_row.result == before_remaining_task.result
+        assert remaining_task_row.error == before_remaining_task.error
+
+    async with external_work_database() as db:
+        stop_work = await db.get(SessionReplyWorkItem, stop_work_id)
+    assert stop_work is not None
+    assert stop_work.status == SessionReplyWorkStatus.SUCCEEDED
+    assert stop_work.event_sent is True
+
+    assistant_texts = [message for message in after["messages"] if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+    assert len(assistant_texts) == 1
+    assert assistant_texts[0].content == "stop response"
+
+    if remaining_task:
+        await _complete_task(case, "call-remaining", "remaining-result")
+        assert await external_work_module.resume_external_work_for_task(case.task_ids["call-remaining"]) is True
+        resumed = await _snapshot(case)
+        assert resumed["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+        _assert_queued_tool_result(resumed, case, "call-1")
+        _assert_queued_tool_result(resumed, case, "call-remaining")
+        completed_remaining_task = next(task for task in resumed["tasks"] if task.id == case.task_ids["call-remaining"])
+        assert completed_remaining_task.status == BackgroundTaskStatus.SUCCEEDED
+        assert completed_remaining_task.result == {"content": "remaining-result"}
+        assert completed_remaining_task.error is None
+
+    unrelated = await _snapshot(unrelated_case)
+    assert unrelated["work"].status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    assert unrelated["work"].locked_by is None
+    _assert_queued_tool_result(unrelated, unrelated_case, "call-2")
+    unrelated_task = next(task for task in unrelated["tasks"] if task.id == unrelated_case.task_ids["call-2"])
+    assert unrelated_task.status == BackgroundTaskStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_cancel_completed_external_work_waits_for_stop_reply_delivery(
+    external_work_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _create_case(external_work_database)
+    task_id = case.task_ids["call-1"]
+    await _complete_task(case, "call-1", "completed-before-transport-failure")
+    before = await _snapshot(case)
+    before_task = next(task for task in before["tasks"] if task.id == task_id)
+
+    stop_work_id, _ = await _enqueue_followup(case)
+    assert await _claim_next(external_work_database, "stop-worker") == stop_work_id
+
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", external_work_database)
+
+    async def execute_foreground(db, work, _worker_id):
+        cancel_executor = ManageBackgroundTasksExecutor(project_root=".", uid=work.uid)
+        cancel_executor.set_runtime_context(db=db, session_id=work.session_id)
+        cancel_response = json.loads(await cancel_executor.execute(operation="cancel", task_id=task_id))
+        assert cancel_response["status"] == "success"
+        await save_message(
+            db,
+            work.session_id,
+            work.uid,
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content="stop response after failed delivery"),
+            work.profile_id,
+            dedupe_key=executor_common_module._result_message_dedupe_key(work),
+            commit=False,
+        )
+        return {
+            "choices": [
+                {
+                    "message": {"role": MessageRole.ASSISTANT, "content": "stop response after failed delivery"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "history": [],
+            "files": None,
+        }
+
+    async def fail_session_event(_uid: str, _session_id: str, _event: dict[str, Any]) -> None:
+        raise RuntimeError("stop reply transport failed")
+
+    monkeypatch.setattr(executor_lifecycle_module, "_execute_foreground", execute_foreground)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", fail_session_event)
+
+    with pytest.raises(RuntimeError, match="stop reply transport failed"):
+        await executor_lifecycle_module.execute_session_reply_work(stop_work_id, "stop-worker")
+
+    waiting = await _snapshot(case)
+    assert waiting["work"].status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    task = next(task for task in waiting["tasks"] if task.id == task_id)
+    assert task.status == BackgroundTaskStatus.SUCCEEDED
+    assert task.result == before_task.result
+    assert task.error == before_task.error
+
+    async with external_work_database() as db:
+        stop_work = await db.get(SessionReplyWorkItem, stop_work_id)
+    assert stop_work is not None
+    assert stop_work.status == SessionReplyWorkStatus.RUNNING
+    assert stop_work.event_sent is False
+
+    assert await external_work_module.resume_external_work_for_task(task_id) is True
+    resumed = await _snapshot(case)
+    assert resumed["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    _assert_queued_tool_result(resumed, case, "call-1")

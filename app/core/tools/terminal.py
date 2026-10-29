@@ -8,13 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import (
     ERR_TERMINAL_COMMAND_TIMEOUT,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     TERMINAL_CLOSE_TOOL_NAME,
     TERMINAL_READ_MAX_BYTES,
     TERMINAL_READ_TOOL_NAME,
     TERMINAL_RESIZE_TOOL_NAME,
     TERMINAL_WRITE_TOOL_NAME,
 )
+from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import t
 from app.core.terminal.manager import terminal_session_manager
@@ -288,6 +291,17 @@ class _TerminalExecutor(BaseExecutor):
         response = receipt.model_dump(mode="json")
         if request.action is TerminalAction.CLOSE:
             await self._wait_for_resource_release(request.terminal_session_id, command.id)
+            if getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY) is not None:
+                watches = await background_task_crud.list_terminal_watches(
+                    db,
+                    uid=self.uid,
+                    session_id=session_id,
+                    terminal_session_id=request.terminal_session_id,
+                )
+                await external_work_crud.record_stopped_tasks(
+                    db,
+                    task_ids=[watch.id for watch in watches if watch.id is not None],
+                )
             response.update(
                 {
                     "exit_code": result.get("exit_code"),

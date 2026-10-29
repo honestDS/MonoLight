@@ -598,7 +598,10 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
     standalone_read_result = TerminalReadResult.model_validate({field: standalone_read_payload[field] for field in TerminalReadResult.model_fields})
     assert standalone_read_result.requested_offset == 0
     expected_read_result = {field: value for field, value in command_results[101].items() if field != "_terminal_snapshot"}
-    assert standalone_read_payload == {**snapshot.model_dump(mode="json"), **expected_read_result}
+    standalone_read_snapshot = TerminalSessionSnapshot.model_validate({field: standalone_read_payload[field] for field in TerminalSessionSnapshot.model_fields})
+    assert standalone_read_snapshot == snapshot
+    assert standalone_read_result.model_dump(mode="json") == expected_read_result
+    assert set(standalone_read_payload) == set(snapshot.model_dump(mode="json")) | set(expected_read_result)
     assert "_terminal_snapshot" not in standalone_read_payload
 
     write_executor = _executor(TerminalWriteExecutor, tool_timeout=5.0)
