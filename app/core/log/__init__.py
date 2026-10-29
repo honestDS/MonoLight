@@ -83,18 +83,6 @@ class LogManager:
         if cls._configured:
             return
 
-        configured_level_no = logger.level(level).no
-
-        def is_sqlite_diagnostic(record):
-            return bool(record["extra"].get("sqlite_diagnostic"))
-
-        def exclude_sqlite_diagnostic(record):
-            return not is_sqlite_diagnostic(record)
-
-        def process_file_filter(record):
-            # 仅进程主日志文件允许诊断日志绕过普通级别阈值。
-            return is_sqlite_diagnostic(record) or record["level"].no >= configured_level_no
-
         # 异步数据库写入器
         async def db_sink(message):
             try:
@@ -170,7 +158,6 @@ class LogManager:
         logger.add(
             sys.stdout,
             level=level,
-            filter=exclude_sqlite_diagnostic,
             colorize=True,
             format=("<green>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</green> <level>[{level}]</level> <cyan>[{file}:{line}]</cyan>: <level>{message}</level>"),
         )
@@ -180,8 +167,7 @@ class LogManager:
         # 每个进程写入独立文件，避免 Windows 下多个进程同时轮转同一文件时发生占用冲突。
         logger.add(
             process_log_path,
-            level="TRACE",
-            filter=process_file_filter,
+            level=level,
             rotation="10 MB",
             retention="1 week",
             compression="zip",
@@ -194,7 +180,7 @@ class LogManager:
         tool_log_path = build_process_log_path(str(Path(abs_log_path).parent / TOOLS_LOG_FILENAME))
         logger.add(
             tool_log_path,
-            filter=lambda record: not is_sqlite_diagnostic(record) and ("tool_call" in record["extra"] or "tool_result" in record["extra"]),
+            filter=lambda record: "tool_call" in record["extra"] or "tool_result" in record["extra"],
             level="DEBUG",
             rotation="10 MB",
             retention="1 week",
@@ -207,7 +193,6 @@ class LogManager:
         # 此处必须 enqueue=False，否则会在线程中因缺少事件循环导致异步任务丢失。
         logger.add(
             db_sink_wrapper,
-            filter=exclude_sqlite_diagnostic,
             level="DEBUG",
             enqueue=False,
         )
