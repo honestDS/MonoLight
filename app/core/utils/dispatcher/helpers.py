@@ -2,7 +2,7 @@ import json
 from importlib import import_module
 from typing import Any
 
-from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, KNOWLEDGE_BASE_QUERY_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, END_SESSION_TOOL_NAME, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, KNOWLEDGE_BASE_QUERY_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.dispatchers.context import DispatchMode
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
@@ -91,7 +91,7 @@ def _filter_tool_output_messages(messages: list[InternalMessage]) -> list[Intern
 
 def _is_end_session_control_message(message: InternalMessage) -> bool:
     provider_metadata = message.provider_metadata
-    return isinstance(provider_metadata, dict) and provider_metadata.get("internal_control") == "end_session"
+    return isinstance(provider_metadata, dict) and provider_metadata.get("internal_control") == END_SESSION_TOOL_NAME
 
 
 async def process_single_tool_with_isolated_db(
