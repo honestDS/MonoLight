@@ -2603,14 +2603,33 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             }
 
             persisted_messages = list((await db.execute(select(Message).where(Message.session_id == SESSION_ID).order_by(Message.id))).scalars().all())
-            tool_call_messages = [message for message in persisted_messages if message.type == MessageType.TOOL_CALL]
+            control_messages = [message for message in persisted_messages if isinstance(message.provider_metadata, dict) and message.provider_metadata.get("internal_control") == END_SESSION_TOOL_NAME]
+            assert len(control_messages) == 2
+            control_call_messages = [message for message in control_messages if message.type == MessageType.TOOL_CALL]
+            control_result_messages = [message for message in control_messages if message.type == MessageType.TOOL_RESULT]
+            assert len(control_call_messages) == 1
+            assert len(control_result_messages) == 1
+            control_call = InternalMessage.model_validate_json(control_call_messages[0].content or "{}")
+            assert control_call.tool_calls is not None
+            assert len(control_call.tool_calls) == 1
+            assert control_call.tool_calls[0].name == END_SESSION_TOOL_NAME
+            assert control_call.tool_calls[0].arguments == {}
+            control_result = InternalMessage.model_validate_json(control_result_messages[0].content or "{}")
+            assert control_result.tool_call_id == control_call.tool_calls[0].id
+            control_result_payload = json.loads(control_result.content or "{}")
+            assert control_result_payload["status"] == "completed"
+            assert control_result_payload["skip_reply"] is False
+            assert control_call_messages[0].id < control_result_messages[0].id
+            control_message_ids = {message.id for message in control_messages}
+            non_control_messages = [message for message in persisted_messages if message.id not in control_message_ids]
+            tool_call_messages = [message for message in non_control_messages if message.type == MessageType.TOOL_CALL]
             tool_calls = [InternalMessage.model_validate_json(message.content or "{}") for message in tool_call_messages]
             assert [tool_call.name for message in tool_calls for tool_call in message.tool_calls or []] == [
                 MANAGE_TODO_TOOL_NAME,
                 TERMINAL_WATCH_TOOL_NAME,
                 TERMINAL_CLOSE_TOOL_NAME,
             ]
-            tool_result_messages = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
+            tool_result_messages = [message for message in non_control_messages if message.type == MessageType.TOOL_RESULT]
             tool_results = [InternalMessage.model_validate_json(message.content or "{}") for message in tool_result_messages]
             assert {tool_result.tool_call_id for tool_result in tool_results} == {tool_call.id for message in tool_calls for tool_call in message.tool_calls or []}
             result_by_call_id = {tool_result.tool_call_id: tool_result for tool_result in tool_results}
@@ -2622,7 +2641,7 @@ async def test_background_summary_resumes_full_goal_tool_loop_after_external_wat
             close_result = json.loads(result_by_call_id[tool_calls[2].tool_calls[0].id].content or "{}")
             assert close_result["action"] == TerminalAction.CLOSE.value
             assert close_result["session_status"] == TerminalSessionStatus.EXITED.value
-            assert not any(END_SESSION_TOOL_NAME in (message.content or "") for message in persisted_messages)
+            assert not any(END_SESSION_TOOL_NAME in (message.content or "") for message in [*tool_call_messages, *tool_result_messages])
 
             result_events = [message for message in persisted_messages if message.type == MessageType.BACKGROUND_TASK_RESULT]
             assert len(result_events) == 2

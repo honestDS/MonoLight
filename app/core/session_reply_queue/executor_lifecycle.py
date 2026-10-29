@@ -14,6 +14,7 @@ from app.core.constants import (
     ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
+from app.core.crud.session.event import session_event_crud
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
@@ -52,7 +53,7 @@ __all__ = [
 ]
 
 
-async def _resume_pending_terminal_results(work: SessionReplyWorkItem) -> None:
+async def _resume_pending_external_results(work: SessionReplyWorkItem) -> None:
     try:
         async with AsyncSessionLocal() as db:
             pending_results = await background_task_crud.list_pending_terminal_watch_results(
@@ -71,8 +72,21 @@ async def _resume_pending_terminal_results(work: SessionReplyWorkItem) -> None:
                     continue
                 seen_task_ids.add(task_id)
                 task_ids.append(task_id)
+            execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+            for field in ("pending_tools", "terminal_watch_waits"):
+                pending_slots = execution_state.get(field)
+                if not isinstance(pending_slots, list):
+                    continue
+                for pending_slot in pending_slots:
+                    if not isinstance(pending_slot, dict):
+                        continue
+                    task_id = pending_slot.get("task_id")
+                    if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0 or task_id in seen_task_ids:
+                        continue
+                    seen_task_ids.add(task_id)
+                    task_ids.append(task_id)
     except Exception:
-        logger.exception("Failed to list pending terminal results for work {}", work.id)
+        logger.exception("Failed to list pending external results for work {}", work.id)
         return
 
     for task_id in task_ids:
@@ -94,19 +108,28 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             if not await prepare_terminal_auto_watch_resume(db, work, worker_id):
                 return
 
-        persisted_result = await _get_persisted_result(db, work)
-        if persisted_result is not None:
-            response = (work.execution_state or {}).get("response") or _response_from_persisted_message(work, persisted_result)
-        elif (work.execution_state or {}).get("external_resume_pending") is True:
-            response = await _execute_external_resume(db, work, worker_id)
-        elif work.work_type == SessionReplyWorkType.FOREGROUND_REPLY:
-            response = await _execute_foreground(db, work, worker_id)
-        elif work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
-            response = await _execute_confirmed_tools(db, work, worker_id)
-        elif work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
-            response = await _execute_background(db, work, worker_id)
+        execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+        saved_response = execution_state.get("response")
+        saved_skip_response = isinstance(saved_response, dict) and saved_response.get("skip_reply") is True
+        persisted_result = None
+        skip_reply = saved_skip_response
+        if saved_skip_response:
+            response = saved_response
         else:
-            response = await _execute_scheduled(db, work, worker_id)
+            persisted_result = await _get_persisted_result(db, work)
+            if persisted_result is not None:
+                response = execution_state.get("response") or _response_from_persisted_message(work, persisted_result)
+            elif execution_state.get("external_resume_pending") is True:
+                response = await _execute_external_resume(db, work, worker_id)
+            elif work.work_type == SessionReplyWorkType.FOREGROUND_REPLY:
+                response = await _execute_foreground(db, work, worker_id)
+            elif work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
+                response = await _execute_confirmed_tools(db, work, worker_id)
+            elif work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
+                response = await _execute_background(db, work, worker_id)
+            else:
+                response = await _execute_scheduled(db, work, worker_id)
+            skip_reply = isinstance(response, dict) and response.get("skip_reply") is True
 
         if isinstance(response, dict) and response.get("status") == "waiting_external_work":
             pending_tools = response.get("pending_tools")
@@ -128,25 +151,44 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                     await resume_external_work_for_task(task_id)
                 except Exception:
                     logger.exception("Failed to resume external work for task {}", task_id)
-            await _resume_pending_terminal_results(work)
+            await _resume_pending_external_results(work)
             return
 
-        result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
-        if result_message is None:
-            raise RuntimeError(t(ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
+        if skip_reply:
+            result_message = None
+            identified_response = response if saved_skip_response else build_identified_work_response(work, response, message_id=None)
+        else:
+            result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
+            if result_message is None:
+                raise RuntimeError(t(ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
+            identified_response = build_identified_work_response(work, response, message_id=result_message.id)
 
-        identified_response = build_identified_work_response(work, response, message_id=result_message.id)
-        state = {**(work.execution_state or {}), "response": identified_response}
+        latest_execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+        state = {**latest_execution_state, "response": identified_response}
         updated = await session_reply_work_item_crud.update_claimed(
             db,
             work_id=work_id,
             worker_id=worker_id,
-            values={"result_message_id": result_message.id, "execution_state": state},
+            values={"result_message_id": result_message.id if result_message is not None else None, "execution_state": state},
         )
         if not updated:
             return
 
-    await send_session_event(work.uid, work.session_id, _event_for_work(work, identified_response))
+        if skip_reply:
+            event = _event_for_work(work, identified_response)
+            event.update({"type": "done", "skip_reply": True, "response": identified_response})
+            await session_event_crud.publish(
+                db,
+                dedupe_key=event["event_id"],
+                uid=work.uid,
+                session_id=work.session_id,
+                event=event,
+                commit=False,
+            )
+            await db.commit()
+
+    if not skip_reply:
+        await send_session_event(work.uid, work.session_id, _event_for_work(work, identified_response))
 
     async with AsyncSessionLocal() as db:
         updated = await session_reply_work_item_crud.mark_terminal(
@@ -154,7 +196,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             work_id=work_id,
             worker_id=worker_id,
             status=SessionReplyWorkStatus.SUCCEEDED,
-            result_message_id=result_message.id,
+            result_message_id=result_message.id if result_message is not None else None,
             event_sent=True,
             commit=False,
         )
@@ -162,7 +204,9 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             await db.rollback()
             return
 
-        if (work.execution_state or {}).get("stopped_task_ids"):
+        await external_work_crud.finish_received_results(db, work=work, commit=False)
+
+        if result_message is not None and (work.execution_state or {}).get("stopped_task_ids"):
             await complete_stopped_task_replies(db, work_id=work_id)
 
         if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
@@ -180,7 +224,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             )
         await db.commit()
 
-    await _resume_pending_terminal_results(work)
+    await _resume_pending_external_results(work)
 
 
 async def fail_session_reply_work(

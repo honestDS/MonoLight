@@ -114,7 +114,7 @@ async def test_background_summary_uses_persisted_result_event_boundary(monkeypat
     assert captured["initial_message"].id == 50
     assert captured["history_before_id"] == 50
     assert captured["frozen_user_message_ids"] == [50]
-    assert captured["allow_additional_user_messages"] is False
+    assert captured["allow_additional_user_messages"] is True
     assert captured["execution_resume_state"]["reload_history"] is True
     assert captured["execution_resume_state"]["context_summary_fixed_upper_message_id"] == 50
     assert "submission_context" not in captured

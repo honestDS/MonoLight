@@ -148,6 +148,7 @@ class _ExecutionCheckpointState:
     session_total_output_tokens: int | None = None
     execution_phase: str = GOAL_EXECUTION_PHASE_RUNNING
     pending_resume_message_ids: list[int] = field(default_factory=list)
+    reply_skipped: bool = False
 
 
 def _is_valid_memory_recall_boundary(value: Any) -> bool:
@@ -200,6 +201,8 @@ async def _save_execution_checkpoint(
         checkpoint["memory_recall_status"] = state.memory_recall_status
     if update_active_audit_execution:
         checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
+    if state.reply_skipped:
+        checkpoint["reply_skipped"] = True
     await state.callback(checkpoint)
 
 

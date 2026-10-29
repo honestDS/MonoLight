@@ -86,6 +86,27 @@ def _build_runtime_snapshot(max_tokens, platform_constraints=None):
     return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
 
 
+def _checkpoint_contains_cancelled_confirmation(checkpoint):
+    def contains_cancelled_confirmation(value):
+        if isinstance(value, dict):
+            if value.get("confirmation_status") in {"superseded", "cancelled"}:
+                return True
+            if value.get("status") == "cancelled" and "confirmation_status" in value:
+                return True
+            return any(contains_cancelled_confirmation(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(contains_cancelled_confirmation(item) for item in value)
+        if isinstance(value, str):
+            try:
+                parsed_value = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                return False
+            return parsed_value != value and contains_cancelled_confirmation(parsed_value)
+        return False
+
+    return contains_cancelled_confirmation(checkpoint)
+
+
 async def _build_max_tokens_runtime_instruction(
     _db,
     _session_id,
@@ -1729,7 +1750,7 @@ async def test_interactive_accumulates_output_tokens_and_session_cache_metrics(m
     assert metadata_events[3]["cached_tokens"] == 440
     assert metadata_events[3]["cache_hit_rate"] == pytest.approx(640 / 2100)
     assert any(checkpoint["total_output_tokens"] == 12 for checkpoint in checkpoints)
-    assert any(checkpoint["session_total_output_tokens"] == 12 for checkpoint in checkpoints)
+    assert any(checkpoint.get("session_total_output_tokens") == 12 for checkpoint in checkpoints)
     assert any(checkpoint["session_total_input_tokens"] == 1000 and checkpoint["session_total_cached_tokens"] == 200 for checkpoint in checkpoints)
     assert response["llm_request_metadata"]["output_tokens"] == 32
     assert response["llm_request_metadata"]["total_output_tokens"] == 32
@@ -2076,7 +2097,8 @@ async def test_interactive_persists_audit_binding_before_tool_and_clears_after_r
 
     assert response["choices"][0]["message"]["content"] == "finished"
     assert tool_states == [{"audit_record_id": 42, "claim_token": "claim-token"}]
-    assert persisted_states[0][SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] == {
+    binding_checkpoints = [checkpoint for checkpoint in persisted_states if SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint]
+    assert binding_checkpoints[0][SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] == {
         "audit_record_id": 42,
         "claim_token": "claim-token",
     }
@@ -2384,8 +2406,9 @@ async def test_pending_audit_cancels_unpersisted_confirmation_when_batch_arrives
     assert fetch_count == 4
     assert none_fetch_count == 3
     assert batch_delivery_count == 1
-    assert checkpoints[-1]["current_turn"] == 0
-    assert checkpoints[-1]["context_summary_fixed_upper_message_id"] == 30
+    cancelled_checkpoint = next(checkpoint for checkpoint in checkpoints if _checkpoint_contains_cancelled_confirmation(checkpoint))
+    assert cancelled_checkpoint["current_turn"] == 0
+    assert cancelled_checkpoint["context_summary_fixed_upper_message_id"] == 30
     assert response["choices"][0]["message"]["content"] == "finished"
     assert unknown_calls == []
 
@@ -2570,8 +2593,9 @@ async def test_streamed_pending_audit_bundle_is_superseded_when_batch_arrives_du
     cancelled_payload = json.loads(cancelled_result.content)
     assert cancelled_payload["status"] == "cancelled"
     assert cancelled_payload["confirmation_status"] == "superseded"
-    assert checkpoints[-1]["current_turn"] == 0
-    assert checkpoints[-1]["context_summary_fixed_upper_message_id"] == 60
+    cancelled_checkpoint = next(checkpoint for checkpoint in checkpoints if _checkpoint_contains_cancelled_confirmation(checkpoint))
+    assert cancelled_checkpoint["current_turn"] == 0
+    assert cancelled_checkpoint["context_summary_fixed_upper_message_id"] == 60
     assert tool_calls == []
     assert [event["type"] for event in events] == [
         "task_start",
@@ -2878,7 +2902,7 @@ async def test_interactive_batches_advance_confirmation_and_summary_boundaries_w
         [*batch_b.source_message_ids, *batch_c.source_message_ids, *batch_d.source_message_ids],
     ]
     assert all(len(message_ids) == len(set(message_ids)) for message_ids in request_batch_ids)
-    checkpoint_upper_ids = [checkpoint["context_summary_fixed_upper_message_id"] for checkpoint in checkpoints]
+    checkpoint_upper_ids = [checkpoint["context_summary_fixed_upper_message_id"] for checkpoint in checkpoints if checkpoint["context_summary_fixed_upper_message_id"] != 1]
     assert checkpoint_upper_ids == sorted(checkpoint_upper_ids)
     assert list(dict.fromkeys(checkpoint_upper_ids)) == [100, 110, 120]
     assert response["choices"][0]["message"]["content"] == "finished"

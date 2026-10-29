@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
-    END_SESSION_TOOL_NAME,
     ERR_BACKGROUND_TASK_UNSUPPORTED,
     ERR_TOOL_ARGUMENT_SCHEMA_INVALID,
     ERR_TOOL_EXECUTION_TIMEOUT,
@@ -68,8 +67,6 @@ from app.models.profile import (
 
 
 def _is_tool_enabled(tool_name: str, cfg: ProfileConfig, *, goal_mode: bool = False) -> bool:
-    if tool_name == END_SESSION_TOOL_NAME:
-        return goal_mode is True
     if tool_name in SYSTEM_BUILTIN_TOOL_NAMES:
         return True
     if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:

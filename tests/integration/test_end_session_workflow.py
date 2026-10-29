@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
@@ -12,6 +13,7 @@ from sqlmodel import select
 
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
+import app.providers.database as database_module
 from app.core.constants import (
     END_SESSION_TOOL_NAME,
     ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
@@ -19,6 +21,7 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASE_FINALIZING,
     MANAGE_TODO_TOOL_NAME,
 )
+from app.core.crud.session.message import message_crud
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import LLMModelCapabilityException, ServerException
@@ -26,8 +29,11 @@ from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, PROMPT_MAX_TURNS_REACHED, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
+from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
+from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask
 from app.models.channel import ModelChannel
 from app.models.message import (
@@ -40,6 +46,7 @@ from app.models.message import (
 )
 from app.models.profile import Profile
 from app.models.session import ChatSession
+from app.models.session_event import SessionEvent
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -252,6 +259,7 @@ def _end_session_response(
     call_id: str,
     reasoning: str | None = "结束前检查已完成",
     content: str | None = None,
+    arguments: dict[str, Any] | None = None,
     usage: dict[str, Any] | None = None,
 ) -> InternalResponse:
     return InternalResponse(
@@ -263,7 +271,7 @@ def _end_session_response(
                 InternalToolCall(
                     id=call_id,
                     name=END_SESSION_TOOL_NAME,
-                    arguments={},
+                    arguments=arguments if arguments is not None else {},
                 )
             ],
         ),
@@ -389,9 +397,96 @@ async def _dispatch(
 
 
 async def _list_messages(factory: async_sessionmaker[AsyncSession], session_id: str) -> list[Message]:
+    """Return every persisted message, including internal control records."""
     async with factory() as db:
         result = await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.id.asc()))
         return list(result.scalars().all())
+
+
+async def _list_control_messages(factory: async_sessionmaker[AsyncSession], session_id: str) -> list[Message]:
+    messages = await _list_messages(factory, session_id)
+    return [message for message in messages if _is_end_session_control_message(message)]
+
+
+def _is_end_session_control_message(message: Message | InternalMessage) -> bool:
+    return isinstance(message.provider_metadata, dict) and message.provider_metadata.get("internal_control") == END_SESSION_TOOL_NAME
+
+
+def _internal_control_messages(messages: list[InternalMessage]) -> list[InternalMessage]:
+    return [message for message in messages if _is_end_session_control_message(message)]
+
+
+def _assert_end_session_control_pair(
+    messages: list[Message] | list[InternalMessage],
+    *,
+    skip_reply: bool,
+    call_id: str,
+    call_arguments: dict[str, Any] | None = None,
+) -> tuple[InternalMessage, InternalMessage]:
+    parsed_messages = parse_db_messages_to_internal(messages) if messages and isinstance(messages[0], Message) else messages
+    control_messages = _internal_control_messages(parsed_messages)
+    assert len(control_messages) == 2
+    assert len({message.id for message in control_messages}) == 2
+    control_call = next(message for message in control_messages if message.role == MessageRole.ASSISTANT)
+    control_result = next(message for message in control_messages if message.role == MessageRole.TOOL)
+    assert control_call.content is None
+    assert control_call.reasoning_content is None
+    assert control_call.tool_calls and len(control_call.tool_calls) == 1
+    tool_call = control_call.tool_calls[0]
+    assert tool_call.id == call_id
+    assert tool_call.name == END_SESSION_TOOL_NAME
+    assert tool_call.arguments == (call_arguments if call_arguments is not None else {"skip_reply": skip_reply})
+    assert control_result.content is not None
+    assert control_result.reasoning_content is None
+    assert control_result.tool_call_id == call_id
+    assert json.loads(control_result.content) == {
+        "status": "completed",
+        "skip_reply": skip_reply,
+        "received_result_task_ids": [],
+    }
+    return control_call, control_result
+
+
+def _assert_end_session_model_pair(
+    messages: list[InternalMessage],
+    *,
+    skip_reply: bool,
+    call_id: str,
+    call_arguments: dict[str, Any],
+) -> tuple[InternalMessage, InternalMessage]:
+    control_calls = [message for message in messages if message.role == MessageRole.ASSISTANT and any(tool.name == END_SESSION_TOOL_NAME for tool in (message.tool_calls or []))]
+    assert len(control_calls) == 1
+    control_call = control_calls[0]
+    assert control_call.content is None
+    assert control_call.reasoning_content is None
+    assert control_call.tool_calls and len(control_call.tool_calls) == 1
+    tool_call = control_call.tool_calls[0]
+    assert tool_call.id == call_id
+    assert tool_call.name == END_SESSION_TOOL_NAME
+    assert tool_call.arguments == call_arguments
+    control_results = [message for message in messages if message.role == MessageRole.TOOL and message.tool_call_id == call_id]
+    assert len(control_results) == 1
+    control_result = control_results[0]
+    assert control_result.content is not None
+    assert control_result.reasoning_content is None
+    assert json.loads(control_result.content) == {
+        "status": "completed",
+        "skip_reply": skip_reply,
+        "received_result_task_ids": [],
+    }
+    return control_call, control_result
+
+
+def _assert_no_control_history(
+    history: list[dict[str, Any]],
+    *,
+    forbidden_texts: tuple[str, ...] = (),
+) -> None:
+    serialized_history = json.dumps(history, ensure_ascii=False)
+    assert "internal_control" not in serialized_history
+    assert all(text not in serialized_history for text in forbidden_texts)
+    assert all(item.get("role") != MessageRole.TOOL for item in history)
+    assert all(not item.get("tool_calls") for item in history)
 
 
 def _response_from_dispatch_result(result: dict[str, Any] | list[dict[str, Any]], *, stream: bool) -> dict[str, Any]:
@@ -467,6 +562,12 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
     assert calls[1]["tools"] == calls[0]["tools"]
     assert any(message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_FINAL_RESPONSE_PROMPT for message in calls[1]["messages"])
     assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for message in calls[1]["messages"] if message.role == MessageRole.SYSTEM)
+    _assert_end_session_model_pair(
+        calls[1]["messages"],
+        skip_reply=False,
+        call_id="final-end-session",
+        call_arguments={},
+    )
     assert any(checkpoint.get("execution_phase") == GOAL_EXECUTION_PHASE_FINALIZING for checkpoint in checkpoints)
     assert response["choices"][0]["message"]["content"] == SUMMARY
     assert response["choices"][0]["finish_reason"] == "stop"
@@ -474,13 +575,27 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
     assert response["history"][-1]["content"] == SUMMARY
     assert all(item.get("role") != MessageRole.TOOL for item in response["history"])
     assert all(not item.get("tool_calls") for item in response["history"])
+    _assert_no_control_history(
+        response["history"],
+        forbidden_texts=("final-end-session", "这段正文不应展示或持久化", "结束前检查已完成"),
+    )
 
     messages = await _list_messages(session_factory, session_id)
     assistant_messages = [message for message in messages if message.role == MessageRole.ASSISTANT]
-    assert len(assistant_messages) == 1
-    assert assistant_messages[0].type == MessageType.TEXT
-    assert assistant_messages[0].content == SUMMARY
-    assert all(message.type not in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} for message in messages)
+    assert len(assistant_messages) == 2
+    assistant_text_messages = [message for message in assistant_messages if message.type == MessageType.TEXT]
+    assert len(assistant_text_messages) == 1
+    assert assistant_text_messages[0].content == SUMMARY
+    control_messages = await _list_control_messages(session_factory, session_id)
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=False,
+        call_id="final-end-session",
+        call_arguments={},
+    )
+    control_ids = {message.id for message in control_messages}
+    ordinary_tool_messages = [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} and message.id not in control_ids]
+    assert ordinary_tool_messages == []
 
     if stream:
         events = result
@@ -492,9 +607,14 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
         assert reasoning_events == []
         assert len(turn_end_events) == 1
         assert turn_end_events[0]["content"] == SUMMARY
-        assert turn_end_events[0]["message_id"] == assistant_messages[0].id
+        assert turn_end_events[0]["message_id"] == assistant_text_messages[0].id
         assert len(done_events) == 1
         assert done_events[0]["response"]["choices"][0]["message"]["content"] == SUMMARY
+        _assert_no_control_history(
+            [event for event in events if event.get("type") != "done"],
+            forbidden_texts=("final-end-session", "这段正文不应展示或持久化", "结束前检查已完成"),
+        )
+        assert not [event for event in events if event.get("name") == END_SESSION_TOOL_NAME]
 
         agent_loop_start_events = [event for event in events if event.get("type") == "agent_loop_start" and event.get("turn") == 1]
         assert len(agent_loop_start_events) == 1
@@ -531,6 +651,141 @@ async def test_end_session_is_stored_as_final_text_and_streamed_as_final_reply(
 
     if stream:
         assert termination_extra["response_id"] == agent_loop_start_events[0]["response_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-stream", "stream"])
+@pytest.mark.parametrize("goal_mode", [False, True], ids=["legacy-mode", "goal-mode"])
+@pytest.mark.parametrize("skip_reply", [False, True], ids=["normal-reply", "skip-reply"])
+async def test_end_session_skip_reply_signal_controls_final_generation_and_public_events(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    goal_mode: bool,
+    skip_reply: bool,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = f"end-session-skip-reply-{int(stream)}-{int(goal_mode)}-{int(skip_reply)}"
+    initial_message = await _seed_conversation(session_factory, session_id, goal_mode=goal_mode)
+    same_turn_content = "同轮正文不得泄漏"
+    same_turn_reasoning = "同轮推理不得泄漏"
+    checkpoints: list[dict[str, Any]] = []
+
+    async def capture_checkpoint(checkpoint: dict[str, Any]) -> None:
+        checkpoints.append(checkpoint)
+
+    responses = [
+        _end_session_response(
+            call_id="skip-reply-end-session",
+            arguments={"skip_reply": skip_reply},
+            content=same_turn_content,
+            reasoning=same_turn_reasoning,
+        )
+    ]
+    if not skip_reply:
+        responses.append(_final_response())
+    calls = _patch_llm(monkeypatch, responses, stream=stream)
+
+    result = await _dispatch(
+        session_factory,
+        initial_message,
+        session_id=session_id,
+        stream=stream,
+        show_tool_calls=True,
+        execution_checkpoint_callback=capture_checkpoint,
+    )
+    response = _response_from_dispatch_result(result, stream=stream)
+
+    assert len(calls) == (1 if skip_reply else 2)
+    assert all(call["tool_choice"] == "auto" for call in calls)
+    assert all(any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in call["tools"]) for call in calls)
+    if not skip_reply:
+        _assert_end_session_model_pair(
+            calls[1]["messages"],
+            skip_reply=False,
+            call_id="skip-reply-end-session",
+            call_arguments={"skip_reply": False},
+        )
+
+    messages = await _list_messages(session_factory, session_id)
+    control_messages = await _list_control_messages(session_factory, session_id)
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=skip_reply,
+        call_id="skip-reply-end-session",
+        call_arguments={"skip_reply": skip_reply},
+    )
+    control_ids = {message.id for message in control_messages}
+    assert len(control_ids) == 2
+    ordinary_tool_messages = [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} and message.id not in control_ids]
+    assert ordinary_tool_messages == []
+
+    async with session_factory() as db:
+        internal_history = await message_crud.get_history(
+            db,
+            session_id=session_id,
+            uid=UID,
+            limit=100,
+        )
+        visible_history = await message_crud.get_history_paged(
+            db,
+            session_id=session_id,
+            uid=UID,
+            limit=100,
+            include_tool_messages=True,
+        )
+    _assert_end_session_control_pair(
+        internal_history,
+        skip_reply=skip_reply,
+        call_id="skip-reply-end-session",
+        call_arguments={"skip_reply": skip_reply},
+    )
+    visible_ids = {message.id for message in visible_history}
+    assert not control_ids & visible_ids
+    assert all(not _is_end_session_control_message(message) for message in visible_history)
+
+    assert checkpoints
+    checkpoint_messages = [InternalMessage.model_validate(message) for message in checkpoints[-1].get("messages", [])]
+    checkpoint_turn_messages = [InternalMessage.model_validate(message) for message in checkpoints[-1].get("turn_messages", [])]
+    _assert_end_session_control_pair(
+        _internal_control_messages(checkpoint_messages),
+        skip_reply=skip_reply,
+        call_id="skip-reply-end-session",
+        call_arguments={"skip_reply": skip_reply},
+    )
+    assert not _internal_control_messages(checkpoint_turn_messages)
+    assert {message.id for message in _internal_control_messages(checkpoint_messages)} == control_ids
+
+    _assert_no_control_history(
+        response["history"],
+        forbidden_texts=("skip-reply-end-session", same_turn_content, same_turn_reasoning),
+    )
+    public_result = json.dumps(result, ensure_ascii=False)
+    assert "internal_control" not in public_result
+    assert "skip-reply-end-session" not in public_result
+    assert same_turn_content not in public_result
+    assert same_turn_reasoning not in public_result
+    if skip_reply:
+        assert response["skip_reply"] is True
+        assert response["choices"] == []
+        assert not [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+        if stream:
+            assert not [event for event in result if event.get("type") in {"content", "reasoning", "agent_loop_output", "turn_end"}]
+    else:
+        assert response.get("skip_reply", False) is False
+        assert response["choices"][0]["message"]["content"] == SUMMARY
+        assert response["choices"][0]["finish_reason"] == "stop"
+        assistant_text_rows = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+        assert len(assistant_text_rows) == 1
+        assert assistant_text_rows[0].content == SUMMARY
+        if stream:
+            assert [event["content"] for event in result if event.get("type") == "content"] == [SUMMARY]
+    if stream:
+        _assert_no_control_history(
+            result,
+            forbidden_texts=("skip-reply-end-session", same_turn_content, same_turn_reasoning),
+        )
+        assert not [event for event in result if event.get("name") == END_SESSION_TOOL_NAME]
 
 
 @pytest.mark.asyncio
@@ -585,7 +840,7 @@ async def test_no_tool_call_round_returns_response_without_extra_final_generatio
     assert len(calls) == expected_turn
     assert all(call["tool_choice"] == "auto" for call in calls)
     for call in calls:
-        assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in call["tools"]) is goal_mode
+        assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in call["tools"])
 
     choice = response["choices"][0]
     assert choice["message"]["content"] == SUMMARY
@@ -605,7 +860,8 @@ async def test_no_tool_call_round_returns_response_without_extra_final_generatio
     assert len(assistant_text_rows) == 1
     assert assistant_text_rows[0].content == SUMMARY
     assert assistant_text_rows[0].reasoning_content == final_reasoning
-    assert all(END_SESSION_TOOL_NAME not in (message.content or "") for message in [*tool_call_rows, *tool_result_rows])
+    ordinary_tool_calls = parse_db_messages_to_internal(tool_call_rows)
+    assert all(tool.name != END_SESSION_TOOL_NAME for message in ordinary_tool_calls for tool in (message.tool_calls or []))
     for row in tool_result_rows:
         outer_payload = json.loads(row.content or "")
         inner_payload = json.loads(outer_payload["content"])
@@ -644,8 +900,8 @@ async def test_end_session_checkpoint_failure_does_not_log_termination_or_genera
     )
 
     async def fail_checkpoint(checkpoint: dict[str, Any]) -> None:
-        assert checkpoint["execution_phase"] == GOAL_EXECUTION_PHASE_FINALIZING
-        raise RuntimeError("checkpoint save failed")
+        if checkpoint.get("execution_phase") == GOAL_EXECUTION_PHASE_FINALIZING:
+            raise RuntimeError("checkpoint save failed")
 
     if stream:
         result = await _dispatch(
@@ -749,11 +1005,21 @@ async def test_goal_mode_continues_beyond_configured_and_legacy_turn_limits_then
     tool_call_rows = [message for message in messages if message.type == MessageType.TOOL_CALL]
     tool_result_rows = [message for message in messages if message.type == MessageType.TOOL_RESULT]
     assistant_text_rows = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
-    assert len(tool_call_rows) == 25
-    assert len(tool_result_rows) == 25
+    control_messages = await _list_control_messages(session_factory, session_id)
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=False,
+        call_id="final-end-session",
+        call_arguments={},
+    )
+    control_ids = {message.id for message in control_messages}
+    ordinary_tool_call_rows = [message for message in tool_call_rows if message.id not in control_ids]
+    ordinary_tool_result_rows = [message for message in tool_result_rows if message.id not in control_ids]
+    assert len(ordinary_tool_call_rows) == 25
+    assert len(ordinary_tool_result_rows) == 25
     assert len(assistant_text_rows) == 1
     assert assistant_text_rows[0].content == SUMMARY
-    for row in tool_result_rows:
+    for row in ordinary_tool_result_rows:
         outer_payload = json.loads(row.content or "")
         inner_payload = json.loads(outer_payload["content"])
         assert inner_payload["status"] == "success"
@@ -827,7 +1093,7 @@ async def test_non_goal_mode_stops_at_configured_turn_limit_then_ends(
     assert all(call["tool_choice"] == "auto" for call in calls)
     assert all(call["tools"] == calls[0]["tools"] for call in calls)
     assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
-    assert all(all(tool["function"]["name"] != END_SESSION_TOOL_NAME for tool in call["tools"]) for call in calls)
+    assert all(any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in call["tools"]) for call in calls)
     assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for call in calls for message in call["messages"] if message.role == MessageRole.SYSTEM)
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
     user_payloads = [[json.loads(message.content)["user_message"] for message in call["messages"] if message.role == MessageRole.USER] for call in calls]
@@ -912,7 +1178,7 @@ async def test_external_source_non_goal_mode_honors_configured_turn_limit(
     assert all(call["tool_choice"] == "auto" for call in calls)
     assert all(call["tools"] == calls[0]["tools"] for call in calls)
     assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
-    assert all(all(tool["function"]["name"] != END_SESSION_TOOL_NAME for tool in call["tools"]) for call in calls)
+    assert all(any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in call["tools"]) for call in calls)
     assert all(message.content != GOAL_MODE_SYSTEM_PROMPT for call in calls for message in call["messages"] if message.role == MessageRole.SYSTEM)
     max_turns_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=3)
     user_payloads = [[json.loads(message.content)["user_message"] for message in call["messages"] if message.role == MessageRole.USER] for call in calls]
@@ -967,7 +1233,7 @@ async def test_execution_resume_state_restarts_over_limit_and_preserves_mode_con
     assert calls[0]["tool_choice"] == "auto"
     assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
     has_end_session = any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
-    assert has_end_session is goal_mode
+    assert has_end_session
     goal_mode_messages = [message for message in calls[0]["messages"] if message.role == MessageRole.SYSTEM and message.content == GOAL_MODE_SYSTEM_PROMPT]
     assert len(goal_mode_messages) == (1 if goal_mode else 0)
     if goal_mode:
@@ -987,8 +1253,21 @@ async def test_execution_resume_state_restarts_over_limit_and_preserves_mode_con
     tool_result_rows = [message for message in messages if message.type == MessageType.TOOL_RESULT]
     assistant_text_rows = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
     assert len(user_rows) == 1
-    assert not tool_call_rows
-    assert not tool_result_rows
+    control_messages = await _list_control_messages(session_factory, session_id)
+    if goal_mode:
+        _assert_end_session_control_pair(
+            control_messages,
+            skip_reply=False,
+            call_id="resumed-end",
+            call_arguments={},
+        )
+        control_ids = {message.id for message in control_messages}
+        assert len([message for message in tool_call_rows if message.id not in control_ids]) == 0
+        assert len([message for message in tool_result_rows if message.id not in control_ids]) == 0
+    else:
+        assert control_messages == []
+        assert not tool_call_rows
+        assert not tool_result_rows
     assert len(assistant_text_rows) == 1
     assert assistant_text_rows[0].content == final_content
 
@@ -1112,7 +1391,7 @@ async def test_text_only_final_reply_never_executes_provider_tool_calls(
     assert all(call["tool_choice"] == "auto" for call in calls)
     assert all(call["tools"] == calls[0]["tools"] for call in calls)
     assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
-    assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"]) is goal_mode
+    assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
     assert any(message.role == MessageRole.USER and INITIAL_MESSAGE in (message.content or "") for message in calls[0]["messages"])
     earlier_call_ids: list[str] = []
     for correction_attempt in range(1, illegal_rounds + 1):
@@ -1221,7 +1500,7 @@ async def test_text_only_final_reply_stops_after_three_failed_corrections(
     assert all(call["tool_choice"] == "auto" for call in calls)
     assert all(call["tools"] == calls[0]["tools"] for call in calls)
     assert any(tool["function"]["name"] == MANAGE_TODO_TOOL_NAME for tool in calls[0]["tools"])
-    assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"]) is goal_mode
+    assert any(tool["function"]["name"] == END_SESSION_TOOL_NAME for tool in calls[0]["tools"])
     assert any(message.role == MessageRole.USER and INITIAL_MESSAGE in (message.content or "") for message in calls[0]["messages"])
     earlier_call_ids: list[str] = []
     for correction_attempt in range(1, FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS + 1):
@@ -1330,11 +1609,23 @@ async def test_invalid_end_session_call_is_corrected_and_failed_result_is_persis
     tool_call_rows = [message for message in messages if message.type == MessageType.TOOL_CALL]
     tool_result_rows = [message for message in messages if message.type == MessageType.TOOL_RESULT]
     assistant_text_rows = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
-    assert len(tool_call_rows) == len(tool_result_rows) == 1
+    control_messages = await _list_control_messages(session_factory, session_id)
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=False,
+        call_id="corrected-end-session",
+        call_arguments={},
+    )
+    control_ids = {message.id for message in control_messages}
+    ordinary_tool_call_rows = [message for message in tool_call_rows if message.id not in control_ids]
+    ordinary_tool_result_rows = [message for message in tool_result_rows if message.id not in control_ids]
+    assert len(ordinary_tool_call_rows) == len(ordinary_tool_result_rows) == 1
     assert len(assistant_text_rows) == 1
     assert assistant_text_rows[0].content == SUMMARY
 
-    stored_tool_result = json.loads(tool_result_rows[0].content or "")
+    ordinary_tool_calls = parse_db_messages_to_internal(ordinary_tool_call_rows)
+    assert [tool.name for message in ordinary_tool_calls for tool in (message.tool_calls or [])] == [END_SESSION_TOOL_NAME]
+    stored_tool_result = json.loads(ordinary_tool_result_rows[0].content or "")
     assert stored_tool_result["tool_call_id"] == invalid_call.id
     failed_payload = json.loads(stored_tool_result["content"])
     assert failed_payload["status"] == "failed"
@@ -1411,13 +1702,27 @@ async def test_end_session_protocol_conflict_persists_all_failures_without_execu
     assert response["choices"][0]["finish_reason"] == "stop"
 
     messages = await _list_messages(session_factory, session_id)
+    tool_call_rows = [message for message in messages if message.type == MessageType.TOOL_CALL]
     tool_result_rows = [message for message in messages if message.type == MessageType.TOOL_RESULT]
     assistant_text_rows = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
-    assert len(tool_result_rows) == len(tool_calls)
+    control_messages = await _list_control_messages(session_factory, session_id)
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=False,
+        call_id="corrected-end-session",
+        call_arguments={},
+    )
+    control_ids = {message.id for message in control_messages}
+    ordinary_tool_call_rows = [message for message in tool_call_rows if message.id not in control_ids]
+    ordinary_tool_result_rows = [message for message in tool_result_rows if message.id not in control_ids]
+    assert len(ordinary_tool_call_rows) == 1
+    assert len(ordinary_tool_result_rows) == len(tool_calls)
+    ordinary_tool_calls = parse_db_messages_to_internal(ordinary_tool_call_rows)
+    assert {tool.id for message in ordinary_tool_calls for tool in (message.tool_calls or [])} == {tool_call.id for tool_call in tool_calls}
     assert len(assistant_text_rows) == 1
     assert assistant_text_rows[0].content == SUMMARY
     persisted_by_call_id = {}
-    for row in tool_result_rows:
+    for row in ordinary_tool_result_rows:
         outer_payload = json.loads(row.content or "")
         inner_payload = json.loads(outer_payload["content"])
         persisted_by_call_id[outer_payload["tool_call_id"]] = inner_payload
@@ -1478,6 +1783,12 @@ async def test_queue_stream_persists_end_session_final_events_and_deduplicated_m
     assert len(calls) == 2
     assert response["choices"][0]["message"]["content"] == SUMMARY
     assert response["choices"][0]["finish_reason"] == "stop"
+    _assert_end_session_model_pair(
+        calls[1]["messages"],
+        skip_reply=False,
+        call_id="queue-end-session",
+        call_arguments={},
+    )
 
     async with session_factory() as db:
         result = await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.id.asc()))
@@ -1488,11 +1799,22 @@ async def test_queue_stream_persists_end_session_final_events_and_deduplicated_m
 
     assert persisted_work is not None
     assistant_messages = [message for message in messages if message.role == MessageRole.ASSISTANT]
-    assert len(assistant_messages) == 1
-    assistant_message = assistant_messages[0]
+    assert len(assistant_messages) == 2
+    assistant_text_messages = [message for message in assistant_messages if message.type == MessageType.TEXT]
+    assert len(assistant_text_messages) == 1
+    assistant_message = assistant_text_messages[0]
     assert assistant_message.type == MessageType.TEXT
     assert assistant_message.content == SUMMARY
     assert assistant_message.dedupe_key == _result_message_dedupe_key(persisted_work)
+    control_messages = [message for message in messages if _is_end_session_control_message(message)]
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=False,
+        call_id="queue-end-session",
+        call_arguments={},
+    )
+    control_ids = {message.id for message in control_messages}
+    assert [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} and message.id not in control_ids] == []
 
     content_events = [row.event for row in stream_events if row.event.get("type") == "content"]
     turn_end_events = [row.event for row in stream_events if row.event.get("type") == "turn_end"]
@@ -1501,3 +1823,134 @@ async def test_queue_stream_persists_end_session_final_events_and_deduplicated_m
     assert turn_end_events[0]["content"] == SUMMARY
     assert turn_end_events[0]["message_id"] == assistant_message.id
     assert turn_end_events[0]["response_id"] == response["response_id"]
+    _assert_no_control_history(
+        [row.event for row in stream_events],
+        forbidden_texts=("queue-end-session",),
+    )
+    assert not [row for row in stream_events if row.event.get("name") == END_SESSION_TOOL_NAME]
+
+
+@pytest.mark.asyncio
+async def test_queue_skip_reply_completes_silently_and_is_idempotent_on_reclaim(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(database_module, "AsyncSessionLocal", session_factory)
+    notifier_events: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def capture_notifier(uid: str, session_id: str, event: dict[str, Any]) -> None:
+        notifier_events.append((uid, session_id, event))
+
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_notifier)
+    session_id = "end-session-queue-skip-reply"
+    _initial_message, seeded_work = await _seed_running_work(session_factory, session_id)
+    calls = _patch_llm(
+        monkeypatch,
+        [
+            _end_session_response(
+                call_id="queue-skip-end-session",
+                arguments={"skip_reply": True},
+                content="队列同轮正文不得泄漏",
+                reasoning="队列同轮推理不得泄漏",
+                usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            )
+        ],
+        stream=True,
+    )
+
+    await executor_lifecycle_module.execute_session_reply_work(seeded_work.id, "worker-1")
+
+    async with session_factory() as db:
+        messages_result = await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.id.asc()))
+        messages = list(messages_result.scalars().all())
+        events_result = await db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id).order_by(SessionEvent.id.asc()))
+        session_events = list(events_result.scalars().all())
+        persisted_work = await db.get(SessionReplyWorkItem, seeded_work.id)
+
+    assert persisted_work is not None
+    work_identity = (persisted_work.id, persisted_work.sequence_no)
+    assert persisted_work.status == SessionReplyWorkStatus.SUCCEEDED
+    assert persisted_work.result_message_id is None
+    saved_response = (persisted_work.execution_state or {}).get("response")
+    assert isinstance(saved_response, dict)
+    assert saved_response["skip_reply"] is True
+    assert saved_response["choices"] == []
+    assert len(session_events) == 1
+    assert session_events[0].event["type"] == "done"
+    assert session_events[0].event["skip_reply"] is True
+    assert session_events[0].event["work_id"] == work_identity[0]
+    assert session_events[0].event["work_sequence_no"] == work_identity[1]
+    assert notifier_events == []
+    control_messages = await _list_control_messages(session_factory, session_id)
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=True,
+        call_id="queue-skip-end-session",
+        call_arguments={"skip_reply": True},
+    )
+    control_ids = {message.id for message in control_messages}
+    assert not [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+    assert not [message for message in messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} and message.id not in control_ids]
+
+    result_response = await session_reply_queue_manager.wait_for_result(seeded_work.id)
+    assert result_response["skip_reply"] is True
+    assert result_response["choices"] == []
+    assert (result_response["work_id"], result_response["work_sequence_no"]) == work_identity
+
+    async def collect_stream() -> list[dict[str, Any]]:
+        return [event async for event in session_reply_queue_manager.wait_for_stream(seeded_work.id)]
+
+    stream_events = await asyncio.wait_for(collect_stream(), timeout=2)
+    assert stream_events
+    assert stream_events[-1]["type"] == "done"
+    assert stream_events[-1]["response"]["skip_reply"] is True
+    _assert_no_control_history(
+        stream_events,
+        forbidden_texts=("queue-skip-end-session", "队列同轮正文不得泄漏", "队列同轮推理不得泄漏"),
+    )
+    assert not [event for event in stream_events if event.get("name") == END_SESSION_TOOL_NAME]
+
+    async with session_factory() as db:
+        reclaimed_work = await db.get(SessionReplyWorkItem, seeded_work.id)
+        assert reclaimed_work is not None
+        reclaimed_work.status = SessionReplyWorkStatus.RUNNING
+        reclaimed_work.locked_by = "worker-1"
+        reclaimed_work.lock_until = 2_000_000_000
+        await db.commit()
+
+    await executor_lifecycle_module.execute_session_reply_work(seeded_work.id, "worker-1")
+    assert len(calls) == 1
+
+    async with session_factory() as db:
+        messages_result = await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.id.asc()))
+        retried_messages = list(messages_result.scalars().all())
+        events_result = await db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id).order_by(SessionEvent.id.asc()))
+        retried_events = list(events_result.scalars().all())
+        retried_work = await db.get(SessionReplyWorkItem, seeded_work.id)
+
+    assert retried_work is not None
+    assert (retried_work.id, retried_work.sequence_no) == work_identity
+    assert retried_work.status == SessionReplyWorkStatus.SUCCEEDED
+    assert retried_work.result_message_id is None
+    retried_response = (retried_work.execution_state or {}).get("response")
+    assert isinstance(retried_response, dict)
+    assert retried_response["skip_reply"] is True
+    retried_control_messages = [message for message in retried_messages if _is_end_session_control_message(message)]
+    _assert_end_session_control_pair(
+        retried_control_messages,
+        skip_reply=True,
+        call_id="queue-skip-end-session",
+        call_arguments={"skip_reply": True},
+    )
+    assert len(retried_events) == 1
+    assert retried_events[0].event["type"] == "done"
+    retried_control_ids = {message.id for message in retried_control_messages}
+    assert len(retried_control_ids) == 2
+    assert retried_control_ids == control_ids
+    assert not [message for message in retried_messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+    assert not [message for message in retried_messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} and message.id not in retried_control_ids]
+    assert notifier_events == []

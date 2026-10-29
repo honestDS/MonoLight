@@ -3,14 +3,16 @@ import json
 
 import pytest
 
-from app.core.log import LogManager
 from app.core.tools import END_SESSION_TOOL_NAME, get_tools_for_profile
 from app.core.tools.background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA
-from app.core.tools.end_session import END_SESSION_TOOL_SCHEMA, is_end_session_signal
+from app.core.tools.end_session import (
+    END_SESSION_TOOL_SCHEMA,
+    is_end_session_signal,
+    is_skip_reply_signal,
+)
 from app.core.utils.dispatcher.process_single_tool import (
     prevalidate_tool_round,
     prevalidate_tool_round_protocol,
-    process_single_tool,
 )
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import Profile, ProfileConfig
@@ -52,6 +54,17 @@ def _ordinary_call(call_id: str = "ordinary-call") -> InternalToolCall:
     )
 
 
+def _message_with_tool_calls(
+    tool_calls: list[InternalToolCall] | None,
+    message_type: str,
+) -> dict[str, object] | InternalMessage:
+    if message_type == "dict":
+        return {
+            "tool_calls": None if tool_calls is None else [tool_call.model_dump() for tool_call in tool_calls],
+        }
+    return InternalMessage(role=MessageRole.ASSISTANT, tool_calls=tool_calls)
+
+
 @pytest.mark.asyncio
 async def test_goal_mode_exposes_end_session_and_parameterless_call_passes_prevalidation():
     profile = _profile_without_configured_tools()
@@ -75,16 +88,16 @@ async def test_goal_mode_exposes_end_session_and_parameterless_call_passes_preva
 @pytest.mark.parametrize(
     ("configs", "goal_mode", "expected_exposed"),
     [
-        ({"tool": {"enabled_tools": []}}, False, False),
+        ({"tool": {"enabled_tools": []}}, False, True),
         ({"tool": {"enabled_tools": []}}, True, True),
-        ({"tool": {"goal_mode": False, "enabled_tools": []}}, False, False),
+        ({"tool": {"goal_mode": False, "enabled_tools": []}}, False, True),
         ({"tool": {"goal_mode": False, "enabled_tools": []}}, True, True),
         (
             {"tool": {"goal_mode": False, "enabled_tools": [END_SESSION_TOOL_NAME]}},
             False,
-            False,
+            True,
         ),
-        ({"tool": {"goal_mode": True, "enabled_tools": []}}, False, False),
+        ({"tool": {"goal_mode": True, "enabled_tools": []}}, False, True),
         ({"tool": {"goal_mode": True, "enabled_tools": []}}, True, True),
         ({"tool": {"goal_mode": True, "enabled_tools": ["write_file"]}}, True, True),
         ({"goal_mode": True, "enabled_tools": []}, True, True),
@@ -101,7 +114,7 @@ async def test_goal_mode_exposes_end_session_and_parameterless_call_passes_preva
         "flat-goal-mode",
     ],
 )
-async def test_end_session_exposure_requires_goal_mode(configs, goal_mode, expected_exposed):
+async def test_end_session_exposure_is_available_in_all_conversation_modes(configs, goal_mode, expected_exposed):
     original_configs = copy.deepcopy(configs)
     profile = Profile(
         id=None,
@@ -117,7 +130,7 @@ async def test_end_session_exposure_requires_goal_mode(configs, goal_mode, expec
     assert configs == original_configs
 
 
-def test_normal_mode_prevalidation_rejects_end_session_even_when_enabled_and_schema_present():
+def test_normal_mode_prevalidation_accepts_end_session_when_enabled_and_schema_present():
     call = _end_session_call()
     config = ProfileConfig.model_validate(
         {
@@ -135,44 +148,18 @@ def test_normal_mode_prevalidation_rejects_end_session_even_when_enabled_and_sch
         tool_schemas=[END_SESSION_TOOL_SCHEMA],
     )
 
-    assert call.id in errors
-    payload = json.loads(errors[call.id])
-    assert payload["status"] == "failed"
-    assert payload["tool_name"] == END_SESSION_TOOL_NAME
-    assert payload["error"]
-
-
-@pytest.mark.asyncio
-async def test_normal_mode_process_single_tool_rejects_end_session(monkeypatch):
-    monkeypatch.setattr(LogManager, "log_tool_call", lambda *args, **kwargs: None)
-    monkeypatch.setattr(LogManager, "log_tool_result", lambda *args, **kwargs: None)
-    profile = _profile_without_configured_tools()
-
-    result = await process_single_tool(
-        _end_session_call(),
-        None,
-        profile,
-        ProfileConfig.model_validate(profile.configs),
-        [],
-        "user-1",
-        "session-1",
-        1,
-        "user-1",
-    )
-
-    payload = json.loads(result.content)
-    assert payload["status"] == "failed"
-    assert payload["tool_name"] == END_SESSION_TOOL_NAME
-    assert payload["error"]
+    assert errors == {}
 
 
 @pytest.mark.parametrize(
     "arguments",
     [
-        {"summary": "completed"},
-        {"unexpected": "value"},
+        {"skip_reply": " true"},
+        {"skip_reply": 1},
+        {"skip_reply": None},
+        {"unknown": "value"},
     ],
-    ids=["legacy-summary", "unexpected-argument"],
+    ids=["skip-reply-leading-space", "skip-reply-integer", "skip-reply-null", "unknown-argument"],
 )
 def test_invalid_end_session_arguments_return_failed_protocol_result(arguments):
     call = InternalToolCall(
@@ -192,6 +179,7 @@ def test_invalid_end_session_arguments_return_failed_protocol_result(arguments):
     payload = json.loads(errors[call.id])
     assert payload["status"] == "failed"
     assert payload["tool_name"] == END_SESSION_TOOL_NAME
+    assert payload["error"]
 
 
 @pytest.mark.parametrize(
@@ -239,12 +227,54 @@ def test_goal_mode_protocol_precheck_accepts_a_single_end_session_call():
     assert errors == {}
 
 
-def test_end_session_signal_requires_one_parameterless_call():
-    message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[_end_session_call()])
+@pytest.mark.parametrize(
+    "message_type",
+    ["dict", "internal"],
+    ids=["dictionary", "internal-message"],
+)
+@pytest.mark.parametrize(
+    ("arguments", "expected_skip_reply"),
+    [
+        ({}, False),
+        ({"skip_reply": False}, False),
+        ({"skip_reply": True}, True),
+    ],
+    ids=["default", "skip-reply-false", "skip-reply-true"],
+)
+def test_end_session_signals_accept_supported_arguments(arguments, expected_skip_reply, message_type):
+    message = _message_with_tool_calls([_end_session_call(arguments=arguments)], message_type)
 
     assert is_end_session_signal(message) is True
+    assert is_skip_reply_signal(message) is expected_skip_reply
 
 
+@pytest.mark.parametrize(
+    "message_type",
+    ["dict", "internal"],
+    ids=["dictionary", "internal-message"],
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"skip_reply": " true"},
+        {"skip_reply": 1},
+        {"skip_reply": None},
+        {"unknown": "value"},
+    ],
+    ids=["skip-reply-leading-space", "skip-reply-integer", "skip-reply-null", "unknown-argument"],
+)
+def test_invalid_end_session_arguments_are_rejected_by_signals(arguments, message_type):
+    message = _message_with_tool_calls([_end_session_call(arguments=arguments)], message_type)
+
+    assert is_end_session_signal(message) is False
+    assert is_skip_reply_signal(message) is False
+
+
+@pytest.mark.parametrize(
+    "message_type",
+    ["dict", "internal"],
+    ids=["dictionary", "internal-message"],
+)
 @pytest.mark.parametrize(
     "tool_calls",
     [
@@ -256,7 +286,8 @@ def test_end_session_signal_requires_one_parameterless_call():
     ],
     ids=["no-tools", "empty-tools", "legacy-summary", "multiple-tools", "other-tool"],
 )
-def test_non_matching_tool_round_is_not_end_session_signal(tool_calls):
-    message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=tool_calls)
+def test_non_matching_tool_round_is_not_end_session_signal(tool_calls, message_type):
+    message = _message_with_tool_calls(tool_calls, message_type)
 
     assert is_end_session_signal(message) is False
+    assert is_skip_reply_signal(message) is False

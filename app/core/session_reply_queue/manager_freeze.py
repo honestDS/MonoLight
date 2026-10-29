@@ -151,6 +151,7 @@ class SessionReplyFreeze:
             not in {
                 SessionReplyWorkType.FOREGROUND_REPLY,
                 SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
             }
         ):
             return None

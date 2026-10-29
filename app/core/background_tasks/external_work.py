@@ -33,6 +33,7 @@ from app.models.session_reply_work_item import SessionReplyWorkItem, SessionRepl
 from app.providers.database import AsyncSessionLocal
 
 __all__ = [
+    "build_external_work_result",
     "resume_external_work_for_task",
     "reconcile_external_work",
     "recover_interrupted_external_work",
@@ -166,6 +167,76 @@ def _build_result(task: BackgroundTask) -> tuple[Any, str, str]:
     else:
         raise ValueError(_unknown_error())
     return payload, payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False), execution_status
+
+
+async def build_external_work_result(
+    db: AsyncSession,
+    *,
+    work: SessionReplyWorkItem,
+    slot: dict[str, Any],
+    task: BackgroundTask,
+) -> tuple[dict[str, Any], str, str]:
+    task_id, call_id, name, message_id, _response_id = _slot(slot)
+    extra = task.extra if isinstance(task.extra, dict) else {}
+    if task.id != task_id or task.uid != work.uid or task.session_id != work.session_id or task.profile_id != work.profile_id or extra.get("origin_work_id") != work.id or extra.get("origin_work_identity") != work.dedupe_key or task.tool_call_id != call_id or task.tool_name != name:
+        raise ValueError(_unknown_error())
+
+    pending_message = await message_crud.get(db, message_id)
+    if pending_message is None or pending_message.uid != work.uid or pending_message.session_id != work.session_id or pending_message.profile_id != work.profile_id or pending_message.role != MessageRole.TOOL or pending_message.type != MessageType.TOOL_RESULT:
+        raise ValueError(_unknown_error())
+    try:
+        stored = InternalMessage.model_validate_json(pending_message.content or "{}")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(_unknown_error()) from exc
+    try:
+        stored_payload = json.loads(stored.content or "{}")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(_unknown_error()) from exc
+    stored_task_id = stored_payload.get("task_id") if isinstance(stored_payload, dict) else None
+    if not isinstance(stored_payload, dict) or stored_payload.get("status") != "queued" or not _is_positive_int(stored_task_id) or stored_task_id != task.id:
+        raise ValueError(_unknown_error())
+    if stored.role != MessageRole.TOOL or not isinstance(stored.tool_call_id, str) or not stored.tool_call_id or (pending_message.audit_tool_call_id is not None and pending_message.audit_tool_call_id != stored.tool_call_id):
+        raise ValueError(_unknown_error())
+    if pending_message.audit_record_id is None:
+        if stored.tool_call_id != call_id:
+            raise ValueError(_unknown_error())
+    else:
+        audit_record_id = pending_message.audit_record_id
+        if audit_record_id != task.audit_record_id or not _is_positive_int(task.audit_execution_record_id):
+            raise ValueError(_unknown_error())
+        execution = await audit_crud.get_execution_record(db, task.audit_execution_record_id)
+        if execution is None or execution.audit_record_id != audit_record_id or execution.new_tool_call_id != call_id:
+            raise ValueError(_unknown_error())
+        details = await audit_crud.list_tool_details(db, audit_record_id)
+        detail = next((item for item in details if item.id == execution.audit_tool_detail_id), None)
+        if detail is None or detail.original_tool_call_id != stored.tool_call_id or detail.tool_name != task.tool_name:
+            raise ValueError(_unknown_error())
+    payload, result_text, execution_status = _build_result(task)
+    if pending_message.audit_record_id is not None:
+        replacement = await replace_pending_tool_result(
+            db,
+            pending_message=pending_message,
+            original_tool_call_id=stored.tool_call_id,
+            content=result_text,
+            tool_execution_status=execution_status,
+            audit_record_id=pending_message.audit_record_id,
+        )
+        result_text = replacement if isinstance(replacement, str) else result_text
+    instruction = TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT if extra.get("auto_terminal_watch") is True else EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
+    marker_payload = {
+        "type": "background_tool_result",
+        "ui_only": True,
+        "original_tool_result_message_id": pending_message.id,
+        "task_id": task.id,
+        "tool_name": task.tool_name,
+        "execution_status": execution_status,
+        "instruction": instruction,
+        "task": payload,
+        "tool_call": {"id": stored.tool_call_id, "name": task.tool_name, "arguments": dict(task.arguments or {})},
+        "request_context": extra.get("request_context") if isinstance(extra.get("request_context"), list) else [],
+        "purpose": extra.get("purpose"),
+    }
+    return marker_payload, result_text, stored.tool_call_id
 
 
 async def _persist_external_work_markers(
@@ -358,8 +429,8 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             slots = [_slot(item) for item in raw_slots]
             seen_task_ids: set[int] = set()
             seen_call_ids: set[str] = set()
-            task_entries: list[tuple[tuple[int, str, str, int, str | None], BackgroundTask]] = []
-            for slot in slots:
+            task_entries: list[tuple[dict[str, Any], tuple[int, str, str, int, str | None], BackgroundTask]] = []
+            for raw_slot, slot in zip(raw_slots, slots):
                 task_id, call_id, name, _message_id, _response_id = slot
                 if task_id in seen_task_ids or call_id in seen_call_ids:
                     raise ValueError(_unknown_error())
@@ -369,79 +440,24 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 extra = task.extra if task is not None and isinstance(task.extra, dict) else {}
                 if task is None or task.uid != uid or task.session_id != session_id or task.profile_id != work.profile_id or extra.get("origin_work_id") != work.id or extra.get("origin_work_identity") != work.dedupe_key or task.tool_call_id != call_id or task.tool_name != name:
                     raise ValueError(_unknown_error())
-                task_entries.append((slot, task))
-            if any(_status_value(task.status) in _PENDING_STATUSES for _slot_data, task in task_entries):
+                task_entries.append((raw_slot, slot, task))
+            ready_task_entries = [entry for entry in task_entries if _status_value(entry[2].status) not in _PENDING_STATUSES]
+            if not ready_task_entries:
                 await db.rollback()
                 return False
-            consumed_slot_keys = {(slot[0], slot[1]) for slot, _task in task_entries}
-            interrupted = any(isinstance(task.extra, dict) and task.extra.get("restart_interrupted") is True for _slot_data, task in task_entries)
+            consumed_slot_keys = {(slot[1][0], slot[1][1]) for slot in ready_task_entries}
+            interrupted = any(isinstance(task.extra, dict) and task.extra.get("restart_interrupted") is True for _raw_slot, _slot_data, task in ready_task_entries)
 
             marker_payloads: list[dict[str, Any]] = []
-            result_entries: list[tuple[tuple[int, str, str, int, str | None], str, Any, str]] = []
-            for slot, task in task_entries:
-                message_id = slot[3]
-                pending_message = await message_crud.get(db, message_id)
-                if pending_message is None or pending_message.uid != uid or pending_message.session_id != session_id or pending_message.profile_id != work.profile_id or pending_message.role != MessageRole.TOOL or pending_message.type != MessageType.TOOL_RESULT:
-                    raise ValueError(_unknown_error())
-                try:
-                    stored = InternalMessage.model_validate_json(pending_message.content or "{}")
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(_unknown_error()) from exc
-                try:
-                    stored_payload = json.loads(stored.content or "{}")
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(_unknown_error()) from exc
-                stored_task_id = stored_payload.get("task_id") if isinstance(stored_payload, dict) else None
-                if not isinstance(stored_payload, dict) or stored_payload.get("status") != "queued" or not _is_positive_int(stored_task_id) or stored_task_id != task.id:
-                    raise ValueError(_unknown_error())
-                if stored.role != MessageRole.TOOL or not isinstance(stored.tool_call_id, str) or not stored.tool_call_id or (pending_message.audit_tool_call_id is not None and pending_message.audit_tool_call_id != stored.tool_call_id):
-                    raise ValueError(_unknown_error())
-                if pending_message.audit_record_id is None:
-                    if stored.tool_call_id != slot[1]:
-                        raise ValueError(_unknown_error())
-                else:
-                    audit_record_id = pending_message.audit_record_id
-                    if audit_record_id != task.audit_record_id or not _is_positive_int(task.audit_execution_record_id):
-                        raise ValueError(_unknown_error())
-                    execution = await audit_crud.get_execution_record(db, task.audit_execution_record_id)
-                    if execution is None or execution.audit_record_id != audit_record_id or execution.new_tool_call_id != slot[1]:
-                        raise ValueError(_unknown_error())
-                    details = await audit_crud.list_tool_details(db, audit_record_id)
-                    detail = next((item for item in details if item.id == execution.audit_tool_detail_id), None)
-                    if detail is None or detail.original_tool_call_id != stored.tool_call_id or detail.tool_name != task.tool_name:
-                        raise ValueError(_unknown_error())
-                payload, result_text, execution_status = _build_result(task)
-                if pending_message.audit_record_id is not None:
-                    replacement = await replace_pending_tool_result(
-                        db,
-                        pending_message=pending_message,
-                        original_tool_call_id=stored.tool_call_id,
-                        content=result_text,
-                        tool_execution_status=execution_status,
-                        audit_record_id=pending_message.audit_record_id,
-                    )
-                    result_text = replacement if isinstance(replacement, str) else result_text
-                extra = task.extra if isinstance(task.extra, dict) else {}
-                instruction = TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT if extra.get("auto_terminal_watch") is True else EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
-                marker_payload = {
-                    "type": "background_tool_result",
-                    "ui_only": True,
-                    "original_tool_result_message_id": pending_message.id,
-                    "task_id": task.id,
-                    "tool_name": task.tool_name,
-                    "execution_status": execution_status,
-                    "instruction": instruction,
-                    "task": payload,
-                    "tool_call": {"id": stored.tool_call_id, "name": task.tool_name, "arguments": dict(task.arguments or {})},
-                    "request_context": extra.get("request_context") if isinstance(extra.get("request_context"), list) else [],
-                    "purpose": extra.get("purpose"),
-                }
+            result_entries: list[tuple[tuple[int, str, str, int, str | None], str, str]] = []
+            for raw_slot, slot, task in ready_task_entries:
+                marker_payload, result_text, original_call_id = await build_external_work_result(db, work=work, slot=raw_slot, task=task)
                 marker_payloads.append(marker_payload)
-                result_entries.append((slot, stored.tool_call_id, payload, result_text))
+                result_entries.append((slot, original_call_id, result_text))
 
             if bool(state.get("show_tool_calls")):
                 sequence_no = await session_reply_stream_event_crud.get_latest_sequence(db, work_id=work.id)
-                for slot, original_call_id, _payload, result_text in result_entries:
+                for slot, original_call_id, result_text in result_entries:
                     sequence_no += 1
                     await session_reply_stream_event_crud.publish(
                         db,
@@ -471,7 +487,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             from app.core.utils.assistant_files import merge_assistant_files
             from app.core.utils.dispatcher.helpers import extract_files_to_user
 
-            for _slot_data, original_call_id, _payload, result_text in result_entries:
+            for _slot_data, original_call_id, result_text in result_entries:
                 files = extract_files_to_user([InternalMessage(role=MessageRole.TOOL, tool_call_id=original_call_id, content=result_text)])
                 if files:
                     checkpoint["files_to_user"] = merge_assistant_files(checkpoint.get("files_to_user", []), files)
@@ -493,7 +509,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             if not await external_work_crud.wake_waiting(db, work=work, execution_state=state, commit=False):
                 await db.rollback()
                 return False
-            latest_task_id = max(slot[0] for slot, _call_id, _payload, _result_text in result_entries)
+            latest_task_id = max(slot[0] for slot, _call_id, _result_text in result_entries)
             await session_event_crud.publish(db, dedupe_key=f"external-work-ready:{work.id}:{latest_task_id}", uid=uid, session_id=session_id, event={"type": "work_ready", "session_id": session_id, "work_id": work.id}, commit=False)
             await db.commit()
             return True
@@ -516,6 +532,40 @@ async def _origin_work_status(
         return None
     await db.refresh(work)
     return _status_value(work.status)
+
+
+async def _is_active_received_owner(
+    db: AsyncSession,
+    *,
+    owner: Any,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+) -> bool:
+    if not isinstance(owner, dict) or owner.get("status") != "received":
+        return False
+    owner_work_id = owner.get("work_id")
+    owner_identity = owner.get("identity")
+    owner_sequence_no = owner.get("sequence_no")
+    if not _is_positive_int(owner_work_id) or not isinstance(owner_identity, str) or not owner_identity.strip() or not isinstance(owner_sequence_no, int) or isinstance(owner_sequence_no, bool):
+        return False
+    owner_work = await session_reply_work_item_crud.get(db, owner_work_id)
+    if owner_work is None:
+        return False
+    await db.refresh(owner_work)
+    return (
+        owner_work.uid == uid
+        and owner_work.session_id == session_id
+        and owner_work.profile_id == profile_id
+        and owner_work.dedupe_key == owner_identity
+        and owner_work.sequence_no == owner_sequence_no
+        and _status_value(owner_work.status)
+        in {
+            SessionReplyWorkStatus.READY_FOR_LLM.value,
+            SessionReplyWorkStatus.RUNNING.value,
+            SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value,
+        }
+    )
 
 
 async def resume_external_work_for_task(task_id: int) -> bool:
@@ -564,6 +614,39 @@ async def resume_external_work_for_task(task_id: int) -> bool:
                     await route_terminal_auto_watch_reply(db, pending_result)
                 after_status = await _origin_work_status(db, work_id=work_id, uid=uid, session_id=session_id, profile_id=profile_id, identity=identity)
                 return before_status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value and after_status == SessionReplyWorkStatus.READY_FOR_LLM.value
+
+        if extra.get("auto_terminal_watch") is not True and extra.get("terminal_watch_subscription") is not True:
+            work = await session_reply_work_item_crud.get(db, work_id)
+            if work is not None:
+                await db.refresh(work)
+                if (
+                    work.uid == uid
+                    and work.session_id == session_id
+                    and work.profile_id == profile_id
+                    and work.dedupe_key == identity
+                    and _status_value(work.status) == SessionReplyWorkStatus.SUCCEEDED.value
+                    and _status_value(task.status)
+                    in {
+                        BackgroundTaskStatus.SUCCEEDED.value,
+                        BackgroundTaskStatus.FAILED.value,
+                        BackgroundTaskStatus.CANCELLED.value,
+                    }
+                ):
+                    state = work.execution_state if isinstance(work.execution_state, dict) else {}
+                    has_pending_slot = any(isinstance(slot, dict) and slot.get("task_id") == task.id for state_key in ("pending_tools", "terminal_watch_waits") for slot in (state.get(state_key) if isinstance(state.get(state_key), list) else []))
+                    if has_pending_slot:
+                        owner = extra.get("reply_owner")
+                        owner_status = owner.get("status") if isinstance(owner, dict) else None
+                        active_received_owner = await _is_active_received_owner(
+                            db,
+                            owner=owner,
+                            uid=uid,
+                            session_id=session_id,
+                            profile_id=profile_id,
+                        )
+                        if owner_status != "handled" and not active_received_owner:
+                            if await external_work_crud.reopen_completed_waiting(db, work=work):
+                                await db.commit()
 
     return await _resume_waiting(work_id, uid, session_id, identity)
 

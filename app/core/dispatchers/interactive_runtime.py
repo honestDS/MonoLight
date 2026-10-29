@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -16,10 +17,12 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_generation import generate_interactive_turn
 from app.core.dispatchers.interactive_state import build_interactive_dispatch_state
@@ -30,13 +33,14 @@ from app.core.log import get_logger
 from app.core.profile.selection import resolve_profile_for_session
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
-from app.core.tools.end_session import is_end_session_signal
+from app.core.tools.end_session import is_end_session_signal, is_skip_reply_signal, persist_end_session_control
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
 from app.core.utils.assistant_files import materialize_generated_images, merge_assistant_files
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.helpers import (
     dump_output_history,
+    extract_files_to_user,
     get_multimodal_from_entry,
     resolve_chat_params,
 )
@@ -152,6 +156,107 @@ async def dispatch_interactive(
             execution_checkpoint_callback=execution_checkpoint_callback,
             initial_message_type=initial_message_type,
         )
+
+        async def append_external_results() -> bool:
+            from app.core.background_tasks.result_delivery import receive_pending_external_results
+
+            markers = await receive_pending_external_results(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile.id,
+            )
+            if not markers:
+                return False
+
+            existing_message_ids = {item.id for item in state.messages if isinstance(item.id, int) and not isinstance(item.id, bool) and item.id > 0}
+            pending_message_ids = list(state.checkpoint_state.pending_resume_message_ids)
+            seen_pending_ids = set(pending_message_ids)
+            file_result_messages: list[InternalMessage] = []
+            received = False
+            for marker in markers:
+                marker_id = marker.id
+                if not isinstance(marker_id, int) or isinstance(marker_id, bool) or marker_id <= 0:
+                    continue
+                received = True
+                if marker_id not in seen_pending_ids:
+                    seen_pending_ids.add(marker_id)
+                    pending_message_ids.append(marker_id)
+                if marker_id not in existing_message_ids:
+                    state.messages.append(marker)
+                    existing_message_ids.add(marker_id)
+
+                if not isinstance(marker.content, str):
+                    continue
+                try:
+                    payload = json.loads(marker.content)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+
+                if payload.get("type") == "external_work_resume":
+                    task_entries = payload.get("tasks")
+                elif payload.get("type") == "background_tool_result":
+                    task_entries = [payload]
+                    if isinstance(payload.get("tasks"), list):
+                        task_entries.extend(payload["tasks"])
+                elif isinstance(payload.get("tasks"), list):
+                    task_entries = payload["tasks"]
+                else:
+                    task_entries = [payload]
+                if not isinstance(task_entries, list):
+                    continue
+                for task_entry in task_entries:
+                    task_payload = task_entry.get("task") if isinstance(task_entry, dict) and "task" in task_entry else task_entry
+                    if isinstance(task_payload, dict) and "content" in task_payload:
+                        task_payload = task_payload["content"]
+                    task_payloads = task_payload if isinstance(task_payload, list) else [task_payload]
+                    for item in task_payloads:
+                        if isinstance(item, (dict, list)):
+                            item = json.dumps(item, ensure_ascii=False)
+                        if isinstance(item, str):
+                            file_result_messages.append(InternalMessage(role=MessageRole.TOOL, content=item))
+
+            state.checkpoint_state.pending_resume_message_ids = pending_message_ids
+            if file_result_messages:
+                state.files_to_user[:] = merge_assistant_files(
+                    state.files_to_user,
+                    extract_files_to_user(file_result_messages),
+                )
+            return received
+
+        async def get_received_task_ids() -> list[int]:
+            claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+            if not isinstance(claim, tuple) or len(claim) != 2 or not isinstance(claim[0], int) or isinstance(claim[0], bool) or claim[0] <= 0 or not isinstance(claim[1], str) or not claim[1].strip():
+                return []
+            work = await session_reply_work_item_crud.get(db, claim[0])
+            if work is None or work.uid != uid or work.session_id != session_id or work.profile_id != profile.id or work.locked_by != claim[1]:
+                return []
+            await db.refresh(work)
+            execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+            task_ids = execution_state.get("received_external_task_ids")
+            if not isinstance(task_ids, list):
+                return []
+            return list(dict.fromkeys(task_id for task_id in task_ids if isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0))
+
+        def build_skip_reply_response() -> dict[str, Any]:
+            response: dict[str, Any] = {
+                "skip_reply": True,
+                "choices": [],
+                "history": dump_output_history(
+                    state.turn_messages,
+                    show_tool_calls=show_tool_calls,
+                ),
+                "files": None,
+            }
+            if state.latest_llm_request_metadata is not None:
+                response["llm_request_metadata"] = state.latest_llm_request_metadata
+            return response
+
+        if state.checkpoint_state.reply_skipped:
+            return build_skip_reply_response()
+
         session = await session_crud.get_by_session_id(db, session_id)
         if session is not None:
             await db.refresh(session)
@@ -172,6 +277,7 @@ async def dispatch_interactive(
         initial_memory_recall_boundary = state.checkpoint_state.memory_recall_boundary_message_id
         resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None
         resumed_memory_recall_status = execution_resume_state.get("memory_recall_status") if execution_resume_state else None
+        reuse_saved_input = execution_resume_state is not None and execution_resume_state.get("reload_history") is not True
 
         while True:
             try:
@@ -286,21 +392,28 @@ async def dispatch_interactive(
                 while goal_mode or state.current_turn <= max_turns:
                     if context_summary_work_validity_checker is not None and not await context_summary_work_validity_checker():
                         raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
-                    new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
-                    if new_user_batch is not None:
-                        state.current_turn = 0
-                        state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
-                        append_new_user_messages(
-                            state.cfg,
-                            state.messages,
-                            new_user_batch.messages,
-                            state.img_understanding,
-                            state.audio_understanding,
-                            state.video_understanding,
-                        )
-                        state.checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
-                        if state.memory_enabled:
-                            update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
+                    reuse_input = reuse_saved_input
+                    reuse_saved_input = False
+                    new_user_batch = None
+                    if not reuse_input:
+                        new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
+                        if new_user_batch is not None:
+                            state.current_turn = 0
+                            state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
+                            append_new_user_messages(
+                                state.cfg,
+                                state.messages,
+                                new_user_batch.messages,
+                                state.img_understanding,
+                                state.audio_understanding,
+                                state.video_understanding,
+                            )
+                            state.checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                            if state.memory_enabled:
+                                update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
+                    external_results_received = await append_external_results()
+                    if new_user_batch is not None or external_results_received:
+                        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
 
                     if state.memory_precheck_enabled and memory_recall_needs_precheck(state.checkpoint_state):
                         state.checkpoint_state.memory_recall_status = "pending"
@@ -359,6 +472,7 @@ async def dispatch_interactive(
                         state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
                         state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
 
+                    await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
                     response_id = str(uuid.uuid4())
                     generation_result = await generate_interactive_turn(
                         state,
@@ -369,9 +483,48 @@ async def dispatch_interactive(
                     )
                     ai_msg = generation_result.message
 
-                    if goal_mode and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg):
-                        state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
+                    end_session_signal = (state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)) or (state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and is_skip_reply_signal(ai_msg))
+                    if end_session_signal:
+                        new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
+                        if new_user_batch is not None:
+                            append_new_user_messages(
+                                state.cfg,
+                                state.messages,
+                                new_user_batch.messages,
+                                state.img_understanding,
+                                state.audio_understanding,
+                                state.video_understanding,
+                            )
+                            state.checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                            if state.memory_enabled:
+                                update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
+                        external_results_received = await append_external_results()
+                        if new_user_batch is not None or external_results_received:
+                            state.current_turn = 0
+                            state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
+                            await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                            continue
+
+                        effective_skip = is_skip_reply_signal(ai_msg) and not state.files_to_user
+                        call_message, result_message = await persist_end_session_control(
+                            db,
+                            uid=uid,
+                            session_id=session_id,
+                            profile_id=profile.id,
+                            message=ai_msg,
+                            skip_reply=effective_skip,
+                            received_task_ids=await get_received_task_ids(),
+                            dedupe_scope=final_message_dedupe_key or f"{session_id}:{initial_msg.id}:{state.current_turn}",
+                        )
+                        state.messages.extend((call_message, result_message))
+                        if effective_skip:
+                            state.checkpoint_state.reply_skipped = True
+                        else:
+                            state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
                         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                        await db.commit()
+                        if effective_skip:
+                            return build_skip_reply_response()
                         state.dispatch_logger.bind(
                             uid=uid,
                             session_id=session_id,

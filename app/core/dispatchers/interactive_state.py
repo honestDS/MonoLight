@@ -140,6 +140,7 @@ def build_interactive_dispatch_state(
     else:
         initial_memory_recall_boundary = initial_message_boundary
     checkpoint_state = _ExecutionCheckpointState(
+        reply_skipped=execution_resume_state.get("reply_skipped") is True if execution_resume_state else False,
         callback=execution_checkpoint_callback,
         turn_messages=turn_messages,
         files_to_user=files_to_user,

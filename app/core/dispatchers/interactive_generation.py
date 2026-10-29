@@ -29,7 +29,7 @@ from app.core.exceptions import (
 from app.core.i18n import t
 from app.core.log import channel_log_extra
 from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
-from app.core.tools.end_session import is_end_session_signal
+from app.core.tools.end_session import END_SESSION_TOOL_NAME, is_end_session_signal, is_skip_reply_signal
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.helpers import (
@@ -98,13 +98,14 @@ async def generate_interactive_turn(
     tool_call_correction_attempts = 0
     tool_call_correction_messages: list[InternalMessage] = []
     emitted_agent_loop_start = False
+    has_end_session_tool = any(isinstance(tool, dict) and isinstance(tool.get("function"), dict) and tool["function"].get("name") == END_SESSION_TOOL_NAME for tool in current_tools or [])
     stream_state = _AgentLoopStreamState(
         callback=state.stream_event_callback,
         current_turn=state.current_turn,
         response_id=response_id,
         expose_tool_call_content=state.expose_tool_call_content,
         show_tool_calls=state.show_tool_calls,
-        defer_output_until_response=(state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING or tool_choice == "none" or (state.goal_mode is True and state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING)),
+        defer_output_until_response=(state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING or tool_choice == "none" or has_end_session_tool),
     )
     goal_mode = state.goal_mode is True
     execution_phase = state.checkpoint_state.execution_phase
@@ -285,8 +286,8 @@ async def generate_interactive_turn(
             response_provider_metadata = getattr(response, "provider_metadata", None)
             ai_refusal = getattr(ai_msg, "refusal", None)
             ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
-            tool_calls_forbidden = execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and bool(ai_msg.tool_calls)
-            end_session_signal = goal_mode and execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)
+            end_session_signal = (execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)) or (execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and not state.files_to_user and is_skip_reply_signal(ai_msg))
+            tool_calls_forbidden = execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and bool(ai_msg.tool_calls) and not end_session_signal
             if tool_calls_forbidden or end_session_signal:
                 stream_state.buffered_content_chunks.clear()
                 stream_state.buffered_reasoning_chunks.clear()
@@ -332,6 +333,16 @@ async def generate_interactive_turn(
                     )
                 )
                 continue
+            if end_session_signal:
+                return InteractiveGenerationResult(
+                    message=ai_msg,
+                    attempt_started_at=attempt_started_at,
+                    finish_reason=response_finish_reason,
+                    finish_details=response_finish_details,
+                    provider_metadata=response_provider_metadata,
+                    refusal=ai_refusal,
+                    message_provider_metadata=ai_provider_metadata,
+                )
             has_content = bool(ai_msg.content.strip()) if isinstance(ai_msg.content, str) else bool(ai_msg.content)
             has_refusal = bool(ai_refusal.strip()) if isinstance(ai_refusal, str) else False
             legal_empty_finish_reasons = {"length", "content_filter", "refusal", "incomplete"}

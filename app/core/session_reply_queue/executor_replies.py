@@ -416,11 +416,11 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         history_before_id=history_before_id,
         frozen_user_message_ids=frozen_user_message_ids,
         attachments=initial_message.attachments,
-        allow_additional_user_messages=False,
+        allow_additional_user_messages=True,
         execution_resume_state=resume_state,
     )
 
-    if interactive_response.get("status") == "waiting_external_work":
+    if interactive_response.get("status") == "waiting_external_work" or interactive_response.get("skip_reply") is True:
         return interactive_response
 
     history = interactive_response.get("history")
