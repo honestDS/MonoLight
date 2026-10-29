@@ -9,6 +9,7 @@ PyYAML
 passlib[bcrypt]
 python-jose[cryptography]
 aiohttp
+certifi
 python-multipart
 loguru
 greenlet
