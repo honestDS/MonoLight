@@ -4,24 +4,16 @@ from typing import Any
 from sqlalchemy import select, update
 
 from app.core.background_tasks.terminal_watch_reply import route_terminal_auto_watch_reply
-from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT, TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
-from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
-
-BACKGROUND_RESULT_MESSAGE_SAVED_EXTRA_KEY = "background_result_message_saved"
-
-
-def _build_background_message_dedupe_key(task_id: int | str, purpose: str) -> str:
-    return f"background-task:{task_id}:{purpose}"
 
 
 def _is_positive_int(value: Any) -> bool:
@@ -105,12 +97,6 @@ def _terminal_auto_watch_task_ids(work: SessionReplyWorkItem) -> list[int]:
     return task_ids
 
 
-def _terminal_auto_watch_result_dedupe_key(work: SessionReplyWorkItem) -> str:
-    task_ids = _terminal_auto_watch_task_ids(work)
-    anchor_task_id: int | str = task_ids[0] if task_ids else work.source_id
-    return _build_background_message_dedupe_key(anchor_task_id, "result")
-
-
 async def _merge_terminal_auto_watch_reply(
     db,
     *,
@@ -120,39 +106,27 @@ async def _merge_terminal_auto_watch_reply(
     if not _is_positive_int(task.id):
         return False
 
-    result_message = await message_crud.get_by_dedupe_key(db, _terminal_auto_watch_result_dedupe_key(work))
-    if result_message is None or result_message.uid != task.uid or result_message.session_id != task.session_id or result_message.profile_id != task.profile_id or result_message.type != MessageType.BACKGROUND_TASK_RESULT:
-        raise RuntimeError("Terminal auto-watch result message is unavailable")
+    execution_state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+    payloads = execution_state.get("external_resume_context")
+    if not isinstance(payloads, list) or not payloads or not isinstance(payloads[0], dict):
+        raise RuntimeError("Terminal auto-watch result payload is unavailable")
 
-    try:
-        message_payload = json.loads(result_message.content or "")
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("Terminal auto-watch result message is invalid") from exc
-    if not isinstance(message_payload, dict):
-        raise RuntimeError("Terminal auto-watch result message is invalid")
+    payload = payloads[0]
+    if payload.get("type") != "background_tool_result" or not _is_positive_int(payload.get("task_id")) or "task" not in payload or not isinstance(payload.get("instruction"), str) or not payload["instruction"].strip():
+        raise RuntimeError("Terminal auto-watch result payload is invalid")
+    tool_call = payload.get("tool_call")
+    if not isinstance(tool_call, dict) or not isinstance(tool_call.get("id"), str) or not tool_call["id"].strip() or not isinstance(tool_call.get("name"), str) or not tool_call["name"].strip() or not isinstance(tool_call.get("arguments"), dict):
+        raise RuntimeError("Terminal auto-watch result payload is invalid")
 
-    tasks = message_payload.get("tasks")
-    if not isinstance(tasks, list):
-        tasks = []
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list) or any(not isinstance(item, dict) or not _is_positive_int(item.get("task_id")) for item in tasks):
+        raise RuntimeError("Terminal auto-watch result payload is invalid")
     if not any(isinstance(item, dict) and item.get("task_id") == task.id for item in tasks):
         tasks.append(_build_background_tool_result_payload(task))
-    message_payload["tasks"] = tasks
-    message_updated = await db.execute(
-        update(Message)
-        .where(
-            Message.id == result_message.id,
-            Message.uid == task.uid,
-            Message.session_id == task.session_id,
-            Message.profile_id == task.profile_id,
-            Message.type == MessageType.BACKGROUND_TASK_RESULT,
-        )
-        .values(content=json.dumps(message_payload, ensure_ascii=False))
-        .execution_options(synchronize_session=False)
-    )
-    if (message_updated.rowcount or 0) != 1:
-        return False
-
-    execution_state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+    payload = {**payload, "tasks": tasks}
+    payloads = [*payloads]
+    payloads[0] = payload
+    execution_state["external_resume_context"] = payloads
     task_ids = _terminal_auto_watch_task_ids(work)
     if not task_ids:
         try:
@@ -257,48 +231,39 @@ async def trigger_background_task_reply(task_id: int) -> None:
             await db.commit()
             return
 
-        result_message = Message(
-            session_id=task.session_id,
+        work, _ = await session_reply_queue_manager.enqueue_background_summary(
+            db,
             uid=task.uid,
-            role=MessageRole.USER,
-            type=MessageType.BACKGROUND_TASK_RESULT,
-            content=_build_background_tool_result_message(task, include_tasks=True) if origin is not None else _build_background_tool_result_message(task),
+            session_id=task.session_id,
             profile_id=task.profile_id,
-            is_processed=True,
-            dedupe_key=_build_background_message_dedupe_key(task_id, "result"),
+            background_task_id=task_id,
+            commit=False,
         )
-        await message_crud.persist(db, message=result_message, commit=False)
+        payload = _build_background_tool_result_payload(task)
         if origin is not None:
-            work, _created = await session_reply_queue_manager.enqueue_background_summary(
-                db,
-                uid=task.uid,
-                session_id=task.session_id,
-                profile_id=task.profile_id,
-                background_task_id=task_id,
-                commit=False,
-            )
-        else:
-            await session_reply_queue_manager.enqueue_background_summary(
-                db,
-                uid=task.uid,
-                session_id=task.session_id,
-                profile_id=task.profile_id,
-                background_task_id=task_id,
-                commit=False,
-            )
-        task.extra = {
-            **extra,
-            BACKGROUND_RESULT_MESSAGE_SAVED_EXTRA_KEY: True,
-        }
-        db.add(task)
-        if origin is not None:
-            work.execution_state = {
-                **(work.execution_state if isinstance(work.execution_state, dict) else {}),
-                "terminal_auto_watch_group": True,
-                "terminal_auto_watch_origin_work_id": origin[0],
-                "terminal_auto_watch_origin_work_identity": origin[1],
-                "terminal_auto_watch_task_ids": [task.id],
+            payload = {**payload, "tasks": [dict(payload)]}
+        execution_state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+        execution_state.update(
+            {
+                "external_resume_context": [payload],
+                "dispatcher_checkpoint": {
+                    "messages": [],
+                    "turn_messages": [],
+                    "reload_history": True,
+                    "deferred_external_results": True,
+                },
             }
-            db.add(work)
+        )
+        if origin is not None:
+            execution_state.update(
+                {
+                    "terminal_auto_watch_group": True,
+                    "terminal_auto_watch_origin_work_id": origin[0],
+                    "terminal_auto_watch_origin_work_identity": origin[1],
+                    "terminal_auto_watch_task_ids": [task.id],
+                }
+            )
+        work.execution_state = execution_state
+        db.add(work)
         await db.commit()
         logger.bind(task_id=task_id, uid=task.uid, session_id=task.session_id).info("Background task summary queued")

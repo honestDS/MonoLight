@@ -18,6 +18,7 @@ from app.core.crud.task.background import background_task_crud
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_common as executor_common_module
+from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue.manager_result import SessionReplyResult
 from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
@@ -306,6 +307,30 @@ async def _claim_next(
         return claimed.id if claimed is not None else None
 
 
+async def _prepare_claimed_external_resume(case: ExternalWorkCase, worker_id: str = "external-resume-worker") -> None:
+    async with case.factory() as db:
+        claimed = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id=worker_id,
+            lease_seconds=3600,
+        )
+        assert claimed is not None and claimed.id == case.work_id
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (claimed.id, worker_id)
+
+        work = await db.get(SessionReplyWorkItem, case.work_id)
+        assert work is not None
+        assert isinstance(work.execution_state, dict)
+        assert isinstance(work.execution_state.get("dispatcher_checkpoint"), dict)
+        await external_work_module.prepare_external_work_resume(
+            db,
+            uid=case.uid,
+            session_id=case.session_id,
+            profile_id=case.profile_id,
+            checkpoint=work.execution_state["dispatcher_checkpoint"],
+        )
+        await db.commit()
+
+
 async def _enqueue_followup(case: ExternalWorkCase) -> tuple[int, int]:
     async with case.factory() as db:
         message = await save_message(
@@ -457,20 +482,24 @@ async def test_consumer_does_not_cancel_reply_during_external_resume_handoff(
         _assert_queued_tool_result(snapshot, case, "call-1")
 
         markers = _messages_of_type(snapshot, MessageType.BACKGROUND_TASK_RESULT)
-        assert len(markers) == 1
-        _assert_background_result_marker(
-            markers[0],
-            task=completed_content,
-            execution_status="succeeded",
-        )
+        assert not markers
+        resume_context = snapshot["work"].execution_state["external_resume_context"]
+        assert len(resume_context) == 1
+        assert resume_context[0]["task"] == completed_content
+        assert resume_context[0]["execution_status"] == "succeeded"
+
+        tool_end_events = [event for event in snapshot["stream_events"] if event.event.get("type") == "tool_end"]
+        assert len(tool_end_events) == 1
+        assert tool_end_events[0].event["tool_call_id"] == "call-1"
+        assert tool_end_events[0].event["result"] == completed_content
 
         result_manager = SessionReplyResult()
         async with external_work_database() as db:
             status = await result_manager.get_work_status(db, case.work_id, uid=case.uid)
         assert status["status"] == SessionReplyWorkStatus.READY_FOR_LLM.value
-        queried_message = status["session_events"][0]["messages"][0]
-        assert queried_message["id"] == markers[0].id
-        assert json.loads(queried_message["content"])["task"] == completed_content
+        ready_events = [event for event in snapshot["session_events"] if event.event.get("type") == "work_ready"]
+        assert len(ready_events) == 1
+        assert ready_events[0].event["work_id"] == case.work_id
 
         async with external_work_database() as db:
             lock_probe = Message(
@@ -698,9 +727,11 @@ async def test_parallel_external_resume_is_idempotent_and_persists_protocol_even
     assert result_row.id == case.result_message_ids["call-1"]
 
     markers = _messages_of_type(snapshot, MessageType.BACKGROUND_TASK_RESULT)
-    assert len(markers) == 1
-    marker_payload = _assert_background_result_marker(markers[0], task="completed-once", execution_status="succeeded")
-    assert marker_payload["type"] == "background_tool_result"
+    assert not markers
+    resume_context = snapshot["work"].execution_state["external_resume_context"]
+    assert len(resume_context) == 1
+    assert resume_context[0]["task"] == "completed-once"
+    assert resume_context[0]["execution_status"] == "succeeded"
 
     tool_end_events = [event for event in snapshot["stream_events"] if event.event.get("type") == "tool_end"]
     assert len(tool_end_events) == 1
@@ -711,6 +742,38 @@ async def test_parallel_external_resume_is_idempotent_and_persists_protocol_even
     assert len(ready_events) == 1
     assert ready_events[0].event["work_id"] == case.work_id
     assert snapshot["tasks"][0].status == BackgroundTaskStatus.SUCCEEDED
+
+    await _prepare_claimed_external_resume(case)
+    materialized = await _snapshot(case)
+    assert materialized["work"].status == SessionReplyWorkStatus.RUNNING
+    _assert_queued_tool_result(materialized, case, "call-1")
+    markers = _messages_of_type(materialized, MessageType.BACKGROUND_TASK_RESULT)
+    assert len(markers) == 1
+    marker_payload = _assert_background_result_marker(markers[0], task="completed-once", execution_status="succeeded")
+    assert marker_payload["type"] == "background_tool_result"
+    projected_events = [event for event in materialized["session_events"] if event.event.get("type") == "tool_results_update"]
+    assert len(projected_events) == 1
+    assert projected_events[0].event["messages"][0]["id"] == markers[0].id
+
+    async with external_work_database() as db:
+        work = await db.get(SessionReplyWorkItem, case.work_id)
+        assert work is not None
+        assert isinstance(work.execution_state, dict)
+        checkpoint = work.execution_state["dispatcher_checkpoint"]
+        assert "deferred_external_results" not in checkpoint
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (case.work_id, "external-resume-worker")
+        await external_work_module.prepare_external_work_resume(
+            db,
+            uid=case.uid,
+            session_id=case.session_id,
+            profile_id=case.profile_id,
+            checkpoint=checkpoint,
+        )
+        await db.commit()
+
+    repeated = await _snapshot(case)
+    assert len(_messages_of_type(repeated, MessageType.BACKGROUND_TASK_RESULT)) == 1
+    assert len([event for event in repeated["session_events"] if event.event.get("type") == "tool_results_update"]) == 1
 
 
 @pytest.mark.asyncio
@@ -728,12 +791,19 @@ async def test_external_resume_projects_tool_result_notification(external_work_d
     await _complete_task(case, "call-1", final_content)
     assert await external_work_module.resume_external_work_for_task(case.task_ids["call-1"]) is True
 
+    before_claim = await _snapshot(case)
+    assert before_claim["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert not _messages_of_type(before_claim, MessageType.BACKGROUND_TASK_RESULT)
+    assert not [event for event in before_claim["session_events"] if event.event.get("type") == "tool_results_update"]
+
+    await _prepare_claimed_external_resume(case)
     result_manager = SessionReplyResult()
     async with external_work_database() as db:
         first_status = await result_manager.get_work_status(db, case.work_id, uid=case.uid)
     first_snapshot = await _snapshot(case)
 
-    assert first_snapshot["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert first_status["status"] == SessionReplyWorkStatus.RUNNING.value
+    assert first_snapshot["work"].status == SessionReplyWorkStatus.RUNNING
     tool_result_rows = _messages_of_type(first_snapshot, MessageType.TOOL_RESULT)
     assert len(tool_result_rows) == 1
     original_tool_row = tool_result_rows[0]
@@ -784,6 +854,96 @@ async def test_external_resume_projects_tool_result_notification(external_work_d
 
 
 @pytest.mark.asyncio
+async def test_external_resume_materializes_deferred_result_before_preflight_failure(
+    external_work_database,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    case = await _create_case(external_work_database)
+    completed_content = "completed-before-preflight-failure"
+    await _complete_task(case, "call-1", completed_content)
+    assert await external_work_module.resume_external_work_for_task(case.task_ids["call-1"]) is True
+
+    ready = await _snapshot(case)
+    assert ready["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert not _messages_of_type(ready, MessageType.BACKGROUND_TASK_RESULT)
+    queued_before = _assert_queued_tool_result(ready, case, "call-1")
+
+    async with external_work_database() as db:
+        previous_assistant = await save_message(
+            db,
+            case.session_id,
+            case.uid,
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content="此前已完成的回复"),
+            case.profile_id,
+            is_processed=True,
+        )
+    assert previous_assistant.id is not None
+
+    worker_id = "preflight-failure-worker"
+    assert await _claim_next(external_work_database, worker_id) == case.work_id
+
+    for module in (consumer_module, executor_lifecycle_module, executor_interactive_module):
+        monkeypatch.setattr(module, "AsyncSessionLocal", external_work_database)
+
+    delivered_events: list[dict[str, Any]] = []
+
+    async def capture_session_event(_uid: str, _session_id: str, event: dict[str, Any]) -> None:
+        delivered_events.append(event)
+
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_session_event)
+
+    await consumer_module.SessionReplyConsumer()._run_claimed(case.work_id, worker_id, 1, 2)
+
+    failed = await _snapshot(case)
+    assert failed["work"].status == SessionReplyWorkStatus.FAILED
+    assert failed["work"].event_sent is True
+    task = next(task for task in failed["tasks"] if task.id == case.task_ids["call-1"])
+    assert task.status == BackgroundTaskStatus.SUCCEEDED
+    assert task.result == {"content": completed_content}
+    queued_after = _assert_queued_tool_result(failed, case, "call-1")
+    assert queued_after.model_dump() == queued_before.model_dump()
+
+    markers = _messages_of_type(failed, MessageType.BACKGROUND_TASK_RESULT)
+    assert len(markers) == 1
+    marker = markers[0]
+    _assert_background_result_marker(marker, task=completed_content, execution_status="succeeded")
+    error_messages = [message for message in failed["messages"] if message.role == MessageRole.ERR]
+    assert len(error_messages) == 1
+    error_message = error_messages[0]
+    assert error_message.content
+    assert error_message.id is not None and marker.id is not None
+    assert failed["work"].result_message_id == error_message.id
+    assert previous_assistant.id < marker.id < error_message.id
+
+    result_manager = SessionReplyResult()
+    async with external_work_database() as db:
+        status = await result_manager.get_work_status(db, case.work_id, uid=case.uid)
+    assert status["status"] == SessionReplyWorkStatus.FAILED.value
+    projected_events = [event for event in status["session_events"] if event["type"] == "tool_results_update"]
+    assert len(projected_events) == 1
+    projected_message = projected_events[0]["messages"][0]
+    assert projected_message["id"] == marker.id
+    assert projected_message["db_id"] == marker.id
+    assert projected_message["type"] == MessageType.BACKGROUND_TASK_RESULT.value
+    assert projected_message["content"] == marker.content
+
+    assert len(delivered_events) == 1
+    error_event = delivered_events[0]
+    assert error_event["type"] == "proactive_reply_error"
+    assert error_event["work_id"] == case.work_id
+    assert error_event["message_id"] == error_message.id
+    assert error_event["content"] == error_message.content
+
+    await executor_lifecycle_module.fail_session_reply_work(case.work_id, worker_id, "duplicate failure")
+    repeated = await _snapshot(case)
+    assert len(_messages_of_type(repeated, MessageType.BACKGROUND_TASK_RESULT)) == 1
+    assert len([message for message in repeated["messages"] if message.role == MessageRole.ERR]) == 1
+    assert len(delivered_events) == 1
+
+
+@pytest.mark.asyncio
 async def test_reconcile_external_work_completes_task_before_suspension(external_work_database):
     case = await _create_case(external_work_database, suspend=False)
     await _complete_task(case, "call-1", "completed-before-wait")
@@ -797,8 +957,11 @@ async def test_reconcile_external_work_completes_task_before_suspension(external
     assert snapshot["tasks"][0].status == BackgroundTaskStatus.SUCCEEDED
     _assert_queued_tool_result(snapshot, case, "call-1")
     markers = _messages_of_type(snapshot, MessageType.BACKGROUND_TASK_RESULT)
-    assert len(markers) == 1
-    _assert_background_result_marker(markers[0], task="completed-before-wait", execution_status="succeeded")
+    assert not markers
+    resume_context = snapshot["work"].execution_state["external_resume_context"]
+    assert len(resume_context) == 1
+    assert resume_context[0]["task"] == "completed-before-wait"
+    assert resume_context[0]["execution_status"] == "succeeded"
     assert len([event for event in snapshot["session_events"] if event.event.get("type") == "work_ready"]) == 1
 
 
@@ -824,13 +987,27 @@ async def test_external_resume_waits_for_all_tasks_in_one_round(external_work_da
     _assert_queued_tool_result(complete, case, "call-1")
     _assert_queued_tool_result(complete, case, "call-2")
     markers = _messages_of_type(complete, MessageType.BACKGROUND_TASK_RESULT)
+    assert not markers
+    resume_context = complete["work"].execution_state["external_resume_context"]
+    assert len(resume_context) == 2
+    assert {(payload["task"], payload["execution_status"]) for payload in resume_context} == {
+        ("first-result", "succeeded"),
+        ("second-result", "succeeded"),
+    }
+
+    await _prepare_claimed_external_resume(case)
+    materialized = await _snapshot(case)
+    assert materialized["work"].status == SessionReplyWorkStatus.RUNNING
+    _assert_queued_tool_result(materialized, case, "call-1")
+    _assert_queued_tool_result(materialized, case, "call-2")
+    markers = _messages_of_type(materialized, MessageType.BACKGROUND_TASK_RESULT)
     assert len(markers) == 2
     assert {(json.loads(marker.content or "{}")["task"], json.loads(marker.content or "{}")["execution_status"]) for marker in markers} == {
         ("first-result", "succeeded"),
         ("second-result", "succeeded"),
     }
-    assert len([event for event in complete["stream_events"] if event.event.get("type") == "tool_end"]) == 2
-    assert len([event for event in complete["session_events"] if event.event.get("type") == "work_ready"]) == 1
+    assert len([event for event in materialized["stream_events"] if event.event.get("type") == "tool_end"]) == 2
+    assert len([event for event in materialized["session_events"] if event.event.get("type") == "work_ready"]) == 1
 
 
 @pytest.mark.asyncio

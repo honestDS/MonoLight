@@ -363,24 +363,41 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
 
-    result_event = await message_crud.get_by_dedupe_key(db, f"background-task:{int(work.source_id)}:result")
-    if result_event is None or result_event.id is None or result_event.uid != work.uid or result_event.session_id != work.session_id or result_event.profile_id != work.profile_id or result_event.type != MessageType.BACKGROUND_TASK_RESULT:
-        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-
-    parsed_events = parse_db_messages_to_internal([result_event])
-    initial_message = next((message for message in parsed_events if message.role == MessageRole.USER), None)
-    if initial_message is None:
-        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
     resume_state = execution_state.get("dispatcher_checkpoint")
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
+        resume_state = None
+
+    history_before_id: int | None = None
+    frozen_user_message_ids: list[int] = []
+    if resume_state is not None and resume_state.get("deferred_external_results") is True:
+        external_resume_context = execution_state.get("external_resume_context")
+        if not isinstance(external_resume_context, list) or not external_resume_context or not isinstance(external_resume_context[0], dict):
+            raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+        payload = external_resume_context[0]
+        initial_message = InternalMessage(
+            role=MessageRole.USER,
+            content=json.dumps(payload, ensure_ascii=False),
+        )
+    else:
+        result_event = await message_crud.get_by_dedupe_key(db, f"background-task:{int(work.source_id)}:result")
+        if result_event is None or result_event.id is None or result_event.uid != work.uid or result_event.session_id != work.session_id or result_event.profile_id != work.profile_id or result_event.type != MessageType.BACKGROUND_TASK_RESULT:
+            raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+
+        parsed_events = parse_db_messages_to_internal([result_event])
+        initial_message = next((message for message in parsed_events if message.role == MessageRole.USER), None)
+        if initial_message is None:
+            raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+        history_before_id = result_event.id
+        frozen_user_message_ids = [result_event.id]
+
+    if resume_state is None:
         resume_state = {
             "messages": [],
             "turn_messages": [],
             "reload_history": True,
             "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
-            "context_summary_fixed_upper_message_id": result_event.id,
+            "context_summary_fixed_upper_message_id": history_before_id,
         }
     elif resume_state.get("reload_history") is not True:
         resume_state = await _restore_foreground_tool_replies(
@@ -396,8 +413,8 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         worker_id=worker_id,
         message=initial_message.content or "",
         initial_message=initial_message,
-        history_before_id=result_event.id,
-        frozen_user_message_ids=[result_event.id],
+        history_before_id=history_before_id,
+        frozen_user_message_ids=frozen_user_message_ids,
         attachments=initial_message.attachments,
         allow_additional_user_messages=False,
         execution_resume_state=resume_state,

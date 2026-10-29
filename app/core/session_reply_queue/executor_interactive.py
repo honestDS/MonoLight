@@ -252,7 +252,7 @@ async def _dispatch_interactive_work(
     worker_id: str,
     message: str,
     initial_message: InternalMessage,
-    history_before_id: int,
+    history_before_id: int | None,
     frozen_user_message_ids: list[int],
     attachments: list[str] | None,
     allow_additional_user_messages: bool,
