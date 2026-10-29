@@ -114,16 +114,57 @@ async def complete_stopped_task_replies(db: AsyncSession, *, work_id: int) -> No
                 continue
             remaining_slots = []
             for slot in raw_slots:
+                if state_key == "external_resume_context" and isinstance(slot, dict) and isinstance(slot.get("tasks"), list):
+                    remaining_tasks = [item for item in slot["tasks"] if not (isinstance(item, dict) and _is_positive_int(item.get("task_id")) and item["task_id"] in delivered_task_ids)]
+                    task_id = slot.get("task_id")
+                    top_task_stopped = _is_positive_int(task_id) and task_id in delivered_task_ids
+                    if top_task_stopped and not remaining_tasks:
+                        continue
+                    updated_slot = dict(slot)
+                    updated_slot["tasks"] = remaining_tasks
+                    if top_task_stopped:
+                        first_remaining_payload = next(
+                            (item for item in remaining_tasks if isinstance(item, dict) and _is_positive_int(item.get("task_id"))),
+                            None,
+                        )
+                        if first_remaining_payload is not None:
+                            updated_slot = {**slot, **first_remaining_payload}
+                            updated_slot["tasks"] = remaining_tasks
+                    remaining_slots.append(updated_slot)
+                    has_other_wait = True
+                    continue
                 task_id = slot.get("task_id") if isinstance(slot, dict) else slot
                 if _is_positive_int(task_id):
                     if task_id in delivered_task_ids:
                         continue
-                    has_other_wait = True
                 remaining_slots.append(slot)
+                has_other_wait = True
             if remaining_slots:
                 candidate_state[state_key] = remaining_slots
             else:
                 candidate_state.pop(state_key, None)
+
+        raw_auto_task_ids = candidate_state.get("terminal_auto_watch_task_ids")
+        if isinstance(raw_auto_task_ids, list):
+            remaining_auto_task_ids = []
+            for task_id in raw_auto_task_ids:
+                if _is_positive_int(task_id) and task_id in delivered_task_ids:
+                    continue
+                remaining_auto_task_ids.append(task_id)
+                has_other_wait = True
+            if remaining_auto_task_ids:
+                candidate_state["terminal_auto_watch_task_ids"] = remaining_auto_task_ids
+            else:
+                candidate_state.pop("terminal_auto_watch_task_ids", None)
+
+        if not candidate_state.get("external_resume_context"):
+            candidate_state.pop("external_resume_pending", None)
+            candidate_state.pop("terminal_auto_resume", None)
+            checkpoint = candidate_state.get("dispatcher_checkpoint")
+            if isinstance(checkpoint, dict):
+                checkpoint = dict(checkpoint)
+                checkpoint.pop("deferred_external_results", None)
+                candidate_state["dispatcher_checkpoint"] = checkpoint
 
         values: dict[str, Any] = {"execution_state": candidate_state}
         if has_other_wait:

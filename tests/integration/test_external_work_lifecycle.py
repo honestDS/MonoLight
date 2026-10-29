@@ -10,11 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 from app.core.background_tasks import external_work as external_work_module
+from app.core.background_tasks import reply_trigger as reply_trigger_module
 from app.core.background_tasks.manager import BackgroundTaskManager
 from app.core.background_tasks.result_delivery import receive_pending_external_results
-from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.session import session_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue import consumer as consumer_module
@@ -26,7 +28,7 @@ from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
 from app.core.utils.dispatcher.external_work import build_external_wait_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.background_task import BackgroundTask, BackgroundTaskStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
@@ -461,6 +463,179 @@ async def _enqueue_followup(case: ExternalWorkCase) -> tuple[int, int]:
         )
         assert created and followup.id is not None and followup.sequence_no is not None
         return followup.id, followup.sequence_no
+
+
+async def _prepare_stopped_task_reply_case(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    ledger_mode: str,
+    mixed_wait: bool,
+    report_state: str = "reported",
+) -> tuple[ExternalWorkCase, int, list[int]]:
+    call_ids = ("call-1", "call-other") if mixed_wait else ("call-1",)
+    case = await _create_case(session_factory, call_ids=call_ids)
+    for call_id in call_ids:
+        await _complete_task(case, call_id, f"terminal-result-{call_id}")
+
+    closing_work_id, closing_result_message_id = await _enqueue_followup(case)
+    stopped_task_id = case.task_ids["call-1"]
+    terminal_session_id = "terminal-shared-observation-000000000000"
+    cross_uid = "external-work-cross-user"
+    cross_work_specs = (
+        (cross_uid, "external-work-cross-uid-session", PROFILE_ID + 1),
+        (UID, "external-work-cross-session", PROFILE_ID),
+        (UID, "external-work-cross-profile-session", PROFILE_ID + 2),
+    )
+
+    async with session_factory() as db:
+        closing_work = await db.get(SessionReplyWorkItem, closing_work_id)
+        assert closing_work is not None and closing_work.dedupe_key
+
+        db.add_all(
+            [
+                User(uid=cross_uid, username=cross_uid),
+                Profile(id=PROFILE_ID + 1, uid=cross_uid, name="external-work-cross-profile", configs={}),
+                Profile(id=PROFILE_ID + 2, uid=UID, name="external-work-cross-profile-same-user", configs={}),
+                ChatSession(session_id="external-work-cross-uid-session", uid=cross_uid, profile_id=PROFILE_ID + 1),
+                ChatSession(session_id="external-work-cross-session", uid=UID, profile_id=PROFILE_ID),
+                ChatSession(session_id="external-work-cross-profile-session", uid=UID, profile_id=PROFILE_ID + 2),
+            ]
+        )
+
+        for call_id in call_ids:
+            task_id = case.task_ids[call_id]
+            task = await db.get(BackgroundTask, task_id)
+            assert task is not None
+            task.tool_name = TERMINAL_WATCH_TOOL_NAME
+            task.arguments = {
+                "terminal_session_id": terminal_session_id,
+                "after_offset": 0,
+                "condition": "process_exit",
+            }
+            task.result = {"content": {"event": "process_exit", "eof": True, "next_offset": 1}}
+            task.error = None
+            task.status = BackgroundTaskStatus.SUCCEEDED
+            task.auto_reply = True
+            task.reply_status = BackgroundTaskReplyStatus.SUCCEEDED
+            task.extra = {
+                "source": "terminal_auto_watch",
+                "auto_terminal_watch": True,
+                "terminal_session_id": terminal_session_id,
+            }
+            if ledger_mode == "new-work":
+                task.extra["terminal_watch_deliveries"] = {
+                    str(closing_work_id): {
+                        "identity": closing_work.dedupe_key,
+                        "consumed": False,
+                        "routed": False,
+                    }
+                }
+            elif ledger_mode != "empty":
+                raise ValueError(f"unknown ledger mode: {ledger_mode}")
+
+        old_work = await db.get(SessionReplyWorkItem, case.work_id)
+        assert old_work is not None
+        old_work.execution_state = {
+            "terminal_watch_waits": [
+                {
+                    "task_id": case.task_ids[call_id],
+                    "tool_call_id": call_id,
+                    "tool_name": TERMINAL_WATCH_TOOL_NAME,
+                    "tool_result_message_id": case.result_message_ids[call_id],
+                    "response_id": f"terminal-response-{call_id}",
+                    "terminal_watch": True,
+                    "terminal_auto_watch": True,
+                    "terminal_session_id": terminal_session_id,
+                }
+                for call_id in call_ids
+            ]
+        }
+        old_work.status = SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        old_work.locked_by = None
+        old_work.lock_until = None
+
+        closing_work.execution_state = {"stopped_task_ids": [stopped_task_id]}
+        closing_work.locked_by = None
+        closing_work.lock_until = None
+        if report_state == "reported":
+            closing_work.status = SessionReplyWorkStatus.SUCCEEDED
+            closing_work.event_sent = True
+            closing_work.result_message_id = closing_result_message_id
+        elif report_state == "not-succeeded":
+            closing_work.status = SessionReplyWorkStatus.RUNNING
+            closing_work.event_sent = True
+            closing_work.result_message_id = closing_result_message_id
+        elif report_state == "not-sent":
+            closing_work.status = SessionReplyWorkStatus.SUCCEEDED
+            closing_work.event_sent = False
+            closing_work.result_message_id = closing_result_message_id
+        elif report_state == "no-result":
+            closing_work.status = SessionReplyWorkStatus.SUCCEEDED
+            closing_work.event_sent = True
+            closing_work.result_message_id = None
+        else:
+            raise ValueError(f"unknown report state: {report_state}")
+
+        cross_works: list[SessionReplyWorkItem] = []
+        for index, (uid, session_id, profile_id) in enumerate(cross_work_specs, start=1):
+            cross_work = SessionReplyWorkItem(
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile_id,
+                sequence_no=1,
+                work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                source_type=SessionReplySourceType.USER_MESSAGE,
+                source_id=f"cross-source-{index}",
+                dedupe_key=f"external-work-cross:{index}",
+                status=SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                execution_state={
+                    "terminal_watch_waits": [
+                        {
+                            "task_id": stopped_task_id,
+                            "tool_call_id": "call-1",
+                            "tool_name": TERMINAL_WATCH_TOOL_NAME,
+                            "tool_result_message_id": case.result_message_ids["call-1"],
+                            "response_id": "cross-terminal-response",
+                            "terminal_watch": True,
+                            "terminal_auto_watch": True,
+                            "terminal_session_id": terminal_session_id,
+                        }
+                    ]
+                },
+            )
+            db.add(cross_work)
+            cross_works.append(cross_work)
+
+        await db.commit()
+        assert all(work.id is not None for work in cross_works)
+        return case, closing_work_id, [work.id for work in cross_works if work.id is not None]
+
+
+async def _snapshot_stopped_task_replies(
+    case: ExternalWorkCase,
+    *,
+    closing_work_id: int,
+    cross_work_ids: list[int],
+    task_id: int,
+) -> dict[str, Any]:
+    async with case.factory() as db:
+        old_work = await db.get(SessionReplyWorkItem, case.work_id)
+        closing_work = await db.get(SessionReplyWorkItem, closing_work_id)
+        task = await db.get(BackgroundTask, task_id)
+        assert old_work is not None and closing_work is not None and task is not None
+        cross_works = [await db.get(SessionReplyWorkItem, work_id) for work_id in cross_work_ids]
+        assert all(work is not None for work in cross_works)
+
+        session = await session_crud.get_by_session_id(db, case.session_id)
+        assert session is not None
+        activity = next(row for row in await session_crud.get_user_activity(db, uid=case.uid) if row.session_id == case.session_id)
+        return {
+            "old": (old_work.status, old_work.execution_state, old_work.locked_by, old_work.lock_until),
+            "closing": (closing_work.status, closing_work.event_sent, closing_work.result_message_id, closing_work.execution_state),
+            "cross": {work.id: (work.status, work.execution_state, work.locked_by, work.lock_until) for work in cross_works if work is not None and work.id is not None},
+            "task": (task.status, task.reply_status, task.extra, task.result),
+            "session_is_reply_running": getattr(activity, "is_reply_running", getattr(session, "is_reply_running", None)),
+        }
 
 
 async def _snapshot(case: ExternalWorkCase) -> dict[str, Any]:
@@ -2001,3 +2176,218 @@ async def test_reopened_completed_work_keeps_only_new_result_files(
     assert repeated_history.id == old_history.id
     assert repeated_history.content == old_history_content
     assert len([message for message in repeated["messages"] if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT and message.content == old_history_content]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ledger_mode", ["empty", "new-work"], ids=["empty-ledger", "new-work-ledger"])
+@pytest.mark.parametrize("mixed_wait", [False, True], ids=["only-stopped-task", "stopped-and-other-task"])
+async def test_complete_stopped_task_replies_cleans_unledgered_terminal_watch_waits(
+    external_work_database,
+    ledger_mode: str,
+    mixed_wait: bool,
+) -> None:
+    case, closing_work_id, cross_work_ids = await _prepare_stopped_task_reply_case(
+        external_work_database,
+        ledger_mode=ledger_mode,
+        mixed_wait=mixed_wait,
+    )
+    task_id = case.task_ids["call-1"]
+    before = await _snapshot_stopped_task_replies(
+        case,
+        closing_work_id=closing_work_id,
+        cross_work_ids=cross_work_ids,
+        task_id=task_id,
+    )
+    assert before["closing"][0] == SessionReplyWorkStatus.SUCCEEDED
+    assert before["closing"][1] is True
+    assert before["closing"][2] is not None
+    assert before["task"][0] == BackgroundTaskStatus.SUCCEEDED
+    assert before["task"][1] == BackgroundTaskReplyStatus.SUCCEEDED
+
+    async with external_work_database() as db:
+        await external_work_module.complete_stopped_task_replies(db, work_id=closing_work_id)
+        await db.commit()
+
+    first = await _snapshot_stopped_task_replies(
+        case,
+        closing_work_id=closing_work_id,
+        cross_work_ids=cross_work_ids,
+        task_id=task_id,
+    )
+    if mixed_wait:
+        assert first["old"][0] == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert {slot["task_id"] for slot in first["old"][1]["terminal_watch_waits"]} == {case.task_ids["call-other"]}
+        assert first["session_is_reply_running"] is True
+    else:
+        assert first["old"][0] == SessionReplyWorkStatus.CANCELLED
+        assert "terminal_watch_waits" not in first["old"][1]
+        assert first["session_is_reply_running"] is False
+    assert first["cross"] == before["cross"]
+    assert first["task"] == before["task"]
+
+    async with external_work_database() as db:
+        await external_work_module.complete_stopped_task_replies(db, work_id=closing_work_id)
+        await db.commit()
+
+    repeated = await _snapshot_stopped_task_replies(
+        case,
+        closing_work_id=closing_work_id,
+        cross_work_ids=cross_work_ids,
+        task_id=task_id,
+    )
+    assert repeated == first
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "report_state",
+    ["not-succeeded", "not-sent", "no-result"],
+    ids=["not-succeeded", "event-not-sent", "result-not-persisted"],
+)
+async def test_complete_stopped_task_replies_requires_successful_stop_report(
+    external_work_database,
+    report_state: str,
+) -> None:
+    case, closing_work_id, cross_work_ids = await _prepare_stopped_task_reply_case(
+        external_work_database,
+        ledger_mode="empty",
+        mixed_wait=False,
+        report_state=report_state,
+    )
+    task_id = case.task_ids["call-1"]
+    before = await _snapshot_stopped_task_replies(
+        case,
+        closing_work_id=closing_work_id,
+        cross_work_ids=cross_work_ids,
+        task_id=task_id,
+    )
+
+    async with external_work_database() as db:
+        await external_work_module.complete_stopped_task_replies(db, work_id=closing_work_id)
+        await db.commit()
+
+    after = await _snapshot_stopped_task_replies(
+        case,
+        closing_work_id=closing_work_id,
+        cross_work_ids=cross_work_ids,
+        task_id=task_id,
+    )
+    assert after == before
+    assert after["old"][0] == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    assert {slot["task_id"] for slot in after["old"][1]["terminal_watch_waits"]} == {task_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stopped_position",
+    ["first", "nested", "all"],
+    ids=["top-level-stopped", "nested-stopped", "all-stopped"],
+)
+async def test_complete_stopped_task_replies_merges_external_resume_context_tasks(
+    external_work_database,
+    stopped_position: str,
+) -> None:
+    case, closing_work_id, cross_work_ids = await _prepare_stopped_task_reply_case(
+        external_work_database,
+        ledger_mode="empty",
+        mixed_wait=True,
+    )
+    first_task_id = case.task_ids["call-1"]
+    second_task_id = case.task_ids["call-other"]
+    stopped_task_ids = {
+        "first": [first_task_id],
+        "nested": [second_task_id],
+        "all": [first_task_id, second_task_id],
+    }[stopped_position]
+    checkpoint = {
+        "deferred_external_results": True,
+        "messages": [{"role": "user", "content": "preserve-message"}],
+        "turn_messages": [{"role": "assistant", "content": "preserve-turn"}],
+        "preserve": {"value": "checkpoint-field"},
+    }
+
+    async with external_work_database() as db:
+        first_task = await db.get(BackgroundTask, first_task_id)
+        second_task = await db.get(BackgroundTask, second_task_id)
+        old_work = await db.get(SessionReplyWorkItem, case.work_id)
+        closing_work = await db.get(SessionReplyWorkItem, closing_work_id)
+        assert first_task is not None and second_task is not None
+        assert old_work is not None and closing_work is not None
+        first_payload = reply_trigger_module._build_background_tool_result_payload(first_task)
+        second_payload = reply_trigger_module._build_background_tool_result_payload(second_task)
+        old_work.execution_state = {
+            "external_resume_context": [
+                {
+                    **first_payload,
+                    "tasks": [first_payload, second_payload],
+                }
+            ],
+            "terminal_auto_watch_task_ids": [first_task_id, second_task_id],
+            "external_resume_pending": True,
+            "terminal_auto_resume": True,
+            "dispatcher_checkpoint": checkpoint,
+        }
+        closing_work.execution_state = {"stopped_task_ids": stopped_task_ids}
+        await db.commit()
+
+    before = await _snapshot_stopped_task_replies(
+        case,
+        closing_work_id=closing_work_id,
+        cross_work_ids=cross_work_ids,
+        task_id=first_task_id,
+    )
+    before_state = before["old"][1]
+    assert set(before_state) == {
+        "external_resume_context",
+        "terminal_auto_watch_task_ids",
+        "external_resume_pending",
+        "terminal_auto_resume",
+        "dispatcher_checkpoint",
+    }
+    assert before_state["external_resume_context"][0]["task_id"] == first_task_id
+    assert before_state["external_resume_context"][0]["tasks"] == [first_payload, second_payload]
+    assert before_state["dispatcher_checkpoint"]["deferred_external_results"] is True
+
+    async with external_work_database() as db:
+        await external_work_module.complete_stopped_task_replies(db, work_id=closing_work_id)
+        await db.commit()
+
+    first = await _snapshot_stopped_task_replies(
+        case,
+        closing_work_id=closing_work_id,
+        cross_work_ids=cross_work_ids,
+        task_id=first_task_id,
+    )
+    assert first["cross"] == before["cross"]
+    if stopped_position == "all":
+        assert first["old"][0] == SessionReplyWorkStatus.CANCELLED
+        assert first["session_is_reply_running"] is False
+        assert set(first["old"][1]) == {"dispatcher_checkpoint"}
+        assert first["old"][1]["dispatcher_checkpoint"] == {key: value for key, value in checkpoint.items() if key != "deferred_external_results"}
+    else:
+        remaining_task_id = second_task_id if stopped_position == "first" else first_task_id
+        remaining_payload = second_payload if stopped_position == "first" else first_payload
+        state = first["old"][1]
+        assert first["old"][0] == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert first["session_is_reply_running"] is True
+        assert state["terminal_auto_watch_task_ids"] == [remaining_task_id]
+        assert state["external_resume_pending"] is True
+        assert "terminal_auto_resume" not in state
+        assert state["dispatcher_checkpoint"] == checkpoint
+        assert len(state["external_resume_context"]) == 1
+        merged_payload = state["external_resume_context"][0]
+        for key, value in remaining_payload.items():
+            assert merged_payload[key] == value
+        assert merged_payload["tasks"] == [remaining_payload]
+
+    async with external_work_database() as db:
+        await external_work_module.complete_stopped_task_replies(db, work_id=closing_work_id)
+        await db.commit()
+
+    repeated = await _snapshot_stopped_task_replies(
+        case,
+        closing_work_id=closing_work_id,
+        cross_work_ids=cross_work_ids,
+        task_id=first_task_id,
+    )
+    assert repeated == first
