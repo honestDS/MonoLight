@@ -17,6 +17,7 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED,
+    LOG_DISPATCHER_LLM_LOOP_TERMINATED_SKIP_REPLY,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
 from app.core.crud.account.user import user_crud
@@ -524,6 +525,16 @@ async def dispatch_interactive(
                         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
                         await db.commit()
                         if effective_skip:
+                            state.dispatch_logger.bind(
+                                uid=uid,
+                                session_id=session_id,
+                                turn=state.current_turn,
+                                response_id=response_id,
+                                tool_call_id=ai_msg.tool_calls[0].id,
+                                tool_name=ai_msg.tool_calls[0].name,
+                                execution_phase=state.checkpoint_state.execution_phase,
+                                skip_reply=True,
+                            ).info(t(LOG_DISPATCHER_LLM_LOOP_TERMINATED_SKIP_REPLY, username=username, turn=state.current_turn))
                             return build_skip_reply_response()
                         state.dispatch_logger.bind(
                             uid=uid,
