@@ -1,0 +1,3 @@
+from app.https_certificates import initialize_https_certificates
+
+initialize_https_certificates()

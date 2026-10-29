@@ -83,7 +83,7 @@ class WeixinOpenClawClient:
         request_headers = self.build_headers(token_required=token_required)
         if headers:
             request_headers.update(headers)
-        async with self.session.request(method, url, params=params, json=payload, headers=request_headers, timeout=timeout, ssl=False) as response:
+        async with self.session.request(method, url, params=params, json=payload, headers=request_headers, timeout=timeout) as response:
             text = await response.text()
             if response.status >= 400:
                 raise RuntimeError(
