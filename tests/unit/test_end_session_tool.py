@@ -1,14 +1,24 @@
 import copy
 import json
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.core.constants import (
+    END_SESSION_SCOPE_FOREGROUND,
+    END_SESSION_SCOPE_TASK,
+    END_SESSION_SCOPES,
+)
 from app.core.tools import END_SESSION_TOOL_NAME, get_tools_for_profile
 from app.core.tools.background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA
 from app.core.tools.end_session import (
     END_SESSION_TOOL_SCHEMA,
     is_end_session_signal,
     is_skip_reply_signal,
+    persist_end_session_control,
+    resolve_end_session_scope,
 )
 from app.core.utils.dispatcher.process_single_tool import (
     prevalidate_tool_round,
@@ -291,3 +301,66 @@ def test_non_matching_tool_round_is_not_end_session_signal(tool_calls, message_t
 
     assert is_end_session_signal(message) is False
     assert is_skip_reply_signal(message) is False
+
+
+def test_resolve_end_session_scope():
+    for scope in END_SESSION_SCOPES:
+        assert resolve_end_session_scope(execution_scope=scope) == scope
+    assert resolve_end_session_scope(session_source="queue", execution_scope=END_SESSION_SCOPE_FOREGROUND) == END_SESSION_SCOPE_FOREGROUND
+    assert resolve_end_session_scope(session_source="http", execution_scope=END_SESSION_SCOPE_TASK) == END_SESSION_SCOPE_TASK
+
+    for source in ("http", "ws"):
+        assert resolve_end_session_scope(session_source=source) == END_SESSION_SCOPE_FOREGROUND
+        assert resolve_end_session_scope(session_source=source, call_context="chat") == END_SESSION_SCOPE_FOREGROUND
+
+    task_keywords = ("task", "subagent", "worker", "background", "scheduled", "agent")
+    for keyword in task_keywords:
+        assert resolve_end_session_scope(session_source=keyword) == END_SESSION_SCOPE_TASK
+        assert resolve_end_session_scope(call_context=keyword) == END_SESSION_SCOPE_TASK
+        assert resolve_end_session_scope(session_source="ws", call_context=f"{keyword}_run") == END_SESSION_SCOPE_TASK
+        assert resolve_end_session_scope(session_source=f"{keyword}_trigger", call_context="chat") == END_SESSION_SCOPE_TASK
+
+    assert resolve_end_session_scope() == END_SESSION_SCOPE_FOREGROUND
+    assert resolve_end_session_scope(session_source=None, call_context=None, execution_scope=None) == END_SESSION_SCOPE_FOREGROUND
+
+
+@pytest.mark.asyncio
+async def test_persist_end_session_control_records_execution_scope(monkeypatch):
+    mock_db = MagicMock()
+    mock_saved_call = SimpleNamespace(id="saved-call-1", created_at=datetime.now(UTC))
+    mock_saved_result = SimpleNamespace(id="saved-result-2", created_at=datetime.now(UTC))
+    mock_save = AsyncMock(side_effect=[mock_saved_call, mock_saved_result])
+    monkeypatch.setattr("app.core.utils.dispatcher.save_message.save_message", mock_save)
+
+    incoming_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[_end_session_call(arguments={"skip_reply": True})],
+        provider_metadata={"trace_id": "test-trace"},
+    )
+
+    call_message, result_message = await persist_end_session_control(
+        mock_db,
+        uid="user-test-1",
+        session_id="session-test-1",
+        profile_id=10,
+        message=incoming_message,
+        skip_reply=True,
+        received_task_ids=[101, 102],
+        dedupe_scope="scope-key",
+        execution_scope=END_SESSION_SCOPE_TASK,
+    )
+
+    assert mock_save.await_count == 2
+    saved_call_message = mock_save.await_args_list[0].args[5]
+    saved_result_message = mock_save.await_args_list[1].args[5]
+
+    assert saved_call_message.provider_metadata["execution_scope"] == END_SESSION_SCOPE_TASK
+    assert saved_result_message.provider_metadata["execution_scope"] == END_SESSION_SCOPE_TASK
+    assert call_message.provider_metadata["execution_scope"] == END_SESSION_SCOPE_TASK
+    assert result_message.provider_metadata["execution_scope"] == END_SESSION_SCOPE_TASK
+
+    payload = json.loads(result_message.content)
+    assert payload["status"] == "completed"
+    assert payload["skip_reply"] is True
+    assert payload["received_result_task_ids"] == [101, 102]
+    assert {"status", "skip_reply", "received_result_task_ids"}.issubset(payload.keys())

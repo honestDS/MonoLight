@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel.router import select_channel
 from app.core.constants import (
+    END_SESSION_SCOPE_FOREGROUND,
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
     ERR_MESSAGE_PLATFORM_NOT_FOUND,
@@ -34,7 +35,11 @@ from app.core.log import get_logger
 from app.core.profile.selection import resolve_profile_for_session
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
-from app.core.tools.end_session import is_end_session_signal, is_skip_reply_signal, persist_end_session_control
+from app.core.tools.end_session import (
+    is_end_session_signal,
+    is_skip_reply_signal,
+    persist_end_session_control,
+)
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
 from app.core.utils.assistant_files import materialize_generated_images, merge_assistant_files
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
@@ -98,6 +103,8 @@ async def dispatch_interactive(
     actor_uid: str | None = None,
     actor_username: str | None = None,
     initial_message_type: MessageType = MessageType.TEXT,
+    execution_scope: str | None = None,
+    call_context: str | None = None,
     *,
     validate_initial_message_before_save: Callable[..., Awaitable[None]],
 ):
@@ -156,6 +163,8 @@ async def dispatch_interactive(
             execution_resume_state=execution_resume_state,
             execution_checkpoint_callback=execution_checkpoint_callback,
             initial_message_type=initial_message_type,
+            execution_scope=execution_scope,
+            call_context=call_context,
         )
 
         async def append_external_results() -> bool:
@@ -396,7 +405,7 @@ async def dispatch_interactive(
                     reuse_input = reuse_saved_input
                     reuse_saved_input = False
                     new_user_batch = None
-                    if not reuse_input:
+                    if not reuse_input and state.execution_scope == END_SESSION_SCOPE_FOREGROUND:
                         new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
                         if new_user_batch is not None:
                             state.current_turn = 0
@@ -486,25 +495,26 @@ async def dispatch_interactive(
 
                     end_session_signal = (state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)) or (state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and is_skip_reply_signal(ai_msg))
                     if end_session_signal:
-                        new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
-                        if new_user_batch is not None:
-                            append_new_user_messages(
-                                state.cfg,
-                                state.messages,
-                                new_user_batch.messages,
-                                state.img_understanding,
-                                state.audio_understanding,
-                                state.video_understanding,
-                            )
-                            state.checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
-                            if state.memory_enabled:
-                                update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
-                        external_results_received = await append_external_results()
-                        if new_user_batch is not None or external_results_received:
-                            state.current_turn = 0
-                            state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
-                            await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
-                            continue
+                        if state.execution_scope == END_SESSION_SCOPE_FOREGROUND:
+                            new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
+                            if new_user_batch is not None:
+                                append_new_user_messages(
+                                    state.cfg,
+                                    state.messages,
+                                    new_user_batch.messages,
+                                    state.img_understanding,
+                                    state.audio_understanding,
+                                    state.video_understanding,
+                                )
+                                state.checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                                if state.memory_enabled:
+                                    update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
+                            external_results_received = await append_external_results()
+                            if new_user_batch is not None or external_results_received:
+                                state.current_turn = 0
+                                state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
+                                await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                                continue
 
                         effective_skip = is_skip_reply_signal(ai_msg) and not state.files_to_user
                         call_message, result_message = await persist_end_session_control(
@@ -516,6 +526,7 @@ async def dispatch_interactive(
                             skip_reply=effective_skip,
                             received_task_ids=await get_received_task_ids(),
                             dedupe_scope=final_message_dedupe_key or f"{session_id}:{initial_msg.id}:{state.current_turn}",
+                            execution_scope=state.execution_scope,
                         )
                         state.messages.extend((call_message, result_message))
                         if effective_skip:
@@ -533,6 +544,7 @@ async def dispatch_interactive(
                                 tool_call_id=ai_msg.tool_calls[0].id,
                                 tool_name=ai_msg.tool_calls[0].name,
                                 execution_phase=state.checkpoint_state.execution_phase,
+                                execution_scope=state.execution_scope,
                                 skip_reply=True,
                             ).info(t(LOG_DISPATCHER_LLM_LOOP_TERMINATED_SKIP_REPLY, username=username, turn=state.current_turn))
                             return build_skip_reply_response()
@@ -544,6 +556,7 @@ async def dispatch_interactive(
                             tool_call_id=ai_msg.tool_calls[0].id,
                             tool_name=ai_msg.tool_calls[0].name,
                             execution_phase=state.checkpoint_state.execution_phase,
+                            execution_scope=state.execution_scope,
                         ).info(t(LOG_DISPATCHER_LLM_LOOP_TERMINATED, username=username, turn=state.current_turn))
                         continue
 
@@ -571,7 +584,7 @@ async def dispatch_interactive(
                     state.messages.append(ai_msg)
                     state.turn_messages.append(ai_msg)
 
-                    new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"]) if not ai_msg.tool_calls else None
+                    new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"]) if not ai_msg.tool_calls and state.execution_scope == END_SESSION_SCOPE_FOREGROUND else None
                     saved_msg = await save_assistant_message(
                         db,
                         session_id,

@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from app.core.constants import END_SESSION_TOOL_NAME
+from app.core.constants import (
+    END_SESSION_SCOPE_FOREGROUND,
+    END_SESSION_SCOPE_TASK,
+    END_SESSION_SCOPES,
+    END_SESSION_TOOL_NAME,
+)
 
 if TYPE_CHECKING:
     from app.models.message import InternalMessage
+
 
 END_SESSION_TOOL_SCHEMA = {
     "type": "function",
@@ -62,6 +68,36 @@ def is_skip_reply_signal(message: Any) -> bool:
     return arguments is not None and arguments.get("skip_reply") is True
 
 
+def resolve_end_session_scope(
+    *,
+    session_source: str | None = None,
+    call_context: str | None = None,
+    execution_scope: str | None = None,
+) -> str:
+    """Resolve the execution scope for end-session control."""
+    if execution_scope in END_SESSION_SCOPES:
+        return execution_scope
+
+    call_context_lower = call_context.lower() if isinstance(call_context, str) else ""
+    session_source_lower = session_source.lower() if isinstance(session_source, str) else ""
+
+    task_keywords = (
+        "task",
+        "subagent",
+        "agent",
+        "isolated",
+        "background",
+        "scheduled",
+        "auxiliary",
+        "worker",
+        "queue",
+    )
+    if any(keyword in call_context_lower for keyword in task_keywords) or any(keyword in session_source_lower for keyword in task_keywords):
+        return END_SESSION_SCOPE_TASK
+
+    return END_SESSION_SCOPE_FOREGROUND
+
+
 async def persist_end_session_control(
     db: Any,
     *,
@@ -72,6 +108,7 @@ async def persist_end_session_control(
     skip_reply: bool,
     received_task_ids: list[int],
     dedupe_scope: str,
+    execution_scope: str | None = None,
 ) -> tuple[InternalMessage, InternalMessage]:
     import hashlib
     import json
@@ -81,8 +118,10 @@ async def persist_end_session_control(
 
     call = message.tool_calls[0]
     received_result_task_ids = list(dict.fromkeys(task_id for task_id in received_task_ids if isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0))
+    resolved_scope = resolve_end_session_scope(execution_scope=execution_scope)
     provider_metadata = dict(message.provider_metadata or {})
     provider_metadata["internal_control"] = "end_session"
+    provider_metadata["execution_scope"] = resolved_scope
 
     call_message = message.model_copy(deep=True)
     call_message.content = None
@@ -144,4 +183,5 @@ __all__ = [
     "is_end_session_signal",
     "is_skip_reply_signal",
     "persist_end_session_control",
+    "resolve_end_session_scope",
 ]

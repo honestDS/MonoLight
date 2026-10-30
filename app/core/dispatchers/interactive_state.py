@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import (
     DEFAULT_SESSION_GOAL_MODE,
     DEFAULT_SESSION_MAX_TURNS,
+    END_SESSION_SCOPE_FOREGROUND,
     ERR_MEMORY_RECALL_BOUNDARY_INVALID,
     ERR_MEMORY_RECALL_STATUS_BOUNDARY_REQUIRED,
     ERR_MEMORY_RECALL_STATUS_INVALID,
@@ -16,6 +17,9 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASES,
 )
 from app.core.i18n import t
+from app.core.tools.end_session import (
+    resolve_end_session_scope,
+)
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.request_token_baseline import merge_session_cache_token_totals
@@ -55,6 +59,7 @@ class InteractiveDispatchState:
     additional_user_messages_context: _AdditionalUserMessagesContext
     execution_resume_state: dict[str, Any] | None
     checkpoint_state: _ExecutionCheckpointState
+    execution_scope: str = END_SESSION_SCOPE_FOREGROUND
     turn_messages: list[InternalMessage] = field(default_factory=list)
     files_to_user: list[str] = field(default_factory=list)
     is_first_iter: bool = True
@@ -112,7 +117,14 @@ def build_interactive_dispatch_state(
     execution_resume_state: dict[str, Any] | None = None,
     execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     initial_message_type: MessageType = MessageType.TEXT,
+    execution_scope: str | None = None,
+    call_context: str | None = None,
 ) -> InteractiveDispatchState:
+    resolved_execution_scope = resolve_end_session_scope(
+        session_source=session_source,
+        call_context=call_context,
+        execution_scope=execution_scope,
+    )
     turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
     files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
     is_first_iter = execution_resume_state is None
@@ -182,6 +194,7 @@ def build_interactive_dispatch_state(
         additional_user_messages_context=additional_user_messages_context,
         execution_resume_state=execution_resume_state,
         checkpoint_state=checkpoint_state,
+        execution_scope=resolved_execution_scope,
         turn_messages=turn_messages,
         files_to_user=files_to_user,
         is_first_iter=is_first_iter,

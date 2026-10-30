@@ -130,6 +130,8 @@ class StreamDispatcherMixin:
         actor_uid: str | None = None,
         actor_username: str | None = None,
         initial_message_type: MessageType = MessageType.TEXT,
+        execution_scope: str | None = None,
+        call_context: str | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=100)
         response_state: dict[str, str | None] = {"latest_response_id": None}
@@ -147,6 +149,8 @@ class StreamDispatcherMixin:
             "actor_uid": actor_uid,
             "actor_username": actor_username,
             "initial_message_type": initial_message_type,
+            "execution_scope": execution_scope,
+            "call_context": call_context,
             "session_id": session_id,
             "attachments": attachments,
             "active_tasks": active_tasks,

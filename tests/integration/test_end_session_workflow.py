@@ -3,6 +3,7 @@ import json
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -15,6 +16,7 @@ import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.providers.database as database_module
 from app.core.constants import (
+    END_SESSION_SCOPE_TASK,
     END_SESSION_TOOL_NAME,
     ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
     FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS,
@@ -33,6 +35,7 @@ from app.core.session_reply_queue import executor_lifecycle as executor_lifecycl
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask
 from app.models.channel import ModelChannel
@@ -2054,3 +2057,121 @@ async def test_end_session_context_is_loaded_for_model_in_subsequent_turn_while_
             include_tool_messages=True,
         )
     assert all(not _is_end_session_control_message(message) for message in visible_history_all)
+
+
+@pytest.mark.asyncio
+async def test_task_execution_scope_ends_session_without_pulling_foreground_user_messages(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = "end-session-task-scope"
+    initial_message = await _seed_conversation(session_factory, session_id)
+
+    new_msg = InternalMessage(role=MessageRole.USER, content="前台并发新消息")
+    batch = UserInputBatch(messages=(new_msg,), source_message_ids=(1,))
+    additional_user_messages_fetcher = AsyncMock(return_value=batch)
+
+    calls = _patch_llm(
+        monkeypatch,
+        [
+            _end_session_response(
+                call_id="task-end-session",
+                arguments={"skip_reply": False},
+            ),
+            _final_response("任务执行总结"),
+        ],
+        stream=False,
+    )
+
+    async with session_factory() as db:
+        result = await ChatDispatcher.dispatch(
+            db=db,
+            message=INITIAL_MESSAGE,
+            uid=UID,
+            session_id=session_id,
+            session_source="worker",
+            execution_scope=END_SESSION_SCOPE_TASK,
+            additional_user_messages_fetcher=additional_user_messages_fetcher,
+            persisted_initial_message=initial_message,
+            frozen_user_message_ids=[initial_message.id],
+            persisted_profile_id=PROFILE_ID,
+            show_tool_calls=True,
+        )
+
+    assert additional_user_messages_fetcher.await_count == 0
+    assert len(calls) == 2
+    assert result["choices"][0]["message"]["content"] == "任务执行总结"
+    assert result["choices"][0]["finish_reason"] == "stop"
+
+    control_messages = await _list_control_messages(session_factory, session_id)
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=False,
+        call_id="task-end-session",
+        call_arguments={"skip_reply": False},
+    )
+    assert len(control_messages) == 2
+    for message in control_messages:
+        assert isinstance(message.provider_metadata, dict)
+        assert message.provider_metadata["execution_scope"] == END_SESSION_SCOPE_TASK
+
+    messages = await _list_messages(session_factory, session_id)
+    assistant_text_messages = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+    assert len(assistant_text_messages) == 1
+    assert assistant_text_messages[0].content == "任务执行总结"
+
+
+@pytest.mark.asyncio
+async def test_task_execution_scope_ends_session_with_skip_reply(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime_database(monkeypatch, session_factory)
+    session_id = "end-session-task-scope-skip-reply"
+    initial_message = await _seed_conversation(session_factory, session_id)
+
+    calls = _patch_llm(
+        monkeypatch,
+        [
+            _end_session_response(
+                call_id="task-skip-end-session",
+                arguments={"skip_reply": True},
+            ),
+        ],
+        stream=False,
+    )
+
+    async with session_factory() as db:
+        result = await ChatDispatcher.dispatch(
+            db=db,
+            message=INITIAL_MESSAGE,
+            uid=UID,
+            session_id=session_id,
+            session_source="worker",
+            execution_scope=END_SESSION_SCOPE_TASK,
+            persisted_initial_message=initial_message,
+            frozen_user_message_ids=[initial_message.id],
+            persisted_profile_id=PROFILE_ID,
+            show_tool_calls=True,
+        )
+
+    assert len(calls) == 1
+    assert result.get("skip_reply") is True
+    assert result["choices"] == []
+
+    control_messages = await _list_control_messages(session_factory, session_id)
+    _assert_end_session_control_pair(
+        control_messages,
+        skip_reply=True,
+        call_id="task-skip-end-session",
+        call_arguments={"skip_reply": True},
+    )
+    assert len(control_messages) == 2
+    for message in control_messages:
+        assert isinstance(message.provider_metadata, dict)
+        assert message.provider_metadata.get("execution_scope") == END_SESSION_SCOPE_TASK
+
+    messages = await _list_messages(session_factory, session_id)
+    assistant_text_messages = [message for message in messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
+    assert not assistant_text_messages

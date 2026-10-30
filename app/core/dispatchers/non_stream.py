@@ -43,6 +43,8 @@ class NonStreamDispatcherMixin:
         actor_uid: str | None = None,
         actor_username: str | None = None,
         initial_message_type: MessageType = MessageType.TEXT,
+        execution_scope: str | None = None,
+        call_context: str | None = None,
     ):
         return await dispatch_interactive(
             db=db,
@@ -70,6 +72,8 @@ class NonStreamDispatcherMixin:
             actor_uid=actor_uid,
             actor_username=actor_username,
             initial_message_type=initial_message_type,
+            execution_scope=execution_scope,
+            call_context=call_context,
             dispatcher_mode="non_stream",
             validate_initial_message_before_save=cls.validate_initial_message_before_save,
         )
