@@ -48,13 +48,14 @@ app/
 ├── transformers/           # 外部模型协议转换
 ├── workers/                # 独立后台进程
 ├── handler.py              # 应用中间件、路由和异常处理装配
+├── https_certificates.py   # 网络通信安全凭证与根证书加载
 ├── tasks.py                # 后台任务定义
 └── warning_filters.py      # 运行时告警过滤
 ```
 
 ### 应用入口与 Worker
 
-`main.py` 提供 Web 应用入口；`start.py` 负责启动协调，先通过短生命周期初始化子进程完成系统初始化，再启动 Web 进程和长期后台进程。
+`main.py` 提供 Web 应用入口；`start.py` 负责启动协调，先通过短生命周期初始化子进程完成系统初始化，再启动 Web 进程和长期后台进程。后台服务启动时具备异常中断任务清理协调机制，确保历史未完成任务状态一致后再开展业务处理。
 
 ```text
 app/workers/
@@ -225,12 +226,17 @@ app/core/audit/
 ```text
 app/core/background_tasks/
 ├── __init__.py             # 后台任务能力导出
+├── external_work.py        # 外部异步操作挂起、恢复与结果收集
 ├── manager.py              # 后台任务管理
-├── recovery.py             # 后台任务恢复支持
+├── policy.py               # 异步执行策略判定
+├── recovery.py             # 后台任务恢复支持与启动检查
 ├── reply_trigger.py        # 任务回复协调
+├── result_delivery.py      # 外部与后台执行结果交付
 ├── runner.py               # 后台任务执行组件
 ├── scheduler.py            # 定时任务调度
-└── schemas.py              # 后台任务内部数据结构
+├── schemas.py              # 后台任务内部数据结构
+├── terminal_watch_coordinator.py # 终端观察协调与轮次结果处理
+└── terminal_watch_reply.py # 终端观察通知回传与回复路由
 ```
 
 ### 知识领域：`app/core/knowledge/`
@@ -240,6 +246,7 @@ app/core/knowledge/
 ├── __init__.py             # 知识领域能力导出
 ├── bindings.py             # Profile 的用户知识库绑定业务边界
 ├── deletion.py             # 用户知识库与托管知识库删除权限及生命周期边界
+├── documents.py            # 用户知识库文档导入与分块向量化处理
 ├── embedding_migration.py  # 用户知识库手动迁移与托管知识随长期记忆修订自动迁移
 ├── errors.py               # 托管知识领域异常
 ├── input_limits.py         # 知识正文字符、字节与输入边界校验
@@ -399,6 +406,8 @@ app/core/terminal/
 ├── session_runtime_core.py # PTY 启动、读取与状态转换
 ├── session_runtime_state.py # 会话运行状态、租约与进程身份同步
 ├── worker_coordinator.py   # Worker 认领、续租与资源回收协调
+├── watcher.py              # 终端输出变化轮询观察器
+├── watch_schema.py         # 终端观察请求数据结构
 ├── process_config.py       # 终端进程配置
 ├── pty_base.py             # PTY 抽象
 ├── pty_factory.py           # PTY 驱动创建
@@ -427,6 +436,7 @@ app/core/message_platforms/
 app/core/crud/
 ├── base.py                     # 通用数据访问抽象
 ├── account/
+│   ├── file_cleanup.py         # 用户文件清理记录数据访问
 │   └── user.py                 # 用户数据访问
 ├── audit/
 │   ├── audit.py                # 审计数据访问组合入口
@@ -474,15 +484,18 @@ app/core/crud/
 │   ├── message.py              # 消息数据访问
 │   ├── session.py              # 会话数据访问
 │   ├── event.py                # 会话事件数据访问
+│   ├── external_work.py        # 外部异步操作关联数据访问
 │   ├── todo.py                 # 会话 Todo 计划数据访问
 │   ├── reply_provider_usage.py # 回复 Provider Usage 持久化
 │   ├── reply_stream_event.py   # 回复流事件数据访问
-│   └── reply_work_item.py      # 回复工作数据访问
+│   ├── reply_work_item.py      # 回复工作数据访问
+│   └── terminal_watch.py       # 终端观察通知数据访问
 ├── system/
 │   ├── log.py                  # 系统日志数据访问
 │   └── setting.py              # 系统设置数据访问
 ├── task/
 │   ├── background.py           # 后台任务数据访问
+│   ├── interrupted.py          # 异常中断任务数据访问
 │   └── scheduled.py            # 定时任务数据访问
 ├── terminal/
 │   └── session.py              # 终端会话数据访问
@@ -545,6 +558,7 @@ app/core/tools/
 ├── __init__.py             # 工具注册入口
 ├── base.py                 # 工具抽象
 ├── background_tasks.py      # 后台任务查询与取消工具
+├── end_session.py          # 会话结束与回复控制工具
 ├── file_tool/              # 通用文本文件操作工具
 │   ├── __init__.py         # 工具能力导出
 │   ├── executor.py         # 单一 file_tool 执行入口
@@ -556,17 +570,19 @@ app/core/tools/
 │   ├── edit.py             # 字面文本精确编辑
 │   ├── patch.py            # 多 hunk 补丁解析与原子应用
 │   └── grep.py             # 文件或目录正则搜索
-├── web_tool.py             # 统一网页搜索与抓取工具
 ├── image_generation.py     # 图像生成工具
 ├── knowledge_base_query.py # 知识库查询与托管知识可信元数据
 ├── longterm_memory.py      # 统一记忆工具：个人记忆与托管知识维护
 ├── read_text_file.py       # 文本文件读取工具
 ├── read_multimodal_file.py # 多模态文件读取工具
+├── scheduled_tasks.py      # 定时任务管理工具
 ├── send_file_to_user.py    # 文件发送工具
+├── shell.py                # Shell 工具
 ├── skill.py                # 全局共享技能包只读目录访问工具
 ├── terminal.py             # 交互终端工具（terminal_tool，集成 read/write/resize/close 操作）
+├── terminal_watch.py       # 终端输出观察工具
 ├── todo.py                 # 当前会话 Todo 计划工具
-└── shell.py                # Shell 工具
+└── web_tool.py             # 统一网页搜索与抓取工具
 
 app/core/utils/
 ├── dispatcher/             # 对话分发辅助
@@ -574,6 +590,7 @@ app/core/utils/
 │   ├── append_new_user_messages.py # 追加当前轮新增用户消息
 │   ├── channel_call.py     # 模型渠道调用与回退
 │   ├── context_summary_checkpoint.py # 上下文总结检查点应用
+│   ├── external_work.py    # 外部工作挂起状态构建
 │   ├── fetch_and_merge_new_user_messages.py # 拉取并合并新增用户消息
 │   ├── handle_parallel_tool_limit.py # 并行工具调用上限处理
 │   ├── helpers.py          # 分发共用辅助
@@ -588,6 +605,8 @@ app/core/utils/
 │   ├── save_message.py     # 通用消息持久化
 │   ├── save_tool_response.py # 工具结果持久化
 │   ├── session_todo_snapshot.py # Todo 快照持久化与模型上下文恢复
+│   ├── terminal_watch_snapshot.py # 终端观察状态快照构建
+│   ├── tool_call_correction.py # 虚拟工具反馈消息构建
 │   ├── truncate_tool_result.py # 工具结果预算截断
 │   ├── user_input_batch.py # 用户输入批次结构
 │   └── validate_profile_and_cfg.py # Profile 配置校验
@@ -615,11 +634,13 @@ app/core/utils/
 ├── context_budget.py       # 上下文预算辅助
 ├── context_messages.py     # 上下文消息辅助
 ├── database_integrity.py   # 数据库完整性错误识别辅助
+├── file_access.py          # 用户临时文件安全访问辅助
 ├── http_proxy.py           # HTTP 代理辅助
 ├── message_assembler.py    # 消息组装辅助
 ├── message_parser.py       # 消息解析辅助
 ├── model_request_headers.py # 模型请求头辅助
 ├── llm_request_params.py   # 内部任务模型请求参数策略
+├── llm_request_policy.py   # 模型请求大小限制与超限拦截策略
 ├── operation_directories.py # 文件系统目录辅助
 ├── request_token_baseline.py # 请求令牌统计辅助
 ├── session.py              # 会话辅助
@@ -796,6 +817,7 @@ dashboard/src/views/
 ├── ChatView.vue            # 聊天页面
 ├── HistoryLogs.vue         # 历史日志页面
 ├── KnowledgeBase.vue       # 知识库管理页面
+├── KnowledgeEntriesView.vue # 知识库条目列表与编辑管理页面
 ├── LoginView.vue           # 登录页面
 ├── MemoriesView.vue        # 长期记忆数据、作业与运行状态页面，配置入口集中到 Profile 记忆设置
 ├── MessagePlatformsView.vue # 消息平台管理页面
@@ -864,3 +886,4 @@ database / vector storage / external model services
 - `memory` 与 `terminal` 继续作为独立长期进程运行，以保持资源和故障隔离。
 - Web 进程与 Worker 进程通过核心服务及持久化资源共享应用数据，不直接形成前端依赖。
 - 数据库、向量存储、日志、审计文件和临时文件构成运行期资源边界。
+- 长时间运行的外部操作（例如终端输出观察、非交互脚本执行等）通过后台工作进程独立观察，在满足业务观察条件时自动唤醒会话回复流程，实现耗时操作与主对话处理回路的解耦。
