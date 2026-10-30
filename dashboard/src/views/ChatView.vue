@@ -260,6 +260,7 @@
                           <span class="more-option-label more-option-label--profile">{{ $t('chat.more_options_profile') }}</span>
                           <el-select
                             class="more-option-profile-select"
+                            :teleported="false"
                             :model-value="currentSessionProfileDisplayId"
                             clearable
                             filterable
