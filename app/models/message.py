@@ -237,6 +237,7 @@ class Message(MessageBase, table=True):
         ),
     )
     id: int | None = Field(default=None, primary_key=True, index=True)
+    work_id: int | None = Field(default=None, index=True)
     reasoning_content: str | None = Field(default=None, sa_column=Column(Text))
     provider_metadata: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     profile_id: int = Field()

@@ -34,7 +34,6 @@ from app.core.constants import (
     TERMINAL_TOOL_NAME,
     TERMINAL_TOOL_OPERATIONS,
     TERMINAL_WATCH_TOOL_NAME,
-    TOOL_TIMEOUT_EXCLUDED_TOOL_NAMES,
 )
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.dispatchers.context import DispatchMode, build_dispatch_context
@@ -60,6 +59,7 @@ from app.core.tools import (
     tool_schema_has_parameter,
     validate_longterm_memory_arguments,
 )
+from app.core.tools.timeout import resolve_tool_claim_timeout, resolve_tool_execution_timeout
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.truncate_tool_result import (
     truncate_tool_messages_for_budget,
@@ -175,6 +175,22 @@ def _build_tool_error_result(tool_name: str, error_message: str) -> str:
             "status": "failed",
             "tool_name": tool_name,
             "error": error_message,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_tool_timeout_result(tool_name: str, timeout: float | None) -> str:
+    return json.dumps(
+        {
+            "status": "execution_unknown",
+            "tool_name": tool_name,
+            "error_code": ERR_TOOL_EXECUTION_TIMEOUT,
+            "error": t(
+                ERR_TOOL_EXECUTION_TIMEOUT,
+                tool_name=tool_name,
+                timeout=timeout,
+            ),
         },
         ensure_ascii=False,
     )
@@ -455,82 +471,75 @@ async def process_single_tool(
         tool_result = _build_background_task_queued_result(tool_name, task.id)
 
     if tool_result is None:
-        await ensure_session_reply_work_claim(db, commit=True)
         executor_cls = TOOL_EXECUTOR_MAP.get(tool_name)
         if executor_cls:
-            instance = executor_cls(
-                project_root=os.getcwd(),
-                uid=uid,
-            )
-            # 传递配置给 Executor
-            if hasattr(instance, "set_config"):
-                instance.set_config(cfg)
-
-            # 传递运行时上下文给 Executor
-            if hasattr(instance, "set_runtime_context"):
-                dispatch_context = build_dispatch_context(
-                    mode=dispatch_mode,
-                    source=dispatch_source,
-                    uid=uid,
-                    session_id=session_id,
-                    profile=profile,
-                    db=db,
-                    tool_call_id=tool_call.id,
-                    source_message_id=source_message_id,
-                    allowed_knowledge_base_ids=allowed_knowledge_base_ids,
-                )
-                instance.set_runtime_context(
-                    dispatch_context=dispatch_context,
-                )
-
-            execution_timeout = None if tool_name in TOOL_TIMEOUT_EXCLUDED_TOOL_NAMES else cfg.tool.tool_timeout
-            current_coro = instance.execute(**args)
-            task = asyncio.create_task(current_coro)
-            if active_tasks is not None:
-                active_tasks.add(task)
-
-            timeout_context = asyncio.timeout(execution_timeout)
-            start_time = time.perf_counter()
+            claim_timeout = resolve_tool_claim_timeout(cfg)
+            execution_timeout = resolve_tool_execution_timeout(tool_name, cfg)
+            claim_timeout_context = asyncio.timeout(claim_timeout)
+            task: asyncio.Task | None = None
             try:
-                async with timeout_context:
-                    tool_result = await task
-                if timeout_context.expired():
-                    raise TimeoutError
-            except asyncio.CancelledError:
-                duration = time.perf_counter() - start_time
-
-                get_logger("dispatcher").bind(
-                    uid=uid,
-                    session_id=session_id,
-                    tool_name=tool_name,
-                    duration=f"{duration:.3f}s",
-                ).warning(t("LOG_TOOL_ABORTED", tool_name=tool_name, duration=f"{duration:.3f}s"))
-
-                if not task.done():
-                    task.cancel()
-                raise
+                async with claim_timeout_context:
+                    await ensure_session_reply_work_claim(db, commit=True)
             except TimeoutError as exc:
-                if timeout_context.expired():
-                    tool_result = json.dumps(
-                        {
-                            "status": "execution_unknown",
-                            "tool_name": tool_name,
-                            "error_code": ERR_TOOL_EXECUTION_TIMEOUT,
-                            "error": t(
-                                ERR_TOOL_EXECUTION_TIMEOUT,
-                                tool_name=tool_name,
-                                timeout=execution_timeout,
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
+                if claim_timeout_context.expired():
+                    tool_result = _build_tool_timeout_result(tool_name, claim_timeout)
                 else:
                     tool_result = _build_tool_error_result(tool_name, format_exception_message(exc))
-            except Exception as exc:
-                tool_result = _build_tool_error_result(tool_name, format_exception_message(exc))
-            finally:
+            else:
+                instance = executor_cls(
+                    project_root=os.getcwd(),
+                    uid=uid,
+                )
+                if hasattr(instance, "set_config"):
+                    instance.set_config(cfg)
+                if hasattr(instance, "set_runtime_context"):
+                    dispatch_context = build_dispatch_context(
+                        mode=dispatch_mode,
+                        source=dispatch_source,
+                        uid=uid,
+                        session_id=session_id,
+                        profile=profile,
+                        db=db,
+                        tool_call_id=tool_call.id,
+                        source_message_id=source_message_id,
+                        allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                    )
+                    instance.set_runtime_context(dispatch_context=dispatch_context)
+
+                task = asyncio.create_task(instance.execute(**args))
                 if active_tasks is not None:
-                    active_tasks.discard(task)
+                    active_tasks.add(task)
+
+                timeout_context = asyncio.timeout(execution_timeout)
+                start_time = time.perf_counter()
+                try:
+                    async with timeout_context:
+                        tool_result = await task
+                    if timeout_context.expired():
+                        raise TimeoutError
+                except asyncio.CancelledError:
+                    duration = time.perf_counter() - start_time
+
+                    get_logger("dispatcher").bind(
+                        uid=uid,
+                        session_id=session_id,
+                        tool_name=tool_name,
+                        duration=f"{duration:.3f}s",
+                    ).warning(t("LOG_TOOL_ABORTED", tool_name=tool_name, duration=f"{duration:.3f}s"))
+
+                    if not task.done():
+                        task.cancel()
+                    raise
+                except TimeoutError as exc:
+                    if timeout_context.expired():
+                        tool_result = _build_tool_timeout_result(tool_name, execution_timeout)
+                    else:
+                        tool_result = _build_tool_error_result(tool_name, format_exception_message(exc))
+                except Exception as exc:
+                    tool_result = _build_tool_error_result(tool_name, format_exception_message(exc))
+                finally:
+                    if active_tasks is not None:
+                        active_tasks.discard(task)
         else:
             tool_result = json.dumps(
                 {"error": t(ERR_TOOL_NOT_REGISTERED, tool_name=tool_name)},

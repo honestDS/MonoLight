@@ -443,7 +443,7 @@ async def test_recover_expired_does_not_retry_foreground_work_with_active_audit_
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "work_type",
-    [SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.SCHEDULED_TASK_SUMMARY],
+    [SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.AGENT_WORK],
 )
 async def test_recover_expired_does_not_retry_background_or_scheduled_audit_work(db_session: AsyncSession, work_type):
     """租约恢复发现后台或定时审计绑定时不得重新入队。"""
@@ -483,12 +483,16 @@ async def test_recover_expired_does_not_retry_background_or_scheduled_audit_work
 @pytest.mark.asyncio
 async def test_scheduled_claim_respects_profile_limit_and_still_claims_other_work(db_session: AsyncSession):
     crud = CRUDSessionReplyWorkItem()
-    running = await enqueue(
-        crud,
+    running, _created = await crud.enqueue(
         db_session,
-        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        work_type=SessionReplyWorkType.AGENT_WORK,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
         source_id=1,
         dedupe_key="scheduled-task-summary:1",
+        commit=False,
     )
     running.status = SessionReplyWorkStatus.RUNNING
     running.locked_by = "worker-1"
@@ -499,7 +503,7 @@ async def test_scheduled_claim_respects_profile_limit_and_still_claims_other_wor
         uid="user-1",
         session_id="session-2",
         profile_id=1,
-        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        work_type=SessionReplyWorkType.AGENT_WORK,
         source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
         source_id=2,
         dedupe_key="scheduled-task-summary:2",

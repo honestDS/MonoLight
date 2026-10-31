@@ -357,7 +357,7 @@ async def _seed_stop_case(session_factory: async_sessionmaker[AsyncSession]) -> 
             uid="owner",
             profile_id=1,
             sequence_no=1,
-            work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+            work_type=SessionReplyWorkType.AGENT_WORK,
             source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
             source_id="scheduled-1",
             dedupe_key="stop-scheduled",

@@ -19,7 +19,7 @@ from app.core.prompts import TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 
 __all__ = ["route_terminal_auto_watch_reply", "prepare_terminal_auto_watch_resume"]
 
@@ -325,6 +325,7 @@ async def _persist_result_marker(
             type=MessageType.BACKGROUND_TASK_RESULT,
             content=json.dumps(payload, ensure_ascii=False),
             profile_id=work.profile_id,
+            work_id=work.id if work.work_type == SessionReplyWorkType.AGENT_WORK else None,
             is_processed=True,
             dedupe_key=dedupe_key,
         )
@@ -436,7 +437,7 @@ async def prepare_terminal_auto_watch_resume(
     if subscription_entries and _positive_int(work.id):
         session = await session_crud.get_by_session_id(db, work.session_id)
         if session is not None and session.uid == work.uid and session.profile_id == work.profile_id:
-            if bool(state.get("show_tool_calls")):
+            if work.work_type != SessionReplyWorkType.AGENT_WORK and bool(state.get("show_tool_calls")):
                 sequence_no = await session_reply_stream_event_crud.get_latest_sequence(db, work_id=work.id)
                 for slot, _subscription, payload, _marker in subscription_entries:
                     sequence_no += 1
@@ -456,7 +457,7 @@ async def prepare_terminal_auto_watch_resume(
                         },
                         commit=False,
                     )
-            if bool(state.get("show_tool_calls", True)) and session.show_tool_calls:
+            if work.work_type != SessionReplyWorkType.AGENT_WORK and bool(state.get("show_tool_calls", True)) and session.show_tool_calls:
                 latest_marker_id = max(marker.id for _slot, _subscription, _payload, marker in subscription_entries)
                 event_id = f"terminal-auto-watch-subscriptions:{work.id}:{latest_marker_id}"
                 await session_event_crud.publish(

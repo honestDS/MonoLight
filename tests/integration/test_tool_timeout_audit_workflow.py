@@ -946,6 +946,7 @@ async def test_interactive_unconfirmed_file_tool_timeout_persists_execution_unkn
                     db=db,
                     uid="timeout-owner",
                     session_id="timeout-session",
+                    execution_scope=None,
                     active_tasks=set(),
                     session_source="http",
                     final_message_dedupe_key=None,

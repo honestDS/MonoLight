@@ -53,6 +53,8 @@ def _active(status: Any) -> bool:
 
 
 def _same_scope(work: Any, current: Any) -> bool:
+    if (_status(work.work_type) == SessionReplyWorkType.AGENT_WORK.value or _status(current.work_type) == SessionReplyWorkType.AGENT_WORK.value) and work.id != current.id:
+        return False
     return work.uid == current.uid and work.session_id == current.session_id and work.profile_id == current.profile_id and _state(work).get("actor_uid", work.uid) == _state(current).get("actor_uid", current.uid)
 
 
@@ -159,7 +161,7 @@ async def receive_pending_external_results(
     current_state = _state(current)
     isolated_result_scope = isinstance(current_state.get("frozen_context_messages"), list) or _status(current.work_type) in {
         SessionReplyWorkType.BACKGROUND_TASK_RESUME.value,
-        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY.value,
+        SessionReplyWorkType.AGENT_WORK.value,
     }
     include_sibling_works = not isolated_result_scope
 

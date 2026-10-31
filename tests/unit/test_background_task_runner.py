@@ -289,6 +289,92 @@ async def test_background_tool_releases_database_connection_before_execution(mon
     assert execution_commit_counts == [1]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("swallow_cancel", [False, True])
+async def test_background_tool_uses_profile_tool_timeout(monkeypatch, swallow_cancel):
+    db = TrackingSession()
+    task = SimpleNamespace(
+        id=10,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        tool_name="ordinary_background_tool",
+        arguments={},
+        extra={},
+        status=runner_module.BackgroundTaskStatus.RUNNING,
+        auto_reply=False,
+        tool_call_id="call-1",
+    )
+    profile = SimpleNamespace(
+        id=3,
+        uid="user-1",
+        configs={
+            "tool": {
+                "tool_timeout": 0.03,
+                "enabled_tools": ["ordinary_background_tool"],
+            }
+        },
+    )
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    unknown_results = []
+
+    class Executor:
+        def __init__(self, **_kwargs):
+            return None
+
+        def set_config(self, _cfg):
+            return None
+
+        def set_runtime_context(self, **_kwargs):
+            return None
+
+        async def execute(self, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if swallow_cancel:
+                    return {"ok": True}
+                raise
+            finally:
+                finished.set()
+
+    async def get_task(_db, _task_id):
+        return task
+
+    async def get_profile(_db, _profile_id):
+        return profile
+
+    async def mark_execution_unknown(_db, **kwargs):
+        unknown_results.append(kwargs)
+        return True
+
+    async def no_resume(_task):
+        return None
+
+    monkeypatch.setattr(runner_module, "AsyncSessionLocal", lambda: _SingleSessionContext(db))
+    monkeypatch.setattr(runner_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(runner_module.profile_crud, "get", get_profile)
+    monkeypatch.setattr(runner_module.background_task_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(runner_module, "_resume_external_task_if_bound", no_resume)
+    monkeypatch.setitem(runner_module.TOOL_EXECUTOR_MAP, "ordinary_background_tool", Executor)
+
+    result = await asyncio.wait_for(
+        runner_module._execute_claimed_background_task(task.id, "worker-a", CapturingLog()),
+        timeout=0.3,
+    )
+
+    assert result is True
+    assert started.is_set()
+    assert finished.is_set()
+    assert len(unknown_results) == 1
+    assert unknown_results[0]["task_id"] == task.id
+    assert "0.03" in unknown_results[0]["error"]
+    assert unknown_results[0]["result"]["status"] == "execution_unknown"
+    assert unknown_results[0]["result"]["error_code"] == runner_module.ERR_TOOL_EXECUTION_TIMEOUT
+
+
 class _SingleSessionContext:
     def __init__(self, session):
         self.session = session

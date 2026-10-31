@@ -316,7 +316,7 @@ class CRUDSessionReplyWorkItem:
                 select(scheduled_running.c.id)
                 .where(
                     scheduled_running.c.profile_id == profile_id,
-                    scheduled_running.c.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY.value,
+                    scheduled_running.c.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN.value,
                     scheduled_running.c.status == SessionReplyWorkStatus.RUNNING.value,
                     scheduled_running.c.lock_until > now,
                 )
@@ -329,7 +329,7 @@ class CRUDSessionReplyWorkItem:
         ]
         scheduled_capacity_available = (
             or_(
-                SessionReplyWorkItem.work_type != SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+                SessionReplyWorkItem.source_type != SessionReplySourceType.SCHEDULED_TASK_RUN,
                 *scheduled_limit_conditions,
             )
             if scheduled_limits
@@ -438,7 +438,7 @@ class CRUDSessionReplyWorkItem:
         result = await db.execute(
             select(SessionReplyWorkItem.profile_id)
             .where(
-                SessionReplyWorkItem.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+                SessionReplyWorkItem.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN,
                 SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
             )
             .distinct()

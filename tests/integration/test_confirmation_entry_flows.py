@@ -1287,7 +1287,7 @@ async def test_websocket_approval_inherits_scheduled_source_checkpoint(
         session_id="session-1",
         profile_id=1,
         sequence_no=1,
-        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        work_type=SessionReplyWorkType.AGENT_WORK,
         source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
         source_id="scheduled-run-1",
         dedupe_key="scheduled-source-work",

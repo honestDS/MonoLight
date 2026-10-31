@@ -8,7 +8,7 @@ from typing import Any
 from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.background_tasks.external_work import resume_external_work_for_task
 from app.core.background_tasks.terminal_watch_coordinator import complete_terminal_watch_round
-from app.core.constants import BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED, TERMINAL_WATCH_TOOL_NAME
+from app.core.constants import BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_EXECUTION_TIMEOUT, ERR_TOOL_NOT_REGISTERED, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.task.background import background_task_crud
@@ -17,6 +17,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
+from app.core.tools.timeout import resolve_tool_execution_timeout
 from app.core.utils.background_task_result import build_background_task_failure_result, build_background_task_success_result, serialize_execution_summary
 from app.models.audit import AuditExecutionStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
@@ -349,7 +350,41 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
                 await db.commit()
             execute_invoked = True
             observation_in_progress = True
-            raw_result = await instance.execute(**args)
+            execution_timeout = resolve_tool_execution_timeout(task.tool_name, cfg)
+            timeout_context = asyncio.timeout(execution_timeout)
+            try:
+                async with timeout_context:
+                    raw_result = await instance.execute(**args)
+                if timeout_context.expired():
+                    raise TimeoutError
+            except TimeoutError:
+                if not timeout_context.expired():
+                    raise
+                timeout_error = t(
+                    ERR_TOOL_EXECUTION_TIMEOUT,
+                    tool_name=task.tool_name,
+                    timeout=execution_timeout,
+                )
+                timeout_result = {
+                    "status": "execution_unknown",
+                    "tool_name": task.tool_name,
+                    "error_code": ERR_TOOL_EXECUTION_TIMEOUT,
+                    "error": timeout_error,
+                }
+                marked = await background_task_crud.mark_execution_unknown(
+                    db,
+                    task_id=task_id,
+                    worker_id=worker,
+                    error=timeout_error,
+                    result=timeout_result,
+                    auto_reply=task.auto_reply,
+                )
+                if not marked:
+                    return False
+                await _resume_external_task_if_bound(task)
+                if binding is not None:
+                    await update_confirmation_message_status(db, audit_record_id=binding[0])
+                return True
             observation_in_progress = False
             await db.refresh(task)
             if task.status == BackgroundTaskStatus.CANCELLED:

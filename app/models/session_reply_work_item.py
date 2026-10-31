@@ -13,7 +13,7 @@ class SessionReplyWorkType(StrEnum):
     CONFIRMED_TOOL_EXECUTION = "confirmed_tool_execution"
     BACKGROUND_TOOL_SUMMARY = "background_tool_summary"
     BACKGROUND_TASK_RESUME = "background_task_resume"
-    SCHEDULED_TASK_SUMMARY = "scheduled_task_summary"
+    AGENT_WORK = "agent_work"
 
 
 class SessionReplySourceType(StrEnum):
@@ -21,6 +21,7 @@ class SessionReplySourceType(StrEnum):
     AUDIT_RECORD = "audit_record"
     BACKGROUND_TASK = "background_task"
     SCHEDULED_TASK_RUN = "scheduled_task_run"
+    PARENT_WORK = "parent_work"
     TOOL_RESULT = "tool_result"
 
 

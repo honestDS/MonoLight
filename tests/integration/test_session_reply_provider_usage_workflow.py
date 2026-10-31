@@ -183,7 +183,7 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
             _work(
                 work_id=7,
                 sequence_no=1,
-                work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+                work_type=SessionReplyWorkType.AGENT_WORK,
                 source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
                 source_id="6",
             ),
@@ -307,7 +307,7 @@ async def test_scheduled_interactive_usage_contributes_to_session_totals(
             _work(
                 work_id=7,
                 sequence_no=1,
-                work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+                work_type=SessionReplyWorkType.AGENT_WORK,
                 source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
                 source_id="6",
             )

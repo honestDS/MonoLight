@@ -28,9 +28,24 @@ from app.providers.database import ensure_sqlite_outer_transaction
 
 
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
-    async def persist(self, db: AsyncSession, *, message: Message, commit: bool = True) -> Message:
+    async def persist(
+        self,
+        db: AsyncSession,
+        *,
+        message: Message,
+        commit: bool = True,
+        update_session_activity: bool = True,
+    ) -> Message:
         db.add(message)
         await db.flush()
+        if update_session_activity and message.work_id is None:
+            await self._update_session_activity(db, message)
+        if commit:
+            await db.commit()
+            await db.refresh(message)
+        return message
+
+    async def _update_session_activity(self, db: AsyncSession, message: Message) -> None:
         await db.execute(
             update(ChatSession)
             .where(
@@ -61,10 +76,31 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             )
             .execution_options(synchronize_session=False)
         )
+
+    async def promote_work_message_to_session(
+        self,
+        db: AsyncSession,
+        *,
+        message_id: int,
+        work_id: int,
+        commit: bool = True,
+    ) -> bool:
+        message = await db.get(Message, message_id)
+        if message is None or message.work_id not in {work_id, None}:
+            return False
+        if message.work_id == work_id:
+            message.work_id = None
+            db.add(message)
+            await db.flush()
+        await self._update_session_activity(db, message)
+        session = await db.get(ChatSession, message.session_id)
+        if session is not None and session.uid == message.uid:
+            await db.refresh(session)
         if commit:
             await db.commit()
-            await db.refresh(message)
-        return message
+        else:
+            await db.flush()
+        return True
 
     async def create(
         self,
@@ -309,7 +345,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return db_obj
 
     async def get_by_session(self, db: AsyncSession, session_id: str, limit: int = 100) -> list[Message]:
-        result = await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.created_at.asc()).limit(limit))
+        result = await db.execute(select(Message).where(Message.session_id == session_id).where(Message.work_id.is_(None)).order_by(Message.created_at.asc()).limit(limit))
         return result.scalars().all()
 
     async def get_history(
@@ -325,7 +361,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         """
         用于内部上下文管理器获取对话上下文；按时间倒序排列以便 ContextManager 进行 Token 窗口截断
         """
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.work_id.is_(None)).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
         if before_id is not None:
             stmt = stmt.where(Message.id < before_id)
         if after_id is not None:
@@ -341,6 +377,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         *,
         session_id: str,
         uid: str,
+        work_id: int | None = None,
         after_id: int | None = None,
         before_id: int | None = None,
         page_after_id: int | None = None,
@@ -356,7 +393,8 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if page_after_id is not None:
             lower_bound = page_after_id if lower_bound is None else max(lower_bound, page_after_id)
 
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
+        work_filter = Message.work_id.is_(None) if work_id is None else Message.work_id == work_id
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(work_filter).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
         if lower_bound is not None:
             stmt = stmt.where(Message.id > lower_bound)
         if before_id is not None:
@@ -376,7 +414,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if not 1 <= limit <= 500:
             raise ValueError(t(ERR_VALUE_MUST_BE_BETWEEN, field="limit", minimum=1, maximum=500))
 
-        stmt = select(Message).where(Message.uid == uid).where(Message.type == MessageType.TEXT).where(Message.role.in_((MessageRole.USER, MessageRole.ASSISTANT))).where(Message.content.is_not(None)).where(func.trim(Message.content) != "")
+        stmt = select(Message).where(Message.uid == uid).where(Message.work_id.is_(None)).where(Message.type == MessageType.TEXT).where(Message.role.in_((MessageRole.USER, MessageRole.ASSISTANT))).where(Message.content.is_not(None)).where(func.trim(Message.content) != "")
         if before_message_id is not None:
             stmt = stmt.where(Message.id < before_message_id)
 
@@ -404,7 +442,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if page_before_id is not None:
             upper_bound = page_before_id if upper_bound is None else min(upper_bound, page_before_id)
 
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.work_id.is_(None)).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
         if after_id is not None:
             stmt = stmt.where(Message.id > after_id)
         if upper_bound is not None:
@@ -421,6 +459,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             select(Message)
             .where(Message.session_id == session_id)
             .where(Message.uid == uid)
+            .where(Message.work_id.is_(None))
             .where(Message.is_processed == False)  # noqa: E712
             .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
             .where(Message.type != MessageType.GUIDANCE)
@@ -448,6 +487,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             select(Message)
             .where(Message.session_id == session_id)
             .where(Message.uid == uid)
+            .where(Message.work_id.is_(None))
             .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
             .where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
             .where(
@@ -509,7 +549,17 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return result.all()
 
     async def get_latest_session_profile_id(self, db: AsyncSession, *, session_id: str, uid: str) -> int | None:
-        stmt = select(Message.profile_id).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT).order_by(Message.created_at.desc()).limit(1)
+        stmt = (
+            select(Message.profile_id)
+            .where(Message.session_id == session_id)
+            .where(Message.uid == uid)
+            .where(Message.work_id.is_(None))
+            .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
+            .where(Message.type != MessageType.GUIDANCE)
+            .where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
         result = await db.execute(stmt)
         return result.scalars().first()
 

@@ -34,6 +34,8 @@ async def _get_confirmation_tool_result_events(db: AsyncSession, record) -> list
     source_message = await message_crud.get(db, record.source_assistant_message_id)
     if source_message is None:
         return []
+    if source_message.work_id is not None:
+        return []
     try:
         source_internal = InternalMessage.model_validate_json(source_message.content or "{}")
     except ValueError:

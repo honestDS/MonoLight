@@ -399,7 +399,7 @@ async def test_read_and_deleted_results_converge_while_active_snapshots_remain(a
         db,
         session_id=running_unread_session.session_id,
         uid=running_unread_session.uid,
-        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        work_type=SessionReplyWorkType.AGENT_WORK,
         status=SessionReplyWorkStatus.RUNNING,
         sequence_no=2,
     )

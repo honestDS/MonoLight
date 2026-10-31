@@ -184,7 +184,7 @@ def get_bound_audit_execution(work: SessionReplyWorkItem) -> tuple[int, str] | N
     elif work_type in {
         SessionReplyWorkType.FOREGROUND_REPLY,
         SessionReplyWorkType.BACKGROUND_TASK_RESUME,
-        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        SessionReplyWorkType.AGENT_WORK,
     }:
         return None
     else:
@@ -204,7 +204,7 @@ def work_has_active_audit_execution(work: SessionReplyWorkItem) -> bool:
     if getattr(work, "work_type", None) not in {
         SessionReplyWorkType.FOREGROUND_REPLY,
         SessionReplyWorkType.BACKGROUND_TASK_RESUME,
-        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        SessionReplyWorkType.AGENT_WORK,
     }:
         return False
     state_value = getattr(work, "execution_state", None)

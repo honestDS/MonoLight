@@ -14,7 +14,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import get_current_locale, t
-from app.core.utils.dispatcher.frozen_context import capture_frozen_context_messages
+from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.message import (
     InternalMessage,
     Message,
@@ -306,39 +306,39 @@ class SessionReplyEnqueue:
             await db.flush()
         return work, created
 
-    async def enqueue_scheduled_summary(
+    async def enqueue_agent_work(
         self,
         db: AsyncSession,
         *,
         uid: str,
         session_id: str,
         profile_id: int,
-        scheduled_task_id: int,
-        trigger_message_id: int,
+        source_type: SessionReplySourceType,
+        source_id: str | int,
+        dedupe_key: str,
+        spec: AgentWorkSpec,
         commit: bool = True,
     ) -> tuple[SessionReplyWorkItem, bool]:
+        if spec.report_target != AgentWorkReportTarget.SESSION:
+            raise ValueError("parent-work AgentWork routing is not enabled yet")
         work, created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
             session_id=session_id,
             profile_id=profile_id,
-            work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
-            source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
-            source_id=trigger_message_id,
-            dedupe_key=f"scheduled-task-summary:{scheduled_task_id}:{trigger_message_id}",
+            work_type=SessionReplyWorkType.AGENT_WORK,
+            source_type=source_type,
+            source_id=source_id,
+            dedupe_key=dedupe_key,
             commit=False,
         )
         if created:
-            frozen_context_messages = await capture_frozen_context_messages(
-                db,
-                session_id=session_id,
-                uid=uid,
-                before_id=trigger_message_id,
-            )
             work.execution_state = {
                 **(work.execution_state or {}),
                 "language": get_current_locale(),
-                "frozen_context_messages": frozen_context_messages,
+                "execution_scope": spec.execution_scope,
+                "frozen_context_messages": [],
+                "agent_work": spec.model_dump(mode="json"),
             }
             db.add(work)
         if commit:

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.core.constants import (
-    END_SESSION_SCOPE_TASK,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_SESSION_REPLY_LEASE_LOST,
     ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
@@ -269,8 +268,9 @@ async def _dispatch_interactive_work(
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     await ensure_session_reply_work_claim(db, commit=True)
     execution_state = work.execution_state or {}
-    stream_requested = bool((work.execution_state or {}).get("stream_requested"))
-    context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))
+    is_agent_work = work.work_type == SessionReplyWorkType.AGENT_WORK
+    stream_requested = False if is_agent_work else bool((work.execution_state or {}).get("stream_requested"))
+    context_summary_events_requested = False if is_agent_work else bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
         next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work_id) + 1
     stream_state = _InteractiveWorkStreamEventState(
@@ -292,8 +292,8 @@ async def _dispatch_interactive_work(
         sequence_no=work_sequence_no,
     )
 
-    expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))
-    show_tool_calls = bool(execution_state.get("show_tool_calls", True))
+    expose_tool_call_content = False if is_agent_work else bool(execution_state.get("expose_tool_call_content", True))
+    show_tool_calls = False if is_agent_work else bool(execution_state.get("show_tool_calls", True))
 
     dispatch_kwargs = {
         "db": db,
@@ -308,17 +308,8 @@ async def _dispatch_interactive_work(
         "initial_message_type": {
             SessionReplyWorkType.BACKGROUND_TASK_RESUME: MessageType.BACKGROUND_TASK_RESULT,
             SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION: MessageType.AUDIT_DECISION,
-            SessionReplyWorkType.SCHEDULED_TASK_SUMMARY: MessageType.SCHEDULED_TASK_TRIGGER,
         }.get(work.work_type, MessageType.TEXT),
-        "execution_scope": execution_scope
-        or (
-            END_SESSION_SCOPE_TASK
-            if work.work_type
-            in {
-                SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
-            }
-            else None
-        ),
+        "execution_scope": execution_scope,
         "frozen_context_messages": frozen_context_messages,
         "history_before_id": history_before_id,
         "frozen_user_message_ids": frozen_user_message_ids,

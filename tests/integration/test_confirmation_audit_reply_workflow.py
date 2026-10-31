@@ -1485,7 +1485,7 @@ async def test_task_confirmation_inherits_source_work_checkpoint(
             uid="owner",
             session_id="session-confirmation",
             profile_id=1,
-            work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+            work_type=SessionReplyWorkType.AGENT_WORK,
             source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
             source_id="900",
             dedupe_key="scheduled-task-summary:source-checkpoint",

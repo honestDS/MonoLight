@@ -32,6 +32,7 @@ MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA = {
             "Absolute times and cron schedules are not supported. "
             "List all scheduled tasks, including disabled tasks, or delete a task only within the current user's current session. "
             "Deleting a task prevents future triggers but does not cancel already queued replies. "
+            "Triggered tasks execute as independent AgentWork and do not receive conversation history, so create messages must be self-contained. "
             "Ownership, session, and the current runtime profile come from runtime context and cannot be specified through arguments."
         ),
         "parameters": {
@@ -51,7 +52,11 @@ MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA = {
                 "message": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required only when operation=create; this request is sent to the LLM each time the task triggers.",
+                    "description": (
+                        "Required only when operation=create. This must be a self-contained instruction that can be executed later without conversation history. "
+                        "Resolve references such as 'that file' or 'the report above' at creation time into stable paths, IDs, or explicit details. "
+                        "This exact request is sent to an independent AgentWork each time the task triggers."
+                    ),
                 },
                 "interval_seconds": {
                     "type": "integer",

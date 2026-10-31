@@ -73,9 +73,9 @@ async def test_scheduled_task_claim_disables_session_synchronization(monkeypatch
         return SimpleNamespace(username="user")
 
     async def enqueue_summary(db, **kwargs):
-        return None
+        return SimpleNamespace(id=13), True
 
-    async def persist_message(db, *, message, commit=True):
+    async def persist_message(db, *, message, commit=True, update_session_activity=True):
         db.add(message)
         await db.flush()
         return message
@@ -83,7 +83,7 @@ async def test_scheduled_task_claim_disables_session_synchronization(monkeypatch
     monkeypatch.setattr(scheduler_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(scheduler_module.profile_crud, "get_with_relations", get_profile)
     monkeypatch.setattr(scheduler_module.user_crud, "get_by_uid", get_user)
-    monkeypatch.setattr(scheduler_module.session_reply_queue_manager, "enqueue_scheduled_summary", enqueue_summary)
+    monkeypatch.setattr(scheduler_module.session_reply_queue_manager, "enqueue_agent_work", enqueue_summary)
     monkeypatch.setattr(scheduler_module.message_crud, "persist", persist_message)
 
     await scheduler._dispatch_one_with_db(FakeDb(), scheduled_task)

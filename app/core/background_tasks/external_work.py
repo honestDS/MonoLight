@@ -30,7 +30,7 @@ from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
 __all__ = [
@@ -317,6 +317,7 @@ async def _persist_external_work_markers(
             is_processed=True,
             dedupe_key=f"background-task:{payload['task_id']}:result",
             commit=False,
+            work_id=work.id if work.work_type == SessionReplyWorkType.AGENT_WORK else None,
         )
         if not _is_positive_int(marker.id):
             raise ValueError(_unknown_error())
@@ -351,7 +352,7 @@ async def _persist_external_work_markers(
                 external_tool_result_message_ids.append(marker_id)
         state["external_tool_result_message_ids"] = external_tool_result_message_ids
 
-    if ui_only_marker_ids and bool(state.get("show_tool_calls", True)) and session.show_tool_calls:
+    if work.work_type != SessionReplyWorkType.AGENT_WORK and ui_only_marker_ids and bool(state.get("show_tool_calls", True)) and session.show_tool_calls:
         latest_marker_id = max(ui_only_marker_ids)
         results_event_id = f"external-work-results:{work.id}:{latest_marker_id}"
         await session_event_crud.publish(
@@ -519,7 +520,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 marker_payloads.append(marker_payload)
                 result_entries.append((slot, original_call_id, result_text))
 
-            if bool(state.get("show_tool_calls")):
+            if work.work_type != SessionReplyWorkType.AGENT_WORK and bool(state.get("show_tool_calls")):
                 sequence_no = await session_reply_stream_event_crud.get_latest_sequence(db, work_id=work.id)
                 for slot, original_call_id, result_text in result_entries:
                     sequence_no += 1

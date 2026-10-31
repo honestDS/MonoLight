@@ -10,7 +10,7 @@ from app.core.session_reply_queue.manager import (
 )
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.models.message import Message, MessageRole
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkType
+from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkItem, SessionReplyWorkType
 
 __all__ = [
     "SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX",
@@ -92,8 +92,10 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION: "confirmed_tool_execution",
         SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY: "background_task",
         SessionReplyWorkType.BACKGROUND_TASK_RESUME: "background_task",
-        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY: "scheduled_task",
+        SessionReplyWorkType.AGENT_WORK: "agent_work",
     }[work.work_type]
+    if work.work_type == SessionReplyWorkType.AGENT_WORK and work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN:
+        source = "scheduled_task"
     content = parse_assistant_files_content(_response_content(response))
     event = {
         "event_id": build_session_reply_work_event_id(work, error=error),
@@ -114,7 +116,7 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
     if work.work_type in {SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.BACKGROUND_TASK_RESUME}:
         event["task_id"] = int(work.source_id)
         event["background_task_id"] = int(work.source_id)
-    elif work.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY:
+    elif work.work_type == SessionReplyWorkType.AGENT_WORK and work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN:
         event["trigger_message_id"] = int(work.source_id)
     if isinstance(work.execution_state, dict) and work.execution_state.get("stream_requested"):
         event["_stream_requested"] = True

@@ -906,7 +906,7 @@ def test_audit_execution_binding_supports_foreground_and_confirmed_work():
         },
     )
     scheduled = SimpleNamespace(
-        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        work_type=SessionReplyWorkType.AGENT_WORK,
         source_id="trigger-message",
         execution_state={
             SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: {
@@ -1094,85 +1094,19 @@ async def test_execute_background_summary_is_auxiliary_and_disables_tools(monkey
 
 
 @pytest.mark.asyncio
-async def test_execute_scheduled_dispatches_interactive_work(monkeypatch):
+async def test_agent_work_external_resume_routes_back_to_agent_work_executor(monkeypatch):
     work = SimpleNamespace(
-        id=8,
-        sequence_no=2,
-        source_id="8",
-        uid="user-1",
-        session_id="session-1",
-        profile_id=3,
-        dedupe_key="reply-summary:8",
-        created_at=datetime(2026, 7, 20, 0, 0, 0),
-        execution_state={
-            "frozen_context_messages": [
-                InternalMessage(id=4, role=MessageRole.USER, content="frozen scheduled context").model_dump(mode="json", exclude_none=True),
-            ]
-        },
-    )
-    captured = {}
-    trigger_message = Message(
-        id=8,
-        uid=work.uid,
-        session_id=work.session_id,
-        profile_id=work.profile_id,
-        role=MessageRole.USER,
-        type=MessageType.SCHEDULED_TASK_TRIGGER,
-        content="定时指令内容",
-    )
-    interactive_response = {
-        **llm_response_payload(
-            "定时交互回复",
-            history=[
-                {"role": "assistant", "content": "保留历史", "created_at": 0.0},
-            ],
-            files=["temp/data.zip"],
-        ),
-        "llm_request_metadata": {"request_purpose": "main_dialogue"},
-    }
-
-    async def get_profile(db, profile_id):
-        return SimpleNamespace(id=3, uid="user-1")
-
-    async def get_message(db, message_id):
-        assert message_id == 8
-        return trigger_message
-
-    async def dispatch_interactive_work(db, **kwargs):
-        captured.update(kwargs)
-        return interactive_response
-
-    monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_replies_module.message_crud, "get", get_message)
-    monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", dispatch_interactive_work)
-
-    response = await executor_replies_module._execute_scheduled(object(), work, "worker-1")
-
-    assert response["content"] == "定时交互回复"
-    assert response["history"] == [{"role": "assistant", "content": "保留历史", "created_at": 0.0}]
-    assert response["files"] == ["temp/data.zip"]
-    assert response["llm_request_metadata"] == {"request_purpose": "main_dialogue"}
-    assert captured["execution_scope"] == "task"
-    assert captured["allow_additional_user_messages"] is False
-    assert captured["history_before_id"] == 8
-    assert captured["frozen_user_message_ids"] == [8]
-    assert [message.content for message in captured["frozen_context_messages"]] == ["frozen scheduled context"]
-
-
-@pytest.mark.asyncio
-async def test_scheduled_external_resume_routes_back_to_scheduled_executor(monkeypatch):
-    work = SimpleNamespace(
-        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        work_type=SessionReplyWorkType.AGENT_WORK,
         execution_state={"dispatcher_checkpoint": {"messages": []}, "external_resume_pending": True},
     )
     captured = {}
 
-    async def execute_scheduled(db, current_work, worker_id):
+    async def execute_agent_work(db, current_work, worker_id):
         captured["work"] = current_work
         captured["worker_id"] = worker_id
         return {"content": "resumed"}
 
-    monkeypatch.setattr(executor_replies_module, "_execute_scheduled", execute_scheduled)
+    monkeypatch.setattr(executor_replies_module, "execute_agent_work", execute_agent_work)
 
     response = await executor_replies_module._execute_external_resume(object(), work, "worker-1")
 

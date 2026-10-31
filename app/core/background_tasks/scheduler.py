@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from sqlalchemy import update
 
+from app.core.constants import END_SESSION_SCOPE_TASK
 from app.core.crud.account.user import user_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
@@ -12,8 +13,10 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.time import get_local_time
+from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.message import Message, MessageRole, MessageType
 from app.models.scheduled_task import ScheduledTask, ScheduledTaskStatus
+from app.models.session_reply_work_item import SessionReplySourceType
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -130,17 +133,32 @@ class ScheduledTaskScheduler:
             profile_id=profile.id,
             is_processed=True,
         )
-        await message_crud.persist(db, message=trigger_message, commit=False)
+        await message_crud.persist(
+            db,
+            message=trigger_message,
+            commit=False,
+            update_session_activity=False,
+        )
         await db.execute(update(ScheduledTask).where(ScheduledTask.id == scheduled_task.id).values(last_message_id=trigger_message.id).execution_options(synchronize_session=False))
-        await session_reply_queue_manager.enqueue_scheduled_summary(
+        scheduled_work, _created = await session_reply_queue_manager.enqueue_agent_work(
             db,
             uid=scheduled_task.uid,
             session_id=scheduled_task.session_id,
             profile_id=profile.id,
-            scheduled_task_id=scheduled_task.id,
-            trigger_message_id=trigger_message.id,
+            source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+            source_id=trigger_message.id,
+            dedupe_key=f"scheduled-agent-work:{scheduled_task.id}:{trigger_message.id}",
+            spec=AgentWorkSpec(
+                instruction=scheduled_task.message,
+                execution_scope=END_SESSION_SCOPE_TASK,
+                report_target=AgentWorkReportTarget.SESSION,
+                instruction_message_id=trigger_message.id,
+            ),
             commit=False,
         )
+        trigger_message.work_id = scheduled_work.id
+        db.add(trigger_message)
+        await db.flush()
         await db.commit()
         log.bind(message_id=trigger_message.id, profile_id=profile.id).info(t("LOG_SCHEDULED_TASK_MESSAGE_QUEUED"))
 

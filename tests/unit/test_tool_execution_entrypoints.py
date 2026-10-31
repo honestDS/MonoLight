@@ -11,6 +11,7 @@ from app.core.i18n.context import reset_current_locale
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
 from app.core.tools import TOOL_EXECUTOR_MAP, tool_requires_audit
 from app.core.tools.base import BaseExecutor
+from app.core.tools.timeout import resolve_tool_claim_timeout, resolve_tool_execution_timeout
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import Profile, ProfileConfig
@@ -294,6 +295,68 @@ async def test_regular_tool_timeout_uses_profile_value(monkeypatch, _isolated_to
         assert message.tool_execution_status == "succeeded"
     assert finished.is_set()
     assert active_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_file_tool_timeout_includes_claim_preflight(monkeypatch, _isolated_tool_dispatch):
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+    executor_started = asyncio.Event()
+
+    async def blocking_claim(_db, *, commit=False):
+        assert commit is True
+        claim_started.set()
+        await release_claim.wait()
+
+    async def execute_callback():
+        executor_started.set()
+        return "should-not-run"
+
+    monkeypatch.setattr(process_single_tool_module, "ensure_session_reply_work_claim", blocking_claim)
+    _install_fake_executor(monkeypatch, "file_tool", execute_callback)
+    active_tasks = set()
+
+    call_task = asyncio.create_task(
+        _call_tool(
+            "file_tool",
+            {"operation": "grep", "path": ".", "pattern": "scheduled_task"},
+            0.03,
+            active_tasks,
+        )
+    )
+    try:
+        await asyncio.wait_for(claim_started.wait(), timeout=1)
+        message = await asyncio.wait_for(call_task, timeout=0.3)
+    finally:
+        release_claim.set()
+        if not call_task.done():
+            call_task.cancel()
+        await asyncio.gather(call_task, return_exceptions=True)
+
+    payload = json.loads(message.content or "{}")
+    assert message.tool_execution_status == "execution_unknown"
+    assert payload["error_code"] == ERR_TOOL_EXECUTION_TIMEOUT
+    assert executor_started.is_set() is False
+    assert active_tasks == set()
+
+
+def test_tool_execution_timeout_policy_uses_profile_specific_values():
+    cfg = ProfileConfig.model_validate(
+        {
+            "tool": {
+                "tool_timeout": 12.5,
+                "image_generation_timeout": 345.0,
+            }
+        }
+    )
+
+    assert resolve_tool_execution_timeout("file_tool", cfg) == 12.5
+    assert resolve_tool_execution_timeout("web_tool", cfg) == 12.5
+    assert resolve_tool_execution_timeout("generate_image", cfg) == 345.0
+    assert resolve_tool_execution_timeout("execute_shell", cfg) is None
+    assert resolve_tool_execution_timeout("terminal_tool", cfg) is None
+    assert resolve_tool_execution_timeout("terminal_watch", cfg) is None
+    assert resolve_tool_claim_timeout(cfg) == 12.5
 
 
 @pytest.mark.asyncio

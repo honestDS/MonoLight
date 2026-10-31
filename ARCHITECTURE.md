@@ -375,13 +375,15 @@ app/core/session_reply_queue/
 ├── __init__.py             # 队列能力导出
 ├── consumer.py             # 回复工作消费
 ├── executor.py             # 回复工作执行兼容导出入口
+├── executor_agent_work.py  # 独立 AgentWork 指令执行与自身上下文恢复
 ├── executor_audit.py       # 审计执行绑定、未知终态与文件快照校验
 ├── executor_common.py      # 工作身份、去重键与响应事件辅助
 ├── executor_confirmed.py   # 已确认工具执行
 ├── executor_interactive.py # 交互式回复及流事件持久化
 ├── executor_lifecycle.py   # 工作执行、失败、重试与租约生命周期
 ├── executor_metadata.py    # 请求元数据与 Provider Usage 持久化
-├── executor_replies.py     # 前台、后台及定时回复执行
+├── executor_replies.py     # 前台与后台回复执行
+├── executor_resume.py      # 交互工作 checkpoint 工具结果恢复
 ├── manager.py              # 回复工作管理组合入口
 ├── manager_common.py       # 请求标识、事件与失败处理辅助
 ├── manager_enqueue.py      # 回复工作入队
@@ -389,6 +391,8 @@ app/core/session_reply_queue/
 ├── manager_result.py       # 工作结果等待与读取
 └── manager_submission.py   # 用户消息提交、确认判定与入队协调
 ```
+
+`AgentWork` 是独立指令执行的共用底层：输入必须自包含，不读取所属主会话的实时历史；执行过程复用会话回复队列、交互式工具循环、审计、外部工作恢复与自身 checkpoint。结果交付按目标区分：`SESSION` 面向主会话直接展示最终结果，计划任务使用这一途径，内部工具过程保留在自身工作上下文；`PARENT_WORK` 面向父工作独立上报，为未来子代理机制预留，当前不开放执行。定时任务通过 `AgentWork` 执行，未来其他独立 Agent 调度场景可复用同一执行边界。
 
 ### 交互终端：`app/core/terminal/`
 
@@ -692,6 +696,7 @@ app/models/
 ├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息发件箱模型
+├── agent_work.py           # 独立 AgentWork 执行契约与结果目标
 ├── profile.py              # Profile 模型及独立的对话、总结与辅助渠道配置
 ├── prompt.py               # Prompt 模型
 ├── scheduled_task.py       # 定时任务模型

@@ -13,14 +13,17 @@ from sqlmodel import select
 import app.core.audit.persistence as audit_persistence_module
 import app.core.audit.service as audit_service_module
 import app.core.background_tasks.external_work as external_work_module
+import app.core.background_tasks.result_delivery as result_delivery_module
 import app.core.background_tasks.scheduler as scheduler_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_generation as interactive_generation_module
+import app.core.message_platforms.notifier as notifier_module
+import app.core.session.notifier as session_notifier_module
+import app.core.session_reply_queue.executor_agent_work as executor_agent_work_module
 import app.core.session_reply_queue.executor_interactive as executor_interactive_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
-import app.core.session_reply_queue.executor_replies as executor_replies_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
 import app.models  # noqa: F401
 from app.core.background_tasks.external_work import resume_external_work_for_task
@@ -33,14 +36,19 @@ from app.core.constants import (
     SEND_FILE_TO_USER_TOOL_NAME,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
+from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
 from app.core.utils.context_summary import ContextSummaryTriggerMode
+from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
+from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.time import get_local_time
+from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.audit import AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.channel import ModelChannel
@@ -48,6 +56,7 @@ from app.models.message import InternalMessage, InternalResponse, InternalToolCa
 from app.models.profile import Profile, ProfileConfig
 from app.models.scheduled_task import ScheduledTask, ScheduledTaskStatus
 from app.models.session import ChatSession
+from app.models.session_event import SessionEvent
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
     SessionReplyWorkItem,
@@ -103,6 +112,473 @@ async def _create_due_run_once_scheduled_task(db: AsyncSession) -> ScheduledTask
     await db.commit()
     await db.refresh(scheduled_task)
     return scheduled_task
+
+
+async def _enqueue_scheduled_agent_work(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    trigger_message: Message,
+    scheduled_task_id: int = 1,
+) -> tuple[SessionReplyWorkItem, bool]:
+    assert trigger_message.id is not None
+    return await scheduler_module.session_reply_queue_manager.enqueue_agent_work(
+        db,
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+        source_id=trigger_message.id,
+        dedupe_key=f"scheduled-agent-work:{scheduled_task_id}:{trigger_message.id}",
+        spec=AgentWorkSpec(
+            instruction=str(trigger_message.content),
+            execution_scope=END_SESSION_SCOPE_TASK,
+            report_target=AgentWorkReportTarget.SESSION,
+            instruction_message_id=trigger_message.id,
+        ),
+        commit=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_work_resume_restores_its_hidden_tool_result_only(
+    db_session: AsyncSession,
+) -> None:
+    profile_id = 204
+    session_id = "agent-work-resume-hidden-result"
+    db_session.add_all(
+        [
+            User(uid=UID, username=UID),
+            Profile(id=profile_id, uid=UID, name="agent-work-resume-profile", configs=ProfileConfig.model_validate({}).model_dump()),
+            ChatSession(session_id=session_id, uid=UID, profile_id=profile_id),
+        ]
+    )
+    await db_session.commit()
+
+    work, _created = await scheduler_module.session_reply_queue_manager.enqueue_agent_work(
+        db_session,
+        uid=UID,
+        session_id=session_id,
+        profile_id=profile_id,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+        source_id="resume-trigger",
+        dedupe_key="scheduled-agent-work:resume-hidden-result",
+        spec=AgentWorkSpec(
+            instruction="恢复隐藏工具结果",
+            execution_scope=END_SESSION_SCOPE_TASK,
+            report_target=AgentWorkReportTarget.SESSION,
+        ),
+        commit=False,
+    )
+    await db_session.commit()
+    await db_session.refresh(work)
+    assert work.id is not None
+
+    worker_id = "agent-work-resume-worker"
+    claimed = await session_reply_work_item_crud.claim_next(db_session, worker_id=worker_id, lease_seconds=300)
+    assert claimed is not None
+    assert claimed.id == work.id
+    db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+
+    call_id = "resume-hidden-call"
+    assistant_call = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id=call_id, name="resume_tool", arguments={})],
+    )
+    saved_call = await save_assistant_message(db_session, session_id, UID, profile_id, assistant_call)
+    assert saved_call.id is not None
+
+    public_message = Message(
+        session_id=session_id,
+        uid=UID,
+        profile_id=profile_id,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="公开主会话消息",
+        is_processed=True,
+    )
+    await message_crud.persist(db_session, message=public_message, commit=False)
+
+    other_work, _created = await scheduler_module.session_reply_queue_manager.enqueue_agent_work(
+        db_session,
+        uid=UID,
+        session_id=session_id,
+        profile_id=profile_id,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+        source_id="other-agent-work",
+        dedupe_key="scheduled-agent-work:other-hidden-result",
+        spec=AgentWorkSpec(
+            instruction="其他工作",
+            execution_scope=END_SESSION_SCOPE_TASK,
+            report_target=AgentWorkReportTarget.SESSION,
+        ),
+        commit=False,
+    )
+    await db_session.flush()
+    await db_session.refresh(other_work)
+    assert other_work.id is not None
+    other_worker_id = "other-agent-work-worker"
+    other_work.status = SessionReplyWorkStatus.RUNNING
+    other_work.locked_by = other_worker_id
+    other_work.lock_until = int(get_local_time().timestamp()) + 300
+    db_session.add(other_work)
+    await db_session.commit()
+
+    db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (other_work.id, other_worker_id)
+    other_result = await save_tool_response(
+        db_session,
+        session_id,
+        UID,
+        profile_id,
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=call_id,
+            content="其他工作结果",
+            tool_execution_status="succeeded",
+        ),
+        [],
+        [],
+    )
+    assert other_result.id is not None
+
+    db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+    own_result = await save_tool_response(
+        db_session,
+        session_id,
+        UID,
+        profile_id,
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=call_id,
+            content="真实成功结果",
+            tool_execution_status="succeeded",
+        ),
+        [],
+        [],
+    )
+    assert own_result.id is not None
+
+    checkpoint_messages = [assistant_call.model_dump(mode="json", exclude_none=True)]
+    checkpoint = {
+        "messages": checkpoint_messages,
+        "turn_messages": list(checkpoint_messages),
+        "reload_history": False,
+    }
+    db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+    restored = await restore_interactive_tool_replies(
+        db_session,
+        work=work,
+        worker_id=worker_id,
+        checkpoint=checkpoint,
+    )
+
+    restored_messages = [InternalMessage.model_validate(message) for message in restored["messages"]]
+    restored_turn_messages = [InternalMessage.model_validate(message) for message in restored["turn_messages"]]
+    restored_results = [message for message in restored_messages if message.role == MessageRole.TOOL]
+    restored_turn_results = [message for message in restored_turn_messages if message.role == MessageRole.TOOL]
+    assert len(restored_results) == 1
+    assert restored_results[0].id == own_result.id
+    assert restored_results[0].content == "真实成功结果"
+    assert restored_results[0].tool_execution_status == "succeeded"
+    assert len(restored_turn_results) == 1
+    assert restored_turn_results[0].id == own_result.id
+    assert not any(message.tool_execution_status == "execution_unknown" for message in restored_results)
+
+    tool_rows = list(
+        (
+            await db_session.execute(
+                select(Message).where(
+                    Message.session_id == session_id,
+                    Message.type == MessageType.TOOL_RESULT,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {row.id for row in tool_rows} == {other_result.id, own_result.id}
+    assert [row.id for row in tool_rows if row.work_id == work.id] == [own_result.id]
+    saved_call_row = await db_session.get(Message, saved_call.id)
+    assert saved_call_row is not None
+    assert saved_call_row.work_id == work.id
+    public_history = await message_crud.get_history_paged(db_session, session_id=session_id, uid=UID)
+    assert all(message.work_id is None for message in public_history)
+    assert all(message.type not in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT} for message in public_history)
+
+    restored_again = await restore_interactive_tool_replies(
+        db_session,
+        work=work,
+        worker_id=worker_id,
+        checkpoint=restored,
+    )
+    assert restored_again == restored
+    tool_rows_after_repeat = list(
+        (
+            await db_session.execute(
+                select(Message).where(
+                    Message.session_id == session_id,
+                    Message.type == MessageType.TOOL_RESULT,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {row.id for row in tool_rows_after_repeat} == {row.id for row in tool_rows}
+
+
+@pytest.mark.asyncio
+async def test_work_owned_messages_stay_out_of_session_history_until_promoted(db_session: AsyncSession) -> None:
+    profile_id = 190
+    session_id = "work-owned-message-isolation"
+    db_session.add_all(
+        [
+            User(uid=UID, username=UID),
+            Profile(id=profile_id, uid=UID, name="work-owned-message-profile", configs=ProfileConfig.model_validate({}).model_dump()),
+        ]
+    )
+    await db_session.flush()
+    db_session.add(ChatSession(session_id=session_id, uid=UID, profile_id=profile_id))
+    await db_session.flush()
+
+    main_message = Message(
+        session_id=session_id,
+        uid=UID,
+        profile_id=profile_id,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="主会话消息",
+        is_processed=True,
+    )
+    await message_crud.persist(db_session, message=main_message, commit=False)
+    internal_message = Message(
+        session_id=session_id,
+        uid=UID,
+        profile_id=profile_id,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="AgentWork内部消息",
+        is_processed=True,
+        work_id=777,
+    )
+    await message_crud.persist(db_session, message=internal_message, commit=False)
+    await db_session.commit()
+
+    session = await db_session.get(ChatSession, session_id)
+    assert session is not None
+    assert session.latest_message_id == main_message.id
+
+    model_history = await message_crud.get_history_backward_by_id(db_session, session_id=session_id, uid=UID)
+    assert [message.content for message in reversed(model_history)] == ["主会话消息"]
+
+    ui_history = await message_crud.get_history_paged(db_session, session_id=session_id, uid=UID)
+    assert [message.content for message in reversed(ui_history)] == ["主会话消息"]
+
+    assert internal_message.id is not None
+    promoted = await message_crud.promote_work_message_to_session(
+        db_session,
+        message_id=internal_message.id,
+        work_id=777,
+        commit=True,
+    )
+    assert promoted is True
+
+    session = await db_session.get(ChatSession, session_id)
+    assert session is not None
+    assert session.latest_message_id == internal_message.id
+    ui_history = await message_crud.get_history_paged(db_session, session_id=session_id, uid=UID)
+    assert [message.content for message in reversed(ui_history)] == ["主会话消息", "AgentWork内部消息"]
+
+
+@pytest.mark.asyncio
+async def test_agent_work_saved_messages_are_hidden_until_promoted(db_session: AsyncSession) -> None:
+    profile_id = 191
+    session_id = "agent-work-save-isolation"
+    db_session.add_all(
+        [
+            User(uid=UID, username=UID),
+            Profile(id=profile_id, uid=UID, name="agent-work-save-profile", configs=ProfileConfig.model_validate({}).model_dump()),
+        ]
+    )
+    await db_session.flush()
+    db_session.add(ChatSession(session_id=session_id, uid=UID, profile_id=profile_id))
+    await db_session.flush()
+
+    main_message = Message(
+        session_id=session_id,
+        uid=UID,
+        profile_id=profile_id,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="主会话消息",
+        is_processed=True,
+    )
+    await message_crud.persist(db_session, message=main_message, commit=False)
+
+    work, _created = await session_reply_work_item_crud.enqueue(
+        db_session,
+        uid=UID,
+        session_id=session_id,
+        profile_id=profile_id,
+        work_type=SessionReplyWorkType.AGENT_WORK,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+        source_id="trigger-1",
+        dedupe_key="scheduled-agent-work:save-isolation",
+        commit=False,
+    )
+    await db_session.flush()
+    await db_session.refresh(work)
+    assert work.id is not None
+
+    worker_id = "worker-save-isolation"
+    work.status = SessionReplyWorkStatus.RUNNING
+    work.locked_by = worker_id
+    work.lock_until = int(get_local_time().timestamp()) + 300
+    db_session.add(work)
+    await db_session.commit()
+    await db_session.refresh(work)
+    db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+
+    saved = await save_assistant_message(
+        db_session,
+        session_id,
+        UID,
+        profile_id,
+        InternalMessage(role=MessageRole.ASSISTANT, content="计划任务结果"),
+    )
+    assert saved.id is not None
+
+    saved_row = await db_session.get(Message, saved.id)
+    assert saved_row is not None
+    assert saved_row.work_id == work.id
+
+    work_user_message = Message(
+        session_id=session_id,
+        uid=UID,
+        profile_id=profile_id,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="工作消息不应进入主会话输入队列",
+        is_processed=False,
+        work_id=work.id,
+    )
+    await message_crud.persist(db_session, message=work_user_message, commit=False)
+    unprocessed = await message_crud.get_unprocessed_messages(db_session, session_id=session_id, uid=UID)
+    assert work_user_message not in unprocessed
+
+    session = await db_session.get(ChatSession, session_id)
+    assert session is not None
+    assert session.latest_message_id == main_message.id
+    model_history = await message_crud.get_history_backward_by_id(db_session, session_id=session_id, uid=UID)
+    assert [message.content for message in reversed(model_history)] == ["主会话消息"]
+    ui_history = await message_crud.get_history_paged(db_session, session_id=session_id, uid=UID)
+    assert [message.content for message in reversed(ui_history)] == ["主会话消息"]
+
+    promoted = await message_crud.promote_work_message_to_session(
+        db_session,
+        message_id=saved.id,
+        work_id=work.id,
+        commit=True,
+    )
+    assert promoted is True
+    ui_history = await message_crud.get_history_paged(db_session, session_id=session_id, uid=UID)
+    assert [message.content for message in reversed(ui_history)] == ["主会话消息", "计划任务结果"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "report_target",
+    [AgentWorkReportTarget.SESSION, AgentWorkReportTarget.PARENT_WORK],
+    ids=["session-report", "parent-work-report"],
+)
+async def test_agent_work_failure_message_is_visible_in_session_history(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    report_target: AgentWorkReportTarget,
+) -> None:
+    profile_id = 192
+    session_id = "agent-work-failure-isolation"
+    db_session.add_all(
+        [
+            User(uid=UID, username=UID),
+            Profile(id=profile_id, uid=UID, name="agent-work-failure-profile", configs=ProfileConfig.model_validate({}).model_dump()),
+        ]
+    )
+    await db_session.flush()
+    db_session.add(ChatSession(session_id=session_id, uid=UID, profile_id=profile_id))
+    await db_session.flush()
+
+    work, _created = await session_reply_work_item_crud.enqueue(
+        db_session,
+        uid=UID,
+        session_id=session_id,
+        profile_id=profile_id,
+        work_type=SessionReplyWorkType.AGENT_WORK,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+        source_id="1",
+        dedupe_key="scheduled-agent-work:failure-isolation",
+        commit=False,
+    )
+    await db_session.flush()
+    await db_session.refresh(work)
+    assert work.id is not None
+    work.execution_state = {
+        "frozen_context_messages": [],
+        "agent_work": AgentWorkSpec(
+            instruction="计划任务失败",
+            execution_scope=END_SESSION_SCOPE_TASK,
+            report_target=report_target,
+            parent_work_id=1 if report_target == AgentWorkReportTarget.PARENT_WORK else None,
+        ).model_dump(mode="json"),
+    }
+    db_session.add(work)
+
+    worker_id = "worker-failure-isolation"
+    work.status = SessionReplyWorkStatus.RUNNING
+    work.locked_by = worker_id
+    work.lock_until = int(get_local_time().timestamp()) + 300
+    db_session.add(work)
+    await db_session.commit()
+
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(session_notifier_module, "AsyncSessionLocal", session_factory)
+
+    await executor_lifecycle_module.fail_session_reply_work(work.id, worker_id, "internal failure", user_error="计划任务失败")
+
+    async with session_factory() as verification_db:
+        error_message = (await verification_db.execute(select(Message).where(Message.session_id == session_id, Message.role == MessageRole.ERR))).scalars().one()
+        session = await verification_db.get(ChatSession, session_id)
+        assert session is not None
+        finished_work = await verification_db.get(SessionReplyWorkItem, work.id)
+        assert finished_work is not None
+        assert finished_work.status == SessionReplyWorkStatus.FAILED
+        model_history = await message_crud.get_history_backward_by_id(verification_db, session_id=session_id, uid=UID)
+        ui_history = await message_crud.get_history_paged(verification_db, session_id=session_id, uid=UID)
+        session_events = list((await verification_db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id, SessionEvent.uid == UID).order_by(SessionEvent.id.asc()))).scalars().all())
+
+    if report_target == AgentWorkReportTarget.SESSION:
+        assert error_message.work_id is None
+        assert session.latest_message_id == error_message.id
+        assert [message.id for message in reversed(model_history)] == [error_message.id]
+        assert [message.id for message in reversed(ui_history)] == [error_message.id]
+        assert len(session_events) == 1
+        error_event = session_events[0].event
+        assert error_event["type"] == "proactive_reply_error"
+        assert error_event["work_id"] == work.id
+        assert error_event["message_id"] == error_message.id
+        assert error_event["content"] == error_message.content
+        assert finished_work.event_sent is True
+    else:
+        assert error_message.work_id == work.id
+        assert session.latest_message_id is None
+        assert model_history == []
+        assert ui_history == []
+        assert session_events == []
+        assert finished_work.event_sent is False
 
 
 @pytest.mark.asyncio
@@ -425,9 +901,15 @@ async def test_scheduled_task_dispatch_enqueues_once_and_delete_preserves_queued
         assert queued_work.uid == UID
         assert queued_work.session_id == SESSION_ID
         assert queued_work.profile_id == PROFILE_ID
-        assert queued_work.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY
+        assert queued_work.work_type == SessionReplyWorkType.AGENT_WORK
         assert queued_work.status == SessionReplyWorkStatus.READY_FOR_LLM
-        assert isinstance(queued_work.execution_state.get("frozen_context_messages"), list)
+        assert trigger_message.work_id == queued_work.id
+        assert queued_work.execution_state.get("frozen_context_messages") == []
+        queued_spec = AgentWorkSpec.model_validate(queued_work.execution_state.get("agent_work"))
+        assert queued_spec.instruction == "Review deployment status"
+        assert queued_spec.execution_scope == END_SESSION_SCOPE_TASK
+        assert queued_spec.report_target == AgentWorkReportTarget.SESSION
+        assert queued_spec.instruction_message_id == trigger_message.id
 
     deleted = json.loads(await executor.execute("delete", task_id=task_id))
     assert deleted["status"] == "success"
@@ -529,7 +1011,7 @@ async def test_run_once_scheduled_task_is_not_redispatched_from_stale_snapshot_o
             .all()
         )
         assert len(work_items) == 1
-        assert work_items[0].work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY
+        assert work_items[0].work_type == SessionReplyWorkType.AGENT_WORK
         assert work_items[0].status == SessionReplyWorkStatus.READY_FOR_LLM
         assert work_items[0].uid == UID
         assert work_items[0].session_id == SESSION_ID
@@ -551,14 +1033,14 @@ async def test_run_once_scheduled_task_enqueue_failure_rolls_back_before_retry(
     monkeypatch.setattr(scheduler_module, "AsyncSessionLocal", session_factory)
     scheduler = scheduler_module.ScheduledTaskScheduler()
     queue_manager = scheduler_module.session_reply_queue_manager
-    original_enqueue = queue_manager.enqueue_scheduled_summary
+    original_enqueue = queue_manager.enqueue_agent_work
 
     async def enqueue_then_fail(*args: Any, **kwargs: Any) -> None:
         await original_enqueue(*args, **kwargs)
-        raise RuntimeError("simulated scheduled summary enqueue failure")
+        raise RuntimeError("simulated agent work enqueue failure")
 
-    monkeypatch.setattr(queue_manager, "enqueue_scheduled_summary", enqueue_then_fail)
-    with pytest.raises(RuntimeError, match="simulated scheduled summary enqueue failure"):
+    monkeypatch.setattr(queue_manager, "enqueue_agent_work", enqueue_then_fail)
+    with pytest.raises(RuntimeError, match="simulated agent work enqueue failure"):
         await scheduler._dispatch_one(task_id)
 
     async with session_factory() as reader:
@@ -595,7 +1077,7 @@ async def test_run_once_scheduled_task_enqueue_failure_rolls_back_before_retry(
         assert trigger_messages == []
         assert work_items == []
 
-    monkeypatch.setattr(queue_manager, "enqueue_scheduled_summary", original_enqueue)
+    monkeypatch.setattr(queue_manager, "enqueue_agent_work", original_enqueue)
     await scheduler._dispatch_one(task_id)
 
     async with session_factory() as reader:
@@ -631,7 +1113,7 @@ async def test_run_once_scheduled_task_enqueue_failure_rolls_back_before_retry(
             .all()
         )
         assert len(work_items) == 1
-        assert work_items[0].work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY
+        assert work_items[0].work_type == SessionReplyWorkType.AGENT_WORK
         assert work_items[0].status == SessionReplyWorkStatus.READY_FOR_LLM
 
 
@@ -874,11 +1356,25 @@ async def test_scheduled_task_mutation_waits_for_audit_confirmation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "saved_execution_state",
+    [
+        {},
+        {
+            "stream_requested": True,
+            "show_tool_calls": True,
+            "expose_tool_call_content": True,
+            "context_summary_events_requested": True,
+        },
+    ],
+    ids=["default-state", "saved-output-flags"],
+)
 async def test_scheduled_task_execution_supports_multiround_and_send_file(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    saved_execution_state: dict[str, Any],
 ) -> None:
     report_file = tmp_path / "scheduled_report.txt"
     report_file.write_text("scheduled task report content", encoding="utf-8")
@@ -965,6 +1461,11 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
     await db_session.refresh(work_item)
     db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_item.id, worker_id)
 
+    work_item.execution_state = {**(work_item.execution_state or {}), **saved_execution_state}
+    db_session.add(work_item)
+    await db_session.commit()
+    await db_session.refresh(work_item)
+
     calls: list[dict[str, Any]] = []
 
     async def mock_create_chat_completion(**kwargs: Any) -> InternalResponse:
@@ -974,6 +1475,7 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
             return InternalResponse(
                 message=InternalMessage(
                     role=MessageRole.ASSISTANT,
+                    content="内部工具中间正文",
                     tool_calls=[
                         InternalToolCall(
                             id="call-send-file-1",
@@ -1024,39 +1526,114 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
     monkeypatch.setattr(LLMClient, "generate", mock_create_chat_completion)
     monkeypatch.setattr(LLMClient, "create_chat_completion", mock_create_chat_completion, raising=False)
 
-    original_dispatch_interactive_work = executor_replies_module._dispatch_interactive_work
-    captured_dispatch_kwargs: dict[str, Any] = {}
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(session_notifier_module, "AsyncSessionLocal", session_factory)
 
-    async def spy_dispatch_interactive_work(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        captured_dispatch_kwargs.update(kwargs)
-        return await original_dispatch_interactive_work(*args, **kwargs)
+    assert work_item.id is not None
+    original_send_session_event = executor_lifecycle_module.send_session_event
+    send_attempts = 0
 
-    monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", spy_dispatch_interactive_work)
+    async def fail_first_send(uid: str, session_id: str, event: dict[str, Any]) -> None:
+        nonlocal send_attempts
+        send_attempts += 1
+        if send_attempts == 1:
+            raise RuntimeError("simulated notification failure")
+        await original_send_session_event(uid, session_id, event)
 
-    response = await executor_replies_module._execute_scheduled(db_session, work_item, worker_id)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", fail_first_send)
 
-    assert len(calls) == 3
-    assert len(response["files"]) == 1
-    sent_file_info = response["files"][0]
-    assert sent_file_info["name"] == report_file.name
-    assert "id" in sent_file_info
+    with pytest.raises(RuntimeError, match="simulated notification failure"):
+        await executor_lifecycle_module.execute_session_reply_work(work_item.id, worker_id)
+
+    async with session_factory() as failed_delivery_db:
+        failed_work = await failed_delivery_db.get(SessionReplyWorkItem, work_item.id)
+        assert failed_work is not None
+        assert failed_work.status == SessionReplyWorkStatus.RUNNING
+        assert failed_work.event_sent is False
+        assert failed_work.result_message_id is not None
+        failed_result = await failed_delivery_db.get(Message, failed_work.result_message_id)
+        assert failed_result is not None
+        assert failed_result.work_id is None
+        failed_session = await failed_delivery_db.get(ChatSession, session_id)
+        assert failed_session is not None
+        assert failed_session.latest_message_id == failed_result.id
+        failed_model_history = await message_crud.get_history_backward_by_id(failed_delivery_db, session_id=session_id, uid=UID)
+        failed_ui_history = await message_crud.get_history_paged(failed_delivery_db, session_id=session_id, uid=UID)
+        assert [message.id for message in reversed(failed_model_history)] == [failed_result.id]
+        assert [message.id for message in reversed(failed_ui_history)] == [failed_result.id]
+        assert list((await failed_delivery_db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id, SessionEvent.uid == UID))).scalars().all()) == []
+
+    retry_worker_id = "worker-multiround-retry"
+    async with session_factory() as retry_db:
+        assert await session_reply_work_item_crud.release_for_retry(
+            retry_db,
+            work_id=work_item.id,
+            worker_id=worker_id,
+            error="simulated notification failure",
+            delay_seconds=0,
+        )
+        reclaimed = await session_reply_work_item_crud.claim_next(retry_db, worker_id=retry_worker_id, lease_seconds=300)
+        assert reclaimed is not None
+        assert reclaimed.id == work_item.id
+
+    await executor_lifecycle_module.execute_session_reply_work(work_item.id, retry_worker_id)
 
     async with session_factory() as verification_db:
         persisted_messages = list((await verification_db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.id.asc()))).scalars().all())
+        persisted_work = await verification_db.get(SessionReplyWorkItem, work_item.id)
+        session_events = list((await verification_db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id, SessionEvent.uid == UID).order_by(SessionEvent.id.asc()))).scalars().all())
+        session = await verification_db.get(ChatSession, session_id)
+        model_history = await message_crud.get_history_backward_by_id(verification_db, session_id=session_id, uid=UID)
+        ui_history = await message_crud.get_history_paged(verification_db, session_id=session_id, uid=UID)
 
-    final_message = persisted_messages[-1]
+    assert persisted_work is not None
+    assert persisted_work.status == SessionReplyWorkStatus.SUCCEEDED
+    assert persisted_work.result_message_id is not None
+    saved_response = (persisted_work.execution_state or {}).get("response")
+    assert isinstance(saved_response, dict)
+    assert len(saved_response["files"]) == 1
+    sent_file_info = saved_response["files"][0]
+    assert sent_file_info["name"] == report_file.name
+    assert "id" in sent_file_info
+
+    final_message = next(message for message in persisted_messages if message.id == persisted_work.result_message_id)
     assert final_message.role == MessageRole.ASSISTANT
     assert final_message.type == MessageType.TEXT
+    assert final_message.work_id is None
     parsed_content = json.loads(final_message.content)
     assert parsed_content["type"] == "assistant_files"
     assert parsed_content["text"] == "报告已生成并发送完成"
     assert len(parsed_content["files"]) == 1
     assert parsed_content["files"][0]["id"] == sent_file_info["id"]
 
-    assert captured_dispatch_kwargs.get("execution_scope") == END_SESSION_SCOPE_TASK
+    assert len(calls) == 3
+    assert send_attempts == 2
+    assert session is not None
+    assert session.latest_message_id == final_message.id
+    assert [message.content for message in reversed(model_history)] == [final_message.content]
+    assert [message.content for message in reversed(ui_history)] == [final_message.content]
+
+    trigger_messages = [message for message in persisted_messages if message.type == MessageType.SCHEDULED_TASK_TRIGGER]
+    assert len(trigger_messages) == 1
+    assert trigger_messages[0].work_id == work_item.id
+    tool_messages = [message for message in persisted_messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT}]
+    assert tool_messages
+    assert all(message.work_id == work_item.id for message in tool_messages)
     control_messages = [msg for msg in persisted_messages if isinstance(msg.provider_metadata, dict) and msg.provider_metadata.get("internal_control") == END_SESSION_TOOL_NAME]
     assert len(control_messages) == 2
     assert all(msg.provider_metadata.get("execution_scope") == END_SESSION_SCOPE_TASK for msg in control_messages)
+
+    assert len(session_events) == 1
+    final_event = session_events[0].event
+    assert final_event["type"] == "proactive_reply"
+    assert final_event["work_id"] == work_item.id
+    assert final_event["content"] == "报告已生成并发送完成"
+    assert final_event["files"] == saved_response["files"]
+    assert final_event["message_id"] == final_message.id
+    assert final_event["history"] == []
+    assert "内部工具中间正文" not in json.dumps(final_event, ensure_ascii=False)
+    assert all(event.event.get("type") != "tool_results_update" for event in session_events)
 
 
 @pytest.mark.asyncio
@@ -1128,14 +1705,11 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
         executor_lifecycle_module,
         executor_metadata_module,
         external_work_module,
+        notifier_module,
+        session_notifier_module,
     ):
         monkeypatch.setattr(module, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
-
-    async def noop_send_session_event(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", noop_send_session_event)
 
     calls: list[dict[str, Any]] = []
 
@@ -1159,11 +1733,7 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
             )
         if len(calls) == 2:
             resumed_messages: list[InternalMessage] = kwargs["messages"]
-            assert any(
-                message.tool_calls
-                and any(tool_call.id == "scheduled-background-image" for tool_call in message.tool_calls)
-                for message in resumed_messages
-            )
+            assert any(message.tool_calls and any(tool_call.id == "scheduled-background-image" for tool_call in message.tool_calls) for message in resumed_messages)
             assert any("image-1" in str(message.content) for message in resumed_messages if message.content is not None)
             return InternalResponse(
                 message=InternalMessage(role=MessageRole.ASSISTANT, content="scheduled background completed"),
@@ -1181,13 +1751,17 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
 
     async with session_factory() as db:
         work = (
-            await db.execute(
-                select(SessionReplyWorkItem).where(
-                    SessionReplyWorkItem.session_id == session_id,
-                    SessionReplyWorkItem.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == session_id,
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                    )
                 )
             )
-        ).scalars().one()
+            .scalars()
+            .one()
+        )
         assert work.id is not None
         work_id = work.id
         claimed = await session_reply_work_item_crud.claim_next(db, worker_id="scheduled-background-worker-1", lease_seconds=300)
@@ -1201,6 +1775,8 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
         assert waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         works = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == session_id))).scalars().all())
         assert [item.id for item in works] == [work_id]
+        assert await message_crud.get_history_backward_by_id(db, session_id=session_id, uid=UID) == []
+        assert await message_crud.get_history_paged(db, session_id=session_id, uid=UID) == []
         task = (await db.execute(select(BackgroundTask).where(BackgroundTask.session_id == session_id))).scalars().one()
         assert task.id is not None
         assert task.auto_reply is False
@@ -1216,12 +1792,46 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
             auto_reply=False,
         )
 
+    async with session_factory() as db:
+        foreground_work, _created = await session_reply_work_item_crud.enqueue(
+            db,
+            uid=UID,
+            session_id=session_id,
+            profile_id=PROFILE_ID,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="temporary-foreground-input",
+            dedupe_key="foreground-message:scheduled-background-isolation",
+            commit=False,
+        )
+        await db.flush()
+        await db.refresh(foreground_work)
+        assert foreground_work.id is not None
+        foreground_worker_id = "scheduled-foreground-isolation-worker"
+        claimed_foreground = await session_reply_work_item_crud.claim_next(db, worker_id=foreground_worker_id, lease_seconds=300)
+        assert claimed_foreground is not None
+        assert claimed_foreground.id == foreground_work.id
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (foreground_work.id, foreground_worker_id)
+        assert await result_delivery_module.receive_pending_external_results(db, uid=UID, session_id=session_id, profile_id=PROFILE_ID) == []
+        task = await db.get(BackgroundTask, task_id)
+        assert task is not None
+        reply_owner = task.extra.get("reply_owner") if isinstance(task.extra, dict) else None
+        assert not (isinstance(reply_owner, dict) and reply_owner.get("work_id") == foreground_work.id)
+        assert await session_reply_work_item_crud.cancel_session(db, session_id=session_id, uid=UID, interactive_only=True) == 1
+        cancelled_foreground = await db.get(SessionReplyWorkItem, foreground_work.id)
+        assert cancelled_foreground is not None
+        assert cancelled_foreground.status == SessionReplyWorkStatus.CANCELLED
+
     assert await resume_external_work_for_task(task_id) is True
 
     async with session_factory() as db:
         resumed = await db.get(SessionReplyWorkItem, work_id)
         assert resumed is not None
         assert resumed.status == SessionReplyWorkStatus.READY_FOR_LLM
+        assert await message_crud.get_history_backward_by_id(db, session_id=session_id, uid=UID) == []
+        assert await message_crud.get_history_paged(db, session_id=session_id, uid=UID) == []
+        resumed_events = list((await db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id, SessionEvent.uid == UID))).scalars().all())
+        assert all(event.event.get("type") != "tool_results_update" for event in resumed_events)
         claimed = await session_reply_work_item_crud.claim_next(db, worker_id="scheduled-background-worker-2", lease_seconds=300)
         assert claimed is not None and claimed.id == work_id
 
@@ -1231,10 +1841,39 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
         finished = await db.get(SessionReplyWorkItem, work_id)
         assert finished is not None
         assert finished.status == SessionReplyWorkStatus.SUCCEEDED
-        assert len(list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == session_id))).scalars().all())) == 1
+        agent_works = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == session_id,
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [item.id for item in agent_works] == [work_id]
         result_message = await db.get(Message, finished.result_message_id)
         assert result_message is not None
         assert result_message.content == "scheduled background completed"
+        assert result_message.work_id is None
+        session = await db.get(ChatSession, session_id)
+        assert session is not None
+        assert session.latest_message_id == result_message.id
+        model_history = await message_crud.get_history_backward_by_id(db, session_id=session_id, uid=UID)
+        ui_history = await message_crud.get_history_paged(db, session_id=session_id, uid=UID)
+        assert [message.content for message in reversed(model_history)] == [result_message.content]
+        assert [message.content for message in reversed(ui_history)] == [result_message.content]
+        session_events = list((await db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id, SessionEvent.uid == UID).order_by(SessionEvent.id.asc()))).scalars().all())
+
+    assert [event.event["type"] for event in session_events] == ["work_ready", "proactive_reply"]
+    assert all(event.event.get("type") != "tool_results_update" for event in session_events)
+    final_event = session_events[-1].event
+    assert final_event["work_id"] == work_id
+    assert final_event["content"] == "scheduled background completed"
+    assert final_event["files"] == []
+    assert final_event["history"] == []
 
     assert len(calls) == 2
     for call in calls:
@@ -1242,6 +1881,96 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
         assert IMAGE_GENERATION_TOOL_NAME in tool_names
         assert MANAGE_SCHEDULED_TASKS_TOOL_NAME not in tool_names
         assert MANAGE_TODO_TOOL_NAME not in tool_names
+
+
+@pytest.mark.asyncio
+async def test_scheduled_agent_work_skip_reply_completes_silently_without_affecting_foreground(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "scheduled-agent-skip-reply-session"
+    db_session.add_all(
+        [
+            User(uid=UID, username=UID),
+            Profile(id=PROFILE_ID, uid=UID, name="scheduled-agent-skip-reply-profile", configs=ProfileConfig.model_validate({}).model_dump()),
+            ChatSession(session_id=session_id, uid=UID, profile_id=PROFILE_ID),
+        ]
+    )
+    await db_session.commit()
+
+    agent_work, _created = await scheduler_module.session_reply_queue_manager.enqueue_agent_work(
+        db_session,
+        uid=UID,
+        session_id=session_id,
+        profile_id=PROFILE_ID,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+        source_id="skip-reply-trigger",
+        dedupe_key="scheduled-agent-work:skip-reply",
+        spec=AgentWorkSpec(
+            instruction="无需回复的计划任务",
+            execution_scope=END_SESSION_SCOPE_TASK,
+            report_target=AgentWorkReportTarget.SESSION,
+        ),
+        commit=False,
+    )
+    await db_session.commit()
+    await db_session.refresh(agent_work)
+    assert agent_work.id is not None
+
+    worker_id = "scheduled-agent-skip-reply-worker"
+    claimed_agent_work = await session_reply_work_item_crud.claim_next(db_session, worker_id=worker_id, lease_seconds=300)
+    assert claimed_agent_work is not None
+    assert claimed_agent_work.id == agent_work.id
+    claimed_agent_work.execution_state = {
+        **(claimed_agent_work.execution_state or {}),
+        "response": {
+            "skip_reply": True,
+            "choices": [],
+            "history": [],
+            "files": None,
+        },
+    }
+    db_session.add(claimed_agent_work)
+
+    foreground_work, _created = await session_reply_work_item_crud.enqueue(
+        db_session,
+        uid=UID,
+        session_id=session_id,
+        profile_id=PROFILE_ID,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="parallel-foreground-input",
+        dedupe_key="foreground-message:parallel-skip-reply",
+        commit=False,
+    )
+    await db_session.commit()
+    await db_session.refresh(foreground_work)
+    assert foreground_work.id is not None
+
+    for module in (executor_lifecycle_module, notifier_module, session_notifier_module):
+        monkeypatch.setattr(module, "AsyncSessionLocal", session_factory)
+
+    await executor_lifecycle_module.execute_session_reply_work(agent_work.id, worker_id)
+
+    async with session_factory() as verification_db:
+        finished = await verification_db.get(SessionReplyWorkItem, agent_work.id)
+        assert finished is not None
+        assert finished.status == SessionReplyWorkStatus.SUCCEEDED
+        assert finished.result_message_id is None
+        session = await verification_db.get(ChatSession, session_id)
+        assert session is not None
+        assert session.latest_message_id is None
+        model_history = await message_crud.get_history_backward_by_id(verification_db, session_id=session_id, uid=UID)
+        ui_history = await message_crud.get_history_paged(verification_db, session_id=session_id, uid=UID)
+        assert model_history == []
+        assert ui_history == []
+        session_events = list((await verification_db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id, SessionEvent.uid == UID))).scalars().all())
+        assert session_events == []
+        foreground_after = await verification_db.get(SessionReplyWorkItem, foreground_work.id)
+        assert foreground_after is not None
+        assert foreground_after.status == SessionReplyWorkStatus.READY_FOR_LLM
+        assert foreground_after.result_message_id is None
 
 
 @pytest.mark.asyncio
@@ -1303,14 +2032,12 @@ async def test_scheduled_task_execution_excludes_scheduled_and_todo_tools(
     await db_session.flush()
     await db_session.refresh(trigger_message)
 
-    work_item, _ = await scheduler_module.session_reply_queue_manager.enqueue_scheduled_summary(
+    work_item, _ = await _enqueue_scheduled_agent_work(
         db_session,
         uid=UID,
         session_id=session_id,
         profile_id=PROFILE_ID,
-        scheduled_task_id=1,
-        trigger_message_id=trigger_message.id,
-        commit=False,
+        trigger_message=trigger_message,
     )
     await db_session.flush()
     await db_session.refresh(work_item)
@@ -1344,7 +2071,7 @@ async def test_scheduled_task_execution_excludes_scheduled_and_todo_tools(
     monkeypatch.setattr(LLMClient, "generate", mock_create_chat_completion)
     monkeypatch.setattr(LLMClient, "create_chat_completion", mock_create_chat_completion, raising=False)
 
-    response = await executor_replies_module._execute_scheduled(db_session, work_item, worker_id)
+    response = await executor_agent_work_module.execute_agent_work(db_session, work_item, worker_id)
 
     assert captured_tools
     captured_tool_names = {tool["function"]["name"] for tool in captured_tools}
@@ -1355,7 +2082,7 @@ async def test_scheduled_task_execution_excludes_scheduled_and_todo_tools(
 
 
 @pytest.mark.asyncio
-async def test_scheduled_task_history_boundary_isolates_later_triggers(
+async def test_scheduled_agent_work_ignores_all_conversation_history(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -1449,14 +2176,12 @@ async def test_scheduled_task_history_boundary_isolates_later_triggers(
     session.context_summary_message_id = trigger_b.id
     db_session.add(session)
 
-    work_item_a, _ = await scheduler_module.session_reply_queue_manager.enqueue_scheduled_summary(
+    work_item_a, _ = await _enqueue_scheduled_agent_work(
         db_session,
         uid=UID,
         session_id=session_id,
         profile_id=profile_id,
-        scheduled_task_id=1,
-        trigger_message_id=trigger_a.id,
-        commit=False,
+        trigger_message=trigger_a,
     )
     await db_session.flush()
     await db_session.refresh(work_item_a)
@@ -1485,24 +2210,22 @@ async def test_scheduled_task_history_boundary_isolates_later_triggers(
     monkeypatch.setattr(LLMClient, "generate", mock_generate)
     monkeypatch.setattr(LLMClient, "create_chat_completion", mock_generate, raising=False)
 
-    response = await executor_replies_module._execute_scheduled(db_session, work_item_a, worker_id)
+    response = await executor_agent_work_module.execute_agent_work(db_session, work_item_a, worker_id)
 
     assert len(captured_calls) == 1
     llm_messages: list[InternalMessage] = captured_calls[0]["messages"]
     message_contents = [str(m.content) for m in llm_messages if m.content]
 
     assert any("A任务触发指令" in content for content in message_contents)
-    assert any("历史前置消息" in content for content in message_contents)
+    assert not any("历史前置消息" in content for content in message_contents)
     assert not any("B任务指令" in content for content in message_contents)
     assert not any("共享总结已覆盖" in content for content in message_contents)
-    for m in llm_messages:
-        if m.id is not None:
-            assert m.id <= trigger_a.id
+    assert {m.id for m in llm_messages if m.id is not None} == {trigger_a.id}
     assert response["content"] == "A任务处理完毕"
 
 
 @pytest.mark.asyncio
-async def test_scheduled_task_history_boundary_isolates_later_triggers_on_reload_history_resume(
+async def test_scheduled_agent_work_reload_history_resume_stays_context_free(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -1590,14 +2313,12 @@ async def test_scheduled_task_history_boundary_isolates_later_triggers_on_reload
     assert trigger_a.id is not None and trigger_b.id is not None
     assert trigger_a.id < trigger_b.id
 
-    work, _ = await scheduler_module.session_reply_queue_manager.enqueue_scheduled_summary(
+    work, _ = await _enqueue_scheduled_agent_work(
         db_session,
         uid=UID,
         session_id=session_id,
         profile_id=profile_id,
-        scheduled_task_id=1,
-        trigger_message_id=trigger_a.id,
-        commit=False,
+        trigger_message=trigger_a,
     )
     await db_session.flush()
     await db_session.refresh(work)
@@ -1634,19 +2355,16 @@ async def test_scheduled_task_history_boundary_isolates_later_triggers_on_reload
     monkeypatch.setattr(LLMClient, "generate", mock_generate)
     monkeypatch.setattr(LLMClient, "create_chat_completion", mock_generate, raising=False)
 
-    response = await executor_replies_module._execute_scheduled(db_session, work, worker_id)
+    response = await executor_agent_work_module.execute_agent_work(db_session, work, worker_id)
 
     assert len(captured_calls) == 1
     llm_messages: list[InternalMessage] = captured_calls[0]["messages"]
     message_contents = [str(m.content) for m in llm_messages if m.content]
 
     assert any("A任务触发指令" in content for content in message_contents)
-    assert any("历史前置消息" in content for content in message_contents)
+    assert not any("历史前置消息" in content for content in message_contents)
     assert not any("B任务指令特征词" in content for content in message_contents)
-    assert not any(m.id == trigger_b.id for m in llm_messages if m.id is not None)
-    for m in llm_messages:
-        if m.id is not None:
-            assert m.id <= trigger_a.id
+    assert {m.id for m in llm_messages if m.id is not None} == {trigger_a.id}
     assert response["content"] == "A任务处理完毕"
 
 
@@ -1818,14 +2536,12 @@ async def test_scheduled_task_does_not_hijack_foreground_external_results(
     assert scheduled_trigger.id is not None and bg_result_message.id is not None
     assert bg_result_message.id > scheduled_trigger.id
 
-    scheduled_work, _ = await scheduler_module.session_reply_queue_manager.enqueue_scheduled_summary(
+    scheduled_work, _ = await _enqueue_scheduled_agent_work(
         db_session,
         uid=UID,
         session_id=session_id,
         profile_id=profile_id,
-        scheduled_task_id=1,
-        trigger_message_id=scheduled_trigger.id,
-        commit=False,
+        trigger_message=scheduled_trigger,
     )
     await db_session.flush()
     await db_session.refresh(scheduled_work)
@@ -1854,7 +2570,7 @@ async def test_scheduled_task_does_not_hijack_foreground_external_results(
     monkeypatch.setattr(LLMClient, "generate", mock_generate)
     monkeypatch.setattr(LLMClient, "create_chat_completion", mock_generate, raising=False)
 
-    response = await executor_replies_module._execute_scheduled(db_session, scheduled_work, worker_id)
+    response = await executor_agent_work_module.execute_agent_work(db_session, scheduled_work, worker_id)
 
     assert len(captured_calls) == 1
     llm_messages: list[InternalMessage] = captured_calls[0]["messages"]
