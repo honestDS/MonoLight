@@ -282,7 +282,7 @@ class CRUDSessionReplyWorkItem:
         db: AsyncSession,
         work: SessionReplyWorkItem,
     ) -> bool:
-        if work.id is None or work.sequence_no is None:
+        if work.id is None or work.sequence_no is None or work.work_type == SessionReplyWorkType.AGENT_WORK:
             return False
         result = await db.execute(
             select(SessionReplyWorkItem.id)
@@ -290,6 +290,7 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyWorkItem.uid == work.uid,
                 SessionReplyWorkItem.session_id == work.session_id,
                 SessionReplyWorkItem.sequence_no < work.sequence_no,
+                SessionReplyWorkItem.work_type != SessionReplyWorkType.AGENT_WORK,
                 SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
                 SessionReplyWorkItem.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
             )
@@ -341,20 +342,28 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
                 SessionReplyWorkItem.available_at <= now,
                 scheduled_capacity_available,
-                ~exists(
-                    select(1).where(
-                        earlier_work.c.session_id == SessionReplyWorkItem.session_id,
-                        earlier_work.c.sequence_no < SessionReplyWorkItem.sequence_no,
-                        earlier_work.c.status.not_in(_TERMINAL_STATUS_VALUES),
-                        earlier_work.c.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value,
-                    )
+                or_(
+                    SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                    ~exists(
+                        select(1).where(
+                            earlier_work.c.session_id == SessionReplyWorkItem.session_id,
+                            earlier_work.c.sequence_no < SessionReplyWorkItem.sequence_no,
+                            earlier_work.c.work_type != SessionReplyWorkType.AGENT_WORK.value,
+                            earlier_work.c.status.not_in(_TERMINAL_STATUS_VALUES),
+                            earlier_work.c.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value,
+                        )
+                    ),
                 ),
-                ~exists(
-                    select(1).where(
-                        active_running.c.session_id == SessionReplyWorkItem.session_id,
-                        active_running.c.status == SessionReplyWorkStatus.RUNNING.value,
-                        active_running.c.lock_until > now,
-                    )
+                or_(
+                    SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                    ~exists(
+                        select(1).where(
+                            active_running.c.session_id == SessionReplyWorkItem.session_id,
+                            active_running.c.work_type != SessionReplyWorkType.AGENT_WORK.value,
+                            active_running.c.status == SessionReplyWorkStatus.RUNNING.value,
+                            active_running.c.lock_until > now,
+                        )
+                    ),
                 ),
             )
             .order_by(SessionReplyWorkItem.created_at, SessionReplyWorkItem.id)
@@ -874,6 +883,7 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyWorkItem.sequence_no > work.sequence_no,
                 SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
                 SessionReplyWorkItem.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                SessionReplyWorkItem.work_type != SessionReplyWorkType.AGENT_WORK,
                 or_(
                     SessionReplyWorkItem.work_type != SessionReplyWorkType.FOREGROUND_REPLY,
                     SessionReplyWorkItem.profile_id != work.profile_id,
