@@ -613,16 +613,22 @@ class CRUDTerminalWatchReply:
         generation = state.get("terminal_resume_generation")
         if not isinstance(generation, int) or isinstance(generation, bool):
             generation = 0
+        checkpoint = state.get("dispatcher_checkpoint")
+        checkpoint = dict(checkpoint) if isinstance(checkpoint, dict) else {}
+        checkpoint.pop("files_to_user", None)
+        checkpoint.pop("reply_skipped", None)
+        checkpoint.pop("deferred_external_results", None)
+        checkpoint.pop("pending_resume_message_ids", None)
+        if not isinstance(state.get("frozen_context_messages"), list):
+            checkpoint["messages"] = []
+        checkpoint["turn_messages"] = []
+        checkpoint["reload_history"] = True
         state.update(
             {
                 "terminal_resume_generation": generation + 1,
                 "terminal_auto_resume": True,
                 "external_resume_pending": True,
-                "dispatcher_checkpoint": {
-                    "messages": [],
-                    "turn_messages": [],
-                    "reload_history": True,
-                },
+                "dispatcher_checkpoint": checkpoint,
             }
         )
         result = await db.execute(

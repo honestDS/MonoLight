@@ -44,6 +44,7 @@ async def prepare_messages(
     additional_system_prompt: str | None = None,
     include_longterm_memory: bool = True,
     processed_only: bool = False,
+    submission_context: list[InternalMessage] | None = None,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为历史消息加载的预留量。
     # 总结阈值与硬窗口由模型调用前的统一检查点按完整请求重新计算。
@@ -81,34 +82,37 @@ async def prepare_messages(
             image_understanding=False,
             is_history=False,
         )
-    history_before_id = history_before_id if is_first_iter and history_before_id is not None else initial_msg.id if is_first_iter else None
-    summary_state = await get_context_summary_state(
-        db,
-        session_id=session_id,
-        uid=uid,
-    )
-    summary_message = summary_state.as_message()
-    reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions)
-    if summary_message is not None:
-        reserved_tokens += estimate_tokens(str(summary_message.content or ""))
+    if submission_context is None:
+        history_before_id = history_before_id if history_before_id is not None else (initial_msg.id if is_first_iter else None)
+        summary_state = await get_context_summary_state(
+            db,
+            session_id=session_id,
+            uid=uid,
+        )
+        summary_message = summary_state.as_message()
+        reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions)
+        if summary_message is not None:
+            reserved_tokens += estimate_tokens(str(summary_message.content or ""))
 
-    # 获取上下文
-    # 第一轮必须锚定在当前消息，确保上下文一致性
-    # 随后的重入轮次（如果有新消息追加）则加载全部历史以包含上一轮产生的响应
-    messages = await ContextManager.get_messages(
-        db,
-        session_id,
-        uid,
-        profile,
-        message,
-        before_id=history_before_id,
-        after_id=summary_state.message_id,
-        context_window_k=context_window_k,
-        reserved_tokens=reserved_tokens,
-        processed_only=processed_only,
-    )
-    if summary_message is not None:
-        messages.insert(0, summary_message)
+        # 获取上下文
+        # 第一轮必须锚定在当前消息，确保上下文一致性
+        # 随后的重入轮次（如果有新消息追加）则加载全部历史以包含上一轮产生的响应
+        messages = await ContextManager.get_messages(
+            db,
+            session_id,
+            uid,
+            profile,
+            message,
+            before_id=history_before_id,
+            after_id=summary_state.message_id,
+            context_window_k=context_window_k,
+            reserved_tokens=reserved_tokens,
+            processed_only=processed_only,
+        )
+        if summary_message is not None:
+            messages.insert(0, summary_message)
+    else:
+        messages = [item.model_copy(deep=True) for item in submission_context]
     if current_msg is not None:
         messages.append(current_msg)
 

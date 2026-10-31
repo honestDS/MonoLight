@@ -162,6 +162,7 @@ def _context_length_generation_state(*, stream_event_callback=None):
         ),
         context_summary_work_validity_checker=None,
         context_summary_lifecycle_callback=None,
+        context_frozen=False,
         chat_params={
             "temperature": None,
             "top_p": None,
@@ -252,6 +253,58 @@ async def test_context_length_forces_summary_on_current_channel_before_fallback(
     assert sum(1 for call in summary_calls if call.get("force")) == 1
     assert selection_calls == []
     assert state.messages[0].content == "compressed request"
+
+
+@pytest.mark.asyncio
+async def test_frozen_context_length_compacts_locally_before_channel_fallback(monkeypatch):
+    state = _context_length_generation_state()
+    state.context_frozen = True
+    attempts = []
+    local_compaction_calls = []
+
+    async def compact_frozen_context(_db, **kwargs):
+        local_compaction_calls.append(dict(kwargs))
+        if kwargs.get("force"):
+            return [InternalMessage(id=1, role=MessageRole.USER, content="locally compressed request")]
+        return kwargs["messages"]
+
+    async def shared_checkpoint(*_args, **_kwargs):
+        raise AssertionError("frozen context must not mutate the shared session summary")
+
+    async def select_channel(*_args, **_kwargs):
+        raise AssertionError("successful local recovery must retry the current channel first")
+
+    async def generate_response(**kwargs):
+        attempts.append(kwargs["model_id"])
+        if len(attempts) == 1:
+            raise LLMContextLengthException(provider_message="maximum context length exceeded")
+        return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model=kwargs["model_id"], usage={})
+
+    monkeypatch.setattr(
+        interactive_generation_module,
+        "compact_frozen_context_messages",
+        compact_frozen_context,
+        raising=False,
+    )
+    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", shared_checkpoint)
+    monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)
+    monkeypatch.setattr(
+        interactive_generation_module.ContextManager,
+        "prepare_messages_for_model_request",
+        lambda **kwargs: kwargs["messages"],
+    )
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate_response)
+
+    result = await interactive_generation_module.generate_interactive_turn(
+        state,
+        current_tools=[],
+        response_id="response-1",
+    )
+
+    assert result.message.content == "ok"
+    assert attempts == ["model-1", "model-1"]
+    assert sum(call.get("force") is True for call in local_compaction_calls) == 1
+    assert state.messages[0].content == "locally compressed request"
 
 
 @pytest.mark.asyncio
@@ -2628,6 +2681,7 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
     audit_started = asyncio.Event()
     release_audit = asyncio.Event()
     published_events = []
+    checkpoints = []
     audit_result = AuditRoundResult(
         audit_record_id=42,
         status=AuditRecordStatus.PENDING,
@@ -2642,8 +2696,8 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
     async def publish_event(event):
         published_events.append(event)
 
-    async def save_checkpoint(_checkpoint):
-        return None
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(checkpoint)
 
     async def process_tool(*args, **kwargs):
         raise AssertionError("pending audit must not execute tools")
@@ -2680,6 +2734,19 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
         "tool_end",
     ]
     assert json.loads(response["choices"][0]["message"]["content"])["type"] == "audit_confirmation"
+    checkpoint_messages = [
+        InternalMessage.model_validate(item)
+        for item in checkpoints[-1]["messages"]
+    ]
+    assert any(
+        message.role == MessageRole.ASSISTANT
+        and any(tool_call.id == "call-1" for tool_call in message.tool_calls or [])
+        for message in checkpoint_messages
+    )
+    assert any(
+        message.role == MessageRole.TOOL and message.tool_call_id == "call-1"
+        for message in checkpoint_messages
+    )
     assert unknown_calls == []
 
 

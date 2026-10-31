@@ -159,6 +159,7 @@ async def _audit_round(
         source="integration",
         language="zh",
         working_directory=working_directory,
+        execution_scope="foreground",
     )
 
 

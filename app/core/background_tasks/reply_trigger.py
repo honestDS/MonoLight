@@ -9,7 +9,7 @@ from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT, TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import session_reply_queue_manager
-from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
@@ -74,7 +74,7 @@ async def _find_terminal_auto_watch_group(
         .where(
             SessionReplyWorkItem.uid == task.uid,
             SessionReplyWorkItem.session_id == task.session_id,
-            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME,
             SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
         )
         .order_by(SessionReplyWorkItem.sequence_no.asc(), SessionReplyWorkItem.id.asc())
@@ -144,7 +144,7 @@ async def _merge_terminal_auto_watch_reply(
             SessionReplyWorkItem.id == work.id,
             SessionReplyWorkItem.uid == task.uid,
             SessionReplyWorkItem.session_id == task.session_id,
-            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME,
             SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
         )
         .values(execution_state=execution_state)
@@ -231,7 +231,15 @@ async def trigger_background_task_reply(task_id: int) -> None:
             await db.commit()
             return
 
-        work, _ = await session_reply_queue_manager.enqueue_background_summary(
+        reply_mode = BackgroundTaskReplyMode(extra["reply_mode"])
+        enqueue = (
+            session_reply_queue_manager.enqueue_background_task_resume
+            if reply_mode is BackgroundTaskReplyMode.RESUME_AGENT
+            else session_reply_queue_manager.enqueue_background_summary
+        )
+        if reply_mode is BackgroundTaskReplyMode.RESUME_ORIGIN:
+            raise RuntimeError("Origin-bound background task must resume its origin work")
+        work, _ = await enqueue(
             db,
             uid=task.uid,
             session_id=task.session_id,
@@ -239,31 +247,32 @@ async def trigger_background_task_reply(task_id: int) -> None:
             background_task_id=task_id,
             commit=False,
         )
-        payload = _build_background_tool_result_payload(task)
-        if origin is not None:
-            payload = {**payload, "tasks": [dict(payload)]}
-        execution_state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
-        execution_state.update(
-            {
-                "external_resume_context": [payload],
-                "dispatcher_checkpoint": {
-                    "messages": [],
-                    "turn_messages": [],
-                    "reload_history": True,
-                    "deferred_external_results": True,
-                },
-            }
-        )
-        if origin is not None:
+        if reply_mode is BackgroundTaskReplyMode.RESUME_AGENT:
+            payload = _build_background_tool_result_payload(task)
+            if origin is not None:
+                payload = {**payload, "tasks": [dict(payload)]}
+            execution_state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
             execution_state.update(
                 {
-                    "terminal_auto_watch_group": True,
-                    "terminal_auto_watch_origin_work_id": origin[0],
-                    "terminal_auto_watch_origin_work_identity": origin[1],
-                    "terminal_auto_watch_task_ids": [task.id],
+                    "external_resume_context": [payload],
+                    "dispatcher_checkpoint": {
+                        "messages": [],
+                        "turn_messages": [],
+                        "reload_history": True,
+                        "deferred_external_results": True,
+                    },
                 }
             )
-        work.execution_state = execution_state
-        db.add(work)
+            if origin is not None:
+                execution_state.update(
+                    {
+                        "terminal_auto_watch_group": True,
+                        "terminal_auto_watch_origin_work_id": origin[0],
+                        "terminal_auto_watch_origin_work_identity": origin[1],
+                        "terminal_auto_watch_task_ids": [task.id],
+                    }
+                )
+            work.execution_state = execution_state
+            db.add(work)
         await db.commit()
-        logger.bind(task_id=task_id, uid=task.uid, session_id=task.session_id).info("Background task summary queued")
+        logger.bind(task_id=task_id, uid=task.uid, session_id=task.session_id).info("Background task reply queued")

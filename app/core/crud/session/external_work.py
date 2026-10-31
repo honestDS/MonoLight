@@ -115,7 +115,7 @@ class CRUDExternalWork:
 
                 matched = any(work.id == int(delivery_work_id) and work.dedupe_key == delivery["identity"] for delivery_work_id, delivery in get_terminal_watch_deliveries(task).items())
                 if not matched:
-                    matched = work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY and work.source_type == SessionReplySourceType.BACKGROUND_TASK and work.source_id == str(task.id)
+                    matched = work.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME and work.source_type == SessionReplySourceType.BACKGROUND_TASK and work.source_id == str(task.id)
                 if not matched and work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK and task.tool_name == TERMINAL_WATCH_TOOL_NAME:
                     state = work.execution_state if isinstance(work.execution_state, dict) else {}
                     matched = any(
@@ -155,7 +155,6 @@ class CRUDExternalWork:
                     [
                         SessionReplyWorkType.FOREGROUND_REPLY,
                         SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
-                        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
                     ]
                 ),
                 SessionReplyWorkItem.status.in_(
@@ -170,7 +169,13 @@ class CRUDExternalWork:
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        return list(result.scalars().all())
+        works = list(result.scalars().all())
+        return [
+            candidate
+            for candidate in works
+            if candidate.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+            or not isinstance((candidate.execution_state or {}).get("frozen_context_messages"), list)
+        ]
 
     async def list_completed_reply_tasks(
         self,
@@ -479,7 +484,8 @@ class CRUDExternalWork:
         checkpoint.pop("reply_skipped", None)
         checkpoint.pop("deferred_external_results", None)
         checkpoint.pop("pending_resume_message_ids", None)
-        checkpoint["messages"] = []
+        if not isinstance(state.get("frozen_context_messages"), list):
+            checkpoint["messages"] = []
         checkpoint["turn_messages"] = []
         checkpoint["reload_history"] = True
         checkpoint["execution_phase"] = GOAL_EXECUTION_PHASE_RUNNING

@@ -52,6 +52,7 @@ from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SessionReplySequence,
+    SessionReplySourceType,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
     SessionReplyWorkType,
@@ -1241,6 +1242,123 @@ async def test_websocket_adapter_approval_reaches_confirmed_execution_work(db_se
     assert len(works) == 1
     assert works[0].work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
     assert works[0].execution_state["request_ids"] == ["request-1"]
+
+
+@pytest.mark.asyncio
+async def test_websocket_approval_inherits_scheduled_source_checkpoint(
+    db_session,
+    entry_dependencies,
+    monkeypatch,
+):
+    db_session.add(
+        ChatSession(
+            session_id="session-1",
+            uid="owner",
+            profile_id=1,
+            source="ws",
+        )
+    )
+    source_checkpoint_messages = [
+        InternalMessage(
+            id=10,
+            role=MessageRole.USER,
+            content="scheduled trigger",
+        ),
+        InternalMessage(
+            id=11,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[
+                InternalToolCall(
+                    id="call-1",
+                    name="execute_shell",
+                    arguments={"command": "echo pending"},
+                )
+            ],
+        ),
+        InternalMessage(
+            id=12,
+            role=MessageRole.TOOL,
+            tool_call_id="call-1",
+            content="pending confirmation",
+        ),
+    ]
+    source_work = SessionReplyWorkItem(
+        uid="owner",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+        source_id="scheduled-run-1",
+        dedupe_key="scheduled-source-work",
+        status=SessionReplyWorkStatus.SUCCEEDED,
+        execution_state={
+            "frozen_context_messages": [
+                source_checkpoint_messages[0].model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            ],
+            "dispatcher_checkpoint": {
+                "messages": [
+                    message.model_dump(mode="json", exclude_none=True)
+                    for message in source_checkpoint_messages
+                ],
+                "current_turn": 1,
+            },
+        },
+    )
+    db_session.add(source_work)
+    db_session.add(
+        SessionReplySequence(
+            session_id="session-1",
+            next_sequence_no=2,
+        )
+    )
+    await db_session.commit()
+    await db_session.refresh(source_work)
+
+    record = await add_pending_confirmation(db_session)
+    record.execution_scope = "task"
+    record.source_work_id = source_work.id
+    db_session.add(record)
+    await db_session.commit()
+
+    async def wait_for_stream(work_id):
+        yield {
+            "type": "done",
+            "session_id": "session-1",
+            "response": {"work_id": work_id},
+        }
+
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_stream", wait_for_stream)
+    events = [
+        event
+        async for event in ws_chat_adapter.chat(
+            db_session,
+            "approve",
+            uid="owner",
+            session_id="session-1",
+            request_id="scheduled-approval",
+        )
+    ]
+
+    works = await list_work(db_session)
+    confirmed_work = next(
+        work
+        for work in works
+        if work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    )
+    assert events[-1]["type"] == "done"
+    assert confirmed_work.execution_state["execution_scope"] == "task"
+    assert confirmed_work.execution_state["dispatcher_checkpoint"]["current_turn"] == 1
+    inherited_messages = [
+        InternalMessage.model_validate(item)
+        for item in confirmed_work.execution_state["dispatcher_checkpoint"]["messages"]
+    ]
+    assert [message.id for message in inherited_messages] == [10, 11, 12]
+    assert inherited_messages[1].tool_calls[0].id == "call-1"
+    assert inherited_messages[2].tool_call_id == "call-1"
 
 
 @pytest.mark.asyncio

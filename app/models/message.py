@@ -154,6 +154,7 @@ class InternalMessage(BaseModel):
     generated_images: list[InternalGeneratedImage] | None = PyField(default=None, repr=False)
     environment_prompt: str | None = None
     guidance_prompt: str | None = None
+    execution_guidance: str | None = None
     tool_calls: list[InternalToolCall] | None = None
     tool_call_id: str | None = None
     # 工具执行状态独立于可截断的结果正文。

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +37,7 @@ from app.core.terminal.schemas import (
     TerminalOutputBufferState,
     TerminalSessionStatus,
 )
+from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
@@ -45,7 +47,26 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
-from tests.unit.response_test_support import audit_confirmation_payload, llm_response_payload, pending_audit_tool_result
+from tests.unit.response_test_support import (
+    audit_confirmation_payload,
+    pending_audit_tool_result,
+)
+from tests.unit.response_test_support import (
+    llm_response_payload as _raw_llm_response_payload,
+)
+
+
+def test_background_task_resume_work_type_is_distinct():
+    assert SessionReplyWorkType.BACKGROUND_TASK_RESUME.value == "background_task_resume"
+    assert SessionReplyWorkType.BACKGROUND_TASK_RESUME is not SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
+
+
+def llm_response_payload(*args, files=None, **kwargs):
+    if files is not None and any(not isinstance(item, dict) for item in files):
+        payload = _raw_llm_response_payload(*args, **kwargs)
+        payload["files"] = list(files)
+        return payload
+    return _raw_llm_response_payload(*args, files=files, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -875,7 +896,7 @@ def test_audit_execution_binding_supports_foreground_and_confirmed_work():
         execution_state={"audit_claim_token": "confirmed-token"},
     )
     background = SimpleNamespace(
-        work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        work_type=SessionReplyWorkType.BACKGROUND_TASK_RESUME,
         source_id="background-task",
         execution_state={
             SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: {
@@ -956,7 +977,7 @@ def test_confirmed_execution_reaudits_legacy_file_snapshot_without_presence_stat
 
 @pytest.mark.asyncio
 async def test_scheduled_reply_persists_and_clears_audit_binding(monkeypatch):
-    """定时总结在工具执行前后应持久化并清除审计绑定。"""
+    """辅助回复在工具执行前应持久化活动审计绑定。"""
     work = SimpleNamespace(
         id=12,
         source_id="8",
@@ -988,9 +1009,29 @@ async def test_scheduled_reply_persists_and_clears_audit_binding(monkeypatch):
     monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
     monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
 
-    response = await executor_replies_module._execute_scheduled(object(), work, "worker-1")
+    ai_msg, _, _, _ = await executor_metadata_module._generate_auxiliary_reply_with_request_metadata(
+        object(),
+        work=work,
+        request_purpose=SessionReplyProviderRequestPurpose.SCHEDULED_SUMMARY,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile=SimpleNamespace(id=3, uid="user-1"),
+        call_context="session_reply_scheduled_summary",
+        allow_tools=True,
+        initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        initial_fixed_upper_message_id=8,
+        restrict_tools_to_background_allowlist=False,
+        reply_source="scheduled_task",
+        final_message_dedupe_key=executor_common_module._result_message_dedupe_key(work),
+        audit_execution_binding_callback=partial(
+            executor_replies_module._persist_work_audit_execution_binding_callback,
+            db=object(),
+            work=work,
+            worker_id="worker-1",
+        ),
+    )
 
-    assert response["content"] == "定时总结"
+    assert ai_msg.content == "定时总结"
     assert persisted_states[0][SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] == {
         "audit_record_id": 42,
         "claim_token": "claim-token",
@@ -999,7 +1040,7 @@ async def test_scheduled_reply_persists_and_clears_audit_binding(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_background_preserves_main_dialogue_metadata(monkeypatch):
+async def test_execute_background_summary_is_auxiliary_and_disables_tools(monkeypatch):
     work = SimpleNamespace(
         id=7,
         sequence_no=1,
@@ -1007,7 +1048,7 @@ async def test_execute_background_preserves_main_dialogue_metadata(monkeypatch):
         uid="user-1",
         session_id="session-1",
         profile_id=3,
-        dedupe_key="reply-summary:8",
+        dedupe_key="background-task-summary:8",
         created_at=datetime(2026, 7, 20, 0, 0, 0),
         work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
         execution_state={},
@@ -1022,43 +1063,10 @@ async def test_execute_background_preserves_main_dialogue_metadata(monkeypatch):
         tool_call_id="call-1",
         status="succeeded",
         tool_name="safe_tool",
+        arguments={},
         error=None,
     )
     captured = {}
-    marker = Message(
-        id=9,
-        uid=work.uid,
-        session_id=work.session_id,
-        profile_id=work.profile_id,
-        role=MessageRole.USER,
-        type=MessageType.BACKGROUND_TASK_RESULT,
-        content="后台任务结果",
-        dedupe_key="background-task:8:result",
-    )
-    request_metadata = {
-        "type": "llm_request_metadata",
-        "request_purpose": "main_dialogue",
-        "input_tokens": 456,
-        "input_tokens_source": "provider",
-        "cached_tokens": 156,
-        "output_tokens": 11,
-        "context_window_tokens": 4096,
-        "max_output_tokens": 512,
-        "total_output_tokens": 211,
-        "work_id": 7,
-        "work_sequence_no": 1,
-    }
-    interactive_response = {
-        **llm_response_payload(
-            "后台主循环回复",
-            history=[
-                {"role": "assistant", "content": "保留历史", "created_at": 0.0},
-                {"role": "tool", "content": "过滤工具结果", "tool_call_id": "call-1", "created_at": 0.0},
-            ],
-            files=[],
-        ),
-        "llm_request_metadata": request_metadata,
-    }
 
     async def get_task(db, task_id):
         assert task_id == 8
@@ -1067,34 +1075,26 @@ async def test_execute_background_preserves_main_dialogue_metadata(monkeypatch):
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
 
-    async def get_result(db, dedupe_key):
-        assert dedupe_key == "background-task:8:result"
-        return marker
-
-    async def dispatch_interactive_work(db, **kwargs):
+    async def generate_auxiliary(db, **kwargs):
         captured.update(kwargs)
-        return interactive_response
+        return InternalMessage(role=MessageRole.ASSISTANT, content="background summary"), [], [], {"request_purpose": "background_summary"}
 
     monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_replies_module.message_crud, "get_by_dedupe_key", get_result)
-    monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", dispatch_interactive_work)
+    monkeypatch.setattr(executor_replies_module, "_generate_auxiliary_reply_with_request_metadata", generate_auxiliary)
+    monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", lambda *args, **kwargs: pytest.fail("background summary must not enter interactive tool loop"))
 
     response = await executor_replies_module._execute_background(object(), work, "worker-1")
 
-    assert response["content"] == "后台主循环回复"
-    assert response["history"] == [{"role": "assistant", "content": "保留历史", "created_at": 0.0}]
-    assert response["files"] == []
-    assert response["llm_request_metadata"] == request_metadata
-    assert response["llm_request_metadata"]["request_purpose"] == "main_dialogue"
-    assert response["llm_request_metadata"]["work_id"] == 7
-    assert response["llm_request_metadata"]["work_sequence_no"] == 1
-    assert captured["message"] == marker.content
-    assert captured["history_before_id"] == marker.id
+    assert response["content"] == "background summary"
+    assert response["llm_request_metadata"]["request_purpose"] == "background_summary"
+    assert captured["request_purpose"] == SessionReplyProviderRequestPurpose.BACKGROUND_SUMMARY
+    assert captured["allow_tools"] is False
+    assert captured["submission_context"] == []
 
 
 @pytest.mark.asyncio
-async def test_execute_scheduled_persists_llm_request_metadata_with_work_identity(monkeypatch):
+async def test_execute_scheduled_dispatches_interactive_work(monkeypatch):
     work = SimpleNamespace(
         id=8,
         sequence_no=2,
@@ -1104,69 +1104,150 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
         profile_id=3,
         dedupe_key="reply-summary:8",
         created_at=datetime(2026, 7, 20, 0, 0, 0),
-        execution_state={},
+        execution_state={
+            "frozen_context_messages": [
+                InternalMessage(id=4, role=MessageRole.USER, content="frozen scheduled context").model_dump(mode="json", exclude_none=True),
+            ]
+        },
     )
     captured = {}
-    metadata_updates = []
-    request_metadata = {
-        "type": "llm_request_metadata",
-        "input_tokens": 456,
-        "input_tokens_source": "provider",
-        "cached_tokens": 156,
-        "output_tokens": 21,
-        "context_window_tokens": 8192,
-        "max_output_tokens": 1024,
+    trigger_message = Message(
+        id=8,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile_id=work.profile_id,
+        role=MessageRole.USER,
+        type=MessageType.SCHEDULED_TASK_TRIGGER,
+        content="定时指令内容",
+    )
+    interactive_response = {
+        **llm_response_payload(
+            "定时交互回复",
+            history=[
+                {"role": "assistant", "content": "保留历史", "created_at": 0.0},
+            ],
+            files=["temp/data.zip"],
+        ),
+        "llm_request_metadata": {"request_purpose": "main_dialogue"},
     }
-
-    class FakeDb:
-        async def execute(self, *args, **kwargs):
-            return None
 
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
 
-    async def generate_reply(db, **kwargs):
+    async def get_message(db, message_id):
+        assert message_id == 8
+        return trigger_message
+
+    async def dispatch_interactive_work(db, **kwargs):
         captured.update(kwargs)
-        await kwargs["request_metadata_callback"](request_metadata)
-        return InternalMessage(role=MessageRole.ASSISTANT, content="定时总结"), [], []
-
-    async def get_session(db, session_id):
-        assert session_id == "session-1"
-        return SimpleNamespace(
-            llm_request_metadata={
-                "total_output_tokens": 200,
-                "total_input_tokens": 1000,
-                "total_cached_tokens": 250,
-            }
-        )
-
-    async def update_request_metadata(db, **kwargs):
-        metadata_updates.append(kwargs)
-        return True
+        return interactive_response
 
     monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
-    monkeypatch.setattr(executor_metadata_module.session_crud, "get_by_session_id", get_session)
-    monkeypatch.setattr(executor_metadata_module.session_crud, "update_llm_request_metadata", update_request_metadata)
+    monkeypatch.setattr(executor_replies_module.message_crud, "get", get_message)
+    monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", dispatch_interactive_work)
 
-    response = await executor_replies_module._execute_scheduled(FakeDb(), work, "worker-1")
+    response = await executor_replies_module._execute_scheduled(object(), work, "worker-1")
 
-    expected_request_metadata = {
-        **request_metadata,
-        "request_purpose": "scheduled_summary",
-        "output_tokens": 21,
-        "total_output_tokens": 200,
-        "total_input_tokens": 1000,
-        "total_cached_tokens": 250,
-        "cache_hit_rate": 0.25,
-        "work_id": 8,
-        "work_sequence_no": 2,
-    }
-    assert callable(captured["request_metadata_callback"])
-    assert response["llm_request_metadata"] == expected_request_metadata
-    assert response["llm_request_metadata"]["input_tokens"] == 456
-    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(0.25)
-    assert metadata_updates == []
+    assert response["content"] == "定时交互回复"
+    assert response["history"] == [{"role": "assistant", "content": "保留历史", "created_at": 0.0}]
+    assert response["files"] == ["temp/data.zip"]
+    assert response["llm_request_metadata"] == {"request_purpose": "main_dialogue"}
+    assert captured["execution_scope"] == "task"
+    assert captured["allow_additional_user_messages"] is False
+    assert captured["history_before_id"] == 8
+    assert captured["frozen_user_message_ids"] == [8]
+    assert [message.content for message in captured["frozen_context_messages"]] == ["frozen scheduled context"]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_external_resume_routes_back_to_scheduled_executor(monkeypatch):
+    work = SimpleNamespace(
+        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        execution_state={"dispatcher_checkpoint": {"messages": []}, "external_resume_pending": True},
+    )
+    captured = {}
+
+    async def execute_scheduled(db, current_work, worker_id):
+        captured["work"] = current_work
+        captured["worker_id"] = worker_id
+        return {"content": "resumed"}
+
+    monkeypatch.setattr(executor_replies_module, "_execute_scheduled", execute_scheduled)
+
+    response = await executor_replies_module._execute_external_resume(object(), work, "worker-1")
+
+    assert response == {"content": "resumed"}
+    assert captured == {"work": work, "worker_id": "worker-1"}
+
+
+@pytest.mark.asyncio
+async def test_confirmed_external_resume_preserves_task_scope_and_frozen_context(monkeypatch):
+    frozen_message = InternalMessage(
+        id=3,
+        role=MessageRole.USER,
+        content="scheduled frozen context",
+    )
+    work = SimpleNamespace(
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        execution_state={
+            "decision_message_id": 4,
+            "execution_scope": "task",
+            "frozen_context_messages": [
+                frozen_message.model_dump(mode="json", exclude_none=True)
+            ],
+            "dispatcher_checkpoint": {
+                "messages": [
+                    frozen_message.model_dump(mode="json", exclude_none=True)
+                ]
+            },
+        },
+        input_message_ids=[],
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+    )
+    captured = {}
+    decision_message = SimpleNamespace(
+        id=4,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile_id=work.profile_id,
+        role=MessageRole.USER,
+        type=MessageType.AUDIT_DECISION,
+        content="同意",
+        content_format=None,
+        attachments=None,
+        environment_prompt=None,
+        guidance_prompt=None,
+    )
+
+    async def get_message(db, message_id):
+        assert message_id == 4
+        return decision_message
+
+    async def dispatch_interactive_work(db, **kwargs):
+        captured.update(kwargs)
+        return {"content": "resumed"}
+
+    monkeypatch.setattr(executor_replies_module.message_crud, "get", get_message)
+    monkeypatch.setattr(
+        executor_replies_module,
+        "_dispatch_interactive_work",
+        dispatch_interactive_work,
+    )
+
+    response = await executor_replies_module._execute_external_resume(
+        object(),
+        work,
+        "worker-1",
+    )
+
+    assert response == {"content": "resumed"}
+    assert captured["execution_scope"] == "task"
+    assert captured["allow_additional_user_messages"] is False
+    assert [message.content for message in captured["frozen_context_messages"]] == [
+        "scheduled frozen context"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1465,8 +1546,9 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         round_arguments_hash="a" * 64,
         decision_raw_message="同意",
         decision_message_id=4,
+        execution_scope="foreground",
     )
-    new_record = SimpleNamespace(operator_username="tester")
+    new_record = SimpleNamespace(operator_username="tester", execution_scope="foreground")
     details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
     work = SimpleNamespace(
         id=7,
@@ -1600,20 +1682,65 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         round_arguments_hash="a" * 64,
         decision_raw_message="同意",
         decision_message_id=4,
+        execution_scope="task",
     )
     details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
     work = SimpleNamespace(
         id=7,
         work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
         source_id="42",
-        execution_state={"audit_claim_token": "old-token", "decision_message_id": 4},
+        execution_state={
+            "audit_claim_token": "old-token",
+            "decision_message_id": 4,
+            "frozen_context_messages": [
+                InternalMessage(
+                    id=1,
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
+                ).model_dump(mode="json", exclude_none=True),
+                InternalMessage(
+                    id=2,
+                    role=MessageRole.TOOL,
+                    tool_call_id="original-1",
+                    content="old-pending-result",
+                ).model_dump(mode="json", exclude_none=True),
+            ],
+            "dispatcher_checkpoint": {
+                "messages": [
+                    InternalMessage(
+                        id=1,
+                        role=MessageRole.ASSISTANT,
+                        tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
+                    ).model_dump(mode="json", exclude_none=True),
+                    InternalMessage(
+                        id=2,
+                        role=MessageRole.TOOL,
+                        tool_call_id="original-1",
+                        content="old-pending-result",
+                    ).model_dump(mode="json", exclude_none=True),
+                ]
+            },
+        },
         uid="user-1",
         session_id="session-1",
         profile_id=3,
         dedupe_key="confirmed-audit:42",
         created_at=datetime(2026, 7, 20, 0, 0, 0),
     )
-    pending_message = SimpleNamespace(id=2, content="pending")
+    pending_message = Message(
+        id=2,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="original-1",
+            content="old-pending-result",
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
     replaced_results = []
     saved_messages = []
     notified_audit_record_ids = []
@@ -1657,6 +1784,11 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     async def replace_result(db, **kwargs):
         event_order.append("replace")
         replaced_results.append(kwargs)
+        pending_message.content = InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=kwargs["original_tool_call_id"],
+            content=kwargs["content"],
+        ).model_dump_json(exclude_none=True)
         return kwargs["content"]
 
     async def save_confirmation(*args, **kwargs):
@@ -1703,6 +1835,76 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     assert len(saved_messages) == 1
     assert saved_messages[0][0][4] == MessageType.AUDIT_CONFIRMATION
     assert any(message.role == MessageRole.TOOL and message.tool_call_id == "original-1" for message in memory_chains[0])
+    refreshed_frozen = [
+        InternalMessage.model_validate(item)
+        for item in work.execution_state["frozen_context_messages"]
+    ]
+    assert refreshed_frozen[1].role == MessageRole.TOOL
+    assert refreshed_frozen[1].tool_call_id == "original-1"
+    assert refreshed_frozen[1].content != "old-pending-result"
+    refreshed_checkpoint = [
+        InternalMessage.model_validate(item)
+        for item in work.execution_state["dispatcher_checkpoint"]["messages"]
+    ]
+    assert refreshed_checkpoint[1].tool_call_id == "original-1"
+    assert refreshed_checkpoint[1].content == refreshed_frozen[1].content
+
+
+def test_confirmed_wait_checkpoint_refreshes_result_and_keeps_decision():
+    pending_message = Message(
+        id=2,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="original-1",
+            content="actual-result",
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    checkpoint = executor_confirmed_module._build_confirmed_wait_checkpoint(
+        {
+            "dispatcher_checkpoint": {
+                "messages": [
+                    InternalMessage(
+                        id=1,
+                        role=MessageRole.ASSISTANT,
+                        tool_calls=[
+                            InternalToolCall(
+                                id="original-1",
+                                name="execute_shell",
+                                arguments={"command": "echo 1"},
+                            )
+                        ],
+                    ).model_dump(mode="json", exclude_none=True),
+                    InternalMessage(
+                        id=2,
+                        role=MessageRole.TOOL,
+                        tool_call_id="original-1",
+                        content="pending",
+                    ).model_dump(mode="json", exclude_none=True),
+                ],
+                "turn_messages": [{"role": "assistant", "content": "stale"}],
+            }
+        },
+        pending_tool_results={"original-1": pending_message},
+        decision_message_id=4,
+        decision_raw_message="同意",
+    )
+
+    messages = [
+        InternalMessage.model_validate(item)
+        for item in checkpoint["messages"]
+    ]
+    assert messages[1].tool_call_id == "original-1"
+    assert messages[1].content == "actual-result"
+    assert messages[-1].id == 4
+    assert messages[-1].role == MessageRole.USER
+    assert messages[-1].content == "同意"
+    assert checkpoint["turn_messages"] == []
 
 
 @pytest.mark.asyncio
@@ -1734,6 +1936,7 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
         round_arguments_hash="a" * 64,
         decision_raw_message="同意",
         decision_message_id=4,
+        execution_scope="task",
     )
     details = [
         SimpleNamespace(
@@ -1744,10 +1947,47 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
             arguments_hash="b" * 64,
         )
     ]
-    pending_message = SimpleNamespace(id=2, content="pending")
+    pending_message = Message(
+        id=2,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="original-1",
+            content="pending",
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
     work = SimpleNamespace(
         source_id="42",
-        execution_state={"audit_claim_token": "claim-token", "decision_message_id": 4},
+        execution_state={
+            "audit_claim_token": "claim-token",
+            "decision_message_id": 4,
+            "execution_scope": "task",
+            "frozen_context_messages": [
+                InternalMessage(id=3, role=MessageRole.USER, content="scheduled trigger context").model_dump(mode="json", exclude_none=True),
+                InternalMessage(
+                    id=1,
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id="original-1",
+                            name="execute_shell",
+                            arguments={"command": "echo 1", "execution_mode": "interactive"},
+                        )
+                    ],
+                ).model_dump(mode="json", exclude_none=True),
+                InternalMessage(
+                    id=2,
+                    role=MessageRole.TOOL,
+                    tool_call_id="original-1",
+                    content="pending",
+                ).model_dump(mode="json", exclude_none=True),
+            ],
+        },
         uid="user-1",
         session_id="session-1",
         profile_id=3,
@@ -1758,6 +1998,8 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
     finish_attempt_calls = []
     finish_round_calls = []
     process_calls = []
+    precheck_calls = []
+    dispatch_calls = []
     replaced_results = []
     confirmation_status_calls = []
     notification_calls = []
@@ -1794,7 +2036,7 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
         return SimpleNamespace(id=101)
 
     async def process_tool(tool_call, db, profile, cfg, messages, username, session_id, turn, uid, **kwargs):
-        process_calls.append((tool_call, messages))
+        process_calls.append((tool_call, messages, kwargs))
         handoff = ShellInteractiveHandoffResult(
             terminal_session_id="t" * 32,
             status=TerminalSessionStatus.STARTING,
@@ -1816,6 +2058,11 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
     async def replace_result(db, **kwargs):
         event_order.append("replace")
         replaced_results.append(kwargs)
+        pending_message.content = InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=kwargs["original_tool_call_id"],
+            content=kwargs["content"],
+        ).model_dump_json(exclude_none=True)
         return kwargs["content"]
 
     async def get_pending(db, **kwargs):
@@ -1837,6 +2084,7 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
         notification_calls.append(kwargs["audit_record_id"])
 
     async def dispatch_interactive_work(*args, **kwargs):
+        dispatch_calls.append(kwargs)
         event_order.append("dispatch")
         return {
             **llm_response_payload(
@@ -1856,7 +2104,11 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
     monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", lambda **kwargs: True)
     monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
     monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", create_execution)
-    monkeypatch.setattr(executor_confirmed_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    def prevalidate_tool_round(*args, **kwargs):
+        precheck_calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(executor_confirmed_module, "prevalidate_tool_round", prevalidate_tool_round)
     monkeypatch.setattr(executor_confirmed_module, "process_single_tool", process_tool)
     monkeypatch.setattr(executor_confirmed_module, "replace_pending_tool_result", replace_result)
     monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_attempt", finish_attempt)
@@ -1874,6 +2126,16 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
     assert len(created_attempts) == 1
     assert len(process_calls) == 1
     assert process_calls[0][0].name == "execute_shell"
+    assert precheck_calls[0]["execution_scope"] == "task"
+    assert process_calls[0][2]["execution_scope"] == "task"
+    assert dispatch_calls[0]["execution_scope"] == "task"
+    assert dispatch_calls[0]["allow_additional_user_messages"] is False
+    frozen_messages = dispatch_calls[0]["frozen_context_messages"]
+    assert frozen_messages[0].content == "scheduled trigger context"
+    assert frozen_messages[1].tool_calls[0].id == "original-1"
+    assert frozen_messages[2].role == MessageRole.TOOL
+    assert frozen_messages[2].tool_call_id == "original-1"
+    assert "terminal_session_id" in str(frozen_messages[2].content)
     assert finish_attempt_calls == []
     assert finish_round_calls == [{"audit_record_id": 42, "claim_token": "claim-token"}]
     assert replaced_results[0]["pending_message"].id == 2
@@ -1906,6 +2168,7 @@ async def test_confirmed_execution_does_not_run_without_complete_pending_results
         round_arguments_hash="a" * 64,
         decision_raw_message="同意",
         decision_message_id=4,
+        execution_scope="foreground",
     )
     work = SimpleNamespace(
         source_id="42",
@@ -1990,6 +2253,7 @@ async def test_confirmed_execution_rejects_mismatched_decision_message_boundary(
         round_arguments_hash="a" * 64,
         decision_raw_message="同意",
         decision_message_id=5,
+        execution_scope="foreground",
     )
     work = SimpleNamespace(
         source_id="42",
@@ -2091,6 +2355,7 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
         round_arguments_hash="a" * 64,
         decision_raw_message="同意",
         decision_message_id=4,
+        execution_scope="foreground",
     )
     details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
     work = SimpleNamespace(
@@ -2215,6 +2480,7 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
         round_arguments_hash="a" * 64,
         decision_raw_message="同意",
         decision_message_id=4,
+        execution_scope="foreground",
     )
     details = [
         SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64),

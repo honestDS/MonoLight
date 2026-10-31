@@ -32,6 +32,7 @@ from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_P
 from app.core.tools.end_session import END_SESSION_TOOL_NAME, is_end_session_signal, is_skip_reply_signal
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
+from app.core.utils.dispatcher.frozen_context import compact_frozen_context_messages
 from app.core.utils.dispatcher.helpers import (
     format_exception_message,
     get_multimodal_from_entry,
@@ -126,7 +127,22 @@ async def generate_interactive_turn(
                 raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
             current_channel_id = getattr(state.chat_channel_obj, "id", None)
             current_channel_id = current_channel_id if isinstance(current_channel_id, int) and not isinstance(current_channel_id, bool) and current_channel_id > 0 else None
-            if state.checkpoint_state.upper_message_id is not None:
+            if state.context_frozen:
+                state.messages = await compact_frozen_context_messages(
+                    state.db,
+                    session_id=state.session_id,
+                    uid=state.uid,
+                    profile=state.profile,
+                    cfg=state.cfg,
+                    messages=state.messages,
+                    context_window_k=state.chat_params["context_window_k"],
+                    max_tokens=state.chat_params["max_tokens"],
+                    tools=current_tools,
+                    model_id=state.model_entry["model_id"],
+                    protocol=resolve_model_protocol(state.model_entry),
+                    work_validity_checker=state.context_summary_work_validity_checker,
+                )
+            elif state.checkpoint_state.upper_message_id is not None:
                 state.messages = await apply_context_summary_checkpoint(
                     state.db,
                     session_id=state.session_id,
@@ -399,7 +415,28 @@ async def generate_interactive_turn(
 
             current_priority = state.channel_rule.priority
             context_recovery_required = isinstance(exc, LLMContextLengthException)
-            if context_recovery_required and current_priority not in context_length_recovery_priorities and state.checkpoint_state.upper_message_id is not None:
+            if context_recovery_required and state.context_frozen and current_priority not in context_length_recovery_priorities:
+                context_length_recovery_priorities.add(current_priority)
+                previous_messages = state.messages
+                recovered_messages = await compact_frozen_context_messages(
+                    state.db,
+                    session_id=state.session_id,
+                    uid=state.uid,
+                    profile=state.profile,
+                    cfg=state.cfg,
+                    messages=state.messages,
+                    context_window_k=state.chat_params["context_window_k"],
+                    max_tokens=state.chat_params["max_tokens"],
+                    tools=current_tools,
+                    model_id=state.model_entry["model_id"],
+                    protocol=resolve_model_protocol(state.model_entry),
+                    work_validity_checker=state.context_summary_work_validity_checker,
+                    force=True,
+                )
+                if recovered_messages != previous_messages:
+                    state.messages = recovered_messages
+                    continue
+            elif context_recovery_required and current_priority not in context_length_recovery_priorities and state.checkpoint_state.upper_message_id is not None:
                 context_length_recovery_priorities.add(current_priority)
                 previous_messages = state.messages
                 try:

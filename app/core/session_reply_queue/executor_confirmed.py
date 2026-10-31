@@ -16,6 +16,7 @@ from app.core.audit.integrity import verify_persisted_tool_round
 from app.core.audit.service import audit_tool_round, is_audit_configured
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
+    END_SESSION_SCOPE_FOREGROUND,
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
@@ -33,13 +34,17 @@ from app.core.session_reply_queue.executor_audit import (
     _persist_confirmed_work_audit_execution_binding,
 )
 from app.core.session_reply_queue.executor_common import _response_content, _result_message_dedupe_key
-from app.core.session_reply_queue.executor_interactive import _dispatch_interactive_work
+from app.core.session_reply_queue.executor_interactive import (
+    _dispatch_interactive_work,
+    _save_interactive_work_execution_checkpoint,
+)
 from app.core.session_reply_queue.executor_metadata import _generate_auxiliary_reply_with_request_metadata
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.dispatcher.external_work import build_terminal_wait_response
+from app.core.utils.dispatcher.frozen_context import load_frozen_context_messages, serialize_frozen_context_messages
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
 from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
@@ -188,6 +193,64 @@ async def _append_confirmed_tool_result(
     return stored_tool_result
 
 
+def _refresh_confirmed_frozen_tool_results(
+    messages: list[InternalMessage] | None,
+    pending_tool_results: dict[str, Message],
+) -> list[InternalMessage] | None:
+    if messages is None:
+        return None
+    refreshed_by_id: dict[int, InternalMessage] = {}
+    for pending_message in pending_tool_results.values():
+        if pending_message.id is None:
+            continue
+        try:
+            refreshed = InternalMessage.model_validate_json(pending_message.content or "{}")
+        except (TypeError, ValueError):
+            continue
+        refreshed.id = pending_message.id
+        refreshed_by_id[pending_message.id] = refreshed
+    if not refreshed_by_id:
+        return messages
+    return [
+        refreshed_by_id.get(message.id, message).model_copy(deep=True)
+        if isinstance(message.id, int) and not isinstance(message.id, bool)
+        else message.model_copy(deep=True)
+        for message in messages
+    ]
+
+
+def _build_confirmed_wait_checkpoint(
+    execution_state: dict[str, Any],
+    *,
+    pending_tool_results: dict[str, Message],
+    decision_message_id: int,
+    decision_raw_message: str,
+) -> dict[str, Any]:
+    checkpoint = dict(execution_state.get("dispatcher_checkpoint") or {})
+    checkpoint_messages = [
+        InternalMessage.model_validate(item)
+        for item in checkpoint.get("messages", [])
+    ]
+    checkpoint_messages = _refresh_confirmed_frozen_tool_results(
+        checkpoint_messages,
+        pending_tool_results,
+    ) or []
+    if not any(message.id == decision_message_id for message in checkpoint_messages):
+        checkpoint_messages.append(
+            InternalMessage(
+                id=decision_message_id,
+                role=MessageRole.USER,
+                content=decision_raw_message,
+            )
+        )
+    checkpoint["messages"] = [
+        message.model_dump(mode="json", exclude_none=True)
+        for message in checkpoint_messages
+    ]
+    checkpoint["turn_messages"] = []
+    return checkpoint
+
+
 async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
     """校验并执行已确认工具，同时完整关闭审计执行整轮。"""
     audit_record_id = int(work.source_id)
@@ -262,6 +325,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         )
 
     actor_username = execution_state.get("actor_username") or getattr(record, "decided_by", None) or record.operator_username
+    frozen_context_messages = load_frozen_context_messages(execution_state.get("frozen_context_messages"))
     cfg = await validate_profile_and_cfg(db, profile)
     session = await session_crud.get_by_session_id(db, work.session_id)
     confirmed_tool_context_window_k = _resolve_confirmed_tool_context_window_k(session)
@@ -302,6 +366,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             session_id=work.session_id,
             source=record.source,
             language=get_current_locale(),
+            execution_scope=record.execution_scope,
             working_directory=record.working_directory,
         )
     if reaudit_round is not None:
@@ -343,6 +408,33 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 session_id=work.session_id,
                 tool_results=[message for message in turn_messages if message.role == MessageRole.TOOL],
             )
+            if frozen_context_messages is not None:
+                frozen_context_messages = _refresh_confirmed_frozen_tool_results(
+                    frozen_context_messages,
+                    pending_tool_results,
+                )
+                refreshed_state = {
+                    **(work.execution_state or {}),
+                    "frozen_context_messages": serialize_frozen_context_messages(frozen_context_messages),
+                }
+                checkpoint = refreshed_state.get("dispatcher_checkpoint")
+                if isinstance(checkpoint, dict) and isinstance(checkpoint.get("messages"), list):
+                    checkpoint_messages = [
+                        InternalMessage.model_validate(item)
+                        for item in checkpoint["messages"]
+                    ]
+                    checkpoint_messages = _refresh_confirmed_frozen_tool_results(
+                        checkpoint_messages,
+                        pending_tool_results,
+                    ) or checkpoint_messages
+                    refreshed_state["dispatcher_checkpoint"] = {
+                        **checkpoint,
+                        "messages": [
+                            message.model_dump(mode="json", exclude_none=True)
+                            for message in checkpoint_messages
+                        ],
+                    }
+                work.execution_state = refreshed_state
             if reaudit_round.confirmation_payload is not None:
                 confirmation_content = json.dumps(reaudit_round.confirmation_payload, ensure_ascii=False)
                 await save_message(
@@ -438,7 +530,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
 
     precheck_errors = prevalidate_tool_round_protocol(confirmed_calls, cfg)
     if not precheck_errors:
-        precheck_errors = prevalidate_tool_round(confirmed_calls, cfg, tool_schemas=_tools)
+        precheck_errors = prevalidate_tool_round(confirmed_calls, cfg, tool_schemas=_tools, execution_scope=record.execution_scope)
     all_attempts_created = len(executions_by_original_call_id) == len(source_tool_calls)
     all_succeeded = all_attempts_created and not precheck_errors
     execution_round_status = None
@@ -507,6 +599,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     tool_result_round_budget_tokens=confirmed_tool_result_round_budget_tokens,
                     model_id=confirmed_tool_model_id,
                     protocol=confirmed_tool_protocol,
+                    execution_scope=record.execution_scope,
                 )
                 await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
                 terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == SHELL_TOOL_NAME else None
@@ -580,9 +673,25 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         tool_results=[message for message in replacement_state.turn_messages if message.role == MessageRole.TOOL],
     )
     if wait_response is not None:
+        checkpoint = _build_confirmed_wait_checkpoint(
+            work.execution_state or {},
+            pending_tool_results=pending_tool_results,
+            decision_message_id=decision_message_id,
+            decision_raw_message=decision_raw_message,
+        )
+        await _save_interactive_work_execution_checkpoint(
+            db,
+            checkpoint,
+            work=work,
+            worker_id=worker_id,
+        )
         return wait_response
 
     guidance_prompt = (work.execution_state or {}).get("guidance_prompt")
+    frozen_context_messages = _refresh_confirmed_frozen_tool_results(
+        frozen_context_messages,
+        pending_tool_results,
+    )
     initial_message = InternalMessage(
         id=decision_message_id,
         role=MessageRole.USER,
@@ -598,8 +707,10 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         history_before_id=decision_message_id,
         frozen_user_message_ids=[decision_message_id],
         attachments=None,
-        allow_additional_user_messages=True,
+        allow_additional_user_messages=record.execution_scope == END_SESSION_SCOPE_FOREGROUND and frozen_context_messages is None,
         execution_resume_state=None,
+        execution_scope=record.execution_scope,
+        frozen_context_messages=frozen_context_messages,
     )
     if interactive_response.get("status") == "waiting_external_work":
         return interactive_response

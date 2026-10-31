@@ -14,6 +14,7 @@ import app.core.message_platforms.notifier as notifier_module
 import app.core.session_reply_queue.executor_interactive as executor_interactive_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
+import app.core.session_reply_queue.executor_replies as executor_replies_module
 import app.core.tools.terminal as terminal_tool_module
 import app.providers.database as database_provider
 from app.core.background_tasks.external_work import resume_external_work_for_task
@@ -44,7 +45,7 @@ from app.core.utils.dispatcher.markdown_instruction import materialize_user_envi
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.time import get_local_time
-from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.message_platform_outbox import MessagePlatformOutbox
@@ -1568,7 +1569,7 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
                         terminal_session_id=terminal_session_id,
                         uid=UID,
                         session_id=SESSION_ID,
-                        original_tool_call_id="initial-terminal-auto-watch",
+                        original_tool_call_id="real-call",
                         profile_id=PROFILE_ID,
                         command="test terminal command",
                         working_directory=".",
@@ -1919,10 +1920,10 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
         assert "submission_context" not in provider_dump
         assert "obsolete-snapshot-sentinel" not in provider_dump
         assert "future-user-sentinel" not in provider_dump
-        assert "future-assistant-sentinel" in provider_dump
+        assert "future-assistant-sentinel" not in provider_dump
         assert "original terminal task" in provider_dump
-        assert "stop the running process and do not rerun it" in provider_dump
-        assert "Understood, I will stop and not rerun it." in provider_dump
+        assert "stop the running process and do not rerun it" not in provider_dump
+        assert "Understood, I will stop and not rerun it." not in provider_dump
 
         def decode_user_payload(item: dict):
             if item.get("role") != "user" or not isinstance(item.get("content"), str):
@@ -1943,7 +1944,7 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
 
         user_payloads = [decode_user_payload(item) for item in provider_items]
         assert "original terminal task" in user_payloads
-        assert "stop the running process and do not rerun it" in user_payloads
+        assert "stop the running process and do not rerun it" not in user_payloads
         background_payloads = [item for item in user_payloads if isinstance(item, dict) and item.get("type") == "background_tool_result"]
         assert len(background_payloads) == 1
         background_payload = background_payloads[0]
@@ -1951,7 +1952,7 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
         assert background_payload["tool_name"] == TERMINAL_WATCH_TOOL_NAME
         assert background_payload["source"] == "terminal_auto_watch"
         assert background_payload["instruction"] == TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
-        assert background_payload["request_context"] == []
+        assert background_payload["request_context"] == [{"id": 1, "role": "user", "content": "original terminal task"}]
         assert background_payload["purpose"] is None
         assert background_payload["task"] == expected_task_result
         assert background_payload["task"]["content"] == observed_result
@@ -2054,9 +2055,66 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
 
 
 @pytest.mark.asyncio
+async def test_ordinary_background_task_queues_tool_summary_without_tools(database_factory, monkeypatch: pytest.MonkeyPatch) -> None:
+    async with database_factory(foreign_keys=True, wal=True, name="background-summary-split.sqlite3") as factory:
+        async with factory() as db:
+            db.add_all(
+                [
+                    User(uid=UID, username="background-summary-user"),
+                    Profile(id=PROFILE_ID, uid=UID, name="background-summary-profile", configs=ProfileConfig.model_validate({}).model_dump(mode="json")),
+                    ChatSession(session_id=SESSION_ID, uid=UID, profile_id=PROFILE_ID, source="http"),
+                ]
+            )
+            await db.commit()
+            task = await background_task_crud.create_task(
+                db,
+                uid=UID,
+                session_id=SESSION_ID,
+                profile_id=PROFILE_ID,
+                tool_call_id="background-summary-call",
+                tool_name=SHELL_TOOL_NAME,
+                arguments={"command": "echo summary"},
+                auto_reply=True,
+                extra={"source": "integration-seed", "reply_mode": BackgroundTaskReplyMode.SUMMARY.value},
+            )
+            assert task.id is not None
+            task_id = task.id
+            claimed = await background_task_crud.try_claim(db, task_id=task_id, worker_id=TASK_WORKER_ID, lease_seconds=300)
+            assert claimed is not None
+            assert await background_task_crud.mark_succeeded(
+                db,
+                task_id=task_id,
+                worker_id=TASK_WORKER_ID,
+                result=build_background_task_success_result(SHELL_TOOL_NAME, {"stdout": "summary", "stderr": "", "exit_code": 0}),
+                auto_reply=True,
+            )
+
+        monkeypatch.setattr(reply_trigger_module, "AsyncSessionLocal", factory)
+        await trigger_background_task_reply(task_id)
+
+        async with factory() as db:
+            work = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.source_id == str(task_id)))).scalars().one()
+            assert work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
+            assert "external_resume_context" not in (work.execution_state or {})
+            assert "dispatcher_checkpoint" not in (work.execution_state or {})
+            captured: dict[str, object] = {}
+
+            async def generate_auxiliary(_db, **kwargs):
+                captured.update(kwargs)
+                return InternalMessage(role=MessageRole.ASSISTANT, content="summary reply"), [], [], {"request_purpose": "background_summary"}
+
+            monkeypatch.setattr(executor_replies_module, "_generate_auxiliary_reply_with_request_metadata", generate_auxiliary)
+            response = await executor_replies_module._execute_background(db, work, "summary-worker")
+
+        assert response["content"] == "summary reply"
+        assert captured["allow_tools"] is False
+        assert captured["submission_context"] == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
-@pytest.mark.parametrize("source_auto", [False, True], ids=["ordinary-background", "automatic-watch"])
-async def test_background_summary_resumes_full_goal_tool_loop_after_external_watch(
+@pytest.mark.parametrize("source_auto", [True], ids=["automatic-watch"])
+async def test_background_task_resume_runs_full_goal_tool_loop_after_external_watch(
     database_factory,
     monkeypatch: pytest.MonkeyPatch,
     protocol: str,

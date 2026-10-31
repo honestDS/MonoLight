@@ -71,6 +71,8 @@ class AuditRecord(SQLModel, table=True):
     session_id: str = Field(index=True, max_length=100)
     source: str = Field(index=True, max_length=40)
     language: str = Field(max_length=20)
+    execution_scope: str = Field(default="foreground", max_length=20)
+    source_work_id: int | None = Field(default=None, index=True, ge=1)
     status: AuditRecordStatus = Field(default=AuditRecordStatus.PREPARING, index=True, max_length=30)
     failure_type: AuditFailureType | None = Field(default=None, index=True, max_length=40)
     error_reason: str | None = Field(default=None, sa_column=Column(Text))

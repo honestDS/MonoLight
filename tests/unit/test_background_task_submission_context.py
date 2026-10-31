@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.background_tasks import result_delivery as result_delivery_module
+from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
 from app.core.session_reply_queue import executor_replies as executor_replies_module
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkStatus, SessionReplyWorkType
@@ -25,6 +27,54 @@ def _background_result_event(**overrides):
 
 
 @pytest.mark.asyncio
+async def test_background_task_resume_does_not_scan_sibling_result_sources(monkeypatch):
+    worker_id = "worker-1"
+    work = SimpleNamespace(
+        id=12,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        work_type=SessionReplyWorkType.BACKGROUND_TASK_RESUME,
+        source_id="8",
+        status=SessionReplyWorkStatus.RUNNING,
+        locked_by=worker_id,
+        execution_state={},
+        dedupe_key="background-task-resume:8",
+        sequence_no=1,
+    )
+    db = SimpleNamespace(info={SESSION_REPLY_WORK_CLAIM_INFO_KEY: (work.id, worker_id)})
+
+    async def ensure_claim(_db):
+        return None
+
+    async def get_work(_db, work_id):
+        assert work_id == work.id
+        return work
+
+    async def unexpected_source_scan(*_args, **_kwargs):
+        raise AssertionError("independent background agent must not scan sibling work results")
+
+    async def list_completed_tasks(_db, *, work, task_ids):
+        assert task_ids == [8]
+        return []
+
+    monkeypatch.setattr(result_delivery_module, "ensure_session_reply_work_claim", ensure_claim)
+    monkeypatch.setattr(result_delivery_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(result_delivery_module.external_work_crud, "list_result_source_works", unexpected_source_scan)
+    monkeypatch.setattr(result_delivery_module.external_work_crud, "list_completed_reply_tasks", list_completed_tasks)
+
+    assert (
+        await result_delivery_module.receive_pending_external_results(
+            db,
+            uid=work.uid,
+            session_id=work.session_id,
+            profile_id=work.profile_id,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "legacy_extra",
     [
@@ -36,7 +86,7 @@ def _background_result_event(**overrides):
         ),
     ],
 )
-async def test_background_summary_uses_persisted_result_event_boundary(monkeypatch, legacy_extra):
+async def test_background_task_resume_uses_persisted_result_event_boundary(monkeypatch, legacy_extra):
     task = SimpleNamespace(
         id=8,
         uid="user-1",
@@ -56,7 +106,7 @@ async def test_background_summary_uses_persisted_result_event_boundary(monkeypat
         uid="user-1",
         session_id="session-1",
         profile_id=3,
-        work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        work_type=SessionReplyWorkType.BACKGROUND_TASK_RESUME,
         source_type=SessionReplySourceType.BACKGROUND_TASK,
         dedupe_key="background-task:8",
         status=SessionReplyWorkStatus.RUNNING,
@@ -101,7 +151,7 @@ async def test_background_summary_uses_persisted_result_event_boundary(monkeypat
     monkeypatch.setattr(executor_replies_module.message_crud, "get_by_dedupe_key", get_result_event)
     monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", dispatch_interactive_work)
 
-    response = await executor_replies_module._execute_background(object(), work)
+    response = await executor_replies_module._execute_background_task_resume(object(), work)
 
     assert response == {
         "content": "公开后台回复",
@@ -114,7 +164,8 @@ async def test_background_summary_uses_persisted_result_event_boundary(monkeypat
     assert captured["initial_message"].id == 50
     assert captured["history_before_id"] == 50
     assert captured["frozen_user_message_ids"] == [50]
-    assert captured["allow_additional_user_messages"] is True
+    assert captured["allow_additional_user_messages"] is False
+    assert captured["frozen_context_messages"] == []
     assert captured["execution_resume_state"]["reload_history"] is True
     assert captured["execution_resume_state"]["context_summary_fixed_upper_message_id"] == 50
     assert "submission_context" not in captured
@@ -137,7 +188,7 @@ async def test_background_summary_uses_persisted_result_event_boundary(monkeypat
         pytest.param({"profile_id": 99}, {}, id="task-profile-mismatch"),
     ],
 )
-async def test_background_summary_rejects_invalid_persisted_result_boundary(monkeypatch, task_overrides, event_overrides):
+async def test_background_task_resume_rejects_invalid_persisted_result_boundary(monkeypatch, task_overrides, event_overrides):
     task_values = {
         "id": 8,
         "uid": "user-1",
@@ -154,7 +205,7 @@ async def test_background_summary_rejects_invalid_persisted_result_boundary(monk
         uid="user-1",
         session_id="session-1",
         profile_id=3,
-        work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        work_type=SessionReplyWorkType.BACKGROUND_TASK_RESUME,
         source_type=SessionReplySourceType.BACKGROUND_TASK,
         status=SessionReplyWorkStatus.RUNNING,
         execution_state={},
@@ -186,6 +237,6 @@ async def test_background_summary_rejects_invalid_persisted_result_boundary(monk
     monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", dispatch_interactive_work)
 
     with pytest.raises(RuntimeError):
-        await executor_replies_module._execute_background(object(), work)
+        await executor_replies_module._execute_background_task_resume(object(), work)
 
     assert dispatch_called is False

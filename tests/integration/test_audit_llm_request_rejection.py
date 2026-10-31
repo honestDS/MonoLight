@@ -249,6 +249,7 @@ async def test_scoring_request_rejection_persists_failed_audit_without_execution
             source="integration",
             language="zh",
             working_directory=tmp_path,
+            execution_scope="foreground",
         )
 
     assert result is not None
@@ -298,6 +299,7 @@ async def test_summary_request_rejection_preserves_pending_confirmation_with_fal
             source="integration",
             language="zh",
             working_directory=tmp_path,
+            execution_scope="foreground",
         )
 
     assert result is not None
@@ -695,6 +697,7 @@ async def test_shell_blacklist_feedback_survives_history_reload_and_locale_switc
                 source="integration",
                 language="zh",
                 working_directory=tmp_path,
+                execution_scope="foreground",
             )
 
         assert result is not None

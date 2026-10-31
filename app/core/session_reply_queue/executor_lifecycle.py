@@ -32,6 +32,7 @@ from app.core.session_reply_queue.executor_common import (
 from app.core.session_reply_queue.executor_confirmed import _execute_confirmed_tools
 from app.core.session_reply_queue.executor_replies import (
     _execute_background,
+    _execute_background_task_resume,
     _execute_external_resume,
     _execute_foreground,
     _execute_scheduled,
@@ -127,6 +128,8 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                 response = await _execute_confirmed_tools(db, work, worker_id)
             elif work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
                 response = await _execute_background(db, work, worker_id)
+            elif work.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME:
+                response = await _execute_background_task_resume(db, work, worker_id)
             else:
                 response = await _execute_scheduled(db, work, worker_id)
             skip_reply = isinstance(response, dict) and response.get("skip_reply") is True
@@ -209,7 +212,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         if result_message is not None and (work.execution_state or {}).get("stopped_task_ids"):
             await complete_stopped_task_replies(db, work_id=work_id)
 
-        if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
+        if work.work_type in {SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.BACKGROUND_TASK_RESUME}:
             await db.execute(
                 update(BackgroundTask)
                 .where(
@@ -269,7 +272,7 @@ async def fail_session_reply_work(
     await send_session_event(work.uid, work.session_id, _event_for_work(work, identified_response, error=True))
 
     async with AsyncSessionLocal() as db:
-        if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
+        if work.work_type in {SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.BACKGROUND_TASK_RESUME}:
             await db.execute(
                 update(BackgroundTask)
                 .where(BackgroundTask.id == int(work.source_id))

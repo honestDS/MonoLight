@@ -120,6 +120,10 @@ def materialize_user_environment_prompts(messages: list[InternalMessage]) -> lis
             if guidance_prompt:
                 payload["platform_guidance"] = guidance_prompt
 
+        execution_guidance = message.execution_guidance.strip() if isinstance(message.execution_guidance, str) else ""
+        if execution_guidance:
+            payload["execution_guidance"] = execution_guidance
+
         materialized_content = _serialize_environment_snapshot(payload)
         if real_non_text_parts:
             message.content = [TextPart(text=materialized_content), *real_non_text_parts]

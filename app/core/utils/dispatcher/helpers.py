@@ -116,6 +116,7 @@ async def process_single_tool_with_isolated_db(
     dispatch_mode: DispatchMode = "interactive",
     dispatch_source: str = "interactive_tool",
     session_reply_work_claim: tuple[int, str] | None = None,
+    execution_scope: str | None = None,
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatchers.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
@@ -144,6 +145,7 @@ async def process_single_tool_with_isolated_db(
             source_message_id=source_message_id,
             dispatch_mode=dispatch_mode,
             dispatch_source=dispatch_source,
+            execution_scope=execution_scope,
         )
 
 

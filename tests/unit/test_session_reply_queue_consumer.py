@@ -180,7 +180,7 @@ async def test_consumer_marks_foreground_audit_execution_unknown_and_does_not_re
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "work_type",
-    [SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.SCHEDULED_TASK_SUMMARY],
+    [SessionReplyWorkType.BACKGROUND_TASK_RESUME, SessionReplyWorkType.SCHEDULED_TASK_SUMMARY],
 )
 async def test_consumer_does_not_retry_background_or_scheduled_audit_exception(monkeypatch, work_type):
     """后台和定时回复的活动审计异常不得释放为自动重试。"""
@@ -244,7 +244,7 @@ async def test_consumer_does_not_retry_background_or_scheduled_audit_exception(m
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "work_type",
-    [SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.SCHEDULED_TASK_SUMMARY],
+    [SessionReplyWorkType.BACKGROUND_TASK_RESUME, SessionReplyWorkType.SCHEDULED_TASK_SUMMARY],
 )
 async def test_consumer_marks_background_or_scheduled_audit_unknown_when_cancelled(monkeypatch, work_type):
     """后台和定时回复取消时必须标记活动审计结果未知。"""
@@ -403,7 +403,7 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
     [
         SessionReplyWorkType.FOREGROUND_REPLY,
         SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
-        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        SessionReplyWorkType.BACKGROUND_TASK_RESUME,
         SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
     ],
 )

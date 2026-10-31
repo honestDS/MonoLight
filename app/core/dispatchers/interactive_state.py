@@ -60,6 +60,7 @@ class InteractiveDispatchState:
     execution_resume_state: dict[str, Any] | None
     checkpoint_state: _ExecutionCheckpointState
     execution_scope: str = END_SESSION_SCOPE_FOREGROUND
+    context_frozen: bool = False
     turn_messages: list[InternalMessage] = field(default_factory=list)
     files_to_user: list[str] = field(default_factory=list)
     is_first_iter: bool = True
@@ -118,6 +119,7 @@ def build_interactive_dispatch_state(
     execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     initial_message_type: MessageType = MessageType.TEXT,
     execution_scope: str | None = None,
+    context_frozen: bool = False,
     call_context: str | None = None,
 ) -> InteractiveDispatchState:
     resolved_execution_scope = resolve_end_session_scope(
@@ -195,6 +197,7 @@ def build_interactive_dispatch_state(
         execution_resume_state=execution_resume_state,
         checkpoint_state=checkpoint_state,
         execution_scope=resolved_execution_scope,
+        context_frozen=context_frozen,
         turn_messages=turn_messages,
         files_to_user=files_to_user,
         is_first_iter=is_first_iter,

@@ -26,6 +26,7 @@ from app.core.log import get_logger
 from app.core.prompts import EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT, PROMPT_TOOL_INTERRUPTED, TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.core.utils.background_task_result import build_background_task_failure_result
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
@@ -425,12 +426,34 @@ async def prepare_external_work_resume(
             ]
         )
     )
-    new_checkpoint.update(
-        {
-            "context_summary_trigger_mode": "user_message",
-            "context_summary_fixed_upper_message_id": max(marker_ids),
-        }
-    )
+    if isinstance(state.get("frozen_context_messages"), list):
+        checkpoint_messages = new_checkpoint.get("messages")
+        had_checkpoint_messages = isinstance(checkpoint_messages, list) and bool(checkpoint_messages)
+        if had_checkpoint_messages:
+            resume_messages = [InternalMessage.model_validate(item) for item in checkpoint_messages]
+        else:
+            resume_messages = [InternalMessage.model_validate(item) for item in state["frozen_context_messages"]]
+        existing_ids = {message.id for message in resume_messages if isinstance(message.id, int) and not isinstance(message.id, bool)}
+        for marker_id in marker_ids:
+            if marker_id in existing_ids:
+                continue
+            marker = await message_crud.get(db, marker_id)
+            if marker is None:
+                raise ValueError(_unknown_error())
+            parsed = parse_db_messages_to_internal([marker])
+            if not parsed:
+                raise ValueError(_unknown_error())
+            resume_messages.extend(parsed)
+            existing_ids.add(marker_id)
+        new_checkpoint["messages"] = [message.model_dump(mode="json", exclude_none=True) for message in resume_messages]
+        new_checkpoint["reload_history"] = not had_checkpoint_messages
+    else:
+        new_checkpoint.update(
+            {
+                "context_summary_trigger_mode": "user_message",
+                "context_summary_fixed_upper_message_id": max(marker_ids),
+            }
+        )
     state["dispatcher_checkpoint"] = new_checkpoint
     updated = await session_reply_work_item_crud.update_claimed(
         db,
@@ -533,14 +556,23 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 if files:
                     checkpoint["files_to_user"] = merge_assistant_files(checkpoint.get("files_to_user", []), files)
             checkpoint.pop("external_resume_messages", None)
-            checkpoint.update(
-                {
-                    "messages": [],
-                    "turn_messages": [],
-                    "reload_history": True,
-                    "deferred_external_results": True,
-                }
-            )
+            if isinstance(state.get("frozen_context_messages"), list):
+                checkpoint.update(
+                    {
+                        "turn_messages": [],
+                        "reload_history": True,
+                        "deferred_external_results": True,
+                    }
+                )
+            else:
+                checkpoint.update(
+                    {
+                        "messages": [],
+                        "turn_messages": [],
+                        "reload_history": True,
+                        "deferred_external_results": True,
+                    }
+                )
             state["dispatcher_checkpoint"] = checkpoint
             _remove_consumed_slots(state, consumed_slot_keys)
             state.pop("active_audit_execution", None)

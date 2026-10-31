@@ -848,6 +848,48 @@ async def test_absorb_contiguous_messages_rolls_back_when_claim_is_lost(db_sessi
 
 
 @pytest.mark.asyncio
+async def test_background_task_resume_does_not_absorb_foreground_messages(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    manager = SessionReplyQueueManager()
+
+    background = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.BACKGROUND_TASK_RESUME,
+        source_id=9,
+        dedupe_key="background-task-resume:9",
+    )
+    background.status = SessionReplyWorkStatus.RUNNING
+    background.locked_by = "worker-1"
+    db_session.add(background)
+
+    message = await add_message(db_session, 1, "foreground message")
+    foreground = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=1,
+        dedupe_key="foreground-message:1",
+    )
+    await db_session.commit()
+
+    batch = await manager.absorb_contiguous_foreground_messages(
+        db_session,
+        work_id=background.id,
+        worker_id="worker-1",
+    )
+
+    assert batch is None
+    await db_session.refresh(background)
+    await db_session.refresh(foreground)
+    await db_session.refresh(message)
+    assert background.input_message_ids in (None, [])
+    assert foreground.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert foreground.merged_into_id is None
+    assert message.is_processed is False
+
+
+@pytest.mark.asyncio
 async def test_running_foreground_work_does_not_absorb_across_background_boundary(db_session: AsyncSession, monkeypatch):
     crud = CRUDSessionReplyWorkItem()
     manager = SessionReplyQueueManager()

@@ -12,6 +12,7 @@ class SessionReplyWorkType(StrEnum):
     FOREGROUND_REPLY = "foreground_reply"
     CONFIRMED_TOOL_EXECUTION = "confirmed_tool_execution"
     BACKGROUND_TOOL_SUMMARY = "background_tool_summary"
+    BACKGROUND_TASK_RESUME = "background_task_resume"
     SCHEDULED_TASK_SUMMARY = "scheduled_task_summary"
 
 

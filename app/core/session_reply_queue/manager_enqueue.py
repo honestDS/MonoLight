@@ -14,6 +14,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import get_current_locale, t
+from app.core.utils.dispatcher.frozen_context import capture_frozen_context_messages
 from app.models.message import (
     InternalMessage,
     Message,
@@ -271,6 +272,40 @@ class SessionReplyEnqueue:
             await db.flush()
         return work, created
 
+    async def enqueue_background_task_resume(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        background_task_id: int,
+        commit: bool = True,
+    ) -> tuple[SessionReplyWorkItem, bool]:
+        work, created = await session_reply_work_item_crud.enqueue(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            work_type=SessionReplyWorkType.BACKGROUND_TASK_RESUME,
+            source_type=SessionReplySourceType.BACKGROUND_TASK,
+            source_id=background_task_id,
+            dedupe_key=f"background-task-resume:{background_task_id}",
+            commit=False,
+        )
+        if created:
+            work.execution_state = {
+                **(work.execution_state or {}),
+                "language": get_current_locale(),
+            }
+            db.add(work)
+        if commit:
+            await db.commit()
+            await db.refresh(work)
+        else:
+            await db.flush()
+        return work, created
+
     async def enqueue_scheduled_summary(
         self,
         db: AsyncSession,
@@ -294,9 +329,16 @@ class SessionReplyEnqueue:
             commit=False,
         )
         if created:
+            frozen_context_messages = await capture_frozen_context_messages(
+                db,
+                session_id=session_id,
+                uid=uid,
+                before_id=trigger_message_id,
+            )
             work.execution_state = {
                 **(work.execution_state or {}),
                 "language": get_current_locale(),
+                "frozen_context_messages": frozen_context_messages,
             }
             db.add(work)
         if commit:

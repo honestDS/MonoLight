@@ -1613,6 +1613,157 @@ async def test_external_result_delivery_reuses_markers_after_failed_target(exter
 
 
 @pytest.mark.asyncio
+async def test_external_result_delivery_can_isolate_current_work_from_siblings(external_work_database):
+    source = await _create_case(external_work_database, call_ids=("isolated-call",))
+    await _complete_task(source, "isolated-call", "foreground-only-result")
+    target_id, _target_user_id, target_worker = await _create_target_work(source, "isolated background agent")
+
+    async with external_work_database() as db:
+        target = await db.get(SessionReplyWorkItem, target_id)
+        assert target is not None
+        target.work_type = SessionReplyWorkType.BACKGROUND_TASK_RESUME
+        target.source_type = SessionReplySourceType.BACKGROUND_TASK
+        target.source_id = "999999"
+        db.add(target)
+        await db.commit()
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_id, target_worker)
+
+        received = await receive_pending_external_results(
+            db,
+            uid=source.uid,
+            session_id=source.session_id,
+            profile_id=source.profile_id,
+        )
+
+        assert received == []
+        source_work = await db.get(SessionReplyWorkItem, source.work_id)
+        assert source_work is not None
+        assert source_work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert source_work.merged_into_id is None
+        completed_task = await db.get(BackgroundTask, source.task_ids["isolated-call"])
+        assert completed_task is not None
+        assert "reply_owner" not in completed_task.extra
+
+
+@pytest.mark.asyncio
+async def test_foreground_external_result_delivery_does_not_hijack_background_agent(external_work_database):
+    source = await _create_case(external_work_database, call_ids=("background-agent-call",))
+    await _complete_task(source, "background-agent-call", "background-agent-only-result")
+    target_id, _target_user_id, target_worker = await _create_target_work(source, "foreground target")
+
+    async with external_work_database() as db:
+        source_work = await db.get(SessionReplyWorkItem, source.work_id)
+        assert source_work is not None
+        source_work.work_type = SessionReplyWorkType.BACKGROUND_TASK_RESUME
+        source_work.source_type = SessionReplySourceType.BACKGROUND_TASK
+        source_work.source_id = "888888"
+        db.add(source_work)
+        await db.commit()
+
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (target_id, target_worker)
+        received = await receive_pending_external_results(
+            db,
+            uid=source.uid,
+            session_id=source.session_id,
+            profile_id=source.profile_id,
+        )
+
+        assert received == []
+        await db.refresh(source_work)
+        assert source_work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert source_work.merged_into_id is None
+        completed_task = await db.get(BackgroundTask, source.task_ids["background-agent-call"])
+        assert completed_task is not None
+        assert "reply_owner" not in completed_task.extra
+
+
+@pytest.mark.asyncio
+async def test_background_task_resume_does_not_claim_unrelated_auto_reply_task(external_work_database):
+    async with external_work_database() as db:
+        profile = await db.get(Profile, PROFILE_ID)
+        assert profile is not None
+        manager = BackgroundTaskManager()
+        source_task = await manager.submit(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile=profile,
+            tool_call_id="resume-source-call",
+            tool_name="external_test_tool",
+            arguments={"value": "source"},
+            messages=[InternalMessage(id=10, role=MessageRole.USER, content="source context")],
+        )
+        unrelated_task = await manager.submit(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile=profile,
+            tool_call_id="unrelated-auto-reply-call",
+            tool_name="external_test_tool",
+            arguments={"value": "unrelated"},
+            messages=[InternalMessage(id=11, role=MessageRole.USER, content="unrelated context")],
+        )
+        assert source_task.id is not None and unrelated_task.id is not None
+
+        for task, result in (
+            (source_task, "source-result"),
+            (unrelated_task, "unrelated-result"),
+        ):
+            worker_id = f"task-worker-{task.id}"
+            assert await background_task_crud.try_claim(
+                db,
+                task_id=task.id,
+                worker_id=worker_id,
+                lease_seconds=3600,
+            )
+            assert await background_task_crud.mark_succeeded(
+                db,
+                task_id=task.id,
+                worker_id=worker_id,
+                result={"content": result},
+                auto_reply=True,
+            )
+
+        work, created = await session_reply_work_item_crud.enqueue(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            work_type=SessionReplyWorkType.BACKGROUND_TASK_RESUME,
+            source_type=SessionReplySourceType.BACKGROUND_TASK,
+            source_id=source_task.id,
+            dedupe_key=f"background-task-resume:{source_task.id}",
+            commit=False,
+        )
+        assert created and work.id is not None
+        claimed = await session_reply_work_item_crud.claim_next(
+            db,
+            worker_id="background-resume-worker",
+            lease_seconds=3600,
+        )
+        assert claimed is not None and claimed.id == work.id
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (claimed.id, "background-resume-worker")
+
+        received = await receive_pending_external_results(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+        )
+
+        payload_task_ids = {
+            payload["task_id"]
+            for message in received
+            for payload in _result_payloads(message.content or "{}")
+        }
+        assert payload_task_ids == {source_task.id}
+        await db.refresh(source_task)
+        await db.refresh(unrelated_task)
+        assert source_task.extra["reply_owner"]["work_id"] == work.id
+        assert "reply_owner" not in unrelated_task.extra
+
+
+@pytest.mark.asyncio
 async def test_recover_interrupted_external_work_marks_unknown_and_is_idempotent(external_work_database):
     case = await _create_case(external_work_database)
 

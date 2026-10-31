@@ -91,6 +91,7 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         SessionReplyWorkType.FOREGROUND_REPLY: "foreground",
         SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION: "confirmed_tool_execution",
         SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY: "background_task",
+        SessionReplyWorkType.BACKGROUND_TASK_RESUME: "background_task",
         SessionReplyWorkType.SCHEDULED_TASK_SUMMARY: "scheduled_task",
     }[work.work_type]
     content = parse_assistant_files_content(_response_content(response))
@@ -110,7 +111,7 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         event["llm_request_metadata"] = response["llm_request_metadata"]
     if response.get("message_id") is not None:
         event["message_id"] = response["message_id"]
-    if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
+    if work.work_type in {SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.BACKGROUND_TASK_RESUME}:
         event["task_id"] = int(work.source_id)
         event["background_task_id"] = int(work.source_id)
     elif work.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY:

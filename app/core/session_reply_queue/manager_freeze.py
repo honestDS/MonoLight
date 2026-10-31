@@ -151,9 +151,10 @@ class SessionReplyFreeze:
             not in {
                 SessionReplyWorkType.FOREGROUND_REPLY,
                 SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
-                SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
             }
         ):
+            return None
+        if isinstance((work.execution_state or {}).get("frozen_context_messages"), list):
             return None
         if bool((work.execution_state or {}).get("audit_decision_response")):
             return None

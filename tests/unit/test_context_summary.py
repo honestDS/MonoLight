@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
@@ -19,6 +21,7 @@ from app.core.utils.context_summary.common import (
 from app.core.utils.context_summary.common import (
     serialize_message as _serialize_message,
 )
+from app.core.utils.dispatcher import frozen_context as frozen_context_module
 from app.models.message import ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
 from app.models.profile import ProfileConfig
 
@@ -157,6 +160,82 @@ def test_select_summary_segment_skips_oversized_first_turn():
     ]
 
     assert _select_summary_segment(messages, target_tokens=10) == []
+
+
+def test_frozen_compaction_segment_never_splits_pending_tool_chain():
+    messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="request"),
+        InternalMessage(
+            id=2,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-1", name="shell", arguments={"command": "echo first"})],
+        ),
+        InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content="first result"),
+        InternalMessage(
+            id=4,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-2", name="shell", arguments={"command": "echo pending"})],
+        ),
+    ]
+
+    segment = frozen_context_module._select_frozen_compaction_segment(
+        messages,
+        target_tokens=10_000,
+    )
+
+    assert [message.id for message in segment] == [1, 2, 3]
+    assert segment[-1].role == MessageRole.TOOL
+
+
+@pytest.mark.asyncio
+async def test_frozen_context_compaction_summarizes_completed_prefix_only(monkeypatch):
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(id=1, role=MessageRole.USER, content="request exact instruction"),
+        InternalMessage(
+            id=2,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-1", name="shell", arguments={"command": "echo first"})],
+        ),
+        InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content="result " + "y" * 6000),
+        InternalMessage(
+            id=4,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-2", name="shell", arguments={"command": "echo pending"})],
+        ),
+    ]
+    summary_prompts = []
+
+    async def generate_summary_text(_db, **kwargs):
+        summary_prompts.append(kwargs["prompt"])
+        return "compressed completed work"
+
+    monkeypatch.setattr(frozen_context_module, "generate_summary_text", generate_summary_text)
+
+    compacted = await frozen_context_module.compact_frozen_context_messages(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=1),
+        cfg=SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90)),
+        messages=messages,
+        context_window_k=128,
+        max_tokens=512,
+        tools=[],
+        force=True,
+    )
+
+    assert len(summary_prompts) == 1
+    assert "call-1" in summary_prompts[0]
+    assert "call-2" not in summary_prompts[0]
+    assert compacted[0].role == MessageRole.SYSTEM
+    assert compacted[1].role == MessageRole.USER
+    assert compacted[1].content.startswith("<conversation_summary ")
+    assert compacted[2].role == MessageRole.ASSISTANT
+    assert compacted[2].tool_calls[0].id == "call-2"
+    covered_message_id, covered_content = frozen_context_module._covered_user_from_segment(compacted)
+    assert covered_message_id == 1
+    assert covered_content == messages[1].content
 
 
 def test_serialize_message_supports_multimodal_content():

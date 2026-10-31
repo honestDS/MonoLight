@@ -30,6 +30,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import get_current_locale, t
+from app.core.utils.dispatcher.frozen_context import serialize_frozen_context_messages
 from app.models.audit import AuditRecordStatus
 from app.models.message import (
     InternalMessage,
@@ -485,6 +486,29 @@ class SessionReplySubmission:
             db.add(message_row)
         session = await session_crud.get_by_session_id(db, session_id)
         show_tool_calls, expose_tool_call_content = get_tool_call_visibility(session, source)
+        frozen_context_messages = None
+        source_dispatcher_checkpoint = None
+        source_work_id = claimed_record.source_work_id
+        if isinstance(source_work_id, int) and not isinstance(source_work_id, bool) and source_work_id > 0:
+            source_work = await session_reply_work_item_crud.get(db, source_work_id)
+            if (
+                source_work is None
+                or source_work.uid != uid
+                or source_work.session_id != session_id
+                or source_work.profile_id != profile_id
+            ):
+                await db.rollback()
+                raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
+            source_state = source_work.execution_state if isinstance(source_work.execution_state, dict) else {}
+            source_frozen_context = source_state.get("frozen_context_messages")
+            if isinstance(source_frozen_context, list):
+                source_checkpoint = source_state.get("dispatcher_checkpoint")
+                checkpoint_messages = source_checkpoint.get("messages") if isinstance(source_checkpoint, dict) else None
+                if isinstance(source_checkpoint, dict) and isinstance(checkpoint_messages, list) and checkpoint_messages:
+                    source_dispatcher_checkpoint = dict(source_checkpoint)
+                    frozen_context_messages = serialize_frozen_context_messages(checkpoint_messages)
+                else:
+                    frozen_context_messages = serialize_frozen_context_messages(source_frozen_context)
         work, _created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
@@ -508,11 +532,16 @@ class SessionReplySubmission:
             "expose_tool_call_content": expose_tool_call_content,
             "language": get_current_locale(),
             "message_source": source,
+            "execution_scope": claimed_record.execution_scope,
             "request_ids": merge_work_request_ids(work, request_id=request_id),
             "guidance_prompt": guidance_prompt,
         }
         if cleaned_additional_system_prompt:
             work.execution_state["additional_system_prompt"] = cleaned_additional_system_prompt
+        if frozen_context_messages is not None:
+            work.execution_state["frozen_context_messages"] = frozen_context_messages
+        if source_dispatcher_checkpoint is not None:
+            work.execution_state["dispatcher_checkpoint"] = source_dispatcher_checkpoint
         db.add(work)
         await db.commit()
         if confirmation_projection is not None and confirmation_projection.status_update is not None:

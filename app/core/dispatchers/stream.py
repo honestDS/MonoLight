@@ -131,6 +131,7 @@ class StreamDispatcherMixin:
         actor_username: str | None = None,
         initial_message_type: MessageType = MessageType.TEXT,
         execution_scope: str | None = None,
+        frozen_context_messages: list[InternalMessage] | None = None,
         call_context: str | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=100)
@@ -150,6 +151,7 @@ class StreamDispatcherMixin:
             "actor_username": actor_username,
             "initial_message_type": initial_message_type,
             "execution_scope": execution_scope,
+            "frozen_context_messages": frozen_context_messages,
             "call_context": call_context,
             "session_id": session_id,
             "attachments": attachments,

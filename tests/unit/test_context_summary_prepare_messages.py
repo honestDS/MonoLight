@@ -6,13 +6,15 @@ import pytest
 
 from app.core.prompts import SYSTEM_RUNTIME_CONTEXT_POLICY
 from app.core.utils.context_summary.common import ContextSummaryState
+from app.core.utils.dispatcher import frozen_context as frozen_context_module
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.markdown_instruction import (
     append_user_runtime_instruction_text,
     materialize_user_environment_prompts,
     refresh_max_output_tokens_instruction,
 )
-from app.models.message import ChatCompletionRequest, ImagePart, InternalMessage, MessageRole, TextPart
+from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.models.message import ChatCompletionRequest, ImagePart, InternalMessage, Message, MessageRole, MessageType, TextPart
 from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransformer
 from app.transformers.openai.responses import OpenAIResponsesTransformer
 
@@ -38,6 +40,7 @@ def test_runtime_context_policy_describes_the_json_user_message_contract():
         '"response_settings"',
         '"platform_constraints"',
         '"platform_guidance"',
+        '"execution_guidance"',
     ):
         assert field in policy
     assert '"markdown" is a boolean' in policy
@@ -49,6 +52,39 @@ def test_runtime_context_policy_describes_the_json_user_message_contract():
     assert '"type": "attachment", "index", and "media_type"' in policy
     assert "follow immediately after the JSON text part" in policy
     assert "correspond to attachment references by index" in policy
+
+
+def test_scheduled_task_trigger_separates_user_body_platform_and_execution_guidance():
+    raw_message = Message(
+        session_id="scheduled-session",
+        uid="scheduled-user",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.SCHEDULED_TASK_TRIGGER,
+        content="请直接向用户回复：“测试成功”",
+        environment_prompt=_compact_json(
+            {
+                "environment": {"runtime_context": "scheduled runtime"},
+                "response_settings": {"markdown": False, "max_output_tokens": 321},
+                "platform_constraints": "existing platform constraints",
+            }
+        ),
+        guidance_prompt="existing platform guidance",
+        is_processed=True,
+    )
+
+    parsed = parse_db_messages_to_internal([raw_message])
+    assert len(parsed) == 1
+    assert parsed[0].content == raw_message.content
+
+    payload = json.loads(materialize_user_environment_prompts(parsed)[0].content)
+    assert payload["user_message"] == raw_message.content
+    assert payload["environment"] == {"runtime_context": "scheduled runtime"}
+    assert payload["response_settings"] == {"markdown": False, "max_output_tokens": 321}
+    assert payload["platform_constraints"] == "existing platform constraints"
+    assert payload["platform_guidance"] == "existing platform guidance"
+    assert "user-configured scheduled task" in payload["execution_guidance"]
+    assert "Scheduled task content:" not in payload["execution_guidance"]
 
 
 def test_runtime_instruction_materialization_preserves_all_user_snapshots(monkeypatch):
@@ -719,3 +755,93 @@ async def test_prepare_messages_keeps_provider_prefix_stable_across_unsummarized
 
     assert provider_prefix(second_request[: len(first_request)]) == provider_prefix(first_request)
     assert [message.id for message in second_request[len(first_request) :]] == [23, 24]
+
+
+@pytest.mark.asyncio
+async def test_prepare_messages_uses_frozen_context_without_reading_live_summary(monkeypatch):
+    frozen_context = [
+        InternalMessage(role=MessageRole.USER, content='<conversation_summary through_message_id="10">frozen summary</conversation_summary>'),
+        InternalMessage(id=11, role=MessageRole.USER, content="frozen history"),
+        InternalMessage(id=12, role=MessageRole.ASSISTANT, content="frozen answer"),
+    ]
+    current_message = InternalMessage(
+        id=20,
+        role=MessageRole.USER,
+        content="scheduled trigger",
+        environment_prompt=_compact_json(
+            {
+                "environment": {"runtime_context": "scheduled runtime"},
+                "response_settings": {"markdown": False, "max_output_tokens": 512},
+            }
+        ),
+    )
+
+    async def build_system_prompt(_db, _profile):
+        return "system prompt"
+
+    async def unexpected_live_summary(*_args, **_kwargs):
+        raise AssertionError("frozen context must not read the live session summary")
+
+    async def unexpected_live_history(*_args, **_kwargs):
+        raise AssertionError("frozen context must not read live session history")
+
+    monkeypatch.setattr(prepare_module, "build_system_prompt", build_system_prompt)
+    monkeypatch.setattr(prepare_module, "get_context_summary_state", unexpected_live_summary)
+    monkeypatch.setattr(prepare_module.ContextManager, "get_messages", unexpected_live_history)
+
+    messages = await prepare_module.prepare_messages(
+        object(),
+        "session-1",
+        "user-1",
+        SimpleNamespace(),
+        SimpleNamespace(),
+        current_message,
+        current_message.content,
+        True,
+        context_window_k=4,
+        max_tokens=512,
+        submission_context=frozen_context,
+    )
+
+    assert messages[0].role == MessageRole.SYSTEM
+    assert messages[0].content == "system prompt"
+    assert [message.content for message in messages[1:]] == [
+        frozen_context[0].content,
+        "frozen history",
+        "frozen answer",
+        "scheduled trigger",
+    ]
+    assert frozen_context[0].content in messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_frozen_context_ignores_summary_that_advanced_past_boundary(monkeypatch):
+    async def get_summary_state(*_args, **_kwargs):
+        return ContextSummaryState(content="future summary must not leak", message_id=50)
+
+    async def load_history(*_args, **kwargs):
+        assert kwargs["before_id"] == 20
+        assert kwargs["after_id"] is None
+        return [SimpleNamespace(is_processed=True)]
+
+    monkeypatch.setattr(frozen_context_module, "get_context_summary_state", get_summary_state)
+    monkeypatch.setattr(frozen_context_module.ContextManager, "_load_history_backward_by_id", load_history)
+    monkeypatch.setattr(
+        frozen_context_module,
+        "parse_db_messages_to_internal",
+        lambda _rows: [InternalMessage(id=10, role=MessageRole.USER, content="history before scheduled trigger")],
+    )
+    monkeypatch.setattr(
+        frozen_context_module.ContextManager,
+        "audit_tool_chain",
+        lambda messages, **_kwargs: messages,
+    )
+
+    snapshot = await frozen_context_module.capture_frozen_context_messages(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        before_id=20,
+    )
+
+    assert [message["content"] for message in snapshot] == ["history before scheduled trigger"]

@@ -12,7 +12,7 @@ from app.core.constants import ERR_LLM_EMPTY_RESPONSE
 from app.core.exceptions import LLMException
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
-from app.core.session_reply_queue import executor_replies as executor_replies_module
+from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.request_token_baseline import build_provider_request_usage_metadata
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile
@@ -215,7 +215,22 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
     async with session_factory() as db:
         scheduled_work = await db.get(SessionReplyWorkItem, 7)
         assert scheduled_work is not None
-        response = await executor_replies_module._execute_scheduled(db, scheduled_work, "worker-1")
+        ai_msg, turn_messages, files, _ = await executor_metadata_module._generate_auxiliary_reply_with_request_metadata(
+            db,
+            work=scheduled_work,
+            request_purpose=SessionReplyProviderRequestPurpose.SCHEDULED_SUMMARY,
+            uid=scheduled_work.uid,
+            session_id=scheduled_work.session_id,
+            profile=await db.get(Profile, scheduled_work.profile_id),
+            call_context="session_reply_scheduled_summary",
+            allow_tools=True,
+            initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+            initial_fixed_upper_message_id=int(scheduled_work.source_id),
+            restrict_tools_to_background_allowlist=False,
+            reply_source="scheduled_task",
+            final_message_dedupe_key="session-reply-work:7:result",
+        )
+        response = {"content": ai_msg.content}
     assert response["content"] == "auxiliary reply"
 
     async with session_factory() as db:
@@ -278,6 +293,73 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
         assert session.llm_request_metadata["total_output_tokens"] == 211
         assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(340 / 1300)
         assert not any(key.startswith("_provider_") for key in session.llm_request_metadata)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_interactive_usage_contributes_to_session_totals(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_session_and_works(
+        session_factory,
+        metadata=_session_metadata(1000, 250, 200),
+        works=[
+            _work(
+                work_id=7,
+                sequence_no=1,
+                work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+                source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                source_id="6",
+            )
+        ],
+    )
+    monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+
+    async def dispatch(**kwargs):
+        assert kwargs["execution_scope"] == "task"
+        await kwargs["request_metadata_callback"](
+            _request_metadata(
+                "scheduled-main-request",
+                input_tokens=120,
+                cached_tokens=20,
+                output_tokens=7,
+            )
+        )
+        return llm_response_payload("scheduled reply")
+
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+
+    async with session_factory() as db:
+        scheduled_work = await db.get(SessionReplyWorkItem, 7)
+        assert scheduled_work is not None
+        response = await executor_interactive_module._dispatch_interactive_work(
+            db,
+            work=scheduled_work,
+            worker_id="worker-1",
+            message="scheduled input",
+            initial_message=InternalMessage(id=6, role=MessageRole.USER, content="scheduled input"),
+            history_before_id=6,
+            frozen_user_message_ids=[6],
+            attachments=None,
+            allow_additional_user_messages=False,
+            execution_resume_state=None,
+            execution_scope="task",
+            frozen_context_messages=[],
+        )
+    assert response["choices"][0]["message"]["content"] == "scheduled reply"
+
+    async with session_factory() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == SESSION_ID))).scalar_one()
+        usage = (await db.execute(select(SessionReplyProviderUsage))).scalars().one()
+        assert usage.provider_request_id == "scheduled-main-request"
+        assert usage.work_id == 7
+        assert usage.request_purpose == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE
+        assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (120, 20, 7)
+        assert session.llm_request_metadata["total_input_tokens"] == 1120
+        assert session.llm_request_metadata["total_cached_tokens"] == 270
+        assert session.llm_request_metadata["total_output_tokens"] == 207
+        assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
 
 
 @pytest.mark.asyncio

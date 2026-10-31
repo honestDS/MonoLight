@@ -222,6 +222,7 @@ async def handle_interactive_tool_round(
         state.cfg,
         tool_schemas=state.tools,
         goal_mode=state.goal_mode,
+        execution_scope=state.execution_scope,
     )
     if precheck_errors:
         rejected_tool_results_by_id = {tool_result.tool_call_id: tool_result for tool_result in rejected_tool_results}
@@ -307,6 +308,7 @@ async def handle_interactive_tool_round(
         session_id=state.session_id,
         source=state.session_source,
         language=get_current_locale(),
+        execution_scope=state.execution_scope,
     )
     if audit_round is not None and not audit_round.may_execute:
         if audit_round.confirmation_payload is not None:
@@ -455,6 +457,11 @@ async def handle_interactive_tool_round(
         if audit_round.confirmation_payload is not None:
             confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
             await update_confirmation_message_status(state.db, audit_record_id=audit_round.audit_record_id)
+            await _save_execution_checkpoint(
+                state.checkpoint_state,
+                state.messages,
+                state.current_turn,
+            )
             state.final_ai_content = confirmation_content
             response = LLMResponse(
                 choices=[
@@ -623,6 +630,7 @@ async def handle_interactive_tool_round(
         context_summary_boundary_message_id=state.checkpoint_state.upper_message_id,
         source_message_id=state.checkpoint_state.memory_recall_boundary_message_id or (state.initial_msg.id if state.memory_enabled else None),
         session_reply_work_claim=getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY),
+        execution_scope=state.execution_scope,
     )
     tasks = [asyncio.create_task(_execute_isolated_tool_call(parallel_tool_context, tc)) for tc in executable_tool_calls]
     stored_tool_results: list[InternalMessage] = []

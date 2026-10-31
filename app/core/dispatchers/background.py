@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit.confirmation import persist_pending_confirmation_bundle, update_confirmation_message_status
 from app.core.audit.service import audit_tool_round
 from app.core.constants import (
+    END_SESSION_SCOPE_FOREGROUND,
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN,
     ERR_BACKGROUND_TASK_NOT_FOUND,
@@ -62,6 +63,7 @@ from app.core.utils.dispatcher.helpers import (
     process_single_tool_with_isolated_db,
     validate_background_proactive_tool_calls,
 )
+from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import apply_platform_constraints_to_message, materialize_user_environment_prompts
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import (
@@ -136,6 +138,7 @@ class BackgroundDispatcherMixin:
         call_context: str,
         allow_tools: bool,
         extra_messages: list[InternalMessage] | None = None,
+        submission_context: list[InternalMessage] | None = None,
         history_before_id: int | None = None,
         additional_system_prompt: str | None = None,
         guidance_prompt: str | None = None,
@@ -158,14 +161,18 @@ class BackgroundDispatcherMixin:
         cleaned_platform_constraints = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
         cleaned_guidance_prompt = guidance_prompt.strip() if isinstance(guidance_prompt, str) else ""
 
-        profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
-        profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") not in {END_SESSION_TOOL_NAME, MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
-        if restrict_tools_to_background_allowlist:
-            profile_tools = filter_background_proactive_tools(profile_tools)
-            allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
-        else:
-            allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
-        tools = profile_tools or None
+        tools = None
+        allowed_knowledge_base_ids = None
+        allowed_tool_names = None
+        if allow_tools:
+            profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
+            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") not in {END_SESSION_TOOL_NAME, MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
+            if restrict_tools_to_background_allowlist:
+                profile_tools = filter_background_proactive_tools(profile_tools)
+                allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
+            else:
+                allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
+            tools = profile_tools or None
 
         async def recover_context_length(chat_params, chat_channel_obj, model_entry, *, active_tools, target_messages=None):
             nonlocal messages
@@ -265,23 +272,32 @@ class BackgroundDispatcherMixin:
 
         async def build_initial_request(chat_params, chat_channel_obj, model_entry):
             nonlocal messages
-            messages = await prepare_messages(
-                db,
-                session_id,
-                uid,
-                profile,
-                cfg,
-                None,
-                "",
-                history_before_id is not None,
-                context_window_k=chat_params["context_window_k"],
-                max_tokens=chat_params["max_tokens"],
-                tools=tools,
-                history_before_id=history_before_id,
-                additional_system_prompt=cleaned_platform_constraints or None,
-                include_longterm_memory=False,
-                processed_only=True,
-            )
+            if submission_context is None:
+                messages = await prepare_messages(
+                    db,
+                    session_id,
+                    uid,
+                    profile,
+                    cfg,
+                    None,
+                    "",
+                    history_before_id is not None,
+                    context_window_k=chat_params["context_window_k"],
+                    max_tokens=chat_params["max_tokens"],
+                    tools=tools,
+                    history_before_id=history_before_id,
+                    additional_system_prompt=cleaned_platform_constraints or None,
+                    include_longterm_memory=False,
+                    processed_only=True,
+                )
+            else:
+                system_prompt = await build_system_prompt(db, profile, include_longterm_memory=False)
+                if cleaned_platform_constraints:
+                    system_prompt = f"{system_prompt}\n\n{cleaned_platform_constraints}" if system_prompt.strip() else cleaned_platform_constraints
+                messages = inject_system_prompt_text(
+                    [message.model_copy(deep=True) for message in submission_context],
+                    system_prompt,
+                )
             if extra_messages:
                 messages.extend(message.model_copy(deep=True) for message in extra_messages)
             if cleaned_platform_constraints:
@@ -289,7 +305,13 @@ class BackgroundDispatcherMixin:
                     if message.role == MessageRole.USER:
                         apply_platform_constraints_to_message(message, cleaned_platform_constraints)
                         break
-            if initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
+            if (
+                submission_context is None
+                and initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE
+                and isinstance(initial_fixed_upper_message_id, int)
+                and not isinstance(initial_fixed_upper_message_id, bool)
+                and initial_fixed_upper_message_id > 0
+            ):
                 messages = await apply_context_summary_checkpoint(
                     db,
                     session_id=session_id,
@@ -539,6 +561,7 @@ class BackgroundDispatcherMixin:
                     session_id=session_id,
                     source=reply_source,
                     language=get_current_locale(),
+                    execution_scope=END_SESSION_SCOPE_FOREGROUND,
                 )
         if not protocol_precheck_errors and not precheck_errors:
             if audit_round is not None and not audit_round.may_execute:
@@ -732,7 +755,13 @@ class BackgroundDispatcherMixin:
 
         async def build_final_request(final_chat_params, chat_channel_obj, model_entry):
             nonlocal messages
-            if initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
+            if (
+                submission_context is None
+                and initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE
+                and isinstance(initial_fixed_upper_message_id, int)
+                and not isinstance(initial_fixed_upper_message_id, bool)
+                and initial_fixed_upper_message_id > 0
+            ):
                 messages = await apply_context_summary_checkpoint(
                     db,
                     session_id=session_id,

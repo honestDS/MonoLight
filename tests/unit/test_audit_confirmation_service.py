@@ -278,6 +278,7 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
         source="web",
         language="zh",
         working_directory=".",
+        execution_scope="foreground",
     )
 
     assert result.status.value == "pending"
@@ -370,6 +371,7 @@ async def test_missing_audit_configuration_skips_round_without_side_effects(monk
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result is None
@@ -410,6 +412,7 @@ async def test_configured_audit_skips_safe_tool_round_without_side_effects(monke
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result is None
@@ -455,6 +458,7 @@ async def test_shell_blacklist_blocks_audit_round_without_confirmation(monkeypat
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.status.value == "blocked"
@@ -506,6 +510,7 @@ async def test_same_round_file_write_conflict_blocks_without_confirmation(monkey
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.status.value == "blocked"
@@ -559,6 +564,7 @@ async def test_mixed_tool_round_audits_only_declared_calls_and_persists_full_rou
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.status.value == "passed"
@@ -635,6 +641,7 @@ async def test_configured_audit_runtime_failures_still_persist_audit_failed(monk
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result is not None
@@ -693,6 +700,7 @@ async def test_persistence_failure_does_not_reaccess_expired_record(monkeypatch,
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.audit_record_id == 321
@@ -1596,6 +1604,7 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.status.value == expected_status
@@ -1798,6 +1807,7 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.status.value == "pending"
@@ -1864,6 +1874,7 @@ async def test_service_does_not_classify_dynamic_script_command_or_change_model_
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.status.value == expected_status
@@ -1957,6 +1968,7 @@ async def test_service_does_not_infer_missing_script_evidence_from_command_text(
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.status.value == "passed"
@@ -2010,6 +2022,7 @@ async def test_zero_score_for_ordinary_command_stays_zero_without_summary_or_con
         source="web",
         language="en",
         working_directory=tmp_path,
+        execution_scope="foreground",
     )
 
     assert result.status.value == "passed"

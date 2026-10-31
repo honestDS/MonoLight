@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.channel.router import select_channel
 from app.core.constants import (
     END_SESSION_SCOPE_FOREGROUND,
+    END_SESSION_SCOPE_TASK,
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
     ERR_MESSAGE_PLATFORM_NOT_FOUND,
@@ -19,11 +20,14 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASE_RUNNING,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED_SKIP_REPLY,
+    MANAGE_SCHEDULED_TASKS_TOOL_NAME,
+    MANAGE_TODO_TOOL_NAME,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers.interactive_generation import generate_interactive_turn
@@ -57,6 +61,7 @@ from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
@@ -104,6 +109,7 @@ async def dispatch_interactive(
     actor_username: str | None = None,
     initial_message_type: MessageType = MessageType.TEXT,
     execution_scope: str | None = None,
+    frozen_context_messages: list[InternalMessage] | None = None,
     call_context: str | None = None,
     *,
     validate_initial_message_before_save: Callable[..., Awaitable[None]],
@@ -164,10 +170,14 @@ async def dispatch_interactive(
             execution_checkpoint_callback=execution_checkpoint_callback,
             initial_message_type=initial_message_type,
             execution_scope=execution_scope,
+            context_frozen=frozen_context_messages is not None,
             call_context=call_context,
         )
 
         async def append_external_results() -> bool:
+            if state.execution_scope != END_SESSION_SCOPE_FOREGROUND:
+                return False
+
             from app.core.background_tasks.result_delivery import receive_pending_external_results
 
             markers = await receive_pending_external_results(
@@ -322,6 +332,8 @@ async def dispatch_interactive(
                 state.img_understanding, state.audio_understanding, state.video_understanding = get_multimodal_from_entry(state.model_entry)
                 state.chat_params = resolve_chat_params(state.model_entry, state.chat_channel)
                 state.tools, state.allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, goal_mode=state.goal_mode)
+                if state.execution_scope == END_SESSION_SCOPE_TASK:
+                    state.tools = [tool for tool in state.tools if tool.get("function", {}).get("name") not in {MANAGE_SCHEDULED_TASKS_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
 
                 reload_history = False
                 if state.execution_resume_state is not None:
@@ -341,22 +353,77 @@ async def dispatch_interactive(
                         upper_message_id = resume_state.get("context_summary_fixed_upper_message_id")
                         if isinstance(upper_message_id, int) and not isinstance(upper_message_id, bool) and upper_message_id > 0:
                             state.checkpoint_state.upper_message_id = upper_message_id
-                        state.messages = await prepare_messages(
-                            db,
-                            session_id,
-                            uid,
-                            profile,
-                            state.cfg,
-                            state.initial_msg,
-                            message,
-                            False,
-                            context_window_k=state.chat_params["context_window_k"],
-                            max_tokens=state.chat_params["max_tokens"],
-                            tools=state.tools,
-                            history_before_id=None,
-                            additional_system_prompt=additional_system_prompt,
-                            processed_only=True,
-                        )
+                        if resume_state.get("reload_history") is True:
+                            if frozen_context_messages is not None:
+                                resume_messages = [InternalMessage.model_validate(item) for item in resume_state.get("messages", [])]
+                                frozen_resume_messages = [item for item in resume_messages if item.role != MessageRole.SYSTEM]
+                                bootstrap_initial_message = not frozen_resume_messages
+                                if bootstrap_initial_message:
+                                    frozen_resume_messages = [item.model_copy(deep=True) for item in frozen_context_messages]
+                                state.messages = await prepare_messages(
+                                    db,
+                                    session_id,
+                                    uid,
+                                    profile,
+                                    state.cfg,
+                                    state.initial_msg if bootstrap_initial_message else None,
+                                    message if bootstrap_initial_message else "",
+                                    bootstrap_initial_message,
+                                    context_window_k=state.chat_params["context_window_k"],
+                                    max_tokens=state.chat_params["max_tokens"],
+                                    tools=state.tools,
+                                    additional_system_prompt=additional_system_prompt,
+                                    processed_only=True,
+                                    submission_context=frozen_resume_messages,
+                                )
+                            else:
+                                reload_history_before_id = (history_before_id + 1) if state.execution_scope != END_SESSION_SCOPE_FOREGROUND and history_before_id is not None else None
+                                state.messages = await prepare_messages(
+                                    db,
+                                    session_id,
+                                    uid,
+                                    profile,
+                                    state.cfg,
+                                    state.initial_msg,
+                                    message,
+                                    False,
+                                    context_window_k=state.chat_params["context_window_k"],
+                                    max_tokens=state.chat_params["max_tokens"],
+                                    tools=state.tools,
+                                    history_before_id=reload_history_before_id,
+                                    additional_system_prompt=additional_system_prompt,
+                                    processed_only=True,
+                                )
+                        else:
+                            state.messages = [InternalMessage.model_validate(item) for item in resume_state.get("messages", [])]
+                        if frozen_context_messages is not None:
+                            existing_message_ids = {
+                                item.id
+                                for item in state.messages
+                                if isinstance(item.id, int) and not isinstance(item.id, bool) and item.id > 0
+                            }
+                            pending_rows = []
+                            for pending_message_id in resume_state.get("pending_resume_message_ids", []):
+                                if (
+                                    not isinstance(pending_message_id, int)
+                                    or isinstance(pending_message_id, bool)
+                                    or pending_message_id <= 0
+                                    or pending_message_id in existing_message_ids
+                                ):
+                                    continue
+                                pending_row = await message_crud.get(db, pending_message_id)
+                                if (
+                                    pending_row is None
+                                    or pending_row.uid != uid
+                                    or pending_row.session_id != session_id
+                                    or pending_row.profile_id != profile.id
+                                    or pending_row.type != MessageType.BACKGROUND_TASK_RESULT
+                                ):
+                                    continue
+                                pending_rows.append(pending_row)
+                                existing_message_ids.add(pending_message_id)
+                            if pending_rows:
+                                state.messages.extend(parse_db_messages_to_internal(pending_rows))
                     else:
                         state.messages = [InternalMessage.model_validate(item) for item in resume_state.get("messages", [])]
                     state.current_turn = int(resume_state.get("current_turn", 0))
@@ -376,6 +443,7 @@ async def dispatch_interactive(
                         tools=state.tools,
                         history_before_id=history_before_id,
                         additional_system_prompt=additional_system_prompt,
+                        submission_context=frozen_context_messages,
                     )
                     state.current_turn = 0
 

@@ -1470,6 +1470,167 @@ async def test_high_risk_confirmation_stop_before_worker_claim_cancels_audit_bun
 
 
 @pytest.mark.asyncio
+async def test_task_confirmation_inherits_source_work_checkpoint(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        source_work, _ = await session_reply_work_item_crud.enqueue(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile_id=1,
+            work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+            source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+            source_id="900",
+            dedupe_key="scheduled-task-summary:source-checkpoint",
+            commit=False,
+        )
+        source_work.status = SessionReplyWorkStatus.SUCCEEDED
+        source_work.execution_state = {
+            "frozen_context_messages": [
+                InternalMessage(
+                    id=10,
+                    role=MessageRole.USER,
+                    content="base-snapshot-only",
+                ).model_dump(mode="json", exclude_none=True),
+            ],
+            "dispatcher_checkpoint": {
+                "messages": [
+                    InternalMessage(
+                        id=11,
+                        role=MessageRole.USER,
+                        content="scheduled-trigger-context",
+                    ).model_dump(mode="json", exclude_none=True),
+                    InternalMessage(
+                        id=12,
+                        role=MessageRole.ASSISTANT,
+                        tool_calls=[
+                            InternalToolCall(
+                                id="original-shell-call-1",
+                                name="execute_shell",
+                                arguments={"command": "echo confirmed-1", "execution_mode": "non_interactive"},
+                            )
+                        ],
+                    ).model_dump(mode="json", exclude_none=True),
+                    InternalMessage(
+                        id=13,
+                        role=MessageRole.TOOL,
+                        tool_call_id="original-shell-call-1",
+                        content="pending-confirmation-result",
+                    ).model_dump(mode="json", exclude_none=True),
+                ],
+            },
+        }
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None
+        record.execution_scope = "task"
+        record.source_work_id = source_work.id
+        await db.commit()
+
+    async with confirmation_workflow_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        _message, confirmed_work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile=profile,
+            message="approve",
+            attachments=None,
+            source="http",
+        )
+
+    assert submission_status == "approved"
+    assert confirmed_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    assert confirmed_work.execution_state["execution_scope"] == "task"
+    frozen_messages = [
+        InternalMessage.model_validate(item)
+        for item in confirmed_work.execution_state["frozen_context_messages"]
+    ]
+    assert [message.content for message in frozen_messages if message.role == MessageRole.USER] == [
+        "scheduled-trigger-context"
+    ]
+    assert not any(message.content == "base-snapshot-only" for message in frozen_messages)
+    assert any(
+        message.role == MessageRole.ASSISTANT
+        and any(tool_call.id == "original-shell-call-1" for tool_call in message.tool_calls or [])
+        for message in frozen_messages
+    )
+    assert any(
+        message.role == MessageRole.TOOL
+        and message.tool_call_id == "original-shell-call-1"
+        and message.content == "pending-confirmation-result"
+        for message in frozen_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_foreground_confirmation_does_not_inherit_live_source_checkpoint(
+    confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    audit_record_id = await _seed_pending_confirmation(
+        confirmation_workflow_session_factory,
+        working_directory=tmp_path,
+    )
+
+    async with confirmation_workflow_session_factory() as db:
+        source_work, _ = await session_reply_work_item_crud.enqueue(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile_id=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="901",
+            dedupe_key="foreground-source-checkpoint",
+            commit=False,
+        )
+        source_work.status = SessionReplyWorkStatus.SUCCEEDED
+        source_work.execution_state = {
+            "dispatcher_checkpoint": {
+                "messages": [
+                    InternalMessage(
+                        id=21,
+                        role=MessageRole.USER,
+                        content="live-foreground-checkpoint",
+                    ).model_dump(mode="json", exclude_none=True),
+                ],
+            },
+        }
+        record = await db.get(AuditRecord, audit_record_id)
+        assert record is not None
+        record.execution_scope = "foreground"
+        record.source_work_id = source_work.id
+        await db.commit()
+
+    async with confirmation_workflow_session_factory() as db:
+        profile = await db.get(Profile, 1)
+        assert profile is not None
+        _message, confirmed_work, submission_status, _events = await session_reply_queue_manager.submit_user_message(
+            db,
+            uid="owner",
+            session_id="session-confirmation",
+            profile=profile,
+            message="approve",
+            attachments=None,
+            source="http",
+        )
+
+    assert submission_status == "approved"
+    assert confirmed_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    assert confirmed_work.execution_state["execution_scope"] == "foreground"
+    assert "frozen_context_messages" not in confirmed_work.execution_state
+    assert "dispatcher_checkpoint" not in confirmed_work.execution_state
+
+
+@pytest.mark.asyncio
 async def test_stop_pending_confirmation_without_work_cancels_bundle_without_enqueueing(
     confirmation_workflow_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -1696,6 +1857,7 @@ async def test_stop_during_preparing_audit_discards_delayed_result_without_confi
                 source="http",
                 language="zh",
                 working_directory=tmp_path,
+                execution_scope="foreground",
             )
 
     audit_task = asyncio.create_task(run_audit())
@@ -2029,6 +2191,7 @@ async def test_stopped_foreground_work_blocks_audit_before_preparation(
                 source="http",
                 language="zh",
                 working_directory=tmp_path,
+                execution_scope="foreground",
             )
 
     async with confirmation_workflow_session_factory() as db:

@@ -2,10 +2,11 @@ import hashlib
 import json
 import time
 from collections import Counter, deque
-from functools import partial
 from typing import Any
 
 from app.core.constants import (
+    END_SESSION_SCOPE_FOREGROUND,
+    END_SESSION_SCOPE_TASK,
     ERR_BACKGROUND_TASK_NOT_FOUND,
     ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
     ERR_LLM_UNEXPECTED_ERROR,
@@ -16,7 +17,7 @@ from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
-from app.core.prompts import PROMPT_TOOL_INTERRUPTED
+from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT, PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue.executor_audit import _persist_work_audit_execution_binding
 from app.core.session_reply_queue.executor_common import _response_content, _result_message_dedupe_key
 from app.core.session_reply_queue.executor_interactive import (
@@ -27,11 +28,12 @@ from app.core.session_reply_queue.executor_metadata import _generate_auxiliary_r
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.context_summary import ContextSummaryTriggerMode
+from app.core.utils.dispatcher.frozen_context import capture_frozen_context_messages, load_frozen_context_messages, serialize_frozen_context_messages
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.message import InternalMessage, MessageRole, MessageType, decode_message_content
+from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType, decode_message_content
 from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkType
 
@@ -298,8 +300,10 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
 
 
 async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: str) -> dict[str, Any]:
-    if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
-        return await _execute_background(db, work, worker_id)
+    if work.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY:
+        return await _execute_scheduled(db, work, worker_id)
+    if work.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME:
+        return await _execute_background_task_resume(db, work, worker_id)
 
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
     checkpoint = execution_state.get("dispatcher_checkpoint")
@@ -323,6 +327,10 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
         environment_prompt=message.environment_prompt,
         guidance_prompt=message.guidance_prompt,
     )
+    execution_scope = execution_state.get("execution_scope")
+    frozen_context_messages = load_frozen_context_messages(
+        execution_state.get("frozen_context_messages")
+    )
     return await _dispatch_interactive_work(
         db,
         work=work,
@@ -332,8 +340,13 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
         history_before_id=message_ids[0],
         frozen_user_message_ids=message_ids,
         attachments=initial_message.attachments,
-        allow_additional_user_messages=True,
+        allow_additional_user_messages=(
+            execution_scope == END_SESSION_SCOPE_FOREGROUND
+            and frozen_context_messages is None
+        ),
         execution_resume_state=checkpoint,
+        execution_scope=execution_scope,
+        frozen_context_messages=frozen_context_messages,
     )
 
 
@@ -352,7 +365,79 @@ async def _persist_work_audit_execution_binding_callback(
     )
 
 
+def _load_background_request_context(task) -> list[InternalMessage]:
+    extra = task.extra if isinstance(task.extra, dict) else {}
+    raw_context = extra.get("request_context")
+    if not isinstance(raw_context, list):
+        return []
+    return [InternalMessage.model_validate(message) for message in raw_context if isinstance(message, dict)]
+
+
+def _background_context_boundary(task, request_context: list[InternalMessage]) -> int | None:
+    extra = task.extra if isinstance(task.extra, dict) else {}
+    boundary = extra.get("context_summary_user_boundary_message_id")
+    if isinstance(boundary, int) and not isinstance(boundary, bool) and boundary > 0:
+        return boundary
+    return max((message.id for message in request_context if message.role == MessageRole.USER and message.id is not None), default=None)
+
+
+def _build_background_summary_messages(task) -> list[InternalMessage]:
+    task_result = task.result or {"status": task.status, "tool_name": task.tool_name, "error": task.error}
+    return [
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[
+                InternalToolCall(
+                    id=task.tool_call_id,
+                    name=task.tool_name,
+                    arguments=dict(task.arguments) if isinstance(task.arguments, dict) else {},
+                )
+            ],
+        ),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id=task.tool_call_id, content=json.dumps(task_result, ensure_ascii=False)),
+        InternalMessage(role=MessageRole.USER, content=BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT),
+    ]
+
+
 async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
+    """Summarize one completed background tool result without exposing tools."""
+    task = await background_task_crud.get(db, int(work.source_id))
+    if task is None:
+        raise RuntimeError(t(ERR_BACKGROUND_TASK_NOT_FOUND))
+    if task.uid != work.uid or task.session_id != work.session_id or task.profile_id != work.profile_id:
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+    profile = await profile_crud.get_with_relations(db, work.profile_id)
+    if profile is None or profile.uid != work.uid:
+        raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
+
+    request_context = _load_background_request_context(task)
+    ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
+        db,
+        work=work,
+        request_purpose=SessionReplyProviderRequestPurpose.BACKGROUND_SUMMARY,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile=profile,
+        call_context="session_reply_background_summary",
+        allow_tools=False,
+        extra_messages=_build_background_summary_messages(task),
+        submission_context=request_context,
+        initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        initial_fixed_upper_message_id=_background_context_boundary(task, request_context),
+        reply_source="background_task",
+        final_message_dedupe_key=_result_message_dedupe_key(work),
+    )
+    response = {
+        "content": parse_assistant_files_content(ai_msg.content),
+        "history": dump_background_proactive_history(turn_messages),
+        "files": files,
+    }
+    if llm_request_metadata is not None:
+        response["llm_request_metadata"] = llm_request_metadata
+    return response
+
+
+async def _execute_background_task_resume(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
     """使用主对话循环处理后台任务结果并绑定可恢复的执行状态。"""
     task = await background_task_crud.get(db, int(work.source_id))
     if task is None:
@@ -363,7 +448,30 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
 
+    request_context = _load_background_request_context(task)
+    task_extra = task.extra if isinstance(task.extra, dict) else {}
+    frozen_context_messages = load_frozen_context_messages(task_extra.get("frozen_context_messages"))
+    if frozen_context_messages is None:
+        boundary = _background_context_boundary(task, request_context)
+        if boundary is not None:
+            frozen_context_messages = load_frozen_context_messages(
+                await capture_frozen_context_messages(
+                    db,
+                    session_id=work.session_id,
+                    uid=work.uid,
+                    before_id=boundary + 1,
+                )
+            )
+        else:
+            frozen_context_messages = [message.model_copy(deep=True) for message in request_context]
+
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+    if "frozen_context_messages" not in execution_state:
+        execution_state = {
+            **execution_state,
+            "frozen_context_messages": serialize_frozen_context_messages(frozen_context_messages),
+        }
+        work.execution_state = execution_state
     resume_state = execution_state.get("dispatcher_checkpoint")
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
         resume_state = None
@@ -416,8 +524,10 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         history_before_id=history_before_id,
         frozen_user_message_ids=frozen_user_message_ids,
         attachments=initial_message.attachments,
-        allow_additional_user_messages=True,
+        allow_additional_user_messages=False,
         execution_resume_state=resume_state,
+        execution_scope=END_SESSION_SCOPE_FOREGROUND,
+        frozen_context_messages=frozen_context_messages,
     )
 
     if interactive_response.get("status") == "waiting_external_work" or interactive_response.get("skip_reply") is True:
@@ -436,38 +546,84 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
 
 
 async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
-    """生成定时任务总结并绑定可恢复的审计执行状态。"""
+    """使用多轮交互管线处理定时任务执行并绑定可恢复的执行状态。"""
     profile = await profile_crud.get_with_relations(db, work.profile_id)
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND))
 
-    ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
+    trigger_message_id = int(work.source_id)
+    execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+    frozen_context_messages = load_frozen_context_messages(execution_state.get("frozen_context_messages"))
+    if frozen_context_messages is None:
+        serialized_frozen_context = await capture_frozen_context_messages(
+            db,
+            session_id=work.session_id,
+            uid=work.uid,
+            before_id=trigger_message_id,
+        )
+        frozen_context_messages = load_frozen_context_messages(serialized_frozen_context) or []
+        execution_state = {
+            **execution_state,
+            "frozen_context_messages": serialized_frozen_context,
+        }
+        work.execution_state = execution_state
+    checkpoint = execution_state.get("dispatcher_checkpoint")
+    resume_state = None
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get("messages"), list):
+        if checkpoint.get("reload_history") is True:
+            resume_state = checkpoint
+        else:
+            resume_state = await _restore_foreground_tool_replies(
+                db,
+                work=work,
+                worker_id=worker_id,
+                checkpoint=checkpoint,
+            )
+
+    trigger_message = await message_crud.get(db, trigger_message_id)
+    if trigger_message is not None and (trigger_message.uid != work.uid or trigger_message.session_id != work.session_id or trigger_message.profile_id != work.profile_id or trigger_message.role != MessageRole.USER or trigger_message.type != MessageType.SCHEDULED_TASK_TRIGGER):
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+
+    if trigger_message is not None:
+        parsed_events = parse_db_messages_to_internal([trigger_message])
+        initial_message = next((message for message in parsed_events if message.role == MessageRole.USER), None)
+        if initial_message is None:
+            raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+    else:
+        initial_message = InternalMessage(
+            id=trigger_message_id,
+            role=MessageRole.USER,
+            content="",
+        )
+
+    history_before_id = trigger_message_id
+    frozen_user_message_ids = [trigger_message_id]
+
+    interactive_response = await _dispatch_interactive_work(
         db,
         work=work,
-        request_purpose=SessionReplyProviderRequestPurpose.SCHEDULED_SUMMARY,
-        uid=work.uid,
-        session_id=work.session_id,
-        profile=profile,
-        call_context="session_reply_scheduled_summary",
-        allow_tools=True,
-        initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
-        initial_fixed_upper_message_id=int(work.source_id),
-        restrict_tools_to_background_allowlist=False,
-        reply_source="scheduled_task",
-        final_message_dedupe_key=_result_message_dedupe_key(work),
-        audit_execution_binding_callback=partial(
-            _persist_work_audit_execution_binding_callback,
-            db=db,
-            work=work,
-            worker_id=worker_id,
-        ),
+        worker_id=worker_id,
+        message=initial_message.content or "",
+        initial_message=initial_message,
+        history_before_id=history_before_id,
+        frozen_user_message_ids=frozen_user_message_ids,
+        attachments=initial_message.attachments,
+        allow_additional_user_messages=False,
+        execution_resume_state=resume_state,
+        execution_scope=END_SESSION_SCOPE_TASK,
+        frozen_context_messages=frozen_context_messages,
     )
-    content = parse_assistant_files_content(ai_msg.content)
+
+    if interactive_response.get("status") == "waiting_external_work" or interactive_response.get("skip_reply") is True:
+        return interactive_response
+
+    history = interactive_response.get("history")
+    history_messages = [InternalMessage.model_validate(message) for message in history] if isinstance(history, list) else []
     response = {
-        "content": content,
-        "history": dump_background_proactive_history(turn_messages),
-        "files": files,
+        "content": parse_assistant_files_content(_response_content(interactive_response)),
+        "history": dump_background_proactive_history(history_messages),
+        "files": interactive_response.get("files") or [],
     }
-    if llm_request_metadata is not None:
-        response["llm_request_metadata"] = llm_request_metadata
+    if interactive_response.get("llm_request_metadata") is not None:
+        response["llm_request_metadata"] = interactive_response["llm_request_metadata"]
     return response

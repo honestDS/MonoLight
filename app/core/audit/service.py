@@ -45,6 +45,7 @@ from app.core.constants import (
     MSG_AUDIT_ROUND_SKIPPED,
     MSG_AUDIT_STATUS_CANCELLED,
     READ_TEXT_FILE_TOOL_NAME,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     SHELL_TOOL_NAME,
     TERMINAL_TOOL_NAME,
 )
@@ -775,6 +776,7 @@ async def audit_tool_round(
     session_id: str,
     source: str,
     language: str,
+    execution_scope: str,
     working_directory: str | Path | None = None,
 ) -> AuditRoundResult | None:
     if not is_audit_configured(cfg):
@@ -798,6 +800,16 @@ async def audit_tool_round(
     server_confirmation_reasons: dict[str, list[dict[str, Any]]] = {}
     server_blocked_tool_call_ids: set[str] = set()
     snapshot = build_tool_round_integrity_snapshot(tool_calls=payload_calls, uid=uid, session_id=session_id, working_directory=workdir)
+    claim_info = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+    source_work_id = None
+    if (
+        isinstance(claim_info, (tuple, list))
+        and len(claim_info) == 2
+        and isinstance(claim_info[0], int)
+        and not isinstance(claim_info[0], bool)
+        and claim_info[0] > 0
+    ):
+        source_work_id = claim_info[0]
     record = await audit_crud.create_preparing(
         db,
         uid=uid,
@@ -805,6 +817,8 @@ async def audit_tool_round(
         session_id=session_id,
         source=source,
         language=language,
+        execution_scope=execution_scope,
+        source_work_id=source_work_id,
         source_assistant_message_id=source_assistant_message_id,
         working_directory=str(workdir),
         round_arguments_hash=snapshot.round_sha256,

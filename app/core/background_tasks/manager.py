@@ -30,8 +30,9 @@ from app.core.log import get_logger
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import TerminalAction
 from app.core.terminal.watch_schema import TerminalWatchRequest
+from app.core.utils.dispatcher.frozen_context import serialize_frozen_context_messages
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.background_task import BackgroundTask
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session_reply_work_item import SessionReplyWorkStatus
@@ -95,6 +96,7 @@ class BackgroundTaskManager:
                 "source": source,
                 "request_context": request_context,
                 "purpose": purpose,
+                "reply_mode": BackgroundTaskReplyMode.SUMMARY.value,
             }
         else:
             if not isinstance(claim_info, (tuple, list)) or len(claim_info) != 2 or not isinstance(claim_info[0], int) or isinstance(claim_info[0], bool) or claim_info[0] <= 0 or not isinstance(claim_info[1], str) or not claim_info[1]:
@@ -124,9 +126,12 @@ class BackgroundTaskManager:
                 "origin_work_identity": origin_work.dedupe_key,
                 "request_context": request_context,
                 "purpose": purpose,
+                "reply_mode": BackgroundTaskReplyMode.RESUME_ORIGIN.value,
             }
         if isinstance(context_summary_boundary_message_id, int) and not isinstance(context_summary_boundary_message_id, bool) and context_summary_boundary_message_id > 0:
             extra_payload["context_summary_user_boundary_message_id"] = context_summary_boundary_message_id
+        if tool_name == TERMINAL_WATCH_TOOL_NAME:
+            extra_payload["frozen_context_messages"] = serialize_frozen_context_messages(submission_messages)
         if hasattr(db, "execute"):
             binding = await audit_crud.get_execution_binding_for_tool_call(db, new_tool_call_id=tool_call_id)
             if binding is not None:

@@ -16,6 +16,12 @@ class BackgroundTaskStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class BackgroundTaskReplyMode(StrEnum):
+    SUMMARY = "summary"
+    RESUME_AGENT = "resume_agent"
+    RESUME_ORIGIN = "resume_origin"
+
+
 class BackgroundTaskReplyStatus(StrEnum):
     NONE = "none"
     PENDING = "pending"

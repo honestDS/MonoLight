@@ -1,7 +1,7 @@
 import json
 
 from app.core.audit.visibility import obscure_audit_tool_result
-from app.core.prompts import EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT, SCHEDULED_TASK_TRIGGER_PROMPT
+from app.core.prompts import EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import (
     InternalMessage,
@@ -71,6 +71,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             refusal = None
             suppress_tool_result_metadata = False
             provider_metadata = msg.provider_metadata if isinstance(msg.provider_metadata, dict) else None
+            execution_guidance = None
 
             # 直接检测：仅在需要的消息类型中尝试解析 JSON
             if m_type in {MessageType.AUDIT_CONFIRMATION, MessageType.AUDIT_DECISION}:
@@ -80,7 +81,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 continue
             elif m_type == MessageType.SCHEDULED_TASK_TRIGGER:
                 role = MessageRole.USER
-                content = SCHEDULED_TASK_TRIGGER_PROMPT.format(message=content)
+                execution_guidance = SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
             elif m_type == MessageType.TOOL_CALL or m_type == MessageType.TOOL_RESULT:
                 try:
                     parsed = json.loads(content)
@@ -135,6 +136,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 "provider_metadata": provider_metadata,
                 "environment_prompt": msg.environment_prompt,
                 "guidance_prompt": msg.guidance_prompt,
+                "execution_guidance": execution_guidance,
                 "attachments": msg.attachments,
                 "tool_calls": tool_calls,
                 "tool_call_id": tool_call_id,

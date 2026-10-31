@@ -662,7 +662,7 @@ class CRUDSessionReplyWorkItem:
         commit: bool = True,
     ) -> int:
         snapshot_conditions = [
-            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+            SessionReplyWorkItem.work_type.in_([SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.BACKGROUND_TASK_RESUME]),
             SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
         ]
         if before is not None:
@@ -675,7 +675,7 @@ class CRUDSessionReplyWorkItem:
                 update(SessionReplyWorkItem)
                 .where(
                     SessionReplyWorkItem.id.in_(snapshot_ids),
-                    SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    SessionReplyWorkItem.work_type.in_([SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.BACKGROUND_TASK_RESUME]),
                     SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
                 )
                 .values(
@@ -700,7 +700,7 @@ class CRUDSessionReplyWorkItem:
         snapshot_conditions = [
             or_(
                 and_(
-                    SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                    SessionReplyWorkItem.work_type.in_([SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.BACKGROUND_TASK_RESUME]),
                     SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
                 ),
                 SessionReplyWorkItem.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,

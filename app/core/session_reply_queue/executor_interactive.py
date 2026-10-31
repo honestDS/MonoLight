@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.core.constants import (
+    END_SESSION_SCOPE_TASK,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_SESSION_REPLY_LEASE_LOST,
     ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
@@ -257,6 +258,8 @@ async def _dispatch_interactive_work(
     attachments: list[str] | None,
     allow_additional_user_messages: bool,
     execution_resume_state: dict[str, Any] | None,
+    execution_scope: str | None = None,
+    frozen_context_messages: list[InternalMessage] | None = None,
 ) -> dict[str, Any]:
     work_id = work.id
     uid = work.uid
@@ -303,9 +306,20 @@ async def _dispatch_interactive_work(
         "session_source": str(execution_state.get("message_source") or "queue"),
         "persisted_initial_message": initial_message,
         "initial_message_type": {
-            SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY: MessageType.BACKGROUND_TASK_RESULT,
+            SessionReplyWorkType.BACKGROUND_TASK_RESUME: MessageType.BACKGROUND_TASK_RESULT,
             SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION: MessageType.AUDIT_DECISION,
+            SessionReplyWorkType.SCHEDULED_TASK_SUMMARY: MessageType.SCHEDULED_TASK_TRIGGER,
         }.get(work.work_type, MessageType.TEXT),
+        "execution_scope": execution_scope
+        or (
+            END_SESSION_SCOPE_TASK
+            if work.work_type
+            in {
+                SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+            }
+            else None
+        ),
+        "frozen_context_messages": frozen_context_messages,
         "history_before_id": history_before_id,
         "frozen_user_message_ids": frozen_user_message_ids,
         "final_message_dedupe_key": _result_message_dedupe_key(work),

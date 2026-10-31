@@ -176,6 +176,7 @@ async def _audit_round(db, *, cfg: ProfileConfig, tool_calls: list[InternalToolC
         source="integration",
         language="zh",
         working_directory=working_directory,
+        execution_scope="foreground",
     )
 
 
@@ -1030,6 +1031,7 @@ async def test_user_temp_directory_policy_is_scoped_without_mutating_config(
                 session_id=f"{SESSION_ID}-{index}",
                 source="integration",
                 language="zh",
+                execution_scope="foreground",
             )
 
         assert result is not None

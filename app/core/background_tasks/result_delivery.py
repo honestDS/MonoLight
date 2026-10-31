@@ -16,7 +16,7 @@ from app.core.i18n import t
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTaskReplyStatus
 from app.models.message import InternalMessage, Message, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkStatus
+from app.models.session_reply_work_item import SessionReplyWorkStatus, SessionReplyWorkType
 
 
 def _unknown() -> ValueError:
@@ -139,7 +139,13 @@ def _read_marker(marker: Message, current: Any, task_id: int | None = None) -> d
     return payload
 
 
-async def receive_pending_external_results(db: AsyncSession, *, uid: str, session_id: str, profile_id: int) -> list[InternalMessage]:
+async def receive_pending_external_results(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+) -> list[InternalMessage]:
     claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
     if claim is None:
         return []
@@ -150,10 +156,19 @@ async def receive_pending_external_results(db: AsyncSession, *, uid: str, sessio
     current = await session_reply_work_item_crud.get(db, work_id)
     if current is None or _status(current.status) != SessionReplyWorkStatus.RUNNING.value or current.locked_by != worker_id or current.uid != uid or current.session_id != session_id or current.profile_id != profile_id:
         raise _unknown()
+    current_state = _state(current)
+    isolated_result_scope = isinstance(current_state.get("frozen_context_messages"), list) or _status(current.work_type) in {
+        SessionReplyWorkType.BACKGROUND_TASK_RESUME.value,
+        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY.value,
+    }
+    include_sibling_works = not isolated_result_scope
 
-    sources = await external_work_crud.list_result_source_works(db, work=current)
-    if not any(source.id == current.id for source in sources):
-        sources.append(current)
+    if include_sibling_works:
+        sources = await external_work_crud.list_result_source_works(db, work=current)
+        if not any(source.id == current.id for source in sources):
+            sources.append(current)
+    else:
+        sources = [current]
     contexts: list[dict[str, Any]] = []
     by_work_id: dict[int, dict[str, Any]] = {}
     slot_sources: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
@@ -186,7 +201,7 @@ async def receive_pending_external_results(db: AsyncSession, *, uid: str, sessio
             for task_id in _ids(state["terminal_auto_watch_task_ids"]):
                 source_context_by_task.setdefault(task_id, context)
                 candidate_ids.append(task_id)
-        if _status(source.work_type) == "background_tool_summary":
+        if _status(source.work_type) == "background_task_resume":
             try:
                 task_id = int(source.source_id)
             except (TypeError, ValueError):
@@ -204,7 +219,9 @@ async def receive_pending_external_results(db: AsyncSession, *, uid: str, sessio
                 marker_sources.setdefault(task_id, (context, marker, payload, ids[0]))
                 candidate_ids.append(task_id)
 
-    tasks = await external_work_crud.list_completed_reply_tasks(db, work=current, task_ids=_ids(candidate_ids))
+    candidate_task_ids = _ids(candidate_ids)
+    candidate_task_id_set = set(candidate_task_ids)
+    tasks = await external_work_crud.list_completed_reply_tasks(db, work=current, task_ids=candidate_task_ids)
     work_cache = {source.id: source for source in sources if source.id is not None}
     work_cache[current.id] = current
 
@@ -233,6 +250,8 @@ async def receive_pending_external_results(db: AsyncSession, *, uid: str, sessio
 
     for task in tasks:
         if task.id is None:
+            continue
+        if isolated_result_scope and task.id not in candidate_task_id_set:
             continue
         extra = task.extra if isinstance(task.extra, dict) else {}
         owner = extra.get("reply_owner") if isinstance(extra.get("reply_owner"), dict) else {}

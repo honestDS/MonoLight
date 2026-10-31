@@ -212,6 +212,7 @@ async def _audit_round(db, cfg: ProfileConfig, tool_calls: list[InternalToolCall
         source="integration",
         language="zh",
         working_directory=working_directory,
+        execution_scope="foreground",
     )
 
 

@@ -16,8 +16,9 @@ from app.core.crud.session.terminal_watch import get_terminal_watch_deliveries, 
 from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
 from app.core.prompts import TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
-from app.models.message import Message, MessageRole, MessageType
+from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
 
 __all__ = ["route_terminal_auto_watch_reply", "prepare_terminal_auto_watch_resume"]
@@ -509,11 +510,33 @@ async def prepare_terminal_auto_watch_resume(
                 ]
             )
         )
-        checkpoint.update({"messages": [], "turn_messages": [], "reload_history": True})
-        checkpoint["context_summary_trigger_mode"] = "user_message"
-        old_upper = checkpoint.get("context_summary_fixed_upper_message_id")
-        upper_bounds = [*marker_ids, old_upper] if _positive_int(old_upper) else marker_ids
-        checkpoint["context_summary_fixed_upper_message_id"] = max(upper_bounds)
+        if isinstance(state.get("frozen_context_messages"), list):
+            checkpoint_messages = checkpoint.get("messages")
+            had_checkpoint_messages = isinstance(checkpoint_messages, list) and bool(checkpoint_messages)
+            if had_checkpoint_messages:
+                resume_messages = [InternalMessage.model_validate(item) for item in checkpoint_messages]
+            else:
+                resume_messages = [InternalMessage.model_validate(item) for item in state["frozen_context_messages"]]
+            existing_ids = {message.id for message in resume_messages if _positive_int(message.id)}
+            for marker_id in marker_ids:
+                if marker_id in existing_ids:
+                    continue
+                marker = await message_crud.get(db, marker_id)
+                if marker is None:
+                    raise RuntimeError("Terminal auto-watch result marker is missing")
+                parsed = parse_db_messages_to_internal([marker])
+                if not parsed:
+                    raise RuntimeError("Terminal auto-watch result marker is invalid")
+                resume_messages.extend(parsed)
+                existing_ids.add(marker_id)
+            checkpoint["messages"] = [message.model_dump(mode="json", exclude_none=True) for message in resume_messages]
+            checkpoint.update({"turn_messages": [], "reload_history": not had_checkpoint_messages})
+        else:
+            checkpoint.update({"messages": [], "turn_messages": [], "reload_history": True})
+            checkpoint["context_summary_trigger_mode"] = "user_message"
+            old_upper = checkpoint.get("context_summary_fixed_upper_message_id")
+            upper_bounds = [*marker_ids, old_upper] if _positive_int(old_upper) else marker_ids
+            checkpoint["context_summary_fixed_upper_message_id"] = max(upper_bounds)
         state["dispatcher_checkpoint"] = checkpoint
         if work.input_message_ids:
             state["external_resume_pending"] = True

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
+    END_SESSION_SCOPE_TASK,
     ERR_BACKGROUND_TASK_UNSUPPORTED,
     ERR_TERMINAL_PTY_DIMENSIONS_INVALID,
     ERR_TERMINAL_PTY_INPUT_INVALID,
@@ -26,6 +27,8 @@ from app.core.constants import (
     ERR_TOOL_NOT_REGISTERED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
+    MANAGE_SCHEDULED_TASKS_TOOL_NAME,
+    MANAGE_TODO_TOOL_NAME,
     MSG_BACKGROUND_TASK_QUEUED,
     SHELL_TOOL_NAME,
     TERMINAL_TOOL_NAME,
@@ -335,6 +338,7 @@ def prevalidate_tool_round(
     goal_mode: bool = False,
     allow_background_submission: bool = True,
     tool_schemas: list[dict[str, Any]] | None = None,
+    execution_scope: str | None = None,
 ) -> dict[str, str]:
     errors: dict[str, str] = {}
     for tool_call in tool_calls:
@@ -346,7 +350,9 @@ def prevalidate_tool_round(
         declared_properties = parameters_schema.get("properties", {}) if parameters_schema is not None else {}
         missing_arguments = sorted(parameter_name for parameter_name in required_parameters if isinstance(parameter_name, str) and parameter_name not in args)
         unsupported_arguments = sorted(argument_name for argument_name in args if parameters_schema is not None and argument_name not in declared_properties)
-        if not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
+        if execution_scope == END_SESSION_SCOPE_TASK and tool_name in {MANAGE_SCHEDULED_TASKS_TOOL_NAME, MANAGE_TODO_TOOL_NAME}:
+            errors[tool_call.id] = _build_tool_disabled_result(tool_name)
+        elif not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
             errors[tool_call.id] = _build_tool_disabled_result(tool_name)
         elif missing_arguments:
             errors[tool_call.id] = _build_missing_required_arguments_result(
@@ -399,6 +405,7 @@ async def process_single_tool(
     dispatch_mode: DispatchMode = "interactive",
     dispatch_source: str = "interactive_tool",
     goal_mode: bool = False,
+    execution_scope: str | None = None,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -411,7 +418,9 @@ async def process_single_tool(
     log_args = json.dumps(args, ensure_ascii=False)
     LogManager.log_tool_call(turn, tool_name, log_args, session_id, uid)
 
-    if not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
+    if execution_scope == END_SESSION_SCOPE_TASK and tool_name in {MANAGE_SCHEDULED_TASKS_TOOL_NAME, MANAGE_TODO_TOOL_NAME}:
+        tool_result = _build_tool_disabled_result(tool_name)
+    elif not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
         tool_result = _build_tool_disabled_result(tool_name)
     elif missing_arguments:
         tool_result = _build_missing_required_arguments_result(tool_name, missing_arguments)

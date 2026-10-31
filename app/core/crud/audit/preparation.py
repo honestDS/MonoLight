@@ -115,10 +115,12 @@ class CRUDAuditPreparation:
         session_id: str,
         source: str,
         language: str,
+        execution_scope: str,
         source_assistant_message_id: int,
         working_directory: str,
         round_arguments_hash: str,
         tool_count: int,
+        source_work_id: int | None = None,
     ) -> AuditRecord:
         await ensure_session_reply_work_claim(db)
         record = AuditRecord(
@@ -127,6 +129,8 @@ class CRUDAuditPreparation:
             session_id=session_id,
             source=source,
             language=language,
+            execution_scope=execution_scope,
+            source_work_id=source_work_id,
             source_assistant_message_id=source_assistant_message_id,
             working_directory=str(Path(working_directory).resolve(strict=False)),
             round_arguments_hash=round_arguments_hash,

@@ -19,10 +19,176 @@ from app.core.prompts import (
     BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
     BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
 )
+from app.core.session_reply_queue import executor_replies as executor_replies_module
 from app.core.tools.end_session import END_SESSION_TOOL_SCHEMA
 from app.core.tools.send_file_to_user import SEND_FILE_TO_USER_TOOL_SCHEMA
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
+
+
+@pytest.mark.asyncio
+async def test_background_summary_request_keeps_tool_result_protocol_chain(monkeypatch):
+    profile = SimpleNamespace(id=1)
+    cfg = SimpleNamespace(channel=SimpleNamespace(chat_channel=object()))
+    task = SimpleNamespace(
+        tool_call_id="background-call-1",
+        tool_name="execute_shell",
+        arguments={"command": "echo 1"},
+        result={"status": "succeeded", "content": {"stdout": "ok"}},
+    )
+    captured = {}
+
+    async def fake_get_user(_db, _uid):
+        return SimpleNamespace(username="tester")
+
+    async def fake_validate_profile_and_cfg(_db, _profile):
+        return cfg
+
+    async def fake_build_system_prompt(_db, _profile, *, include_longterm_memory):
+        assert include_longterm_memory is False
+        return "system"
+
+    async def fake_generate_chat_with_fallback(_db, **kwargs):
+        request_messages = kwargs["request_builder"](
+            {
+                "context_window_k": 128,
+                "max_tokens": 256,
+                "temperature": 0,
+                "top_p": 1,
+                "chat_timeout": 30,
+            },
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
+        )
+        if hasattr(request_messages, "__await__"):
+            request_messages = await request_messages
+        captured["messages"] = request_messages
+        captured["tools"] = kwargs["tools"]
+        return (
+            InternalResponse(
+                message=InternalMessage(role=MessageRole.ASSISTANT, content="summary"),
+                model="test-model",
+            ),
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
+            None,
+            {
+                "context_window_k": 128,
+                "max_tokens": 256,
+                "temperature": 0,
+                "top_p": 1,
+                "chat_timeout": 30,
+            },
+        )
+
+    async def fake_save(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(background_module.user_crud, "get_by_uid", fake_get_user)
+    monkeypatch.setattr(background_module, "validate_profile_and_cfg", fake_validate_profile_and_cfg)
+    monkeypatch.setattr(background_module, "build_system_prompt", fake_build_system_prompt)
+    monkeypatch.setattr(background_module, "generate_chat_with_fallback", fake_generate_chat_with_fallback)
+    monkeypatch.setattr(background_module, "save_assistant_message", fake_save)
+
+    await BackgroundDispatcherMixin._generate_reply_from_history(
+        object(),
+        uid="u1",
+        session_id="s1",
+        profile=profile,
+        call_context="session_reply_background_summary",
+        allow_tools=False,
+        submission_context=[InternalMessage(role=MessageRole.USER, content="original request")],
+        extra_messages=executor_replies_module._build_background_summary_messages(task),
+    )
+
+    assert captured["tools"] is None
+    messages = captured["messages"]
+    for index, message in enumerate(messages):
+        if message.role != MessageRole.TOOL:
+            continue
+        assert any(
+            previous.role == MessageRole.ASSISTANT
+            and any(tool_call.id == message.tool_call_id for tool_call in previous.tool_calls or [])
+            for previous in messages[:index]
+        )
+
+
+@pytest.mark.asyncio
+async def test_background_summary_submission_context_skips_shared_summary_checkpoint(monkeypatch):
+    profile = SimpleNamespace(id=1)
+    cfg = SimpleNamespace(channel=SimpleNamespace(chat_channel=object()))
+
+    async def fake_get_user(_db, _uid):
+        return SimpleNamespace(username="tester")
+
+    async def fake_validate_profile_and_cfg(_db, _profile):
+        return cfg
+
+    async def fake_build_system_prompt(_db, _profile, *, include_longterm_memory):
+        assert include_longterm_memory is False
+        return "system"
+
+    async def unexpected_shared_summary(*_args, **_kwargs):
+        raise AssertionError("frozen submission context must not read or mutate shared summary")
+
+    async def fake_generate_chat_with_fallback(_db, **kwargs):
+        request_messages = kwargs["request_builder"](
+            {
+                "context_window_k": 128,
+                "max_tokens": 256,
+                "temperature": 0,
+                "top_p": 1,
+                "chat_timeout": 30,
+            },
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
+        )
+        if hasattr(request_messages, "__await__"):
+            request_messages = await request_messages
+        assert any(
+            "frozen original request" in str(message.content)
+            for message in request_messages
+        )
+        return (
+            InternalResponse(
+                message=InternalMessage(role=MessageRole.ASSISTANT, content="summary"),
+                model="test-model",
+            ),
+            SimpleNamespace(id=11),
+            {"model_id": "test-model", "protocol": "OPENAI"},
+            None,
+            {
+                "context_window_k": 128,
+                "max_tokens": 256,
+                "temperature": 0,
+                "top_p": 1,
+                "chat_timeout": 30,
+            },
+        )
+
+    async def fake_save(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(background_module.user_crud, "get_by_uid", fake_get_user)
+    monkeypatch.setattr(background_module, "validate_profile_and_cfg", fake_validate_profile_and_cfg)
+    monkeypatch.setattr(background_module, "build_system_prompt", fake_build_system_prompt)
+    monkeypatch.setattr(background_module, "apply_context_summary_checkpoint", unexpected_shared_summary)
+    monkeypatch.setattr(background_module, "generate_chat_with_fallback", fake_generate_chat_with_fallback)
+    monkeypatch.setattr(background_module, "save_assistant_message", fake_save)
+
+    await BackgroundDispatcherMixin._generate_reply_from_history(
+        object(),
+        uid="u1",
+        session_id="s1",
+        profile=profile,
+        call_context="session_reply_background_summary",
+        allow_tools=False,
+        submission_context=[
+            InternalMessage(id=10, role=MessageRole.USER, content="frozen original request")
+        ],
+        initial_trigger_mode=background_module.ContextSummaryTriggerMode.USER_MESSAGE,
+        initial_fixed_upper_message_id=10,
+    )
 
 
 def assert_rejected_feedback(request, tool_call_id, correction_prompt, *, expect_rejected=True):
@@ -361,6 +527,7 @@ async def test_reply_corrects_illegal_tool_calls_without_executing_or_persisting
     requests = []
     saved_messages = []
     tool_execution_called = False
+    tool_schema_load_calls = 0
 
     async def fake_get_user(_db, _uid):
         return SimpleNamespace(username="tester")
@@ -369,6 +536,8 @@ async def test_reply_corrects_illegal_tool_calls_without_executing_or_persisting
         return cfg
 
     async def fake_get_tools_for_profile(_db, _profile, allow_background):
+        nonlocal tool_schema_load_calls
+        tool_schema_load_calls += 1
         assert allow_background is False
         return (
             [
@@ -455,10 +624,14 @@ async def test_reply_corrects_illegal_tool_calls_without_executing_or_persisting
         assert exc_info.value.message == ERR_LLM_EMPTY_RESPONSE
 
     assert len(requests) == 3
+    assert tool_schema_load_calls == (1 if allow_tools else 0)
     for request_index, request in enumerate(requests):
-        assert request["tools"] is not None
-        assert {tool["function"]["name"] for tool in request["tools"]} == {"send_file_to_user"}
-        assert request["tools"] == requests[0]["tools"]
+        if allow_tools:
+            assert request["tools"] is not None
+            assert {tool["function"]["name"] for tool in request["tools"]} == {"send_file_to_user"}
+            assert request["tools"] == requests[0]["tools"]
+        else:
+            assert request["tools"] is None
         assert request["tool_choice"] == "auto"
         assert request["request_metadata_callback"] is request_metadata_callback
         request_messages = request["messages"]

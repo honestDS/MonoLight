@@ -11,9 +11,10 @@ from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
 from app.core.terminal.schemas import TERMINAL_SESSION_FINAL_STATUSES
 from app.core.utils.background_task_result import build_background_task_success_result
+from app.core.utils.dispatcher.frozen_context import capture_frozen_context_messages, serialize_frozen_context_messages
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.time import get_local_time
-from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.terminal_session import TerminalSession
@@ -47,11 +48,18 @@ async def _build_terminal_watch_background(
     profile_id: int,
     origin_work_id: int | None,
     origin_work_identity: str | None,
-) -> tuple[list[dict[str, Any]], Any]:
+) -> tuple[list[dict[str, Any]], Any, list[dict[str, Any]]]:
     request_context: list[dict[str, Any]] = []
+    frozen_context_messages: list[dict[str, Any]] = []
     if isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0 and isinstance(origin_work_identity, str) and origin_work_identity.strip():
         origin_work = await session_reply_work_item_crud.get(db, origin_work_id)
         if origin_work is not None and origin_work.uid == uid and origin_work.session_id == session_id and origin_work.profile_id == profile_id and origin_work.dedupe_key == origin_work_identity:
+            origin_state = origin_work.execution_state if isinstance(origin_work.execution_state, dict) else {}
+            origin_checkpoint = origin_state.get("dispatcher_checkpoint")
+            if isinstance(origin_checkpoint, dict) and isinstance(origin_checkpoint.get("messages"), list) and origin_checkpoint["messages"]:
+                frozen_context_messages = serialize_frozen_context_messages(origin_checkpoint["messages"])
+            elif isinstance(origin_state.get("frozen_context_messages"), list):
+                frozen_context_messages = serialize_frozen_context_messages(origin_state["frozen_context_messages"])
             for message_id in origin_work.input_message_ids or []:
                 if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
                     continue
@@ -88,13 +96,42 @@ async def _build_terminal_watch_background(
             parsed_messages = parse_db_messages_to_internal([preceding_user])
             if parsed_messages and parsed_messages[0].role == MessageRole.USER:
                 request_context.append(_serialize_terminal_request_message(parsed_messages[0]))
-    return request_context, purpose
+    if not frozen_context_messages:
+        related_ids = [
+            message.id
+            for message in parsed_history
+            if isinstance(message.id, int)
+            and not isinstance(message.id, bool)
+            and (
+                message is tool_call_message
+                or (message.role == MessageRole.TOOL and message.tool_call_id == terminal_session.original_tool_call_id)
+            )
+        ]
+        if not related_ids:
+            related_ids = [
+                message.get("id")
+                for message in request_context
+                if isinstance(message, dict) and isinstance(message.get("id"), int) and not isinstance(message.get("id"), bool)
+            ]
+        if related_ids:
+            frozen_context_messages = await capture_frozen_context_messages(
+                db,
+                session_id=session_id,
+                uid=uid,
+                before_id=max(related_ids) + 1,
+            )
+    return request_context, purpose, frozen_context_messages
 
 
-def _inherit_terminal_watch_background(extra: Any) -> tuple[list[dict[str, Any]], Any]:
+def _inherit_terminal_watch_background(extra: Any) -> tuple[list[dict[str, Any]], Any, list[dict[str, Any]]]:
     source = extra if isinstance(extra, dict) else {}
     request_context = source.get("request_context")
-    return (list(request_context) if isinstance(request_context, list) else [], source.get("purpose"))
+    frozen_context_messages = source.get("frozen_context_messages")
+    return (
+        list(request_context) if isinstance(request_context, list) else [],
+        source.get("purpose"),
+        serialize_frozen_context_messages(frozen_context_messages),
+    )
 
 
 async def create_terminal_auto_watch(
@@ -223,12 +260,13 @@ async def create_terminal_auto_watch(
     extra: dict[str, Any] = {
         "source": "terminal_auto_watch",
         "auto_terminal_watch": True,
+        "reply_mode": BackgroundTaskReplyMode.RESUME_AGENT.value,
         "terminal_session_id": terminal_session_id,
     }
     if previous_task is not None:
-        request_context, purpose = _inherit_terminal_watch_background(previous_extra)
+        request_context, purpose, frozen_context_messages = _inherit_terminal_watch_background(previous_extra)
     else:
-        request_context, purpose = await _build_terminal_watch_background(
+        request_context, purpose, frozen_context_messages = await _build_terminal_watch_background(
             db,
             terminal_session=terminal_session,
             uid=uid,
@@ -239,6 +277,8 @@ async def create_terminal_auto_watch(
         )
     extra["request_context"] = request_context
     extra["purpose"] = purpose
+    if frozen_context_messages:
+        extra["frozen_context_messages"] = frozen_context_messages
     if previous_content is not None and isinstance(previous_content.get("watch_states"), dict):
         extra["watch_states"] = previous_content["watch_states"]
     if isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0:
@@ -333,6 +373,11 @@ async def create_terminal_watch_subscription(
 
     origin_work_id = extra.get("origin_work_id") if isinstance(extra, dict) else None
     origin_work_identity = extra.get("origin_work_identity") if isinstance(extra, dict) else None
+    background_context_payload = {
+        key: extra[key]
+        for key in ("request_context", "purpose", "frozen_context_messages")
+        if isinstance(extra, dict) and key in extra
+    }
     valid_origin = isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0 and isinstance(origin_work_identity, str) and bool(origin_work_identity.strip())
     origin_payload: dict[str, Any] = {}
     if valid_origin:
@@ -366,6 +411,7 @@ async def create_terminal_watch_subscription(
             if valid_origin:
                 active_extra = dict(active_watch.extra) if isinstance(active_watch.extra, dict) else {}
                 active_extra.update(origin_payload)
+                active_extra.update(background_context_payload)
                 active_watch.extra = active_extra
                 db.add(active_watch)
                 await db.flush()
@@ -382,9 +428,11 @@ async def create_terminal_watch_subscription(
                 auto_extra: dict[str, Any] = {
                     "source": "terminal_auto_watch",
                     "auto_terminal_watch": True,
+                    "reply_mode": BackgroundTaskReplyMode.RESUME_AGENT.value,
                     "terminal_session_id": terminal_session_id,
                 }
                 auto_extra.update(origin_payload)
+                auto_extra.update(background_context_payload)
                 await background_task_crud.create_task(
                     db,
                     uid=uid,
@@ -633,7 +681,17 @@ async def persist_terminal_completion(
             terminal_session_id=terminal_session_id,
         )
         has_cancelled_watch = any(task.tool_name == TERMINAL_WATCH_TOOL_NAME and task.status == BackgroundTaskStatus.CANCELLED and isinstance(task.extra, dict) and task.extra.get("auto_terminal_watch") is True for task in history)
-        inherited_request_context, inherited_purpose = _inherit_terminal_watch_background(history[-1].extra if history else None)
+        inherited_request_context, inherited_purpose, inherited_frozen_context = _inherit_terminal_watch_background(history[-1].extra if history else None)
+        active_extra: dict[str, Any] = {
+            "source": "terminal_auto_watch",
+            "auto_terminal_watch": True,
+            "reply_mode": BackgroundTaskReplyMode.RESUME_AGENT.value,
+            "terminal_session_id": terminal_session_id,
+            "request_context": inherited_request_context,
+            "purpose": inherited_purpose,
+        }
+        if inherited_frozen_context:
+            active_extra["frozen_context_messages"] = inherited_frozen_context
 
         active_task = await background_task_crud.create_task(
             db,
@@ -648,13 +706,7 @@ async def persist_terminal_completion(
                 "condition": "process_exit",
             },
             auto_reply=not has_cancelled_watch,
-            extra={
-                "source": "terminal_auto_watch",
-                "auto_terminal_watch": True,
-                "terminal_session_id": terminal_session_id,
-                "request_context": inherited_request_context,
-                "purpose": inherited_purpose,
-            },
+            extra=active_extra,
             commit=False,
         )
 

@@ -45,7 +45,7 @@ from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.terminal_watch_snapshot import append_terminal_watch_snapshot, load_current_terminal_watch_snapshot
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
@@ -437,6 +437,10 @@ async def test_terminal_auto_watch_background_survives_snapshot_and_renewal(
         expected_request_context = [{"id": request_message.id, "role": MessageRole.USER.value, "content": request_content}]
         assert task.extra["request_context"] == expected_request_context
         assert task.extra["purpose"] == purpose
+        frozen_context = task.extra["frozen_context_messages"]
+        frozen_context_text = json.dumps(frozen_context, ensure_ascii=False)
+        assert request_content in frozen_context_text
+        assert purpose in frozen_context_text
 
         snapshot = await load_current_terminal_watch_snapshot(
             db,
@@ -487,6 +491,7 @@ async def test_terminal_auto_watch_background_survives_snapshot_and_renewal(
         assert next_task.arguments["after_offset"] == 37
         assert next_task.extra["request_context"] == expected_request_context
         assert next_task.extra["purpose"] == purpose
+        assert next_task.extra["frozen_context_messages"] == frozen_context
         assert later_request.id not in [item["id"] for item in next_task.extra["request_context"]]
         assert later_request_content not in json.dumps(next_task.extra, ensure_ascii=False)
 
@@ -752,12 +757,12 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_active_manual_watc
             .scalars()
             .all()
         )
-        summary_work_items = list(
+        resume_work_items = list(
             (
                 await db.execute(
                     select(SessionReplyWorkItem).where(
                         SessionReplyWorkItem.session_id == SESSION_ID,
-                        SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME,
                     )
                 )
             )
@@ -771,13 +776,13 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_active_manual_watc
     assert persisted_auto.status == BackgroundTaskStatus.SUCCEEDED
     assert persisted_auto.reply_status == BackgroundTaskReplyStatus.RUNNING
     assert len(result_messages) == 0
-    assert len(summary_work_items) == 1
-    summary_work = summary_work_items[0]
-    assert summary_work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
-    assert summary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
-    assert summary_work.source_id == str(auto_task_id)
-    summary_state = dict(summary_work.execution_state or {})
-    external_resume_context = summary_state.get("external_resume_context")
+    assert len(resume_work_items) == 1
+    resume_work = resume_work_items[0]
+    assert resume_work.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME
+    assert resume_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert resume_work.source_id == str(auto_task_id)
+    resume_state = dict(resume_work.execution_state or {})
+    external_resume_context = resume_state.get("external_resume_context")
     assert isinstance(external_resume_context, list)
     assert len(external_resume_context) == 1
     resume_payload = external_resume_context[0]
@@ -789,7 +794,7 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_active_manual_watc
         "next_offset": AFTER_OFFSET,
     }
     assert json.loads(resume_payload["tool_result"]["content"]) == persisted_auto.result
-    checkpoint = dict(summary_state.get("dispatcher_checkpoint") or {})
+    checkpoint = dict(resume_state.get("dispatcher_checkpoint") or {})
     assert checkpoint["reload_history"] is True
     assert checkpoint["deferred_external_results"] is True
 
@@ -888,12 +893,12 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_manual_watch_on_ot
             .scalars()
             .all()
         )
-        summary_work_items = list(
+        resume_work_items = list(
             (
                 await db.execute(
                     select(SessionReplyWorkItem).where(
                         SessionReplyWorkItem.session_id == SESSION_ID,
-                        SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME,
                     )
                 )
             )
@@ -907,13 +912,13 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_manual_watch_on_ot
     assert persisted_auto.status == BackgroundTaskStatus.SUCCEEDED
     assert persisted_auto.reply_status == BackgroundTaskReplyStatus.RUNNING
     assert len(result_messages) == 0
-    assert len(summary_work_items) == 1
-    summary_work = summary_work_items[0]
-    assert summary_work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
-    assert summary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
-    assert summary_work.source_id == str(auto_task_id)
-    summary_state = dict(summary_work.execution_state or {})
-    external_resume_context = summary_state.get("external_resume_context")
+    assert len(resume_work_items) == 1
+    resume_work = resume_work_items[0]
+    assert resume_work.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME
+    assert resume_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert resume_work.source_id == str(auto_task_id)
+    resume_state = dict(resume_work.execution_state or {})
+    external_resume_context = resume_state.get("external_resume_context")
     assert isinstance(external_resume_context, list)
     assert len(external_resume_context) == 1
     resume_payload = external_resume_context[0]
@@ -926,7 +931,7 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_manual_watch_on_ot
         "terminal_session_id": SECOND_TERMINAL_SESSION_ID,
     }
     assert json.loads(resume_payload["tool_result"]["content"]) == persisted_auto.result
-    checkpoint = dict(summary_state.get("dispatcher_checkpoint") or {})
+    checkpoint = dict(resume_state.get("dispatcher_checkpoint") or {})
     assert checkpoint["reload_history"] is True
     assert checkpoint["deferred_external_results"] is True
 
@@ -2458,6 +2463,7 @@ async def test_terminal_auto_watch_renews_after_timeout_and_stops_at_eof(
         assert next_task.extra == {
             "source": "terminal_auto_watch",
             "auto_terminal_watch": True,
+            "reply_mode": BackgroundTaskReplyMode.RESUME_AGENT.value,
             "terminal_session_id": TERMINAL_SESSION_ID,
             "request_context": [],
             "purpose": None,

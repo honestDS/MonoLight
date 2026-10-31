@@ -183,7 +183,7 @@ def get_bound_audit_execution(work: SessionReplyWorkItem) -> tuple[int, str] | N
         claim_token = state.get("audit_claim_token")
     elif work_type in {
         SessionReplyWorkType.FOREGROUND_REPLY,
-        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        SessionReplyWorkType.BACKGROUND_TASK_RESUME,
         SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
     }:
         return None
@@ -203,7 +203,7 @@ def work_has_active_audit_execution(work: SessionReplyWorkItem) -> bool:
     """判断回复工作是否持有需要禁止自动重试的活动审计绑定。"""
     if getattr(work, "work_type", None) not in {
         SessionReplyWorkType.FOREGROUND_REPLY,
-        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        SessionReplyWorkType.BACKGROUND_TASK_RESUME,
         SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
     }:
         return False
