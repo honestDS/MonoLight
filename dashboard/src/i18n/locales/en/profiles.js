@@ -15,7 +15,7 @@ export default {
   edit: 'Edit',
   delete: 'Delete',
   delete_impact_title: 'Confirm Profile Deletion',
-  delete_impact_intro: 'Deleting “{name}” will perform the following actions:',
+  delete_impact_intro: 'Are you sure you want to delete profile “{name}”?',
   delete_impact_sessions: 'Delete {count} linked sessions and their {messages} messages',
   delete_impact_session_item: 'Session: {name}',
   delete_impact_managed_kb: 'Delete managed knowledge base “{name}” and its {count} managed knowledge items',

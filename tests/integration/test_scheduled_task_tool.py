@@ -128,7 +128,6 @@ async def _snapshot(session_factory: async_sessionmaker[AsyncSession]) -> list[t
                 task.name,
                 task.uid,
                 task.session_id,
-                task.profile_id,
                 task.message,
                 task.interval_seconds,
                 task.run_once,
@@ -171,7 +170,6 @@ async def test_create_persists_scheduled_task_for_runtime_context(
         "id",
         "uid",
         "session_id",
-        "profile_id",
         "interval_seconds",
         "run_once",
         "status",
@@ -187,7 +185,6 @@ async def test_create_persists_scheduled_task_for_runtime_context(
     assert task.message == "Review the deployment"
     assert task.uid == "owner"
     assert task.session_id == "owner-main"
-    assert task.profile_id == 1
     assert task.interval_seconds == 60
     assert response["task"]["run_once"] is run_once
     assert task.run_once is run_once
@@ -197,7 +194,7 @@ async def test_create_persists_scheduled_task_for_runtime_context(
     assert 55 <= (task.next_run_at - task.created_at).total_seconds() <= 65
 
 
-async def test_create_uses_dispatch_context_owner_and_runtime_profile(
+async def test_create_uses_runtime_context_owner_without_rewriting_session_profile(
     db_session: AsyncSession,
     scheduled_tool_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -222,7 +219,6 @@ async def test_create_uses_dispatch_context_owner_and_runtime_profile(
     assert session is not None
     assert task.uid == "owner"
     assert task.session_id == "owner-main"
-    assert task.profile_id == 2
     assert session.profile_id == 1
 
 
@@ -391,7 +387,6 @@ async def _seed_list_tasks(db: AsyncSession) -> datetime:
                 name="owner-main-oldest",
                 uid="owner",
                 session_id="owner-main",
-                profile_id=1,
                 message="Oldest owner-main task",
                 interval_seconds=60,
                 run_once=True,
@@ -405,7 +400,6 @@ async def _seed_list_tasks(db: AsyncSession) -> datetime:
                 name="owner-other-only",
                 uid="owner",
                 session_id="owner-other",
-                profile_id=1,
                 message="Different owner session",
                 interval_seconds=60,
                 status=ScheduledTaskStatus.ENABLED,
@@ -418,7 +412,6 @@ async def _seed_list_tasks(db: AsyncSession) -> datetime:
                 name="peer-main-only",
                 uid="peer",
                 session_id="peer-main",
-                profile_id=3,
                 message="Different owner",
                 interval_seconds=60,
                 status=ScheduledTaskStatus.ENABLED,
@@ -431,7 +424,6 @@ async def _seed_list_tasks(db: AsyncSession) -> datetime:
                 name="owner-main-disabled",
                 uid="owner",
                 session_id="owner-main",
-                profile_id=1,
                 message="Disabled owner-main task",
                 interval_seconds=120,
                 status=ScheduledTaskStatus.DISABLED,
@@ -444,7 +436,6 @@ async def _seed_list_tasks(db: AsyncSession) -> datetime:
                 name="owner-main-newest",
                 uid="owner",
                 session_id="owner-main",
-                profile_id=1,
                 message="Newest task message",
                 interval_seconds=180,
                 status=ScheduledTaskStatus.ENABLED,
@@ -484,7 +475,6 @@ async def test_list_paginates_current_session_tasks_without_mutation(
         "name": "owner-main-newest",
         "uid": "owner",
         "session_id": "owner-main",
-        "profile_id": 1,
         "message": "Newest task message",
         "interval_seconds": 180,
         "run_once": False,

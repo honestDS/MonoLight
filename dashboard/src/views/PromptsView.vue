@@ -85,12 +85,13 @@
 
 <script setup>
 import { computed, ref, reactive, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { adminApi, promptApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import { getShortContent } from '../utils'
 import { useUserPermissionsStore } from '../composables/useUserPermissions'
+import { useConfirmDialog } from '../composables/useConfirmDialog.js'
 
 const prompts = ref([])
 const loading = ref(false)
@@ -112,6 +113,7 @@ const ownerUsersError = ref('')
 
 const { t } = useI18n()
 const userPermissionsStore = useUserPermissionsStore()
+const { confirm } = useConfirmDialog()
 
 const form = reactive({
   id: null,
@@ -288,7 +290,7 @@ const deletePrompt = async (row) => {
   if (deleteSubmitting.value) return
   deleteSubmitting.value = true
   try {
-    await ElMessageBox.confirm(t('prompts.delete_confirm', { name: row.name }), t('prompts.delete'), { type: 'warning' })
+    if (!await confirm({ message: t('prompts.delete_confirm', { name: row.name }), title: t('prompts.delete') })) return
     await promptApi.delete(row.id)
     ElMessage.success(t('prompts.delete_success'))
     loadPrompts()

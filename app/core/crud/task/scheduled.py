@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -10,35 +10,17 @@ from app.models.scheduled_task import ScheduledTask, ScheduledTaskCreate, Schedu
 
 
 class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTaskCreate]):
-    async def list_by_profile(
+    async def list_by_sessions(
         self,
         db: AsyncSession,
         *,
         uid: str,
-        profile_id: int,
+        session_ids: list[str],
     ) -> list[ScheduledTask]:
-        result = await db.execute(select(ScheduledTask).where(ScheduledTask.uid == uid, ScheduledTask.profile_id == profile_id).order_by(ScheduledTask.id.asc()))
+        if not session_ids:
+            return []
+        result = await db.execute(select(ScheduledTask).where(ScheduledTask.uid == uid, ScheduledTask.session_id.in_(session_ids)).order_by(ScheduledTask.id.asc()))
         return list(result.scalars().all())
-
-    async def delete_by_profile(
-        self,
-        db: AsyncSession,
-        *,
-        uid: str,
-        profile_id: int,
-        commit: bool = False,
-    ) -> int:
-        result = await db.execute(
-            delete(ScheduledTask).where(
-                ScheduledTask.uid == uid,
-                ScheduledTask.profile_id == profile_id,
-            )
-        )
-        if commit:
-            await db.commit()
-        else:
-            await db.flush()
-        return result.rowcount or 0
 
     async def create_scheduled_task(
         self,
@@ -47,7 +29,6 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         name: str,
         uid: str,
         session_id: str,
-        profile_id: int | None,
         message: str,
         interval_seconds: int,
         run_once: bool = False,
@@ -57,7 +38,6 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             name=name,
             uid=uid,
             session_id=session_id,
-            profile_id=profile_id,
             message=message,
             interval_seconds=interval_seconds,
             run_once=run_once,
@@ -107,18 +87,6 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             stmt = stmt.where(ScheduledTask.session_id == session_id)
         result = await db.execute(stmt)
         return result.scalar() or 0
-
-    async def has_profile_assignment(self, db: AsyncSession, profile_id: int) -> bool:
-        stmt = select(ScheduledTask.id).where(ScheduledTask.profile_id == profile_id).limit(1)
-        result = await db.execute(stmt)
-        return result.scalar() is not None
-
-    async def unlink_profile_references(self, db: AsyncSession, *, profile_ids: set[int], excluded_uid: str) -> int:
-        if not profile_ids:
-            return 0
-        result = await db.execute(update(ScheduledTask).where(ScheduledTask.uid != excluded_uid, ScheduledTask.profile_id.in_(profile_ids)).values(profile_id=None))
-        await db.flush()
-        return result.rowcount or 0
 
     async def list_due(self, db: AsyncSession, *, limit: int = 100) -> list[ScheduledTask]:
         now = get_local_time()

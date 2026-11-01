@@ -601,7 +601,6 @@ async def test_superuser_deletes_user_data_and_unlinks_foreign_dependencies(
                 name=task_name,
                 uid="peer-user",
                 session_id=session_id,
-                profile_id=profile_id,
                 message="scheduled dependency",
                 interval_seconds=60,
             )
@@ -668,7 +667,9 @@ async def test_superuser_deletes_user_data_and_unlinks_foreign_dependencies(
             assert persisted_task.uid == "peer-user"
             assert persisted_task.session_id == session_id
             assert persisted_task.message == "scheduled dependency"
-            assert persisted_task.profile_id is None
+            result = await session.execute(select(ChatSession).where(ChatSession.session_id == persisted_task.session_id))
+            persisted_session = result.scalars().one()
+            assert persisted_session.uid == "peer-user"
         elif dependency in {"user-kb", "managed-kb"}:
             result = await session.execute(select(KnowledgeBase).where(KnowledgeBase.name == knowledge_base_name))
             assert result.scalars().first() is None
@@ -1034,7 +1035,6 @@ async def test_superuser_delete_clears_complete_session_task_subtree_without_aff
                     name=task_name,
                     uid=uid,
                     session_id=session_id,
-                    profile_id=profile.id,
                     message=f"{uid} scheduled message",
                     interval_seconds=60,
                 ),

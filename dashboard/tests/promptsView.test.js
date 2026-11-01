@@ -9,6 +9,8 @@ import {
   reactive,
   ref,
 } from 'vue'
+import { renderToString } from 'vue/server-renderer'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const promptsViewSource = readFileSync(new URL('../src/views/PromptsView.vue', import.meta.url), 'utf8')
 const promptsViewScriptMatch = promptsViewSource.match(/<script\s+setup(?:\s[^>]*)?>([\s\S]*?)<\/script>/)
@@ -136,11 +138,12 @@ const createHarness = (t, options = {}) => {
       return apiState.confirmHandler(args)
     },
   }
-  const translate = key => {
+  const translate = options.translate || (key => {
     if (key === 'prompts.name') return locale.nameLabel
     if (key === 'prompts.owner_unassigned') return locale.ownerUnassigned
     return key
-  }
+  })
+  const actualUseConfirmDialog = loadUseConfirmDialog({ t: translate, ElMessageBox })
   const context = vm.createContext({
     computed,
     reactive,
@@ -151,6 +154,7 @@ const createHarness = (t, options = {}) => {
     adminApi,
     promptApi,
     useI18n: () => ({ t: translate }),
+    useConfirmDialog: actualUseConfirmDialog,
     useUserPermissionsStore: () => permissions,
     console: { log() {}, warn() {}, error() {}, info() {} },
   })
@@ -802,21 +806,81 @@ test('rejects foreign replacements and identity changes without a new delete req
   )))
 })
 
-test('does not delete after confirmation cancellation', async t => {
-  const target = { id: 601, name: 'target', uid: 'user-a' }
-  const harness = createHarness(t)
+test('waits for shared confirmation, escapes the prompt name, and refreshes after deletion', async t => {
+  const confirmation = createDeferred()
+  const target = { id: 601, name: '<img src=x onerror=alert(1)>', uid: 'user-a' }
+  const harness = createHarness(t, {
+    confirmHandler: () => confirmation.promise,
+    translate: (key, params) => key === 'prompts.delete_confirm'
+      ? `Delete ${params.name}`
+      : key,
+  })
   await harness.flush()
   harness.permissions.currentUser = { uid: 'user-a' }
-  harness.apiState.confirmHandler = async () => {
-    throw 'cancel'
+
+  const deletePromise = harness.module.deletePrompt(target)
+  assert.equal(harness.module.deleteSubmitting.value, true)
+  assert.equal(harness.apiState.deleteRequests.length, 0)
+  assert.equal(harness.apiState.listRequests.length, 1)
+  assert.equal(harness.confirmations.length, 1)
+
+  const html = await renderToString(harness.confirmations[0][0])
+  assert.match(html, /Delete &lt;img src=x onerror=alert\(1\)&gt;/)
+  assert.doesNotMatch(html, /<img\b/i)
+
+  confirmation.resolve('confirm')
+  await deletePromise
+  await harness.flush()
+
+  assert.equal(harness.apiState.deleteRequests.length, 1)
+  assert.equal(harness.apiState.deleteRequests[0].id, target.id)
+  assert.equal(harness.apiState.listRequests.length, 2)
+  assert.equal(harness.module.deleteSubmitting.value, false)
+})
+
+test('does not delete, refresh, or report errors after confirmation cancellation or close', async t => {
+  for (const action of ['cancel', 'close']) {
+    const target = { id: 602, name: `target-${action}`, uid: 'user-a' }
+    const harness = createHarness(t)
+    await harness.flush()
+    harness.permissions.currentUser = { uid: 'user-a' }
+    harness.apiState.confirmHandler = async () => {
+      throw action
+    }
+
+    await harness.module.deletePrompt(target)
+    await harness.flush()
+    assert.equal(harness.confirmations.length, 1, action)
+    assert.equal(harness.apiState.deleteRequests.length, 0, action)
+    assert.equal(harness.apiState.listRequests.length, 1, action)
+    assert.equal(harness.messages.some(message => message.type === 'error'), false, action)
+    assert.equal(harness.module.deleteSubmitting.value, false, action)
+    assert.equal(harness.module.pendingDeletePrompt.value, null, action)
+    assert.equal(harness.module.reassignDialogVisible.value, false, action)
   }
+})
+
+test('reports non-cancel confirmation failures without deleting', async t => {
+  const target = { id: 603, name: 'target', uid: 'user-a' }
+  const error = new Error('confirmation failed')
+  const harness = createHarness(t, {
+    confirmHandler: async () => {
+      throw error
+    },
+  })
+  await harness.flush()
+  harness.permissions.currentUser = { uid: 'user-a' }
 
   await harness.module.deletePrompt(target)
+  await harness.flush()
+
   assert.equal(harness.confirmations.length, 1)
   assert.equal(harness.apiState.deleteRequests.length, 0)
+  assert.equal(harness.apiState.listRequests.length, 1)
   assert.equal(harness.module.deleteSubmitting.value, false)
-  assert.equal(harness.module.pendingDeletePrompt.value, null)
-  assert.equal(harness.module.reassignDialogVisible.value, false)
+  assert.ok(harness.messages.some(message => (
+    message.type === 'error' && message.value === error.message
+  )))
 })
 
 test('ignores repeated delete operations during slow confirmation and deletion', async t => {

@@ -33,7 +33,7 @@ MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA = {
             "List all scheduled tasks, including disabled tasks, or delete a task only within the current user's current session. "
             "Deleting a task prevents future triggers but does not cancel already queued replies. "
             "Triggered tasks execute as independent AgentWork and do not receive conversation history, so create messages must be self-contained. "
-            "Ownership, session, and the current runtime profile come from runtime context and cannot be specified through arguments."
+            "Ownership and session come from runtime context and cannot be specified through arguments. Each trigger uses the session's current profile, which remains fixed for that execution."
         ),
         "parameters": {
             "type": "object",
@@ -227,7 +227,6 @@ class ManageScheduledTasksExecutor(BaseExecutor):
                 name=params.name,
                 uid=uid,
                 session_id=session_id,
-                profile_id=profile_id,
                 message=params.message,
                 interval_seconds=params.interval_seconds,
                 run_once=params.run_once,

@@ -10,6 +10,7 @@ from app.core.constants import (
     ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
+from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import (
     ensure_session_reply_work_claim,
@@ -204,6 +205,7 @@ async def _check_interactive_work_validity(
     uid: str,
     profile_id: int,
     worker_id: str,
+    work_type: SessionReplyWorkType,
 ) -> bool:
     async with AsyncSessionLocal() as validity_db:
         active_claims = await session_reply_work_item_crud.get_active_claims(
@@ -214,7 +216,14 @@ async def _check_interactive_work_validity(
             validity_db,
             session_id,
         )
-    return (work_id, worker_id) in active_claims and session is not None and session.uid == uid and session.profile_id == profile_id
+        profile = None
+        if work_type == SessionReplyWorkType.AGENT_WORK:
+            profile = await profile_crud.get_with_relations(validity_db, profile_id)
+    if (work_id, worker_id) not in active_claims or session is None or session.uid != uid:
+        return False
+    if work_type == SessionReplyWorkType.AGENT_WORK:
+        return profile is not None and profile.uid == uid
+    return session.profile_id == profile_id
 
 
 async def _save_interactive_work_execution_checkpoint(
@@ -364,6 +373,7 @@ async def _dispatch_interactive_work(
             uid=uid,
             profile_id=work.profile_id,
             worker_id=worker_id,
+            work_type=work.work_type,
         ),
         "expose_tool_call_content": expose_tool_call_content,
         "show_tool_calls": show_tool_calls,

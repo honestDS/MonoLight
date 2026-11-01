@@ -1,8 +1,9 @@
 import { onUnmounted, ref } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { useConfirmDialog } from '../useConfirmDialog.js'
 import { isAuditConfirmationActionable } from '../../utils/auditConfirmation.js'
 
 export function useChatAuditConfirmation({ props, emit, t }) {
+  const { confirm } = useConfirmDialog()
   const pendingAuditDecisions = ref(new Set())
   const auditDecisionStatuses = ref(new Map())
   const auditCountdownNow = ref(Date.now())
@@ -82,17 +83,19 @@ export function useChatAuditConfirmation({ props, emit, t }) {
 
     if (decision === 'ignore') {
       pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value, auditRecordId])
+      let confirmed
       try {
-        await ElMessageBox.confirm(
-          t('chat.audit_high_risk_warning'),
-          t('chat.audit_high_risk_warning_title'),
-          {
-            type: 'error',
-            confirmButtonText: t('chat.audit_ignore_and_allow'),
-            cancelButtonText: t('common.cancel')
-          }
-        )
+        confirmed = await confirm({
+          message: t('chat.audit_high_risk_warning'),
+          title: t('chat.audit_high_risk_warning_title'),
+          type: 'error',
+          confirmButtonText: t('chat.audit_ignore_and_allow'),
+          cancelButtonText: t('common.cancel')
+        })
       } catch {
+        confirmed = false
+      }
+      if (!confirmed) {
         pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value].filter(id => id !== auditRecordId))
         return
       }

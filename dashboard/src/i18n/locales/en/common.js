@@ -7,7 +7,7 @@ export default {
   refresh: 'Refresh',
   warning: 'System Warning',
   delete_confirm: 'Are you sure you want to permanently delete this profile?',
-  delete_named_confirm: 'Are you sure you want to delete <span style="color: #F56C6C; font-weight: bold;">{name}</span>?',
+  delete_named_confirm: 'Are you sure you want to delete “{name}”?',
   delete_success: 'Deleted successfully',
   delete_failed: 'Delete failed',
   action_failed: 'Action failed',

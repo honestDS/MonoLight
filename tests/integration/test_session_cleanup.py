@@ -187,7 +187,6 @@ async def _seed_session_data(db: AsyncSession) -> tuple[int, int, int]:
             name="scheduled",
             uid="user-1",
             session_id="session-1",
-            profile_id=1,
             message="run",
             interval_seconds=60,
         )

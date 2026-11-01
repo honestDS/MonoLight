@@ -5,6 +5,7 @@ import vm from 'node:vm'
 import { createPinia, setActivePinia } from 'pinia'
 import { computed, effectScope, reactive, ref, watch } from 'vue'
 import { createI18n } from 'vue-i18n'
+import { renderToString } from 'vue/server-renderer'
 
 import { getKnowledgeBaseProfileLabel } from '../src/utils/knowledgeBaseManagement.js'
 import * as knowledgeBaseManagement from '../src/utils/knowledgeBaseManagement.js'
@@ -15,6 +16,7 @@ import zhCommon from '../src/i18n/locales/zh/common.js'
 import zhKnowledgeBase from '../src/i18n/locales/zh/knowledgeBase.js'
 import enCommon from '../src/i18n/locales/en/common.js'
 import enKnowledgeBase from '../src/i18n/locales/en/knowledgeBase.js'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const useKnowledgeBaseViewSource = readFileSync(
   new URL('../src/composables/knowledgeBase/useKnowledgeBaseView.js', import.meta.url),
@@ -49,6 +51,12 @@ const useKnowledgeBaseViewScript = stripModuleSyntax(useKnowledgeBaseViewSource)
 const useKnowledgeBaseQueryTestScript = stripModuleSyntax(useKnowledgeBaseQueryTestSource)
 const dataResponse = data => ({ data: { data } })
 const normalize = value => JSON.parse(JSON.stringify(value))
+const escapeHtml = value => String(value)
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+  .replaceAll("'", '&#39;')
 const deferred = () => {
   let resolve
   let reject
@@ -204,13 +212,19 @@ const createHarness = async (t, options = {}) => {
   ElMessage.info = (...args) => messages.push({ type: 'info', args })
 
   const ElMessageBox = {
-    confirm: async (...args) => {
+    confirm: (...args) => {
       confirms.push(args)
-      const result = typeof options.confirm === 'function'
-        ? await options.confirm(...args)
-        : options.confirm ?? true
-      if (!result) throw 'cancel'
-      return 'confirm'
+      try {
+        const result = typeof options.confirm === 'function'
+          ? options.confirm(...args)
+          : options.confirm ?? true
+        return Promise.resolve(result).then(value => {
+          if (!value) throw 'cancel'
+          return 'confirm'
+        })
+      } catch (error) {
+        return Promise.reject(error)
+      }
     },
     close: () => confirmationCloses.push(true),
   }
@@ -233,6 +247,11 @@ const createHarness = async (t, options = {}) => {
       en: { common: enCommon, knowledgeBase: enKnowledgeBase },
     },
   })
+  const translate = (key, params) => i18n.global.t(
+    key,
+    params && typeof params === 'object' ? JSON.parse(JSON.stringify(params)) : params,
+  )
+  const actualUseConfirmDialog = loadUseConfirmDialog({ t: translate, ElMessageBox })
   const scope = effectScope()
   const context = vm.createContext({
     computed,
@@ -249,12 +268,8 @@ const createHarness = async (t, options = {}) => {
     reactive,
     ref,
     watch,
-    useI18n: () => ({
-      t: (key, params) => i18n.global.t(
-        key,
-        params && typeof params === 'object' ? JSON.parse(JSON.stringify(params)) : params,
-      ),
-    }),
+    useConfirmDialog: actualUseConfirmDialog,
+    useI18n: () => ({ t: translate }),
     useUserPermissionsStore,
     i18n,
     ...knowledgeBaseManagement,
@@ -1383,19 +1398,23 @@ test('uses the localized owner identity for each knowledge-base delete confirmat
 
     assert.equal(harness.confirms.length, 2)
     assert.equal(harness.confirms[0][1], locale === 'zh' ? '提示' : 'Prompt')
-    assert.notEqual(harness.confirms[0][0], harness.confirms[1][0])
+    const renderedMessages = await Promise.all(
+      harness.confirms.map(([message]) => renderToString(message)),
+    )
+    assert.notEqual(renderedMessages[0], renderedMessages[1])
 
-    for (const [confirmation, row, other] of [
-      [harness.confirms[0], first, second],
-      [harness.confirms[1], second, first],
+    for (const [index, [confirmation, row, other]] of [
+      [0, [harness.confirms[0], first, second]],
+      [1, [harness.confirms[1], second, first]],
     ]) {
-      const [message, , options] = confirmation
-      assert.ok(message.includes(row.username))
-      assert.ok(message.includes(row.id))
-      assert.ok(message.includes(row.name))
-      assert.ok(!message.includes(other.username))
-      assert.ok(!message.includes(row.uid))
-      assert.ok(!message.includes(other.uid))
+      const [, , options] = confirmation
+      const html = renderedMessages[index]
+      assert.ok(html.includes(escapeHtml(row.username)))
+      assert.ok(html.includes(escapeHtml(row.id)))
+      assert.ok(html.includes(escapeHtml(row.name)))
+      assert.ok(!html.includes(escapeHtml(other.username)))
+      assert.ok(!html.includes(escapeHtml(row.uid)))
+      assert.ok(!html.includes(escapeHtml(other.uid)))
       assert.equal(options.dangerouslyUseHTMLString, false)
     }
 
@@ -1450,7 +1469,9 @@ test('waits for confirmation and preserves literal names and unknown owner place
     assert.equal(harness.api.deletes.length, 0)
     assert.equal(harness.confirms.length, 1)
     const [specialMessage, , specialOptions] = harness.confirms[0]
-    assert.ok(specialMessage.includes(specialRow.name))
+    const specialHtml = await renderToString(specialMessage)
+    assert.ok(specialHtml.includes(escapeHtml(specialRow.name)))
+    assert.doesNotMatch(specialHtml, /<(?:alpha|admin|script)\b/i)
     assert.equal(specialOptions.dangerouslyUseHTMLString, false)
 
     resolveConfirmation(true)
@@ -1463,9 +1484,10 @@ test('waits for confirmation and preserves literal names and unknown owner place
     }
     await harness.module.handleDelete(missingUsernameRow)
     const [missingMessage, , missingOptions] = harness.confirms[1]
-    assert.ok(missingMessage.includes(unknownOwnerLabel))
-    assert.ok(!missingMessage.includes(missingUsernameRow.uid))
-    assert.doesNotMatch(missingMessage, /undefined/)
+    const missingHtml = await renderToString(missingMessage)
+    assert.ok(missingHtml.includes(escapeHtml(unknownOwnerLabel)))
+    assert.ok(!missingHtml.includes(escapeHtml(missingUsernameRow.uid)))
+    assert.doesNotMatch(missingHtml, /undefined/)
     assert.equal(missingOptions.dangerouslyUseHTMLString, false)
     assert.deepEqual(harness.api.deletes.map(request => request.id), [specialRow.id, missingUsernameRow.id])
   }
@@ -1663,9 +1685,11 @@ test('confirms per-knowledge-base repair with literal owner identity and skips c
 
     assert.equal(harness.confirms.length, 1)
     const [message, , options] = harness.confirms[0]
-    assert.ok(message.includes(row.name))
-    assert.ok(message.includes(row.username))
-    assert.ok(message.includes(row.id))
+    const html = await renderToString(message)
+    assert.ok(html.includes(escapeHtml(row.name)))
+    assert.ok(html.includes(escapeHtml(row.username)))
+    assert.ok(html.includes(escapeHtml(row.id)))
+    assert.doesNotMatch(html, /<(?:alpha|admin|script)\b/i)
     assert.equal(options.dangerouslyUseHTMLString, false)
     assert.equal(harness.api.repairs.length, 0)
   }
@@ -1888,9 +1912,10 @@ test('routes the more-menu repair action through confirmation and repairs only t
   await cancelled.module.handleKnowledgeBaseMoreAction('repair', row)
 
   assert.equal(cancelled.confirms.length, 1)
-  assert.ok(cancelled.confirms[0][0].includes(row.name))
-  assert.ok(cancelled.confirms[0][0].includes(row.username))
-  assert.ok(cancelled.confirms[0][0].includes(row.id))
+  const cancelledHtml = await renderToString(cancelled.confirms[0][0])
+  assert.ok(cancelledHtml.includes(escapeHtml(row.name)))
+  assert.ok(cancelledHtml.includes(escapeHtml(row.username)))
+  assert.ok(cancelledHtml.includes(escapeHtml(row.id)))
   assert.equal(cancelled.confirms[0][2].dangerouslyUseHTMLString, false)
   assert.equal(cancelled.api.repairs.length, 0)
 
@@ -1906,9 +1931,10 @@ test('routes the more-menu repair action through confirmation and repairs only t
   await flushPromises()
 
   assert.equal(repaired.confirms.length, 1)
-  assert.ok(repaired.confirms[0][0].includes(row.name))
-  assert.ok(repaired.confirms[0][0].includes(row.username))
-  assert.ok(repaired.confirms[0][0].includes(row.id))
+  const repairedHtml = await renderToString(repaired.confirms[0][0])
+  assert.ok(repairedHtml.includes(escapeHtml(row.name)))
+  assert.ok(repairedHtml.includes(escapeHtml(row.username)))
+  assert.ok(repairedHtml.includes(escapeHtml(row.id)))
   assert.equal(repaired.api.repairs.length, 1)
   assert.deepEqual(repaired.api.repairs[0].params, { kb_id: row.id })
   assert.deepEqual(repaired.api.gets.map(request => request.id), [row.id])

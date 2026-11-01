@@ -15,6 +15,7 @@ from app.core.constants import ERR_BACKGROUND_TASK_NOT_FOUND, ERR_SCHEDULED_TASK
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers
+from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.scheduled_task import ScheduledTask, ScheduledTaskStatus
@@ -46,6 +47,7 @@ async def scheduled_task_session_factory(database_factory) -> AsyncIterator[asyn
         User.__table__,
         PromptLibrary.__table__,
         Profile.__table__,
+        MessagePlatform.__table__,
         ChatSession.__table__,
         ScheduledTask.__table__,
     ]
@@ -77,12 +79,12 @@ async def scheduled_task_session_factory(database_factory) -> AsyncIterator[asyn
             await session.flush()
             session.add_all(
                 [
-                    ChatSession(session_id="owner-main", uid="owner", profile_id=1),
-                    ChatSession(session_id="owner-alternate", uid="owner", profile_id=2),
-                    ChatSession(session_id="peer-main", uid="peer", profile_id=3),
-                    ChatSession(session_id="admin-main", uid="admin", profile_id=4),
+                    ChatSession(session_id="owner-main", uid="owner", profile_id=1, profile_override_id=1),
+                    ChatSession(session_id="owner-alternate", uid="owner", profile_id=2, profile_override_id=2),
+                    ChatSession(session_id="peer-main", uid="peer", profile_id=3, profile_override_id=3),
+                    ChatSession(session_id="admin-main", uid="admin", profile_id=4, profile_override_id=4),
                     ChatSession(session_id="owner-no-profile", uid="owner", profile_id=None),
-                    ChatSession(session_id="owner-wrong-profile", uid="owner", profile_id=3),
+                    ChatSession(session_id="owner-wrong-profile", uid="owner", profile_id=3, profile_override_id=3),
                 ]
             )
             await session.flush()
@@ -93,7 +95,6 @@ async def scheduled_task_session_factory(database_factory) -> AsyncIterator[asyn
                         name="owner-enabled",
                         uid="owner",
                         session_id="owner-main",
-                        profile_id=1,
                         message="owner enabled message",
                         interval_seconds=60,
                         status=ScheduledTaskStatus.ENABLED,
@@ -106,7 +107,6 @@ async def scheduled_task_session_factory(database_factory) -> AsyncIterator[asyn
                         name="owner-disabled",
                         uid="owner",
                         session_id="owner-alternate",
-                        profile_id=2,
                         message="owner disabled message",
                         interval_seconds=120,
                         status=ScheduledTaskStatus.DISABLED,
@@ -119,7 +119,6 @@ async def scheduled_task_session_factory(database_factory) -> AsyncIterator[asyn
                         name="peer-enabled",
                         uid="peer",
                         session_id="peer-main",
-                        profile_id=3,
                         message="peer enabled message",
                         interval_seconds=180,
                         status=ScheduledTaskStatus.ENABLED,
@@ -132,7 +131,6 @@ async def scheduled_task_session_factory(database_factory) -> AsyncIterator[asyn
                         name="admin-enabled",
                         uid="admin",
                         session_id="admin-main",
-                        profile_id=4,
                         message="admin enabled message",
                         interval_seconds=240,
                         status=ScheduledTaskStatus.ENABLED,
@@ -235,23 +233,22 @@ async def test_owner_pagination_filters_total_and_keeps_pages_disjoint(
 
 
 CREATE_SUCCESS_CASES = (
-    pytest.param("task-owner", "owner-main", "owner", 1, "task-owner", id="owner-creates-owner-task"),
-    pytest.param("super-admin", "admin-main", "admin", 4, "super-admin", id="superuser-creates-admin-task"),
-    pytest.param("super-admin", "owner-main", "owner", 1, "task-owner", id="superuser-creates-owner-task"),
-    pytest.param("super-admin", "peer-main", "peer", 3, "task-peer", id="superuser-creates-peer-task"),
+    pytest.param("task-owner", "owner-main", "owner", "task-owner", id="owner-creates-owner-task"),
+    pytest.param("super-admin", "admin-main", "admin", "super-admin", id="superuser-creates-admin-task"),
+    pytest.param("super-admin", "owner-main", "owner", "task-owner", id="superuser-creates-owner-task"),
+    pytest.param("super-admin", "peer-main", "peer", "task-peer", id="superuser-creates-peer-task"),
 )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operator,session_id,expected_uid,expected_profile_id,owner_username", CREATE_SUCCESS_CASES)
+@pytest.mark.parametrize("operator,session_id,expected_uid,owner_username", CREATE_SUCCESS_CASES)
 @pytest.mark.parametrize("run_once", (pytest.param(False, id="recurring-default"), pytest.param(True, id="one-time")))
-async def test_create_persists_target_session_owner_and_profile(
+async def test_create_persists_target_session_owner(
     api_app: FastAPI,
     scheduled_task_session_factory: async_sessionmaker[AsyncSession],
     operator: str,
     session_id: str,
     expected_uid: str,
-    expected_profile_id: int,
     owner_username: str,
     run_once: bool,
 ) -> None:
@@ -276,7 +273,6 @@ async def test_create_persists_target_session_owner_and_profile(
         task_id = payload["data"]["id"]
         assert payload["data"]["uid"] == expected_uid
         assert payload["data"]["session_id"] == session_id
-        assert payload["data"]["profile_id"] == expected_profile_id
         assert payload["data"]["run_once"] is run_once
 
         list_response = await client.get(LIST_PATH, headers=_headers(owner_username))
@@ -298,14 +294,12 @@ async def test_create_persists_target_session_owner_and_profile(
     created_task = after_by_id[task_id]
     assert created_task["uid"] == expected_uid
     assert created_task["session_id"] == session_id
-    assert created_task["profile_id"] == expected_profile_id
     assert created_task["run_once"] is run_once
     async with scheduled_task_session_factory() as session:
         result = await session.execute(select(ScheduledTask).where(ScheduledTask.id == task_id))
         persisted_task = result.scalar_one()
         assert persisted_task.uid == expected_uid
         assert persisted_task.session_id == session_id
-        assert persisted_task.profile_id == expected_profile_id
         assert persisted_task.run_once is run_once
 
 
@@ -486,7 +480,6 @@ async def test_update_preserves_and_reschedules_one_time_task_contract(
             assert data["id"] == 1
             assert data["uid"] == before_task["uid"]
             assert data["session_id"] == before_task["session_id"]
-            assert data["profile_id"] == before_task["profile_id"]
             return data
 
         one_time_task = await update_task({"run_once": True})
@@ -532,7 +525,6 @@ async def test_update_preserves_and_reschedules_one_time_task_contract(
     assert listed_task["run_once"] is False
     assert listed_task["uid"] == before_task["uid"]
     assert listed_task["session_id"] == before_task["session_id"]
-    assert listed_task["profile_id"] == before_task["profile_id"]
 
     after = await _task_snapshot(scheduled_task_session_factory)
     _assert_other_tasks_unchanged(before, after, 1)
@@ -542,7 +534,6 @@ async def test_update_preserves_and_reschedules_one_time_task_contract(
     assert updated_task["message"] == "one-time task message changed"
     assert updated_task["uid"] == before_task["uid"]
     assert updated_task["session_id"] == before_task["session_id"]
-    assert updated_task["profile_id"] == before_task["profile_id"]
     assert_deadline(updated_task, third_deadline)
 
 
@@ -593,15 +584,15 @@ async def test_create_and_update_reject_non_boolean_run_once_without_persisting(
 
 
 UPDATE_SUCCESS_CASES = (
-    pytest.param("task-owner", 1, "owner", "owner-main", 1, id="owner-updates-own-task"),
-    pytest.param("super-admin", 1, "owner", "owner-main", 1, id="superuser-updates-owner-task"),
-    pytest.param("super-admin", 3, "peer", "peer-main", 3, id="superuser-updates-peer-task"),
-    pytest.param("super-admin", 4, "admin", "admin-main", 4, id="superuser-updates-own-task"),
+    pytest.param("task-owner", 1, "owner", "owner-main", id="owner-updates-own-task"),
+    pytest.param("super-admin", 1, "owner", "owner-main", id="superuser-updates-owner-task"),
+    pytest.param("super-admin", 3, "peer", "peer-main", id="superuser-updates-peer-task"),
+    pytest.param("super-admin", 4, "admin", "admin-main", id="superuser-updates-own-task"),
 )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operator,task_id,expected_uid,expected_session_id,expected_profile_id", UPDATE_SUCCESS_CASES)
+@pytest.mark.parametrize("operator,task_id,expected_uid,expected_session_id", UPDATE_SUCCESS_CASES)
 async def test_update_changes_task_fields_and_preserves_database_owner(
     api_app: FastAPI,
     scheduled_task_session_factory: async_sessionmaker[AsyncSession],
@@ -609,7 +600,6 @@ async def test_update_changes_task_fields_and_preserves_database_owner(
     task_id: int,
     expected_uid: str,
     expected_session_id: str,
-    expected_profile_id: int,
 ) -> None:
     before = await _task_snapshot(scheduled_task_session_factory)
     before_by_id = {task["id"]: task for task in before}
@@ -655,7 +645,6 @@ async def test_update_changes_task_fields_and_preserves_database_owner(
     assert updated_task["status"] == ScheduledTaskStatus.ENABLED.value
     assert updated_task["uid"] == expected_uid
     assert updated_task["session_id"] == expected_session_id
-    assert updated_task["profile_id"] == expected_profile_id
     assert updated_task["next_run_at"] != before_task["next_run_at"]
 
     now = get_local_time()
@@ -670,7 +659,7 @@ UPDATE_SESSION_SUCCESS_OPERATORS = ("task-owner", "super-admin")
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operator", UPDATE_SESSION_SUCCESS_OPERATORS)
-async def test_update_switches_task_session_only_with_same_owner_profile(
+async def test_update_switches_task_session_only_with_same_owner(
     api_app: FastAPI,
     scheduled_task_session_factory: async_sessionmaker[AsyncSession],
     operator: str,
@@ -687,15 +676,13 @@ async def test_update_switches_task_session_only_with_same_owner_profile(
     data = _success_data(response)
     assert data["uid"] == "owner"
     assert data["session_id"] == "owner-alternate"
-    assert data["profile_id"] == 2
 
     after = await _task_snapshot(scheduled_task_session_factory)
     _assert_other_tasks_unchanged(before, after, 1)
     updated_task = {task["id"]: task for task in after}[1]
     assert updated_task["uid"] == "owner"
     assert updated_task["session_id"] == "owner-alternate"
-    assert updated_task["profile_id"] == 2
-    _assert_task_unchanged_except(before_task, updated_task, "session_id", "profile_id", "updated_at")
+    _assert_task_unchanged_except(before_task, updated_task, "session_id", "updated_at")
 
 
 UPDATE_FORBIDDEN_CASES = (
@@ -903,7 +890,6 @@ async def test_update_ignores_explicit_null_fields_without_clearing_task_data(
     data = _success_data(response)
     assert data["uid"] == before_task["uid"]
     assert data["session_id"] == before_task["session_id"]
-    assert data["profile_id"] == before_task["profile_id"]
     assert data["name"] == before_task["name"]
     assert data["message"] == before_task["message"]
     assert data["interval_seconds"] == before_task["interval_seconds"]
@@ -988,3 +974,118 @@ async def test_scheduled_task_endpoints_reject_authentication_failures_without_p
         )
     _assert_unauthorized(response)
     assert await _task_snapshot(scheduled_task_session_factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("create", "enable", "move"))
+@pytest.mark.parametrize("profile_source", ("override", "platform", "default"))
+@pytest.mark.parametrize("operator", ("task-owner", "super-admin"))
+async def test_scheduled_task_mutations_accept_current_session_profile_selection(
+    api_app: FastAPI,
+    scheduled_task_session_factory: async_sessionmaker[AsyncSession],
+    operation: str,
+    profile_source: str,
+    operator: str,
+) -> None:
+    target_session_id = "owner-no-profile"
+    target_task_id = {"enable": 2, "move": 1}.get(operation)
+    platform_id: int | None = None
+
+    async with scheduled_task_session_factory() as session:
+        target = await session.get(ChatSession, target_session_id)
+        profile = await session.get(Profile, 2)
+        assert target is not None
+        assert profile is not None
+        assert target.profile_id is None
+
+        if profile_source == "override":
+            target.profile_override_id = profile.id
+        elif profile_source == "platform":
+            platform = MessagePlatform(
+                name=f"scheduled-task-{operation}",
+                platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+                uid="owner",
+                profile_id=profile.id,
+            )
+            session.add(platform)
+            await session.flush()
+            platform_id = platform.id
+            target.message_platform_id = platform.id
+        else:
+            profile.is_default = True
+
+        if operation == "enable":
+            task = await session.get(ScheduledTask, 2)
+            assert task is not None
+            task.session_id = target_session_id
+            task.status = ScheduledTaskStatus.DISABLED
+
+        await session.commit()
+
+    before = await _task_snapshot(scheduled_task_session_factory)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        if operation == "create":
+            response = await client.post(
+                CREATE_PATH,
+                headers=_headers(operator),
+                json={
+                    "name": f"profile-selection-{profile_source}",
+                    "session_id": target_session_id,
+                    "message": "profile selection regression",
+                    "interval_seconds": 60,
+                },
+            )
+        elif operation == "enable":
+            response = await client.post(
+                UPDATE_PATH,
+                headers=_headers(operator),
+                params={"task_id": target_task_id},
+                json={"status": ScheduledTaskStatus.ENABLED.value},
+            )
+        else:
+            response = await client.post(
+                UPDATE_PATH,
+                headers=_headers(operator),
+                params={"task_id": target_task_id},
+                json={"session_id": target_session_id},
+            )
+    data = _success_data(response)
+    assert data["uid"] == "owner"
+    assert data["session_id"] == target_session_id
+    assert data["status"] == ScheduledTaskStatus.ENABLED.value
+
+    after = await _task_snapshot(scheduled_task_session_factory)
+    if operation == "create":
+        before_by_id = {task["id"]: task for task in before}
+        after_by_id = {task["id"]: task for task in after}
+        created_ids = set(after_by_id) - set(before_by_id)
+        assert len(created_ids) == 1
+        created_task = after_by_id[created_ids.pop()]
+        assert created_task["uid"] == "owner"
+        assert created_task["session_id"] == target_session_id
+        assert created_task["status"] == ScheduledTaskStatus.ENABLED.value
+        assert all(after_by_id[task_id] == task for task_id, task in before_by_id.items())
+    else:
+        assert target_task_id is not None
+        _assert_other_tasks_unchanged(before, after, target_task_id)
+        before_task = {task["id"]: task for task in before}[target_task_id]
+        updated_task = {task["id"]: task for task in after}[target_task_id]
+        assert updated_task["uid"] == "owner"
+        assert updated_task["session_id"] == target_session_id
+        assert updated_task["status"] == ScheduledTaskStatus.ENABLED.value
+        changed_fields = ("status", "updated_at") if operation == "enable" else ("session_id", "updated_at")
+        _assert_task_unchanged_except(before_task, updated_task, *changed_fields)
+
+    async with scheduled_task_session_factory() as session:
+        target = await session.get(ChatSession, target_session_id)
+        assert target is not None
+        assert target.profile_id is None
+        if profile_source == "override":
+            assert target.profile_override_id == 2
+            assert target.message_platform_id is None
+        elif profile_source == "platform":
+            assert target.profile_override_id is None
+            assert target.message_platform_id == platform_id
+        else:
+            assert target.profile_override_id is None
+            assert target.message_platform_id is None

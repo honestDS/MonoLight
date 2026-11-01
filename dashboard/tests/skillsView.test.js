@@ -6,11 +6,22 @@ import test from 'node:test'
 import vm from 'node:vm'
 import { reactive, ref } from 'vue'
 import { createI18n } from 'vue-i18n'
+import { renderToString } from 'vue/server-renderer'
 
 import enCommon from '../src/i18n/locales/en/common.js'
 import zhCommon from '../src/i18n/locales/zh/common.js'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const root = dirname(fileURLToPath(import.meta.url))
+
+const toHostObject = value => Object.fromEntries(Object.entries(value))
+
+const escapeHtml = value => value
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+  .replaceAll("'", '&#39;')
 
 const stripImportLines = source => source
   .split('\n')
@@ -60,12 +71,20 @@ const createHarness = ({ permission, locale = 'zh', token = 'initial-token' } = 
   const pendingConfirmations = []
   const ElMessageBox = {
     confirm(message, title, options) {
-      confirmCalls.push({ message, title, options })
+      confirmCalls.push({ message, title, options: toHostObject(options) })
       return new Promise((resolve, reject) => {
         pendingConfirmations.push({ resolve, reject })
       })
     }
   }
+  const t = (...args) => i18n.global.t(
+    ...args.map((value, index) => (
+      index > 0 && value && typeof value === 'object' && !Array.isArray(value)
+        ? toHostObject(value)
+        : value
+    ))
+  )
+  const actualUseConfirmDialog = loadUseConfirmDialog({ t, ElMessageBox })
   const apiCalls = { list: [], delete: [] }
   let listHandler = async () => apiResponse([], 0)
   let deleteHandler = async () => {}
@@ -90,11 +109,10 @@ const createHarness = ({ permission, locale = 'zh', token = 'initial-token' } = 
     ref,
     onMounted: callback => lifecycle.mounted.push(callback),
     onUnmounted: callback => lifecycle.unmounted.push(callback),
-    useI18n: () => ({ t: (key, params) => params === undefined
-      ? i18n.global.t(key)
-      : i18n.global.t(key, { ...params }) }),
+    useI18n: () => ({ t }),
     ElMessage,
     ElMessageBox,
+    useConfirmDialog: actualUseConfirmDialog,
     systemApi,
     useUserPermissionsStore: () => userPermissions,
     localStorage
@@ -128,8 +146,8 @@ const createHarness = ({ permission, locale = 'zh', token = 'initial-token' } = 
     setDeleteHandler: handler => { deleteHandler = handler },
     setToken: value => { currentToken = value },
     approveConfirmation: () => takeConfirmation().resolve(),
-    cancelConfirmation: () => takeConfirmation().reject(new Error('cancelled')),
-    closeConfirmation: () => takeConfirmation().reject(new Error('closed'))
+    cancelConfirmation: () => takeConfirmation().reject('cancel'),
+    closeConfirmation: () => takeConfirmation().reject('close')
   }
 }
 
@@ -233,10 +251,17 @@ test('SkillsView confirms localized safe-text names and deduplicates pending del
     const deletion = harness.view.handleDelete(row)
     const template = locale === 'zh' ? zhCommon.skills.delete_confirm : enCommon.skills.delete_confirm
     const expectedMessage = template.replace('{name}', row.name).replace('{id}', row.id)
+    const common = locale === 'zh' ? zhCommon : enCommon
 
     assert.equal(harness.apiCalls.delete.length, 0)
     assert.equal(harness.confirmCalls.length, 1)
-    assert.equal(harness.confirmCalls[0].message, expectedMessage)
+    const renderedMessage = await renderToString(harness.confirmCalls[0].message)
+    assert.ok(renderedMessage.includes(escapeHtml(expectedMessage)))
+    assert.doesNotMatch(renderedMessage, /<img\b/i)
+    assert.equal(harness.confirmCalls[0].title, common.warning)
+    assert.equal(harness.confirmCalls[0].options.confirmButtonText, common.confirm)
+    assert.equal(harness.confirmCalls[0].options.cancelButtonText, common.cancel)
+    assert.equal(harness.confirmCalls[0].options.customClass, 'app-confirm-dialog')
     assert.equal(harness.confirmCalls[0].options.dangerouslyUseHTMLString, false)
     assert.equal(await harness.view.handleDelete({ id: 'duplicate-confirm', name: 'duplicate' }), false)
     assert.equal(harness.confirmCalls.length, 1)

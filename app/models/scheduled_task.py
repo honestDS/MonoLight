@@ -17,7 +17,6 @@ class ScheduledTaskBase(SQLModel):
     name: str = Field(index=True, max_length=100)
     uid: str = Field(index=True, max_length=100)
     session_id: str = Field(index=True, max_length=100)
-    profile_id: int | None = Field(default=None, index=True, foreign_key="profile.id", ondelete="RESTRICT")
     message: str
     interval_seconds: int = Field(ge=60)
     run_once: bool = Field(default=False)

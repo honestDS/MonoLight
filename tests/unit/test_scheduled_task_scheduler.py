@@ -39,7 +39,6 @@ async def test_scheduled_task_claim_disables_session_synchronization(monkeypatch
         session_id="session-1",
         name="test",
         message="run",
-        profile_id=3,
         status=ScheduledTaskStatus.ENABLED,
         interval_seconds=60,
         next_run_at=get_local_time(),
@@ -66,7 +65,14 @@ async def test_scheduled_task_claim_disables_session_synchronization(monkeypatch
     async def get_session(db, session_id):
         return SimpleNamespace(uid="user-1")
 
-    async def get_profile(db, profile_id):
+    async def resolve_profile(db, *, uid, session_id):
+        assert uid == "user-1"
+        assert session_id == "session-1"
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def lock_profile(db, *, profile_id, uid):
+        assert profile_id == 3
+        assert uid == "user-1"
         return SimpleNamespace(id=3, uid="user-1")
 
     async def get_user(db, uid):
@@ -81,7 +87,8 @@ async def test_scheduled_task_claim_disables_session_synchronization(monkeypatch
         return message
 
     monkeypatch.setattr(scheduler_module.session_crud, "get_by_session_id", get_session)
-    monkeypatch.setattr(scheduler_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(scheduler_module, "resolve_profile_for_session", resolve_profile)
+    monkeypatch.setattr(scheduler_module.profile_crud, "lock_for_runtime_use", lock_profile)
     monkeypatch.setattr(scheduler_module.user_crud, "get_by_uid", get_user)
     monkeypatch.setattr(scheduler_module.session_reply_queue_manager, "enqueue_agent_work", enqueue_summary)
     monkeypatch.setattr(scheduler_module.message_crud, "persist", persist_message)

@@ -15,7 +15,7 @@ export default {
   edit: '编辑',
   delete: '删除',
   delete_impact_title: '确认删除配置',
-  delete_impact_intro: '删除“{name}”将执行以下操作：',
+  delete_impact_intro: '确定要删除配置“{name}”吗？',
   delete_impact_sessions: '删除 {count} 个关联会话及其中 {messages} 条消息',
   delete_impact_session_item: '会话：{name}',
   delete_impact_managed_kb: '删除托管知识库“{name}”及其中 {count} 条托管知识',

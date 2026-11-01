@@ -9,6 +9,7 @@ from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.exceptions import ResourceNotFoundException
+from app.core.profile.selection import resolve_profile_for_session
 from app.core.security import get_current_user
 from app.core.utils.time import get_local_time
 from app.models.scheduled_task import ScheduledTaskResponse, ScheduledTaskStatus
@@ -29,14 +30,15 @@ async def _get_session_profile_id(db: AsyncSession, session_id: str, uid: str) -
     session = await session_crud.get_by_session_id(db, session_id)
     if not session or session.uid != uid:
         return None
-    if session.profile_id is None:
+    profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id)
+    if profile is None or profile.id is None:
         return None
-    profile = await profile_crud.lock_for_runtime_use(
+    locked_profile = await profile_crud.lock_for_runtime_use(
         db,
-        profile_id=session.profile_id,
+        profile_id=profile.id,
         uid=uid,
     )
-    return profile.id if profile is not None else None
+    return locked_profile.id if locked_profile is not None else None
 
 
 @router.get("/list")
@@ -93,7 +95,6 @@ async def create_scheduled_task(
         name=request.name,
         uid=session.uid,
         session_id=request.session_id,
-        profile_id=profile_id,
         message=request.message,
         interval_seconds=request.interval_seconds,
         run_once=request.run_once,
@@ -122,7 +123,6 @@ async def update_scheduled_task(
         profile_id = await _get_session_profile_id(db, session_id, task.uid)
         if profile_id is None:
             return StandardResponse.error(code=400, message=ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND)
-        obj_in["profile_id"] = profile_id
     updated_task = await scheduled_task_crud.update_scheduled_task(db, scheduled_task=task, obj_in=obj_in)
     return StandardResponse.success(data=ScheduledTaskResponse.model_validate(updated_task), message=MSG_GENERIC_SUCCESS)
 

@@ -3,6 +3,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.event import session_event_crud
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
@@ -132,9 +133,14 @@ async def _route_terminal_auto_watch_delivery(
         return True
 
     session = await session_crud.get_by_session_id(db, task.session_id)
-    if session is None or session.uid != task.uid or session.profile_id != task.profile_id:
+    if session is None or session.uid != task.uid or (work.work_type != SessionReplyWorkType.AGENT_WORK and session.profile_id != task.profile_id):
         await _consume_and_commit(db, task, work_id=work_id, identity=identity)
         return True
+    if work.work_type == SessionReplyWorkType.AGENT_WORK:
+        profile = await profile_crud.get_with_relations(db, work.profile_id)
+        if profile is None or profile.uid != work.uid:
+            await _consume_and_commit(db, task, work_id=work_id, identity=identity)
+            return True
 
     if work_status == SessionReplyWorkStatus.MERGED.value:
         target = await session_reply_work_item_crud.resolve_merged_target(db, work_id)

@@ -162,6 +162,7 @@ async def test_scheduled_task_creation_concurrent_with_user_deletion(resource_ap
                 session_id="resource-session",
                 uid="resource-owner",
                 profile_id=profile.id,
+                profile_override_id=profile.id,
             )
         )
         await seed_session.commit()

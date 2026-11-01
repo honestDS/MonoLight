@@ -43,11 +43,15 @@ from app.models.knowledge_base import (
 from app.models.memory import LongTermMemoryStore
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
+from app.models.session import ChatSession
+from app.models.session_reply_work_item import SessionReplyWorkItem
 
 _TABLES = (
     PromptLibrary.__table__,
     ModelChannel.__table__,
     Profile.__table__,
+    ChatSession.__table__,
+    SessionReplyWorkItem.__table__,
     LongTermMemoryStore.__table__,
     KnowledgeBase.__table__,
     KnowledgeBaseCollectionOwner.__table__,
@@ -898,7 +902,6 @@ async def test_managed_knowledge_tool_profile_delete_logs_active_organization_lo
         return None
 
     monkeypatch.setattr(profile_deletion_module, "logger", _Logger())
-    monkeypatch.setattr(profile_deletion_module.scheduled_task_crud, "delete_by_profile", no_op)
     monkeypatch.setattr(profile_deletion_module.message_platform_crud, "clear_profile_assignment", no_op)
 
     async with managed_knowledge_tool_database() as db:

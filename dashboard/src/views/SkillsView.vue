@@ -60,13 +60,15 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import { systemApi } from '../api'
+import { useConfirmDialog } from '../composables/useConfirmDialog.js'
 import { useUserPermissionsStore } from '../composables/useUserPermissions'
 
 const { t } = useI18n()
 const userPermissions = useUserPermissionsStore()
+const { confirm } = useConfirmDialog()
 
 const skills = ref([])
 const loading = ref(false)
@@ -128,16 +130,16 @@ async function handleDelete(row) {
   const token = localStorage.getItem('token')
   try {
     try {
-      await ElMessageBox.confirm(
-        t('common.skills.delete_confirm', { name: row.name || row.id, id: row.id }),
-        t('common.warning'),
-        {
-          type: 'warning',
+      if (
+        !(await confirm({
+          message: t('common.skills.delete_confirm', { name: row.name || row.id, id: row.id }),
+          title: t('common.warning'),
           confirmButtonText: t('common.confirm'),
-          cancelButtonText: t('common.cancel'),
-          dangerouslyUseHTMLString: false
-        }
-      )
+          cancelButtonText: t('common.cancel')
+        }))
+      ) {
+        return false
+      }
     } catch {
       return false
     }

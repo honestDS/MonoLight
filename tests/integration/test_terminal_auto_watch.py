@@ -45,6 +45,7 @@ from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.terminal_watch_snapshot import append_terminal_watch_snapshot, load_current_terminal_watch_snapshot
 from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.models.agent_work import AgentWorkSpec
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
@@ -1108,6 +1109,156 @@ async def test_terminal_sync_receipts_suspend_claimed_work_without_rewriting_too
             is None
         )
         assert len(await _terminal_watch_tasks(db)) == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("agent-profile-retained", id="agent-profile-retained"),
+        pytest.param("agent-profile-deleted", id="agent-profile-deleted"),
+        pytest.param("foreground-changed", id="foreground-changed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_terminal_auto_watch_profile_change_routes_agent_work_by_work_profile(
+    terminal_auto_watch_database: async_sessionmaker[AsyncSession],
+    case: str,
+) -> None:
+    worker_id = f"terminal-auto-watch-profile-change-{case}"
+    profile_b_id = PROFILE_ID + 1
+
+    async with terminal_auto_watch_database() as db:
+        work = await _create_claimed_reply_work(db, worker_id=worker_id)
+        if case != "foreground-changed":
+            work.work_type = SessionReplyWorkType.AGENT_WORK
+            work.source_type = SessionReplySourceType.SCHEDULED_TASK_RUN
+            work.execution_state = {
+                "frozen_context_messages": [],
+                "agent_work": AgentWorkSpec(instruction="watch the scheduled terminal").model_dump(mode="json"),
+            }
+        await db.flush()
+
+        task = await ensure_terminal_auto_watch(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            terminal_session_id=TERMINAL_SESSION_ID,
+            after_offset=0,
+            session_status=TerminalSessionStatus.RUNNING,
+        )
+        assert task is not None and task.id is not None
+
+        tool_call = InternalToolCall(
+            id=f"terminal-auto-watch-profile-change-{case}-call",
+            name=TERMINAL_TOOL_NAME,
+            arguments={
+                "operation": "write",
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "data": "input\n",
+            },
+        )
+        receipt_payload = {
+            "status": "succeeded",
+            "terminal_session_id": TERMINAL_SESSION_ID,
+            "session_status": TerminalSessionStatus.RUNNING.value,
+        }
+        tool_result = await save_tool_response(
+            db,
+            SESSION_ID,
+            UID,
+            PROFILE_ID,
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id=tool_call.id,
+                content=json.dumps(receipt_payload, ensure_ascii=False),
+            ),
+            [],
+            [],
+        )
+        wait_response = await build_terminal_wait_response(
+            db,
+            uid=UID,
+            session_id=SESSION_ID,
+            profile_id=PROFILE_ID,
+            tool_calls=[tool_call],
+            tool_results=[tool_result],
+            response_id=f"terminal-auto-watch-profile-change-{case}-response",
+        )
+        assert wait_response is not None and wait_response["status"] == "waiting_external_work"
+        pending_tool = wait_response["pending_tools"][0]
+        assert pending_tool["task_id"] == task.id
+        assert pending_tool["tool_result_message_id"] == tool_result.id
+        assert pending_tool["terminal_auto_watch"] is True
+        assert await external_work_crud.suspend_claimed(
+            db,
+            work=work,
+            worker_id=worker_id,
+            pending_tools=wait_response["pending_tools"],
+        )
+
+        db.add(Profile(id=profile_b_id, uid=UID, name="terminal-auto-watch-profile-b", configs={}, is_default=False))
+        await db.flush()
+        session = await db.get(ChatSession, SESSION_ID)
+        assert session is not None
+        session.profile_id = profile_b_id
+        session.profile_override_id = profile_b_id
+        await db.flush()
+
+        if case == "agent-profile-deleted":
+            old_profile = await db.get(Profile, PROFILE_ID)
+            assert old_profile is not None
+            assert old_profile.is_default is False
+            await db.delete(old_profile)
+            await db.flush()
+            assert await db.get(Profile, PROFILE_ID) is None
+
+        completion = {
+            "event": "process_exit",
+            "eof": True,
+            "next_offset": 0,
+            "terminal_session_id": TERMINAL_SESSION_ID,
+            "exit_code": 0,
+            "session_status": TerminalSessionStatus.EXITED.value,
+        }
+        await _complete_auto_watch(db, task=task, worker_id=worker_id, content=completion)
+        assert task.status == BackgroundTaskStatus.SUCCEEDED
+        assert await route_terminal_auto_watch_reply(db, task)
+        await db.refresh(work)
+        await db.refresh(task)
+        await db.refresh(session)
+        assert (session.profile_id, session.profile_override_id) == (profile_b_id, profile_b_id)
+        assert (work.profile_id, task.profile_id) == (PROFILE_ID, PROFILE_ID)
+
+        if case == "agent-profile-retained":
+            assert work.status == SessionReplyWorkStatus.READY_FOR_LLM
+            resume_worker_id = f"{worker_id}-resume"
+            claimed_work = await session_reply_work_item_crud.claim_next(
+                db,
+                worker_id=resume_worker_id,
+                lease_seconds=300,
+            )
+            assert claimed_work is not None
+            assert claimed_work.id == work.id
+            db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, resume_worker_id)
+            assert await prepare_terminal_auto_watch_resume(db, claimed_work, resume_worker_id)
+            await db.refresh(claimed_work)
+            await db.refresh(task)
+            assert claimed_work.status == SessionReplyWorkStatus.RUNNING
+        else:
+            assert work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            assert work.work_type == (SessionReplyWorkType.AGENT_WORK if case == "agent-profile-deleted" else SessionReplyWorkType.FOREGROUND_REPLY)
+            assert task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+
+        markers = list((await db.execute(select(Message).where(Message.session_id == SESSION_ID, Message.type == MessageType.BACKGROUND_TASK_RESULT))).scalars().all())
+        if case == "agent-profile-retained":
+            assert len(markers) == 1
+            marker = markers[0]
+            assert marker.uid == UID and marker.profile_id == PROFILE_ID and marker.work_id == work.id
+            assert json.loads(marker.content or "{}")["task_id"] == task.id
+            assert task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+        else:
+            assert markers == []
 
 
 @pytest.mark.asyncio

@@ -10,9 +10,11 @@ import {
   ref,
   watch,
 } from 'vue'
+import { renderToString } from 'vue/server-renderer'
 import { createI18n } from 'vue-i18n'
 import * as memoryManagement from '../src/utils/memoryManagement.js'
 import { createAbortableTaskManager } from '../src/utils/channelTestManager.js'
+import enCommon from '../src/i18n/locales/en/common.js'
 import enMemories from '../src/i18n/locales/en/memories.js'
 import zhMemories from '../src/i18n/locales/zh/memories.js'
 import {
@@ -20,6 +22,7 @@ import {
   MEMORY_JOB_STATUSES,
   MEMORY_TYPES,
 } from '../src/constants/index.js'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const memoryComposableSources = [
   readFileSync(new URL('../src/composables/memories/useMemoryRuntime.js', import.meta.url), 'utf8'),
@@ -74,6 +77,15 @@ const translate = (key, params = {}) => {
     return `memories.blocked_with_reason:${params.reason ?? ''}:${params.job ?? ''}`
   }
   return String(key).replace(/\{(\w+)\}/g, (_match, name) => String(params[name] ?? ''))
+}
+
+const confirmationTranslate = (key, params = {}) => {
+  const [namespace, ...path] = key.split('.')
+  const messages = namespace === 'common' ? enCommon : namespace === 'memories' ? enMemories : null
+  const message = messages?.[path.join('.')]
+  return typeof message === 'string'
+    ? message.replace(/\{(\w+)\}/g, (_match, name) => String(params[name] ?? ''))
+    : translate(key, params)
 }
 
 const flush = async () => {
@@ -169,10 +181,19 @@ const createHarness = (t, options = {}) => {
   const ElMessageBox = {
     confirm: (...args) => {
       confirmCalls.push(args)
-      if (typeof options.confirm === 'function') return options.confirm(...args)
-      return options.confirm ?? true
+      const configured = typeof options.confirm === 'function'
+        ? options.confirm(...args)
+        : options.confirm ?? true
+      if (configured === false) return Promise.reject('cancel')
+      if (configured === 'cancel' || configured === 'close') return Promise.reject(configured)
+      if (configured === undefined || configured === true) return Promise.resolve()
+      return configured
     },
   }
+  const actualUseConfirmDialog = loadUseConfirmDialog({
+    t: options.translate ?? translate,
+    ElMessageBox,
+  })
 
   let timerId = 0
   const windowStub = {
@@ -193,6 +214,7 @@ const createHarness = (t, options = {}) => {
     onMounted: callback => mountedCallbacks.push(callback),
     onBeforeUnmount: callback => beforeUnmountCallbacks.push(callback),
     useI18n: () => ({ t: options.translate ?? translate }),
+    useConfirmDialog: actualUseConfirmDialog,
     ElMessage,
     ElMessageBox,
     adminApi,
@@ -1349,17 +1371,25 @@ test('toggles pin state through the memory menu and refreshes the list', async t
 
 test('waits for delete confirmation and sends the positive id, version, and dedupe key', async t => {
   const confirmation = createDeferred()
-  const harness = createMenuHarness(t, { confirm: () => confirmation.promise })
+  const harness = createMenuHarness(t, {
+    confirm: () => confirmation.promise,
+    translate: confirmationTranslate,
+  })
   await harness.mount()
   const row = { id: 302, version: 8, owner_uid: 'owner-a' }
 
   harness.module.handleMemoryMoreAction('delete', row)
   assert.equal(harness.confirmCalls.length, 1)
-  assert.deepEqual(normalize(harness.confirmCalls[0][2]), {
-    type: 'warning',
-    confirmButtonText: 'common.confirm',
-    cancelButtonText: 'common.cancel',
-  })
+  const [message, title, options] = harness.confirmCalls[0]
+  const html = await renderToString(message)
+  assert.ok(html.includes(enMemories.delete_confirm))
+  assert.equal(title, enCommon.warning)
+  assert.equal(options.confirmButtonText, enCommon.confirm)
+  assert.equal(options.cancelButtonText, enCommon.cancel)
+  assert.equal(options.type, 'warning')
+  assert.equal(options.showCancelButton, true)
+  assert.equal(options.dangerouslyUseHTMLString, false)
+  assert.equal(options.customClass, 'app-confirm-dialog')
   assert.equal(harness.calls('memoryApi.delete').length, 0)
 
   confirmation.resolve(true)
@@ -3366,21 +3396,137 @@ const delayedOwnershipMutationCases = [
     name: 'delete',
     row: 'memory',
     request: 'memoryApi.delete',
+    confirmationKey: 'delete_confirm',
+    successKey: 'delete_success',
     invoke: (module, row) => module.deleteMemory(row),
+    assertRequest: (request, row) => {
+      assert.equal(request.args[0].memory_id, row.id)
+      assert.equal(request.args[0].expected_version, row.version)
+      assert.equal(typeof request.args[0].dedupe_key, 'string')
+      assert.ok(request.args[0].dedupe_key.length > 0)
+    },
   },
   {
     name: 'retry job',
     row: 'retryJob',
     request: 'memoryApi.retryJob',
+    confirmationKey: 'retry_confirm',
+    successKey: 'retry_success',
     invoke: (module, row) => module.retryJob(row),
+    assertRequest: (request, row) => assert.deepEqual(normalize(request.args), [row.id]),
   },
   {
     name: 'cancel job',
     row: 'cancelJob',
     request: 'memoryApi.cancelJob',
+    confirmationKey: 'cancel_confirm',
+    successKey: 'cancel_success',
     invoke: (module, row) => module.cancelJob(row),
+    assertRequest: (request, row) => assert.deepEqual(normalize(request.args), [row.id]),
   },
 ]
+
+const assertMemoryMutationConfirmation = async (harness, mutationCase) => {
+  const [message, title, options] = harness.confirmCalls.at(-1)
+  const html = await renderToString(message)
+  assert.ok(html.includes(enMemories[mutationCase.confirmationKey]), mutationCase.name)
+  assert.equal(title, enCommon.warning, mutationCase.name)
+  assert.equal(options.confirmButtonText, enCommon.confirm, mutationCase.name)
+  assert.equal(options.cancelButtonText, enCommon.cancel, mutationCase.name)
+  assert.equal(options.type, 'warning', mutationCase.name)
+  assert.equal(options.showCancelButton, true, mutationCase.name)
+  assert.equal(options.dangerouslyUseHTMLString, false, mutationCase.name)
+  assert.equal(options.customClass, 'app-confirm-dialog', mutationCase.name)
+}
+
+test('uses the shared confirmation dialog for delete and job mutations', async t => {
+  for (const mutationCase of delayedOwnershipMutationCases) {
+    const confirmation = createDeferred()
+    const method = mutationCase.request.split('.')[1]
+    const harness = createHarness(t, {
+      currentUid: 'user-a',
+      translate: confirmationTranslate,
+      confirm: () => confirmation.promise,
+      apiOverrides: {
+        memoryApi: {
+          [method]: (...args) => args.at(-1).deferred.promise,
+        },
+      },
+    })
+    const rows = createOwnershipRows('user-a')
+    await harness.mount()
+    const row = rows[mutationCase.row]
+    const listCountBefore = harness.calls('memoryApi.list').length
+
+    const pending = mutationCase.invoke(harness.module, row)
+    assert.equal(harness.confirmCalls.length, 1, mutationCase.name)
+    await assertMemoryMutationConfirmation(harness, mutationCase)
+    assert.equal(harness.calls(mutationCase.request).length, 0, mutationCase.name)
+    assert.equal(harness.messages.filter(message => message.type === 'info').length, 0, mutationCase.name)
+
+    confirmation.resolve()
+    await harness.flush()
+    const request = harness.calls(mutationCase.request)[0]
+    mutationCase.assertRequest(request, row)
+    assert.equal(harness.messages.filter(message => message.type === 'info').length, 0, mutationCase.name)
+
+    request.deferred.resolve(dataResponse({ accepted: true }))
+    await pending
+    await harness.flush()
+
+    assert.ok(harness.calls('memoryApi.list').length > listCountBefore, mutationCase.name)
+    assert.equal(
+      harness.messages.filter(message => message.type === 'info' && message.value === enMemories[mutationCase.successKey]).length,
+      1,
+      mutationCase.name,
+    )
+  }
+})
+
+test('does not submit delete or job mutations after confirmation cancellation, closure, or error', async t => {
+  const outcomes = [
+    { name: 'cancel', rejection: 'cancel' },
+    { name: 'close', rejection: 'close' },
+    { name: 'error', rejection: new Error('confirmation failed') },
+  ]
+
+  for (const mutationCase of delayedOwnershipMutationCases) {
+    for (const outcome of outcomes) {
+      const confirmation = createDeferred()
+      const method = mutationCase.request.split('.')[1]
+      const harness = createHarness(t, {
+        currentUid: 'user-a',
+        translate: confirmationTranslate,
+        confirm: () => confirmation.promise,
+        apiOverrides: {
+          memoryApi: {
+            [method]: (...args) => args.at(-1).deferred.promise,
+          },
+        },
+      })
+      const rows = createOwnershipRows('user-a')
+      await harness.mount()
+      const listCountBefore = harness.calls('memoryApi.list').length
+      const messagesBefore = normalize(harness.messages)
+
+      const pending = mutationCase.invoke(harness.module, rows[mutationCase.row])
+      assert.equal(harness.confirmCalls.length, 1, `${mutationCase.name}:${outcome.name}`)
+      confirmation.reject(outcome.rejection)
+      await pending
+      await harness.flush()
+
+      assert.equal(harness.calls(mutationCase.request).length, 0, `${mutationCase.name}:${outcome.name}`)
+      assert.equal(harness.calls('memoryApi.list').length, listCountBefore, `${mutationCase.name}:${outcome.name}`)
+      assert.equal(harness.messages.some(message => message.type === 'info'), false, `${mutationCase.name}:${outcome.name}`)
+      if (outcome.name === 'error') {
+        assert.equal(harness.messages.at(-1).type, 'error', `${mutationCase.name}:${outcome.name}`)
+        assert.equal(harness.messages.at(-1).value, 'confirmation failed', `${mutationCase.name}:${outcome.name}`)
+      } else {
+        assert.deepEqual(normalize(harness.messages), messagesBefore, `${mutationCase.name}:${outcome.name}`)
+      }
+    }
+  }
+})
 
 test('rechecks row ownership after delayed destructive confirmations', async t => {
   const revocationCases = [

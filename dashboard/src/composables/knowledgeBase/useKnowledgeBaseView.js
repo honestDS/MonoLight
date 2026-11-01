@@ -15,11 +15,13 @@ import {
   normalizeKnowledgeBase
 } from '../../utils/knowledgeBaseManagement.js'
 import { createKnowledgeBaseScope } from '../../utils/knowledgeBaseScope.js'
+import { useConfirmDialog } from '../useConfirmDialog.js'
 import { useUserPermissionsStore } from '../useUserPermissions.js'
 import { useKnowledgeBaseQueryTest } from './useKnowledgeBaseQueryTest.js'
 
 export function useKnowledgeBaseView() {
   const { t } = useI18n()
+  const { confirm: confirmDialog } = useConfirmDialog()
   const userPermissions = useUserPermissionsStore()
   const isSuperuser = computed(() => userPermissions.isSuperuser)
 
@@ -67,7 +69,7 @@ export function useKnowledgeBaseView() {
       !knowledgeBaseViewDisposed &&
       (userPermissions.currentUser?.uid ?? null) !== null
     ),
-    confirm: (...args) => ElMessageBox.confirm(...args),
+    confirm: (message, title, options) => confirmDialog({ message, title, ...options }),
     closeConfirmations: () => ElMessageBox.close()
   })
 
@@ -383,8 +385,7 @@ export function useKnowledgeBaseView() {
         {
           confirmButtonText: t('knowledgeBase.repair'),
           cancelButtonText: t('knowledgeBase.cancel'),
-          type: 'warning',
-          dangerouslyUseHTMLString: false
+          type: 'warning'
         }
       )
       if (!confirmed || !isCurrent()) return
@@ -828,8 +829,7 @@ export function useKnowledgeBaseView() {
       {
         confirmButtonText: t('common.confirm'),
         cancelButtonText: t('common.cancel'),
-        type: 'warning',
-        dangerouslyUseHTMLString: false
+        type: 'warning'
       }
     )
     if (!scopeGuard() || !confirmed) return

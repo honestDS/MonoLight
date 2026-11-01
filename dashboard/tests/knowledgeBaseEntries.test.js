@@ -4,11 +4,13 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { createPinia, setActivePinia } from 'pinia'
 import { computed, effectScope, ref, watch } from 'vue'
+import { renderToString } from 'vue/server-renderer'
 
 import * as knowledgeBaseManagement from '../src/utils/knowledgeBaseManagement.js'
 import { createKnowledgeBaseScope } from '../src/utils/knowledgeBaseScope.js'
 import * as requestTaskManager from '../src/utils/requestTaskManager.js'
 import { useUserPermissionsStore } from '../src/composables/useUserPermissions.js'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const source = readFileSync(
   new URL('../src/composables/knowledgeBase/useKnowledgeBaseEntries.js', import.meta.url),
@@ -37,6 +39,12 @@ const stripImports = sourceText => {
 const composableScript = stripImports(source).replace(/\bexport\s+/g, '')
 const dataResponse = data => ({ data: { data } })
 const normalize = value => JSON.parse(JSON.stringify(value))
+const escapeHtml = value => String(value)
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+  .replaceAll("'", '&#39;')
 const deferred = () => {
   let resolve
   let reject
@@ -120,12 +128,15 @@ const createHarness = (t, options = {}) => {
       confirms.push(args)
       const result = typeof options.confirm === 'function'
         ? await options.confirm(...args)
-        : options.confirm
-      if (result === false) throw 'cancel'
-      return result === undefined || result === true ? 'confirm' : result
+        : options.confirm ?? true
+      if (result === false || result === 'cancel') throw 'cancel'
+      if (result === 'close') throw 'close'
+      return 'confirm'
     },
     close: () => confirmationCloses.push(true),
   }
+
+  const translate = options.translate ?? (key => key)
 
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -150,7 +161,8 @@ const createHarness = (t, options = {}) => {
     ref,
     ...requestTaskManager,
     watch,
-    useI18n: () => ({ t: key => key }),
+    useConfirmDialog: loadUseConfirmDialog({ t: translate, ElMessageBox }),
+    useI18n: () => ({ t: translate }),
     useUserPermissionsStore,
     ...knowledgeBaseManagement,
     __routeId: routeId,
@@ -789,6 +801,7 @@ test('delete confirmation is single-flight, cancellation writes nothing, and mut
   })
   await flushPromises()
   const userRow = { id: 12, filename: 'manual.md' }
+  const cancelListCount = cancelHarness.api.documents.length
   const firstDelete = cancelHarness.module.deleteEntry(userRow)
   const duplicateDelete = cancelHarness.module.deleteEntry(userRow)
   await duplicateDelete
@@ -798,6 +811,8 @@ test('delete confirmation is single-flight, cancellation writes nothing, and mut
   await firstDelete
   assert.equal(cancelHarness.api.deleteDocument.length, 0)
   assert.equal(cancelHarness.api.deleteManagedItem.length, 0)
+  assert.equal(cancelHarness.api.documents.length, cancelListCount)
+  assert.deepEqual(cancelHarness.messages, [])
   assert.equal(cancelHarness.module.entryActionId.value, null)
 
   const userHarness = createHarness(t, {
@@ -836,6 +851,70 @@ test('delete confirmation is single-flight, cancellation writes nothing, and mut
     dedupe_key: retryPayload.dedupe_key,
   })
   assert.match(retryPayload.dedupe_key, /^managed-ui-retry:/)
+})
+
+test('delete confirmations render interpolated filenames and keys as escaped SSR text', async t => {
+  const translate = (key, params) => {
+    if (key === 'knowledgeBase.delete_doc_confirm') {
+      return `Delete document "${params.filename}"?`
+    }
+    if (key === 'knowledgeBase.managed_delete_confirm') {
+      return `Delete managed knowledge "${params.key}"?`
+    }
+    return key
+  }
+  const filename = '<script>alert("x")</script>& "manual".md'
+  const knowledgeKey = '<img src=x onerror=alert(1)>& "managed"'
+  const userHarness = createHarness(t, {
+    translate,
+    get: id => Promise.resolve(dataResponse({ id, knowledge_base_type: 'user', index_status: 'ready' })),
+  })
+  await flushPromises()
+  await userHarness.module.deleteEntry({ id: 32, filename })
+  const userHtml = await renderToString(userHarness.confirms[0][0])
+  assert.ok(userHtml.includes(escapeHtml(filename)))
+  assert.doesNotMatch(userHtml, /<script\b/i)
+
+  const managedHarness = createHarness(t, {
+    translate,
+    get: id => Promise.resolve(dataResponse({
+      id,
+      knowledge_base_type: 'llm_managed',
+      index_status: 'ready',
+    })),
+  })
+  await flushPromises()
+  await managedHarness.module.deleteEntry({ id: 33, knowledge_key: knowledgeKey, version: 4 })
+  const managedHtml = await renderToString(managedHarness.confirms[0][0])
+  assert.ok(managedHtml.includes(escapeHtml(knowledgeKey)))
+  assert.doesNotMatch(managedHtml, /<img\b/i)
+})
+
+test('close and confirmation errors do not submit, refresh, or leak action state', async t => {
+  const closeHarness = createHarness(t, {
+    confirm: 'close',
+    get: id => Promise.resolve(dataResponse({ id, knowledge_base_type: 'user', index_status: 'ready' })),
+  })
+  await flushPromises()
+  const closeListCount = closeHarness.api.documents.length
+  await closeHarness.module.deleteEntry({ id: 34, filename: 'closed.md' })
+  assert.equal(closeHarness.api.deleteDocument.length, 0)
+  assert.equal(closeHarness.api.documents.length, closeListCount)
+  assert.deepEqual(closeHarness.messages, [])
+  assert.equal(closeHarness.module.entryActionId.value, null)
+
+  const confirmationError = new Error('confirmation unavailable')
+  const errorHarness = createHarness(t, {
+    confirm: () => Promise.reject(confirmationError),
+    get: id => Promise.resolve(dataResponse({ id, knowledge_base_type: 'user', index_status: 'ready' })),
+  })
+  await flushPromises()
+  const errorListCount = errorHarness.api.documents.length
+  await errorHarness.module.deleteEntry({ id: 35, filename: 'error.md' })
+  assert.equal(errorHarness.api.deleteDocument.length, 0)
+  assert.equal(errorHarness.api.documents.length, errorListCount)
+  assert.deepEqual(errorHarness.messages, [{ type: 'error', args: [confirmationError.message] }])
+  assert.equal(errorHarness.module.entryActionId.value, null)
 })
 
 test('identity changes during a delete confirmation prevent the write', async t => {

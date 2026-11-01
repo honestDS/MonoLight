@@ -8,12 +8,14 @@ import {
 } from '../../utils/knowledgeBaseManagement.js'
 import { createKnowledgeBaseScope } from '../../utils/knowledgeBaseScope.js'
 import { createAbortableTaskManager, createLatestRequestTracker } from '../../utils/requestTaskManager.js'
+import { useConfirmDialog } from '../useConfirmDialog.js'
 import { useUserPermissionsStore } from '../useUserPermissions.js'
 
 const LIST_TASK_KEY = 'knowledge-base-entries-list'
 
 export function useKnowledgeBaseEntries(knowledgeBaseId) {
   const { t } = useI18n()
+  const { confirm: confirmDialog } = useConfirmDialog()
   const userPermissions = useUserPermissionsStore()
   const currentUser = computed(() => userPermissions.currentUser)
   const isSuperuser = computed(() => userPermissions.isSuperuser === true)
@@ -47,7 +49,7 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
 
   const scope = createKnowledgeBaseScope({
     isActive: () => !disposed && currentUser.value?.uid != null,
-    confirm: (...args) => ElMessageBox.confirm(...args),
+    confirm: (message, title, options) => confirmDialog({ message, title, ...options }),
     closeConfirmations: () => ElMessageBox.close()
   })
   const listTaskManager = createAbortableTaskManager()
@@ -425,8 +427,7 @@ export function useKnowledgeBaseEntries(knowledgeBaseId) {
         {
           confirmButtonText: managed ? t('knowledgeBase.confirm') : t('common.confirm'),
           cancelButtonText: managed ? t('knowledgeBase.cancel') : t('common.cancel'),
-          type: 'warning',
-          dangerouslyUseHTMLString: false
+          type: 'warning'
         }
       )
       if (!confirmed || !isCurrent()) return

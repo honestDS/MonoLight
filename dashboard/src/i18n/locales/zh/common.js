@@ -7,7 +7,7 @@ export default {
   refresh: '刷新列表',
   warning: '系统提示',
   delete_confirm: '确定要永久删除该配置吗？',
-  delete_named_confirm: '确定要删除 <span style="color: #F56C6C; font-weight: bold;">{name}</span> 吗？',
+  delete_named_confirm: '确定要删除“{name}”吗？',
   delete_success: '删除成功',
   delete_failed: '删除失败',
   action_failed: '操作失败',

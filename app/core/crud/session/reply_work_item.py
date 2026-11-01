@@ -662,6 +662,35 @@ class CRUDSessionReplyWorkItem:
             await db.commit()
         return result.rowcount or 0
 
+    async def cancel_agent_work_by_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        commit: bool = False,
+    ) -> int:
+        result = await db.execute(
+            update(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.profile_id == profile_id,
+                SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+            )
+            .values(
+                status=SessionReplyWorkStatus.CANCELLED,
+                locked_by=None,
+                lock_until=None,
+                updated_at=get_local_time(),
+            )
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return result.rowcount or 0
+
     async def cancel_background_tool_summaries(
         self,
         db: AsyncSession,

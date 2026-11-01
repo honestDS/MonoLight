@@ -11,6 +11,7 @@ from app.core.crud.session.session import session_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.profile.selection import resolve_profile_for_session
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.time import get_local_time
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
@@ -92,9 +93,23 @@ class ScheduledTaskScheduler:
             await scheduled_task_crud.mark_skipped(db, scheduled_task=scheduled_task)
             return
 
-        profile = await profile_crud.get_with_relations(db, scheduled_task.profile_id) if scheduled_task.profile_id else None
-        if not profile or not profile.id or profile.uid != scheduled_task.uid:
-            log.bind(profile_id=scheduled_task.profile_id).warning(t("LOG_SCHEDULED_TASK_PROFILE_MISSING"))
+        resolved_profile = await resolve_profile_for_session(
+            db,
+            uid=scheduled_task.uid,
+            session_id=scheduled_task.session_id,
+        )
+        resolved_profile_id = resolved_profile.id if resolved_profile is not None else None
+        profile = (
+            await profile_crud.lock_for_runtime_use(
+                db,
+                profile_id=resolved_profile_id,
+                uid=scheduled_task.uid,
+            )
+            if resolved_profile_id is not None
+            else None
+        )
+        if not profile or not profile.id:
+            log.bind(profile_id=resolved_profile_id).warning(t("LOG_SCHEDULED_TASK_PROFILE_MISSING"))
             await scheduled_task_crud.disable_task(db, scheduled_task=scheduled_task)
             return
 

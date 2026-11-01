@@ -1,6 +1,7 @@
 import { computed, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { memoryApi } from '../../api/index.js'
+import { useConfirmDialog } from '../useConfirmDialog.js'
 import {
   createLatestRequestTracker,
   estimateMemoryTokens,
@@ -22,6 +23,7 @@ export function useMemoryRecords({
   statusType,
   newDedupeKey
 }) {
+  const { confirm } = useConfirmDialog()
   const editorVisible = ref(false)
   const editorMode = ref('create')
   const submitting = ref(false)
@@ -226,11 +228,12 @@ export function useMemoryRecords({
   const deleteMemory = async row => {
     if (!canMutateRecord(row)) return
     try {
-      await ElMessageBox.confirm(t('memories.delete_confirm'), t('common.warning'), {
-        type: 'warning',
+      if (!await confirm({
+        message: t('memories.delete_confirm'),
+        title: t('common.warning'),
         confirmButtonText: t('common.confirm'),
         cancelButtonText: t('common.cancel')
-      })
+      })) return
       if (!canMutateRecord(row)) return
       await memoryApi.delete({ memory_id: row.id, expected_version: row.version, dedupe_key: newDedupeKey() })
       if (!canAccessMemoryData(row)) return
@@ -325,7 +328,10 @@ export function useMemoryRecords({
   const retryJob = async row => {
     if (!canRetry(row)) return
     try {
-      await ElMessageBox.confirm(t('memories.retry_confirm'), t('common.warning'), { type: 'warning' })
+      if (!await confirm({
+        message: t('memories.retry_confirm'),
+        title: t('common.warning')
+      })) return
       if (!canRetry(row)) return
       await memoryApi.retryJob(row.id)
       if (!canAccessMemoryData(row)) return
@@ -338,7 +344,10 @@ export function useMemoryRecords({
   const cancelJob = async row => {
     if (!canCancel(row)) return
     try {
-      await ElMessageBox.confirm(t('memories.cancel_confirm'), t('common.warning'), { type: 'warning' })
+      if (!await confirm({
+        message: t('memories.cancel_confirm'),
+        title: t('common.warning')
+      })) return
       if (!canCancel(row)) return
       await memoryApi.cancelJob(row.id)
       if (!canAccessMemoryData(row)) return

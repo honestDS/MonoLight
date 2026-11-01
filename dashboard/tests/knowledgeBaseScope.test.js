@@ -30,6 +30,18 @@ test('confirms successfully, treats cancel and close as false, and propagates ot
   await assert.rejects(failed.confirm('fail'), received => received === error)
 })
 
+test('requires an explicit true confirmation result', async () => {
+  const outcomes = [false, undefined, 'confirm', true]
+  const scope = createKnowledgeBaseScope({
+    confirm: async () => outcomes.shift(),
+  })
+
+  assert.equal(await scope.confirm('declined'), false)
+  assert.equal(await scope.confirm('missing'), false)
+  assert.equal(await scope.confirm('text'), false)
+  assert.equal(await scope.confirm('confirmed'), true)
+})
+
 test('does not show a confirmation when the scope is inactive', async () => {
   let confirmCalls = 0
   const scope = createKnowledgeBaseScope({

@@ -70,7 +70,7 @@
 
 <script setup>
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import QRCode from 'qrcode'
 
@@ -78,6 +78,7 @@ import BaseDataTable from '../components/BaseDataTable.vue'
 import MessagePlatformFormDialog from '../components/MessagePlatformFormDialog.vue'
 import WeixinOcLoginDialog from '../components/weixin_oc/WeixinOcLoginDialog.vue'
 import { adminApi, messagePlatformApi, profileApi } from '../api'
+import { useConfirmDialog } from '../composables/useConfirmDialog.js'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import { useUserPermissionsStore } from '../composables/useUserPermissions'
 import {
@@ -89,6 +90,7 @@ import {
 
 const { t } = useI18n()
 const userPermissions = useUserPermissionsStore()
+const { confirm } = useConfirmDialog()
 
 const loading = ref(false)
 const submitting = ref(false)
@@ -235,22 +237,13 @@ const submitForm = async () => {
     const editing = isEdit.value
     const platformId = currentId.value
     if (editing) {
-      try {
-        await ElMessageBox.confirm(
-          t('messagePlatforms.overwrite_settings_confirm'),
-          t('messagePlatforms.overwrite_settings_title'),
-          {
-            type: 'warning',
-            confirmButtonText: t('messagePlatforms.continue_save'),
-            cancelButtonText: t('common.cancel'),
-            closeOnClickModal: false,
-            distinguishCancelAndClose: true
-          }
-        )
-      } catch (err) {
-        if (err === 'cancel' || err === 'close') return
-        throw err
-      }
+      if (!await confirm({
+        message: t('messagePlatforms.overwrite_settings_confirm'),
+        title: t('messagePlatforms.overwrite_settings_title'),
+        confirmButtonText: t('messagePlatforms.continue_save'),
+        cancelButtonText: t('common.cancel'),
+        closeOnClickModal: false
+      })) return
       await messagePlatformApi.update(platformId, payload)
       ElMessage.success(t('messagePlatforms.update_success'))
       dialogVisible.value = false

@@ -139,7 +139,6 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         "CASCADE",
     ),
     ("session_reply_stream_event", ("work_id",), "session_reply_work_item", ("id",), "CASCADE"),
-    ("scheduled_task", ("profile_id",), "profile", ("id",), "RESTRICT"),
     (
         "scheduled_task",
         ("session_id", "uid"),
@@ -241,7 +240,6 @@ async def _create_profile_with_scheduled_task(db: AsyncSession) -> tuple[Profile
         name="test-task",
         uid="user-1",
         session_id="session-1",
-        profile_id=profile.id,
         message="run",
         interval_seconds=60,
         status=ScheduledTaskStatus.ENABLED,
@@ -347,7 +345,7 @@ async def test_provider_usage_cascades_with_reply_work_but_session_totals_remain
 
 
 @pytest.mark.asyncio
-async def test_sqlite_restricts_profile_deletion_with_scheduled_task(db_session_factory):
+async def test_sqlite_profile_deletion_allows_scheduled_task_and_session_deletion_cascades(db_session_factory):
     async with db_session_factory() as db:
         profile, _chat_session, scheduled_task = await _create_profile_with_scheduled_task(db)
         profile_id = profile.id
@@ -356,22 +354,79 @@ async def test_sqlite_restricts_profile_deletion_with_scheduled_task(db_session_
         assert scheduled_task_id is not None
 
         await db.delete(profile)
-        with pytest.raises(IntegrityError):
-            await db.commit()
-        await db.rollback()
+        await db.commit()
 
-        assert await db.get(Profile, profile_id) is not None
-        assert await db.get(ScheduledTask, scheduled_task_id) is not None
+    async with db_session_factory() as check_db:
+        assert await check_db.get(Profile, profile_id) is None
+        assert await check_db.get(ScheduledTask, scheduled_task_id) is not None
+
+        chat_session = await check_db.get(ChatSession, "session-1")
+        assert chat_session is not None
+        await check_db.delete(chat_session)
+        await check_db.commit()
+
+    async with db_session_factory() as check_db:
+        assert await check_db.get(ScheduledTask, scheduled_task_id) is None
 
 
 @pytest.mark.asyncio
-async def test_scheduled_task_crud_has_profile_assignment(db_session_factory):
+async def test_scheduled_task_crud_list_by_sessions_filters_uid_and_orders_ids(db_session_factory):
     async with db_session_factory() as db:
-        profile, _chat_session, _scheduled_task = await _create_profile_with_scheduled_task(db)
-        assert profile.id is not None
+        db.add_all(
+            [
+                ChatSession(session_id="session-1", uid="user-1"),
+                ChatSession(session_id="session-2", uid="user-1"),
+                ChatSession(session_id="session-3", uid="user-1"),
+                ChatSession(session_id="session-other-user", uid="user-2"),
+            ]
+        )
+        await db.flush()
+        db.add_all(
+            [
+                ScheduledTask(
+                    id=20,
+                    name="selected-later",
+                    uid="user-1",
+                    session_id="session-1",
+                    message="run",
+                    interval_seconds=60,
+                ),
+                ScheduledTask(
+                    id=10,
+                    name="selected-earlier",
+                    uid="user-1",
+                    session_id="session-2",
+                    message="run",
+                    interval_seconds=60,
+                ),
+                ScheduledTask(
+                    id=5,
+                    name="unselected",
+                    uid="user-1",
+                    session_id="session-3",
+                    message="run",
+                    interval_seconds=60,
+                ),
+                ScheduledTask(
+                    id=30,
+                    name="other-user",
+                    uid="user-2",
+                    session_id="session-other-user",
+                    message="run",
+                    interval_seconds=60,
+                ),
+            ]
+        )
+        await db.commit()
 
-        assert await scheduled_task_crud.has_profile_assignment(db, profile.id) is True
-        assert await scheduled_task_crud.has_profile_assignment(db, profile.id + 1) is False
+        assert await scheduled_task_crud.list_by_sessions(db, uid="user-1", session_ids=[]) == []
+        tasks = await scheduled_task_crud.list_by_sessions(
+            db,
+            uid="user-1",
+            session_ids=["session-other-user", "session-2", "session-1"],
+        )
+
+        assert [task.id for task in tasks] == [10, 20]
 
 
 @pytest.mark.asyncio

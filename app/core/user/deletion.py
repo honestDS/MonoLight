@@ -69,7 +69,6 @@ async def delete_user_data(db: AsyncSession, *, uid: str) -> list[str]:
         )
 
     await session_crud.unlink_profile_references(db, profile_ids=profile_ids, excluded_uid=uid)
-    await scheduled_task_crud.unlink_profile_references(db, profile_ids=profile_ids, excluded_uid=uid)
     await message_platform_crud.unlink_profile_references(db, profile_ids=profile_ids, excluded_uid=uid)
     await profile_crud.unlink_prompt_references(db, prompt_ids=prompt_ids, excluded_uid=uid)
 

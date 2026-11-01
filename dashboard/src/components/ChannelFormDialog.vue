@@ -145,10 +145,11 @@
 </template>
 
 <script setup>
-import { h, reactive, ref, computed, watch, onBeforeUnmount } from 'vue'
+import { reactive, ref, computed, watch, onBeforeUnmount } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
+import { useConfirmDialog } from '../composables/useConfirmDialog.js'
 import { channelApi, openRouterApi } from '../api'
 import { defaultChannelForm, defaultModelEntry, normalizeModelEntry } from '../constants'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
@@ -172,6 +173,7 @@ const props = defineProps({
 
 const emit = defineEmits(['update:visible', 'saved'])
 const { t } = useI18n()
+const { confirm } = useConfirmDialog()
 
 const dialogVisible = computed({
   get: () => props.visible,
@@ -502,24 +504,12 @@ const confirmConfigImpact = async (data) => {
     messages.push(t('channels.audit_refs_cleared', { count: clearedAuditRefs }))
   }
 
-  try {
-    await ElMessageBox.confirm(
-      h('div', { class: 'config-impact-warning' }, messages.map((message, index) => (
-        h('div', { class: 'config-impact-warning__item', key: index }, message)
-      ))),
-      t('channels.config_refs_changed_title'),
-      {
-        type: 'warning',
-        confirmButtonText: t('channels.confirm'),
-        cancelButtonText: t('channels.cancel'),
-        showCancelButton: true
-      }
-    )
-    return true
-  } catch (action) {
-    if (action === 'cancel' || action === 'close') return false
-    return false
-  }
+  return confirm({
+    sections: messages.map(summary => ({ summary })),
+    title: t('channels.config_refs_changed_title'),
+    confirmButtonText: t('channels.confirm'),
+    cancelButtonText: t('channels.cancel')
+  })
 }
 
 const showConcurrentMemoryOrganizationDisabledNotice = async (data) => {

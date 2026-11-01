@@ -45,6 +45,7 @@ import { useChatState } from '../src/composables/chat/useChatState.js'
 import { CHAT_DRAFT_STORAGE_PREFIX, useChatDrafts } from '../src/composables/chat/useChatDrafts.js'
 import { createSessionTaskController } from '../src/composables/chat/sessionTasks.js'
 import { PAGE_SIZE, SESSION_MAX_TURNS_UPPER_BOUND } from '../src/constants/index.js'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const source = relativePath => readFileSync(new URL(relativePath, import.meta.url), 'utf8')
 
@@ -586,14 +587,19 @@ export const createHarness = async (t, options = {}) => {
   const confirmationApi = {
     confirm: () => {
       const planned = confirmations.length > 0 ? confirmations.shift() : true
-      if (planned === 'cancel') return Promise.reject('cancel')
+      if (planned === 'cancel' || planned === 'close') return Promise.reject(planned)
       if (planned instanceof Error) return Promise.reject(planned)
       return Promise.resolve(planned)
     }
   }
   const useDeleteConfirm = loadVmModule(
     useDeleteConfirmSource,
-    { ElMessageBox: confirmationApi, ElMessage, i18n },
+    {
+      ElMessageBox: confirmationApi,
+      ElMessage,
+      i18n,
+      useConfirmDialog: loadUseConfirmDialog({ t: translate, ElMessageBox: confirmationApi })
+    },
     ['useDeleteConfirm'],
     'useDeleteConfirm.js'
   ).useDeleteConfirm

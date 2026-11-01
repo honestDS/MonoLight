@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator
+from copy import deepcopy
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -42,6 +43,8 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
+from app.core.exceptions import ServerException
+from app.core.profile.deletion import build_profile_deletion_impact, execute_profile_deletion
 from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
@@ -93,6 +96,7 @@ async def _create_due_run_once_scheduled_task(db: AsyncSession) -> ScheduledTask
         uid=UID,
         name="scheduled-task-run-once-profile",
         configs=ProfileConfig.model_validate({}).model_dump(),
+        is_default=True,
     )
     db.add_all([User(uid=UID, username=UID), profile])
     await db.flush()
@@ -103,7 +107,6 @@ async def _create_due_run_once_scheduled_task(db: AsyncSession) -> ScheduledTask
         name="One-time reminder",
         uid=UID,
         session_id=SESSION_ID,
-        profile_id=PROFILE_ID,
         message="Run this reminder once",
         interval_seconds=60,
         run_once=True,
@@ -1142,13 +1145,13 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
     assert [result["operation"] for result in observed_results] == ["create", "list", "delete"]
 
     created_task = observed_results[0]["task"]
-    assert (created_task["uid"], created_task["session_id"], created_task["profile_id"]) == (UID, SESSION_ID, PROFILE_ID)
+    assert (created_task["uid"], created_task["session_id"]) == (UID, SESSION_ID)
     assert created_task["run_once"] is run_once
     listed_tasks = observed_results[1]["tasks"]
     assert len(listed_tasks) == 1
     listed_task = listed_tasks[0]
     assert listed_task["id"] == created_task["id"]
-    assert (listed_task["uid"], listed_task["session_id"], listed_task["profile_id"]) == (UID, SESSION_ID, PROFILE_ID)
+    assert (listed_task["uid"], listed_task["session_id"]) == (UID, SESSION_ID)
     assert listed_task["run_once"] is run_once
     assert observed_results[2]["task_id"] == created_task["id"]
 
@@ -1181,6 +1184,7 @@ async def test_scheduled_task_dispatch_enqueues_once_and_delete_preserves_queued
         uid=UID,
         name="scheduled-task-dispatch-profile",
         configs=ProfileConfig.model_validate({}).model_dump(),
+        is_default=True,
     )
     db_session.add_all([User(uid=UID, username=UID), profile])
     await db_session.flush()
@@ -1528,7 +1532,6 @@ async def test_scheduled_task_mutation_waits_for_audit_confirmation(
             name="Protected task",
             uid=UID,
             session_id=SESSION_ID,
-            profile_id=PROFILE_ID,
             message="Keep this scheduled request",
             interval_seconds=60,
             next_run_at=get_local_time() + timedelta(seconds=60),
@@ -1774,7 +1777,7 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
                     }
                 ],
             ),
-            Profile(id=PROFILE_ID, uid=UID, name="scheduled-task-multiround-profile", configs=configs),
+            Profile(id=PROFILE_ID, uid=UID, name="scheduled-task-multiround-profile", configs=configs, is_default=True),
         ]
     )
     await db_session.flush()
@@ -1794,7 +1797,6 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
         name="Scheduled report task",
         uid=UID,
         session_id=session_id,
-        profile_id=PROFILE_ID,
         message=scheduled_message,
         interval_seconds=60,
         run_once=True,
@@ -2011,12 +2013,16 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("switch_profile", [False, True])
 async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    switch_profile: bool,
 ) -> None:
     session_id = "scheduled-background-resume-session"
+    switched_profile_id = PROFILE_ID + 1
+    switched_model_id = "scheduled-background-switched-model"
     configs = ProfileConfig.model_validate({}).model_dump()
     configs["channel"]["chat_channel"]["rules"] = [{"channel_id": 1, "model_id": MODEL_ID, "priority": 1, "weight": 1}]
     configs["memory"]["precheck_enabled"] = False
@@ -2050,7 +2056,7 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
                     },
                 ],
             ),
-            Profile(id=PROFILE_ID, uid=UID, name="scheduled-background-resume-profile", configs=configs),
+            Profile(id=PROFILE_ID, uid=UID, name="scheduled-background-resume-profile", configs=configs, is_default=True),
         ]
     )
     await db_session.flush()
@@ -2060,7 +2066,6 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
         name="Scheduled background resume",
         uid=UID,
         session_id=session_id,
-        profile_id=PROFILE_ID,
         message="run background shell and report",
         interval_seconds=60,
         run_once=True,
@@ -2089,6 +2094,7 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
 
     async def mock_generate(**kwargs: Any) -> InternalResponse:
         calls.append(kwargs)
+        assert kwargs["model_id"] == MODEL_ID
         if len(calls) == 1:
             return InternalResponse(
                 message=InternalMessage(
@@ -2147,6 +2153,7 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
         waiting = await db.get(SessionReplyWorkItem, work_id)
         assert waiting is not None
         assert waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert waiting.profile_id == PROFILE_ID
         works = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == session_id))).scalars().all())
         assert [item.id for item in works] == [work_id]
         assert await message_crud.get_history_backward_by_id(db, session_id=session_id, uid=UID) == []
@@ -2165,6 +2172,39 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
             result={"status": "succeeded", "content": {"files": [{"id": "image-1", "name": "scheduled.png"}]}},
             auto_reply=False,
         )
+
+    if switch_profile:
+        switched_configs = deepcopy(configs)
+        switched_configs["channel"]["chat_channel"]["rules"] = [{"channel_id": 1, "model_id": switched_model_id, "priority": 1, "weight": 1}]
+        async with session_factory() as db:
+            channel = await db.get(ModelChannel, 1)
+            assert channel is not None
+            switched_model = deepcopy(next(model for model in channel.model_ids if model["model_id"] == MODEL_ID and model["usage"] == "CHAT"))
+            switched_model["model_id"] = switched_model_id
+            channel.model_ids = [*channel.model_ids, switched_model]
+            db.add(
+                Profile(
+                    id=switched_profile_id,
+                    uid=UID,
+                    name="scheduled-background-switched-profile",
+                    configs=switched_configs,
+                )
+            )
+            await db.flush()
+            session = await db.get(ChatSession, session_id)
+            assert session is not None
+            session.profile_id = switched_profile_id
+            session.profile_override_id = switched_profile_id
+            await db.commit()
+        async with session_factory() as db:
+            switched_work = await db.get(SessionReplyWorkItem, work_id)
+            switched_session = await db.get(ChatSession, session_id)
+            switched_profile = await db.get(Profile, switched_profile_id)
+            assert switched_work is not None
+            assert switched_work.profile_id == PROFILE_ID
+            assert switched_session is not None
+            assert (switched_session.profile_id, switched_session.profile_override_id) == (switched_profile_id, switched_profile_id)
+            assert switched_profile is not None
 
     async with session_factory() as db:
         foreground_work, _created = await session_reply_work_item_crud.enqueue(
@@ -2215,6 +2255,7 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
         finished = await db.get(SessionReplyWorkItem, work_id)
         assert finished is not None
         assert finished.status == SessionReplyWorkStatus.SUCCEEDED
+        assert finished.profile_id == PROFILE_ID
         agent_works = list(
             (
                 await db.execute(
@@ -2230,10 +2271,13 @@ async def test_scheduled_task_background_tool_resumes_same_work_with_task_scope(
         assert [item.id for item in agent_works] == [work_id]
         result_message = await db.get(Message, finished.result_message_id)
         assert result_message is not None
+        assert result_message.profile_id == PROFILE_ID
         assert result_message.content == "scheduled background completed"
         assert result_message.work_id is None
         session = await db.get(ChatSession, session_id)
         assert session is not None
+        if switch_profile:
+            assert (session.profile_id, session.profile_override_id) == (switched_profile_id, switched_profile_id)
         assert session.latest_message_id == result_message.id
         model_history = await message_crud.get_history_backward_by_id(db, session_id=session_id, uid=UID)
         ui_history = await message_crud.get_history_paged(db, session_id=session_id, uid=UID)
@@ -2964,3 +3008,351 @@ async def test_scheduled_task_does_not_hijack_foreground_external_results(
     refreshed_fg_work = await db_session.get(SessionReplyWorkItem, fg_work.id)
     assert refreshed_fg_work is not None
     assert refreshed_fg_work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+
+
+@pytest.mark.asyncio
+async def test_scheduled_task_workflow_preserves_profile_binding_across_session_switches(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "scheduled-profile-switch-session"
+    profile_a_id, profile_b_id, profile_c_id = 301, 302, 303
+    model_a, model_b, model_c = "scheduled-profile-a", "scheduled-profile-b", "scheduled-profile-c"
+
+    def profile_configs(model_id: str) -> dict[str, Any]:
+        configs = ProfileConfig.model_validate({}).model_dump()
+        configs["channel"]["chat_channel"]["rules"] = [{"channel_id": 1, "model_id": model_id, "priority": 1, "weight": 1}]
+        configs["memory"]["precheck_enabled"] = False
+        return configs
+
+    db_session.add_all(
+        [
+            User(uid=UID, username=UID),
+            ModelChannel(
+                id=1,
+                name="scheduled-profile-switch-channel",
+                base_url="https://llm.invalid",
+                api_key="enc:v1:stored-test-key",
+                model_ids=[{"model_id": model_id, "usage": "CHAT", "protocol": "OPENAI", "context_window_k": 32, "max_tokens": 512, "temperature": 0, "top_p": 1} for model_id in (model_a, model_b, model_c)],
+            ),
+            Profile(id=profile_a_id, uid=UID, name="scheduled-profile-a", configs=profile_configs(model_a), is_default=True),
+            Profile(id=profile_b_id, uid=UID, name="scheduled-profile-b", configs=profile_configs(model_b)),
+            Profile(id=profile_c_id, uid=UID, name="scheduled-profile-c", configs=profile_configs(model_c)),
+            ChatSession(
+                session_id=session_id,
+                uid=UID,
+                profile_id=profile_a_id,
+                profile_override_id=None,
+                goal_mode=True,
+                max_turns=5,
+            ),
+        ]
+    )
+    await db_session.flush()
+    scheduled_task = ScheduledTask(
+        name="Profile switch reminder",
+        uid=UID,
+        session_id=session_id,
+        message="Run the profile-bound reminder",
+        interval_seconds=60,
+        run_once=False,
+        next_run_at=get_local_time() - timedelta(seconds=1),
+    )
+    db_session.add(scheduled_task)
+    await db_session.commit()
+    await db_session.refresh(scheduled_task)
+    assert scheduled_task.id is not None
+    task_id = scheduled_task.id
+
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
+    for module in (
+        channel_cursor_module,
+        dispatcher_module,
+        scheduler_module,
+        executor_interactive_module,
+        executor_lifecycle_module,
+        executor_metadata_module,
+        notifier_module,
+        session_notifier_module,
+    ):
+        monkeypatch.setattr(module, "AsyncSessionLocal", session_factory)
+
+    async def set_session_profile(profile_id: int | None = None, profile_override_id: int | None = None) -> None:
+        async with session_factory() as profile_db:
+            session = await profile_db.get(ChatSession, session_id)
+            assert session is not None
+            if profile_id is not None:
+                session.profile_id = profile_id
+            session.profile_override_id = profile_override_id
+            await profile_db.commit()
+
+    async def capture_send_session_event(_uid: str, _session_id: str, _event: dict[str, Any]) -> None:
+        return None
+
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_send_session_event)
+
+    await set_session_profile(profile_override_id=profile_b_id)
+    async with session_factory() as setup_db:
+        session = await setup_db.get(ChatSession, session_id)
+        assert session is not None
+        assert (session.profile_id, session.profile_override_id) == (profile_a_id, profile_b_id)
+
+    async def scheduled_runs(db: AsyncSession) -> tuple[list[Message], list[SessionReplyWorkItem]]:
+        triggers = list((await db.execute(select(Message).where(Message.session_id == session_id, Message.type == MessageType.SCHEDULED_TASK_TRIGGER))).scalars().all())
+        works = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == session_id, SessionReplyWorkItem.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN).order_by(SessionReplyWorkItem.id))).scalars().all())
+        return triggers, works
+
+    scheduler = scheduler_module.ScheduledTaskScheduler()
+    await scheduler._dispatch_one(task_id)
+
+    async with session_factory() as verify_db:
+        trigger_messages, work_items = await scheduled_runs(verify_db)
+    assert len(trigger_messages) == len(work_items) == 1
+    first_trigger, first_work = trigger_messages[0], work_items[0]
+    assert first_trigger.profile_id == profile_b_id
+    assert first_work.profile_id == profile_b_id
+    assert first_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert first_trigger.work_id == first_work.id
+    assert first_work.id is not None
+    first_work_id = first_work.id
+
+    worker_id = "scheduled-profile-switch-worker"
+    await set_session_profile(profile_c_id, profile_c_id)
+    async with session_factory() as claim_db:
+        claimed = await session_reply_work_item_crud.claim_next(claim_db, worker_id=worker_id, lease_seconds=300)
+    assert claimed is not None
+    assert claimed.id == first_work_id
+    assert claimed.profile_id == profile_b_id
+
+    calls: list[dict[str, Any]] = []
+
+    async def mock_generate(**kwargs: Any) -> InternalResponse:
+        calls.append(kwargs)
+        assert kwargs["model_id"] == model_b
+        if len(calls) == 1:
+            await set_session_profile(profile_a_id, profile_a_id)
+            return InternalResponse(
+                message=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id="profile-switch-end-session",
+                            name=END_SESSION_TOOL_NAME,
+                            arguments={"skip_reply": False},
+                        )
+                    ],
+                ),
+                model=model_b,
+                usage=USAGE,
+                finish_reason="tool_calls",
+            )
+        if len(calls) == 2:
+            return InternalResponse(
+                message=InternalMessage(role=MessageRole.ASSISTANT, content=FINAL_REPLY),
+                model=model_b,
+                usage=USAGE,
+                finish_reason="stop",
+            )
+        raise AssertionError(f"Unexpected model call {len(calls)}")
+
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", mock_generate)
+    monkeypatch.setattr(LLMClient, "generate", mock_generate)
+
+    await executor_lifecycle_module.execute_session_reply_work(first_work_id, worker_id)
+
+    async with session_factory() as verify_db:
+        finished_work = await verify_db.get(SessionReplyWorkItem, first_work_id)
+        assert finished_work is not None
+        assert finished_work.result_message_id is not None
+        final_message = await verify_db.get(Message, finished_work.result_message_id)
+        session = await verify_db.get(ChatSession, session_id)
+        task = await verify_db.get(ScheduledTask, task_id)
+    assert finished_work.status == SessionReplyWorkStatus.SUCCEEDED
+    assert final_message is not None
+    assert final_message.profile_id == profile_b_id
+    assert final_message.content == FINAL_REPLY
+    assert session is not None
+    assert (session.profile_id, session.profile_override_id) == (profile_a_id, profile_a_id)
+    assert task is not None
+    assert task.status == ScheduledTaskStatus.ENABLED
+    assert [call["model_id"] for call in calls] == [model_b, model_b]
+    async with session_factory() as reschedule_db:
+        task = await reschedule_db.get(ScheduledTask, task_id)
+        assert task is not None
+        task.next_run_at = get_local_time() - timedelta(seconds=1)
+        await reschedule_db.commit()
+
+    await scheduler._dispatch_one(task_id)
+
+    async with session_factory() as verify_db:
+        task = await verify_db.get(ScheduledTask, task_id)
+        _trigger_messages, work_items = await scheduled_runs(verify_db)
+    assert task is not None
+    assert task.status == ScheduledTaskStatus.ENABLED
+    assert task.run_count == 2
+    assert len(work_items) == 2
+    assert work_items[0].id == first_work_id
+    assert work_items[0].profile_id == profile_b_id
+    assert work_items[0].status == SessionReplyWorkStatus.SUCCEEDED
+    assert work_items[1].profile_id == profile_a_id
+    assert work_items[1].status == SessionReplyWorkStatus.READY_FOR_LLM
+
+
+@pytest.mark.asyncio
+async def test_scheduled_task_work_rejects_profile_deleted_during_dispatch(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled_task = await _create_due_run_once_scheduled_task(db_session)
+    assert scheduled_task.id is not None
+    task_id = scheduled_task.id
+    profile_b_id = PROFILE_ID + 1
+
+    configs = ProfileConfig.model_validate({}).model_dump()
+    configs["channel"]["chat_channel"]["rules"] = [{"channel_id": 1, "model_id": MODEL_ID, "priority": 1, "weight": 1}]
+    configs["memory"]["precheck_enabled"] = False
+    profile_a = await db_session.get(Profile, PROFILE_ID)
+    assert profile_a is not None
+    profile_a.configs = configs
+    profile_a.is_default = False
+    db_session.add_all(
+        [
+            ModelChannel(
+                id=1,
+                name="scheduled-profile-deletion-channel",
+                base_url="https://llm.invalid",
+                api_key="enc:v1:stored-test-key",
+                model_ids=[
+                    {
+                        "model_id": MODEL_ID,
+                        "usage": "CHAT",
+                        "protocol": "OPENAI",
+                        "context_window_k": 32,
+                        "max_tokens": 512,
+                        "temperature": 0,
+                        "top_p": 1,
+                    }
+                ],
+            ),
+            Profile(
+                id=profile_b_id,
+                uid=UID,
+                name="scheduled-profile-deletion-default",
+                configs=deepcopy(configs),
+                is_default=True,
+            ),
+        ]
+    )
+    await db_session.flush()
+    session = await db_session.get(ChatSession, SESSION_ID)
+    assert session is not None
+    session.profile_id = PROFILE_ID
+    session.profile_override_id = PROFILE_ID
+    await db_session.commit()
+
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
+    for module in (
+        channel_cursor_module,
+        dispatcher_module,
+        scheduler_module,
+        executor_interactive_module,
+        executor_lifecycle_module,
+        executor_metadata_module,
+        notifier_module,
+        session_notifier_module,
+    ):
+        monkeypatch.setattr(module, "AsyncSessionLocal", session_factory)
+
+    async def capture_send_session_event(_uid: str, _session_id: str, _event: dict[str, Any]) -> None:
+        return None
+
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", capture_send_session_event)
+
+    scheduler = scheduler_module.ScheduledTaskScheduler()
+    await scheduler._dispatch_one(task_id)
+
+    async with session_factory() as claim_db:
+        queued_work = (
+            (
+                await claim_db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN,
+                        SessionReplyWorkItem.session_id == SESSION_ID,
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+        assert queued_work.profile_id == PROFILE_ID
+        assert queued_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+        assert queued_work.id is not None
+        work_id = queued_work.id
+        claimed_work = await session_reply_work_item_crud.claim_next(claim_db, worker_id="profile-deletion-worker", lease_seconds=300)
+        assert claimed_work is not None
+        assert claimed_work.id == work_id
+
+    calls: list[dict[str, Any]] = []
+
+    async def mock_generate(**kwargs: Any) -> InternalResponse:
+        calls.append(kwargs)
+        if len(calls) != 1:
+            raise AssertionError(f"Unexpected model call {len(calls)}")
+        async with session_factory() as deletion_db:
+            switched_session = await deletion_db.get(ChatSession, SESSION_ID)
+            assert switched_session is not None
+            switched_session.profile_id = profile_b_id
+            switched_session.profile_override_id = profile_b_id
+            await deletion_db.commit()
+
+            profile_to_delete = await deletion_db.get(Profile, PROFILE_ID)
+            assert profile_to_delete is not None
+            impact = await build_profile_deletion_impact(deletion_db, profile=profile_to_delete)
+            assert impact["sessions"]["count"] == 0
+            assert impact["scheduled_tasks"]["count"] == 0
+            await execute_profile_deletion(deletion_db, profile=profile_to_delete, impact=impact)
+            await deletion_db.commit()
+
+        return InternalResponse(
+            message=InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    InternalToolCall(
+                        id="profile-deletion-end-session",
+                        name=END_SESSION_TOOL_NAME,
+                        arguments={"skip_reply": False},
+                    )
+                ],
+            ),
+            model=MODEL_ID,
+            usage=USAGE,
+            finish_reason="tool_calls",
+        )
+
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", mock_generate)
+    monkeypatch.setattr(LLMClient, "generate", mock_generate)
+
+    with pytest.raises(ServerException):
+        await executor_lifecycle_module.execute_session_reply_work(work_id, "profile-deletion-worker")
+
+    assert len(calls) == 1
+    async with session_factory() as verification_db:
+        finished_work = await verification_db.get(SessionReplyWorkItem, work_id)
+        remaining_profile_a = await verification_db.get(Profile, PROFILE_ID)
+        remaining_session = await verification_db.get(ChatSession, SESSION_ID)
+        remaining_task = await verification_db.get(ScheduledTask, task_id)
+        work_messages = list((await verification_db.execute(select(Message).where(Message.work_id == work_id))).scalars().all())
+
+    assert finished_work is not None
+    assert finished_work.status == SessionReplyWorkStatus.CANCELLED
+    assert finished_work.locked_by is None
+    assert finished_work.lock_until is None
+    assert finished_work.result_message_id is None
+    assert remaining_profile_a is None
+    assert remaining_session is not None
+    assert (remaining_session.profile_id, remaining_session.profile_override_id) == (profile_b_id, profile_b_id)
+    assert remaining_task is not None
+    assert remaining_task.status == ScheduledTaskStatus.DISABLED
+    assert [message for message in work_messages if message.role in {MessageRole.ASSISTANT, MessageRole.TOOL}] == []

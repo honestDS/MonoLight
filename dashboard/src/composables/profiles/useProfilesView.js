@@ -1,15 +1,17 @@
-import { h, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { profileApi, promptApi, systemApi, adminApi, knowledgeBaseApi } from '../../api/index.js'
 import { defaultProfileConfigs } from '../../constants/index.js'
 import { SUPPORT_LOCALES } from '../../i18n/index.js'
+import { useConfirmDialog } from '../useConfirmDialog.js'
 import { useUserPermissionsStore } from '../useUserPermissions.js'
 import { useProfileMemory } from './useProfileMemory.js'
 import { useProfileEditor } from './useProfileEditor.js'
 
 export function useProfilesView() {
   const { t } = useI18n()
+  const { confirm } = useConfirmDialog()
   const userPermissions = useUserPermissionsStore()
 
   const configPermissions = ref({ security: false })
@@ -109,74 +111,74 @@ export function useProfilesView() {
   }
 
   const confirmProfileDeleteImpact = async (data) => {
-    const messages = [t('profiles.delete_impact_intro', { name: data?.profile?.name || '' })]
     const sessions = data?.sessions || {}
-    if (sessions.count) {
-      messages.push(t('profiles.delete_impact_sessions', {
-        count: sessions.count,
-        messages: sessions.message_count || 0
-      }))
-      for (const session of sessions.items || []) {
-        messages.push(t('profiles.delete_impact_session_item', {
-          name: session.title || session.session_id
-        }))
-      }
-      if (sessions.omitted_count) {
-        messages.push(t('profiles.delete_impact_more', { count: sessions.omitted_count }))
-      }
-    }
-
     const managedKnowledgeBase = data?.managed_knowledge_base
-    if (managedKnowledgeBase?.count) {
-      const item = managedKnowledgeBase.items?.[0]
-      messages.push(t('profiles.delete_impact_managed_kb', {
-        name: item?.name || '',
-        count: item?.knowledge_count || 0
-      }))
-    }
-    if (data?.scheduled_tasks?.count) {
-      messages.push(t('profiles.delete_impact_scheduled_tasks', { count: data.scheduled_tasks.count }))
-      for (const item of data.scheduled_tasks.items || []) {
-        messages.push(t('profiles.delete_impact_scheduled_task_item', { name: item.name }))
-      }
-      if (data.scheduled_tasks.omitted_count) {
-        messages.push(t('profiles.delete_impact_more', { count: data.scheduled_tasks.omitted_count }))
-      }
-    }
-    if (data?.message_platforms?.count) {
-      messages.push(t('profiles.delete_impact_message_platforms', { count: data.message_platforms.count }))
-      for (const item of data.message_platforms.items || []) {
-        messages.push(t('profiles.delete_impact_message_platform_item', { name: item.name }))
-      }
-      if (data.message_platforms.omitted_count) {
-        messages.push(t('profiles.delete_impact_more', { count: data.message_platforms.omitted_count }))
-      }
-    }
-    if (data?.user_knowledge_base_bindings?.count) {
-      messages.push(t('profiles.delete_impact_user_kbs', { count: data.user_knowledge_base_bindings.count }))
-      for (const item of data.user_knowledge_base_bindings.items || []) {
-        messages.push(t('profiles.delete_impact_user_kb_item', { name: item.name }))
-      }
-      if (data.user_knowledge_base_bindings.omitted_count) {
-        messages.push(t('profiles.delete_impact_more', { count: data.user_knowledge_base_bindings.omitted_count }))
+    const scheduledTasks = data?.scheduled_tasks || {}
+    const messagePlatforms = data?.message_platforms || {}
+    const userKnowledgeBaseBindings = data?.user_knowledge_base_bindings || {}
+
+    const buildImpactSection = (impact, summaryKey, summaryParams, itemKey, itemName) => {
+      if (!impact?.count) return null
+
+      return {
+        summary: t(summaryKey, summaryParams),
+        items: itemKey
+          ? (impact.items || []).map(item => t(itemKey, { name: itemName(item) }))
+          : [],
+        more: impact.omitted_count
+          ? t('profiles.delete_impact_more', { count: impact.omitted_count })
+          : ''
       }
     }
 
-    try {
-      await ElMessageBox.confirm(
-        h('div', messages.map((message, index) => h('div', { key: index }, message))),
-        t('profiles.delete_impact_title'),
+    const sections = [
+      buildImpactSection(
+        sessions,
+        'profiles.delete_impact_sessions',
+        { count: sessions.count, messages: sessions.message_count || 0 },
+        'profiles.delete_impact_session_item',
+        (session) => session.title || session.session_id
+      ),
+      buildImpactSection(
+        managedKnowledgeBase,
+        'profiles.delete_impact_managed_kb',
         {
-          type: 'warning',
-          confirmButtonText: t('profiles.delete_impact_confirm'),
-          cancelButtonText: t('common.cancel'),
-          showCancelButton: true
-        }
+          name: managedKnowledgeBase?.items?.[0]?.name || '',
+          count: managedKnowledgeBase?.items?.[0]?.knowledge_count || 0
+        },
+        null,
+        null
+      ),
+      buildImpactSection(
+        scheduledTasks,
+        'profiles.delete_impact_scheduled_tasks',
+        { count: scheduledTasks.count },
+        'profiles.delete_impact_scheduled_task_item',
+        (item) => item.name
+      ),
+      buildImpactSection(
+        messagePlatforms,
+        'profiles.delete_impact_message_platforms',
+        { count: messagePlatforms.count },
+        'profiles.delete_impact_message_platform_item',
+        (item) => item.name
+      ),
+      buildImpactSection(
+        userKnowledgeBaseBindings,
+        'profiles.delete_impact_user_kbs',
+        { count: userKnowledgeBaseBindings.count },
+        'profiles.delete_impact_user_kb_item',
+        (item) => item.name
       )
-      return true
-    } catch (action) {
-      return false
-    }
+    ].filter(Boolean)
+
+    return confirm({
+      message: t('profiles.delete_impact_intro', { name: data?.profile?.name || '' }),
+      sections,
+      title: t('profiles.delete_impact_title'),
+      confirmButtonText: t('profiles.delete_impact_confirm'),
+      cancelButtonText: t('common.cancel')
+    })
   }
 
   const handleDelete = async (id) => {

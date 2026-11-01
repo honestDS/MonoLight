@@ -12,6 +12,7 @@ from app.core.constants import (
     TERMINAL_WATCH_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.event import session_event_crud
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
@@ -30,6 +31,7 @@ from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.session import ChatSession
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
@@ -281,6 +283,19 @@ async def build_external_work_result(
     return marker_payload, result_text, stored.tool_call_id
 
 
+async def _load_work_session(db: AsyncSession, work: SessionReplyWorkItem) -> ChatSession:
+    session = await session_crud.get_by_session_id(db, work.session_id)
+    if session is None or session.uid != work.uid:
+        raise ValueError(_unknown_error())
+    if work.work_type == SessionReplyWorkType.AGENT_WORK:
+        profile = await profile_crud.get(db, work.profile_id)
+        if profile is None or profile.uid != work.uid:
+            raise ValueError(_unknown_error())
+    elif session.profile_id != work.profile_id:
+        raise ValueError(_unknown_error())
+    return session
+
+
 async def _persist_external_work_markers(
     db: AsyncSession,
     *,
@@ -288,9 +303,7 @@ async def _persist_external_work_markers(
     state: dict[str, Any],
     payloads: list[dict[str, Any]],
 ) -> list[int]:
-    session = await session_crud.get_by_session_id(db, work.session_id)
-    if session is None or session.uid != work.uid or session.profile_id != work.profile_id:
-        raise ValueError(_unknown_error())
+    session = await _load_work_session(db, work)
     if not _is_positive_int(work.id):
         raise ValueError(_unknown_error())
 
@@ -476,9 +489,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             if work is None:
                 await db.rollback()
                 return False
-            session = await session_crud.get_by_session_id(db, session_id)
-            if session is None or session.uid != uid or session.profile_id != work.profile_id:
-                raise ValueError(_unknown_error())
+            await _load_work_session(db, work)
             state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
             pending_tools = state.get("pending_tools", [])
             terminal_watch_waits = state.get("terminal_watch_waits")

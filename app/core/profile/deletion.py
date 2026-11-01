@@ -16,6 +16,7 @@ from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.i18n import t
@@ -65,10 +66,10 @@ async def build_profile_deletion_impact(
         uid=profile.uid,
         session_ids=session_ids,
     )
-    scheduled_tasks = await scheduled_task_crud.list_by_profile(
+    scheduled_tasks = await scheduled_task_crud.list_by_sessions(
         db,
         uid=profile.uid,
-        profile_id=profile.id,
+        session_ids=session_ids,
     )
     message_platforms = await message_platform_crud.list_by_profile_assignment(
         db,
@@ -198,13 +199,13 @@ async def execute_profile_deletion(
                 is_admin=True,
             )
 
-    await scheduled_task_crud.delete_by_profile(
+    await message_platform_crud.clear_profile_assignment(
         db,
         uid=profile.uid,
         profile_id=profile.id,
         commit=False,
     )
-    await message_platform_crud.clear_profile_assignment(
+    await session_reply_work_item_crud.cancel_agent_work_by_profile(
         db,
         uid=profile.uid,
         profile_id=profile.id,

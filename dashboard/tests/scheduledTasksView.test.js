@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 import { computed, reactive, ref } from 'vue'
+import { renderToString } from 'vue/server-renderer'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const viewSource = readFileSync(new URL('../src/views/ScheduledTasksView.vue', import.meta.url), 'utf8')
 const scriptMatch = viewSource.match(/<script\s+setup(?:\s[^>]*)?>([\s\S]*?)<\/script>/)
@@ -32,11 +34,24 @@ const createHarness = (options = {}) => {
     listRequests: [],
     createRequests: [],
     updateRequests: [],
+    deleteRequests: [],
   }
   const ElMessage = Object.fromEntries(['warning', 'error', 'success'].map(type => [
     type,
     value => messages.push({ type, value }),
   ]))
+  const confirmationCalls = []
+  const pendingConfirmations = []
+  const ElMessageBox = {
+    confirm: (message, title, options) => new Promise((resolve, reject) => {
+      confirmationCalls.push({ message, title, options })
+      pendingConfirmations.push({ resolve, reject })
+    }),
+  }
+  const actualUseConfirmDialog = loadUseConfirmDialog({
+    t: key => key,
+    ElMessageBox,
+  })
   const scheduledTaskApi = {
     list: async params => {
       apiState.listRequests.push({ ...params })
@@ -54,7 +69,13 @@ const createHarness = (options = {}) => {
         ? options.updateHandler(request)
         : { data: { data: { status: payload.status, next_run_at: null } } }
     },
-    delete: async () => ({ data: { data: {} } }),
+    delete: async id => {
+      const request = { id }
+      apiState.deleteRequests.push(request)
+      return options.deleteHandler
+        ? options.deleteHandler(request)
+        : { data: { data: {} } }
+    },
   }
   const context = vm.createContext({
     ref,
@@ -62,25 +83,38 @@ const createHarness = (options = {}) => {
     computed,
     useI18n: () => ({ t: key => key }),
     ElMessage,
-    ElMessageBox: { confirm: async () => 'confirm' },
+    useConfirmDialog: actualUseConfirmDialog,
     chatApi: { sessionsList: async () => ({ data: { data: [] } }) },
     scheduledTaskApi,
     onMounted: callback => mountedCallbacks.push(callback),
   })
 
   vm.runInContext(`${stripSingleLineImports(scriptMatch[1])}
-globalThis.__page = {
-  form,
-  showDialog,
-  buildPayload,
-  submitForm,
-  toggleStatus,
-  dialogVisible,
-  submitting
-}
+  globalThis.__page = {
+    form,
+    showDialog,
+    buildPayload,
+    submitForm,
+    toggleStatus,
+    deleteTask,
+    dialogVisible,
+    submitting
+  }
 `, context, { filename: 'ScheduledTasksView.vue?script-setup' })
 
-  return { apiState, messages, mountedCallbacks, page: context.__page }
+  return {
+    apiState,
+    messages,
+    mountedCallbacks,
+    confirmationCalls,
+    page: context.__page,
+    settleConfirmation: (action = 'confirm') => {
+      const pending = pendingConfirmations.shift()
+      assert.ok(pending, 'a confirmation must be pending')
+      if (action === 'confirm') pending.resolve()
+      else pending.reject(action)
+    },
+  }
 }
 
 test('defaults and reset use repeating mode; edit loads one-time and legacy rows as repeating', () => {
@@ -247,6 +281,73 @@ test('failed create and edit retain the form and dialog and release submitting s
     assert.equal(apiState.createRequests.length, type === 'create' ? 1 : 0)
     assert.equal(apiState.updateRequests.length, type === 'edit' ? 1 : 0)
   }
+})
+
+test('deleteTask waits for confirmation, deletes the correct id, and refreshes on success', async () => {
+  const { apiState, messages, confirmationCalls, page, settleConfirmation } = createHarness()
+  const deletion = page.deleteTask({ id: 12, name: 'Task to delete' })
+
+  assert.deepEqual(apiState.deleteRequests, [])
+  assert.deepEqual(apiState.listRequests, [])
+  assert.equal(confirmationCalls.length, 1)
+
+  const confirmation = confirmationCalls[0]
+  const html = await renderToString(confirmation.message)
+  assert.match(html, /<p class="confirm-dialog-content__message">scheduledTasks\.delete_confirm<\/p>/)
+  assert.equal(confirmation.title, 'common.warning')
+  assert.equal(confirmation.options.confirmButtonText, 'common.confirm')
+  assert.equal(confirmation.options.cancelButtonText, 'common.cancel')
+  assert.equal(confirmation.options.customClass, 'app-confirm-dialog')
+
+  settleConfirmation()
+  await deletion
+
+  assert.deepEqual(apiState.deleteRequests, [{ id: 12 }])
+  assert.deepEqual(apiState.listRequests, [{ page: 1, size: 20 }])
+  assert.deepEqual(messages, [{ type: 'success', value: 'scheduledTasks.delete_success' }])
+})
+
+test('cancelled or closed delete confirmations have no side effects', async () => {
+  for (const action of ['cancel', 'close']) {
+    const { apiState, messages, page, settleConfirmation } = createHarness()
+    const deletion = page.deleteTask({ id: 13, name: `Task ${action}` })
+
+    assert.deepEqual(apiState.deleteRequests, [])
+    settleConfirmation(action)
+    await deletion
+
+    assert.deepEqual(apiState.deleteRequests, [])
+    assert.deepEqual(apiState.listRequests, [])
+    assert.deepEqual(messages, [])
+  }
+})
+
+test('confirmation and delete API failures show errors without refreshing', async () => {
+  const confirmationFailure = new Error('confirmation failed')
+  const confirmationHarness = createHarness()
+  const failedConfirmation = confirmationHarness.page.deleteTask({ id: 14 })
+  confirmationHarness.settleConfirmation(confirmationFailure)
+  await failedConfirmation
+
+  assert.deepEqual(confirmationHarness.apiState.deleteRequests, [])
+  assert.deepEqual(confirmationHarness.apiState.listRequests, [])
+  assert.deepEqual(confirmationHarness.messages, [
+    { type: 'error', value: confirmationFailure.message },
+  ])
+
+  const deleteFailure = new Error('delete failed')
+  const deleteHarness = createHarness({
+    deleteHandler: async () => { throw deleteFailure },
+  })
+  const failedDelete = deleteHarness.page.deleteTask({ id: 15 })
+  deleteHarness.settleConfirmation()
+  await failedDelete
+
+  assert.deepEqual(deleteHarness.apiState.deleteRequests, [{ id: 15 }])
+  assert.deepEqual(deleteHarness.apiState.listRequests, [])
+  assert.deepEqual(deleteHarness.messages, [
+    { type: 'error', value: deleteFailure.message },
+  ])
 })
 
 test('toggleStatus only applies server status and next_run_at, preserving username; failures leave the row unchanged', async () => {

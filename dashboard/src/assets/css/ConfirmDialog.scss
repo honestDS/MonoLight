@@ -1,0 +1,54 @@
+.app-confirm-dialog {
+  .el-message-box__content {
+    max-height: calc(100vh - 200px);
+    overflow-y: auto;
+  }
+
+  .el-message-box__container {
+    align-items: flex-start;
+  }
+
+  .el-message-box__status {
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .el-message-box__message {
+    min-width: 0;
+  }
+
+  .confirm-dialog-content {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+
+    &__message {
+      margin: 0;
+    }
+
+    &__section {
+      min-width: 0;
+    }
+
+    &__summary {
+      margin: 0;
+      font-weight: 500;
+    }
+
+    &__items {
+      display: grid;
+      gap: 3px;
+      margin: 4px 0 0;
+      color: var(--color-text-regular);
+      font-size: 13px;
+    }
+
+    &__more {
+      margin: 4px 0 0;
+      color: var(--color-text-regular);
+      font-size: 12px;
+    }
+  }
+}

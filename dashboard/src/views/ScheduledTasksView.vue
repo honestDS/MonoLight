@@ -96,12 +96,14 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { chatApi, scheduledTaskApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
+import { useConfirmDialog } from '../composables/useConfirmDialog.js'
 
 const { t } = useI18n()
+const { confirm } = useConfirmDialog()
 
 const tasks = ref([])
 const loading = ref(false)
@@ -250,11 +252,12 @@ const toggleStatus = async (row) => {
 
 const deleteTask = async (row) => {
   try {
-    await ElMessageBox.confirm(t('scheduledTasks.delete_confirm'), t('common.warning'), {
+    if (!await confirm({
+      message: t('scheduledTasks.delete_confirm'),
+      title: t('common.warning'),
       confirmButtonText: t('common.confirm'),
-      cancelButtonText: t('common.cancel'),
-      type: 'warning'
-    })
+      cancelButtonText: t('common.cancel')
+    })) return
     await scheduledTaskApi.delete(row.id)
     ElMessage.success(t('scheduledTasks.delete_success'))
     loadTasks()

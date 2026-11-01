@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,11 +13,14 @@ from fastapi import FastAPI
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import app.core.background_tasks.scheduler as scheduler_module
 import app.models  # noqa: F401
 from app.api.v1.profile import router
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.security import get_current_user
+from app.core.utils.time import get_local_time
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
@@ -24,11 +28,17 @@ from app.models.knowledge_base import (
     KnowledgeBaseProfileBinding,
     KnowledgeBaseType,
 )
-from app.models.message import Message, MessageRole
+from app.models.message import Message, MessageRole, MessageType
 from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.profile import Profile
 from app.models.scheduled_task import ScheduledTask
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import (
+    SessionReplySourceType,
+    SessionReplyWorkItem,
+    SessionReplyWorkStatus,
+    SessionReplyWorkType,
+)
 from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
 
@@ -127,7 +137,6 @@ async def _seed_profile_delete_case(
             name="Delete scheduled task",
             uid=session.uid,
             session_id=session.session_id,
-            profile_id=target_profile.id,
             message="scheduled message",
             interval_seconds=60,
         )
@@ -178,6 +187,48 @@ async def test_profile_delete_requires_fresh_impact_confirmation_and_cleans_boun
     app, session_factory, _current_user = profile_delete_api
     target_profile_id, default_profile_id, platform_id, knowledge_base_id = await _seed_profile_delete_case(session_factory)
 
+    async with session_factory() as db:
+        db.add_all(
+            [
+                SessionReplyWorkItem(
+                    uid="profile-delete-user",
+                    session_id="profile-delete-session-1",
+                    profile_id=target_profile_id,
+                    sequence_no=1,
+                    work_type=SessionReplyWorkType.AGENT_WORK,
+                    source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                    source_id="profile-delete-scheduled-run-ready",
+                    dedupe_key="profile-delete-scheduled-work-ready",
+                    status=SessionReplyWorkStatus.READY_FOR_LLM,
+                ),
+                SessionReplyWorkItem(
+                    uid="profile-delete-user",
+                    session_id="profile-delete-session-1",
+                    profile_id=target_profile_id,
+                    sequence_no=2,
+                    work_type=SessionReplyWorkType.AGENT_WORK,
+                    source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                    source_id="profile-delete-scheduled-run-running",
+                    dedupe_key="profile-delete-scheduled-work-running",
+                    status=SessionReplyWorkStatus.RUNNING,
+                    locked_by="profile-delete-scheduled-worker",
+                    lock_until=int(get_local_time().timestamp()) + 300,
+                ),
+                SessionReplyWorkItem(
+                    uid="profile-delete-user",
+                    session_id="profile-delete-session-1",
+                    profile_id=target_profile_id,
+                    sequence_no=3,
+                    work_type=SessionReplyWorkType.AGENT_WORK,
+                    source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                    source_id="profile-delete-scheduled-run-waiting",
+                    dedupe_key="profile-delete-scheduled-work-waiting",
+                    status=SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                ),
+            ]
+        )
+        await db.commit()
+
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
@@ -208,6 +259,16 @@ async def test_profile_delete_requires_fresh_impact_confirmation_and_cleans_boun
                     title="Override also deleted",
                 )
             )
+            await db.flush()
+            db.add(
+                ScheduledTask(
+                    name="Delete overridden scheduled task",
+                    uid="profile-delete-user",
+                    session_id="profile-delete-session-2",
+                    message="overridden scheduled message",
+                    interval_seconds=60,
+                )
+            )
             await db.commit()
 
         stale_confirmation = await client.post(
@@ -223,6 +284,7 @@ async def test_profile_delete_requires_fresh_impact_confirmation_and_cleans_boun
         refreshed = stale_payload["data"]
         assert refreshed["requires_confirmation"] is True
         assert refreshed["sessions"]["count"] == 2
+        assert refreshed["scheduled_tasks"]["count"] == 2
         assert refreshed["impact_token"] != first_token
 
         final_response = await client.post(
@@ -243,7 +305,8 @@ async def test_profile_delete_requires_fresh_impact_confirmation_and_cleans_boun
         assert await db.get(Profile, default_profile_id) is not None
         assert await db.scalar(select(func.count()).select_from(ChatSession).where(ChatSession.session_id.in_(("profile-delete-session-1", "profile-delete-session-2")))) == 0
         assert await db.scalar(select(func.count()).select_from(Message).where(Message.session_id == "profile-delete-session-1")) == 0
-        assert await db.scalar(select(func.count()).select_from(ScheduledTask).where(ScheduledTask.profile_id == target_profile_id)) == 0
+        assert await db.scalar(select(func.count()).select_from(ScheduledTask).where(ScheduledTask.session_id.in_(("profile-delete-session-1", "profile-delete-session-2")))) == 0
+        assert await db.scalar(select(func.count()).select_from(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == "profile-delete-session-1")) == 0
 
         platform = await db.get(MessagePlatform, platform_id)
         assert platform is not None
@@ -262,6 +325,291 @@ async def test_profile_delete_requires_fresh_impact_confirmation_and_cleans_boun
             )
             == 0
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "work_status",
+    [
+        SessionReplyWorkStatus.READY_FOR_LLM,
+        SessionReplyWorkStatus.RUNNING,
+        SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+    ],
+    ids=["ready", "running", "waiting-external-work"],
+)
+async def test_profile_delete_cancels_only_active_agent_work_for_deleted_profile_in_switched_session(
+    profile_delete_api,
+    work_status: SessionReplyWorkStatus,
+) -> None:
+    app, session_factory, _current_user = profile_delete_api
+    target_profile_id, default_profile_id, _platform_id, _knowledge_base_id = await _seed_profile_delete_case(session_factory)
+    target_worker_id = f"profile-delete-target-worker-{work_status.value}"
+    default_worker_id = f"profile-delete-default-worker-{work_status.value}"
+
+    async with session_factory() as db:
+        session = await db.get(ChatSession, "profile-delete-session-1")
+        task = (
+            await db.execute(
+                select(ScheduledTask).where(
+                    ScheduledTask.session_id == "profile-delete-session-1",
+                )
+            )
+        ).scalar_one()
+        assert session is not None
+        assert task.id is not None
+        session.profile_id = default_profile_id
+        session.profile_override_id = None
+        lock_until = int(get_local_time().timestamp()) + 300 if work_status == SessionReplyWorkStatus.RUNNING else None
+        db.add_all(
+            [
+                SessionReplyWorkItem(
+                    uid="profile-delete-user",
+                    session_id="profile-delete-session-1",
+                    profile_id=target_profile_id,
+                    sequence_no=1,
+                    work_type=SessionReplyWorkType.AGENT_WORK,
+                    source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                    source_id=f"profile-delete-cancel-target-{work_status.value}",
+                    dedupe_key=f"profile-delete-cancel-target-{work_status.value}",
+                    status=work_status,
+                    locked_by=target_worker_id if lock_until is not None else None,
+                    lock_until=lock_until,
+                ),
+                SessionReplyWorkItem(
+                    uid="profile-delete-user",
+                    session_id="profile-delete-session-1",
+                    profile_id=default_profile_id,
+                    sequence_no=2,
+                    work_type=SessionReplyWorkType.AGENT_WORK,
+                    source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                    source_id=f"profile-delete-cancel-default-{work_status.value}",
+                    dedupe_key=f"profile-delete-cancel-default-{work_status.value}",
+                    status=work_status,
+                    locked_by=default_worker_id if lock_until is not None else None,
+                    lock_until=lock_until,
+                ),
+                SessionReplyWorkItem(
+                    uid="profile-delete-user",
+                    session_id="profile-delete-session-1",
+                    profile_id=target_profile_id,
+                    sequence_no=3,
+                    work_type=SessionReplyWorkType.AGENT_WORK,
+                    source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                    source_id=f"profile-delete-cancel-succeeded-{work_status.value}",
+                    dedupe_key=f"profile-delete-cancel-succeeded-{work_status.value}",
+                    status=SessionReplyWorkStatus.SUCCEEDED,
+                ),
+            ]
+        )
+        await db.commit()
+
+    async with session_factory() as db:
+        session = await db.get(ChatSession, "profile-delete-session-1")
+        task = (
+            await db.execute(
+                select(ScheduledTask).where(
+                    ScheduledTask.session_id == "profile-delete-session-1",
+                )
+            )
+        ).scalar_one()
+        works = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == "profile-delete-session-1").order_by(SessionReplyWorkItem.sequence_no))).scalars().all())
+        assert session is not None
+        assert task.id is not None
+        assert len(works) == 3
+        target_work, default_work, succeeded_work = works
+        assert target_work.id is not None
+        assert default_work.id is not None
+        assert succeeded_work.id is not None
+        await db.refresh(session)
+        await db.refresh(task)
+        await db.refresh(target_work)
+        await db.refresh(default_work)
+        await db.refresh(succeeded_work)
+        task_id = task.id
+        target_work_id = target_work.id
+        default_work_id = default_work.id
+        succeeded_work_id = succeeded_work.id
+        session_snapshot = session.model_dump(mode="json")
+        task_snapshot = task.model_dump(mode="json")
+        default_work_snapshot = default_work.model_dump(mode="json")
+        succeeded_work_snapshot = succeeded_work.model_dump(mode="json")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        preview_response = await client.post(
+            "/api/v1/profiles/delete",
+            params={"profile_id": target_profile_id},
+        )
+        preview_payload = preview_response.json()
+        assert preview_response.status_code == 200
+        assert preview_payload["code"] == 200
+        preview = preview_payload["data"]
+        assert preview["requires_confirmation"] is True
+        assert preview["sessions"]["count"] == 0
+        assert preview["scheduled_tasks"]["count"] == 0
+
+        final_response = await client.post(
+            "/api/v1/profiles/delete",
+            params={
+                "profile_id": target_profile_id,
+                "confirm_impact": "true",
+                "impact_token": preview["impact_token"],
+            },
+        )
+        final_payload = final_response.json()
+        assert final_response.status_code == 200
+        assert final_payload["code"] == 200
+        assert final_payload["data"] == {"requires_confirmation": False}
+
+    async with session_factory() as db:
+        assert await db.get(Profile, target_profile_id) is None
+        persisted_session = await db.get(ChatSession, "profile-delete-session-1")
+        persisted_task = await db.get(ScheduledTask, task_id)
+        persisted_target_work = await db.get(SessionReplyWorkItem, target_work_id)
+        persisted_default_work = await db.get(SessionReplyWorkItem, default_work_id)
+        persisted_succeeded_work = await db.get(SessionReplyWorkItem, succeeded_work_id)
+        assert persisted_session is not None
+        assert persisted_session.model_dump(mode="json") == session_snapshot
+        assert persisted_task is not None
+        assert persisted_task.model_dump(mode="json") == task_snapshot
+        assert persisted_target_work is not None
+        assert persisted_target_work.status == SessionReplyWorkStatus.CANCELLED
+        assert persisted_target_work.profile_id == target_profile_id
+        assert persisted_target_work.locked_by is None
+        assert persisted_target_work.lock_until is None
+        assert persisted_target_work.result_message_id is None
+        assert persisted_default_work is not None
+        assert persisted_default_work.model_dump(mode="json") == default_work_snapshot
+        assert persisted_succeeded_work is not None
+        assert persisted_succeeded_work.model_dump(mode="json") == succeeded_work_snapshot
+
+        if work_status == SessionReplyWorkStatus.RUNNING:
+            assert await session_reply_work_item_crud.get_active_claims(
+                db,
+                {
+                    target_work_id: target_worker_id,
+                    default_work_id: default_worker_id,
+                },
+            ) == {(default_work_id, default_worker_id)}
+        elif work_status == SessionReplyWorkStatus.READY_FOR_LLM:
+            claimed = await session_reply_work_item_crud.claim_next(
+                db,
+                worker_id="profile-delete-claim-worker",
+                lease_seconds=300,
+            )
+            assert claimed is not None
+            assert claimed.id == default_work_id
+            assert claimed.profile_id == default_profile_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_once", [False, True], ids=["recurring", "one-time"])
+async def test_profile_delete_preserves_switched_session_task_and_dispatches_with_default_profile(
+    profile_delete_api,
+    run_once: bool,
+) -> None:
+    app, session_factory, _current_user = profile_delete_api
+    target_profile_id, default_profile_id, _platform_id, _knowledge_base_id = await _seed_profile_delete_case(session_factory)
+
+    async with session_factory() as db:
+        session = await db.get(ChatSession, "profile-delete-session-1")
+        task = (
+            await db.execute(
+                select(ScheduledTask).where(
+                    ScheduledTask.session_id == "profile-delete-session-1",
+                )
+            )
+        ).scalar_one()
+        assert session is not None
+        assert task.id is not None
+        session.profile_id = default_profile_id
+        session.profile_override_id = None
+        task.run_once = run_once
+        await db.commit()
+        await db.refresh(session)
+        await db.refresh(task)
+        task_id = task.id
+        task_snapshot = task.model_dump(mode="json")
+        session_snapshot = session.model_dump(mode="json")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        preview_response = await client.post(
+            "/api/v1/profiles/delete",
+            params={"profile_id": target_profile_id},
+        )
+        preview_payload = preview_response.json()
+        assert preview_response.status_code == 200
+        assert preview_payload["code"] == 200
+        preview = preview_payload["data"]
+        assert preview["requires_confirmation"] is True
+        assert preview["sessions"]["count"] == 0
+        assert preview["scheduled_tasks"]["count"] == 0
+
+        final_response = await client.post(
+            "/api/v1/profiles/delete",
+            params={
+                "profile_id": target_profile_id,
+                "confirm_impact": "true",
+                "impact_token": preview["impact_token"],
+            },
+        )
+        final_payload = final_response.json()
+        assert final_response.status_code == 200
+        assert final_payload["code"] == 200
+        assert final_payload["data"] == {"requires_confirmation": False}
+
+    async with session_factory() as db:
+        assert await db.get(Profile, target_profile_id) is None
+        persisted_session = await db.get(ChatSession, "profile-delete-session-1")
+        persisted_task = await db.get(ScheduledTask, task_id)
+        assert persisted_session is not None
+        assert persisted_session.model_dump(mode="json") == session_snapshot
+        assert persisted_task is not None
+        assert persisted_task.model_dump(mode="json") == task_snapshot
+
+        persisted_task.next_run_at = get_local_time() - timedelta(seconds=1)
+        await db.commit()
+        await db.refresh(persisted_task)
+        await scheduler_module.ScheduledTaskScheduler()._dispatch_one_with_db(db, persisted_task)
+
+    async with session_factory() as db:
+        trigger_messages = list(
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == "profile-delete-session-1",
+                        Message.type == MessageType.SCHEDULED_TASK_TRIGGER,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(trigger_messages) == 1
+        trigger_message = trigger_messages[0]
+        assert trigger_message.profile_id == default_profile_id
+        assert trigger_message.id is not None
+
+        work_items = list(
+            (
+                await db.execute(
+                    select(SessionReplyWorkItem).where(
+                        SessionReplyWorkItem.session_id == "profile-delete-session-1",
+                        SessionReplyWorkItem.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(work_items) == 1
+        assert work_items[0].profile_id == default_profile_id
+        assert work_items[0].source_id == str(trigger_message.id)
 
 
 @pytest.mark.asyncio

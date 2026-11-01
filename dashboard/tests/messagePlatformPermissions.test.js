@@ -4,8 +4,10 @@ import test from 'node:test'
 import vm from 'node:vm'
 import { createPinia, setActivePinia } from 'pinia'
 import { effectScope, nextTick, reactive, ref } from 'vue'
+import { renderToString } from 'vue/server-renderer'
 import { useUserPermissionsStore } from '../src/composables/useUserPermissions.js'
 import { createMessagePlatformForm, loadMessagePlatformForm, buildMessagePlatformPayload, isValidMessagePlatformMaxTurns } from '../src/utils/messagePlatformForm.js'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const messagePlatformsViewSource = readFileSync(
   new URL('../src/views/MessagePlatformsView.vue', import.meta.url),
@@ -131,6 +133,8 @@ const createHarness = async (t, options = {}) => {
       return options.confirmSave ? options.confirmSave(...args) : Promise.resolve()
     },
   }
+  const translate = key => String(key)
+  const actualUseConfirmDialog = loadUseConfirmDialog({ t: translate, ElMessageBox })
 
   const scope = effectScope()
   const context = vm.createContext({
@@ -155,7 +159,8 @@ const createHarness = async (t, options = {}) => {
       return timerCalls.length
     },
     useDeleteConfirm: () => ({ handleDelete: async () => {} }),
-    useI18n: () => ({ t: key => String(key) }),
+    useConfirmDialog: actualUseConfirmDialog,
+    useI18n: () => ({ t: translate }),
     useUserPermissionsStore,
     nextTick,
   })
@@ -522,6 +527,17 @@ test('platform edit waits for confirmation and cancel or close can be retried', 
   const update = harness.module.submitForm()
 
   assert.equal(harness.confirmCalls.length, 1)
+  const [confirmationMessage, confirmationTitle, confirmationOptions] = harness.confirmCalls[0]
+  const confirmationHtml = await renderToString(confirmationMessage)
+  assert.match(
+    confirmationHtml,
+    /<p class="confirm-dialog-content__message">messagePlatforms\.overwrite_settings_confirm<\/p>/,
+  )
+  assert.equal(confirmationTitle, 'messagePlatforms.overwrite_settings_title')
+  assert.equal(confirmationOptions.confirmButtonText, 'messagePlatforms.continue_save')
+  assert.equal(confirmationOptions.cancelButtonText, 'common.cancel')
+  assert.equal(confirmationOptions.customClass, 'app-confirm-dialog')
+  assert.equal(confirmationOptions.closeOnClickModal, false)
   assert.equal(harness.module.submitting.value, true)
   assert.equal(harness.api.platformUpdates.length, 0)
 
@@ -569,4 +585,23 @@ test('platform edit waits for confirmation and cancel or close can be retried', 
     assert.equal(harness.api.platformUpdates.length, updatesBefore + 1)
     assert.equal(harness.module.dialogVisible.value, false)
   }
+
+  const confirmationError = new Error('confirmation failed')
+  const failedHarness = await createHarness(t, {
+    confirmSave: () => Promise.reject(confirmationError),
+  })
+  failedHarness.module.handleEdit(row)
+  const formBeforeFailedConfirmation = normalize(failedHarness.module.form)
+  await failedHarness.module.submitForm()
+  await flush()
+
+  assert.equal(failedHarness.api.platformUpdates.length, 0)
+  assert.equal(failedHarness.api.platformList.length, 0)
+  assert.deepEqual(normalize(failedHarness.module.form), formBeforeFailedConfirmation)
+  assert.equal(failedHarness.module.dialogVisible.value, true)
+  assert.equal(failedHarness.module.submitting.value, false)
+  assert.deepEqual(
+    failedHarness.messages.filter(message => message.type === 'error').map(message => message.args[0]),
+    [confirmationError.message],
+  )
 })

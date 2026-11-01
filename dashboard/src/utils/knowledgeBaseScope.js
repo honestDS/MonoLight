@@ -22,8 +22,8 @@ export function createKnowledgeBaseScope({
     })
 
     try {
-      await Promise.race([confirm(message, title, options), invalidated])
-      return isCurrent()
+      const confirmed = await Promise.race([confirm(message, title, options), invalidated])
+      return confirmed === true && isCurrent()
     } catch (error) {
       if (!isCurrent() || error === 'cancel' || error === 'close') {
         return false

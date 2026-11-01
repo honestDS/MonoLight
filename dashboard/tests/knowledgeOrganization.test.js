@@ -4,12 +4,14 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { computed, effectScope, ref } from 'vue'
 import { createI18n } from 'vue-i18n'
+import { renderToString } from 'vue/server-renderer'
 
 import * as knowledgeBaseManagement from '../src/utils/knowledgeBaseManagement.js'
 import { createKnowledgeBaseScope } from '../src/utils/knowledgeBaseScope.js'
 import * as requestTaskManager from '../src/utils/requestTaskManager.js'
 import zhKnowledgeBase from '../src/i18n/locales/zh/knowledgeBase.js'
 import enKnowledgeBase from '../src/i18n/locales/en/knowledgeBase.js'
+import { loadUseConfirmDialog } from './confirmDialogHarness.js'
 
 const useKnowledgeOrganizationSource = readFileSync(
   new URL('../src/composables/knowledgeBase/useKnowledgeOrganization.js', import.meta.url),
@@ -39,6 +41,7 @@ const stripModuleSyntax = sourceText => stripImports(sourceText).replace(/\bexpo
 const useKnowledgeOrganizationScript = stripModuleSyntax(useKnowledgeOrganizationSource)
 const dataResponse = data => ({ data: { data } })
 const normalize = value => JSON.parse(JSON.stringify(value))
+const toHostObject = value => Object.fromEntries(Object.entries(value))
 const deferred = () => {
   let resolve
   let reject
@@ -70,6 +73,7 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
   const organizes = []
   const organizationJobs = []
   const retries = []
+  const cancels = []
   const refreshed = []
   const scheduled = []
   const messages = []
@@ -89,6 +93,10 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
       retries.push({ selectedId, jobId })
       return Promise.resolve(dataResponse({}))
     },
+    cancelOrganizationJob: (selectedId, jobId) => {
+      cancels.push({ selectedId, jobId })
+      return Promise.resolve(dataResponse({}))
+    },
   }
   const ElMessage = {}
   for (const type of ['success', 'error']) ElMessage[type] = (...args) => messages.push({ type, args })
@@ -98,6 +106,7 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
       const result = typeof options.confirm === 'function'
         ? await options.confirm(...args)
         : options.confirm ?? true
+      if (result === 'cancel' || result === 'close') throw result
       if (!result) throw 'cancel'
       return 'confirm'
     },
@@ -107,13 +116,26 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
     locale: options.locale ?? 'zh',
     messages: { zh: { knowledgeBase: zhKnowledgeBase }, en: { knowledgeBase: enKnowledgeBase } },
   })
+  const translate = (...args) => i18n.global.t(
+    ...args.map(value => (
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? toHostObject(value)
+        : value
+    )),
+  )
+  const actualUseConfirmDialog = loadUseConfirmDialog({ t: translate, ElMessageBox })
+  const { confirm: confirmDialog } = actualUseConfirmDialog()
   const fetchManagedKnowledgeItems = (...args) => {
     refreshed.push(args)
     return Promise.resolve()
   }
   const scheduleManagedKnowledgePolling = (...args) => scheduled.push(args)
   const scope = createKnowledgeBaseScope({
-    confirm: (...args) => ElMessageBox.confirm(...args),
+    confirm: (message, title, options) => confirmDialog({
+      message,
+      title,
+      ...(options ? toHostObject(options) : {})
+    }),
     closeConfirmations: () => {},
   })
   const vueEffectScope = effectScope()
@@ -130,7 +152,7 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
     selectedKb,
     scope,
     setTimeout: (...args) => (timers.push(args), timers.length),
-    t: (...args) => i18n.global.t(...args),
+    t: translate,
     ...knowledgeBaseManagement,
     ...requestTaskManager,
     console: { log() {}, warn() {}, error() {}, info() {} },
@@ -142,7 +164,7 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
     { filename: 'useKnowledgeOrganization.js' },
   ))
   const harness = {
-    api: { organizes, organizationJobs, retries },
+    api: { organizes, organizationJobs, retries, cancels },
     confirms,
     messages,
     module: context.__module,
@@ -150,6 +172,7 @@ const createKnowledgeOrganizationHarness = async (t, options = {}) => {
     scheduled,
     selectedKb,
     scope,
+    t: translate,
     timers,
     dispose: () => {
       scope.invalidate()
@@ -235,7 +258,13 @@ test('retries failed and cancelled jobs when the server allows it', async t => {
         confirmButtonText: locale === 'zh' ? '重试整理' : 'Retry Organization',
         cancelButtonText: locale === 'zh' ? '取消' : 'Cancel',
         type: 'warning',
+        showCancelButton: true,
+        dangerouslyUseHTMLString: false,
+        customClass: 'app-confirm-dialog',
+        closeOnClickModal: true,
       })
+      const retryHtml = await renderToString(harness.confirms[0][0])
+      assert.ok(retryHtml.includes(harness.t('knowledgeBase.organization_retry_confirm')))
       assert.equal(
         harness.messages[harness.messages.length - 1].args[0],
         locale === 'zh' ? '整理作业已重新提交' : 'Organization job retried',
@@ -243,6 +272,119 @@ test('retries failed and cancelled jobs when the server allows it', async t => {
       assert.deepEqual(harness.refreshed, [[true, true]])
       assert.equal(harness.module.organizationActionJobId.value, null)
     }
+  }
+})
+
+test('does not retry after confirmation cancel or close and can retry again', async t => {
+  for (const action of ['cancel', 'close']) {
+    const selectedKb = { id: `managed-${action}`, knowledge_base_type: 'llm_managed' }
+    const job = {
+      id: `organization-${action}`,
+      knowledge_base_id: selectedKb.id,
+      status: 'failed',
+      can_retry: true,
+    }
+    const actions = [action, true]
+    const harness = await createKnowledgeOrganizationHarness(t, {
+      selectedKb,
+      confirm: () => actions.shift(),
+    })
+
+    await harness.module.handleRetryOrganizationJob(job)
+
+    assert.deepEqual(normalize(harness.api.retries), [])
+    assert.deepEqual(harness.refreshed, [])
+    assert.deepEqual(harness.messages, [])
+    assert.equal(harness.module.organizationActionJobId.value, null)
+
+    await harness.module.handleRetryOrganizationJob(job)
+
+    assert.deepEqual(normalize(harness.api.retries), [{ selectedId: selectedKb.id, jobId: job.id }])
+    assert.deepEqual(harness.refreshed, [[true, true]])
+    assert.equal(harness.confirms.length, 2)
+    assert.equal(harness.messages.at(-1).args[0], '整理作业已重新提交')
+  }
+})
+
+test('cancels eligible organization jobs through the shared confirmation', async t => {
+  for (const locale of ['zh', 'en']) {
+    for (const status of ['pending', 'running', 'retry']) {
+      const selectedKb = { id: `managed-${locale}-${status}`, knowledge_base_type: 'llm_managed' }
+      const job = {
+        id: `organization-${locale}-${status}`,
+        knowledge_base_id: selectedKb.id,
+        status,
+      }
+      const harness = await createKnowledgeOrganizationHarness(t, { locale, selectedKb })
+      const cancellation = harness.module.handleCancelOrganizationJob(job)
+
+      assert.deepEqual(normalize(harness.api.cancels), [])
+      assert.equal(harness.confirms.length, 1)
+      const cancelHtml = await renderToString(harness.confirms[0][0])
+      assert.ok(cancelHtml.includes(harness.t('knowledgeBase.organization_cancel_confirm')))
+      assert.equal(
+        harness.confirms[0][2].confirmButtonText,
+        harness.t('knowledgeBase.organization_cancel'),
+      )
+      assert.equal(harness.confirms[0][2].cancelButtonText, harness.t('knowledgeBase.cancel'))
+
+      await cancellation
+
+      assert.deepEqual(normalize(harness.api.cancels), [{ selectedId: selectedKb.id, jobId: job.id }])
+      assert.deepEqual(harness.refreshed, [[true, true]])
+      assert.equal(
+        harness.messages.at(-1).args[0],
+        locale === 'zh' ? '整理作业已取消' : 'Organization job cancelled',
+      )
+    }
+  }
+})
+
+test('does not cancel after confirmation cancel or close', async t => {
+  for (const action of ['cancel', 'close']) {
+    const selectedKb = { id: `managed-cancel-${action}`, knowledge_base_type: 'llm_managed' }
+    const job = {
+      id: `organization-cancel-${action}`,
+      knowledge_base_id: selectedKb.id,
+      status: 'running',
+    }
+    const harness = await createKnowledgeOrganizationHarness(t, {
+      selectedKb,
+      confirm: () => action,
+    })
+
+    await harness.module.handleCancelOrganizationJob(job)
+
+    assert.deepEqual(normalize(harness.api.cancels), [])
+    assert.deepEqual(harness.refreshed, [])
+    assert.deepEqual(harness.messages, [])
+  }
+})
+
+test('rechecks cancellation eligibility after confirmation and scope invalidation', async t => {
+  for (const guard of ['status', 'scope']) {
+    const pending = deferred()
+    const selectedKb = { id: `managed-cancel-guard-${guard}`, knowledge_base_type: 'llm_managed' }
+    const job = {
+      id: `organization-cancel-guard-${guard}`,
+      knowledge_base_id: selectedKb.id,
+      status: 'running',
+    }
+    const harness = await createKnowledgeOrganizationHarness(t, {
+      selectedKb,
+      confirm: () => pending.promise,
+    })
+    const cancellation = harness.module.handleCancelOrganizationJob(job)
+
+    assert.deepEqual(normalize(harness.api.cancels), [])
+    if (guard === 'status') job.status = 'succeeded'
+    else harness.scope.invalidate()
+    pending.resolve(true)
+    await cancellation
+
+    assert.deepEqual(normalize(harness.api.cancels), [])
+    assert.deepEqual(harness.refreshed, [])
+    assert.deepEqual(harness.messages, [])
   }
 })
 

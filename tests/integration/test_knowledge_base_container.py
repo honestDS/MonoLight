@@ -27,6 +27,7 @@ from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.scheduled_task import ScheduledTask
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import SessionReplyWorkItem
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -37,6 +38,7 @@ _TABLES = (
     KnowledgeBaseProfileBinding.__table__,
     ManagedKnowledgeItem.__table__,
     ChatSession.__table__,
+    SessionReplyWorkItem.__table__,
     Message.__table__,
     ScheduledTask.__table__,
     MessagePlatform.__table__,
