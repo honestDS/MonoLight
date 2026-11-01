@@ -356,6 +356,7 @@ async def _seed_work(
                 status=BackgroundTaskStatus.SUCCEEDED,
                 arguments={"prompt": "keep"},
                 result=task_result,
+                extra={"request_context": [InternalMessage(role=MessageRole.USER, content=content).model_dump(mode="json", include={"role", "content"})]},
                 auto_reply=True,
                 reply_status=BackgroundTaskReplyStatus.RUNNING,
             )

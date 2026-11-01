@@ -731,6 +731,7 @@ async def test_real_channel_fallback_preserves_persisted_provider_state(
                 session_total_output_tokens=0,
                 execution_phase=GOAL_EXECUTION_PHASE_RUNNING,
             ),
+            context_frozen=False,
             context_summary_work_validity_checker=None,
             context_summary_lifecycle_callback=None,
             chat_params={
@@ -871,6 +872,7 @@ def _build_reasoning_effort_state(
             session_total_output_tokens=0,
             execution_phase=GOAL_EXECUTION_PHASE_RUNNING,
         ),
+        context_frozen=False,
         context_summary_work_validity_checker=None,
         context_summary_lifecycle_callback=None,
         chat_params={

@@ -12,7 +12,7 @@ from app.core.audit.integrity import build_tool_round_integrity_snapshot, serial
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.audit.startup import recover_and_cleanup_audit_data
 from app.core.audit.storage import AuditCleanupResult
-from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER
+from app.core.constants import END_SESSION_SCOPE_FOREGROUND, ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.task.background import background_task_crud
@@ -75,6 +75,7 @@ async def _create_preparing(session, tmp_path, tool_count=2):
         session_id="session-1",
         source="web",
         language="zh",
+        execution_scope=END_SESSION_SCOPE_FOREGROUND,
         source_assistant_message_id=10,
         working_directory=str(tmp_path),
         round_arguments_hash=snapshot.round_sha256,

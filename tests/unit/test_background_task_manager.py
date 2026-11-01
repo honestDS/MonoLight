@@ -140,6 +140,7 @@ async def test_submit_allows_empty_request_context(monkeypatch, messages, expect
     assert create_kwargs["extra"] == {
         "allowed_knowledge_base_ids": [4, 9],
         "source": "background-test",
+        "reply_mode": "summary",
         "request_context": [],
         "purpose": expected_purpose,
     }

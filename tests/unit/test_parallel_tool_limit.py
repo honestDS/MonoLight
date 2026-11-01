@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import app.core.dispatchers.interactive_tools as interactive_tools
+from app.core.constants import END_SESSION_SCOPE_FOREGROUND
 from app.core.prompts import ERR_PARALLEL_LIMIT_EXCEEDED
 from app.core.tools.background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA
 from app.core.tools.todo import MANAGE_TODO_TOOL_NAME, MANAGE_TODO_TOOL_SCHEMA, ManageTodoExecutor
@@ -34,6 +35,7 @@ def _state(tool_limit: int = 5, tools: list[dict] | None = None) -> SimpleNamesp
         session_id="session",
         active_tasks=set(),
         session_source="test",
+        execution_scope=END_SESSION_SCOPE_FOREGROUND,
         chat_channel_obj=SimpleNamespace(id=1),
         goal_mode=False,
         final_message_dedupe_key=None,

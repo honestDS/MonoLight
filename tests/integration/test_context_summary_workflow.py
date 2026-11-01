@@ -530,6 +530,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             ),
             context_summary_work_validity_checker=None,
             context_summary_lifecycle_callback=None,
+            context_frozen=False,
             chat_params={
                 "temperature": None,
                 "top_p": None,

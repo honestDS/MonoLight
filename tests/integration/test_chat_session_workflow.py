@@ -1749,6 +1749,7 @@ async def test_session_list_loading_and_reply_running_follow_work_type_and_statu
         SessionReplyWorkType.FOREGROUND_REPLY: SessionReplySourceType.USER_MESSAGE,
         SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION: SessionReplySourceType.AUDIT_RECORD,
         SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY: SessionReplySourceType.BACKGROUND_TASK,
+        SessionReplyWorkType.BACKGROUND_TASK_RESUME: SessionReplySourceType.BACKGROUND_TASK,
         SessionReplyWorkType.AGENT_WORK: SessionReplySourceType.SCHEDULED_TASK_RUN,
     }
     interactive_work_types = {
