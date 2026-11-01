@@ -14,7 +14,7 @@ from app.core.utils.dispatcher.frozen_context import load_frozen_context_message
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
-from app.models.message import InternalMessage, MessageRole, decode_message_content
+from app.models.message import InternalMessage, MessageRole
 from app.models.session_reply_work_item import SessionReplyWorkItem
 
 __all__ = ["execute_agent_work", "load_agent_work_spec"]
@@ -34,22 +34,14 @@ async def _load_instruction_message(db, work: SessionReplyWorkItem, spec: AgentW
         return InternalMessage(role=MessageRole.USER, content=spec.instruction)
 
     message = await message_crud.get(db, message_id)
-    if (
-        message is None
-        or message.uid != work.uid
-        or message.session_id != work.session_id
-        or message.profile_id != work.profile_id
-        or message.role != MessageRole.USER
-    ):
+    if message is None or message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id or message.role != MessageRole.USER:
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
 
     parsed = parse_db_messages_to_internal([message])
     initial_message = next((item for item in parsed if item.role == MessageRole.USER), None)
     if initial_message is None:
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-    content = decode_message_content(message.content, message.content_format)
-    if not isinstance(content, str) or content != spec.instruction or initial_message.content != spec.instruction:
-        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+    initial_message.content = spec.instruction
     return initial_message
 
 

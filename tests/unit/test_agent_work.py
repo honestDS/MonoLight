@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.constants import END_SESSION_SCOPE_TASK
+from app.core.prompts import SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.session_reply_queue import executor_agent_work as executor_agent_work_module
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.message import Message, MessageRole, MessageType
@@ -27,8 +28,23 @@ def test_agent_work_spec_requires_parent_for_parent_report_target() -> None:
     assert spec.parent_work_id == 17
 
 
+@pytest.mark.parametrize(
+    "trigger_content",
+    [
+        pytest.param("send the resolved report file", id="contract-text"),
+        pytest.param("send the resolved report file\n", id="trailing-newline"),
+        pytest.param("\t\n send the resolved report file \n\t", id="surrounding-whitespace"),
+        pytest.param("send the draft report file", id="different-copy"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_agent_work_executes_with_empty_conversation_context(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_agent_work_executes_with_empty_conversation_context(
+    monkeypatch: pytest.MonkeyPatch,
+    trigger_content: str,
+) -> None:
+    environment_prompt = "scheduled environment"
+    guidance_prompt = "scheduled guidance"
+    attachments = ["reports/report.txt"]
     spec = AgentWorkSpec(
         instruction="send the resolved report file",
         execution_scope=END_SESSION_SCOPE_TASK,
@@ -55,7 +71,10 @@ async def test_agent_work_executes_with_empty_conversation_context(monkeypatch: 
         profile_id=work.profile_id,
         role=MessageRole.USER,
         type=MessageType.SCHEDULED_TASK_TRIGGER,
-        content=spec.instruction,
+        content=trigger_content,
+        environment_prompt=environment_prompt,
+        guidance_prompt=guidance_prompt,
+        attachments=attachments,
         is_processed=True,
     )
     captured = {}
@@ -81,10 +100,16 @@ async def test_agent_work_executes_with_empty_conversation_context(monkeypatch: 
     assert response["content"] == "done"
     assert captured["message"] == spec.instruction
     assert captured["initial_message"].content == spec.instruction
+    assert captured["initial_message"].id == trigger.id
+    assert captured["initial_message"].environment_prompt == environment_prompt
+    assert captured["initial_message"].guidance_prompt == guidance_prompt
+    assert captured["initial_message"].execution_guidance == SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
+    assert captured["initial_message"].attachments == attachments
     assert captured["execution_scope"] == END_SESSION_SCOPE_TASK
     assert captured["allow_additional_user_messages"] is False
     assert captured["frozen_context_messages"] == []
     assert captured["frozen_user_message_ids"] == [8]
+    assert captured["attachments"] == attachments
 
 
 @pytest.mark.asyncio
@@ -113,4 +138,3 @@ async def test_agent_work_rejects_unimplemented_parent_report_routing(monkeypatc
 
     with pytest.raises(RuntimeError):
         await executor_agent_work_module.execute_agent_work(object(), work, "worker-1")
-

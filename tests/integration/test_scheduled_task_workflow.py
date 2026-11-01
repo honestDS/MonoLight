@@ -42,7 +42,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
-from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
+from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
 from app.core.utils.context_summary import ContextSummaryTriggerMode
@@ -1727,12 +1727,22 @@ async def test_scheduled_task_mutation_waits_for_audit_confirmation(
     ],
     ids=["default-state", "saved-output-flags"],
 )
+@pytest.mark.parametrize(
+    "scheduled_message",
+    [
+        pytest.param("请生成报告并发送给用户", id="original"),
+        pytest.param(" \t请生成报告并发送给用户", id="leading-whitespace"),
+        pytest.param("请生成报告并发送给用户\n", id="trailing-newline"),
+        pytest.param("\t \n请生成报告并发送给用户 \t\r\n", id="surrounding-whitespace"),
+    ],
+)
 async def test_scheduled_task_execution_supports_multiround_and_send_file(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     saved_execution_state: dict[str, Any],
+    scheduled_message: str,
 ) -> None:
     report_file = tmp_path / "scheduled_report.txt"
     report_file.write_text("scheduled task report content", encoding="utf-8")
@@ -1785,7 +1795,7 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
         uid=UID,
         session_id=session_id,
         profile_id=PROFILE_ID,
-        message="请生成报告并发送给用户",
+        message=scheduled_message,
         interval_seconds=60,
         run_once=True,
         next_run_at=get_local_time() - timedelta(seconds=1),
@@ -1830,6 +1840,11 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
         calls.append(kwargs)
         turn = len(calls)
         if turn == 1:
+            user_messages = [message for message in kwargs["messages"] if message.role == MessageRole.USER]
+            assert len(user_messages) == 1
+            payload = json.loads(user_messages[0].content)
+            assert payload["user_message"] == scheduled_message.strip()
+            assert payload["execution_guidance"] == SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT.strip()
             return InternalResponse(
                 message=InternalMessage(
                     role=MessageRole.ASSISTANT,
@@ -1974,6 +1989,7 @@ async def test_scheduled_task_execution_supports_multiround_and_send_file(
 
     trigger_messages = [message for message in persisted_messages if message.type == MessageType.SCHEDULED_TASK_TRIGGER]
     assert len(trigger_messages) == 1
+    assert trigger_messages[0].content == scheduled_message
     assert trigger_messages[0].work_id == work_item.id
     tool_messages = [message for message in persisted_messages if message.type in {MessageType.TOOL_CALL, MessageType.TOOL_RESULT}]
     assert tool_messages
