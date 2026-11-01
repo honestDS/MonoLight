@@ -270,8 +270,8 @@ async def test_non_streaming_interactive_work_delegates_provider_usage_persisten
         await kwargs["request_metadata_callback"](request_metadata)
         return llm_response_payload()
 
-    async def persist_provider_usage(metadata, *, work, request_purpose):
-        persistence_calls.append((dict(metadata), work, request_purpose))
+    async def persist_provider_usage(metadata, *, work, request_purpose, update_session_context):
+        persistence_calls.append((dict(metadata), work, request_purpose, update_session_context))
         return None
 
     monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
@@ -299,10 +299,11 @@ async def test_non_streaming_interactive_work_delegates_provider_usage_persisten
     assert response == llm_response_payload()
     assert callable(dispatch_kwargs["request_metadata_callback"])
     assert len(persistence_calls) == 1
-    metadata, persisted_work, request_purpose = persistence_calls[0]
+    metadata, persisted_work, request_purpose, update_session_context = persistence_calls[0]
     assert metadata == request_metadata
     assert persisted_work is work
     assert request_purpose == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE
+    assert update_session_context is True
 
 
 @pytest.mark.asyncio

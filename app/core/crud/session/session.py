@@ -8,7 +8,12 @@ from app.core.crud.base import CRUDBase
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.session.source import default_show_tool_calls_for_source
-from app.core.utils.request_token_baseline import MAIN_DIALOGUE_REQUEST_PURPOSE
+from app.core.utils.request_token_baseline import (
+    MAIN_DIALOGUE_REQUEST_PURPOSE,
+    build_session_cache_metrics,
+    extract_session_total_output_tokens,
+    merge_session_cache_token_totals,
+)
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
@@ -288,6 +293,16 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         return list(result.scalars().all())
 
     async def get_by_session_id_for_update(self, db: AsyncSession, *, session_id: str, uid: str) -> ChatSession | None:
+        if db.get_bind().dialect.name == "sqlite":
+            await db.execute(
+                update(ChatSession)
+                .where(
+                    ChatSession.session_id == session_id,
+                    ChatSession.uid == uid,
+                )
+                .values(session_id=ChatSession.session_id)
+                .execution_options(synchronize_session=False)
+            )
         result = await db.execute(
             select(ChatSession)
             .where(
@@ -295,6 +310,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
                 ChatSession.uid == uid,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return result.scalars().first()
 
@@ -417,6 +433,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         uid: str,
         metadata: dict[str, Any],
         commit: bool = True,
+        update_context: bool = True,
     ) -> bool:
         if not isinstance(metadata, dict):
             return False
@@ -479,11 +496,11 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
                 return False
             if request_purpose != MAIN_DIALOGUE_REQUEST_PURPOSE:
                 return True
-        if metadata.get("input_tokens_source") == "estimated":
+        if update_context and metadata.get("input_tokens_source") == "estimated":
             return True
 
         work_sequence_no = metadata.get("work_sequence_no")
-        use_work_order = isinstance(work_sequence_no, int) and not isinstance(work_sequence_no, bool) and work_sequence_no > 0
+        use_work_order = update_context and isinstance(work_sequence_no, int) and not isinstance(work_sequence_no, bool) and work_sequence_no > 0
         event_sequence_no = 0
         if use_work_order:
             event_sequence_no = metadata.get("event_sequence_no", 0)
@@ -492,11 +509,48 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             persisted_metadata["work_sequence_no"] = work_sequence_no
             persisted_metadata["event_sequence_no"] = event_sequence_no
 
+        session = await self.get_by_session_id_for_update(
+            db,
+            session_id=session_id,
+            uid=uid,
+        )
+        if session is None:
+            return False
+
+        current_metadata = session.llm_request_metadata if isinstance(session.llm_request_metadata, dict) else {}
+        has_cache_totals = any(field in metadata or field in current_metadata for field in ("total_input_tokens", "total_cached_tokens"))
+        if has_cache_totals:
+            total_input_tokens, total_cached_tokens = merge_session_cache_token_totals(
+                current_metadata,
+                total_input_tokens=metadata.get("total_input_tokens", 0),
+                total_cached_tokens=metadata.get("total_cached_tokens", 0),
+            )
+            cache_metrics = build_session_cache_metrics(total_input_tokens, total_cached_tokens)
+        else:
+            cache_metrics = {}
+
+        has_total_output_tokens = "total_output_tokens" in metadata or "total_output_tokens" in current_metadata
+        if has_total_output_tokens:
+            total_output_tokens = max(
+                extract_session_total_output_tokens(current_metadata),
+                metadata.get("total_output_tokens", 0),
+            )
+        else:
+            total_output_tokens = None
+
+        if update_context:
+            metadata_to_persist = persisted_metadata
+        else:
+            metadata_to_persist = dict(current_metadata)
+        metadata_to_persist.update(cache_metrics)
+        if total_output_tokens is not None:
+            metadata_to_persist["total_output_tokens"] = total_output_tokens
+
         stmt = update(ChatSession).where(
             ChatSession.session_id == session_id,
             ChatSession.uid == uid,
         )
-        values = {"llm_request_metadata": persisted_metadata}
+        values = {"llm_request_metadata": metadata_to_persist}
         if use_work_order:
             stmt = stmt.where(
                 or_(

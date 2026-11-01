@@ -133,6 +133,7 @@ class StreamDispatcherMixin:
         execution_scope: str | None = None,
         frozen_context_messages: list[InternalMessage] | None = None,
         call_context: str | None = None,
+        request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=100)
         response_state: dict[str, str | None] = {"latest_response_id": None}
@@ -167,6 +168,7 @@ class StreamDispatcherMixin:
             "additional_user_messages_fetcher": additional_user_messages_fetcher,
             "execution_resume_state": execution_resume_state,
             "execution_checkpoint_callback": execution_checkpoint_callback,
+            "request_metadata_callback": request_metadata_callback,
             "context_summary_work_validity_checker": context_summary_work_validity_checker,
             "expose_tool_call_content": expose_tool_call_content,
             "show_tool_calls": show_tool_calls,

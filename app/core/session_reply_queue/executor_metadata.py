@@ -73,6 +73,7 @@ async def _persist_session_reply_provider_usage(
     *,
     work: SessionReplyWorkItem,
     request_purpose: SessionReplyProviderRequestPurpose,
+    update_session_context: bool = True,
 ) -> _ProviderUsagePersistenceResult | None:
     provider_usage = extract_provider_request_usage(metadata)
     if provider_usage is None:
@@ -122,7 +123,9 @@ async def _persist_session_reply_provider_usage(
             new_total_output_tokens += output_tokens
         if request_purpose.contributes_to_session_totals:
             incoming_metadata = _metadata_with_work_order(work, _without_provider_usage_fields(metadata))
-            if _incoming_work_metadata_is_current(session, work, incoming_metadata):
+            if not update_session_context:
+                metadata_to_persist = incoming_metadata
+            elif _incoming_work_metadata_is_current(session, work, incoming_metadata):
                 metadata_to_persist = incoming_metadata
             else:
                 current_metadata = session.llm_request_metadata
@@ -139,6 +142,7 @@ async def _persist_session_reply_provider_usage(
                 uid=work.uid,
                 metadata=metadata_to_persist,
                 commit=False,
+                update_context=update_session_context,
             )
             if not updated:
                 raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_METADATA_UPDATE_FAILED))
@@ -156,12 +160,14 @@ async def _persist_session_reply_provider_usage_reliably(
     *,
     work: SessionReplyWorkItem,
     request_purpose: SessionReplyProviderRequestPurpose,
+    update_session_context: bool = True,
 ) -> _ProviderUsagePersistenceResult | None:
     operation = asyncio.create_task(
         _persist_session_reply_provider_usage(
             metadata,
             work=work,
             request_purpose=request_purpose,
+            update_session_context=update_session_context,
         )
     )
     try:
@@ -181,11 +187,13 @@ async def _persist_interactive_work_request_metadata(
     metadata: dict[str, Any],
     *,
     work: SessionReplyWorkItem,
-) -> None:
-    await _persist_session_reply_provider_usage_reliably(
+    update_session_context: bool = True,
+) -> _ProviderUsagePersistenceResult | None:
+    return await _persist_session_reply_provider_usage_reliably(
         metadata,
         work=work,
         request_purpose=SessionReplyProviderRequestPurpose.MAIN_DIALOGUE,
+        update_session_context=update_session_context,
     )
 
 

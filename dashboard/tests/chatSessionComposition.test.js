@@ -83,6 +83,152 @@ test('composed session keeps confirmed LLM metadata scoped and ordered', async t
   assert.equal(sessionMetadata.input_tokens_source, 'provider')
 })
 
+test('composed session accumulates LLM totals across ordered main and scheduled metadata', async t => {
+  const harness = await createHarness(t, {
+    sessions: [
+      createSession('A', {
+        source: 'ws',
+        llm_request_metadata: {
+          total_input_tokens: 1000,
+          total_cached_tokens: 250,
+          total_output_tokens: 200,
+          cache_hit_rate: 0.25
+        }
+      }),
+      createSession('B', { source: 'ws' })
+    ],
+    initialRoute: { path: '/', query: { session_id: 'A' } }
+  })
+  const { chat } = harness
+  const currentMetadata = () => chat.llmRequestMetadata.value
+  const sessionMetadata = () => chat.sessions.value.find(item => item.session_id === 'A').llm_request_metadata
+  const totals = () => [
+    currentMetadata().total_input_tokens,
+    currentMetadata().total_cached_tokens,
+    currentMetadata().total_output_tokens
+  ]
+
+  await harness.flush()
+  assert.deepEqual(totals(), [1000, 250, 200])
+  assert.equal(currentMetadata().input_tokens, undefined)
+
+  const mainMetadata = {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    input_tokens: 120,
+    input_tokens_source: 'provider',
+    context_window_tokens: 8192,
+    max_output_tokens: 1024,
+    work_sequence_no: 3,
+    event_sequence_no: 1,
+    request_purpose: 'main_dialogue',
+    total_input_tokens: 1120,
+    total_cached_tokens: 270,
+    total_output_tokens: 207
+  }
+  await receiveWs(harness, mainMetadata)
+  assert.deepEqual(totals(), [1120, 270, 207])
+  assert.equal(currentMetadata().input_tokens, 120)
+  assert.equal(currentMetadata().context_window_tokens, 8192)
+  assert.equal(currentMetadata().max_output_tokens, 1024)
+  assert.equal(currentMetadata().work_sequence_no, 3)
+  assert.deepEqual(sessionMetadata(), currentMetadata())
+
+  const olderMetadata = {
+    ...mainMetadata,
+    input_tokens: 999,
+    context_window_tokens: 16384,
+    max_output_tokens: 2048,
+    work_sequence_no: 2,
+    event_sequence_no: 9,
+    total_input_tokens: 1420,
+    total_cached_tokens: 360,
+    total_output_tokens: 218
+  }
+  await receiveWs(harness, olderMetadata)
+  assert.deepEqual(totals(), [1420, 360, 218])
+  assert.equal(currentMetadata().input_tokens, 120)
+  assert.equal(currentMetadata().context_window_tokens, 8192)
+  assert.equal(currentMetadata().max_output_tokens, 1024)
+  assert.equal(currentMetadata().work_sequence_no, 3)
+
+  await receiveWs(harness, { ...olderMetadata })
+  assert.deepEqual(totals(), [1420, 360, 218])
+  await receiveWs(harness, {
+    ...olderMetadata,
+    input_tokens: 88,
+    context_window_tokens: 4096,
+    max_output_tokens: 512,
+    event_sequence_no: 10,
+    total_input_tokens: 1300,
+    total_cached_tokens: 300,
+    total_output_tokens: 210
+  })
+  assert.deepEqual(totals(), [1420, 360, 218])
+
+  for (const [index, request_purpose] of [
+    'memory_recall',
+    'context_summary',
+    'audit_auxiliary',
+    'background_summary',
+    'confirmed_auxiliary'
+  ].entries()) {
+    await receiveWs(harness, {
+      ...mainMetadata,
+      input_tokens: 999999,
+      context_window_tokens: 1000000,
+      max_output_tokens: 4096,
+      work_sequence_no: 99,
+      event_sequence_no: index + 1,
+      request_purpose,
+      total_input_tokens: 999999,
+      total_cached_tokens: 888888,
+      total_output_tokens: 999999
+    })
+  }
+  await receiveWs(harness, {
+    ...mainMetadata,
+    session_id: 'B',
+    input_tokens: 500,
+    work_sequence_no: 9,
+    total_input_tokens: 999999,
+    total_cached_tokens: 888888,
+    total_output_tokens: 999999
+  })
+  assert.deepEqual(totals(), [1420, 360, 218])
+
+  const scheduledMetadata = {
+    input_tokens: 120,
+    input_tokens_source: 'provider',
+    context_window_tokens: 8192,
+    max_output_tokens: 1024,
+    work_sequence_no: 4,
+    event_sequence_no: 1,
+    request_purpose: 'main_dialogue',
+    total_input_tokens: 1540,
+    total_cached_tokens: 380,
+    total_output_tokens: 225,
+    cache_hit_rate: 380 / 1540
+  }
+  harness.sessions.find(item => item.session_id === 'A').llm_request_metadata = {
+    ...scheduledMetadata
+  }
+
+  await receiveWs(harness, {
+    type: 'proactive_reply',
+    session_id: 'A',
+    source: 'scheduled_task',
+    request_id: 'scheduled-request',
+    request_ids: ['scheduled-request'],
+    work_id: 'scheduled-work',
+    work_sequence_no: 4,
+    event_sequence_no: 1,
+    llm_request_metadata: scheduledMetadata
+  })
+  assert.deepEqual(totals(), [1540, 380, 225])
+  assert.deepEqual(sessionMetadata(), currentMetadata())
+})
+
 test('composed session applies only current-session todo revisions', async t => {
   const harness = await createHarness(t, {
     sessions: [

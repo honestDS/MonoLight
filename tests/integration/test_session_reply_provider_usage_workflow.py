@@ -9,11 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import select
 
 from app.core.constants import ERR_LLM_EMPTY_RESPONSE
+from app.core.crud.session.session import session_crud
+from app.core.dispatchers import stream as stream_dispatcher_module
 from app.core.exceptions import LLMException
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.utils.context_summary import ContextSummaryTriggerMode
-from app.core.utils.request_token_baseline import build_provider_request_usage_metadata
+from app.core.utils.request_token_baseline import build_provider_request_usage_metadata, extract_confirmed_provider_input_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
@@ -155,7 +157,7 @@ def _work(
 async def _seed_session_and_works(
     factory: async_sessionmaker[AsyncSession],
     *,
-    metadata: dict[str, Any],
+    metadata: dict[str, Any] | None,
     works: list[SessionReplyWorkItem],
 ) -> None:
     async with factory() as db:
@@ -295,38 +297,66 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
         assert not any(key.startswith("_provider_") for key in session.llm_request_metadata)
 
 
+@pytest.mark.parametrize("scheduled_sequence_no", [1, 3])
 @pytest.mark.asyncio
 async def test_scheduled_interactive_usage_contributes_to_session_totals(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    scheduled_sequence_no: int,
 ) -> None:
+    main_metadata = _session_metadata(100000, 250, 200)
+    main_metadata.update(
+        {
+            "channel_id": 1,
+            "context_summary_revision": 0,
+            "context_content_revision": 0,
+            "input_tokens": 50000,
+            "work_sequence_no": 2,
+            "event_sequence_no": 4,
+        }
+    )
     await _seed_session_and_works(
         session_factory,
-        metadata=_session_metadata(1000, 250, 200),
+        metadata=main_metadata,
         works=[
             _work(
                 work_id=7,
-                sequence_no=1,
+                sequence_no=scheduled_sequence_no,
                 work_type=SessionReplyWorkType.AGENT_WORK,
                 source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
                 source_id="6",
             )
         ],
     )
+    async with session_factory() as db:
+        session = await db.get(ChatSession, SESSION_ID)
+        assert session is not None
+        session.llm_request_metadata_work_sequence_no = 2
+        session.llm_request_metadata_event_sequence_no = 4
+        await db.commit()
+
     monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
 
+    request_metadata = _request_metadata(
+        "scheduled-main-request",
+        input_tokens=120,
+        cached_tokens=20,
+        output_tokens=7,
+    )
+    request_metadata.update(
+        channel_id=1,
+        context_summary_revision=0,
+        context_content_revision=0,
+    )
+
     async def dispatch(**kwargs):
         assert kwargs["execution_scope"] == "task"
-        await kwargs["request_metadata_callback"](
-            _request_metadata(
-                "scheduled-main-request",
-                input_tokens=120,
-                cached_tokens=20,
-                output_tokens=7,
-            )
-        )
-        return llm_response_payload("scheduled reply")
+        await kwargs["request_metadata_callback"](request_metadata)
+        await kwargs["request_metadata_callback"](request_metadata)
+        response = llm_response_payload("scheduled reply")
+        response["llm_request_metadata"] = dict(request_metadata)
+        return response
 
     monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
 
@@ -351,15 +381,574 @@ async def test_scheduled_interactive_usage_contributes_to_session_totals(
 
     async with session_factory() as db:
         session = (await db.execute(select(ChatSession).where(ChatSession.session_id == SESSION_ID))).scalar_one()
-        usage = (await db.execute(select(SessionReplyProviderUsage))).scalars().one()
+        usages = list((await db.execute(select(SessionReplyProviderUsage))).scalars().all())
+        assert len(usages) == 1
+        usage = usages[0]
         assert usage.provider_request_id == "scheduled-main-request"
         assert usage.work_id == 7
         assert usage.request_purpose == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE
         assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (120, 20, 7)
-        assert session.llm_request_metadata["total_input_tokens"] == 1120
+        assert session.llm_request_metadata["total_input_tokens"] == 100120
         assert session.llm_request_metadata["total_cached_tokens"] == 270
         assert session.llm_request_metadata["total_output_tokens"] == 207
-        assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
+        assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 100120)
+        assert session.llm_request_metadata["input_tokens"] == 50000
+        assert session.llm_request_metadata["channel_id"] == 1
+        assert session.llm_request_metadata["model_id"] == "test-model"
+        assert session.llm_request_metadata["protocol"] == "OPENAI"
+        assert session.llm_request_metadata["context_summary_revision"] == 0
+        assert session.llm_request_metadata["context_content_revision"] == 0
+        assert session.llm_request_metadata["work_sequence_no"] == 2
+        assert session.llm_request_metadata["event_sequence_no"] == 4
+        assert session.llm_request_metadata_work_sequence_no == 2
+        assert session.llm_request_metadata_event_sequence_no == 4
+        assert (
+            extract_confirmed_provider_input_tokens(
+                session.llm_request_metadata,
+                channel_id=1,
+                model_id="test-model",
+                protocol="OPENAI",
+                context_summary_revision=0,
+                context_content_revision=0,
+            )
+            == 50000
+        )
+        assert response["llm_request_metadata"]["total_input_tokens"] == 100120
+        assert response["llm_request_metadata"]["total_cached_tokens"] == 270
+        assert response["llm_request_metadata"]["total_output_tokens"] == 207
+
+
+@pytest.mark.parametrize("stream_requested", [False, True])
+@pytest.mark.asyncio
+async def test_interleaved_foreground_and_scheduled_usage_keep_latest_totals(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    stream_requested: bool,
+) -> None:
+    main_metadata = _session_metadata(1000, 250, 200)
+    main_metadata.update(
+        {
+            "channel_id": 1,
+            "context_summary_revision": 0,
+            "context_content_revision": 0,
+            "work_sequence_no": 1,
+            "event_sequence_no": 0,
+        }
+    )
+    await _seed_session_and_works(
+        session_factory,
+        metadata=main_metadata,
+        works=[
+            _work(
+                work_id=7,
+                sequence_no=1,
+                work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                source_type=SessionReplySourceType.USER_MESSAGE,
+                source_id="1",
+            ),
+            _work(
+                work_id=8,
+                sequence_no=2,
+                work_type=SessionReplyWorkType.AGENT_WORK,
+                source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                source_id="6",
+            ),
+        ],
+    )
+    async with session_factory() as db:
+        session = await db.get(ChatSession, SESSION_ID)
+        foreground_work = await db.get(SessionReplyWorkItem, 7)
+        assert session is not None
+        assert foreground_work is not None
+        session.llm_request_metadata_work_sequence_no = 1
+        session.llm_request_metadata_event_sequence_no = 0
+        foreground_work.execution_state = {"stream_requested": stream_requested}
+        await db.commit()
+
+    monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+
+    foreground_metadata = _request_metadata(
+        "foreground-interleaved-request",
+        input_tokens=300,
+        cached_tokens=90,
+        output_tokens=11,
+    )
+    foreground_metadata.update(
+        channel_id=1,
+        context_summary_revision=0,
+        context_content_revision=0,
+    )
+    foreground_stale_metadata = {
+        **foreground_metadata,
+        "total_input_tokens": 1300,
+        "total_cached_tokens": 340,
+        "total_output_tokens": 211,
+        "cache_hit_rate": 340 / 1300,
+    }
+    scheduled_metadata = _request_metadata(
+        "scheduled-interleaved-request",
+        input_tokens=120,
+        cached_tokens=20,
+        output_tokens=7,
+    )
+    scheduled_metadata.update(
+        channel_id=1,
+        context_summary_revision=0,
+        context_content_revision=0,
+    )
+    foreground_callback_finished = asyncio.Event()
+    scheduled_returned = asyncio.Event()
+
+    async def emit_foreground_response(request_metadata_callback, stream_event_callback):
+        await request_metadata_callback(foreground_metadata)
+        foreground_callback_finished.set()
+        await scheduled_returned.wait()
+        if stream_event_callback is not None:
+            await stream_event_callback(dict(foreground_stale_metadata))
+        response = llm_response_payload("foreground reply")
+        response["llm_request_metadata"] = dict(foreground_stale_metadata)
+        return response
+
+    async def dispatch(**kwargs):
+        if kwargs["execution_scope"] == "task":
+            await foreground_callback_finished.wait()
+            await kwargs["request_metadata_callback"](scheduled_metadata)
+            response = llm_response_payload("scheduled reply")
+            response["llm_request_metadata"] = dict(scheduled_metadata)
+            return response
+        return await emit_foreground_response(
+            kwargs["request_metadata_callback"],
+            kwargs.get("stream_event_callback"),
+        )
+
+    async def dispatch_interactive(**kwargs):
+        return await emit_foreground_response(
+            kwargs["request_metadata_callback"],
+            kwargs["stream_event_callback"],
+        )
+
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+    if stream_requested:
+        monkeypatch.setattr(stream_dispatcher_module, "dispatch_interactive", dispatch_interactive)
+
+    async def run_work(work_id: int, *, scheduled: bool):
+        async with session_factory() as db:
+            work = await db.get(SessionReplyWorkItem, work_id)
+            assert work is not None
+            response = await executor_interactive_module._dispatch_interactive_work(
+                db,
+                work=work,
+                worker_id="worker-1",
+                message="scheduled input" if scheduled else "foreground input",
+                initial_message=InternalMessage(
+                    id=6 if scheduled else 1,
+                    role=MessageRole.USER,
+                    content="scheduled input" if scheduled else "foreground input",
+                ),
+                history_before_id=6 if scheduled else 1,
+                frozen_user_message_ids=[6] if scheduled else [1],
+                attachments=None,
+                allow_additional_user_messages=False,
+                execution_resume_state=None,
+                execution_scope="task" if scheduled else None,
+                frozen_context_messages=[] if scheduled else None,
+            )
+        if scheduled:
+            scheduled_returned.set()
+        return response
+
+    foreground_task = asyncio.create_task(run_work(7, scheduled=False))
+    scheduled_task = asyncio.create_task(run_work(8, scheduled=True))
+    foreground_response, scheduled_response = await asyncio.wait_for(
+        asyncio.gather(foreground_task, scheduled_task),
+        timeout=10,
+    )
+
+    assert foreground_response["choices"][0]["message"]["content"] == "foreground reply"
+    assert scheduled_response["choices"][0]["message"]["content"] == "scheduled reply"
+    assert scheduled_response["llm_request_metadata"]["total_input_tokens"] == 1420
+    assert scheduled_response["llm_request_metadata"]["total_cached_tokens"] == 360
+    assert scheduled_response["llm_request_metadata"]["total_output_tokens"] == 218
+
+    async with session_factory() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == SESSION_ID))).scalar_one()
+        usages = list((await db.execute(select(SessionReplyProviderUsage))).scalars().all())
+        usage_by_request_id = {usage.provider_request_id: usage for usage in usages}
+        assert len(usages) == 2
+        assert {request_id: (usage.work_id, usage.input_tokens, usage.cached_tokens, usage.output_tokens) for request_id, usage in usage_by_request_id.items()} == {
+            "foreground-interleaved-request": (7, 300, 90, 11),
+            "scheduled-interleaved-request": (8, 120, 20, 7),
+        }
+        assert all(usage.request_purpose == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE for usage in usages)
+        assert session.llm_request_metadata["total_input_tokens"] == 1420
+        assert session.llm_request_metadata["total_cached_tokens"] == 360
+        assert session.llm_request_metadata["total_output_tokens"] == 218
+        assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(360 / 1420)
+        assert session.llm_request_metadata["input_tokens"] == 300
+        assert session.llm_request_metadata_work_sequence_no == 1
+        assert (
+            extract_confirmed_provider_input_tokens(
+                session.llm_request_metadata,
+                channel_id=1,
+                model_id="test-model",
+                protocol="OPENAI",
+                context_summary_revision=0,
+                context_content_revision=0,
+            )
+            == 300
+        )
+        if stream_requested:
+            stream_events = list((await db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == 7).order_by(SessionReplyStreamEvent.sequence_no))).scalars().all())
+            metadata_events = [event.event for event in stream_events if event.event.get("type") == "llm_request_metadata"]
+            assert metadata_events
+            assert session.llm_request_metadata_event_sequence_no == metadata_events[-1]["event_sequence_no"]
+            assert all(event["total_input_tokens"] >= 1300 for event in metadata_events)
+            assert all(event["total_cached_tokens"] >= 340 for event in metadata_events)
+            assert all(event["total_output_tokens"] >= 211 for event in metadata_events)
+        else:
+            assert session.llm_request_metadata_event_sequence_no == 0
+
+
+@pytest.mark.asyncio
+async def test_scheduled_interactive_usage_without_main_metadata_preserves_totals_without_provider_baseline(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_session_and_works(
+        session_factory,
+        metadata=None,
+        works=[
+            _work(
+                work_id=7,
+                sequence_no=99,
+                work_type=SessionReplyWorkType.AGENT_WORK,
+                source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                source_id="6",
+            )
+        ],
+    )
+    monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+
+    request_metadata = _request_metadata(
+        "scheduled-without-baseline",
+        input_tokens=120,
+        cached_tokens=20,
+        output_tokens=7,
+    )
+    request_metadata.update(
+        channel_id=1,
+        context_summary_revision=0,
+        context_content_revision=0,
+    )
+
+    async def dispatch(**kwargs):
+        await kwargs["request_metadata_callback"](request_metadata)
+        response = llm_response_payload("scheduled reply")
+        response["llm_request_metadata"] = dict(request_metadata)
+        return response
+
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+
+    async with session_factory() as db:
+        scheduled_work = await db.get(SessionReplyWorkItem, 7)
+        assert scheduled_work is not None
+        await executor_interactive_module._dispatch_interactive_work(
+            db,
+            work=scheduled_work,
+            worker_id="worker-1",
+            message="scheduled input",
+            initial_message=InternalMessage(id=6, role=MessageRole.USER, content="scheduled input"),
+            history_before_id=6,
+            frozen_user_message_ids=[6],
+            attachments=None,
+            allow_additional_user_messages=False,
+            execution_resume_state=None,
+            execution_scope="task",
+            frozen_context_messages=[],
+        )
+
+    async with session_factory() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == SESSION_ID))).scalar_one()
+        usage = (await db.execute(select(SessionReplyProviderUsage))).scalars().one()
+        assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (120, 20, 7)
+        assert session.llm_request_metadata["total_input_tokens"] == 120
+        assert session.llm_request_metadata["total_cached_tokens"] == 20
+        assert session.llm_request_metadata["total_output_tokens"] == 7
+        assert session.llm_request_metadata.get("input_tokens") != 120 or session.llm_request_metadata.get("input_tokens_source") != "provider"
+        assert (
+            extract_confirmed_provider_input_tokens(
+                session.llm_request_metadata,
+                channel_id=1,
+                model_id="test-model",
+                protocol="OPENAI",
+                context_summary_revision=0,
+                context_content_revision=0,
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_provider_usage_waits_for_main_metadata_snapshot_before_committing_totals(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_metadata = _session_metadata(1300, 340, 211)
+    main_metadata.update(
+        {
+            "channel_id": 1,
+            "context_summary_revision": 0,
+            "context_content_revision": 0,
+            "input_tokens": 300,
+            "work_sequence_no": 1,
+            "event_sequence_no": 0,
+        }
+    )
+    await _seed_session_and_works(
+        session_factory,
+        metadata=main_metadata,
+        works=[
+            _work(
+                work_id=7,
+                sequence_no=1,
+                work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                source_type=SessionReplySourceType.USER_MESSAGE,
+                source_id="1",
+            ),
+            _work(
+                work_id=8,
+                sequence_no=2,
+                work_type=SessionReplyWorkType.AGENT_WORK,
+                source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                source_id="6",
+            ),
+        ],
+    )
+    async with session_factory() as db:
+        session = await db.get(ChatSession, SESSION_ID)
+        scheduled_work = await db.get(SessionReplyWorkItem, 8)
+        assert session is not None
+        assert scheduled_work is not None
+        session.llm_request_metadata_work_sequence_no = 1
+        session.llm_request_metadata_event_sequence_no = 0
+        await db.commit()
+
+    monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
+    scheduled_metadata = _request_metadata(
+        "scheduled-lock-request",
+        input_tokens=120,
+        cached_tokens=20,
+        output_tokens=7,
+    )
+    scheduled_metadata.update(
+        channel_id=1,
+        context_summary_revision=0,
+        context_content_revision=0,
+    )
+    main_request_metadata = _request_metadata(
+        "foreground-lock-request",
+        input_tokens=300,
+        cached_tokens=90,
+        output_tokens=11,
+    )
+    main_request_metadata.update(
+        channel_id=1,
+        context_summary_revision=0,
+        context_content_revision=0,
+        total_input_tokens=1300,
+        total_cached_tokens=340,
+        total_output_tokens=211,
+        cache_hit_rate=340 / 1300,
+        request_purpose=SessionReplyProviderRequestPurpose.MAIN_DIALOGUE.value,
+        work_sequence_no=1,
+        event_sequence_no=0,
+    )
+
+    provider_task = None
+    async with session_factory() as reply_db:
+        try:
+            locked_session = await session_crud.get_by_session_id_for_update(
+                reply_db,
+                session_id=SESSION_ID,
+                uid=UID,
+            )
+            assert locked_session is not None
+            provider_task = asyncio.create_task(
+                executor_metadata_module._persist_interactive_work_request_metadata(
+                    scheduled_metadata,
+                    work=scheduled_work,
+                    update_session_context=False,
+                )
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(provider_task), timeout=0.2)
+
+            updated = await session_crud.update_llm_request_metadata(
+                reply_db,
+                session_id=SESSION_ID,
+                uid=UID,
+                metadata=main_request_metadata,
+                commit=True,
+            )
+            assert updated is True
+            provider_result = await asyncio.wait_for(asyncio.shield(provider_task), timeout=5)
+            assert provider_result is not None
+            assert (
+                provider_result.total_input_tokens,
+                provider_result.total_cached_tokens,
+                provider_result.total_output_tokens,
+            ) == (1420, 360, 218)
+        finally:
+            if reply_db.in_transaction():
+                await reply_db.rollback()
+            if provider_task is not None:
+                if not provider_task.done():
+                    provider_task.cancel()
+                await asyncio.gather(provider_task, return_exceptions=True)
+
+    async with session_factory() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == SESSION_ID))).scalar_one()
+        usages = list((await db.execute(select(SessionReplyProviderUsage))).scalars().all())
+        assert len(usages) == 1
+        usage = usages[0]
+        assert usage.provider_request_id == "scheduled-lock-request"
+        assert usage.work_id == 8
+        assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (120, 20, 7)
+        assert session.llm_request_metadata["total_input_tokens"] == 1420
+        assert session.llm_request_metadata["total_cached_tokens"] == 360
+        assert session.llm_request_metadata["total_output_tokens"] == 218
+        assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(360 / 1420)
+        assert session.llm_request_metadata["input_tokens"] == 300
+        assert session.llm_request_metadata_work_sequence_no == 1
+        assert session.llm_request_metadata_event_sequence_no == 0
+
+
+@pytest.mark.asyncio
+async def test_foreground_usage_updates_baseline_after_scheduled_usage_with_larger_sequence(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_session_and_works(
+        session_factory,
+        metadata=None,
+        works=[
+            _work(
+                work_id=7,
+                sequence_no=99,
+                work_type=SessionReplyWorkType.AGENT_WORK,
+                source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+                source_id="6",
+            ),
+            _work(
+                work_id=8,
+                sequence_no=2,
+                work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                source_type=SessionReplySourceType.USER_MESSAGE,
+                source_id="1",
+            ),
+        ],
+    )
+    monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+
+    scheduled_metadata = _request_metadata(
+        "scheduled-before-foreground",
+        input_tokens=120,
+        cached_tokens=20,
+        output_tokens=7,
+    )
+    scheduled_metadata.update(
+        channel_id=1,
+        context_summary_revision=0,
+        context_content_revision=0,
+    )
+    foreground_metadata = _request_metadata(
+        "foreground-after-scheduled",
+        input_tokens=300,
+        cached_tokens=90,
+        output_tokens=11,
+    )
+    foreground_metadata.update(
+        channel_id=1,
+        context_summary_revision=0,
+        context_content_revision=0,
+    )
+
+    async def dispatch(**kwargs):
+        request_metadata = scheduled_metadata if kwargs["execution_scope"] == "task" else foreground_metadata
+        await kwargs["request_metadata_callback"](request_metadata)
+        response = llm_response_payload("scheduled reply" if kwargs["execution_scope"] == "task" else "foreground reply")
+        response["llm_request_metadata"] = dict(request_metadata)
+        return response
+
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+
+    async with session_factory() as db:
+        scheduled_work = await db.get(SessionReplyWorkItem, 7)
+        assert scheduled_work is not None
+        await executor_interactive_module._dispatch_interactive_work(
+            db,
+            work=scheduled_work,
+            worker_id="worker-1",
+            message="scheduled input",
+            initial_message=InternalMessage(id=6, role=MessageRole.USER, content="scheduled input"),
+            history_before_id=6,
+            frozen_user_message_ids=[6],
+            attachments=None,
+            allow_additional_user_messages=False,
+            execution_resume_state=None,
+            execution_scope="task",
+            frozen_context_messages=[],
+        )
+
+    async with session_factory() as db:
+        foreground_work = await db.get(SessionReplyWorkItem, 8)
+        assert foreground_work is not None
+        await executor_interactive_module._dispatch_interactive_work(
+            db,
+            work=foreground_work,
+            worker_id="worker-1",
+            message="foreground input",
+            initial_message=InternalMessage(id=1, role=MessageRole.USER, content="foreground input"),
+            history_before_id=1,
+            frozen_user_message_ids=[1],
+            attachments=None,
+            allow_additional_user_messages=False,
+            execution_resume_state=None,
+        )
+
+    async with session_factory() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == SESSION_ID))).scalar_one()
+        usages = list((await db.execute(select(SessionReplyProviderUsage))).scalars().all())
+        assert {usage.provider_request_id for usage in usages} == {
+            "scheduled-before-foreground",
+            "foreground-after-scheduled",
+        }
+        assert session.llm_request_metadata["input_tokens"] == 300
+        assert session.llm_request_metadata["input_tokens_source"] == "provider"
+        assert session.llm_request_metadata["channel_id"] == 1
+        assert session.llm_request_metadata["model_id"] == "test-model"
+        assert session.llm_request_metadata["protocol"] == "OPENAI"
+        assert session.llm_request_metadata["context_summary_revision"] == 0
+        assert session.llm_request_metadata["context_content_revision"] == 0
+        assert session.llm_request_metadata["total_input_tokens"] == 420
+        assert session.llm_request_metadata["total_cached_tokens"] == 110
+        assert session.llm_request_metadata["total_output_tokens"] == 18
+        assert session.llm_request_metadata_work_sequence_no == 2
+        assert session.llm_request_metadata_event_sequence_no == 0
+        assert (
+            extract_confirmed_provider_input_tokens(
+                session.llm_request_metadata,
+                channel_id=1,
+                model_id="test-model",
+                protocol="OPENAI",
+                context_summary_revision=0,
+                context_content_revision=0,
+            )
+            == 300
+        )
 
 
 @pytest.mark.asyncio

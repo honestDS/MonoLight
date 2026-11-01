@@ -12,8 +12,7 @@ import {
 import {
   isMainDialogueRequestMetadata,
   mergeLlmRequestMetadata,
-  normalizeLlmRequestMetadata,
-  shouldReplaceLlmRequestMetadata
+  normalizeLlmRequestMetadata
 } from './llmRequestMetadata.js'
 import {
   mergeTodoPlan,
@@ -123,7 +122,6 @@ export function useChatSessionEvents({
     const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
     const currentMetadata = llmRequestMetadataBySession.value.get(sessionId)
       || normalizeLlmRequestMetadata(sessionManager.sessions.value[sessionIndex]?.llm_request_metadata)
-    if (!shouldReplaceLlmRequestMetadata(currentMetadata, metadata)) return
 
     const nextMetadata = mergeLlmRequestMetadata(currentMetadata, metadata)
 

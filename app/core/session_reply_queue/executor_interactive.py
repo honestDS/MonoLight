@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +26,7 @@ from app.core.session_reply_queue.executor_common import (
 from app.core.session_reply_queue.executor_metadata import _persist_interactive_work_request_metadata
 from app.core.session_reply_queue.manager import get_work_request_ids, session_reply_queue_manager
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
+from app.core.utils.request_token_baseline import build_session_cache_metrics
 from app.models.message import InternalMessage, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
@@ -45,6 +46,8 @@ class _InteractiveWorkStreamEventState:
     uid: str | None = None
     session_id: str | None = None
     work_sequence_no: int | None = None
+    update_session_context: bool = True
+    session_token_totals: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.work_id is None or self.uid is None or self.session_id is None or self.work_sequence_no is None:
@@ -91,16 +94,20 @@ async def _persist_interactive_work_stream_event(
                     id=work_id,
                     sequence_no=stream_state.work_sequence_no,
                 ),
-                persisted_event,
+                {
+                    **persisted_event,
+                    **stream_state.session_token_totals,
+                },
                 event_sequence_no=stream_state.next_sequence,
             )
-            await session_crud.update_llm_request_metadata(
-                event_db,
-                session_id=stream_state.session_id,
-                uid=stream_state.uid,
-                metadata=persisted_event,
-                commit=False,
-            )
+            if stream_state.update_session_context:
+                await session_crud.update_llm_request_metadata(
+                    event_db,
+                    session_id=stream_state.session_id,
+                    uid=stream_state.uid,
+                    metadata=persisted_event,
+                    commit=False,
+                )
         await session_reply_stream_event_crud.publish(
             event_db,
             work_id=work_id,
@@ -269,6 +276,7 @@ async def _dispatch_interactive_work(
     await ensure_session_reply_work_claim(db, commit=True)
     execution_state = work.execution_state or {}
     is_agent_work = work.work_type == SessionReplyWorkType.AGENT_WORK
+    update_session_context = not is_agent_work and frozen_context_messages is None
     stream_requested = False if is_agent_work else bool((work.execution_state or {}).get("stream_requested"))
     context_summary_events_requested = False if is_agent_work else bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
@@ -284,6 +292,7 @@ async def _dispatch_interactive_work(
         dequeued_request_ids=set(),
         turn_end_content_by_response_id={},
         tool_names_by_response_id={},
+        update_session_context=update_session_context,
     )
     metadata_work = SimpleNamespace(
         id=work_id,
@@ -291,6 +300,22 @@ async def _dispatch_interactive_work(
         session_id=session_id,
         sequence_no=work_sequence_no,
     )
+
+    async def persist_request_metadata(metadata: dict[str, Any]) -> None:
+        result = await _persist_interactive_work_request_metadata(
+            metadata,
+            work=work,
+            update_session_context=update_session_context,
+        )
+        if result is None:
+            return
+        stream_state.session_token_totals.update(
+            build_session_cache_metrics(
+                result.total_input_tokens,
+                result.total_cached_tokens,
+            )
+        )
+        stream_state.session_token_totals["total_output_tokens"] = result.total_output_tokens
 
     expose_tool_call_content = False if is_agent_work else bool(execution_state.get("expose_tool_call_content", True))
     show_tool_calls = False if is_agent_work else bool(execution_state.get("show_tool_calls", True))
@@ -331,6 +356,7 @@ async def _dispatch_interactive_work(
             work=work,
             worker_id=worker_id,
         ),
+        "request_metadata_callback": persist_request_metadata,
         "context_summary_work_validity_checker": partial(
             _check_interactive_work_validity,
             work_id=work_id,
@@ -348,7 +374,6 @@ async def _dispatch_interactive_work(
     if not stream_requested:
         response = await ChatDispatcher.dispatch(
             **dispatch_kwargs,
-            request_metadata_callback=partial(_persist_interactive_work_request_metadata, work=work),
             context_summary_lifecycle_callback=partial(
                 _publish_interactive_work_stream_event,
                 stream_state,
@@ -357,14 +382,21 @@ async def _dispatch_interactive_work(
             else None,
         )
         if isinstance(response.get("llm_request_metadata"), dict):
-            response["llm_request_metadata"] = _metadata_with_work_order(metadata_work, response["llm_request_metadata"])
-            await session_crud.update_llm_request_metadata(
-                db,
-                session_id=session_id,
-                uid=uid,
-                metadata=response["llm_request_metadata"],
-                commit=False,
+            response["llm_request_metadata"] = _metadata_with_work_order(
+                metadata_work,
+                {
+                    **response["llm_request_metadata"],
+                    **stream_state.session_token_totals,
+                },
             )
+            if update_session_context:
+                await session_crud.update_llm_request_metadata(
+                    db,
+                    session_id=session_id,
+                    uid=uid,
+                    metadata=response["llm_request_metadata"],
+                    commit=False,
+                )
         return response
 
     response = None
@@ -386,4 +418,12 @@ async def _dispatch_interactive_work(
             await _publish_interactive_work_stream_event(stream_state, event)
     if not isinstance(response, dict):
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+    if isinstance(response.get("llm_request_metadata"), dict):
+        response["llm_request_metadata"] = _metadata_with_work_order(
+            metadata_work,
+            {
+                **response["llm_request_metadata"],
+                **stream_state.session_token_totals,
+            },
+        )
     return response
