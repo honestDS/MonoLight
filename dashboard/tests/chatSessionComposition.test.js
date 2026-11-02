@@ -211,7 +211,11 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
     cache_hit_rate: 380 / 1540
   }
   harness.sessions.find(item => item.session_id === 'A').llm_request_metadata = {
-    ...scheduledMetadata
+    ...currentMetadata(),
+    total_input_tokens: scheduledMetadata.total_input_tokens,
+    total_cached_tokens: scheduledMetadata.total_cached_tokens,
+    total_output_tokens: scheduledMetadata.total_output_tokens,
+    cache_hit_rate: scheduledMetadata.cache_hit_rate
   }
 
   await receiveWs(harness, {
@@ -226,6 +230,7 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
     llm_request_metadata: scheduledMetadata
   })
   assert.deepEqual(totals(), [1540, 380, 225])
+  assert.equal(currentMetadata().work_sequence_no, 3)
   assert.deepEqual(sessionMetadata(), currentMetadata())
 })
 
@@ -996,4 +1001,526 @@ test('composed initial history deduplicates database ids without deduplicating d
     Array.from(sameContentResponses, message => [String(message.db_id), message.response_id]),
     [['2', 'response-2'], ['3', 'response-3']]
   )
+})
+
+const snapshotMetadata = value => value == null ? value : JSON.parse(JSON.stringify(value))
+
+const createMainMetadata = ({
+  responseId = 'main-response',
+  turn = 2,
+  workSequenceNo = 2,
+  eventSequenceNo = 4
+} = {}) => ({
+  input_tokens: 50000,
+  input_tokens_source: 'provider',
+  context_window_tokens: 131072,
+  max_output_tokens: 8192,
+  output_tokens: 180,
+  cached_tokens: 200,
+  response_id: responseId,
+  turn,
+  work_sequence_no: workSequenceNo,
+  event_sequence_no: eventSequenceNo,
+  request_purpose: 'main_dialogue',
+  total_input_tokens: 50000,
+  total_cached_tokens: 250,
+  total_output_tokens: 200,
+  cache_hit_rate: 250 / 50000
+})
+
+const createTaskMetadata = (source, workSequenceNo, totals = null) => ({
+  input_tokens: 120,
+  input_tokens_source: 'provider',
+  context_window_tokens: 8192,
+  max_output_tokens: 1024,
+  output_tokens: 7,
+  cached_tokens: 17,
+  response_id: `${source}-response-${workSequenceNo}`,
+  turn: 11,
+  work_sequence_no: workSequenceNo,
+  event_sequence_no: 1,
+  request_purpose: 'main_dialogue',
+  ...(totals || {})
+})
+
+const createProactiveReply = ({
+  source,
+  sessionId = 'A',
+  workSequenceNo,
+  eventSequenceNo = 1,
+  requestId = `${source}-request-${workSequenceNo}-${eventSequenceNo}`,
+  workId = `${source}-work-${workSequenceNo}-${eventSequenceNo}`,
+  llmRequestMetadata
+}) => ({
+  type: 'proactive_reply',
+  session_id: sessionId,
+  source,
+  request_id: requestId,
+  request_ids: [requestId],
+  work_id: workId,
+  work_sequence_no: workSequenceNo,
+  event_sequence_no: eventSequenceNo,
+  llm_request_metadata: llmRequestMetadata
+})
+
+const getSessionMetadata = chat => chat.sessions.value.find(item => item.session_id === 'A').llm_request_metadata
+
+test('composed proactive task results do not overwrite main dialogue token metadata', async t => {
+  const taskTotals = {
+    total_input_tokens: 50120,
+    total_cached_tokens: 270,
+    total_output_tokens: 207,
+    cache_hit_rate: 270 / 50120
+  }
+
+  for (const source of ['scheduled_task', 'agent_work']) {
+    for (const workSequenceNo of [1, 3]) {
+      await t.test(`${source}, work_sequence_no=${workSequenceNo}`, async nested => {
+        const mainMetadata = createMainMetadata()
+        const taskMetadata = createTaskMetadata(source, workSequenceNo, taskTotals)
+        const expectedMetadata = { ...mainMetadata, ...taskTotals }
+        const taskContent = `${source} task result ${workSequenceNo}`
+        const harness = await createHarness(nested, {
+          sessions: [createSession('A', { source: 'ws', llm_request_metadata: mainMetadata })],
+          initialRoute: { path: '/', query: { session_id: 'A' } }
+        })
+        const { chat } = harness
+        const currentMetadata = () => chat.llmRequestMetadata.value
+
+        await harness.flush()
+        assert.deepEqual(snapshotMetadata(currentMetadata()), mainMetadata)
+        assert.deepEqual(snapshotMetadata(getSessionMetadata(chat)), mainMetadata)
+
+        await receiveWs(harness, {
+          type: 'llm_request_metadata',
+          session_id: 'A',
+          ...mainMetadata
+        })
+        assert.deepEqual(snapshotMetadata(currentMetadata()), mainMetadata)
+
+        const serverSession = harness.sessions.find(item => item.session_id === 'A')
+        serverSession.llm_request_metadata = { ...expectedMetadata }
+        serverSession.messages.push({
+          id: 900 + workSequenceNo,
+          role: 'assistant',
+          response_id: taskMetadata.response_id,
+          content: taskContent
+        })
+
+        const proactiveReply = createProactiveReply({
+          source,
+          workSequenceNo,
+          llmRequestMetadata: taskMetadata
+        })
+        await receiveWs(harness, proactiveReply)
+        assert.deepEqual(snapshotMetadata(currentMetadata()), expectedMetadata)
+        assert.deepEqual(snapshotMetadata(getSessionMetadata(chat)), expectedMetadata)
+        assert.equal(currentMetadata().total_input_tokens, 50120)
+        assert.equal(chat.messages.value.filter(message => message.content === taskContent).length, 1)
+
+        const metadataBeforeDuplicate = snapshotMetadata(currentMetadata())
+        const messageCountBeforeDuplicate = chat.messages.value.length
+        await receiveWs(harness, { ...proactiveReply })
+        assert.deepEqual(snapshotMetadata(currentMetadata()), metadataBeforeDuplicate)
+        assert.equal(currentMetadata().total_input_tokens, 50120)
+        assert.equal(chat.messages.value.length, messageCountBeforeDuplicate)
+        assert.equal(chat.messages.value.filter(message => message.content === taskContent).length, 1)
+
+        const expectedNextMetadata = {
+          ...expectedMetadata,
+          input_tokens: 60000,
+          input_tokens_source: 'provider',
+          context_window_tokens: 131072,
+          max_output_tokens: 8192,
+          output_tokens: 191,
+          cached_tokens: 300,
+          response_id: 'main-next-response',
+          turn: 3,
+          work_sequence_no: 2,
+          event_sequence_no: 5,
+          request_purpose: 'main_dialogue',
+          total_input_tokens: 110120,
+          total_cached_tokens: 570,
+          total_output_tokens: 218,
+          cache_hit_rate: 570 / 110120
+        }
+        await receiveWs(harness, {
+          type: 'llm_request_metadata',
+          session_id: 'A',
+          ...expectedNextMetadata
+        })
+        assert.deepEqual(snapshotMetadata(currentMetadata()), expectedNextMetadata)
+        assert.deepEqual(snapshotMetadata(getSessionMetadata(chat)), expectedNextMetadata)
+      })
+    }
+  }
+})
+
+test('composed proactive task metadata keeps main context at boundary inputs', async t => {
+  const forbiddenRequestFields = [
+    'input_tokens',
+    'input_tokens_source',
+    'context_window_tokens',
+    'max_output_tokens',
+    'output_tokens',
+    'cached_tokens',
+    'response_id',
+    'turn',
+    'work_sequence_no',
+    'event_sequence_no'
+  ]
+  const assertTotalsOnly = (metadata, expectedTotals) => {
+    assert.ok(metadata)
+    assert.deepEqual({
+      total_input_tokens: metadata.total_input_tokens,
+      total_cached_tokens: metadata.total_cached_tokens,
+      total_output_tokens: metadata.total_output_tokens,
+      cache_hit_rate: metadata.cache_hit_rate
+    }, expectedTotals)
+    for (const field of forbiddenRequestFields) assert.equal(metadata[field], undefined)
+  }
+  const zeroTotals = {
+    total_input_tokens: 0,
+    total_cached_tokens: 0,
+    total_output_tokens: 0,
+    cache_hit_rate: 0
+  }
+
+  for (const source of ['scheduled_task', 'agent_work']) {
+    await t.test(`${source} boundary metadata`, async nested => {
+      const zeroHarness = await createHarness(nested, {
+        sessions: [createSession('A', { source: 'ws' })],
+        initialRoute: { path: '/', query: { session_id: 'A' } }
+      })
+      await zeroHarness.flush()
+      zeroHarness.sessions.find(item => item.session_id === 'A').llm_request_metadata = {
+        ...zeroTotals
+      }
+      await receiveWs(zeroHarness, createProactiveReply({
+        source,
+        workSequenceNo: 1,
+        llmRequestMetadata: createTaskMetadata(source, 1, zeroTotals)
+      }))
+      assertTotalsOnly(zeroHarness.chat.llmRequestMetadata.value, zeroTotals)
+      assertTotalsOnly(getSessionMetadata(zeroHarness.chat), zeroTotals)
+
+      const noTotalsMain = createMainMetadata({ responseId: `${source}-no-totals-main` })
+      const noTotalsHarness = await createHarness(nested, {
+        sessions: [createSession('A', { source: 'ws', llm_request_metadata: noTotalsMain })],
+        initialRoute: { path: '/', query: { session_id: 'A' } }
+      })
+      await noTotalsHarness.flush()
+      await receiveWs(noTotalsHarness, createProactiveReply({
+        source,
+        workSequenceNo: 3,
+        llmRequestMetadata: createTaskMetadata(source, 3)
+      }))
+      assert.deepEqual(snapshotMetadata(noTotalsHarness.chat.llmRequestMetadata.value), noTotalsMain)
+      assert.deepEqual(snapshotMetadata(getSessionMetadata(noTotalsHarness.chat)), noTotalsMain)
+
+      const invalidMain = createMainMetadata({ responseId: `${source}-invalid-main` })
+      const invalidHarness = await createHarness(nested, {
+        sessions: [
+          createSession('A', { source: 'ws', llm_request_metadata: invalidMain }),
+          createSession('B', { source: 'ws' })
+        ],
+        initialRoute: { path: '/', query: { session_id: 'A' } }
+      })
+      await invalidHarness.flush()
+      const invalidEvents = [
+        {
+          name: 'negative',
+          workSequenceNo: 3,
+          eventSequenceNo: 1,
+          totals: {
+            total_input_tokens: -1,
+            total_cached_tokens: 0,
+            total_output_tokens: 0,
+            cache_hit_rate: 0
+          }
+        },
+        {
+          name: 'invalid',
+          workSequenceNo: 4,
+          eventSequenceNo: 1,
+          totals: {
+            total_input_tokens: 10,
+            total_cached_tokens: 11,
+            total_output_tokens: 999,
+            cache_hit_rate: 1.1
+          }
+        },
+        {
+          name: 'foreign',
+          sessionId: 'B',
+          workSequenceNo: 99,
+          eventSequenceNo: 1,
+          totals: {
+            total_input_tokens: 1000,
+            total_cached_tokens: 999,
+            total_output_tokens: 888,
+            cache_hit_rate: 0.999
+          }
+        }
+      ]
+      for (const event of invalidEvents) {
+        await receiveWs(invalidHarness, createProactiveReply({
+          ...event,
+          source,
+          requestId: `${source}-${event.name}-request`,
+          workId: `${source}-${event.name}-work`,
+          llmRequestMetadata: createTaskMetadata(source, event.workSequenceNo, event.totals)
+        }))
+        assert.deepEqual(snapshotMetadata(invalidHarness.chat.llmRequestMetadata.value), invalidMain)
+        assert.deepEqual(snapshotMetadata(getSessionMetadata(invalidHarness.chat)), invalidMain)
+      }
+    })
+  }
+})
+
+test('composed reconnect refreshes persisted task totals without replaying task events', async t => {
+  const mainMetadata = createMainMetadata()
+  const taskTotals = {
+    total_input_tokens: 50120,
+    total_cached_tokens: 270,
+    total_output_tokens: 207,
+    cache_hit_rate: 270 / 50120
+  }
+  const expectedMetadata = { ...mainMetadata, ...taskTotals }
+  const taskContent = 'task completed while disconnected'
+  const harness = await createHarness(t, {
+    sessions: [createSession('A', { source: 'ws', llm_request_metadata: mainMetadata })],
+    initialRoute: { path: '/', query: { session_id: 'A' } }
+  })
+  const { chat } = harness
+
+  await harness.flush()
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...mainMetadata
+  })
+
+  const sentBeforeReconnect = harness.wsManager.sent.length
+  await receiveWs(harness, { type: 'connection_closed' })
+  const serverSession = harness.sessions.find(item => item.session_id === 'A')
+  serverSession.llm_request_metadata = { ...expectedMetadata }
+  serverSession.messages.push({
+    id: 1201,
+    role: 'assistant',
+    response_id: 'disconnected-task-response',
+    content: taskContent
+  })
+
+  await receiveWs(harness, { type: 'connection_reopened' })
+  const resumeRequest = harness.wsManager.sent
+    .slice(sentBeforeReconnect)
+    .find(item => item.type === 'resume' && item.session_id === 'A')
+  assert.ok(resumeRequest)
+  assert.equal(resumeRequest.history_message_id, 0)
+
+  await receiveWs(harness, { type: 'resume_complete', session_id: 'A' })
+  assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), expectedMetadata)
+  assert.equal(chat.llmRequestMetadata.value.total_input_tokens, 50120)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, 50000)
+  assert.equal(chat.llmRequestMetadata.value.context_window_tokens, 131072)
+  assert.equal(chat.llmRequestMetadata.value.work_sequence_no, 2)
+  assert.equal(chat.messages.value.filter(message => message.content === taskContent).length, 1)
+
+  serverSession.llm_request_metadata = null
+  await receiveWs(harness, { type: 'resume_complete', session_id: 'A' })
+  assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), expectedMetadata)
+  assert.equal(chat.llmRequestMetadata.value.total_input_tokens, 50120)
+  assert.equal(chat.messages.value.filter(message => message.content === taskContent).length, 1)
+  serverSession.llm_request_metadata = { ...expectedMetadata }
+
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...mainMetadata,
+    event_sequence_no: 3,
+    total_input_tokens: 50000,
+    total_cached_tokens: 250,
+    total_output_tokens: 200,
+    cache_hit_rate: 250 / 50000
+  })
+  assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), expectedMetadata)
+})
+
+test('composed reconnect preserves newer metadata across stale session snapshots', async t => {
+  const mainMetadata = createMainMetadata()
+  const persistedTotals = {
+    total_input_tokens: 50120,
+    total_cached_tokens: 270,
+    total_output_tokens: 207,
+    cache_hit_rate: 270 / 50120
+  }
+  const persistedMetadata = { ...mainMetadata, ...persistedTotals }
+  const expectedNextMetadata = {
+    ...persistedMetadata,
+    input_tokens: 60000,
+    output_tokens: 191,
+    cached_tokens: 300,
+    response_id: 'reconnect-next-response',
+    turn: 3,
+    event_sequence_no: 5,
+    total_input_tokens: 110120,
+    total_cached_tokens: 570,
+    total_output_tokens: 218,
+    cache_hit_rate: 570 / 110120
+  }
+  let holdNextListRefresh = false
+  let capturedPending = null
+  let listSnapshot
+  const harness = await createHarness(t, {
+    sessions: [createSession('A', { source: 'ws', llm_request_metadata: mainMetadata })],
+    sessionsList: ({ pending, sessions }) => {
+      if (holdNextListRefresh) {
+        holdNextListRefresh = false
+        capturedPending = pending
+        return pending.promise
+      }
+      return listSnapshot ?? sessions
+    },
+    initialRoute: { path: '/', query: { session_id: 'A' } }
+  })
+  const { chat } = harness
+
+  await harness.flush()
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...mainMetadata
+  })
+  await receiveWs(harness, { type: 'connection_closed' })
+  harness.sessions.find(item => item.session_id === 'A').llm_request_metadata = {
+    ...persistedMetadata
+  }
+  await receiveWs(harness, { type: 'connection_reopened' })
+  holdNextListRefresh = true
+  await receiveWs(harness, { type: 'resume_complete', session_id: 'A' })
+  assert.ok(capturedPending)
+
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...expectedNextMetadata
+  })
+  capturedPending.resolve([
+    createSession('A', { source: 'ws', llm_request_metadata: persistedMetadata })
+  ])
+  await harness.flush()
+  assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), expectedNextMetadata)
+
+  const refreshSnapshot = async snapshot => {
+    listSnapshot = snapshot
+    await chat.loadSessions()
+    await harness.flush()
+    assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), expectedNextMetadata)
+  }
+
+  for (const snapshot of [
+    [createSession('A', { source: 'ws', llm_request_metadata: persistedMetadata })],
+    [createSession('A', { source: 'ws', llm_request_metadata: {} })],
+    [createSession('A', {
+      source: 'ws',
+      llm_request_metadata: {
+        total_input_tokens: -1,
+        total_cached_tokens: 0,
+        total_output_tokens: 0,
+        cache_hit_rate: 0
+      }
+    })]
+  ]) {
+    await refreshSnapshot(snapshot)
+  }
+
+  await refreshSnapshot(new Error('session list temporarily unavailable'))
+  await refreshSnapshot([
+    createSession('A', { source: 'ws', llm_request_metadata: expectedNextMetadata })
+  ])
+})
+
+test('composed reconnect keeps recovered metadata isolated across session switches', async t => {
+  const mainMetadata = createMainMetadata()
+  const taskTotals = {
+    total_input_tokens: 50120,
+    total_cached_tokens: 270,
+    total_output_tokens: 207,
+    cache_hit_rate: 270 / 50120
+  }
+  const recoveredMetadata = { ...mainMetadata, ...taskTotals }
+  const otherMetadata = {
+    ...createMainMetadata({ responseId: 'other-response', workSequenceNo: 1, eventSequenceNo: 1 }),
+    input_tokens: 7000,
+    context_window_tokens: 16384,
+    max_output_tokens: 4096,
+    output_tokens: 70,
+    cached_tokens: 70,
+    total_input_tokens: 7000,
+    total_cached_tokens: 70,
+    total_output_tokens: 70,
+    cache_hit_rate: 70 / 7000
+  }
+  let holdNextListRefresh = false
+  let capturedPending = null
+  const harness = await createHarness(t, {
+    sessions: [
+      createSession('A', { source: 'ws', llm_request_metadata: mainMetadata }),
+      createSession('B', { source: 'ws', llm_request_metadata: otherMetadata })
+    ],
+    sessionsList: ({ pending, sessions }) => {
+      if (holdNextListRefresh) {
+        holdNextListRefresh = false
+        capturedPending = pending
+        return pending.promise
+      }
+      return sessions
+    },
+    initialRoute: { path: '/', query: { session_id: 'A' } }
+  })
+  const { chat } = harness
+  const sessionsSnapshot = (aMetadata = mainMetadata) => [
+    createSession('A', { source: 'ws', llm_request_metadata: aMetadata }),
+    createSession('B', { source: 'ws', llm_request_metadata: otherMetadata })
+  ]
+
+  await harness.flush()
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...mainMetadata
+  })
+  await receiveWs(harness, { type: 'connection_closed' })
+  const serverSession = harness.sessions.find(item => item.session_id === 'A')
+  serverSession.llm_request_metadata = { ...recoveredMetadata }
+  serverSession.messages.push({
+    id: 1301,
+    role: 'assistant',
+    response_id: 'isolated-task-response',
+    content: 'isolated task result'
+  })
+  await receiveWs(harness, { type: 'connection_reopened' })
+  holdNextListRefresh = true
+  await receiveWs(harness, { type: 'resume_complete', session_id: 'A' })
+  assert.ok(capturedPending)
+
+  await selectSession(harness, 'B')
+  assert.equal(chat.currentSessionId.value, 'B')
+  assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), otherMetadata)
+
+  capturedPending.resolve(sessionsSnapshot(recoveredMetadata))
+  await harness.flush()
+  assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), otherMetadata)
+  assert.deepEqual(
+    snapshotMetadata(chat.sessions.value.find(item => item.session_id === 'A').llm_request_metadata),
+    recoveredMetadata
+  )
+
+  await selectSession(harness, 'A')
+  await harness.flush()
+  assert.equal(chat.currentSessionId.value, 'A')
+  assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), recoveredMetadata)
+  assert.equal(chat.llmRequestMetadata.value.total_input_tokens, 50120)
+  assert.equal(chat.messages.value.filter(message => message.content === 'isolated task result').length, 1)
 })

@@ -109,6 +109,14 @@ export function useChatSessionEvents({
     })
   }
 
+  const cacheLlmRequestMetadata = (sessionId, currentMetadata, metadata) => {
+    const nextMetadata = mergeLlmRequestMetadata(currentMetadata, metadata)
+    const nextMetadataBySession = new Map(llmRequestMetadataBySession.value)
+    nextMetadataBySession.set(sessionId, nextMetadata)
+    llmRequestMetadataBySession.value = nextMetadataBySession
+    return nextMetadata
+  }
+
   const updateLlmRequestMetadata = (event, isCurrentRequestSession) => {
     if (!isCurrentRequestSession()) return
     const currentSessionId = sessionManager.currentSessionId.value
@@ -123,11 +131,7 @@ export function useChatSessionEvents({
     const currentMetadata = llmRequestMetadataBySession.value.get(sessionId)
       || normalizeLlmRequestMetadata(sessionManager.sessions.value[sessionIndex]?.llm_request_metadata)
 
-    const nextMetadata = mergeLlmRequestMetadata(currentMetadata, metadata)
-
-    const nextMetadataBySession = new Map(llmRequestMetadataBySession.value)
-    nextMetadataBySession.set(sessionId, nextMetadata)
-    llmRequestMetadataBySession.value = nextMetadataBySession
+    const nextMetadata = cacheLlmRequestMetadata(sessionId, currentMetadata, metadata)
 
     if (sessionIndex !== -1) {
       sessionManager.sessions.value[sessionIndex] = {
@@ -136,6 +140,23 @@ export function useChatSessionEvents({
       }
     }
   }
+
+  watch(
+    () => [sessionManager.currentSessionId.value, currentSession.value?.llm_request_metadata],
+    ([sessionId, persistedMetadata]) => {
+      if (!sessionId) return
+      const metadata = normalizeLlmRequestMetadata(persistedMetadata)
+      if (!metadata || !isMainDialogueRequestMetadata(metadata)) return
+
+      // 完整会话刷新需要同步断线期间产生的累计用量。
+      cacheLlmRequestMetadata(
+        sessionId,
+        llmRequestMetadataBySession.value.get(sessionId),
+        metadata
+      )
+    },
+    { immediate: true, flush: 'sync' }
+  )
 
   const refreshSessionLoadingState = () => {
     void sessionManager.refreshSessionLoadingState()
@@ -433,8 +454,18 @@ export function useChatSessionEvents({
           data.llm_request_metadata
           && (data.llm_request_metadata.request_purpose || !data.source || data.source === 'foreground')
         ) {
+          // 独立工作只更新会话累计用量，不覆盖主对话上下文。
+          const metadata = ['scheduled_task', 'agent_work'].includes(data.source)
+            ? Object.fromEntries(Object.entries(data.llm_request_metadata).filter(([field]) => [
+              'request_purpose',
+              'total_input_tokens',
+              'total_cached_tokens',
+              'total_output_tokens',
+              'cache_hit_rate'
+            ].includes(field)))
+            : data.llm_request_metadata
           updateLlmRequestMetadata({
-            ...data.llm_request_metadata,
+            ...metadata,
             session_id: data.session_id || sessionManager.currentSessionId.value
           }, isCurrentSession)
         }
