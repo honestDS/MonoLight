@@ -16,7 +16,8 @@ from app.core.session_reply_queue import executor_interactive as executor_intera
 from app.core.session_reply_queue import executor_metadata as executor_metadata_module
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.request_token_baseline import build_provider_request_usage_metadata, extract_confirmed_provider_input_tokens
-from app.models.message import InternalMessage, MessageRole
+from app.models.audit import AuditRecord
+from app.models.message import InternalMessage, Message, MessageRole
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
@@ -34,6 +35,21 @@ from tests.unit.response_test_support import llm_response_payload
 SESSION_ID = "session-provider-usage"
 UID = "user-1"
 PROFILE_ID = 1
+_NON_MAIN_METADATA_PRIVATE_KEYS = frozenset(
+    {
+        "input_tokens",
+        "input_tokens_source",
+        "context_window_tokens",
+        "max_output_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "channel_id",
+        "model_id",
+        "protocol",
+        "context_summary_revision",
+        "context_content_revision",
+    }
+)
 
 
 @pytest_asyncio.fixture
@@ -60,6 +76,8 @@ async def session_factory(tmp_path) -> AsyncGenerator[async_sessionmaker[AsyncSe
             PromptLibrary.__table__,
             Profile.__table__,
             ChatSession.__table__,
+            Message.__table__,
+            AuditRecord.__table__,
             SessionReplyWorkItem.__table__,
             SessionReplyProviderUsage.__table__,
             SessionReplyStreamEvent.__table__,
@@ -127,6 +145,11 @@ def _request_metadata(
             cache_hit_rate=cached_tokens / input_tokens if input_tokens else 0.0,
         )
     return metadata
+
+
+def _assert_non_main_metadata_boundary(metadata: dict[str, Any]) -> None:
+    assert _NON_MAIN_METADATA_PRIVATE_KEYS.isdisjoint(metadata)
+    assert not any(key.startswith("_provider_") for key in metadata)
 
 
 def _work(
@@ -413,9 +436,239 @@ async def test_scheduled_interactive_usage_contributes_to_session_totals(
             )
             == 50000
         )
-        assert response["llm_request_metadata"]["total_input_tokens"] == 100120
-        assert response["llm_request_metadata"]["total_cached_tokens"] == 270
-        assert response["llm_request_metadata"]["total_output_tokens"] == 207
+        response_metadata = response["llm_request_metadata"]
+        assert response_metadata["total_input_tokens"] == 100120
+        assert response_metadata["total_cached_tokens"] == 270
+        assert response_metadata["total_output_tokens"] == 207
+        _assert_non_main_metadata_boundary(response_metadata)
+
+
+@pytest.mark.parametrize(
+    ("work_type", "source_type", "source_id", "frozen_context_messages", "updates_context"),
+    [
+        pytest.param(
+            SessionReplyWorkType.FOREGROUND_REPLY,
+            SessionReplySourceType.USER_MESSAGE,
+            "1",
+            [],
+            False,
+            id="foreground-frozen-context",
+        ),
+        pytest.param(
+            SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            SessionReplySourceType.AUDIT_RECORD,
+            "999",
+            [],
+            False,
+            id="confirmed-tool-frozen-context",
+        ),
+        pytest.param(
+            SessionReplyWorkType.BACKGROUND_TASK_RESUME,
+            SessionReplySourceType.BACKGROUND_TASK,
+            "999",
+            [],
+            False,
+            id="background-resume-frozen-context",
+        ),
+        pytest.param(
+            SessionReplyWorkType.FOREGROUND_REPLY,
+            SessionReplySourceType.USER_MESSAGE,
+            "1",
+            None,
+            True,
+            id="foreground-main-context",
+        ),
+    ],
+)
+@pytest.mark.parametrize("stream_requested", [False, True], ids=["non-stream", "stream"])
+@pytest.mark.asyncio
+async def test_interactive_metadata_boundary_is_cumulative_without_leaking_non_main_context(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    work_type: SessionReplyWorkType,
+    source_type: SessionReplySourceType,
+    source_id: str,
+    frozen_context_messages: list[InternalMessage] | None,
+    updates_context: bool,
+    stream_requested: bool,
+) -> None:
+    main_metadata = _session_metadata(1000, 250, 200)
+    main_metadata.update(
+        {
+            "input_tokens": 777,
+            "input_tokens_source": "provider",
+            "cached_tokens": 77,
+            "output_tokens": 33,
+            "context_window_tokens": 8192,
+            "max_output_tokens": 1024,
+            "channel_id": 41,
+            "model_id": "main-model",
+            "protocol": "MAIN_PROTOCOL",
+            "context_summary_revision": 5,
+            "context_content_revision": 6,
+            "main_context_marker": "unchanged",
+            "work_sequence_no": 2,
+            "event_sequence_no": 4,
+        }
+    )
+    await _seed_session_and_works(
+        session_factory,
+        metadata=main_metadata,
+        works=[
+            _work(
+                work_id=7,
+                sequence_no=9,
+                work_type=work_type,
+                source_type=source_type,
+                source_id=source_id,
+            )
+        ],
+    )
+    async with session_factory() as db:
+        session = await db.get(ChatSession, SESSION_ID)
+        work = await db.get(SessionReplyWorkItem, 7)
+        assert session is not None
+        assert work is not None
+        session.llm_request_metadata_work_sequence_no = 2
+        session.llm_request_metadata_event_sequence_no = 4
+        work.execution_state = {"stream_requested": stream_requested}
+        await db.commit()
+
+    monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+
+    request_metadata = _request_metadata(
+        "boundary-request",
+        input_tokens=120,
+        cached_tokens=20,
+        output_tokens=7,
+    )
+    request_metadata.update(
+        channel_id=2,
+        context_summary_revision=7,
+        context_content_revision=8,
+    )
+
+    def build_response() -> dict[str, Any]:
+        response = llm_response_payload("boundary reply")
+        response["llm_request_metadata"] = dict(request_metadata)
+        return response
+
+    async def dispatch(**kwargs):
+        await kwargs["request_metadata_callback"](dict(request_metadata))
+        await kwargs["request_metadata_callback"](dict(request_metadata))
+        return build_response()
+
+    async def dispatch_stream(**kwargs):
+        await kwargs["request_metadata_callback"](dict(request_metadata))
+        await kwargs["request_metadata_callback"](dict(request_metadata))
+        yield {"type": "llm_request_metadata", **request_metadata}
+        yield {"type": "llm_request_metadata", **request_metadata}
+        yield {"type": "done", "response": build_response(), "response_id": "boundary-response"}
+
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch_stream", dispatch_stream)
+
+    async with session_factory() as db:
+        work = await db.get(SessionReplyWorkItem, 7)
+        assert work is not None
+        response = await executor_interactive_module._dispatch_interactive_work(
+            db,
+            work=work,
+            worker_id="worker-1",
+            message="boundary input",
+            initial_message=InternalMessage(id=1, role=MessageRole.USER, content="boundary input"),
+            history_before_id=1,
+            frozen_user_message_ids=[1],
+            attachments=None,
+            allow_additional_user_messages=False,
+            execution_resume_state=None,
+            frozen_context_messages=frozen_context_messages,
+        )
+
+    response_metadata = response.get("llm_request_metadata")
+    assert isinstance(response_metadata, dict)
+    assert response_metadata["total_input_tokens"] == 1120
+    assert response_metadata["total_cached_tokens"] == 270
+    assert response_metadata["total_output_tokens"] == 207
+    assert response_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
+    assert response_metadata["work_id"] == 7
+    assert response_metadata["work_sequence_no"] == 9
+    if updates_context:
+        assert response_metadata["input_tokens"] == 120
+        assert response_metadata["context_window_tokens"] == 4096
+        assert response_metadata["max_output_tokens"] == 512
+    else:
+        _assert_non_main_metadata_boundary(response_metadata)
+
+    async with session_factory() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == SESSION_ID))).scalar_one()
+        usages = list((await db.execute(select(SessionReplyProviderUsage))).scalars().all())
+        stream_events = list((await db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == 7).order_by(SessionReplyStreamEvent.sequence_no))).scalars().all())
+
+        assert len(usages) == 1
+        usage = usages[0]
+        assert usage.provider_request_id == "boundary-request"
+        assert usage.work_id == 7
+        assert usage.request_purpose == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE
+        assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (120, 20, 7)
+
+        assert session.llm_request_metadata is not None
+        assert session.llm_request_metadata["total_input_tokens"] == 1120
+        assert session.llm_request_metadata["total_cached_tokens"] == 270
+        assert session.llm_request_metadata["total_output_tokens"] == 207
+        assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
+        if updates_context:
+            assert session.llm_request_metadata["input_tokens"] == 120
+            assert session.llm_request_metadata["context_window_tokens"] == 4096
+            assert session.llm_request_metadata["max_output_tokens"] == 512
+            assert session.llm_request_metadata_work_sequence_no == 9
+            assert session.llm_request_metadata_event_sequence_no == (2 if stream_requested else 0)
+        else:
+            for key in (
+                "input_tokens",
+                "input_tokens_source",
+                "cached_tokens",
+                "output_tokens",
+                "context_window_tokens",
+                "max_output_tokens",
+                "channel_id",
+                "model_id",
+                "protocol",
+                "context_summary_revision",
+                "context_content_revision",
+                "main_context_marker",
+                "work_sequence_no",
+                "event_sequence_no",
+            ):
+                assert session.llm_request_metadata[key] == main_metadata[key]
+            assert session.llm_request_metadata_work_sequence_no == 2
+            assert session.llm_request_metadata_event_sequence_no == 4
+
+        if stream_requested:
+            assert len(stream_events) == 2
+            assert [item.sequence_no for item in stream_events] == [1, 2]
+            for expected_sequence_no, stream_item in enumerate(stream_events, start=1):
+                metadata_event = stream_item.event
+                assert stream_item.work_id == 7
+                assert metadata_event["type"] == "llm_request_metadata"
+                assert metadata_event["session_id"] == SESSION_ID
+                assert metadata_event["work_id"] == 7
+                assert metadata_event["work_sequence_no"] == 9
+                assert metadata_event["event_sequence_no"] == expected_sequence_no
+                assert metadata_event["event_sequence_no"] == stream_item.sequence_no
+                assert metadata_event["total_input_tokens"] == 1120
+                assert metadata_event["total_cached_tokens"] == 270
+                assert metadata_event["total_output_tokens"] == 207
+                assert metadata_event["cache_hit_rate"] == pytest.approx(270 / 1120)
+                if updates_context:
+                    assert metadata_event["input_tokens"] == 120
+                    assert metadata_event["context_window_tokens"] == 4096
+                    assert metadata_event["max_output_tokens"] == 512
+                else:
+                    _assert_non_main_metadata_boundary(metadata_event)
+        else:
+            assert not stream_events
 
 
 @pytest.mark.parametrize("stream_requested", [False, True])

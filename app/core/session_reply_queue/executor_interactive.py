@@ -100,7 +100,11 @@ async def _persist_interactive_work_stream_event(
                     **stream_state.session_token_totals,
                 },
                 event_sequence_no=stream_state.next_sequence,
+                update_session_context=stream_state.update_session_context,
             )
+            if not stream_state.update_session_context:
+                persisted_event["type"] = "llm_request_metadata"
+                persisted_event["session_id"] = stream_state.session_id
             if stream_state.update_session_context:
                 await session_crud.update_llm_request_metadata(
                     event_db,
@@ -398,6 +402,7 @@ async def _dispatch_interactive_work(
                     **response["llm_request_metadata"],
                     **stream_state.session_token_totals,
                 },
+                update_session_context=update_session_context,
             )
             if update_session_context:
                 await session_crud.update_llm_request_metadata(
@@ -435,5 +440,6 @@ async def _dispatch_interactive_work(
                 **response["llm_request_metadata"],
                 **stream_state.session_token_totals,
             },
+            update_session_context=update_session_context,
         )
     return response

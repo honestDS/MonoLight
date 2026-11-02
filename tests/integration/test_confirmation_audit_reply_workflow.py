@@ -2561,6 +2561,14 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
         assert profile is not None
         assert session is not None
         assert record is not None and record.source_assistant_message_id is not None
+        initial_session_metadata = deepcopy(session.llm_request_metadata)
+        initial_metadata_work_sequence_no = session.llm_request_metadata_work_sequence_no
+        initial_metadata_event_sequence_no = session.llm_request_metadata_event_sequence_no
+        assert isinstance(initial_session_metadata, dict)
+        assert initial_session_metadata["input_tokens"] == 1000
+        assert initial_session_metadata["total_input_tokens"] == 1000
+        assert initial_session_metadata["context_window_tokens"] == 4096
+        assert initial_session_metadata["max_output_tokens"] == 512
 
         profile.configs = _profile_config()
         profile.configs["tool"].update(
@@ -2932,9 +2940,11 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
         foreground_work = await verification_db.get(SessionReplyWorkItem, foreground_work.id)
         messages = list((await verification_db.execute(select(Message).where(Message.session_id == "session-confirmation").order_by(Message.id))).scalars().all())
         executions = list((await verification_db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == audit_record_id).order_by(AuditExecutionRecord.id))).scalars().all())
+        provider_usages = list((await verification_db.execute(select(SessionReplyProviderUsage).where(SessionReplyProviderUsage.work_id == submitted_work_id).order_by(SessionReplyProviderUsage.id))).scalars().all())
         tasks = list((await verification_db.execute(select(BackgroundTask).order_by(BackgroundTask.id))).scalars().all())
         session_events = list((await verification_db.execute(select(SessionEvent).where(SessionEvent.session_id == "session-confirmation").order_by(SessionEvent.id))).scalars().all())
         stream_rows = list((await verification_db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == submitted_work_id))).scalars().all())
+        session = await verification_db.get(ChatSession, "session-confirmation")
         final_message = await verification_db.get(Message, confirmed_work.result_message_id) if confirmed_work and confirmed_work.result_message_id else None
         assert confirmed_work is not None
         background_markers = [message for message in messages if message.type == MessageType.BACKGROUND_TASK_RESULT]
@@ -2985,6 +2995,64 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
     assert [execution.status for execution in executions] == [AuditExecutionStatus.SUCCEEDED, AuditExecutionStatus.SUCCEEDED]
     assert len({execution.new_tool_call_id for execution in executions}) == 2
     assert all(execution.new_tool_call_id.startswith("call_") for execution in executions)
+
+    expected_request_count = 3 if reply_mode == "summary" else 2
+    expected_output_increment = 7 if reply_mode == "summary" else 5
+    assert len(provider_usages) == expected_request_count
+    assert all(usage.work_id == submitted_work_id for usage in provider_usages)
+    assert all(usage.session_id == "session-confirmation" and usage.uid == "owner" for usage in provider_usages)
+    assert all(usage.request_purpose == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE for usage in provider_usages)
+    assert sorted((usage.input_tokens, usage.cached_tokens, usage.output_tokens) for usage in provider_usages) == sorted([(10, 0, 3), *([(10, 0, 2)] * (expected_request_count - 1))])
+    usage_input_tokens = sum(usage.input_tokens for usage in provider_usages)
+    usage_cached_tokens = sum(usage.cached_tokens for usage in provider_usages)
+    usage_output_tokens = sum(usage.output_tokens for usage in provider_usages)
+    assert (usage_input_tokens, usage_cached_tokens, usage_output_tokens) == (expected_request_count * 10, 0, expected_output_increment)
+    assert session is not None
+    final_session_metadata = session.llm_request_metadata
+    assert isinstance(final_session_metadata, dict)
+    assert final_session_metadata["total_input_tokens"] == initial_session_metadata["total_input_tokens"] + usage_input_tokens
+    assert final_session_metadata["total_cached_tokens"] == initial_session_metadata["total_cached_tokens"] + usage_cached_tokens
+    assert final_session_metadata["total_output_tokens"] == initial_session_metadata["total_output_tokens"] + usage_output_tokens
+    assert final_session_metadata["cache_hit_rate"] == pytest.approx(final_session_metadata["total_cached_tokens"] / final_session_metadata["total_input_tokens"])
+    private_request_metadata_fields = {
+        "type",
+        "input_tokens",
+        "input_tokens_source",
+        "context_window_tokens",
+        "max_output_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "response_id",
+        "turn",
+        "model_id",
+        "channel_id",
+        "protocol",
+    }
+    assert {key: final_session_metadata.get(key) for key in private_request_metadata_fields} == {key: initial_session_metadata.get(key) for key in private_request_metadata_fields}
+    assert {key: final_session_metadata.get(key) for key in ("work_id", "work_sequence_no")} == {key: initial_session_metadata.get(key) for key in ("work_id", "work_sequence_no")}
+    assert session.llm_request_metadata_work_sequence_no == initial_metadata_work_sequence_no
+    assert session.llm_request_metadata_event_sequence_no == initial_metadata_event_sequence_no
+
+    def assert_public_work_metadata(metadata: object) -> None:
+        assert isinstance(metadata, dict)
+        assert set(metadata) == {
+            "request_purpose",
+            "total_input_tokens",
+            "total_cached_tokens",
+            "total_output_tokens",
+            "cache_hit_rate",
+            "work_id",
+            "work_sequence_no",
+        }
+        assert not private_request_metadata_fields.intersection(metadata)
+        assert not any(key.startswith("_provider_") for key in metadata)
+        assert metadata["request_purpose"] == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE.value
+        assert metadata["total_input_tokens"] == final_session_metadata["total_input_tokens"]
+        assert metadata["total_cached_tokens"] == final_session_metadata["total_cached_tokens"]
+        assert metadata["total_output_tokens"] == final_session_metadata["total_output_tokens"]
+        assert metadata["cache_hit_rate"] == pytest.approx(final_session_metadata["cache_hit_rate"])
+        assert metadata["work_id"] == submitted_work_id
+        assert metadata["work_sequence_no"] == confirmed_work.sequence_no
 
     source_message = next(message for message in messages if message.id == record.source_assistant_message_id)
     assert source_message.work_id == source_work.id
@@ -3051,6 +3119,8 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
         assert lifecycle_events[0]["work_id"] == submitted_work_id
         assert lifecycle_events[0]["history"] == []
         assert lifecycle_events[0]["content"] == "agent continuation summary"
+        assert_public_work_metadata(confirmed_work.execution_state["response"]["llm_request_metadata"])
+        assert_public_work_metadata(lifecycle_events[0]["llm_request_metadata"])
     else:
         assert final_message is None
         assert lifecycle_events == []
@@ -3065,10 +3135,25 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
     assert all("echo confirmed-" not in json.dumps(item, ensure_ascii=False) for item in status_response["history"])
     if reply_mode == "summary":
         assert status_response["choices"][0]["message"]["content"] == "agent continuation summary"
+        assert_public_work_metadata(status_response["llm_request_metadata"])
     else:
         assert status_response["skip_reply"] is True
     assert forced_recall_requests == []
-    assert llm_call_count == (3 if reply_mode == "summary" else 2)
+    assert llm_call_count == expected_request_count
+
+    result_response = await session_reply_queue_manager.wait_for_result(submitted_work_id)
+    if reply_mode == "summary":
+        assert_public_work_metadata(result_response["llm_request_metadata"])
+    completed_stream = [stream_event async for stream_event in session_reply_queue_manager.wait_for_stream(submitted_work_id)]
+    resumed_stream = [stream_event async for stream_event in session_reply_queue_manager.wait_for_stream(submitted_work_id, resume_mode=True)]
+    for stream_response in (
+        next(stream_event["response"] for stream_event in completed_stream if stream_event.get("type") == "done"),
+        next(stream_event["response"] for stream_event in resumed_stream if stream_event.get("type") == "done"),
+    ):
+        if reply_mode == "summary":
+            assert_public_work_metadata(stream_response["llm_request_metadata"])
+    assert completed_stream[-1]["type"] == "done"
+    assert resumed_stream[-1]["type"] == "done"
     assert all(message.content != "仅主会话可见的无关内容" for request in captured_requests for message in request)
     expected_external_results_by_command = {
         "echo confirmed-1": ("original-shell-call-1", "echo confirmed-1\n"),

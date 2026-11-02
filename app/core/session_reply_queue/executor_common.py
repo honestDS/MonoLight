@@ -127,14 +127,27 @@ def _metadata_with_work_order(
     work: SessionReplyWorkItem,
     metadata: Any,
     event_sequence_no: int | None = None,
+    *,
+    update_session_context: bool = True,
 ) -> Any:
     if not isinstance(metadata, dict):
         return metadata
-    ordered_metadata = {
-        **metadata,
-        "work_id": work.id,
-        "work_sequence_no": work.sequence_no,
-    }
+    if update_session_context:
+        ordered_metadata = dict(metadata)
+    else:
+        session_total_fields = (
+            "request_purpose",
+            "total_input_tokens",
+            "total_cached_tokens",
+            "total_output_tokens",
+            "cache_hit_rate",
+        )
+        ordered_metadata = {}
+        for field in session_total_fields:
+            if field in metadata:
+                ordered_metadata[field] = metadata[field]
+    ordered_metadata["work_id"] = work.id
+    ordered_metadata["work_sequence_no"] = work.sequence_no
     if event_sequence_no is not None:
         ordered_metadata["event_sequence_no"] = event_sequence_no
     return ordered_metadata

@@ -1065,6 +1065,156 @@ const createProactiveReply = ({
 
 const getSessionMetadata = chat => chat.sessions.value.find(item => item.session_id === 'A').llm_request_metadata
 
+test('composed cumulative-only independent responses preserve the main context', async t => {
+  const mainMetadata = createMainMetadata()
+  const createCumulativeMetadata = (
+    totalInputTokens,
+    totalCachedTokens,
+    totalOutputTokens,
+    workId,
+    workSequenceNo,
+    eventSequenceNo
+  ) => ({
+    total_input_tokens: totalInputTokens,
+    total_cached_tokens: totalCachedTokens,
+    total_output_tokens: totalOutputTokens,
+    cache_hit_rate: totalCachedTokens / totalInputTokens,
+    request_purpose: 'main_dialogue',
+    work_id: workId,
+    work_sequence_no: workSequenceNo,
+    event_sequence_no: eventSequenceNo
+  })
+  const metadataEvent = (metadata, sessionId = 'A') => ({
+    type: 'llm_request_metadata',
+    session_id: sessionId,
+    ...metadata
+  })
+  const doneEvent = (metadata, nested, responseId) => {
+    const response = {
+      work_id: metadata.work_id,
+      response_id: responseId,
+      choices: [{
+        message: { role: 'assistant', content: responseId },
+        finish_reason: 'stop'
+      }]
+    }
+    return {
+      type: 'done',
+      session_id: 'A',
+      work_id: metadata.work_id,
+      work_sequence_no: metadata.work_sequence_no,
+      event_sequence_no: metadata.event_sequence_no,
+      ...(nested
+        ? { response: { ...response, llm_request_metadata: metadata } }
+        : { llm_request_metadata: metadata, response })
+    }
+  }
+  const harness = await createHarness(t, {
+    sessions: [
+      createSession('A', { source: 'ws', llm_request_metadata: mainMetadata }),
+      createSession('B', { source: 'ws' })
+    ],
+    initialRoute: { path: '/', query: { session_id: 'A' } }
+  })
+  const { chat } = harness
+  const currentMetadata = () => chat.llmRequestMetadata.value
+  const pickMainFields = metadata => Object.fromEntries([
+    'input_tokens',
+    'context_window_tokens',
+    'max_output_tokens',
+    'response_id',
+    'output_tokens',
+    'cached_tokens',
+    'work_sequence_no',
+    'event_sequence_no'
+  ].map(field => [field, metadata[field]]))
+  const pickTotals = metadata => Object.fromEntries([
+    'total_input_tokens',
+    'total_cached_tokens',
+    'total_output_tokens',
+    'cache_hit_rate'
+  ].map(field => [field, metadata[field]]))
+  const assertMainContext = expected => assert.deepEqual(
+    pickMainFields(currentMetadata()),
+    pickMainFields(expected)
+  )
+  const assertTotals = expected => assert.deepEqual(pickTotals(currentMetadata()), expected)
+
+  await harness.flush()
+  assertMainContext(mainMetadata)
+  assertTotals(pickTotals(mainMetadata))
+
+  const firstMetadata = createCumulativeMetadata(50100, 260, 204, 'confirmed-work', 3, 2)
+  const nestedMetadata = createCumulativeMetadata(50200, 280, 210, 'agent-work', 4, 3)
+  const topLevelMetadata = createCumulativeMetadata(50300, 300, 216, 'agent-work-top-level', 5, 4)
+  const backgroundMetadata = createCumulativeMetadata(50400, 320, 223, 'background-work', 6, 1)
+  const independentEvents = [
+    [metadataEvent(firstMetadata), pickTotals(firstMetadata)],
+    [doneEvent(nestedMetadata, true, 'confirmed-response'), pickTotals(nestedMetadata)],
+    [doneEvent(topLevelMetadata, false, 'agent-work-response'), pickTotals(topLevelMetadata)],
+    [{
+      type: 'proactive_reply',
+      session_id: 'A',
+      source: 'background_task',
+      work_id: backgroundMetadata.work_id,
+      work_sequence_no: backgroundMetadata.work_sequence_no,
+      event_sequence_no: backgroundMetadata.event_sequence_no,
+      llm_request_metadata: backgroundMetadata
+    }, pickTotals(backgroundMetadata)]
+  ]
+
+  for (const [event, expectedTotals] of independentEvents) {
+    await receiveWs(harness, event)
+    assertMainContext(mainMetadata)
+    assertTotals(expectedTotals)
+  }
+
+  await receiveWs(harness, { ...independentEvents[3][0] })
+  assertMainContext(mainMetadata)
+  assertTotals(pickTotals(backgroundMetadata))
+
+  const lateMetadata = createCumulativeMetadata(50150, 255, 205, 'late-work', 7, 1)
+  await receiveWs(harness, metadataEvent(lateMetadata))
+  assertMainContext(mainMetadata)
+  assertTotals(pickTotals(backgroundMetadata))
+
+  const nextMainMetadata = {
+    ...createMainMetadata({ responseId: 'main-next-response', eventSequenceNo: 5 }),
+    input_tokens: 51000,
+    output_tokens: 190,
+    cached_tokens: 240,
+    total_input_tokens: 51400,
+    total_cached_tokens: 360,
+    total_output_tokens: 230,
+    cache_hit_rate: 360 / 51400
+  }
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    work_id: 'main-work-2',
+    ...nextMainMetadata
+  })
+  assertMainContext(nextMainMetadata)
+  assertTotals(pickTotals(nextMainMetadata))
+
+  await selectSession(harness, 'B')
+  const bMetadata = createCumulativeMetadata(700, 70, 12, 'background-b', 8, 1)
+  await receiveWs(harness, metadataEvent(bMetadata, 'B'))
+  assert.deepEqual(currentMetadata(), pickTotals(bMetadata))
+
+  await selectSession(harness, 'A')
+  assertMainContext(nextMainMetadata)
+  assertTotals(pickTotals(nextMainMetadata))
+
+  await receiveWs(harness, { type: 'connection_closed' })
+  await receiveWs(harness, { type: 'connection_reopened' })
+  await receiveWs(harness, { type: 'resume_complete', session_id: 'A' })
+  await chat.loadSessions()
+  await harness.flush()
+  assertMainContext(nextMainMetadata)
+  assertTotals(pickTotals(nextMainMetadata))
+})
+
 test('composed proactive task results do not overwrite main dialogue token metadata', async t => {
   const taskTotals = {
     total_input_tokens: 50120,
