@@ -17,19 +17,28 @@ from app.core.constants import (
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
+from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.tools.base import BaseExecutor
+from app.core.utils.scheduled_time import get_next_run_times
+from app.core.utils.time import get_local_time
 from app.models.scheduled_task import ScheduledTaskResponse
+from app.schemas.scheduled_task import ScheduledTaskSchedule
 
 MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": MANAGE_SCHEDULED_TASKS_TOOL_NAME,
         "description": (
-            "Create repeating interval tasks by default in the current user's current session. Set run_once=true for a single delayed task. "
-            "The first trigger waits for interval_seconds in either mode; repeating tasks then trigger at that interval. "
+            "Create repeating delay or calendar tasks by default in the current user's current session. For a relative delay, provide interval_seconds in seconds; set run_once=true for a single delayed task. "
+            "For a recurring calendar schedule, provide a five-field cron_expression (minute hour day month weekday) and an explicit IANA timezone; cron schedules require run_once=false. "
+            "The first trigger waits for interval_seconds in delay mode; repeating delay tasks then trigger at that interval. "
             "After a single task is successfully enqueued, it is automatically disabled so it triggers only once; enqueue does not mean the LLM has completed execution. "
-            "Absolute times and cron schedules are not supported. "
+            "Absolute one-time timestamps are not supported; use interval_seconds for a relative delay or cron_expression for a recurring calendar schedule. "
+            "Never use the server's default timezone. Determine an IANA timezone from the user's explicit time, location, or known preference; language is only a hint, so ask the user before creating when it is not reliable. "
+            "Ask the user for a concrete execution time or delay/schedule before creating when none is provided; do not create an ambiguous schedule. "
+            "After successful creation, explain in plain language the period, timezone, and future execution times returned by the tool. Calendar schedules skip months that do not contain the requested day. "
+            "Cron day-of-month and weekday restrictions are combined as OR, not AND, so do not use both to request an AND condition. Holiday and lunar-calendar rules are not inferred; ask the user to clarify any ambiguous request. "
             "List all scheduled tasks, including disabled tasks, or delete a task only within the current user's current session. "
             "Deleting a task prevents future triggers but does not cancel already queued replies. "
             "Triggered tasks execute as independent AgentWork and do not receive conversation history, so create messages must be self-contained. "
@@ -62,12 +71,27 @@ MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA = {
                     "type": "integer",
                     "minimum": 60,
                     "maximum": 2147483647,
-                    "description": "Required only when operation=create; the initial wait before the first trigger, and the repeating interval unless run_once=true.",
+                    "description": "Used only when operation=create. Provide exactly one of interval_seconds or cron_expression. This is a relative delay in seconds before the first trigger and, unless run_once=true, between repeating triggers; do not provide a timezone for delay mode.",
+                },
+                "cron_expression": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "description": "Used for create. Deterministic five-field Cron: minute hour day-of-month month weekday. Supports L for month-end and # for the nth weekday; random schedules are not supported. Requires timezone and run_once=false.",
+                },
+                "timezone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100,
+                    "description": (
+                        "Used only with cron_expression when operation=create. Required explicit IANA timezone, such as Asia/Shanghai or America/New_York; never infer or use the server default. "
+                        "Use the user's explicit time, location, or known preference; language is only a hint, so ask before creating if the timezone is uncertain."
+                    ),
                 },
                 "run_once": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Used only when operation=create; defaults to false for repeating tasks. Set true for a single delayed task.",
+                    "description": "Used only when operation=create; defaults to false. Set true only for a single interval_seconds delay; cron_expression requires false.",
                 },
                 "page": {
                     "type": "integer",
@@ -95,13 +119,12 @@ MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA = {
 }
 
 
-class _CreateArguments(BaseModel):
+class _CreateArguments(ScheduledTaskSchedule):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
 
     name: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1)
-    interval_seconds: int = Field(ge=60, le=2147483647)
-    run_once: bool = False
+    interval_seconds: int | None = Field(default=None, ge=60, le=2147483647)
 
 
 class _ListArguments(BaseModel):
@@ -143,6 +166,8 @@ class ManageScheduledTasksExecutor(BaseExecutor):
 
         try:
             params = arguments_model.model_validate(arguments)
+        except ParameterException as exc:
+            return _failure(operation, exc.message)
         except ValidationError as exc:
             return _failure(
                 operation,
@@ -229,11 +254,29 @@ class ManageScheduledTasksExecutor(BaseExecutor):
                 session_id=session_id,
                 message=params.message,
                 interval_seconds=params.interval_seconds,
+                cron_expression=params.cron_expression,
+                timezone=params.timezone,
                 run_once=params.run_once,
             )
         except Exception:
             await db.rollback()
             raise
+
+        first_next_run = task.next_run_at
+        if first_next_run.tzinfo is None:
+            first_next_run = first_next_run.replace(tzinfo=get_local_time().tzinfo)
+        next_run_times = [first_next_run]
+        if not task.run_once:
+            next_run_times.extend(
+                get_next_run_times(
+                    interval_seconds=task.interval_seconds,
+                    cron_expression=task.cron_expression,
+                    timezone=task.timezone,
+                    run_once=task.run_once,
+                    after=first_next_run,
+                    count=2,
+                )
+            )
 
         return json.dumps(
             {
@@ -241,6 +284,7 @@ class ManageScheduledTasksExecutor(BaseExecutor):
                 "operation": operation,
                 "message": t(MSG_SCHEDULED_TASK_CREATED),
                 "task": ScheduledTaskResponse.model_validate(task).model_dump(mode="json"),
+                "next_run_times": [run_time.isoformat() for run_time in next_run_times],
             },
             ensure_ascii=False,
         )

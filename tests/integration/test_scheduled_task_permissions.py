@@ -457,6 +457,7 @@ async def test_update_preserves_and_reschedules_one_time_task_contract(
     before_task = {task["id"]: task for task in before}[1]
     assert before_task["run_once"] is False
 
+    monkeypatch.setenv("LOG_TZ_OFFSET", "0")
     clock = {"now": datetime(2026, 4, 1, tzinfo=UTC)}
     monkeypatch.setattr(scheduled_tasks, "get_local_time", lambda: clock["now"])
     interval_seconds = before_task["interval_seconds"]

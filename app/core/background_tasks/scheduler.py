@@ -1,5 +1,4 @@
 import asyncio
-from datetime import timedelta
 
 from sqlalchemy import update
 
@@ -13,6 +12,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.profile.selection import resolve_profile_for_session
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.utils.scheduled_time import get_next_run_times
 from app.core.utils.time import get_local_time
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.message import Message, MessageRole, MessageType
@@ -115,6 +115,16 @@ class ScheduledTaskScheduler:
 
         old_next_run_at = scheduled_task.next_run_at
         now = get_local_time()
+        if scheduled_task.run_once:
+            next_run_at = old_next_run_at
+        else:
+            next_run_at = get_next_run_times(
+                interval_seconds=scheduled_task.interval_seconds,
+                cron_expression=scheduled_task.cron_expression,
+                timezone=scheduled_task.timezone,
+                after=now,
+                count=1,
+            )[0]
         claimed = await db.execute(
             update(ScheduledTask)
             .where(
@@ -127,7 +137,7 @@ class ScheduledTaskScheduler:
                 status=ScheduledTaskStatus.DISABLED if scheduled_task.run_once else ScheduledTaskStatus.ENABLED,
                 last_run_at=now,
                 run_count=ScheduledTask.run_count + 1,
-                next_run_at=old_next_run_at if scheduled_task.run_once else now + timedelta(seconds=scheduled_task.interval_seconds),
+                next_run_at=next_run_at,
                 updated_at=now,
             )
             .execution_options(synchronize_session=False)

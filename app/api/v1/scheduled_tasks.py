@@ -1,5 +1,3 @@
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,11 +9,12 @@ from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.profile.selection import resolve_profile_for_session
 from app.core.security import get_current_user
+from app.core.utils.scheduled_time import get_next_run_times
 from app.core.utils.time import get_local_time
 from app.models.scheduled_task import ScheduledTaskResponse, ScheduledTaskStatus
 from app.providers.database import get_db
 from app.schemas.response import PageData, StandardResponse
-from app.schemas.scheduled_task import ScheduledTaskCreateRequest, ScheduledTaskUpdateRequest
+from app.schemas.scheduled_task import ScheduledTaskCreateRequest, ScheduledTaskSchedule, ScheduledTaskUpdateRequest
 
 router = APIRouter(prefix="/scheduled-tasks", tags=["ScheduledTasks"], dependencies=[Depends(get_current_user)])
 
@@ -97,9 +96,25 @@ async def create_scheduled_task(
         session_id=request.session_id,
         message=request.message,
         interval_seconds=request.interval_seconds,
+        cron_expression=request.cron_expression,
+        timezone=request.timezone,
         run_once=request.run_once,
     )
     return StandardResponse.success(data=ScheduledTaskResponse.model_validate(task), message=MSG_GENERIC_SUCCESS)
+
+
+@router.post("/preview")
+async def preview_scheduled_task(request: ScheduledTaskSchedule):
+    return StandardResponse.success(
+        data={
+            "next_run_times": get_next_run_times(
+                **request.model_dump(),
+                after=get_local_time(),
+                count=3,
+            )
+        },
+        message=MSG_GENERIC_SUCCESS,
+    )
 
 
 @router.post("/update")
@@ -117,8 +132,56 @@ async def update_scheduled_task(
     session_id = obj_in.get("session_id", task.session_id)
     await _validate_user_session(db, session_id, task.uid)
 
-    if "interval_seconds" in obj_in or obj_in.get("run_once", task.run_once) != task.run_once or (obj_in.get("run_once", task.run_once) and obj_in.get("status") == ScheduledTaskStatus.ENABLED and task.status != ScheduledTaskStatus.ENABLED):
-        obj_in["next_run_at"] = get_local_time() + timedelta(seconds=obj_in.get("interval_seconds", task.interval_seconds))
+    interval_seconds_provided = "interval_seconds" in obj_in
+    schedule_values = {
+        "interval_seconds": task.interval_seconds,
+        "cron_expression": task.cron_expression,
+        "timezone": task.timezone,
+        "run_once": task.run_once,
+    }
+    for field in ("interval_seconds", "cron_expression", "timezone", "run_once"):
+        if field in obj_in:
+            schedule_values[field] = obj_in[field]
+
+    if "cron_expression" in obj_in and "interval_seconds" not in obj_in:
+        schedule_values["interval_seconds"] = None
+        if "run_once" not in obj_in:
+            schedule_values["run_once"] = False
+    elif "interval_seconds" in obj_in and "cron_expression" not in obj_in:
+        schedule_values["cron_expression"] = None
+        if "timezone" not in obj_in:
+            schedule_values["timezone"] = None
+
+    schedule = ScheduledTaskSchedule(**schedule_values)
+    obj_in["interval_seconds"] = schedule.interval_seconds
+    obj_in["cron_expression"] = schedule.cron_expression
+    obj_in["timezone"] = schedule.timezone
+    obj_in["run_once"] = schedule.run_once
+
+    run_once_changed = schedule.run_once != task.run_once
+    cron_changed = schedule.cron_expression != task.cron_expression
+    timezone_changed = schedule.timezone != task.timezone
+    status_enabled = obj_in.get("status") == ScheduledTaskStatus.ENABLED
+    task_was_disabled = task.status != ScheduledTaskStatus.ENABLED
+    one_time_reenabled = schedule.run_once and status_enabled and task_was_disabled
+    cron_reenabled = schedule.cron_expression is not None and status_enabled and task_was_disabled
+
+    should_reschedule = interval_seconds_provided
+    if run_once_changed:
+        should_reschedule = True
+    if cron_changed or timezone_changed:
+        should_reschedule = True
+    if one_time_reenabled or cron_reenabled:
+        should_reschedule = True
+    if should_reschedule:
+        obj_in["next_run_at"] = get_next_run_times(
+            interval_seconds=schedule.interval_seconds,
+            cron_expression=schedule.cron_expression,
+            timezone=schedule.timezone,
+            run_once=schedule.run_once,
+            after=get_local_time(),
+            count=1,
+        )[0]
     if obj_in.get("status") == ScheduledTaskStatus.ENABLED or "session_id" in obj_in:
         profile_id = await _get_session_profile_id(db, session_id, task.uid)
         if profile_id is None:

@@ -34,6 +34,176 @@
   white-space: nowrap;
 }
 
-.mt-4{
-  margin-top: 4px;
+.scheduled-task-dialog {
+  width: min(760px, calc(100vw - 48px)) !important;
+  max-width: calc(100vw - 48px);
+  box-sizing: border-box;
+
+  .el-dialog__header {
+    flex-shrink: 0;
+    margin-right: 0;
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+
+  .el-dialog__body {
+    min-width: 0;
+    padding: 16px 20px 20px;
+  }
+
+  .el-dialog__footer {
+    padding: 12px 20px 16px;
+    border-top: 1px solid var(--el-border-color-lighter);
+  }
+
+  .el-form {
+    min-width: 0;
+  }
+
+  .scheduled-task-schedule-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+    margin: 0 0 16px;
+
+    > .el-form-item,
+    > .help-text,
+    > .scheduled-task-schedule-error {
+      margin: 0;
+    }
+
+    .el-form-item {
+      min-width: 0;
+      margin-bottom: 0;
+    }
+  }
+
+  .scheduled-task-weekdays {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    min-width: 0;
+
+    .el-checkbox {
+      flex: 0 0 auto;
+      margin-right: 0;
+    }
+  }
+
+  .scheduled-task-month-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+
+    .el-date-editor {
+      flex: 1 1 180px;
+      width: 220px;
+      min-width: 160px;
+      max-width: 220px;
+    }
+
+    .el-switch {
+      flex: 0 1 auto;
+      max-width: 100%;
+    }
+  }
+
+  .scheduled-task-preview {
+    min-width: 0;
+    width: 100%;
+    line-height: 1.5;
+  }
+
+  .scheduled-task-preview-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px 16px;
+    min-width: 0;
+
+    > .el-button {
+      flex: 0 0 auto;
+      max-width: 100%;
+      margin-left: auto;
+      white-space: normal;
+      overflow-wrap: anywhere;
+
+      .el-icon {
+        margin-left: 6px;
+      }
+    }
+  }
+
+  .scheduled-task-preview-summary {
+    display: flex;
+    flex: 1 1 18rem;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    min-width: 0;
+    color: var(--el-text-color-primary);
+    overflow-wrap: anywhere;
+
+    > * {
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
+  }
+
+  .scheduled-task-preview-timezone {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    min-width: 0;
+    margin-top: 12px;
+    padding-top: 12px;
+    color: var(--el-text-color-secondary);
+    border-top: 1px solid var(--el-border-color-lighter);
+
+    strong {
+      min-width: 0;
+      color: var(--el-text-color-primary);
+      font-weight: 600;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+  }
+
+  .scheduled-task-preview-times {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 12px 0 0;
+    padding: 0 0 0 22px;
+    color: var(--el-text-color-primary);
+    overflow-wrap: anywhere;
+
+    li {
+      min-width: 0;
+      padding-left: 4px;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+  }
+
+  .scheduled-task-schedule-error {
+    color: var(--el-color-danger);
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .mt-4 {
+    margin-top: 4px;
+  }
 }

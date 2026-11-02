@@ -29,3 +29,5 @@ pywinpty==3.0.5; sys_platform == "win32" # Windows ConPTY 伪终端驱动
 chromadb
 rank-bm25
 jieba
+croniter>=6.2.4,<7
+tzdata

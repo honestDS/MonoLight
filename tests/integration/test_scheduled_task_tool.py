@@ -13,6 +13,7 @@ from app.core.constants import (
     ERR_SCHEDULED_TASK_ARGUMENTS_INVALID,
     ERR_SCHEDULED_TASK_NOT_FOUND,
     ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND,
+    ERR_SCHEDULED_TASK_SCHEDULE_INVALID,
     ERR_SESSION_NOT_FOUND,
     ERR_TOOL_NOT_ENABLED,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
@@ -26,6 +27,7 @@ from app.core.i18n.context import reset_current_locale
 from app.core.tools import get_tools_for_profile
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round, process_single_tool
+from app.core.utils.time import get_local_time
 from app.models.message import InternalToolCall, MessageRole
 from app.models.profile import Profile, ProfileConfig
 from app.models.scheduled_task import ScheduledTask, ScheduledTaskStatus
@@ -227,7 +229,6 @@ async def test_create_uses_runtime_context_owner_without_rewriting_session_profi
     [
         pytest.param({"message": "message", "interval_seconds": 60}, id="missing-name"),
         pytest.param({"name": "name", "interval_seconds": 60}, id="missing-message"),
-        pytest.param({"name": "name", "message": "message"}, id="missing-interval"),
         pytest.param({"name": "  ", "message": "message", "interval_seconds": 60}, id="blank-name"),
         pytest.param({"name": "name", "message": "  ", "interval_seconds": 60}, id="blank-message"),
         pytest.param({"name": "n" * 101, "message": "message", "interval_seconds": 60}, id="name-too-long"),
@@ -287,6 +288,34 @@ async def test_create_rejects_invalid_arguments_without_changing_tasks(
 
     assert response["status"] == "failed"
     assert response["error"] == t(ERR_SCHEDULED_TASK_ARGUMENTS_INVALID)
+    assert await _snapshot(scheduled_tool_session_factory) == before
+
+
+async def test_create_rejects_missing_schedule_without_changing_tasks(
+    db_session: AsyncSession,
+    scheduled_tool_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    baseline = json.loads(
+        await (await _executor(db_session)).execute(
+            "create",
+            name="Existing task",
+            message="Existing message",
+            interval_seconds=60,
+        )
+    )
+    assert baseline["status"] == "success"
+    before = await _snapshot(scheduled_tool_session_factory)
+
+    response = json.loads(
+        await (await _executor(db_session)).execute(
+            "create",
+            name="Missing schedule",
+            message="Must not persist",
+        )
+    )
+
+    assert response["status"] == "failed"
+    assert response["error"] == t(ERR_SCHEDULED_TASK_SCHEDULE_INVALID)
     assert await _snapshot(scheduled_tool_session_factory) == before
 
 
@@ -457,6 +486,7 @@ async def test_list_paginates_current_session_tasks_without_mutation(
     scheduled_tool_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     created_at = await _seed_list_tasks(db_session)
+    local_tz = get_local_time().tzinfo
     before = await _snapshot(scheduled_tool_session_factory)
     executor = await _executor(db_session, profile_id=None)
 
@@ -477,14 +507,16 @@ async def test_list_paginates_current_session_tasks_without_mutation(
         "session_id": "owner-main",
         "message": "Newest task message",
         "interval_seconds": 180,
+        "cron_expression": None,
+        "timezone": None,
         "run_once": False,
         "status": "enabled",
-        "next_run_at": (created_at + timedelta(seconds=180)).isoformat(),
-        "last_run_at": (created_at + timedelta(seconds=60)).isoformat(),
+        "next_run_at": (created_at + timedelta(seconds=180)).replace(tzinfo=local_tz).isoformat(),
+        "last_run_at": (created_at + timedelta(seconds=60)).replace(tzinfo=local_tz).isoformat(),
         "last_message_id": 42,
         "run_count": 2,
-        "created_at": created_at.isoformat(),
-        "updated_at": (created_at + timedelta(seconds=60)).isoformat(),
+        "created_at": created_at.replace(tzinfo=local_tz).isoformat(),
+        "updated_at": (created_at + timedelta(seconds=60)).replace(tzinfo=local_tz).isoformat(),
         "username": None,
     }
     assert default_response["tasks"][2]["id"] == 1

@@ -1,10 +1,9 @@
-from datetime import timedelta
-
 from sqlalchemy import delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
+from app.core.utils.scheduled_time import get_next_run_times, validate_schedule
 from app.core.utils.time import get_local_time
 from app.models.scheduled_task import ScheduledTask, ScheduledTaskCreate, ScheduledTaskStatus
 
@@ -30,18 +29,35 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         uid: str,
         session_id: str,
         message: str,
-        interval_seconds: int,
+        interval_seconds: int | None = None,
+        cron_expression: str | None = None,
+        timezone: str | None = None,
         run_once: bool = False,
     ) -> ScheduledTask:
         now = get_local_time()
+        cron_expression = validate_schedule(
+            interval_seconds=interval_seconds,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            run_once=run_once,
+        )
         scheduled_task = ScheduledTask(
             name=name,
             uid=uid,
             session_id=session_id,
             message=message,
             interval_seconds=interval_seconds,
+            cron_expression=cron_expression,
+            timezone=timezone,
             run_once=run_once,
-            next_run_at=now + timedelta(seconds=interval_seconds),
+            next_run_at=get_next_run_times(
+                interval_seconds=interval_seconds,
+                cron_expression=cron_expression,
+                timezone=timezone,
+                run_once=run_once,
+                after=now,
+                count=1,
+            )[0],
         )
         db.add(scheduled_task)
         await db.commit()
@@ -111,7 +127,13 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         if scheduled_task.run_once:
             scheduled_task.status = ScheduledTaskStatus.DISABLED
         else:
-            scheduled_task.next_run_at = now + timedelta(seconds=scheduled_task.interval_seconds)
+            scheduled_task.next_run_at = get_next_run_times(
+                interval_seconds=scheduled_task.interval_seconds,
+                cron_expression=scheduled_task.cron_expression,
+                timezone=scheduled_task.timezone,
+                after=now,
+                count=1,
+            )[0]
         scheduled_task.updated_at = now
         db.add(scheduled_task)
         await db.commit()
@@ -123,7 +145,13 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         if scheduled_task.run_once:
             scheduled_task.status = ScheduledTaskStatus.DISABLED
         else:
-            scheduled_task.next_run_at = now + timedelta(seconds=scheduled_task.interval_seconds)
+            scheduled_task.next_run_at = get_next_run_times(
+                interval_seconds=scheduled_task.interval_seconds,
+                cron_expression=scheduled_task.cron_expression,
+                timezone=scheduled_task.timezone,
+                after=now,
+                count=1,
+            )[0]
         scheduled_task.updated_at = now
         db.add(scheduled_task)
         await db.commit()

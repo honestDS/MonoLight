@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, field_serializer
 from sqlalchemy import ForeignKeyConstraint
 from sqlmodel import Column, DateTime, Field, SQLModel
 
@@ -18,7 +18,9 @@ class ScheduledTaskBase(SQLModel):
     uid: str = Field(index=True, max_length=100)
     session_id: str = Field(index=True, max_length=100)
     message: str
-    interval_seconds: int = Field(ge=60)
+    interval_seconds: int | None = Field(default=None, ge=60)
+    cron_expression: str | None = Field(default=None, max_length=255)
+    timezone: str | None = Field(default=None, max_length=100)
     run_once: bool = Field(default=False)
     status: ScheduledTaskStatus = Field(default=ScheduledTaskStatus.ENABLED, index=True, max_length=20)
     next_run_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
@@ -53,3 +55,17 @@ class ScheduledTaskResponse(ScheduledTaskBase):
     updated_at: datetime
     username: str | None = None
     model_config = ConfigDict(from_attributes=True)
+
+    @field_serializer(
+        "next_run_at",
+        "last_run_at",
+        "created_at",
+        "updated_at",
+        when_used="json",
+    )
+    def serialize_datetime(self, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=get_local_time().tzinfo)
+        return value

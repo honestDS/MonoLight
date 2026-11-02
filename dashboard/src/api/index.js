@@ -218,6 +218,7 @@ export const systemApi = {
 export const scheduledTaskApi = {
   list: (params) => request.get('/scheduled-tasks/list', { params }),
   create: (data) => request.post('/scheduled-tasks/create', data),
+  preview: (data) => request.post('/scheduled-tasks/preview', data),
   update: (id, data) => request.post(`/scheduled-tasks/update?task_id=${id}`, data),
   delete: (id) => request.post(`/scheduled-tasks/delete?task_id=${id}`)
 }
