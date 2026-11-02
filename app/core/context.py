@@ -11,6 +11,7 @@ from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
+from app.core.utils.assistant_files import model_visible_message_content
 from app.core.utils.context_budget import ensure_configured_request_capacity_available
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import (
@@ -145,6 +146,7 @@ class ContextManager:
         """
         request_messages = [msg.model_copy(deep=True) for msg in messages]
         for message in request_messages:
+            message.content = model_visible_message_content(message)
             if message.role != MessageRole.TOOL or not isinstance(message.content, str):
                 continue
             try:

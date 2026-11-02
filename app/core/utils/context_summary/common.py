@@ -10,6 +10,7 @@ from app.core.constants import (
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
+from app.core.utils.assistant_files import model_visible_message_content
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 
@@ -75,7 +76,8 @@ class ContextSummaryState:
 
 
 def serialize_message(message: InternalMessage) -> str:
-    payload = message.model_dump(
+    serializable_message = message.model_copy(update={"content": model_visible_message_content(message)})
+    payload = serializable_message.model_dump(
         mode="json",
         exclude={"id", "attachments", "created_at", "assembled_attachment_part_count"},
         exclude_none=True,

@@ -151,6 +151,64 @@ async def test_chat_history_recall_parses_plain_and_multimodal_text(db_session: 
 
 
 @pytest.mark.asyncio
+async def test_chat_history_recall_strips_assistant_files_without_mutating_persisted_messages(db_session: AsyncSession):
+    query = "needle"
+    download_token = "download-token-1"
+    download_url = f"/api/v1/download-sent?token={download_token}"
+    file_metadata = {
+        "id": download_token,
+        "name": "result.txt",
+        "mime_type": "text/plain",
+        "size": 12,
+        "download_url": download_url,
+        "previewable": False,
+    }
+    assistant_files_content = json.dumps(
+        {"type": "assistant_files", "text": "assistant needle body", "files": [file_metadata]},
+        ensure_ascii=False,
+    )
+    user_json_content = json.dumps(
+        {"type": "assistant_files", "text": "user needle body", "files": [file_metadata]},
+        ensure_ascii=False,
+    )
+    business_json_content = json.dumps(
+        {"type": "business_result", "text": "assistant needle business body"},
+        ensure_ascii=False,
+    )
+    assistant_message = _message(1, role=MessageRole.ASSISTANT, content=assistant_files_content)
+    user_message = _message(2, role=MessageRole.USER, content=user_json_content)
+    business_message = _message(3, role=MessageRole.ASSISTANT, content=business_json_content)
+    assistant_message.attachments = ["/tmp/assistant-source.txt"]
+    user_message.attachments = ["/tmp/user-source.txt"]
+    business_message.attachments = ["/tmp/business-source.txt"]
+    messages = (assistant_message, user_message, business_message)
+    expected_contents = {
+        1: "assistant needle body",
+        2: user_json_content,
+        3: business_json_content,
+    }
+    original_db_values = {message.id: (message.content, message.attachments) for message in messages}
+
+    assert all(query in content for content in expected_contents.values())
+    await _commit(db_session, *messages)
+
+    result = await chat_history_module.chat_history_recall_service.recall(db_session, "user-1", query, top_k=10)
+
+    items_by_message_id = {item.message_id: item for item in result.items}
+    assert set(items_by_message_id) == set(expected_contents)
+    for message_id, expected_content in expected_contents.items():
+        item = items_by_message_id[message_id]
+        assert item.content == expected_content
+
+    assert download_token not in items_by_message_id[1].content
+    assert download_url not in items_by_message_id[1].content
+
+    for message in messages:
+        await db_session.refresh(message)
+        assert (message.content, message.attachments) == original_db_values[message.id]
+
+
+@pytest.mark.asyncio
 async def test_chat_history_recall_ranks_relevant_messages_and_prefers_newer_ties(db_session: AsyncSession):
     await _commit(
         db_session,

@@ -305,13 +305,7 @@ class BackgroundDispatcherMixin:
                     if message.role == MessageRole.USER:
                         apply_platform_constraints_to_message(message, cleaned_platform_constraints)
                         break
-            if (
-                submission_context is None
-                and initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE
-                and isinstance(initial_fixed_upper_message_id, int)
-                and not isinstance(initial_fixed_upper_message_id, bool)
-                and initial_fixed_upper_message_id > 0
-            ):
+            if submission_context is None and initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
                 messages = await apply_context_summary_checkpoint(
                     db,
                     session_id=session_id,
@@ -467,22 +461,25 @@ class BackgroundDispatcherMixin:
             session_id=session_id,
             cfg=cfg,
         )
+        display_ai_msg = ai_msg.model_copy(deep=True)
         if not ai_msg.tool_calls and generated_image_files:
-            ai_msg.content = build_assistant_files_content(safe_content, generated_image_files)
-        logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=ai_msg.content or "[工具调用]"))
+            display_ai_msg.content = build_assistant_files_content(safe_content, generated_image_files)
+        logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=display_ai_msg.content or "[工具调用]"))
         messages.append(ai_msg)
-        turn_messages = [ai_msg]
+        turn_messages = [display_ai_msg]
         if persist_response:
             await save_assistant_message(
                 db,
                 session_id,
                 uid,
                 profile.id,
-                ai_msg,
+                display_ai_msg,
                 dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls else None,
             )
+            ai_msg.id = display_ai_msg.id
+            ai_msg.created_at = display_ai_msg.created_at
         if not allow_tools or not ai_msg.tool_calls:
-            return ai_msg, turn_messages, generated_image_files
+            return display_ai_msg, turn_messages, generated_image_files
 
         validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
         audit_round = None
@@ -755,13 +752,7 @@ class BackgroundDispatcherMixin:
 
         async def build_final_request(final_chat_params, chat_channel_obj, model_entry):
             nonlocal messages
-            if (
-                submission_context is None
-                and initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE
-                and isinstance(initial_fixed_upper_message_id, int)
-                and not isinstance(initial_fixed_upper_message_id, bool)
-                and initial_fixed_upper_message_id > 0
-            ):
+            if submission_context is None and initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
                 messages = await apply_context_summary_checkpoint(
                     db,
                     session_id=session_id,
@@ -823,20 +814,21 @@ class BackgroundDispatcherMixin:
             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
         logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=1, content=final_text))
+        display_final_msg = final_msg.model_copy(deep=True)
         if files_to_user:
-            final_msg.content = build_assistant_files_content(final_text, files_to_user)
+            display_final_msg.content = build_assistant_files_content(final_text, files_to_user)
         messages.append(final_msg)
-        turn_messages.append(final_msg)
+        turn_messages.append(display_final_msg)
         if persist_response:
             await save_assistant_message(
                 db,
                 session_id,
                 uid,
                 profile.id,
-                final_msg,
+                display_final_msg,
                 dedupe_key=final_message_dedupe_key,
             )
-        return final_msg, turn_messages, files_to_user
+        return display_final_msg, turn_messages, files_to_user
 
     @classmethod
     async def dispatch_proactive_reply(cls, task_id: int) -> dict[str, Any]:

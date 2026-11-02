@@ -20,15 +20,7 @@ from app.core.constants import (
 )
 from app.core.exceptions import LLMException
 from app.core.paths import get_user_temp_dir
-from app.core.tools.send_file_to_user import (
-    DEFAULT_MAX_FILE_COUNT,
-    DEFAULT_MAX_SINGLE_FILE_SIZE_MB,
-    DEFAULT_MAX_TOTAL_FILE_SIZE_MB,
-    _encode_token,
-    _is_previewable,
-    _normalize_blocked_extensions,
-)
-from app.models.message import InternalMessage
+from app.models.message import InternalMessage, MessageRole
 
 
 def build_assistant_files_content(text: Any, files: list[dict[str, Any]]) -> str:
@@ -54,6 +46,47 @@ def parse_assistant_files_content(content: Any) -> str:
         return content.strip()
     text = str(parsed.get("text") or "").strip()
     return text
+
+
+def model_visible_message_content(message: InternalMessage) -> Any:
+    content = message.content
+    if not isinstance(content, str):
+        return content
+
+    if message.role == MessageRole.ASSISTANT and not message.tool_calls:
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("type") == "assistant_files" and isinstance(payload.get("text"), str) and isinstance(payload.get("files"), list):
+            return payload["text"]
+
+    if message.role != MessageRole.TOOL:
+        return content
+
+    try:
+        payload, end = json.JSONDecoder().raw_decode(content)
+    except (TypeError, ValueError):
+        return content
+    if not isinstance(payload, dict) or payload.get("type") != "files_to_user" or not isinstance(payload.get("files"), list):
+        return content
+
+    visible_payload = {
+        "status": payload.get("status"),
+        "files": [
+            {
+                "name": file_item.get("name"),
+                "description": file_item.get("description"),
+                "mime_type": file_item.get("mime_type"),
+                "size": file_item.get("size"),
+            }
+            for file_item in payload["files"]
+            if isinstance(file_item, dict)
+        ],
+        "errors": payload.get("errors"),
+        "allowed_operation_dirs": payload.get("allowed_operation_dirs"),
+    }
+    return json.dumps(visible_payload, ensure_ascii=False) + content[end:]
 
 
 def merge_assistant_files(*file_groups: Any) -> list[dict[str, Any]]:
@@ -85,6 +118,15 @@ async def materialize_generated_images(
     generated_images = message.generated_images
     if not generated_images:
         return []
+
+    from app.core.tools.send_file_to_user import (
+        DEFAULT_MAX_FILE_COUNT,
+        DEFAULT_MAX_SINGLE_FILE_SIZE_MB,
+        DEFAULT_MAX_TOTAL_FILE_SIZE_MB,
+        _encode_token,
+        _is_previewable,
+        _normalize_blocked_extensions,
+    )
 
     def _materialize() -> list[dict[str, Any]]:
         from PIL import Image

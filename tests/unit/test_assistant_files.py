@@ -22,10 +22,11 @@ from app.core.utils.assistant_files import (
     build_assistant_files_content,
     materialize_generated_images,
     merge_assistant_files,
+    model_visible_message_content,
     parse_assistant_files_content,
 )
 from app.core.utils.dispatcher.process_markdown_response import process_markdown_response
-from app.models.message import InternalGeneratedImage, InternalMessage, MessageRole
+from app.models.message import ImagePart, InternalGeneratedImage, InternalMessage, InternalToolCall, MessageRole, TextPart
 from tests.unit.response_test_support import llm_response_payload
 
 
@@ -90,6 +91,155 @@ def test_build_assistant_files_content_unwraps_existing_protocol():
         "text": "图片已重新发送。",
         "files": [current_file],
     }
+
+
+@pytest.mark.parametrize("text", ["图片已发送。", ""])
+def test_model_visible_message_content_unwraps_complete_assistant_files_without_mutating_message(text):
+    content = build_assistant_files_content(text, [{"id": "file-1", "name": "generated.png"}])
+    message = InternalMessage(role=MessageRole.ASSISTANT, content=content)
+    original_message = message.model_dump(mode="json")
+
+    assert model_visible_message_content(message) == text
+    assert message.model_dump(mode="json") == original_message
+
+
+def test_model_visible_message_content_keeps_user_assistant_files_content_unchanged():
+    content = build_assistant_files_content("用户发送的同形内容", [{"id": "file-1", "name": "input.png"}])
+    message = InternalMessage(role=MessageRole.USER, content=content)
+    original_message = message.model_dump(mode="json")
+
+    assert model_visible_message_content(message) == content
+    assert message.model_dump(mode="json") == original_message
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        json.dumps({"type": "business_event", "text": "业务 JSON", "files": []}, ensure_ascii=False),
+        '{"type":"assistant_files"',
+        json.dumps({"type": "assistant_files", "text": "缺少 files"}, ensure_ascii=False),
+        json.dumps({"type": "assistant_files", "files": []}, ensure_ascii=False),
+        json.dumps({"type": "assistant_files", "text": "files 类型错误", "files": {}}, ensure_ascii=False),
+    ],
+    ids=["business-json", "invalid-json", "missing-files", "missing-text", "invalid-files"],
+)
+def test_model_visible_message_content_keeps_invalid_or_incomplete_assistant_content_unchanged(content):
+    message = InternalMessage(role=MessageRole.ASSISTANT, content=content)
+    original_message = message.model_dump(mode="json")
+
+    assert model_visible_message_content(message) == content
+    assert message.model_dump(mode="json") == original_message
+
+
+def test_model_visible_message_content_keeps_multimodal_content_unchanged():
+    message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content=[TextPart(text="图片说明"), ImagePart(image_url={"url": "https://example.test/image.png"})],
+    )
+    original_message = message.model_dump(mode="json")
+
+    assert model_visible_message_content(message) == message.content
+    assert message.model_dump(mode="json") == original_message
+
+
+def test_model_visible_message_content_keeps_assistant_tool_call_content_unchanged():
+    content = build_assistant_files_content("工具调用期间的内容", [{"id": "file-1", "name": "generated.png"}])
+    message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content=content,
+        tool_calls=[InternalToolCall(id="call-1", name="send_file_to_user", arguments={"files": []})],
+    )
+    original_message = message.model_dump(mode="json")
+
+    assert model_visible_message_content(message) == content
+    assert message.model_dump(mode="json") == original_message
+
+
+@pytest.mark.parametrize(
+    ("status", "files", "errors"),
+    [
+        (
+            "success",
+            [
+                {
+                    "type": "file",
+                    "id": "file-success",
+                    "name": "报告.pdf",
+                    "description": "成功文件",
+                    "mime_type": "application/pdf",
+                    "size": 1024,
+                    "download_url": "/api/v1/download-sent?token=success",
+                    "url": "https://example.test/success",
+                    "previewable": True,
+                }
+            ],
+            [],
+        ),
+        (
+            "partial_success",
+            [
+                {
+                    "type": "file",
+                    "id": "file-partial",
+                    "name": "部分.txt",
+                    "description": "部分成功文件",
+                    "mime_type": "text/plain",
+                    "size": 12,
+                    "download_url": "/api/v1/download-sent?token=partial",
+                    "url": "https://example.test/partial",
+                    "previewable": False,
+                }
+            ],
+            [{"path": "failed.bin", "error": "发送失败"}],
+        ),
+        (
+            "failed",
+            [],
+            [{"path": "failed.bin", "error": "发送失败"}],
+        ),
+    ],
+)
+def test_model_visible_message_content_sanitizes_file_tool_results_and_preserves_suffix(status, files, errors):
+    allowed_operation_dirs = ["D:/workspace", "D:/shared"]
+    suffix = "\n\nTodo: 保留这段\n\n追加片段"
+    content = (
+        json.dumps(
+            {
+                "type": "files_to_user",
+                "status": status,
+                "files": files,
+                "errors": errors,
+                "allowed_operation_dirs": allowed_operation_dirs,
+            },
+            ensure_ascii=False,
+        )
+        + suffix
+    )
+    message = InternalMessage(role=MessageRole.TOOL, content=content)
+    original_message = message.model_dump(mode="json")
+    expected_content = (
+        json.dumps(
+            {
+                "status": status,
+                "files": [
+                    {
+                        "name": file_item["name"],
+                        "description": file_item["description"],
+                        "mime_type": file_item["mime_type"],
+                        "size": file_item["size"],
+                    }
+                    for file_item in files
+                ],
+                "errors": errors,
+                "allowed_operation_dirs": allowed_operation_dirs,
+            },
+            ensure_ascii=False,
+        )
+        + suffix
+    )
+
+    assert model_visible_message_content(message) == expected_content
+    assert message.model_dump(mode="json") == original_message
 
 
 @pytest.mark.parametrize(

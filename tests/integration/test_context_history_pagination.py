@@ -3,17 +3,21 @@ import json
 
 import pytest
 from PIL import Image
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import context as context_module
 from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER
 from app.core.context import ContextManager
 from app.core.i18n import t
+from app.core.utils.context_summary.common import serialize_message
+from app.core.utils.dispatcher.frozen_context import capture_frozen_context_messages, load_frozen_context_messages
 from app.core.utils.dispatcher.helpers import reassemble_multimodal_messages
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
+from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
@@ -702,3 +706,271 @@ def test_prepare_messages_for_model_request_obscures_legacy_audit_checkpoint_cop
     assert "BUSINESS_SUCCESS_MARKER" in provider_json
     assert "BUSINESS_FAILURE_MARKER" in provider_json
     assert "BUSINESS_FAILURE_REASON_MARKER" in provider_json
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
+async def test_sent_file_history_isolated_across_same_work_reload_and_frozen_context(
+    image_chat_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    protocol: str,
+):
+    original_assistant_text = "原文字回复"
+    business_json = json.dumps(
+        {"status": "succeeded", "result": "普通业务JSON正文"},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    file_name = "sent-report.txt"
+    file_path = tmp_path / file_name
+    file_bytes = b"sent attachment body"
+    file_path.write_bytes(file_bytes)
+    script_tool_call_id = "send-file-call"
+
+    async with image_chat_runtime(protocol, goal_mode=False) as runtime:
+        runtime.outputs.extend(
+            [
+                InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id=script_tool_call_id,
+                            name="send_file_to_user",
+                            arguments={
+                                "files": [
+                                    {
+                                        "path": str(file_path),
+                                        "display_name": file_name,
+                                        "mime_type": "text/plain",
+                                    }
+                                ]
+                            },
+                        )
+                    ],
+                ),
+                InternalMessage(role=MessageRole.ASSISTANT, content=original_assistant_text),
+                InternalMessage(role=MessageRole.ASSISTANT, content=business_json),
+            ]
+        )
+
+        transformer = OpenAIChatCompletionsTransformer if protocol == "OPENAI" else OpenAIResponsesTransformer
+        fixture_post_json = transformer._post_json
+        follow_up_submission = None
+
+        async def wrapped_post_json(_transformer, **kwargs):
+            nonlocal follow_up_submission
+            if len(runtime.provider_payloads) + 1 == 2:
+                follow_up = await runtime.client.post(
+                    "/api/v1/chat/completions",
+                    json={
+                        "session_id": runtime.session_id,
+                        "request_id": "same-work-follow-up",
+                        "message": "同一工作追问",
+                    },
+                )
+                assert follow_up.status_code == 200
+                follow_up_submission = follow_up.json()["data"]
+            return await fixture_post_json(_transformer, **kwargs)
+
+        monkeypatch.setattr(transformer, "_post_json", wrapped_post_json)
+
+        accepted = await runtime.client.post(
+            "/api/v1/chat/completions",
+            json={
+                "session_id": runtime.session_id,
+                "request_id": "send-file-request",
+                "message": "发送文件并继续",
+            },
+        )
+        assert accepted.status_code == 200
+        accepted_data = accepted.json()["data"]
+        initial_work_id = accepted_data["work_id"]
+
+        completed = await runtime.run_next()
+        assert completed is not None and completed.id == initial_work_id and completed.status.value == "succeeded"
+        assert follow_up_submission is not None
+        assert follow_up_submission["submission_status"] == "queued"
+        follow_up_work_id = follow_up_submission["work_id"]
+        assert follow_up_work_id != initial_work_id
+        assert len(runtime.provider_payloads) == 3
+
+        if protocol == "OPENAI":
+            actual_tool_call = next(
+                tool_call for item in runtime.provider_payloads[1]["messages"] if item.get("role") == MessageRole.ASSISTANT.value for tool_call in item.get("tool_calls") or [] if isinstance(tool_call, dict) and isinstance(tool_call.get("function"), dict) and tool_call["function"].get("name") == "send_file_to_user"
+            )
+            tool_call_id = actual_tool_call["id"]
+        else:
+            actual_tool_call = next(item for item in runtime.provider_payloads[1]["input"] if item.get("type") == "function_call" and item.get("name") == "send_file_to_user")
+            tool_call_id = actual_tool_call.get("call_id") or actual_tool_call.get("id")
+        assert isinstance(tool_call_id, str) and tool_call_id
+
+        reply_response = await runtime.client.get(f"/api/v1/chat/reply-works/{initial_work_id}")
+        assert reply_response.status_code == 200
+        work_data = reply_response.json()["data"]
+        assert work_data["status"] == "succeeded"
+        follow_up_reply = await runtime.client.get(f"/api/v1/chat/reply-works/{follow_up_work_id}")
+        assert follow_up_reply.status_code == 200
+        assert follow_up_reply.json()["data"]["resolved_work_id"] == initial_work_id
+        response = work_data["response"]
+        response_files = response["files"]
+        assert isinstance(response_files, list) and len(response_files) == 1
+        response_file = response_files[0]
+        assert response_file["name"] == file_name
+        assert response_file["mime_type"] == "text/plain"
+        response_content = json.loads(response["choices"][0]["message"]["content"])
+        assert response_content == {
+            "type": "assistant_files",
+            "text": business_json,
+            "files": response_files,
+        }
+        download = await runtime.client.get(response_file["download_url"])
+        assert download.status_code == 200
+        assert download.content == file_bytes
+
+        history_response = await runtime.client.get(
+            "/api/v1/chat/sessions/history",
+            params={"session_id": runtime.session_id},
+        )
+        assert history_response.status_code == 200
+        history = history_response.json()["data"]
+        assistant_file_cards = []
+        for item in history:
+            if item.get("role") != MessageRole.ASSISTANT.value or not isinstance(item.get("content"), str):
+                continue
+            try:
+                content = json.loads(item["content"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(content, dict) and content.get("type") == "assistant_files":
+                assistant_file_cards.append(content)
+        assert any(card["text"] == original_assistant_text and card["files"] == response_files for card in assistant_file_cards)
+        assert any(card["text"] == business_json and card["files"] == response_files for card in assistant_file_cards)
+
+        def provider_items(payload):
+            return payload["messages"] if protocol == "OPENAI" else payload["input"]
+
+        def provider_assistant_texts(payload):
+            texts = []
+            for item in provider_items(payload):
+                if item.get("role") != MessageRole.ASSISTANT.value:
+                    continue
+                content = item.get("content")
+                if isinstance(content, str):
+                    texts.append(content)
+                elif isinstance(content, list):
+                    texts.extend(part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+            return texts
+
+        def provider_tool_result(payload):
+            if protocol == "OPENAI":
+                item = next(item for item in provider_items(payload) if item.get("role") == MessageRole.TOOL.value and item.get("tool_call_id") == tool_call_id)
+                return item["content"]
+            item = next(item for item in provider_items(payload) if item.get("type") == "function_call_output" and item.get("call_id") == tool_call_id)
+            return item["output"]
+
+        sent_token = response_file["id"]
+        sent_download_url = response_file["download_url"]
+
+        def assert_isolated_provider_payload(payload):
+            provider_json = json.dumps(payload, ensure_ascii=False)
+            assert original_assistant_text in provider_assistant_texts(payload)
+            assert "assistant_files" not in provider_json
+            assert sent_token not in provider_json
+            assert sent_download_url not in provider_json
+            visible_tool_result = json.loads(provider_tool_result(payload))
+            assert visible_tool_result["status"] == "success"
+            assert visible_tool_result["files"][0]["name"] == file_name
+            assert "type" not in visible_tool_result
+            assert "type" not in visible_tool_result["files"][0]
+            assert "id" not in visible_tool_result["files"][0]
+            assert "download_url" not in visible_tool_result["files"][0]
+            assert "url" not in visible_tool_result["files"][0]
+
+        assert_isolated_provider_payload(runtime.provider_payloads[2])
+
+        async with runtime.factory() as db:
+            stored_rows = list((await db.execute(select(Message).where(Message.session_id == runtime.session_id).order_by(Message.id))).scalars().all())
+            stored_snapshot = [(row.id, row.content, row.attachments) for row in stored_rows]
+            latest_message_id = max(row.id for row in stored_rows if row.id is not None)
+            frozen_serialized = await capture_frozen_context_messages(
+                db,
+                session_id=runtime.session_id,
+                uid=runtime.uid,
+                before_id=latest_message_id + 1,
+            )
+
+            frozen_messages = load_frozen_context_messages(frozen_serialized)
+            assert frozen_messages is not None
+            frozen_snapshot = [message.model_dump(mode="json") for message in frozen_messages]
+            frozen_assistant_texts = [message.content for message in frozen_messages if message.role == MessageRole.ASSISTANT and not message.tool_calls]
+            assert original_assistant_text in frozen_assistant_texts
+            frozen_tool = next(message for message in frozen_messages if message.tool_call_id == tool_call_id)
+            frozen_tool_payload = json.loads(frozen_tool.content or "{}")
+            assert frozen_tool_payload["files"][0]["id"] == sent_token
+
+            prepared_messages = ContextManager.prepare_messages_for_model_request(
+                frozen_messages,
+                context_window_k=32,
+                max_tokens=512,
+                safety_margin_tokens=0,
+            )
+            assert [message.model_dump(mode="json") for message in frozen_messages] == frozen_snapshot
+            prepared_assistant_texts = [message.content for message in prepared_messages if message.role == MessageRole.ASSISTANT and not message.tool_calls]
+            assert original_assistant_text in prepared_assistant_texts
+            prepared_tool = next(message for message in prepared_messages if message.tool_call_id == tool_call_id)
+            prepared_tool_payload = json.loads(prepared_tool.content or "{}")
+            assert prepared_tool_payload["status"] == "success"
+            assert prepared_tool_payload["files"][0]["name"] == file_name
+            assert "type" not in prepared_tool_payload
+            assert sent_token not in json.dumps(prepared_tool_payload, ensure_ascii=False)
+            assert sent_download_url not in json.dumps(prepared_tool_payload, ensure_ascii=False)
+
+            serialized_context = "\n".join(serialize_message(message) for message in frozen_messages)
+            assert original_assistant_text in serialized_context
+            assert "assistant_files" not in serialized_context
+            assert sent_token not in serialized_context
+            assert sent_download_url not in serialized_context
+
+            checkpoint_work = await db.get(SessionReplyWorkItem, initial_work_id)
+            assert checkpoint_work is not None
+            checkpoint = checkpoint_work.execution_state["dispatcher_checkpoint"]
+            checkpoint_messages = checkpoint["messages"]
+            checkpoint_tool_call_ids = [tool_call.get("id") for item in checkpoint_messages if item.get("role") == MessageRole.ASSISTANT.value for tool_call in item.get("tool_calls") or []]
+            checkpoint_tool_result_ids = [item.get("tool_call_id") for item in checkpoint_messages if item.get("role") == MessageRole.TOOL.value]
+            assert tool_call_id in checkpoint_tool_call_ids
+            assert tool_call_id in checkpoint_tool_result_ids
+            checkpoint_assistant_contents = [item.get("content") for item in checkpoint_messages if item.get("role") == MessageRole.ASSISTANT.value and not item.get("tool_calls")]
+            assert original_assistant_text in checkpoint_assistant_contents
+            assert all("assistant_files" not in str(content) for content in checkpoint_assistant_contents)
+
+        async with runtime.factory() as db:
+            rows_after_context_views = list((await db.execute(select(Message).where(Message.session_id == runtime.session_id).order_by(Message.id))).scalars().all())
+        assert [(row.id, row.content, row.attachments) for row in rows_after_context_views] == stored_snapshot
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=business_json))
+        reload_accepted = await runtime.client.post(
+            "/api/v1/chat/completions",
+            json={
+                "session_id": runtime.session_id,
+                "request_id": "reload-history-request",
+                "message": "重载历史后继续",
+            },
+        )
+        assert reload_accepted.status_code == 200
+        reload_work_id = reload_accepted.json()["data"]["work_id"]
+        assert reload_work_id != initial_work_id
+        reloaded = await runtime.run_next()
+        assert reloaded is not None and reloaded.id == reload_work_id and reloaded.status.value == "succeeded"
+        assert len(runtime.provider_payloads) == 4
+        assert_isolated_provider_payload(runtime.provider_payloads[3])
+
+        reload_reply = await runtime.client.get(f"/api/v1/chat/reply-works/{reload_work_id}")
+        assert reload_reply.status_code == 200
+        reload_response = reload_reply.json()["data"]["response"]
+        assert reload_response["choices"][0]["message"]["content"] == business_json
+        assert reload_response["files"] in (None, [])
+
+        async with runtime.factory() as db:
+            final_rows = list((await db.execute(select(Message).where(Message.session_id == runtime.session_id, Message.role == MessageRole.ASSISTANT).order_by(Message.id))).scalars().all())
+        assert final_rows[-1].content == business_json

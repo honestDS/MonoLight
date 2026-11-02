@@ -2,6 +2,7 @@ import json
 
 from app.core.audit.visibility import obscure_audit_tool_result
 from app.core.prompts import EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
+from app.core.utils.assistant_files import model_visible_message_content
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import (
     InternalMessage,
@@ -125,6 +126,8 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
 
             if role == MessageRole.ERR:
                 role = MessageRole.ASSISTANT
+            if m_type == MessageType.TEXT and role == MessageRole.ASSISTANT:
+                content = model_visible_message_content(InternalMessage(role=role, content=content))
             if not content and refusal:
                 content = refusal
 

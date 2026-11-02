@@ -397,28 +397,13 @@ async def dispatch_interactive(
                         else:
                             state.messages = [InternalMessage.model_validate(item) for item in resume_state.get("messages", [])]
                         if frozen_context_messages is not None:
-                            existing_message_ids = {
-                                item.id
-                                for item in state.messages
-                                if isinstance(item.id, int) and not isinstance(item.id, bool) and item.id > 0
-                            }
+                            existing_message_ids = {item.id for item in state.messages if isinstance(item.id, int) and not isinstance(item.id, bool) and item.id > 0}
                             pending_rows = []
                             for pending_message_id in resume_state.get("pending_resume_message_ids", []):
-                                if (
-                                    not isinstance(pending_message_id, int)
-                                    or isinstance(pending_message_id, bool)
-                                    or pending_message_id <= 0
-                                    or pending_message_id in existing_message_ids
-                                ):
+                                if not isinstance(pending_message_id, int) or isinstance(pending_message_id, bool) or pending_message_id <= 0 or pending_message_id in existing_message_ids:
                                     continue
                                 pending_row = await message_crud.get(db, pending_message_id)
-                                if (
-                                    pending_row is None
-                                    or pending_row.uid != uid
-                                    or pending_row.session_id != session_id
-                                    or pending_row.profile_id != profile.id
-                                    or pending_row.type != MessageType.BACKGROUND_TASK_RESULT
-                                ):
+                                if pending_row is None or pending_row.uid != uid or pending_row.session_id != session_id or pending_row.profile_id != profile.id or pending_row.type != MessageType.BACKGROUND_TASK_RESULT:
                                     continue
                                 pending_rows.append(pending_row)
                                 existing_message_ids.add(pending_message_id)
@@ -635,22 +620,23 @@ async def dispatch_interactive(
                         session_id=session_id,
                         cfg=state.cfg,
                     )
+                    display_msg = ai_msg.model_copy(deep=True)
                     state.files_to_user[:] = merge_assistant_files(state.files_to_user, generated_image_files)
 
-                    if not ai_msg.tool_calls and state.files_to_user:
-                        ai_msg.content = build_assistant_content(ai_msg.content, state.files_to_user)
+                    if not display_msg.tool_calls and state.files_to_user:
+                        display_msg.content = build_assistant_content(display_msg.content, state.files_to_user)
 
                     state.dispatch_logger.bind(uid=uid, session_id=session_id).info(
                         t(
                             "LOG_DISPATCHER_LLM_RESPONSE",
                             username=username,
                             turn=state.current_turn,
-                            content=ai_msg.content or "[工具调用]",
+                            content=display_msg.content or "[工具调用]",
                         )
                     )
 
                     state.messages.append(ai_msg)
-                    state.turn_messages.append(ai_msg)
+                    state.turn_messages.append(display_msg)
 
                     new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"]) if not ai_msg.tool_calls and state.execution_scope == END_SESSION_SCOPE_FOREGROUND else None
                     saved_msg = await save_assistant_message(
@@ -658,14 +644,16 @@ async def dispatch_interactive(
                         session_id,
                         uid,
                         profile.id,
-                        ai_msg,
+                        display_msg,
                         dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls and new_user_batch is None else None,
                         created_at=generation_result.attempt_started_at if stream_event_callback is not None else None,
                     )
+                    ai_msg.id = display_msg.id
+                    ai_msg.created_at = display_msg.created_at
                     if stream_event_callback is not None and not (ai_msg.tool_calls and not show_tool_calls):
-                        turn_end_content = saved_msg.content if saved_msg is not None else ai_msg.content
+                        turn_end_content = saved_msg.content if saved_msg is not None else display_msg.content
                         if ai_msg.tool_calls:
-                            turn_end_content = ai_msg.content if expose_tool_call_content else None
+                            turn_end_content = display_msg.content if expose_tool_call_content else None
                         if isinstance(turn_end_content, str) and not turn_end_content.strip():
                             turn_end_content = None
                         turn_end_event: dict[str, Any] = {
@@ -678,7 +666,7 @@ async def dispatch_interactive(
                             turn_end_event["message_id"] = saved_message_id
                         turn_end_values = {
                             "content": turn_end_content,
-                            "reasoning_content": ai_msg.reasoning_content,
+                            "reasoning_content": display_msg.reasoning_content,
                             "finish_reason": generation_result.finish_reason,
                             "finish_details": generation_result.finish_details,
                             "refusal": generation_result.refusal,
@@ -689,8 +677,8 @@ async def dispatch_interactive(
                         await stream_event_callback(turn_end_event)
 
                     if not ai_msg.tool_calls:
-                        state.final_ai_content = ai_msg.content
-                        state.final_reasoning_content = ai_msg.reasoning_content
+                        state.final_ai_content = display_msg.content
+                        state.final_reasoning_content = display_msg.reasoning_content
                         state.final_finish_reason = generation_result.finish_reason
                         state.final_finish_details = generation_result.finish_details
                         state.final_provider_metadata = generation_result.provider_metadata
