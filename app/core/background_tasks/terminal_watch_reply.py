@@ -20,7 +20,7 @@ from app.core.prompts import TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
 
 __all__ = ["route_terminal_auto_watch_reply", "prepare_terminal_auto_watch_resume"]
 
@@ -132,11 +132,12 @@ async def _route_terminal_auto_watch_delivery(
         await _consume_and_commit(db, task, work_id=work_id, identity=identity)
         return True
 
+    is_independent_work = (await session_reply_work_item_crud.get_message_work_id(db, work)) is not None
     session = await session_crud.get_by_session_id(db, task.session_id)
-    if session is None or session.uid != task.uid or (work.work_type != SessionReplyWorkType.AGENT_WORK and session.profile_id != task.profile_id):
+    if session is None or session.uid != task.uid or (not is_independent_work and session.profile_id != task.profile_id):
         await _consume_and_commit(db, task, work_id=work_id, identity=identity)
         return True
-    if work.work_type == SessionReplyWorkType.AGENT_WORK:
+    if is_independent_work:
         profile = await profile_crud.get_with_relations(db, work.profile_id)
         if profile is None or profile.uid != work.uid:
             await _consume_and_commit(db, task, work_id=work_id, identity=identity)
@@ -324,6 +325,7 @@ async def _persist_result_marker(
     dedupe_key = f"background-task:{task.id}:result"
     marker = await message_crud.get_by_dedupe_key(db, dedupe_key)
     if marker is None:
+        message_work_id = await session_reply_work_item_crud.get_message_work_id(db, work)
         marker = Message(
             session_id=work.session_id,
             uid=work.uid,
@@ -331,7 +333,7 @@ async def _persist_result_marker(
             type=MessageType.BACKGROUND_TASK_RESULT,
             content=json.dumps(payload, ensure_ascii=False),
             profile_id=work.profile_id,
-            work_id=work.id if work.work_type == SessionReplyWorkType.AGENT_WORK else None,
+            work_id=message_work_id,
             is_processed=True,
             dedupe_key=dedupe_key,
         )
@@ -350,6 +352,7 @@ async def prepare_terminal_auto_watch_resume(
 ) -> bool:
     await ensure_session_reply_work_claim(db)
     await db.refresh(work)
+    message_work_id = await session_reply_work_item_crud.get_message_work_id(db, work)
 
     state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
     raw_terminal_watch_waits = state.get("terminal_watch_waits")
@@ -443,7 +446,7 @@ async def prepare_terminal_auto_watch_resume(
     if subscription_entries and _positive_int(work.id):
         session = await session_crud.get_by_session_id(db, work.session_id)
         if session is not None and session.uid == work.uid and session.profile_id == work.profile_id:
-            if work.work_type != SessionReplyWorkType.AGENT_WORK and bool(state.get("show_tool_calls")):
+            if message_work_id is None and bool(state.get("show_tool_calls")):
                 sequence_no = await session_reply_stream_event_crud.get_latest_sequence(db, work_id=work.id)
                 for slot, _subscription, payload, _marker in subscription_entries:
                     sequence_no += 1
@@ -463,7 +466,7 @@ async def prepare_terminal_auto_watch_resume(
                         },
                         commit=False,
                     )
-            if work.work_type != SessionReplyWorkType.AGENT_WORK and bool(state.get("show_tool_calls", True)) and session.show_tool_calls:
+            if message_work_id is None and bool(state.get("show_tool_calls", True)) and session.show_tool_calls:
                 latest_marker_id = max(marker.id for _slot, _subscription, _payload, marker in subscription_entries)
                 event_id = f"terminal-auto-watch-subscriptions:{work.id}:{latest_marker_id}"
                 await session_event_crud.publish(

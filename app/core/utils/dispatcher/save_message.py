@@ -21,7 +21,6 @@ from app.models.message import (
     MessageType,
     decode_message_content,
 )
-from app.models.session_reply_work_item import SessionReplyWorkType
 
 
 def _to_storable_content(content: Any, msg_type: MessageType) -> str:
@@ -54,9 +53,9 @@ async def _get_work_owned_message_id(db: AsyncSession) -> int | None:
 
     work_id, worker_id = claim_info
     work = await session_reply_work_item_crud.get(db, work_id)
-    if work is None or work.locked_by != worker_id or work.work_type != SessionReplyWorkType.AGENT_WORK:
+    if work is None or work.locked_by != worker_id:
         return None
-    return work_id
+    return await session_reply_work_item_crud.get_message_work_id(db, work)
 
 
 async def save_message(

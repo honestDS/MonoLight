@@ -48,11 +48,14 @@ class SessionReplyResult:
         work = await session_reply_work_item_crud.resolve_merged_target(db, work_id)
         if work is None or work.uid != original_work.uid or work.session_id != original_work.session_id:
             raise ResourceNotFoundException(ERR_SESSION_REPLY_WORK_NOT_FOUND)
+        message_work_id = await session_reply_work_item_crud.get_message_work_id(db, work)
 
         response = None
         if work.status == SessionReplyWorkStatus.SUCCEEDED:
             execution_response = (work.execution_state or {}).get("response")
             if isinstance(execution_response, dict):
+                if message_work_id is not None:
+                    execution_response = {**execution_response, "history": []}
                 response = build_identified_work_response(work, execution_response)
 
         error = None
@@ -62,8 +65,9 @@ class SessionReplyResult:
             error = work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status)
 
         session_events: list[dict[str, Any]] = []
-        session = await session_crud.get_by_session_id(db, work.session_id)
-        if session is not None and session.uid == work.uid and session.show_tool_calls is True:
+        if message_work_id is None:
+            session = await session_crud.get_by_session_id(db, work.session_id)
+        if message_work_id is None and session is not None and session.uid == work.uid and session.show_tool_calls is True:
             execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
             raw_message_ids = execution_state.get("external_tool_result_message_ids")
             message_ids: list[int] = []

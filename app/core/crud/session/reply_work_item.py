@@ -18,6 +18,8 @@ from app.core.constants import (
 )
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
+from app.models.audit import AuditRecord
+from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
@@ -50,6 +52,33 @@ class CRUDSessionReplyWorkItem:
     async def get(self, db: AsyncSession, work_id: int) -> SessionReplyWorkItem | None:
         result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work_id))
         return result.scalars().first()
+
+    async def get_message_work_id(self, db: AsyncSession, work: SessionReplyWorkItem) -> int | None:
+        if work.work_type == SessionReplyWorkType.AGENT_WORK:
+            return work.id
+        if work.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or work.source_type != SessionReplySourceType.AUDIT_RECORD:
+            return None
+        try:
+            audit_record_id = int(work.source_id)
+        except (TypeError, ValueError):
+            return None
+
+        result = await db.execute(
+            select(Message.work_id)
+            .join(AuditRecord, AuditRecord.source_assistant_message_id == Message.id)
+            .where(
+                AuditRecord.id == audit_record_id,
+                AuditRecord.uid == work.uid,
+                AuditRecord.session_id == work.session_id,
+                Message.uid == work.uid,
+                Message.session_id == work.session_id,
+                Message.role == MessageRole.ASSISTANT,
+                Message.type == MessageType.TOOL_CALL,
+                Message.profile_id == work.profile_id,
+                Message.work_id.is_not(None),
+            )
+        )
+        return work.id if result.scalar() is not None else None
 
     async def get_by_dedupe_key(self, db: AsyncSession, dedupe_key: str) -> SessionReplyWorkItem | None:
         result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.dedupe_key == dedupe_key))

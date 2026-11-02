@@ -51,7 +51,7 @@ from app.core.constants import (
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel.channel import channel_crud
-from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
@@ -76,6 +76,7 @@ from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConcl
 from app.models.channel import ModelUsage, resolve_model_protocol
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
+from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkType
 from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
@@ -786,7 +787,43 @@ async def audit_tool_round(
         return None
     audited_tool_call_ids = [item.id for item in audited_tool_calls]
     audited_tool_call_id_set = set(audited_tool_call_ids)
-    await cancel_confirmation_by_session(db, uid=uid, session_id=session_id, locale=cfg.security.audit_report_language)
+    claim_info = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+    source_work_id = None
+    if isinstance(claim_info, (tuple, list)) and len(claim_info) == 2 and isinstance(claim_info[0], int) and not isinstance(claim_info[0], bool) and claim_info[0] > 0:
+        source_work_id = claim_info[0]
+    is_scheduled_task = False
+    if source_work_id is not None:
+        source_work = await session_reply_work_item_crud.get(db, source_work_id)
+        source_profile_id = source_work.profile_id if source_work is not None else None
+        visited_work_ids: set[int] = set()
+        while source_work is not None:
+            work_id = source_work.id
+            if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0 or work_id in visited_work_ids or source_work.uid != uid or source_work.session_id != session_id or source_work.profile_id != source_profile_id:
+                break
+            visited_work_ids.add(work_id)
+            if source_work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN:
+                is_scheduled_task = True
+                break
+            if source_work.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or source_work.source_type != SessionReplySourceType.AUDIT_RECORD:
+                break
+            source_id = source_work.source_id
+            if isinstance(source_id, bool) or not isinstance(source_id, (int, str)):
+                break
+            try:
+                audit_record_id = int(source_id)
+            except (TypeError, ValueError):
+                break
+            if audit_record_id <= 0:
+                break
+            source_record = await audit_crud.get_record(db, audit_record_id)
+            if source_record is None or source_record.uid != uid or source_record.session_id != session_id:
+                break
+            next_work_id = source_record.source_work_id
+            if not isinstance(next_work_id, int) or isinstance(next_work_id, bool) or next_work_id <= 0 or next_work_id in visited_work_ids:
+                break
+            source_work = await session_reply_work_item_crud.get(db, next_work_id)
+    if not is_scheduled_task:
+        await cancel_confirmation_by_session(db, uid=uid, session_id=session_id, locale=cfg.security.audit_report_language)
     workdir = Path(working_directory or get_user_temp_dir(os.getcwd(), uid)).resolve(strict=False)
     read_budget = AuditReadBudget(limit=cfg.security.audit_depth)
     allowed_operation_dirs = get_allowed_operation_dirs(cfg)
@@ -800,16 +837,6 @@ async def audit_tool_round(
     server_confirmation_reasons: dict[str, list[dict[str, Any]]] = {}
     server_blocked_tool_call_ids: set[str] = set()
     snapshot = build_tool_round_integrity_snapshot(tool_calls=payload_calls, uid=uid, session_id=session_id, working_directory=workdir)
-    claim_info = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
-    source_work_id = None
-    if (
-        isinstance(claim_info, (tuple, list))
-        and len(claim_info) == 2
-        and isinstance(claim_info[0], int)
-        and not isinstance(claim_info[0], bool)
-        and claim_info[0] > 0
-    ):
-        source_work_id = claim_info[0]
     record = await audit_crud.create_preparing(
         db,
         uid=uid,
@@ -968,6 +995,8 @@ async def audit_tool_round(
                     conclusion = classify_audit_score(result["score"], cfg.security.audit_threshold)
                     if cfg.security.audit_threshold > 0 and (local_reasons or requires_confirmation) and conclusion != AuditToolConclusion.BLOCKED:
                         conclusion = AuditToolConclusion.PENDING
+                if is_scheduled_task and conclusion == AuditToolConclusion.PENDING:
+                    conclusion = AuditToolConclusion.BLOCKED
                 conclusions.append(conclusion)
             status = _aggregate(conclusions)
         except Exception as exc:

@@ -98,11 +98,12 @@ async def _resume_pending_external_results(work: SessionReplyWorkItem) -> None:
             logger.exception("Failed to resume external work for task {}", task_id)
 
 
-async def _promote_direct_agent_work_message(db, work: SessionReplyWorkItem, message_id: int | None) -> bool:
-    if work.work_type != SessionReplyWorkType.AGENT_WORK or load_agent_work_spec(work).report_target != AgentWorkReportTarget.SESSION:
+async def _promote_independent_work_message(db, work: SessionReplyWorkItem, message_id: int | None) -> bool:
+    message_work_id = await session_reply_work_item_crud.get_message_work_id(db, work)
+    if message_work_id is None or (work.work_type == SessionReplyWorkType.AGENT_WORK and load_agent_work_spec(work).report_target != AgentWorkReportTarget.SESSION):
         return False
     await ensure_session_reply_work_claim(db)
-    if message_id is None or not await message_crud.promote_work_message_to_session(db, message_id=message_id, work_id=work.id, commit=False):
+    if message_id is None or not await message_crud.promote_work_message_to_session(db, message_id=message_id, work_id=message_work_id, commit=False):
         raise RuntimeError(t(ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
     return True
 
@@ -114,6 +115,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
             return
         db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
+        is_independent_work = (await session_reply_work_item_crud.get_message_work_id(db, work)) is not None
 
         if isinstance(work.execution_state, dict) and work.execution_state.get("terminal_auto_resume") is True:
             if not await prepare_terminal_auto_watch_resume(db, work, worker_id):
@@ -169,7 +171,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             await _resume_pending_external_results(work)
             return
 
-        direct_agent_work = False
+        direct_independent_work = False
         if skip_reply:
             result_message = None
             identified_response = response if saved_skip_response else build_identified_work_response(work, response, message_id=None)
@@ -177,8 +179,8 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
             result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
             if result_message is None:
                 raise RuntimeError(t(ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
-            direct_agent_work = await _promote_direct_agent_work_message(db, work, result_message.id)
-            if direct_agent_work:
+            direct_independent_work = await _promote_independent_work_message(db, work, result_message.id)
+            if direct_independent_work:
                 response = {**response, "history": []}
             identified_response = build_identified_work_response(work, response, message_id=result_message.id)
 
@@ -196,7 +198,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
 
         event_sent = False
         if skip_reply:
-            if work.work_type != SessionReplyWorkType.AGENT_WORK:
+            if not is_independent_work:
                 event = _event_for_work(work, identified_response)
                 event.update({"type": "done", "skip_reply": True, "response": identified_response})
                 await session_event_crud.publish(
@@ -209,7 +211,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                 )
                 event_sent = True
         else:
-            event_sent = work.work_type != SessionReplyWorkType.AGENT_WORK or direct_agent_work
+            event_sent = not is_independent_work or direct_independent_work
         await db.commit()
 
     if not skip_reply and event_sent:
@@ -266,6 +268,7 @@ async def fail_session_reply_work(
         db_info = getattr(db, "info", None)
         if isinstance(db_info, dict):
             db_info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
+        is_independent_work = (await session_reply_work_item_crud.get_message_work_id(db, work)) is not None
         checkpoint = (work.execution_state or {}).get("dispatcher_checkpoint")
         if isinstance(checkpoint, dict) and checkpoint.get("deferred_external_results") is True:
             await prepare_external_work_resume(
@@ -288,13 +291,13 @@ async def fail_session_reply_work(
             dedupe_key=_error_message_dedupe_key(work),
             commit=False,
         )
-        direct_agent_work = await _promote_direct_agent_work_message(db, work, error_message.id)
+        direct_independent_work = await _promote_independent_work_message(db, work, error_message.id)
         identified_response = build_identified_work_response(
             work,
-            {"content": error_content, "history": []} if direct_agent_work else {"content": error_content},
+            {"content": error_content, "history": []} if direct_independent_work else {"content": error_content},
             message_id=error_message.id,
         )
-        event_sent = work.work_type != SessionReplyWorkType.AGENT_WORK or direct_agent_work
+        event_sent = not is_independent_work or direct_independent_work
         await db.commit()
 
     if event_sent:

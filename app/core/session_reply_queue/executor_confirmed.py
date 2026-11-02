@@ -211,12 +211,7 @@ def _refresh_confirmed_frozen_tool_results(
         refreshed_by_id[pending_message.id] = refreshed
     if not refreshed_by_id:
         return messages
-    return [
-        refreshed_by_id.get(message.id, message).model_copy(deep=True)
-        if isinstance(message.id, int) and not isinstance(message.id, bool)
-        else message.model_copy(deep=True)
-        for message in messages
-    ]
+    return [refreshed_by_id.get(message.id, message).model_copy(deep=True) if isinstance(message.id, int) and not isinstance(message.id, bool) else message.model_copy(deep=True) for message in messages]
 
 
 def _build_confirmed_wait_checkpoint(
@@ -227,14 +222,14 @@ def _build_confirmed_wait_checkpoint(
     decision_raw_message: str,
 ) -> dict[str, Any]:
     checkpoint = dict(execution_state.get("dispatcher_checkpoint") or {})
-    checkpoint_messages = [
-        InternalMessage.model_validate(item)
-        for item in checkpoint.get("messages", [])
-    ]
-    checkpoint_messages = _refresh_confirmed_frozen_tool_results(
-        checkpoint_messages,
-        pending_tool_results,
-    ) or []
+    checkpoint_messages = [InternalMessage.model_validate(item) for item in checkpoint.get("messages", [])]
+    checkpoint_messages = (
+        _refresh_confirmed_frozen_tool_results(
+            checkpoint_messages,
+            pending_tool_results,
+        )
+        or []
+    )
     if not any(message.id == decision_message_id for message in checkpoint_messages):
         checkpoint_messages.append(
             InternalMessage(
@@ -243,10 +238,7 @@ def _build_confirmed_wait_checkpoint(
                 content=decision_raw_message,
             )
         )
-    checkpoint["messages"] = [
-        message.model_dump(mode="json", exclude_none=True)
-        for message in checkpoint_messages
-    ]
+    checkpoint["messages"] = [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages]
     checkpoint["turn_messages"] = []
     return checkpoint
 
@@ -419,20 +411,17 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 }
                 checkpoint = refreshed_state.get("dispatcher_checkpoint")
                 if isinstance(checkpoint, dict) and isinstance(checkpoint.get("messages"), list):
-                    checkpoint_messages = [
-                        InternalMessage.model_validate(item)
-                        for item in checkpoint["messages"]
-                    ]
-                    checkpoint_messages = _refresh_confirmed_frozen_tool_results(
-                        checkpoint_messages,
-                        pending_tool_results,
-                    ) or checkpoint_messages
+                    checkpoint_messages = [InternalMessage.model_validate(item) for item in checkpoint["messages"]]
+                    checkpoint_messages = (
+                        _refresh_confirmed_frozen_tool_results(
+                            checkpoint_messages,
+                            pending_tool_results,
+                        )
+                        or checkpoint_messages
+                    )
                     refreshed_state["dispatcher_checkpoint"] = {
                         **checkpoint,
-                        "messages": [
-                            message.model_dump(mode="json", exclude_none=True)
-                            for message in checkpoint_messages
-                        ],
+                        "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],
                     }
                 work.execution_state = refreshed_state
             if reaudit_round.confirmation_payload is not None:
@@ -712,7 +701,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         execution_scope=record.execution_scope,
         frozen_context_messages=frozen_context_messages,
     )
-    if interactive_response.get("status") == "waiting_external_work":
+    if interactive_response.get("status") == "waiting_external_work" or interactive_response.get("skip_reply") is True:
         return interactive_response
     content = parse_assistant_files_content(_response_content(interactive_response))
     history = interactive_response.get("history", [])

@@ -4,7 +4,7 @@ from collections import Counter, deque
 from typing import Any
 
 from app.core.crud.session.message import message_crud
-from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.session_reply_queue.executor_interactive import _save_interactive_work_execution_checkpoint
@@ -12,7 +12,7 @@ from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkType
+from app.models.session_reply_work_item import SessionReplyWorkItem
 
 __all__ = ["restore_interactive_tool_replies"]
 
@@ -67,7 +67,8 @@ async def restore_interactive_tool_replies(
 
     await ensure_session_reply_work_claim(db)
     restored_results: dict[tuple[tuple[str, int], int], InternalMessage] = {}
-    history_kwargs = {"work_id": work.id} if work.work_type == SessionReplyWorkType.AGENT_WORK else {}
+    message_work_id = await session_reply_work_item_crud.get_message_work_id(db, work)
+    history_kwargs = {"work_id": message_work_id} if message_work_id is not None else {}
     for group in groups:
         assistant = group["assistant"]
         if not group["missing"] or assistant.id is None:

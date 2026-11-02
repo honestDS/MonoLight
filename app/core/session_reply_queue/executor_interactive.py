@@ -205,7 +205,7 @@ async def _check_interactive_work_validity(
     uid: str,
     profile_id: int,
     worker_id: str,
-    work_type: SessionReplyWorkType,
+    independent_context: bool,
 ) -> bool:
     async with AsyncSessionLocal() as validity_db:
         active_claims = await session_reply_work_item_crud.get_active_claims(
@@ -217,11 +217,11 @@ async def _check_interactive_work_validity(
             session_id,
         )
         profile = None
-        if work_type == SessionReplyWorkType.AGENT_WORK:
+        if independent_context:
             profile = await profile_crud.get_with_relations(validity_db, profile_id)
     if (work_id, worker_id) not in active_claims or session is None or session.uid != uid:
         return False
-    if work_type == SessionReplyWorkType.AGENT_WORK:
+    if independent_context:
         return profile is not None and profile.uid == uid
     return session.profile_id == profile_id
 
@@ -284,10 +284,10 @@ async def _dispatch_interactive_work(
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     await ensure_session_reply_work_claim(db, commit=True)
     execution_state = work.execution_state or {}
-    is_agent_work = work.work_type == SessionReplyWorkType.AGENT_WORK
-    update_session_context = not is_agent_work and frozen_context_messages is None
-    stream_requested = False if is_agent_work else bool((work.execution_state or {}).get("stream_requested"))
-    context_summary_events_requested = False if is_agent_work else bool((work.execution_state or {}).get("context_summary_events_requested"))
+    is_independent_work = (await session_reply_work_item_crud.get_message_work_id(db, work)) is not None
+    update_session_context = not is_independent_work and frozen_context_messages is None
+    stream_requested = False if is_independent_work else bool((work.execution_state or {}).get("stream_requested"))
+    context_summary_events_requested = False if is_independent_work else bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
         next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work_id) + 1
     stream_state = _InteractiveWorkStreamEventState(
@@ -326,8 +326,8 @@ async def _dispatch_interactive_work(
         )
         stream_state.session_token_totals["total_output_tokens"] = result.total_output_tokens
 
-    expose_tool_call_content = False if is_agent_work else bool(execution_state.get("expose_tool_call_content", True))
-    show_tool_calls = False if is_agent_work else bool(execution_state.get("show_tool_calls", True))
+    expose_tool_call_content = False if is_independent_work else bool(execution_state.get("expose_tool_call_content", True))
+    show_tool_calls = False if is_independent_work else bool(execution_state.get("show_tool_calls", True))
 
     dispatch_kwargs = {
         "db": db,
@@ -373,7 +373,7 @@ async def _dispatch_interactive_work(
             uid=uid,
             profile_id=work.profile_id,
             worker_id=worker_id,
-            work_type=work.work_type,
+            independent_context=is_independent_work,
         ),
         "expose_tool_call_content": expose_tool_call_content,
         "show_tool_calls": show_tool_calls,

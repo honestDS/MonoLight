@@ -52,10 +52,12 @@ def _active(status: Any) -> bool:
     }
 
 
-def _same_scope(work: Any, current: Any) -> bool:
-    if (_status(work.work_type) == SessionReplyWorkType.AGENT_WORK.value or _status(current.work_type) == SessionReplyWorkType.AGENT_WORK.value) and work.id != current.id:
+async def _same_scope(db: AsyncSession, work: Any, current: Any) -> bool:
+    if work.uid != current.uid or work.session_id != current.session_id or work.profile_id != current.profile_id or _state(work).get("actor_uid", work.uid) != _state(current).get("actor_uid", current.uid):
         return False
-    return work.uid == current.uid and work.session_id == current.session_id and work.profile_id == current.profile_id and _state(work).get("actor_uid", work.uid) == _state(current).get("actor_uid", current.uid)
+    if work.id != current.id and (await session_reply_work_item_crud.get_message_work_id(db, work) is not None or await session_reply_work_item_crud.get_message_work_id(db, current) is not None):
+        return False
+    return True
 
 
 def _clean_slots(slots: Any, received: set[int], auto_sessions: set[str]) -> list[dict[str, Any]]:
@@ -159,10 +161,8 @@ async def receive_pending_external_results(
     if current is None or _status(current.status) != SessionReplyWorkStatus.RUNNING.value or current.locked_by != worker_id or current.uid != uid or current.session_id != session_id or current.profile_id != profile_id:
         raise _unknown()
     current_state = _state(current)
-    isolated_result_scope = isinstance(current_state.get("frozen_context_messages"), list) or _status(current.work_type) in {
-        SessionReplyWorkType.BACKGROUND_TASK_RESUME.value,
-        SessionReplyWorkType.AGENT_WORK.value,
-    }
+    message_work_id = await session_reply_work_item_crud.get_message_work_id(db, current)
+    isolated_result_scope = isinstance(current_state.get("frozen_context_messages"), list) or _status(current.work_type) == SessionReplyWorkType.BACKGROUND_TASK_RESUME.value or message_work_id is not None
     include_sibling_works = not isolated_result_scope
 
     if include_sibling_works:
@@ -180,7 +180,7 @@ async def receive_pending_external_results(
     candidate_ids: list[int] = []
 
     for source in sources:
-        if not _same_scope(source, current) or (source.id != current.id and _status(source.status) == SessionReplyWorkStatus.RUNNING.value):
+        if not await _same_scope(db, source, current) or (source.id != current.id and _status(source.status) == SessionReplyWorkStatus.RUNNING.value):
             continue
         state = _state(source)
         context = {"work": source, "state": state, "received": set(), "auto_sessions": set()}
@@ -236,7 +236,7 @@ async def receive_pending_external_results(
 
     async def valid_origin(origin_id: Any, identity: Any, allow_succeeded: bool = False) -> Any:
         origin = await get_work(origin_id)
-        if origin is None or not _same_scope(origin, current) or not isinstance(identity, str) or origin.dedupe_key != identity:
+        if origin is None or not await _same_scope(db, origin, current) or not isinstance(identity, str) or origin.dedupe_key != identity:
             return None
         if origin.id != current.id and _status(origin.status) == SessionReplyWorkStatus.RUNNING.value:
             return None
@@ -260,9 +260,9 @@ async def receive_pending_external_results(
         if owner.get("status") == "handled":
             continue
         owner_work = await get_work(owner.get("work_id")) if owner.get("work_id") is not None else None
-        if owner_work is not None and not _same_scope(owner_work, current):
+        if owner_work is not None and not await _same_scope(db, owner_work, current):
             continue
-        if owner.get("status") == "received" and owner_work is not None and _same_scope(owner_work, current) and _active(owner_work.status) and owner_work.dedupe_key == owner.get("identity"):
+        if owner.get("status") == "received" and owner_work is not None and await _same_scope(db, owner_work, current) and _active(owner_work.status) and owner_work.dedupe_key == owner.get("identity"):
             if owner_work.id == current.id and owner.get("sequence_no") != current.sequence_no:
                 updated_extra = dict(extra)
                 updated_owner = dict(owner)
