@@ -4,6 +4,7 @@ from typing import Any
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.channel.router import select_channel
+from app.core.constants import TOOL_AUDIT_EXEMPT_OPERATIONS
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.embedding.knowledge_base import build_knowledge_base_whitelist
 from app.core.log import get_logger
@@ -132,9 +133,12 @@ def get_tool_round_execution_policy(tool_name: str) -> str:
 def tool_requires_audit(tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
     executor_class = TOOL_EXECUTOR_MAP.get(tool_name)
     requires_audit = bool(executor_class is not None and executor_class.requires_audit)
-    if not requires_audit or tool_name != TERMINAL_TOOL_SCHEMA["function"]["name"] or arguments is None:
+    if not requires_audit or arguments is None:
         return requires_audit
-    return arguments.get("operation") not in ("read", "resize")
+    operation = arguments.get("operation")
+    if isinstance(operation, str) and (tool_name, operation) in TOOL_AUDIT_EXEMPT_OPERATIONS:
+        return False
+    return True
 
 
 def get_registered_tool_names():

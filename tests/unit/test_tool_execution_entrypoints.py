@@ -46,6 +46,49 @@ def test_terminal_tool_audit_requirement_depends_on_operation(arguments, expecte
     assert tool_requires_audit("terminal_tool", arguments) is expected_audit
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected_audit"),
+    [
+        ({"operation": "list"}, False),
+        ({"operation": "create"}, True),
+        ({"operation": "delete"}, True),
+        ({"operation": "read"}, True),
+        ({"operation": "resize"}, True),
+        ({"operation": "unknown"}, True),
+        (None, True),
+        ({}, True),
+        ({"operation": None}, True),
+        ({"operation": []}, True),
+        ({"operation": {}}, True),
+    ],
+)
+def test_manage_scheduled_tasks_audit_requirement_depends_on_operation(arguments, expected_audit):
+    assert tool_requires_audit("manage_scheduled_tasks", arguments) is expected_audit
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected_audit"),
+    [
+        ("terminal_tool", {"read": False, "resize": False, "list": True}),
+        ("manage_scheduled_tasks", {"read": True, "resize": True, "list": False}),
+        ("file_tool", {"read": True, "resize": True, "list": True}),
+        ("execute_shell", {"read": True, "resize": True, "list": True}),
+    ],
+)
+def test_audit_exemptions_match_tool_and_operation(tool_name, expected_audit):
+    actual_audit = {operation: tool_requires_audit(tool_name, {"operation": operation}) for operation in ("read", "resize", "list")}
+
+    assert actual_audit == expected_audit
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "operation"),
+    [("web_tool", "read"), ("unknown_tool", "list")],
+)
+def test_non_audited_tools_ignore_operation(tool_name, operation):
+    assert tool_requires_audit(tool_name, {"operation": operation}) is False
+
+
 def test_confirmed_tool_result_budget_reuses_last_model_context_window():
     session = SimpleNamespace(llm_request_metadata={"context_window_tokens": 1_050_000})
 

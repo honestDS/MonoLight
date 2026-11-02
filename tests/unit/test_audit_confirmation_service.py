@@ -42,7 +42,7 @@ from app.core.constants import (
 )
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
-from app.core.prompts import AUDIT_SUMMARY_PROMPT
+from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_STANDARD_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT, AUDIT_TASK_AUTHORIZATION_PROMPT
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.operation_directories import get_write_protected_dirs
 from app.core.utils.tokenizer import estimate_tokens
@@ -1409,12 +1409,21 @@ def test_file_edit_snapshot_preserves_link_type_and_resolved_path(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(tmp_path, monkeypatch):
+@pytest.mark.parametrize("protect_system_directories", [True, False])
+@pytest.mark.parametrize(
+    "task_instruction",
+    [
+        None,
+        "Create prepare.sh and verify.py; only write both scripts and do not run either script.",
+    ],
+)
+async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(tmp_path, monkeypatch, protect_system_directories, task_instruction):
     outside_file = tmp_path.parent / "audit-visible.txt"
     outside_file.write_text("server evidence", encoding="utf-8")
     cfg = _profile_config()
     cfg.security.audit_channel_id = 1
     cfg.security.audit_model_id = "audit-model"
+    cfg.security.protect_system_directories = protect_system_directories
     calls = []
 
     class FakeDb:
@@ -1459,25 +1468,33 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
     monkeypatch.setattr("app.core.audit.service.channel_crud.get", get_channel)
     monkeypatch.setattr("app.core.audit.service.LLMClient.generate", generate)
 
+    request_payload = {
+        "confirmation_threshold": 5,
+        "working_directory": str(tmp_path),
+        "tool_calls": [
+            {
+                "tool_call_id": "call-1",
+                "turn_index": 0,
+                "tool_name": "execute_shell",
+                "arguments": {"command": "python dynamic_target"},
+            }
+        ],
+    }
+    if task_instruction is not None:
+        request_payload["task_instruction"] = task_instruction
+
     request_context, response_context = await _call_auditor(
         FakeDb(),
         cfg,
-        {
-            "confirmation_threshold": 5,
-            "working_directory": str(tmp_path),
-            "tool_calls": [
-                {
-                    "tool_call_id": "call-1",
-                    "turn_index": 0,
-                    "tool_name": "execute_shell",
-                    "arguments": {"command": "python dynamic_target"},
-                }
-            ],
-        },
+        request_payload,
         tmp_path,
     )
 
     assert len(calls) == 2
+    expected_system_prompt = AUDIT_BATCH_PROMPT if protect_system_directories else AUDIT_STANDARD_BATCH_PROMPT
+    if task_instruction is not None:
+        expected_system_prompt += "\n\n" + AUDIT_TASK_AUTHORIZATION_PROMPT
+    assert [call["messages"][0].content for call in calls] == [expected_system_prompt] * len(calls)
     assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
     assert [tool["function"]["name"] for tool in calls[1]["tools"]] == ["read_text_file", "execute_shell"]
     shell_tool = calls[1]["tools"][1]["function"]["parameters"]
@@ -1485,8 +1502,13 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
     assert "tool_call_id" in shell_tool["required"]
     assert all(call["max_tokens"] == DEFAULT_CHAT_MAX_TOKENS for call in calls)
     assert all(isinstance(call["request_context_tokens"], int) and call["request_context_tokens"] >= 0 for call in calls)
-    assert json.loads(calls[0]["messages"][1].content)["working_directory"] == str(tmp_path)
-    assert json.loads(calls[0]["messages"][1].content)["tool_calls"][0]["arguments"] == {"command": "python dynamic_target"}
+    user_payloads = [json.loads(call["messages"][1].content) for call in calls]
+    assert all(payload["working_directory"] == str(tmp_path) for payload in user_payloads)
+    assert all(payload["tool_calls"][0]["arguments"] == {"command": "python dynamic_target"} for payload in user_payloads)
+    if task_instruction is None:
+        assert all("task_instruction" not in payload for payload in user_payloads)
+    else:
+        assert all(payload["task_instruction"] == task_instruction for payload in user_payloads)
     expected_results = [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "deny": False, "file_checks": []}]
     expected_response_context = {
         "content": {"results": expected_results},
@@ -2043,6 +2065,9 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     calls = []
     script = tmp_path / "test.py"
     script.write_text("from pathlib import Path\nPath('important.txt').unlink()\n", encoding="utf-8")
+    task_instruction = (
+        "Run the following scripts in order:\n1. python test.py\n2. bash verify.sh --strict\n3. pwsh cleanup.ps1 -WhatIf\nLimits:\n- Keep all operations under the configured working directory.\n- Do not delete or modify files outside that directory.\n- Stop after one pass and require confirmation before execution."
+    )
 
     class FakeDb:
         async def commit(self):
@@ -2093,6 +2118,7 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
         [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "python test.py"}}],
         reasons,
         working_directory=tmp_path,
+        task_instruction=task_instruction,
     )
 
     system_prompt = calls[0]["messages"][0].content
@@ -2106,6 +2132,7 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     assert tool_payload["content"] == script.read_bytes().decode("utf-8")
     assert system_prompt == AUDIT_SUMMARY_PROMPT.format(audit_report_language=cfg.security.audit_report_language)
     summary_payload = json.loads(calls[0]["messages"][1].content)
+    assert summary_payload["task_instruction"] == task_instruction
     assert summary_payload["working_directory"] == str(tmp_path.resolve())
     assert summary_payload["tool_calls"] == [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "python test.py"}}]
     assert summary_payload["server_confirmation_reasons"] == reasons

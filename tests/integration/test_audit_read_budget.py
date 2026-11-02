@@ -617,7 +617,7 @@ async def test_format_correction_preserves_evidence_budget_and_result_id_mapping
     generate_calls: list[dict[str, Any]] = []
     shell_executions: list[tuple[str, str]] = []
     _record_real_shell_execution(monkeypatch, shell_executions)
-    expected_summary = "操作: 确认后运行两条Shell命令，输出各自指定的业务标记。\n\n范围: 本轮提交的两项待审计命令。\n\n影响: 两条命令只输出文本，不修改文件。\n\n未核实: 暂无其他关键不确定项。"
+    expected_summary = "操作: 确认后运行两条Shell命令，输出各自指定的业务标记。\n\n范围: 本轮提交的两项待审计命令。\n\n影响: 两条命令只输出文本，不修改文件。"
 
     malformed_content = json.dumps(
         {
@@ -756,6 +756,11 @@ async def test_format_correction_preserves_evidence_budget_and_result_id_mapping
     }
     assert all(json.loads(message.content or "{}") == expected_tool_result for message in result.tool_results)
     assert result.confirmation_payload is not None
+    output_summary = result.confirmation_payload["summary"]
+    assert output_summary.count("操作:") == 1
+    assert output_summary.count("范围:") == 1
+    assert output_summary.count("影响:") == 1
+    assert "未核实:" not in output_summary
     assert result.confirmation_payload["summary"] == expected_summary
     assert expected_summary in result.confirmation_payload["plain_text"]
 

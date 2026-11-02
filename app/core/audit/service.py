@@ -60,6 +60,7 @@ from app.core.prompts import (
     AUDIT_FORMAT_CORRECTION_PROMPT,
     AUDIT_STANDARD_BATCH_PROMPT,
     AUDIT_SUMMARY_PROMPT,
+    AUDIT_TASK_AUTHORIZATION_PROMPT,
 )
 from app.core.terminal.manager import terminal_session_manager
 from app.core.tools import tool_requires_audit
@@ -72,6 +73,7 @@ from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.operation_directories import get_allowed_operation_dirs, get_write_protected_dirs, is_path_write_protected, normalize_allowed_operation_dirs
 from app.core.utils.time import get_local_time
+from app.models.agent_work import AgentWorkSpec
 from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConclusion
 from app.models.channel import ModelUsage, resolve_model_protocol
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
@@ -703,10 +705,13 @@ async def _call_auditor(
         read_budget = AuditReadBudget(limit=cfg.security.audit_depth)
     expected_tool_call_ids = {item.get("tool_call_id") for item in request_payload.get("tool_calls", []) if isinstance(item, dict) and isinstance(item.get("tool_call_id"), str)}
     result_ids = [item["tool_call_id"] for item in request_payload.get("tool_calls", []) if isinstance(item, dict) and isinstance(item.get("tool_call_id"), str)]
+    system_prompt = AUDIT_BATCH_PROMPT if cfg.security.protect_system_directories else AUDIT_STANDARD_BATCH_PROMPT
+    if request_payload.get("task_instruction") is not None:
+        system_prompt += "\n\n" + AUDIT_TASK_AUTHORIZATION_PROMPT
     request_context, response_context = await _run_audit_model(
         db,
         cfg,
-        AUDIT_BATCH_PROMPT if cfg.security.protect_system_directories else AUDIT_STANDARD_BATCH_PROMPT,
+        system_prompt,
         request_payload,
         working_directory,
         expected_tool_call_ids,
@@ -728,6 +733,7 @@ async def _summarize_pending(
     audit_results: list[dict[str, Any]] | None = None,
     file_reads: list[dict[str, Any]] | None = None,
     shell_results: list[dict[str, Any]] | None = None,
+    task_instruction: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     fallback_summary = t(MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK, locale=cfg.security.audit_report_language)
     workdir = Path(working_directory or os.getcwd()).resolve(strict=False)
@@ -739,6 +745,8 @@ async def _summarize_pending(
         "file_reads": file_reads or [],
         "shell_results": shell_results or [],
     }
+    if task_instruction is not None:
+        summary_payload["task_instruction"] = task_instruction
     summary_prompt = AUDIT_SUMMARY_PROMPT.format(audit_report_language=cfg.security.audit_report_language)
     expected_tool_call_ids = {item.get("id") for item in tool_calls if isinstance(item, dict) and isinstance(item.get("id"), str)}
     if read_budget is None:
@@ -792,6 +800,7 @@ async def audit_tool_round(
     if isinstance(claim_info, (tuple, list)) and len(claim_info) == 2 and isinstance(claim_info[0], int) and not isinstance(claim_info[0], bool) and claim_info[0] > 0:
         source_work_id = claim_info[0]
     is_scheduled_task = False
+    task_instruction: str | None = None
     if source_work_id is not None:
         source_work = await session_reply_work_item_crud.get(db, source_work_id)
         source_profile_id = source_work.profile_id if source_work is not None else None
@@ -801,6 +810,8 @@ async def audit_tool_round(
             if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0 or work_id in visited_work_ids or source_work.uid != uid or source_work.session_id != session_id or source_work.profile_id != source_profile_id:
                 break
             visited_work_ids.add(work_id)
+            if source_work.work_type == SessionReplyWorkType.AGENT_WORK:
+                task_instruction = AgentWorkSpec.model_validate((source_work.execution_state or {}).get("agent_work")).instruction
             if source_work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN:
                 is_scheduled_task = True
                 break
@@ -883,6 +894,8 @@ async def audit_tool_round(
                 if item.id in audited_tool_call_id_set
             ],
         }
+        if task_instruction is not None:
+            request_payload["task_instruction"] = task_instruction
         failure_type = None
         error_reason = None
         request_context: dict[str, Any] = {"messages": []}
@@ -1028,6 +1041,7 @@ async def audit_tool_round(
                 audit_results=parsed_results,
                 file_reads=file_reads,
                 shell_results=shell_results,
+                task_instruction=task_instruction,
             )
             expires_at = get_local_time() + timedelta(seconds=cfg.security.audit_confirmation_timeout_seconds)
 

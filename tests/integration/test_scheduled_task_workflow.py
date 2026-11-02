@@ -49,7 +49,7 @@ from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import ServerException
 from app.core.profile.deletion import build_profile_deletion_impact, execute_profile_deletion
-from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
+from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT, AUDIT_TASK_AUTHORIZATION_PROMPT, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
 from app.core.utils.context_summary import ContextSummaryTriggerMode
@@ -953,12 +953,14 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     stream: bool,
     run_once: bool,
 ) -> None:
     configs = ProfileConfig.model_validate({}).model_dump()
     configs["channel"]["chat_channel"]["rules"] = [{"channel_id": 1, "model_id": MODEL_ID, "priority": 1, "weight": 1}]
     configs["memory"]["precheck_enabled"] = False
+    configs["security"].update({"audit_channel_id": 1, "audit_model_id": MODEL_ID, "audit_threshold": 5})
 
     db_session.add_all(
         [
@@ -1016,9 +1018,15 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
     monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
     monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(
+        audit_service_module,
+        "persist_prepared_audit_round",
+        partial(audit_persistence_module.persist_prepared_audit_round, audit_root=tmp_path / "audit"),
+    )
 
     calls: list[dict[str, Any]] = []
     observed_results: list[dict[str, Any]] = []
+    audit_requests: list[dict[str, Any]] = []
 
     def tool_result(messages: list[InternalMessage], call_id: str) -> dict[str, Any]:
         for message in reversed(messages):
@@ -1095,6 +1103,30 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
         )
 
     async def generate(**kwargs: Any) -> InternalResponse:
+        messages: list[InternalMessage] = kwargs["messages"]
+        system_messages = [message for message in messages if message.role == MessageRole.SYSTEM]
+        if system_messages and system_messages[0].content == AUDIT_BATCH_PROMPT:
+            audit_payload = json.loads(next(message.content for message in messages if message.role == MessageRole.USER))
+            audit_requests.append(audit_payload)
+            results = [
+                {
+                    "tool_call_id": item["tool_call_id"],
+                    "score": 0,
+                    "deny": False,
+                    "reason": "scheduled task operation is safe",
+                    "file_checks": [],
+                }
+                for item in audit_payload["tool_calls"]
+            ]
+            return InternalResponse(
+                message=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=json.dumps({"results": results}),
+                ),
+                model=MODEL_ID,
+                usage=USAGE,
+                finish_reason="stop",
+            )
         assert not stream
         return response_for(kwargs)
 
@@ -1145,6 +1177,7 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
         )
 
     assert len(calls) == 4
+    assert [item["arguments"]["operation"] for request in audit_requests for item in request["tool_calls"]] == ["create", "delete"]
     assert response["choices"][0]["message"]["content"] == FINAL_REPLY
     assert [result["operation"] for result in observed_results] == ["create", "list", "delete"]
 
@@ -1162,8 +1195,15 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
     async with session_factory() as verification_db:
         remaining_tasks = list((await verification_db.execute(select(ScheduledTask))).scalars().all())
         persisted_messages = list((await verification_db.execute(select(Message).where(Message.session_id == SESSION_ID).order_by(Message.id.asc()))).scalars().all())
+        audit_records = list((await verification_db.execute(select(AuditRecord).where(AuditRecord.uid == UID, AuditRecord.session_id == SESSION_ID).order_by(AuditRecord.id.asc()))).scalars().all())
+        audit_details = list((await verification_db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id.in_([record.id for record in audit_records])).order_by(AuditToolDetail.audit_record_id, AuditToolDetail.turn_index))).scalars().all())
+        confirmation_cards = list((await verification_db.execute(select(Message).where(Message.uid == UID, Message.session_id == SESSION_ID, Message.type == MessageType.AUDIT_CONFIRMATION))).scalars().all())
+        confirmation_claims = list((await verification_db.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.uid == UID, AuditConfirmationClaim.session_id == SESSION_ID))).scalars().all())
 
     assert remaining_tasks == []
+    assert len(audit_records) == 2
+    assert [record.status for record in audit_records] == [AuditRecordStatus.SUCCEEDED, AuditRecordStatus.SUCCEEDED]
+    assert [json.loads(detail.arguments_summary)["operation"] for detail in audit_details] == ["create", "delete"]
     tool_call_messages = [message for message in persisted_messages if message.type == MessageType.TOOL_CALL]
     tool_result_messages = [message for message in persisted_messages if message.type == MessageType.TOOL_RESULT]
     assistant_text_messages = [message for message in persisted_messages if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT]
@@ -1171,6 +1211,9 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
     assert all(message.role == MessageRole.ASSISTANT for message in tool_call_messages)
     assert len(tool_result_messages) == 3
     assert all(message.role == MessageRole.TOOL for message in tool_result_messages)
+    assert all(message.audit_record_id is None for message in tool_result_messages)
+    assert confirmation_cards == []
+    assert confirmation_claims == []
     assert len(assistant_text_messages) == 1
     assert assistant_text_messages[0].content == FINAL_REPLY
     assert persisted_messages[-1].role == MessageRole.ASSISTANT
@@ -2596,6 +2639,7 @@ async def test_scheduled_task_audit_block_then_safe_read_finishes_with_original_
     assert not output_file.exists()
 
     scheduled_task = await _create_due_run_once_scheduled_task(db_session)
+    scheduled_task_instruction = scheduled_task.message
     await _configure_audit_profile_for_workflow(db_session, tmp_path, threshold=5)
     profile = await db_session.get(Profile, PROFILE_ID)
     assert profile is not None
@@ -2676,9 +2720,10 @@ async def test_scheduled_task_audit_block_then_safe_read_finishes_with_original_
         messages: list[InternalMessage] = kwargs["messages"]
         system_messages = [message for message in messages if message.role == MessageRole.SYSTEM]
         first_system = system_messages[0].content if system_messages else None
-        if first_system == AUDIT_BATCH_PROMPT:
+        if first_system == AUDIT_BATCH_PROMPT + "\n\n" + AUDIT_TASK_AUTHORIZATION_PROMPT:
             audit_calls.append(kwargs)
             audit_payload = json.loads(next(message.content for message in messages if message.role == MessageRole.USER))
+            assert audit_payload["task_instruction"] == scheduled_task_instruction
             audited_call_ids = [item["tool_call_id"] for item in audit_payload["tool_calls"]]
             if audited_call_ids == [write_call.id, first_read_call.id]:
                 results = [
@@ -2933,6 +2978,7 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
         name="execute_shell",
         arguments={"command": "echo followup", "execution_mode": "non_interactive"},
     )
+    root_instruction = "Write two complete scripts without running them: scripts/prepare_report.py must read input.json, normalize each record, and write report.json; scripts/validate_report.py must read report.json, validate required fields, and write validation.json. Do not execute either script."
     summary_calls = 0
 
     async def call_auditor(
@@ -2946,6 +2992,10 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
         assert len(call_ids) == 1
         call_id = call_ids[0]
         assert call_id in {original_call.id, probe_call.id, followup_call.id}
+        if call_id in {original_call.id, probe_call.id}:
+            assert "task_instruction" not in request_payload
+        else:
+            assert request_payload["task_instruction"] == root_instruction
         return (
             {"messages": []},
             {
@@ -2965,9 +3015,24 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
             },
         )
 
-    async def summarize_pending(*_args: Any, **_kwargs: Any) -> tuple[str, dict[str, Any]]:
+    async def summarize_pending(
+        _db: AsyncSession,
+        _cfg: ProfileConfig,
+        tool_calls: list[dict[str, Any]],
+        *_args: Any,
+        task_instruction: str | None = None,
+        **_kwargs: Any,
+    ) -> tuple[str, dict[str, Any]]:
         nonlocal summary_calls
         summary_calls += 1
+        assert len(tool_calls) == 1
+        call_id = tool_calls[0]["id"]
+        assert call_id in {original_call.id, probe_call.id, followup_call.id}
+        if call_id in {original_call.id, probe_call.id}:
+            assert task_instruction is None
+        else:
+            assert root_source_type == SessionReplySourceType.TOOL_RESULT
+            assert task_instruction == root_instruction
         return "待确认摘要", {"request": [], "response": "待确认摘要", "file_reads": [], "shell_results": []}
 
     monkeypatch.setattr(audit_service_module, "_call_auditor", call_auditor)
@@ -3014,7 +3079,7 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
         source_id=f"legacy-root:{root_source_type.value}",
         dedupe_key=f"legacy-confirmation-root:{root_source_type.value}",
         spec=AgentWorkSpec(
-            instruction="legacy confirmation root",
+            instruction=root_instruction,
             execution_scope=END_SESSION_SCOPE_TASK,
             report_target=AgentWorkReportTarget.SESSION,
         ),
