@@ -15,6 +15,7 @@ from app.core.constants import (
     FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS,
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
@@ -57,7 +58,7 @@ from app.core.utils.request_token_baseline import (
 from app.core.utils.time import get_local_time
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
-from app.providers.llm.client import LLMClient
+from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
 from .interactive_helpers import (
     _AgentLoopStreamState,
@@ -66,6 +67,7 @@ from .interactive_helpers import (
     _flush_buffered_stream_reasoning,
     _handle_stream_content,
     _handle_stream_reasoning,
+    _save_execution_checkpoint,
     build_pending_multimodal_input_message,
     collect_pending_multimodal_file_inputs,
 )
@@ -110,6 +112,86 @@ async def generate_interactive_turn(
     )
     goal_mode = state.goal_mode is True
     execution_phase = state.checkpoint_state.execution_phase
+
+    def build_request_messages(messages: list[InternalMessage]) -> list[InternalMessage]:
+        pending_file_inputs = collect_pending_multimodal_file_inputs(messages)
+        pending_modalities = {item["modality"] for item in pending_file_inputs}
+        if ("image" in pending_modalities and not state.img_understanding) or ("audio" in pending_modalities and not state.audio_understanding) or ("video" in pending_modalities and not state.video_understanding):
+            raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
+        request_messages = materialize_user_environment_prompts(
+            [MessageAssembler.prepare_inline_images(message, state.cfg.tool) for message in [*messages, *tool_call_correction_messages]]
+        )
+        pending_multimodal_message = build_pending_multimodal_input_message(
+            pending_file_inputs,
+            image_understanding=state.img_understanding,
+            audio_understanding=state.audio_understanding,
+            video_understanding=state.video_understanding,
+            tool_config=state.cfg.tool,
+        )
+        if pending_multimodal_message is not None:
+            request_messages.append(materialize_user_environment_prompts([pending_multimodal_message])[0])
+        return request_messages
+
+    async def compact_current_context(*, force: bool, channel_id: int | None, model_id: str, protocol: str) -> bool:
+        claim_info = getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+        work_id = (
+            claim_info[0]
+            if isinstance(claim_info, (tuple, list))
+            and len(claim_info) == 2
+            and isinstance(claim_info[0], int)
+            and not isinstance(claim_info[0], bool)
+            and claim_info[0] > 0
+            else None
+        )
+        previous_messages = state.messages
+        pending_multimodal_tool_call_ids = {item["tool_call_id"] for item in collect_pending_multimodal_file_inputs(previous_messages)}
+        try:
+            recovered_messages = await compact_frozen_context_messages(
+                state.db,
+                session_id=state.session_id,
+                uid=state.uid,
+                profile=state.profile,
+                cfg=state.cfg,
+                messages=previous_messages,
+                pending_multimodal_tool_call_ids=pending_multimodal_tool_call_ids,
+                context_window_k=state.chat_params["context_window_k"],
+                max_tokens=state.chat_params["max_tokens"],
+                tools=current_tools,
+                model_id=model_id,
+                protocol=protocol,
+                channel_id=channel_id,
+                work_id=work_id,
+                measure_request_tokens=lambda candidate: estimate_request_context_tokens(
+                    build_request_messages(candidate),
+                    current_tools,
+                    model_id=model_id,
+                    protocol=protocol,
+                    channel_id=channel_id,
+                ),
+                work_validity_checker=state.context_summary_work_validity_checker,
+                force=force,
+            )
+        except LLMException as exc:
+            if isinstance(exc, LLMRequestRejectedException) and not exc.allow_channel_fallback:
+                raise
+            state.dispatch_logger.bind(
+                uid=state.uid,
+                session_id=state.session_id,
+                **channel_log_extra(state.chat_channel_obj, state.model_entry),
+            ).warning(
+                t(
+                    "LOG_CONTEXT_SUMMARY_CHANNEL_FAILED",
+                    default="Context summary channel failed: {error}",
+                    error=format_exception_message(exc),
+                )
+            )
+            return False
+        if recovered_messages == previous_messages:
+            return False
+        state.messages = recovered_messages
+        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+        return True
+
     state.messages = [message for message in state.messages if not (message.role == MessageRole.SYSTEM and message.content in {GOAL_MODE_SYSTEM_PROMPT, GOAL_MODE_FINAL_RESPONSE_PROMPT})]
     if execution_phase == GOAL_EXECUTION_PHASE_FINALIZING:
         system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
@@ -127,20 +209,14 @@ async def generate_interactive_turn(
                 raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
             current_channel_id = getattr(state.chat_channel_obj, "id", None)
             current_channel_id = current_channel_id if isinstance(current_channel_id, int) and not isinstance(current_channel_id, bool) and current_channel_id > 0 else None
+            model_id = state.model_entry["model_id"]
+            protocol = resolve_model_protocol(state.model_entry)
             if state.context_frozen:
-                state.messages = await compact_frozen_context_messages(
-                    state.db,
-                    session_id=state.session_id,
-                    uid=state.uid,
-                    profile=state.profile,
-                    cfg=state.cfg,
-                    messages=state.messages,
-                    context_window_k=state.chat_params["context_window_k"],
-                    max_tokens=state.chat_params["max_tokens"],
-                    tools=current_tools,
-                    model_id=state.model_entry["model_id"],
-                    protocol=resolve_model_protocol(state.model_entry),
-                    work_validity_checker=state.context_summary_work_validity_checker,
+                await compact_current_context(
+                    force=False,
+                    channel_id=current_channel_id,
+                    model_id=model_id,
+                    protocol=protocol,
                 )
             elif state.checkpoint_state.upper_message_id is not None:
                 state.messages = await apply_context_summary_checkpoint(
@@ -158,26 +234,11 @@ async def generate_interactive_turn(
                     work_validity_checker=state.context_summary_work_validity_checker,
                     lifecycle_event_callback=state.context_summary_lifecycle_callback,
                     channel_id=current_channel_id,
-                    model_id=state.model_entry["model_id"],
-                    protocol=resolve_model_protocol(state.model_entry),
+                    model_id=model_id,
+                    protocol=protocol,
                     previous_llm_request_metadata=(state.latest_llm_request_metadata if isinstance(state.latest_llm_request_metadata, dict) and state.latest_llm_request_metadata.get("input_tokens_source") == "provider" else None),
                 )
-            pending_file_inputs = collect_pending_multimodal_file_inputs(state.messages)
-            pending_modalities = {item["modality"] for item in pending_file_inputs}
-            if ("image" in pending_modalities and not state.img_understanding) or ("audio" in pending_modalities and not state.audio_understanding) or ("video" in pending_modalities and not state.video_understanding):
-                raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
-            request_messages = materialize_user_environment_prompts([MessageAssembler.prepare_inline_images(message, state.cfg.tool) for message in [*state.messages, *tool_call_correction_messages]])
-            pending_multimodal_message = build_pending_multimodal_input_message(
-                pending_file_inputs,
-                image_understanding=state.img_understanding,
-                audio_understanding=state.audio_understanding,
-                video_understanding=state.video_understanding,
-                tool_config=state.cfg.tool,
-            )
-            if pending_multimodal_message is not None:
-                request_messages.append(materialize_user_environment_prompts([pending_multimodal_message])[0])
-            model_id = state.model_entry["model_id"]
-            protocol = resolve_model_protocol(state.model_entry)
+            request_messages = build_request_messages(state.messages)
             previous_in_memory_llm_request_metadata = state.latest_llm_request_metadata
             session = None
             if hasattr(state.db, "execute"):
@@ -417,24 +478,12 @@ async def generate_interactive_turn(
             context_recovery_required = isinstance(exc, LLMContextLengthException)
             if context_recovery_required and state.context_frozen and current_priority not in context_length_recovery_priorities:
                 context_length_recovery_priorities.add(current_priority)
-                previous_messages = state.messages
-                recovered_messages = await compact_frozen_context_messages(
-                    state.db,
-                    session_id=state.session_id,
-                    uid=state.uid,
-                    profile=state.profile,
-                    cfg=state.cfg,
-                    messages=state.messages,
-                    context_window_k=state.chat_params["context_window_k"],
-                    max_tokens=state.chat_params["max_tokens"],
-                    tools=current_tools,
-                    model_id=state.model_entry["model_id"],
-                    protocol=resolve_model_protocol(state.model_entry),
-                    work_validity_checker=state.context_summary_work_validity_checker,
+                if await compact_current_context(
                     force=True,
-                )
-                if recovered_messages != previous_messages:
-                    state.messages = recovered_messages
+                    channel_id=current_channel_id,
+                    model_id=model_id,
+                    protocol=protocol,
+                ):
                     continue
             elif context_recovery_required and current_priority not in context_length_recovery_priorities and state.checkpoint_state.upper_message_id is not None:
                 context_length_recovery_priorities.add(current_priority)
@@ -455,8 +504,8 @@ async def generate_interactive_turn(
                         work_validity_checker=state.context_summary_work_validity_checker,
                         lifecycle_event_callback=state.context_summary_lifecycle_callback,
                         channel_id=current_channel_id,
-                        model_id=state.model_entry["model_id"],
-                        protocol=resolve_model_protocol(state.model_entry),
+                        model_id=model_id,
+                        protocol=protocol,
                         force=True,
                     )
                 except LLMRequestRejectedException:

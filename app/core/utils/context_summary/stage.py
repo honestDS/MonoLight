@@ -19,6 +19,7 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_STAGE_COMPLETION_FAILED,
     ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
+    FROZEN_CONTEXT_SUMMARY_WORK_KEY_PREFIX,
 )
 from app.core.crud.context_summary.fragment import (
     build_context_summary_fragment_dedupe_key,
@@ -199,23 +200,26 @@ def build_summary_work_identity(
     snapshot: ContextSummarySnapshot,
     revision: int,
 ) -> tuple[int, str, str]:
+    snapshot_payload_data = {
+        "uid": uid,
+        "session_id": session_id,
+        "expected_summary_message_id": snapshot.expected_summary_message_id,
+        "revision": revision,
+        "content_revision": snapshot.content_revision,
+        "snapshot_max_message_id": snapshot.snapshot_max_message_id,
+        "persistent_summary_target_id": snapshot.persistent_summary_target_id,
+    }
+    if snapshot.source_key is not None:
+        snapshot_payload_data["source_key"] = snapshot.source_key
     snapshot_payload = json.dumps(
-        {
-            "uid": uid,
-            "session_id": session_id,
-            "expected_summary_message_id": snapshot.expected_summary_message_id,
-            "revision": revision,
-            "content_revision": snapshot.content_revision,
-            "snapshot_max_message_id": snapshot.snapshot_max_message_id,
-            "persistent_summary_target_id": snapshot.persistent_summary_target_id,
-        },
+        snapshot_payload_data,
         sort_keys=True,
         separators=(",", ":"),
     )
     snapshot_key = hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()
     return (
         int(snapshot_key[:15], 16) or 1,
-        f"context-summary:{snapshot_key}",
+        f"{FROZEN_CONTEXT_SUMMARY_WORK_KEY_PREFIX if snapshot.source_key is not None else 'context-summary:'}{snapshot_key}",
         snapshot_key,
     )
 

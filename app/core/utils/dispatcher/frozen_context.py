@@ -1,23 +1,39 @@
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS
-from app.core.context import ContextManager
-from app.core.prompts import CONTEXT_SUMMARY_PROMPT, CONTEXT_SUMMARY_WRAPPER
-from app.core.utils.context_messages import is_context_summary_message, message_token_text
-from app.core.utils.context_summary.common import (
-    ContextSummaryWorkValidityChecker,
-    calc_token_usage,
-    join_messages,
-    serialize_message,
+from app.core.constants import (
+    CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
 )
-from app.core.utils.context_summary.service import generate_summary_text, get_context_summary_state
+from app.core.context import ContextManager
+from app.core.exceptions import LLMException
+from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
+from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
+from app.core.utils.context_messages import is_context_summary_message
+from app.core.utils.context_summary.cleanup import cleanup_context_summary_work_safely
+from app.core.utils.context_summary.common import (
+    ContextSummaryWorkInvalidError,
+    ContextSummaryWorkValidityChecker,
+)
+from app.core.utils.context_summary.engine import refine_context_summary_to_fit
+from app.core.utils.context_summary.reduction import refine_completed_summary_stage
+from app.core.utils.context_summary.service import get_context_summary_state
+from app.core.utils.context_summary.snapshot import build_frozen_context_summary_snapshot
+from app.core.utils.context_summary.stage import (
+    build_summary_work_identity,
+    generate_snapshot_summary_result,
+)
 from app.core.utils.context_summary.user_message_block import append_covered_user_message, split_covered_user_message
+from app.core.utils.dispatcher.markdown_instruction import (
+    inherit_user_request_context,
+    materialize_user_environment_prompts,
+)
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile, ProfileConfig
+from app.providers.llm.client import estimate_request_context_tokens
 
 
 def serialize_frozen_context_messages(messages: Any) -> list[dict[str, Any]]:
@@ -41,30 +57,38 @@ def load_frozen_context_messages(messages: Any) -> list[InternalMessage] | None:
 def _select_frozen_compaction_segment(
     messages: list[InternalMessage],
     *,
-    target_tokens: int,
-    model_id: str | None = None,
-    protocol: str | None = None,
+    pending_multimodal_tool_call_ids: set[str] | None = None,
 ) -> list[InternalMessage]:
-    if len(messages) < 2:
+    if not messages:
         return []
 
-    safe_ends: list[tuple[int, int]] = []
-    running_tokens = 0
+    safe_end = 1 if is_context_summary_message(messages[0]) else 0
+    protected_user_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.role == MessageRole.USER:
+            if isinstance(message.content, list) or message.attachments:
+                protected_user_index = index
+            break
+
     index = 0
     while index < len(messages):
+        if index == protected_user_index:
+            break
         message = messages[index]
-        running_tokens += estimate_tokens(
-            serialize_message(message),
-            model_id=model_id,
-            protocol=protocol,
-        )
+        if message.role == MessageRole.TOOL:
+            break
         if message.role != MessageRole.ASSISTANT:
             index += 1
             continue
 
         tool_calls = message.tool_calls or []
+        if pending_multimodal_tool_call_ids and any(
+            tool_call.id in pending_multimodal_tool_call_ids for tool_call in tool_calls
+        ):
+            break
         if not tool_calls:
-            safe_ends.append((index + 1, running_tokens))
+            safe_end = index + 1
             index += 1
             continue
 
@@ -73,23 +97,33 @@ def _select_frozen_compaction_segment(
         cursor = index + 1
         while cursor < len(messages) and messages[cursor].role == MessageRole.TOOL:
             tool_message = messages[cursor]
-            running_tokens += estimate_tokens(
-                serialize_message(tool_message),
-                model_id=model_id,
-                protocol=protocol,
-            )
             if tool_message.tool_call_id in required_ids:
                 found_ids.add(tool_message.tool_call_id)
             cursor += 1
-        if found_ids == required_ids:
-            safe_ends.append((cursor, running_tokens))
+        if not required_ids.issubset(found_ids):
+            break
+        safe_end = cursor
         index = cursor
 
-    if not safe_ends:
+    if safe_end <= 0:
         return []
-    eligible = [item for item in safe_ends if item[1] <= max(target_tokens, 1)]
-    end = eligible[-1][0] if eligible else safe_ends[0][0]
-    return messages[:end]
+    return messages[:safe_end]
+
+
+def _summary_through_message_id(message: InternalMessage) -> int | None:
+    if not is_context_summary_message(message) or not isinstance(message.content, str):
+        return None
+    prefix = '<conversation_summary through_message_id="'
+    if not message.content.startswith(prefix):
+        return None
+    value_start = len(prefix)
+    value_end = message.content.find('">', value_start)
+    if value_end < 0:
+        return None
+    value = message.content[value_start:value_end]
+    if not 1 <= len(value) <= 19 or not all("0" <= character <= "9" for character in value):
+        return None
+    return int(value)
 
 
 def _covered_user_from_segment(messages: list[InternalMessage]) -> tuple[int | None, str | None]:
@@ -129,113 +163,143 @@ async def compact_frozen_context_messages(
     tools: list[dict] | None,
     model_id: str | None = None,
     protocol: str | None = None,
+    channel_id: int | None = None,
+    work_id: int | None = None,
+    measure_request_tokens: Callable[[list[InternalMessage]], int] | None = None,
     safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     force: bool = False,
+    pending_multimodal_tool_call_ids: set[str] | None = None,
 ) -> list[InternalMessage]:
-    system_messages = [message.model_copy(deep=True) for message in messages if message.role == MessageRole.SYSTEM]
-    history_messages = [message.model_copy(deep=True) for message in messages if message.role != MessageRole.SYSTEM]
-    if len(history_messages) < 2:
+    system_messages = [message for message in messages if message.role == MessageRole.SYSTEM]
+    history_messages = [message for message in messages if message.role != MessageRole.SYSTEM]
+    threshold_percent = cfg.other.context_summary_threshold_percent
+    compression_target_tokens = calculate_context_summary_trigger_tokens(
+        context_window_k=context_window_k,
+        max_tokens=max_tokens,
+        threshold_percent=threshold_percent,
+        safety_margin_tokens=safety_margin_tokens,
+    )
+
+    def estimate_request_tokens(request_messages: list[InternalMessage]) -> int:
+        return estimate_request_context_tokens(
+            materialize_user_environment_prompts(request_messages),
+            tools,
+            model_id=model_id,
+            protocol=protocol,
+            channel_id=channel_id,
+        )
+
+    request_measure = measure_request_tokens or estimate_request_tokens
+    current_request_tokens = request_measure(messages)
+    if not force and current_request_tokens <= compression_target_tokens:
         return messages
 
-    reserved_tokens = sum(
-        estimate_tokens(
-            message_token_text(message),
-            model_id=model_id,
-            protocol=protocol,
-        )
-        for message in system_messages
+    if force:
+        compression_target_tokens = min(compression_target_tokens, current_request_tokens - 1)
+
+    segment = _select_frozen_compaction_segment(
+        history_messages,
+        pending_multimodal_tool_call_ids=pending_multimodal_tool_call_ids,
     )
-    threshold_percent = cfg.other.context_summary_threshold_percent
-    must_compact = force
+    if not segment:
+        return messages
 
-    while True:
-        usage = calc_token_usage(
-            messages=history_messages,
-            summary_content=None,
-            current_message="",
-            reserved_tokens=reserved_tokens,
-            tools=tools,
-            context_window_k=context_window_k,
-            max_tokens=max_tokens,
-            safety_margin_tokens=safety_margin_tokens,
-            threshold_percent=threshold_percent,
-            model_id=model_id,
-            protocol=protocol,
-        )
-        if not must_compact and usage["required_tokens"] <= usage["compression_goal_tokens"]:
-            break
+    covered_message_id, covered_content = _covered_user_from_segment(segment)
+    summary_through_id = max(
+        [
+            message.id
+            for message in segment
+            if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0
+        ]
+        + [
+            through_id
+            for message in segment
+            if (through_id := _summary_through_message_id(message)) is not None
+        ],
+        default=covered_message_id or 0,
+    )
+    snapshot = build_frozen_context_summary_snapshot(segment, work_id=work_id)
+    _, work_dedupe_key, _ = build_summary_work_identity(
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+        revision=0,
+    )
+    replacement_template = InternalMessage(role=MessageRole.USER)
+    inherit_user_request_context(replacement_template, segment)
 
-        available_history_tokens = max(
-            1,
-            usage["input_budget"] - reserved_tokens - usage["tools_tokens"],
-        )
-        segment = _select_frozen_compaction_segment(
-            history_messages,
-            target_tokens=max(1, available_history_tokens // 2),
-            model_id=model_id,
-            protocol=protocol,
-        )
-        if not segment:
-            break
-
-        prompt = CONTEXT_SUMMARY_PROMPT.format(
-            existing_summary="(none)",
-            recent_dialogue="(none)",
-            conversation=join_messages(segment),
-        )
-        summary = await generate_summary_text(
-            db,
-            profile=profile,
-            cfg=cfg,
-            prompt=prompt,
-            safety_margin_tokens=safety_margin_tokens,
-            uid=uid,
-            session_id=session_id,
-            work_validity_checker=work_validity_checker,
-        )
-        if not summary:
-            break
-
-        covered_message_id, covered_content = _covered_user_from_segment(segment)
-        summary = append_covered_user_message(
+    def build_candidate_messages(summary: str) -> list[InternalMessage]:
+        summary_with_covered_user = append_covered_user_message(
             summary,
             message_id=covered_message_id,
             content=covered_content,
         )
-        if not summary:
-            break
-        summary_through_id = max(
-            (
-                message.id
-                for message in segment
-                if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0
-            ),
-            default=covered_message_id or 0,
+        replacement = replacement_template.model_copy(
+            update={
+                "content": CONTEXT_SUMMARY_WRAPPER.format(
+                    through_message_id=summary_through_id,
+                    content=summary_with_covered_user or "",
+                ),
+            },
         )
-        replacement = InternalMessage(
-            role=MessageRole.USER,
-            content=CONTEXT_SUMMARY_WRAPPER.format(
-                through_message_id=summary_through_id,
-                content=summary,
-            ),
+        return [
+            *system_messages,
+            replacement,
+            *history_messages[len(segment) :],
+        ]
+
+    def measure_candidate_request_tokens(summary: str) -> int:
+        return request_measure(build_candidate_messages(summary))
+
+    try:
+        generated = await generate_snapshot_summary_result(
+            db,
+            session_id=session_id,
+            uid=uid,
+            profile=profile,
+            cfg=cfg,
+            snapshot=snapshot,
+            existing_summary=None,
+            existing_summary_revision=0,
+            safety_margin_tokens=safety_margin_tokens,
+            work_validity_checker=work_validity_checker,
         )
-        candidate_history = [replacement, *history_messages[len(segment) :]]
-        candidate_tokens = sum(
-            estimate_tokens(
-                serialize_message(message),
-                model_id=model_id,
-                protocol=protocol,
+        candidate_summary = generated.content
+        generated_stage = generated.completed_stage
+        if not isinstance(candidate_summary, str) or not candidate_summary.strip() or generated_stage is None:
+            raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
+        completed_stage = generated_stage
+
+        async def refine_candidate(summary: str, refinement_index: int) -> str:
+            nonlocal completed_stage
+            refined = await refine_completed_summary_stage(
+                db,
+                profile=profile,
+                cfg=cfg,
+                lower_stage=completed_stage,
+                safety_margin_tokens=safety_margin_tokens,
+                refinement_index=refinement_index,
+                work_validity_checker=work_validity_checker,
             )
-            for message in candidate_history
+            completed_stage = refined.stage
+            return refined.content
+
+        candidate_summary = await refine_context_summary_to_fit(
+            candidate_summary,
+            input_budget_tokens=compression_target_tokens,
+            measure_request_tokens=measure_candidate_request_tokens,
+            refine_summary=refine_candidate,
+            model_id=model_id,
+            protocol=protocol,
         )
-        if candidate_tokens >= usage["history_tokens"]:
-            break
-
-        history_messages = candidate_history
-        must_compact = False
-
-    return [*system_messages, *history_messages]
+        return build_candidate_messages(candidate_summary)
+    except ContextSummaryWorkInvalidError:
+        raise
+    except RuntimeError as exc:
+        raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED) from exc
+    finally:
+        await cleanup_context_summary_work_safely(work_dedupe_key)
 
 
 async def capture_frozen_context_messages(

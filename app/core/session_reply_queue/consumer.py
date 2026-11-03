@@ -1,12 +1,12 @@
 import asyncio
 import uuid
 
-from app.core.constants import ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN
+from app.core.constants import ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED, ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.system.setting import system_setting_crud
-from app.core.exceptions import BaseBusinessException, LLMRequestRejectedException
+from app.core.exceptions import BaseBusinessException, LLMContextLengthException, LLMRequestRejectedException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.log import get_logger
@@ -19,7 +19,7 @@ from app.core.session_reply_queue.executor import (
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.models.profile import ProfileConfig
-from app.models.session_reply_work_item import SessionReplyWorkStatus, SessionReplyWorkType
+from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -171,23 +171,28 @@ class SessionReplyConsumer:
             has_active_audit_execution = work is not None and (work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or work_has_active_audit_execution(work))
             if has_active_audit_execution:
                 await mark_work_audit_execution_unknown(work_id, worker_id, error)
-                if isinstance(exc, LLMRequestRejectedException):
-                    await fail_session_reply_work(
-                        work_id,
-                        worker_id,
-                        error,
-                        user_error=exc.render_message(),
-                    )
-                else:
-                    await fail_session_reply_work(work_id, worker_id, error)
-            elif isinstance(exc, BaseBusinessException):
+            if (
+                isinstance(exc, LLMContextLengthException)
+                and work is not None
+                and work.work_type == SessionReplyWorkType.AGENT_WORK
+                and work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN
+            ):
+                await fail_session_reply_work(
+                    work_id,
+                    worker_id,
+                    error,
+                    user_error=t(ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED),
+                )
+            elif isinstance(exc, BaseBusinessException) and (
+                not has_active_audit_execution or isinstance(exc, LLMRequestRejectedException)
+            ):
                 await fail_session_reply_work(
                     work_id,
                     worker_id,
                     error,
                     user_error=exc.render_message(),
                 )
-            elif attempt_count >= max_attempts or stream_started:
+            elif has_active_audit_execution or attempt_count >= max_attempts or stream_started:
                 await fail_session_reply_work(work_id, worker_id, error)
             else:
                 async with AsyncSessionLocal() as db:

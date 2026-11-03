@@ -384,6 +384,37 @@ async def test_merge_groups_reject_fragment_metadata_larger_than_budget():
 
 
 @pytest.mark.asyncio
+async def test_merge_groups_allow_adjacent_ranges_with_shared_boundary():
+    fragments = [
+        CompletedSummaryFragment(
+            fragment_index=0,
+            message_start_id=1,
+            message_end_id=10,
+            content="first-fragment",
+        ),
+        CompletedSummaryFragment(
+            fragment_index=1,
+            message_start_id=10,
+            message_end_id=20,
+            content="second-fragment",
+        ),
+    ]
+
+    groups = [
+        group
+        async for group in group_completed_summary_fragments(
+            _iterate(fragments),
+            max_group_tokens=100,
+            token_counter=lambda _content: 1,
+        )
+    ]
+
+    assert [(group.message_start_id, group.message_end_id) for group in groups] == [(1, 20)]
+    assert "first-fragment" in groups[0].content
+    assert "second-fragment" in groups[0].content
+
+
+@pytest.mark.asyncio
 async def test_merge_groups_reject_overlapping_ranges():
     fragments = [
         _completed_fragment(
@@ -393,7 +424,7 @@ async def test_merge_groups_reject_overlapping_ranges():
         ),
         _completed_fragment(
             1,
-            message_start_id=10,
+            message_start_id=9,
             message_end_id=20,
         ),
     ]

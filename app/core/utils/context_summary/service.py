@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
-    CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS,
     ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
     ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
@@ -37,6 +36,7 @@ from app.core.utils.context_summary.common import (
     ensure_context_summary_work_valid,
     find_context_summary_output_budget_error,
 )
+from app.core.utils.context_summary.engine import refine_context_summary_to_fit
 from app.core.utils.context_summary.history import (
     measure_complete_replacement_input,
     measure_snapshot_history,
@@ -327,6 +327,7 @@ async def _ensure_context_summary(
             session_id=session_id,
             profile_id=profile.id,
         )
+    reserved_tokens_before_snapshots = reserved_tokens
     fixed_snapshot = "\n\n".join(snapshot for snapshot in (todo_snapshot, watch_snapshot) if snapshot)
     reserved_tokens += measure_session_todo_snapshot_tokens(todo_snapshot)
     reserved_tokens += measure_terminal_watch_snapshot_tokens(watch_snapshot)
@@ -499,13 +500,29 @@ async def _ensure_context_summary(
         return state
 
     recent_messages = list(snapshot.recent_messages)
-    refinement_attempts = 0
-    insufficient_refinement_progress = False
-    while True:
+
+    def build_summary_content(candidate: str) -> str | None:
+        summary_content: str | None = candidate
+        if fixed_snapshot:
+            summary_content = f"{summary_content}\n\n{fixed_snapshot}" if summary_content else fixed_snapshot
+        if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT:
+            return append_covered_user_message(
+                summary_content,
+                message_id=boundary.covered_user_message_id,
+                content=boundary.covered_user_message_content,
+            )
+        return append_covered_user_message(
+            summary_content,
+            message_id=existing_user_message.message_id if existing_user_message is not None else None,
+            content=existing_user_message.content if existing_user_message is not None else None,
+        )
+
+    def measure_final_request_tokens(candidate: str) -> int:
+        summary_content = build_summary_content(candidate)
         if fixed_request_messages is not None:
             candidate_message_id = snapshot.persistent_summary_target_id or state.message_id
             candidate_summary_message = ContextSummaryState(
-                content=candidate_summary,
+                content=summary_content,
                 message_id=candidate_message_id,
             ).as_message()
             fixed_system_messages = [message for message in fixed_request_messages if message.role == MessageRole.SYSTEM]
@@ -517,61 +534,29 @@ async def _ensure_context_summary(
                 *fixed_non_system_messages,
             ]
             materialized_candidate_request_messages = materialize_user_environment_prompts(candidate_request_messages)
-            required_tokens = estimate_request_context_tokens(
+            return estimate_request_context_tokens(
                 materialized_candidate_request_messages,
                 tools,
                 model_id=model_id,
                 protocol=protocol,
                 channel_id=channel_id,
-            ) + max(reserved_tokens, 0)
-            compression_goal_tokens = calculate_context_summary_trigger_tokens(
-                context_window_k=context_window_k,
-                max_tokens=max_tokens,
-                threshold_percent=threshold_percent,
-                safety_margin_tokens=safety_margin_tokens,
-            )
-            final_usage = {
-                "required_tokens": required_tokens,
-                "compression_goal_tokens": compression_goal_tokens,
-                "summary_tokens": (
-                    estimate_tokens(
-                        message_token_text(materialized_candidate_request_messages[len(fixed_system_messages)]),
-                        model_id=model_id,
-                        protocol=protocol,
-                    )
-                    if candidate_summary_message is not None
-                    else 0
-                ),
-            }
-        else:
-            final_usage = calc_token_usage(
-                messages=recent_messages,
-                summary_content=candidate_summary,
-                current_message=current_message,
-                reserved_tokens=reserved_tokens,
-                tools=tools,
-                context_window_k=context_window_k,
-                max_tokens=max_tokens,
-                safety_margin_tokens=safety_margin_tokens,
-                threshold_percent=threshold_percent,
-                model_id=model_id,
-                protocol=protocol,
-            )
-        if final_usage["required_tokens"] <= final_usage["compression_goal_tokens"]:
-            break
-        if insufficient_refinement_progress:
-            await release_db_session(db)
-            raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
+            ) + max(reserved_tokens_before_snapshots, 0)
+        return calc_token_usage(
+            messages=recent_messages,
+            summary_content=summary_content,
+            current_message=current_message,
+            reserved_tokens=reserved_tokens_before_snapshots,
+            tools=tools,
+            context_window_k=context_window_k,
+            max_tokens=max_tokens,
+            safety_margin_tokens=safety_margin_tokens,
+            threshold_percent=threshold_percent,
+            model_id=model_id,
+            protocol=protocol,
+        )["required_tokens"]
 
-        refinement_attempts += 1
-        previous_candidate_tokens = max(
-            1,
-            estimate_tokens(
-                candidate_summary or "",
-                model_id=model_id,
-                protocol=protocol,
-            ),
-        )
+    async def refine_candidate(candidate: str, refinement_index: int) -> str:
+        nonlocal completed_stage
         await ensure_context_summary_work_valid(combined_work_validity_checker)
         if completed_stage is not None:
             from app.core.utils.context_summary.reduction import (
@@ -585,7 +570,7 @@ async def _ensure_context_summary(
                     cfg=cfg,
                     lower_stage=completed_stage,
                     safety_margin_tokens=safety_margin_tokens,
-                    refinement_index=refinement_attempts,
+                    refinement_index=refinement_index,
                     work_validity_checker=combined_work_validity_checker,
                 )
             except Exception as exc:
@@ -602,7 +587,7 @@ async def _ensure_context_summary(
                 logger.bind(
                     uid=uid,
                     session_id=session_id,
-                    refinement_attempts=refinement_attempts,
+                    refinement_attempts=refinement_index,
                 ).warning(
                     "Context summary refinement stage failed: {error}",
                     error=format_exception_message(exc),
@@ -611,41 +596,30 @@ async def _ensure_context_summary(
                 raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED) from exc
             compressed = refined.content
             completed_stage = refined.stage
-        else:
-            compressed = await generate_summary_text(
-                db,
-                profile=profile,
-                cfg=cfg,
-                prompt=CONTEXT_SUMMARY_COMPRESS_PROMPT.format(summary=candidate_summary),
-                safety_margin_tokens=safety_margin_tokens,
-                uid=uid,
-                session_id=session_id,
-                work_validity_checker=combined_work_validity_checker,
-            )
-            if not compressed:
-                await release_db_session(db)
-                raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
-        compressed_tokens = max(
-            1,
-            estimate_tokens(
-                compressed or "",
-                model_id=model_id,
-                protocol=protocol,
-            ),
-        )
-        candidate_summary = compressed
-        insufficient_refinement_progress = previous_candidate_tokens - compressed_tokens < CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS
-
-    if final_usage["required_tokens"] > final_usage["compression_goal_tokens"]:
-        logger.bind(
+            return compressed
+        compressed = await generate_summary_text(
+            db,
+            profile=profile,
+            cfg=cfg,
+            prompt=CONTEXT_SUMMARY_COMPRESS_PROMPT.format(summary=candidate),
+            safety_margin_tokens=safety_margin_tokens,
             uid=uid,
             session_id=session_id,
-            refinement_attempts=refinement_attempts,
-            required_tokens=final_usage["required_tokens"],
-            compression_goal_tokens=final_usage["compression_goal_tokens"],
-        ).warning("Context summary did not reach compression goal; candidate will not be persisted")
-        await release_db_session(db)
-        raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
+            work_validity_checker=combined_work_validity_checker,
+        )
+        if not compressed:
+            await release_db_session(db)
+            raise LLMException(message=ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED)
+        return compressed
+
+    candidate_summary = await refine_context_summary_to_fit(
+        candidate_summary,
+        input_budget_tokens=summary_trigger_tokens,
+        measure_request_tokens=measure_final_request_tokens,
+        refine_summary=refine_candidate,
+        model_id=model_id,
+        protocol=protocol,
+    )
 
     target_message_id = snapshot.persistent_summary_target_id if snapshot.has_persistent_history else state.message_id
     if target_message_id is None:
@@ -666,20 +640,7 @@ async def _ensure_context_summary(
             model_id=model_id,
             protocol=protocol,
         )
-    if fixed_snapshot:
-        candidate_summary = f"{candidate_summary}\n\n{fixed_snapshot}" if candidate_summary else fixed_snapshot
-    if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT:
-        candidate_summary = append_covered_user_message(
-            candidate_summary,
-            message_id=boundary.covered_user_message_id,
-            content=boundary.covered_user_message_content,
-        )
-    else:
-        candidate_summary = append_covered_user_message(
-            candidate_summary,
-            message_id=existing_user_message.message_id if existing_user_message is not None else None,
-            content=existing_user_message.content if existing_user_message is not None else None,
-        )
+    candidate_summary = build_summary_content(candidate_summary)
     if not candidate_summary:
         await release_db_session(db)
         return state

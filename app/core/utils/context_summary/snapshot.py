@@ -1,9 +1,14 @@
+import hashlib
+import json
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import ERR_VALUE_MUST_BE_POSITIVE
 from app.core.crud.session.message import message_crud
+from app.core.i18n import t
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshots
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, Message, MessageRole
@@ -23,11 +28,57 @@ class ContextSummarySnapshot:
     recent_messages: tuple[InternalMessage, ...]
     model_excluded_message_ids: tuple[int, ...] = ()
     content_revision: int = 0
+    frozen_rounds: tuple[tuple[InternalMessage, ...], ...] | None = None
+    source_key: str | None = None
 
     @property
     def has_persistent_history(self) -> bool:
         expected_id = self.expected_summary_message_id or 0
         return self.persistent_summary_target_id is not None and self.persistent_summary_target_id > expected_id
+
+
+def build_frozen_context_summary_snapshot(messages: list[InternalMessage], *, work_id: int | None) -> ContextSummarySnapshot:
+    if not messages:
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="messages"))
+
+    serialized_messages = json.dumps(
+        [message.model_dump(mode="json") for message in messages],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    content_digest = hashlib.sha256(serialized_messages.encode("utf-8")).hexdigest()
+    task_identity = str(work_id) if work_id is not None else uuid.uuid4().hex
+    source_key = f"frozen:{task_identity}:{content_digest}"
+
+    copied_messages: list[InternalMessage] = []
+    for message_id, message in enumerate(messages, start=1):
+        copied_message = message.model_copy(deep=True)
+        copied_message.id = message_id
+        copied_messages.append(copied_message)
+
+    frozen_rounds: list[tuple[InternalMessage, ...]] = []
+    current_round: list[InternalMessage] = []
+    for message in copied_messages:
+        if current_round and message.role == MessageRole.USER:
+            frozen_rounds.append(tuple(current_round))
+            current_round = []
+        current_round.append(message)
+    if current_round:
+        frozen_rounds.append(tuple(current_round))
+
+    message_count = len(copied_messages)
+    return ContextSummarySnapshot(
+        expected_summary_message_id=None,
+        snapshot_before_id=None,
+        snapshot_max_message_id=message_count,
+        persistent_summary_target_id=message_count,
+        recent_round_start_ids=(),
+        frozen_user_message_ids=(),
+        recent_messages=(),
+        frozen_rounds=tuple(frozen_rounds),
+        source_key=source_key,
+    )
 
 
 async def build_context_summary_snapshot(
@@ -117,6 +168,11 @@ async def iter_persistent_summary_rounds(
     snapshot: ContextSummarySnapshot,
     page_size: int = CONTEXT_SUMMARY_SCAN_PAGE_SIZE,
 ) -> AsyncIterator[list[InternalMessage]]:
+    if snapshot.frozen_rounds is not None:
+        for round_messages in snapshot.frozen_rounds:
+            yield list(round_messages)
+        return
+
     if not snapshot.has_persistent_history:
         return
 

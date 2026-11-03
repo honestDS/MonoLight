@@ -11,11 +11,22 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
-from app.core.constants import ERR_CONTEXT_SUMMARY_OUTPUT_BUDGET_EXHAUSTED, GOAL_EXECUTION_PHASE_RUNNING
-from app.core.crud.context_summary.fragment import build_context_summary_fragment_dedupe_key
+from app.core.constants import (
+    CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS,
+    ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
+    ERR_CONTEXT_SUMMARY_OUTPUT_BUDGET_EXHAUSTED,
+    FROZEN_CONTEXT_SUMMARY_WORK_KEY_PREFIX,
+    GOAL_EXECUTION_PHASE_RUNNING,
+)
+from app.core.crud.context_summary.fragment import (
+    build_context_summary_fragment_dedupe_key,
+    context_summary_fragment_crud,
+)
+from app.core.crud.context_summary.stage import context_summary_stage_crud
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.exceptions import LLMContextLengthException, LLMException, LLMRequestRejectedException
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
+from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
 from app.core.utils.context_summary import cleanup as context_summary_cleanup
 from app.core.utils.context_summary import merge as context_summary_merge
 from app.core.utils.context_summary import reduction as context_summary_reduction
@@ -27,15 +38,19 @@ from app.core.utils.context_summary.model_call import call_context_summary_model
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot, select_context_summary_model
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
+from app.core.utils.dispatcher.frozen_context import compact_frozen_context_messages
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage, ContextSummaryStageStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import ProfileConfig, ToolConfig
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
-from app.providers.llm.client import LLMClient
+from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 from app.transformers.openai.base import BaseOpenAITransformer
 from tests.database_support import clone_sqlite_schema
+from tests.integration.context_summary_test_support import make_fragment, make_stage
 from tests.memory_recall_support import memory_recall_payload
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
@@ -231,6 +246,123 @@ async def test_real_summary_stage_persists_fragment_and_completion(
     assert fragments[0].message_start_id == 1
     assert fragments[0].message_end_id == 2
     assert fragments[0].content == "compressed integration summary"
+
+
+@pytest.mark.asyncio
+async def test_frozen_context_compaction_refines_over_budget_single_summary(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_summary = "entry " * 6500
+    first_summary_response = "entry " * 3200
+    first_summary = first_summary_response.strip()
+    short_summary = "short summary"
+    task_model_id = "task-model"
+    task_protocol = "openai"
+    task_channel_id = 11
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(
+            role=MessageRole.USER,
+            id=None,
+            content=CONTEXT_SUMMARY_WRAPPER.format(
+                through_message_id=1,
+                content=original_summary,
+            ),
+        ),
+    ]
+    summary_model = ContextSummaryModelSnapshot(
+        channel_id=task_channel_id,
+        channel_name="integration-summary",
+        model_id="summary-model",
+        protocol="openai",
+        base_url="https://summary.invalid",
+        api_key="secret",
+        priority=1,
+        context_window_tokens=16_000,
+        max_output_tokens=6_000,
+        temperature=0.2,
+        top_p=None,
+        safety_margin_tokens=256,
+        input_budget_tokens=9_744,
+    )
+    model_prompts: list[str] = []
+
+    async def select_model(*_args, **_kwargs):
+        return summary_model
+
+    async def generate_model(**kwargs):
+        prompt = kwargs["messages"][0].content
+        assert isinstance(prompt, str)
+        model_prompts.append(prompt)
+        content = first_summary_response if len(model_prompts) == 1 else short_summary
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content=content),
+            model=kwargs["model_id"],
+            usage={"completion_tokens": 8},
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr(context_summary_stage, "select_context_summary_model", select_model)
+    monkeypatch.setattr(context_summary_reduction, "select_context_summary_model", select_model)
+    monkeypatch.setattr(LLMClient, "generate", generate_model)
+
+    cfg = ProfileConfig.model_validate({})
+    profile = SimpleNamespace(id=1)
+
+    async with context_summary_database() as db:
+        compacted = await compact_frozen_context_messages(
+            db,
+            session_id="frozen-task-session",
+            uid="frozen-task-user",
+            profile=profile,
+            cfg=cfg,
+            messages=messages,
+            context_window_k=4,
+            max_tokens=512,
+            tools=[],
+            model_id=task_model_id,
+            protocol=task_protocol,
+            channel_id=task_channel_id,
+            work_id=123,
+        )
+
+    target_tokens = calculate_context_summary_trigger_tokens(
+        context_window_k=4,
+        max_tokens=512,
+        threshold_percent=90,
+    )
+
+    def request_tokens(candidate: list[InternalMessage]) -> int:
+        return estimate_request_context_tokens(
+            materialize_user_environment_prompts(candidate),
+            [],
+            model_id=task_model_id,
+            protocol=task_protocol,
+            channel_id=task_channel_id,
+        )
+
+    first_candidate = [
+        messages[0],
+        InternalMessage(
+            role=MessageRole.USER,
+            content=CONTEXT_SUMMARY_WRAPPER.format(
+                through_message_id=1,
+                content=first_summary,
+            ),
+        ),
+    ]
+
+    assert target_tokens == 2_908
+    assert compacted[1].content == CONTEXT_SUMMARY_WRAPPER.format(
+        through_message_id=1,
+        content=short_summary,
+    )
+    assert request_tokens(compacted) <= target_tokens
+    assert request_tokens(first_candidate) > target_tokens
+    assert len(model_prompts) == 2
+    assert model_prompts[1].startswith("Further compress the summary below")
+    assert first_summary in model_prompts[1]
 
 
 @pytest.mark.asyncio
@@ -1443,3 +1575,298 @@ async def test_context_summary_reduction_budget_failure_invalidates_and_falls_ba
         assert reduction_fragments[0].status.value == "completed"
     else:
         assert reduction_fragments == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["session-history", "frozen-task"], ids=["session-history", "frozen-task"])
+async def test_context_summary_reduction_splits_repeated_range_and_completes(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    first_content = "first source " + "fact " * 700 + " tail evidence"
+    last_content = "last message evidence"
+    if mode == "session-history":
+        await _seed_summary_history(context_summary_database)
+        uid, session_id = "summary-user", "summary-session"
+        work_dedupe_key = "repeated-range-summary-work"
+    else:
+        uid, session_id = "frozen-user", "frozen-session"
+        work_dedupe_key = f"{FROZEN_CONTEXT_SUMMARY_WORK_KEY_PREFIX}repeated-range-summary"
+
+    lower_stage = make_stage(
+        work_dedupe_key=work_dedupe_key,
+        stage_key="repeated-range-source-stage",
+        model_key="repeated-range-source-model",
+        expected_fragment_count=2,
+        persistent_summary_target_id=4,
+    )
+    lower_stage.uid = uid
+    lower_stage.session_id = session_id
+    lower_stage.snapshot_max_message_id = 4
+
+    async with context_summary_database() as db:
+        persisted_stage, created = await context_summary_stage_crud.create_stage(db, stage=lower_stage)
+        assert created is True
+        for fragment_index, (message_start_id, message_end_id, content) in enumerate(
+            [(1, 3, first_content), (4, 4, last_content)]
+        ):
+            fragment = make_fragment(
+                fragment_index=fragment_index,
+                work_dedupe_key=work_dedupe_key,
+                stage_key=persisted_stage.stage_key,
+                model_key=persisted_stage.model_key,
+                message_start_id=message_start_id,
+                message_end_id=message_end_id,
+            )
+            fragment.uid = persisted_stage.uid
+            fragment.session_id = persisted_stage.session_id
+            fragment.content = content
+            persisted_fragment, fragment_created = await context_summary_fragment_crud.write_ordered(
+                db,
+                fragment=fragment,
+            )
+            assert persisted_fragment is not None
+            assert fragment_created is True
+        await db.refresh(persisted_stage)
+        assert await context_summary_stage_crud.mark_completed(
+            db,
+            work_dedupe_key=work_dedupe_key,
+            stage_key=persisted_stage.stage_key,
+            model_key=persisted_stage.model_key,
+        )
+        await db.refresh(persisted_stage)
+
+    model = replace(
+        _summary_rejection_models()[1],
+        context_window_tokens=2_000,
+        max_output_tokens=768,
+        safety_margin_tokens=0,
+        input_budget_tokens=1_232,
+    )
+    model_prompts: list[str] = []
+
+    async def select_model(*_args, **_kwargs):
+        return model
+
+    async def generate_model(*_args, **kwargs):
+        model_prompts.append(kwargs["messages"][0].content)
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="condensed evidence"),
+            model=kwargs["model_id"],
+            usage={"completion_tokens": 2},
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr(context_summary_reduction, "select_context_summary_model", select_model)
+    monkeypatch.setattr(LLMClient, "generate", generate_model)
+
+    profile = SimpleNamespace(id=1)
+    cfg = SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object()))
+    async with context_summary_database() as db:
+        result = await context_summary_reduction.reduce_completed_summary_stage_result(
+            db,
+            profile=profile,
+            cfg=cfg,
+            initial_stage=persisted_stage,
+            safety_margin_tokens=0,
+        )
+
+    async with context_summary_database() as db:
+        stages = list((await db.execute(select(ContextSummaryStage))).scalars().all())
+        fragments = list((await db.execute(select(ContextSummaryFragment))).scalars().all())
+
+    source_stage = next(stage for stage in stages if stage.stage_key == "repeated-range-source-stage")
+    first_reduction = next(stage for stage in stages if stage.lower_stage_key == source_stage.stage_key)
+    first_fragments = sorted(
+        (fragment for fragment in fragments if fragment.stage_key == first_reduction.stage_key),
+        key=lambda fragment: fragment.fragment_index,
+    )
+    first_ranges = [(fragment.message_start_id, fragment.message_end_id) for fragment in first_fragments]
+    assert source_stage.status == ContextSummaryStageStatus.COMPLETED
+    assert source_stage.succeeded_fragment_count == 2
+    assert first_reduction.status == ContextSummaryStageStatus.COMPLETED
+    assert len(first_fragments) == first_reduction.expected_fragment_count
+    assert first_ranges.count((1, 3)) >= 2
+    assert first_ranges.count((4, 4)) == 1
+    assert set(first_ranges) <= {(1, 3), (4, 4)}
+
+    final_stage = next(stage for stage in stages if stage.stage_key == result.stage.stage_key)
+    final_fragments = [fragment for fragment in fragments if fragment.stage_key == final_stage.stage_key]
+    assert final_stage.status == ContextSummaryStageStatus.COMPLETED
+    assert final_stage.expected_fragment_count == 1
+    assert final_stage.succeeded_fragment_count == 1
+    assert len(final_fragments) == 1
+    assert (final_fragments[0].message_start_id, final_fragments[0].message_end_id) == (1, 4)
+    assert result.content == final_fragments[0].content == "condensed evidence"
+    assert any("first source " in prompt for prompt in model_prompts)
+    assert any("tail evidence" in prompt for prompt in model_prompts)
+    assert any(last_content in prompt for prompt in model_prompts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["success", "no-progress", "insufficient"], ids=["success", "no-progress", "insufficient"])
+async def test_context_summary_checkpoint_refines_against_complete_request_budget(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    await _seed_summary_history(context_summary_database)
+    async with context_summary_database() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "summary-session"))).scalar_one()
+        session.context_summary = "stable saved summary"
+        session.context_summary_message_id = 2
+        session.context_summary_revision = 3
+        session.context_content_revision = 7
+        history = list((await db.execute(select(Message).where(Message.session_id == "summary-session", Message.id.in_([3, 4])))).scalars())
+        for message in history:
+            message.content = "history evidence " * 2000
+        db.add(
+            Message(
+                id=5,
+                session_id="summary-session",
+                uid="summary-user",
+                profile_id=1,
+                role=MessageRole.USER,
+                content="current question",
+            )
+        )
+        await db.commit()
+
+    summary_model = replace(
+        _summary_rejection_models()[1],
+        max_output_tokens=2_048,
+        input_budget_tokens=65_536 - 2_048,
+    )
+    first_summary = ("fact " * 1_400).strip()
+    summary_1_200 = ("fact " * 1_200).strip()
+    near_limit_summary = ("fact " * 725).strip()
+    slightly_smaller_summary = ("fact " * 721).strip()
+    short_summary = "short summary"
+    model_prompts: list[str] = []
+    response_sequences = {
+        "success": (first_summary, summary_1_200, near_limit_summary, short_summary),
+        "insufficient": (first_summary, near_limit_summary, slightly_smaller_summary),
+    }
+
+    async def select_model(*_args, excluded_priorities=None, **_kwargs):
+        excluded = set(excluded_priorities or ())
+        return None if summary_model.priority in excluded else summary_model
+
+    async def generate_model(**kwargs):
+        prompt = kwargs["messages"][0].content
+        model_prompts.append(prompt)
+        response_index = len(model_prompts) - 1
+        if mode == "no-progress":
+            content = first_summary
+        else:
+            responses = response_sequences[mode]
+            if response_index >= len(responses):
+                raise AssertionError("summary refinement attempted another round")
+            content = responses[response_index]
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content=content),
+            model=kwargs["model_id"],
+            usage={"completion_tokens": 1},
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr(context_summary_stage, "select_context_summary_model", select_model)
+    monkeypatch.setattr(context_summary_reduction, "select_context_summary_model", select_model)
+    monkeypatch.setattr(LLMClient, "generate", generate_model)
+
+    system_message = InternalMessage(
+        role=MessageRole.SYSTEM,
+        content=("context fact policy requires preserving verified history and current task constraints " * 7).strip(),
+    )
+    current_message = InternalMessage(id=5, role=MessageRole.USER, content="current question")
+    request_model_id = summary_model.model_id
+    request_protocol = summary_model.protocol
+    request_channel_id = summary_model.channel_id
+
+    def request_tokens(messages: list[InternalMessage]) -> int:
+        return estimate_request_context_tokens(
+            materialize_user_environment_prompts(messages),
+            [],
+            model_id=request_model_id,
+            protocol=request_protocol,
+            channel_id=request_channel_id,
+        )
+
+    def candidate_messages(summary: str) -> list[InternalMessage]:
+        return [
+            system_message,
+            InternalMessage(
+                role=MessageRole.USER,
+                content=CONTEXT_SUMMARY_WRAPPER.format(through_message_id=4, content=summary),
+            ),
+            current_message,
+        ]
+
+    target_tokens = calculate_context_summary_trigger_tokens(
+        context_window_k=2,
+        max_tokens=256,
+        threshold_percent=50,
+    )
+    near_limit_tokens = estimate_tokens(near_limit_summary, model_id=request_model_id, protocol=request_protocol)
+    slightly_smaller_tokens = estimate_tokens(slightly_smaller_summary, model_id=request_model_id, protocol=request_protocol)
+    assert target_tokens == 744
+    assert near_limit_tokens <= target_tokens
+    assert slightly_smaller_tokens <= target_tokens
+    assert 0 < near_limit_tokens - slightly_smaller_tokens < CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS
+    assert request_tokens(candidate_messages(near_limit_summary)) > target_tokens
+    assert request_tokens(candidate_messages(slightly_smaller_summary)) > target_tokens
+
+    checkpoint_kwargs = {
+        "session_id": "summary-session",
+        "uid": "summary-user",
+        "profile": SimpleNamespace(id=1),
+        "cfg": SimpleNamespace(
+            channel=SimpleNamespace(context_summary_channel=object()),
+            other=SimpleNamespace(context_summary_threshold_percent=50),
+        ),
+        "messages": [system_message, current_message],
+        "trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE,
+        "fixed_upper_message_id": 5,
+        "context_window_k": 2,
+        "max_tokens": 256,
+        "tools": [],
+        "channel_id": request_channel_id,
+        "model_id": request_model_id,
+        "protocol": request_protocol,
+        "force": True,
+    }
+
+    async def run_checkpoint():
+        async with context_summary_database() as db:
+            return await apply_context_summary_checkpoint(db, **checkpoint_kwargs)
+
+    if mode == "success":
+        checkpointed = await run_checkpoint()
+        assert request_tokens(checkpointed) <= target_tokens
+        assert checkpointed[1].content == CONTEXT_SUMMARY_WRAPPER.format(through_message_id=4, content=short_summary)
+        assert checkpointed[2].id == 5
+        assert len(model_prompts) == 4
+    else:
+        with pytest.raises(LLMException) as exc_info:
+            await run_checkpoint()
+        assert exc_info.value.message == ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED
+        if mode == "no-progress":
+            assert len(model_prompts) > 1
+            assert all(prompt.startswith("Further compress the summary below") for prompt in model_prompts[1:])
+        else:
+            assert len(model_prompts) == 3
+            assert near_limit_summary in model_prompts[2]
+
+    async with context_summary_database() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "summary-session"))).scalar_one()
+
+    if mode == "success":
+        assert session.context_summary == short_summary
+        assert session.context_summary_message_id == 4
+        assert session.context_summary_revision == 4
+    else:
+        assert session.context_summary == "stable saved summary"
+        assert session.context_summary_message_id == 2
+        assert session.context_summary_revision == 3
+    assert session.context_content_revision == 7

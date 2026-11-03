@@ -392,7 +392,7 @@ app/core/session_reply_queue/
 └── manager_submission.py   # 用户消息提交、确认判定与工作上下文继承
 ```
 
-`AgentWork` 是独立指令执行的共用底层：输入必须自包含，不读取所属主会话的实时历史；执行过程复用会话回复队列、交互式工具循环、审计、外部工作恢复与自身 checkpoint。结果交付按目标区分：`SESSION` 面向主会话直接展示最终结果，计划任务使用这一途径，内部工具过程保留在自身工作上下文；`PARENT_WORK` 面向父工作独立上报，为未来子代理机制预留，当前不开放执行。定时任务通过 `AgentWork` 执行，未来其他独立 Agent 调度场景可复用同一执行边界。
+`AgentWork` 是独立指令执行的共用底层：输入必须自包含，不读取所属主会话的实时历史；执行过程复用会话回复队列、交互式工具循环、审计、外部工作恢复与自身 checkpoint，并与普通会话共用上下文分片、合并和精简。任务只读取自身快照，以独立工作身份保存摘要片段；压缩后的任务消息保存在自身执行记录，不改写主会话摘要。结果交付按目标区分：`SESSION` 面向主会话直接展示最终结果，计划任务使用这一途径，内部工具过程保留在自身工作上下文；`PARENT_WORK` 面向父工作独立上报，为未来子代理机制预留，当前不开放执行。定时任务通过 `AgentWork` 执行，未来其他独立 Agent 调度场景可复用同一执行边界。
 
 ### 交互终端：`app/core/terminal/`
 
@@ -597,7 +597,7 @@ app/core/utils/
 │   ├── context_summary_checkpoint.py # 上下文总结检查点应用
 │   ├── external_work.py    # 外部工作挂起状态构建
 │   ├── fetch_and_merge_new_user_messages.py # 拉取并合并新增用户消息
-│   ├── frozen_context.py    # 工作上下文快照捕获、恢复与独立压缩
+│   ├── frozen_context.py    # 工作上下文快照捕获、恢复与共用总结接入
 │   ├── handle_parallel_tool_limit.py # 并行工具调用上限处理
 │   ├── helpers.py          # 分发共用辅助
 │   ├── inject_system_prompt.py # 系统提示构建与注入
@@ -616,11 +616,12 @@ app/core/utils/
 │   ├── truncate_tool_result.py # 工具结果预算截断
 │   ├── user_input_batch.py # 用户输入批次结构
 │   └── validate_profile_and_cfg.py # Profile 配置校验
-├── context_summary/        # 上下文总结辅助
+├── context_summary/        # 会话与 AgentWork 共用的上下文总结辅助
 │   ├── __init__.py         # 上下文总结能力导出
 │   ├── boundary.py         # 总结触发边界解析
 │   ├── cleanup.py          # 总结阶段与过期数据清理
 │   ├── common.py           # 总结共用状态、统计与选择辅助
+│   ├── engine.py           # 共用摘要再次压缩与完整请求容量检查
 │   ├── history.py          # 持久化历史与摘要片段读取统计
 │   ├── merge.py            # 已完成摘要片段分组与合并
 │   ├── model_call.py       # 上下文总结模型调用
@@ -757,7 +758,7 @@ Provider 层隔离数据库、向量存储、语言模型、嵌入、重排、�
 - Provider 成功响应中的输入 Token 用量是主会话上下文占用、前端展示和主动总结阈值的权威来源。主动总结只复用同一 `channel_id + model_id + protocol` 且上下文版本未变化的最近一次 Provider 确认值；旧 metadata 没有渠道身份时不得复用，避免不同 NewAPI/OpenAI-compatible 渠道的同名 alias 串用。
 - 主对话模型请求不会因为本地 Token 估算超过配置窗口而被拒绝或触发总结。若 Provider 明确返回上下文超限，则在当前渠道强制总结后重试；仅 `context_window - max_output - safety_margin <= 0` 这类与 Tokenizer 无关的静态配置错误会在本地直接拒绝。
 - 本地 Token 估算只用于发送前必须确定大小的内部链路，例如工具结果截断、审计载荷拟合、总结分片和压缩结果校验，不作为整个会话是否超限的事实来源。
-- `core/utils/dispatcher/frozen_context.py`：冻结工作上下文独立压缩，不改写主会话摘要。
+- `app/core/utils/context_summary/engine.py`：会话与 AgentWork 共用的摘要再次压缩和完整请求容量检查；`app/core/utils/dispatcher/frozen_context.py` 捕获、恢复工作上下文并接入共用总结，压缩后的任务消息保存在自身执行记录，不改写主会话摘要。
 - `transformers` 负责把内部消息转换为实际 Provider 请求形态；`providers/llm/token_estimation.py` 对该 Provider 载荷做本地估算。审计完整请求拟合、工具结果预算和总结后的最终请求校验都复用这一口径；回传的推理文本或原生推理项按实际请求形态计入，未发送的内部元数据不计入，避免重复。
 - `core/utils/tokenizer.py` 只根据 `model_id` 选择 tiktoken 已知编码；协议只表示请求格式，不能用于推断真实模型厂商。对于 `gpt-5.6-*` 这类 tiktoken 前缀表已能表达、但点号版本名无法直接命中的名称，仅做名称归一化后再次交给 tiktoken 决策；无法确认的普通 alias 使用通用回退。
 - 不通过 OpenAI-compatible 协议猜测并调用厂商专有的预请求 Token 计数接口，也不维护“本地估算 / Provider usage”的历史校准系数；聚合网关后的真实 Provider 由对端响应负责给出最终 usage 和上下文超限结果。

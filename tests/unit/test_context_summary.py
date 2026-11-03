@@ -21,6 +21,7 @@ from app.core.utils.context_summary.common import (
 from app.core.utils.context_summary.common import (
     serialize_message as _serialize_message,
 )
+from app.core.utils.context_summary.stage import GeneratedSummaryResult
 from app.core.utils.dispatcher import frozen_context as frozen_context_module
 from app.models.message import ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
 from app.models.profile import ProfileConfig
@@ -178,13 +179,80 @@ def test_frozen_compaction_segment_never_splits_pending_tool_chain():
         ),
     ]
 
-    segment = frozen_context_module._select_frozen_compaction_segment(
-        messages,
-        target_tokens=10_000,
-    )
+    segment = frozen_context_module._select_frozen_compaction_segment(messages)
 
     assert [message.id for message in segment] == [1, 2, 3]
     assert segment[-1].role == MessageRole.TOOL
+
+
+@pytest.mark.parametrize(
+    ("raw_content", "attachments", "has_old_history"),
+    [
+        pytest.param(
+            [
+                TextPart(text="describe the latest image"),
+                ImagePart(image_url={"url": "data:image/png;base64,latest"}),
+            ],
+            None,
+            True,
+            id="multimodal-user-with-completed-tool-round",
+        ),
+        pytest.param(
+            "latest attached request",
+            ["latest.pdf"],
+            True,
+            id="attachment-user-with-completed-tool-round",
+        ),
+        pytest.param(
+            "unreplied raw input",
+            None,
+            False,
+            id="unreplied-raw-user-without-history",
+        ),
+    ],
+)
+def test_frozen_compaction_segment_protects_latest_raw_user_boundary(raw_content, attachments, has_old_history):
+    old_history = [
+        InternalMessage(id=1, role=MessageRole.USER, content="old question"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
+        InternalMessage(id=3, role=MessageRole.USER, content="old tool request"),
+        InternalMessage(
+            id=4,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="old-call", name="shell", arguments={"command": "echo old"})],
+        ),
+        InternalMessage(id=5, role=MessageRole.TOOL, tool_call_id="old-call", content="old result"),
+    ] if has_old_history else []
+    raw_user = InternalMessage(
+        id=6 if has_old_history else 1,
+        role=MessageRole.USER,
+        content=raw_content,
+        attachments=attachments,
+    )
+    latest_tool_round = [
+        InternalMessage(
+            id=raw_user.id + 1,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="latest-call", name="shell", arguments={"command": "echo latest"})],
+        ),
+        InternalMessage(
+            id=raw_user.id + 2,
+            role=MessageRole.TOOL,
+            tool_call_id="latest-call",
+            content="latest result",
+        ),
+    ]
+    messages = [*old_history, raw_user, *latest_tool_round] if has_old_history else [raw_user]
+
+    segment = frozen_context_module._select_frozen_compaction_segment(messages)
+    retained = messages[len(segment) :]
+
+    assert [message.id for message in segment] == ([1, 2, 3, 4, 5] if has_old_history else [])
+    assert retained[0] == raw_user
+    if has_old_history:
+        assert retained[1:] == latest_tool_round
+    else:
+        assert retained == [raw_user]
 
 
 @pytest.mark.asyncio
@@ -204,13 +272,24 @@ async def test_frozen_context_compaction_summarizes_completed_prefix_only(monkey
             tool_calls=[InternalToolCall(id="call-2", name="shell", arguments={"command": "echo pending"})],
         ),
     ]
-    summary_prompts = []
+    snapshots = []
 
-    async def generate_summary_text(_db, **kwargs):
-        summary_prompts.append(kwargs["prompt"])
-        return "compressed completed work"
+    async def generate_snapshot_summary_result(_db, **kwargs):
+        snapshots.append(kwargs["snapshot"])
+        return GeneratedSummaryResult(
+            content="compressed completed work",
+            message_count=3,
+            completed_stage=SimpleNamespace(),
+        )
 
-    monkeypatch.setattr(frozen_context_module, "generate_summary_text", generate_summary_text)
+    async def noop_cleanup(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(frozen_context_module, "generate_snapshot_summary_result", generate_snapshot_summary_result)
+    monkeypatch.setattr(frozen_context_module, "cleanup_context_summary_work_safely", noop_cleanup)
+
+    def measure_request_tokens(request_messages):
+        return sum(len(message.model_dump_json()) for message in request_messages)
 
     compacted = await frozen_context_module.compact_frozen_context_messages(
         object(),
@@ -222,17 +301,23 @@ async def test_frozen_context_compaction_summarizes_completed_prefix_only(monkey
         context_window_k=128,
         max_tokens=512,
         tools=[],
+        measure_request_tokens=measure_request_tokens,
         force=True,
     )
 
-    assert len(summary_prompts) == 1
-    assert "call-1" in summary_prompts[0]
-    assert "call-2" not in summary_prompts[0]
+    assert len(snapshots) == 1
+    snapshot_tool_call_ids = [
+        tool_call.id
+        for round_messages in snapshots[0].frozen_rounds
+        for message in round_messages
+        for tool_call in message.tool_calls or []
+    ]
+    assert "call-1" in snapshot_tool_call_ids
+    assert "call-2" not in snapshot_tool_call_ids
     assert compacted[0].role == MessageRole.SYSTEM
     assert compacted[1].role == MessageRole.USER
     assert compacted[1].content.startswith("<conversation_summary ")
-    assert compacted[2].role == MessageRole.ASSISTANT
-    assert compacted[2].tool_calls[0].id == "call-2"
+    assert compacted[2:] == messages[4:]
     covered_message_id, covered_content = frozen_context_module._covered_user_from_segment(compacted)
     assert covered_message_id == 1
     assert covered_content == messages[1].content

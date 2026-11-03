@@ -152,7 +152,10 @@ def _context_length_generation_state(*, stream_event_callback=None):
         profile=SimpleNamespace(id=1),
         cfg=SimpleNamespace(tool=ToolConfig(), other=SimpleNamespace(context_summary_threshold_percent=90)),
         messages=[InternalMessage(id=1, role=MessageRole.USER, content="request")],
-        checkpoint_state=SimpleNamespace(
+        checkpoint_state=interactive_helpers_module._ExecutionCheckpointState(
+            callback=None,
+            turn_messages=[],
+            files_to_user=[],
             upper_message_id=1,
             total_output_tokens=0,
             session_total_input_tokens=0,
@@ -260,7 +263,13 @@ async def test_frozen_context_length_compacts_locally_before_channel_fallback(mo
     state = _context_length_generation_state()
     state.context_frozen = True
     attempts = []
+    saved_checkpoints = []
     local_compaction_calls = []
+
+    async def save_checkpoint(checkpoint):
+        saved_checkpoints.append(checkpoint)
+
+    state.checkpoint_state.callback = save_checkpoint
 
     async def compact_frozen_context(_db, **kwargs):
         local_compaction_calls.append(dict(kwargs))
@@ -278,6 +287,12 @@ async def test_frozen_context_length_compacts_locally_before_channel_fallback(mo
         attempts.append(kwargs["model_id"])
         if len(attempts) == 1:
             raise LLMContextLengthException(provider_message="maximum context length exceeded")
+        assert any(
+            message["content"] == "locally compressed request"
+            for checkpoint in saved_checkpoints
+            for message in checkpoint["messages"]
+        )
+        assert json.loads(kwargs["messages"][0].content)["user_message"] == "locally compressed request"
         return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model=kwargs["model_id"], usage={})
 
     monkeypatch.setattr(

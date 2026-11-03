@@ -167,6 +167,28 @@ def apply_platform_constraints_to_message(message: InternalMessage, platform_con
     return message
 
 
+def inherit_user_request_context(replacement: InternalMessage, covered_messages: list[InternalMessage]) -> None:
+    last_user: InternalMessage | None = None
+    latest_platform_constraints: str | None = None
+    for message in covered_messages:
+        if message.role != MessageRole.USER:
+            continue
+        last_user = message
+        normalized_environment = _normalize_environment_prompt(message.environment_prompt)
+        platform_constraints = normalized_environment.get("platform_constraints")
+        if isinstance(platform_constraints, str) and platform_constraints:
+            latest_platform_constraints = platform_constraints
+
+    if last_user is None:
+        return
+
+    replacement.environment_prompt = last_user.environment_prompt
+    replacement.guidance_prompt = last_user.guidance_prompt
+    replacement.execution_guidance = last_user.execution_guidance
+    if latest_platform_constraints is not None:
+        apply_platform_constraints_to_message(replacement, latest_platform_constraints)
+
+
 async def ensure_user_runtime_instructions(
     db: AsyncSession,
     session_id: str,

@@ -154,7 +154,7 @@ async def iter_completed_lower_stage_fragments(
             if fragment.fragment_index != expected_fragment_index:
                 raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS))
             repeated_range = fragment.message_start_id == previous_message_start_id and fragment.message_end_id == previous_message_end_id
-            if fragment.message_start_id > fragment.message_end_id or (expected_fragment_index == 0 and fragment.message_start_id <= (expected_summary_message_id or 0)) or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id and not repeated_range):
+            if fragment.message_start_id > fragment.message_end_id or (expected_fragment_index == 0 and fragment.message_start_id <= (expected_summary_message_id or 0)) or (previous_message_end_id is not None and fragment.message_start_id < previous_message_end_id and not repeated_range):
                 raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGE_INVALID))
             yield fragment
             expected_fragment_index += 1
@@ -188,6 +188,7 @@ async def group_completed_summary_fragments(
     previous_fragment_index: int | None = None
     previous_message_start_id: int | None = None
     previous_message_end_id: int | None = None
+    previous_fragment_isolated = False
 
     def build_group() -> SummaryFragmentInput:
         if group_start_id is None or group_end_id is None:
@@ -201,11 +202,13 @@ async def group_completed_summary_fragments(
             content=content,
         )
 
-    async for fragment in fragments:
+    fragment = await anext(fragments, None)
+    while fragment is not None:
+        next_fragment = await anext(fragments, None)
         if previous_fragment_index is not None and fragment.fragment_index != previous_fragment_index + 1:
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS))
         repeated_range = fragment.message_start_id == previous_message_start_id and fragment.message_end_id == previous_message_end_id
-        if previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id and not repeated_range:
+        if previous_message_end_id is not None and fragment.message_start_id < previous_message_end_id and not repeated_range:
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGES_OVERLAP))
 
         parts = _split_completed_fragment(
@@ -213,7 +216,24 @@ async def group_completed_summary_fragments(
             max_group_tokens=max_group_tokens,
             token_counter=token_counter,
         )
-        for part in parts:
+        fragment_range = (fragment.message_start_id, fragment.message_end_id)
+        fragment_isolated = (
+            fragment.message_start_id != fragment.message_end_id
+            and (
+                len(parts) > 1
+                or repeated_range
+                or (
+                    next_fragment is not None
+                    and (next_fragment.message_start_id, next_fragment.message_end_id) == fragment_range
+                )
+            )
+        )
+        isolation_boundary = (
+            previous_message_start_id is not None
+            and fragment_range != (previous_message_start_id, previous_message_end_id)
+            and (fragment_isolated or previous_fragment_isolated)
+        )
+        for part_index, part in enumerate(parts):
             part_token_floor = max(1, token_counter(part))
             candidate_content = "\n".join([*group_parts, part])
             candidate_token_floor = group_token_floor + part_token_floor
@@ -221,7 +241,7 @@ async def group_completed_summary_fragments(
                 candidate_token_floor,
                 max(1, token_counter(candidate_content)),
             )
-            if group_parts and candidate_tokens > max_group_tokens:
+            if group_parts and (candidate_tokens > max_group_tokens or (part_index == 0 and isolation_boundary)):
                 if group_index >= first_group_index:
                     yield build_group()
                 group_index += 1
@@ -237,6 +257,8 @@ async def group_completed_summary_fragments(
         previous_fragment_index = fragment.fragment_index
         previous_message_start_id = fragment.message_start_id
         previous_message_end_id = fragment.message_end_id
+        previous_fragment_isolated = fragment_isolated
+        fragment = next_fragment
 
     if group_parts and group_index >= first_group_index:
         yield build_group()
