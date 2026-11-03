@@ -34,6 +34,22 @@
   white-space: nowrap;
 }
 
+.scheduled-task-date-picker {
+  .el-date-picker__header {
+    .d-arrow-left,
+    .d-arrow-right,
+    .el-date-picker__prev-btn + .el-date-picker__header-label {
+      display: none;
+    }
+  }
+}
+
+.scheduled-task-month-picker {
+  .el-date-picker__header {
+    display: none;
+  }
+}
+
 .scheduled-task-dialog {
   width: min(760px, calc(100vw - 48px)) !important;
   max-width: calc(100vw - 48px);
