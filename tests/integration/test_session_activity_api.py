@@ -15,6 +15,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.security import get_current_user
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
+from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SESSION_REPLY_ACTIVE_STATUSES,
     SessionReplySourceType,
@@ -32,6 +33,7 @@ ACTIVITY_FIELDS = {
     "source",
     "is_reply_running",
     "is_loading",
+    "is_context_summarizing",
 }
 ACTIVITY_EXTENDED_FIELDS = {
     "title",
@@ -58,6 +60,7 @@ def _activity_defaults(*, is_owned: bool, **overrides: object) -> dict[str, obje
         "last_read_message_id": None,
         "last_read_at": None,
         "is_running": False,
+        "is_context_summarizing": False,
         "completed_message_id": None,
         "completed_status": None,
         "has_unread_result": False,
@@ -170,6 +173,47 @@ async def _add_work(
     db.add(work)
     await db.commit()
     return work
+
+
+async def _persist_stream_event(
+    db: AsyncSession,
+    *,
+    work: SessionReplyWorkItem,
+    sequence_no: int,
+    event_type: str,
+    work_sequence_no: int | None = None,
+) -> None:
+    assert work.id is not None
+    persisted_work_sequence_no = work.sequence_no
+    if work_sequence_no is not None:
+        persisted_work_sequence_no = work_sequence_no
+    db.add(
+        SessionReplyStreamEvent(
+            work_id=work.id,
+            sequence_no=sequence_no,
+            event={
+                "type": event_type,
+                "session_id": work.session_id,
+                "work_id": work.id,
+                "work_sequence_no": persisted_work_sequence_no,
+                "event_sequence_no": sequence_no,
+            },
+        )
+    )
+    await db.commit()
+
+
+async def _assert_context_summary_flags(
+    client: httpx.AsyncClient,
+    *,
+    expected: dict[str, bool],
+) -> None:
+    for endpoint in ("/api/v1/chat/sessions/activity", "/api/v1/chat/sessions/list"):
+        response = await client.get(endpoint)
+        assert response.status_code == 200
+        rows = {row["session_id"]: row["is_context_summarizing"] for row in response.json()["data"]}
+        assert set(rows) == set(expected)
+        assert rows == expected
 
 
 async def _add_users(db: AsyncSession, *uids: str) -> None:
@@ -436,6 +480,305 @@ async def test_activity_stays_running_for_older_active_work_with_newer_terminal_
     assert response.status_code == 200
     assert response.json()["data"][0]["is_reply_running"] is True
     assert response.json()["data"][0]["is_loading"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("work_type", INTERACTIVE_WORK_TYPES)
+async def test_activity_and_full_list_track_persisted_context_summary_lifecycle(
+    api_context,
+    work_type: SessionReplyWorkType,
+) -> None:
+    db, _auth_state, client = api_context
+    await _add_users(db, "user-1")
+    target_session = _make_session(
+        "context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 1, 1, 2, 3),
+    )
+    isolated_session = _make_session(
+        "isolated-context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 1, 1, 2, 4),
+    )
+    db.add_all([target_session, isolated_session])
+    await db.commit()
+    work = await _add_work(
+        db,
+        session_id=target_session.session_id,
+        uid=target_session.uid,
+        work_type=work_type,
+        status=SessionReplyWorkStatus.RUNNING,
+    )
+    expected = {
+        target_session.session_id: False,
+        isolated_session.session_id: False,
+    }
+
+    await _assert_context_summary_flags(client, expected=expected)
+
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=1,
+        event_type="context_summary_start",
+    )
+    expected[target_session.session_id] = True
+    await _assert_context_summary_flags(client, expected=expected)
+
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=2,
+        event_type="agent_loop_start",
+    )
+    await _assert_context_summary_flags(client, expected=expected)
+
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=3,
+        event_type="context_summary_end",
+    )
+    expected[target_session.session_id] = False
+    await _assert_context_summary_flags(client, expected=expected)
+
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=4,
+        event_type="context_summary_start",
+    )
+    expected[target_session.session_id] = True
+    await _assert_context_summary_flags(client, expected=expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        SessionReplyWorkStatus.SUCCEEDED,
+        SessionReplyWorkStatus.FAILED,
+        SessionReplyWorkStatus.CANCELLED,
+    ],
+)
+async def test_activity_and_full_list_clear_context_summary_for_terminal_work(
+    api_context,
+    terminal_status: SessionReplyWorkStatus,
+) -> None:
+    db, _auth_state, client = api_context
+    await _add_users(db, "user-1")
+    target_session = _make_session(
+        "terminal-context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 2, 1, 2, 3),
+    )
+    isolated_session = _make_session(
+        "terminal-isolated-context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 2, 1, 2, 4),
+    )
+    db.add_all([target_session, isolated_session])
+    await db.commit()
+    work = await _add_work(
+        db,
+        session_id=target_session.session_id,
+        uid=target_session.uid,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        status=SessionReplyWorkStatus.RUNNING,
+    )
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=1,
+        event_type="context_summary_start",
+    )
+    await _assert_context_summary_flags(
+        client,
+        expected={
+            target_session.session_id: True,
+            isolated_session.session_id: False,
+        },
+    )
+
+    assert work.id is not None
+    assert await session_reply_work_item_crud.mark_terminal(
+        db,
+        work_id=work.id,
+        worker_id="worker",
+        status=terminal_status,
+    )
+    await _assert_context_summary_flags(
+        client,
+        expected={
+            target_session.session_id: False,
+            isolated_session.session_id: False,
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "work_type",
+    [
+        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        SessionReplyWorkType.BACKGROUND_TASK_RESUME,
+        SessionReplyWorkType.AGENT_WORK,
+    ],
+)
+async def test_activity_and_full_list_ignore_context_summary_for_noninteractive_work(
+    api_context,
+    work_type: SessionReplyWorkType,
+) -> None:
+    db, _auth_state, client = api_context
+    await _add_users(db, "user-1")
+    target_session = _make_session(
+        "noninteractive-context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 3, 1, 2, 3),
+    )
+    isolated_session = _make_session(
+        "noninteractive-isolated-context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 3, 1, 2, 4),
+    )
+    db.add_all([target_session, isolated_session])
+    await db.commit()
+    work = await _add_work(
+        db,
+        session_id=target_session.session_id,
+        uid=target_session.uid,
+        work_type=work_type,
+        status=SessionReplyWorkStatus.RUNNING,
+    )
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=1,
+        event_type="context_summary_start",
+    )
+
+    await _assert_context_summary_flags(
+        client,
+        expected={
+            target_session.session_id: False,
+            isolated_session.session_id: False,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_activity_and_full_list_ignore_other_user_context_summary_events(api_context) -> None:
+    db, auth_state, client = api_context
+    await _add_users(db, "user-1", "user-2")
+    owned_session = _make_session(
+        "owned-context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 4, 1, 2, 3),
+    )
+    other_session = _make_session(
+        "other-user-context-summary-session",
+        "user-2",
+        created_at=datetime(2026, 8, 4, 1, 2, 4),
+    )
+    db.add_all([owned_session, other_session])
+    await db.commit()
+    other_work = await _add_work(
+        db,
+        session_id=other_session.session_id,
+        uid=other_session.uid,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        status=SessionReplyWorkStatus.RUNNING,
+    )
+    await _persist_stream_event(
+        db,
+        work=other_work,
+        sequence_no=1,
+        event_type="context_summary_start",
+    )
+
+    await _assert_context_summary_flags(
+        client,
+        expected={owned_session.session_id: False},
+    )
+
+    auth_state["is_superuser"] = True
+    await _assert_context_summary_flags(
+        client,
+        expected={
+            owned_session.session_id: False,
+            other_session.session_id: True,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_activity_and_full_list_ignore_context_summary_events_from_old_work_sequence(api_context) -> None:
+    db, _auth_state, client = api_context
+    await _add_users(db, "user-1")
+    target_session = _make_session(
+        "sequence-context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 5, 1, 2, 3),
+    )
+    isolated_session = _make_session(
+        "sequence-isolated-context-summary-session",
+        "user-1",
+        created_at=datetime(2026, 8, 5, 1, 2, 4),
+    )
+    db.add_all([target_session, isolated_session])
+    await db.commit()
+    work = await _add_work(
+        db,
+        session_id=target_session.session_id,
+        uid=target_session.uid,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        status=SessionReplyWorkStatus.RUNNING,
+        sequence_no=2,
+    )
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=1,
+        event_type="context_summary_start",
+        work_sequence_no=1,
+    )
+    await _assert_context_summary_flags(
+        client,
+        expected={
+            target_session.session_id: False,
+            isolated_session.session_id: False,
+        },
+    )
+
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=2,
+        event_type="context_summary_start",
+        work_sequence_no=2,
+    )
+    await _assert_context_summary_flags(
+        client,
+        expected={
+            target_session.session_id: True,
+            isolated_session.session_id: False,
+        },
+    )
+
+    await _persist_stream_event(
+        db,
+        work=work,
+        sequence_no=3,
+        event_type="context_summary_end",
+        work_sequence_no=1,
+    )
+    await _assert_context_summary_flags(
+        client,
+        expected={
+            target_session.session_id: True,
+            isolated_session.session_id: False,
+        },
+    )
 
 
 @pytest.mark.asyncio

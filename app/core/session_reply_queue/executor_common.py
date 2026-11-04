@@ -141,6 +141,9 @@ def _metadata_with_work_order(
             "total_cached_tokens",
             "total_output_tokens",
             "cache_hit_rate",
+            "cache_reported_input_tokens",
+            "cache_reported_cached_tokens",
+            "cache_coverage",
         )
         ordered_metadata = {}
         for field in session_total_fields:

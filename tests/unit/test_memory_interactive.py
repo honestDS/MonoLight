@@ -17,6 +17,7 @@ from app.core.tools import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
+from app.models.profile import OtherConfig
 from tests.memory_recall_support import memory_recall_payload
 from tests.unit.response_test_support import memory_content_too_long_payload, memory_mutation_payload
 
@@ -61,6 +62,7 @@ def _build_cfg(memory=_MISSING, *, max_turns=1):
             max_parallel_tools=4,
             executor_max_workers=1,
         ),
+        other=OtherConfig(),
     )
     if memory is not _MISSING:
         cfg.memory = memory

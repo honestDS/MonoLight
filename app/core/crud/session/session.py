@@ -7,10 +7,12 @@ from sqlmodel import select
 from app.core.crud.base import CRUDBase
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.reply_stream_event import context_summary_running_expression
 from app.core.session.source import default_show_tool_calls_for_source
 from app.core.utils.request_token_baseline import (
     MAIN_DIALOGUE_REQUEST_PURPOSE,
     build_session_cache_metrics,
+    extract_session_cache_reporting_totals,
     extract_session_total_output_tokens,
     merge_session_cache_token_totals,
 )
@@ -96,6 +98,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             ChatSession.last_read_at,
             is_loading,
             is_reply_running,
+            context_summary_running_expression(),
             is_running,
             completed_message_id,
             completed_status,
@@ -452,6 +455,8 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             "total_input_tokens",
             "total_cached_tokens",
             "cached_tokens",
+            "cache_reported_input_tokens",
+            "cache_reported_cached_tokens",
         )
         for field in optional_int_fields:
             if field not in metadata:
@@ -463,6 +468,12 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
                 return False
             persisted_metadata[field] = value
 
+        if "summary_trigger_tokens" in metadata:
+            summary_trigger_tokens = metadata["summary_trigger_tokens"]
+            if summary_trigger_tokens is not None and (not isinstance(summary_trigger_tokens, int) or isinstance(summary_trigger_tokens, bool) or summary_trigger_tokens <= 0):
+                return False
+            persisted_metadata["summary_trigger_tokens"] = summary_trigger_tokens
+
         has_total_input_tokens = "total_input_tokens" in metadata
         has_total_cached_tokens = "total_cached_tokens" in metadata
         if has_total_input_tokens != has_total_cached_tokens:
@@ -470,11 +481,25 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         if has_total_input_tokens and metadata["total_cached_tokens"] > metadata["total_input_tokens"]:
             return False
 
-        if "cache_hit_rate" in metadata:
-            cache_hit_rate = metadata["cache_hit_rate"]
-            if isinstance(cache_hit_rate, bool) or not isinstance(cache_hit_rate, (int, float)) or not 0 <= cache_hit_rate <= 1:
+        has_cache_reported_input_tokens = "cache_reported_input_tokens" in metadata
+        has_cache_reported_cached_tokens = "cache_reported_cached_tokens" in metadata
+        if has_cache_reported_input_tokens != has_cache_reported_cached_tokens:
+            return False
+        if has_cache_reported_input_tokens:
+            if metadata["cache_reported_cached_tokens"] > metadata["cache_reported_input_tokens"]:
                 return False
-            persisted_metadata["cache_hit_rate"] = float(cache_hit_rate)
+            if has_total_input_tokens and (metadata["cache_reported_input_tokens"] > metadata["total_input_tokens"] or metadata["cache_reported_cached_tokens"] > metadata["total_cached_tokens"]):
+                return False
+
+        for field in ("cache_hit_rate", "cache_coverage"):
+            if field not in metadata:
+                continue
+            value = metadata[field]
+            if value is not None:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                    return False
+                value = float(value)
+            persisted_metadata[field] = value
 
         for field in ("model_id", "protocol"):
             if field not in metadata:
@@ -518,14 +543,36 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             return False
 
         current_metadata = session.llm_request_metadata if isinstance(session.llm_request_metadata, dict) else {}
-        has_cache_totals = any(field in metadata or field in current_metadata for field in ("total_input_tokens", "total_cached_tokens"))
-        if has_cache_totals:
+        has_cache_metrics = any(
+            field in metadata or field in current_metadata
+            for field in (
+                "total_input_tokens",
+                "total_cached_tokens",
+                "cache_reported_input_tokens",
+                "cache_reported_cached_tokens",
+            )
+        )
+        if has_cache_metrics:
             total_input_tokens, total_cached_tokens = merge_session_cache_token_totals(
                 current_metadata,
                 total_input_tokens=metadata.get("total_input_tokens", 0),
                 total_cached_tokens=metadata.get("total_cached_tokens", 0),
             )
-            cache_metrics = build_session_cache_metrics(total_input_tokens, total_cached_tokens)
+            persisted_cache_reported_input_tokens, persisted_cache_reported_cached_tokens = extract_session_cache_reporting_totals(current_metadata)
+            cache_reported_input_tokens = max(
+                persisted_cache_reported_input_tokens,
+                metadata.get("cache_reported_input_tokens", 0),
+            )
+            cache_reported_cached_tokens = max(
+                persisted_cache_reported_cached_tokens,
+                metadata.get("cache_reported_cached_tokens", 0),
+            )
+            cache_metrics = build_session_cache_metrics(
+                total_input_tokens,
+                total_cached_tokens,
+                cache_reported_input_tokens=cache_reported_input_tokens,
+                cache_reported_cached_tokens=cache_reported_cached_tokens,
+            )
         else:
             cache_metrics = {}
 

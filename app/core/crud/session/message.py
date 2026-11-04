@@ -14,6 +14,7 @@ from sqlmodel import (
 
 from app.core.constants import END_SESSION_TOOL_NAME, ERR_VALUE_MUST_BE_BETWEEN
 from app.core.crud.base import CRUDBase
+from app.core.crud.session.reply_stream_event import context_summary_running_expression
 from app.core.i18n import t
 from app.models.message import (
     Message,
@@ -523,6 +524,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 ChatSession.latest_message_id,
                 is_loading,
                 is_reply_running,
+                context_summary_running_expression(),
                 ChatSession.uid,
                 User.username,
                 ChatSession.title,
@@ -539,6 +541,8 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 ChatSession.message_platform_user_id,
                 ChatSession.created_at,
                 ChatSession.llm_request_metadata,
+                ChatSession.context_summary_revision,
+                ChatSession.context_content_revision,
             )
             .join(User, ChatSession.uid == User.uid)
             .order_by(desc(last_active))

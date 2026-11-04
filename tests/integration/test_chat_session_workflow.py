@@ -33,6 +33,7 @@ from app.models.message import Message, MessageResponse, MessageRole, MessageTyp
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
+from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SESSION_REPLY_ACTIVE_STATUSES,
     SessionReplySequence,
@@ -78,6 +79,7 @@ async def chat_session_database(tmp_path) -> AsyncGenerator[AsyncSession]:
             AuditConfirmationClaim.__table__,
             SessionReplySequence.__table__,
             SessionReplyWorkItem.__table__,
+            SessionReplyStreamEvent.__table__,
             BackgroundTask.__table__,
             TerminalSession.__table__,
             TerminalControlCommand.__table__,

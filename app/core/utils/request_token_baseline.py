@@ -95,8 +95,8 @@ def extract_provider_token_metrics(usage: Any) -> dict[str, int | float]:
     if _is_positive_int(prompt_tokens):
         metrics["input_tokens"] = prompt_tokens
         metrics["input_tokens_source"] = "provider"
-        cached_tokens_for_rate = cached_tokens if _is_non_negative_int(cached_tokens) else 0
-        metrics["cache_hit_rate"] = min(cached_tokens_for_rate, prompt_tokens) / prompt_tokens
+        if _is_non_negative_int(cached_tokens):
+            metrics["cache_hit_rate"] = min(cached_tokens, prompt_tokens) / prompt_tokens
     if _is_non_negative_int(completion_tokens):
         metrics["output_tokens"] = completion_tokens
     if _is_non_negative_int(cached_tokens):
@@ -113,13 +113,18 @@ def extract_session_cache_token_totals(metadata: Any) -> tuple[int, int]:
     if _is_non_negative_int(total_input_tokens) and _is_non_negative_int(total_cached_tokens) and total_cached_tokens <= total_input_tokens:
         return total_input_tokens, total_cached_tokens
 
-    input_tokens = metadata.get("input_tokens")
-    if metadata.get("input_tokens_source") != "provider" or not _is_positive_int(input_tokens):
+    return 0, 0
+
+
+def extract_session_cache_reporting_totals(metadata: Any) -> tuple[int, int]:
+    if not isinstance(metadata, dict):
         return 0, 0
 
-    cached_tokens = metadata.get("cached_tokens")
-    cached_tokens = cached_tokens if _is_non_negative_int(cached_tokens) else 0
-    return input_tokens, min(cached_tokens, input_tokens)
+    cache_reported_input_tokens = metadata.get("cache_reported_input_tokens")
+    cache_reported_cached_tokens = metadata.get("cache_reported_cached_tokens")
+    if _is_non_negative_int(cache_reported_input_tokens) and _is_non_negative_int(cache_reported_cached_tokens) and cache_reported_cached_tokens <= cache_reported_input_tokens:
+        return cache_reported_input_tokens, cache_reported_cached_tokens
+    return 0, 0
 
 
 def merge_session_cache_token_totals(
@@ -138,14 +143,25 @@ def merge_session_cache_token_totals(
     )
 
 
-def build_session_cache_metrics(total_input_tokens: Any, total_cached_tokens: Any) -> dict[str, int | float]:
+def build_session_cache_metrics(
+    total_input_tokens: Any,
+    total_cached_tokens: Any,
+    *,
+    cache_reported_input_tokens: Any = 0,
+    cache_reported_cached_tokens: Any = 0,
+) -> dict[str, int | float | None]:
     if not (_is_non_negative_int(total_input_tokens) and _is_non_negative_int(total_cached_tokens) and total_cached_tokens <= total_input_tokens):
         total_input_tokens, total_cached_tokens = 0, 0
+    if not (_is_non_negative_int(cache_reported_input_tokens) and _is_non_negative_int(cache_reported_cached_tokens) and cache_reported_cached_tokens <= cache_reported_input_tokens and cache_reported_input_tokens <= total_input_tokens and cache_reported_cached_tokens <= total_cached_tokens):
+        cache_reported_input_tokens, cache_reported_cached_tokens = 0, 0
 
     return {
         "total_input_tokens": total_input_tokens,
         "total_cached_tokens": total_cached_tokens,
-        "cache_hit_rate": total_cached_tokens / total_input_tokens if total_input_tokens > 0 else 0.0,
+        "cache_reported_input_tokens": cache_reported_input_tokens,
+        "cache_reported_cached_tokens": cache_reported_cached_tokens,
+        "cache_hit_rate": cache_reported_cached_tokens / cache_reported_input_tokens if cache_reported_input_tokens > 0 else None,
+        "cache_coverage": cache_reported_input_tokens / total_input_tokens if total_input_tokens > 0 else None,
     }
 
 
@@ -192,5 +208,4 @@ def extract_session_total_output_tokens(metadata: Any) -> int:
     total_output_tokens = metadata.get("total_output_tokens")
     if _is_non_negative_int(total_output_tokens):
         return total_output_tokens
-    output_tokens = metadata.get("output_tokens")
-    return output_tokens if _is_non_negative_int(output_tokens) else 0
+    return 0

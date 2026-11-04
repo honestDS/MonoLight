@@ -25,7 +25,7 @@ from app.core.utils.dispatcher import markdown_instruction as markdown_instructi
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.audit import AuditRecordStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
-from app.models.profile import ToolConfig
+from app.models.profile import OtherConfig, ToolConfig
 from app.models.session_todo import SessionTodoPlan
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 from tests.unit.response_test_support import audit_confirmation_payload, multimodal_read_payload, pending_audit_tool_result
@@ -518,6 +518,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
             max_parallel_tools=5,
             executor_max_workers=1,
         ),
+        other=OtherConfig(),
     )
     checkpoint_messages = [
         InternalMessage(role=MessageRole.USER, content="original request"),
@@ -689,6 +690,7 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
             max_parallel_tools=5,
             executor_max_workers=1,
         ),
+        other=OtherConfig(),
     )
     selected_models = []
     emitted_events = []
@@ -824,6 +826,7 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
             max_parallel_tools=5,
             executor_max_workers=1,
         ),
+        other=OtherConfig(),
     )
     model_requests = []
     persisted_environment_prompts = []
@@ -979,7 +982,8 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
     assert request_metadatas[0]["total_cached_tokens"] == 100
     assert request_metadatas[1]["total_input_tokens"] == 200
     assert request_metadatas[1]["total_cached_tokens"] == 100
-    assert request_metadatas[1]["cache_hit_rate"] == pytest.approx(0.5)
+    assert [metadata["cache_hit_rate"] for metadata in request_metadatas] == [None, None]
+    assert [metadata["cache_coverage"] for metadata in request_metadatas] == [0, 0]
     first_user_payload = json.loads(model_requests[0]["messages"][0].content)
     second_user_payload = json.loads(model_requests[1]["messages"][0].content)
     assert first_user_payload["user_message"] == "original request"
@@ -998,7 +1002,8 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
     assert response["llm_request_metadata"]["cached_tokens"] == 0
     assert response["llm_request_metadata"]["total_input_tokens"] == 200
     assert response["llm_request_metadata"]["total_cached_tokens"] == 100
-    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(0.5)
+    assert response["llm_request_metadata"]["cache_hit_rate"] is None
+    assert response["llm_request_metadata"]["cache_coverage"] == 0
 
 
 @pytest.mark.asyncio
@@ -1011,6 +1016,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
             max_parallel_tools=5,
             executor_max_workers=1,
         ),
+        other=OtherConfig(),
     )
     model_requests = []
     channel_call_contexts = []
@@ -1214,6 +1220,7 @@ async def _run_audited_interactive_dispatch(
             audit_model_id="audit-model" if audit_configured else None,
         ),
         tool=ToolConfig(max_parallel_tools=5, executor_max_workers=1),
+        other=OtherConfig(),
     )
     tool_call = tool_call or InternalToolCall(
         id="call-1",
@@ -1800,26 +1807,28 @@ async def test_interactive_accumulates_output_tokens_and_session_cache_metrics(m
         "estimated",
         "provider",
     ]
+    assert [event["summary_trigger_tokens"] for event in metadata_events] == [2908] * 4
     provider_metadata_events = [event for event in metadata_events if event["input_tokens_source"] == "provider"]
     assert [event["input_tokens"] for event in provider_metadata_events] == [1000, 1100]
     assert [event["total_input_tokens"] for event in metadata_events] == [0, 1000, 1000, 2100]
     assert [event["total_cached_tokens"] for event in metadata_events] == [0, 200, 200, 640]
+    assert [event["cache_hit_rate"] for event in metadata_events] == [None, None, None, None]
+    assert [event["cache_coverage"] for event in metadata_events] == [None, 0, 0, 0]
     assert metadata_events[1]["output_tokens"] == 12
     assert metadata_events[1]["total_output_tokens"] == 12
     assert metadata_events[2]["output_tokens"] == 12
     assert metadata_events[2]["total_output_tokens"] == 12
     assert metadata_events[2]["cached_tokens"] == 200
-    assert metadata_events[2]["cache_hit_rate"] == pytest.approx(0.2)
     assert metadata_events[3]["output_tokens"] == 32
     assert metadata_events[3]["total_output_tokens"] == 32
     assert metadata_events[3]["cached_tokens"] == 440
-    assert metadata_events[3]["cache_hit_rate"] == pytest.approx(640 / 2100)
     assert any(checkpoint["total_output_tokens"] == 12 for checkpoint in checkpoints)
     assert any(checkpoint.get("session_total_output_tokens") == 12 for checkpoint in checkpoints)
     assert any(checkpoint["session_total_input_tokens"] == 1000 and checkpoint["session_total_cached_tokens"] == 200 for checkpoint in checkpoints)
     assert response["llm_request_metadata"]["output_tokens"] == 32
     assert response["llm_request_metadata"]["total_output_tokens"] == 32
-    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(640 / 2100)
+    assert response["llm_request_metadata"]["cache_hit_rate"] is None
+    assert response["llm_request_metadata"]["cache_coverage"] == 0
     assert unknown_calls == []
 
 
@@ -1937,13 +1946,14 @@ async def test_interactive_resume_continues_total_output_tokens(monkeypatch):
     assert [event["total_output_tokens"] for event in provider_metadata_events] == [19, 22]
     assert [event["total_input_tokens"] for event in provider_metadata_events] == [600, 720]
     assert [event["total_cached_tokens"] for event in provider_metadata_events] == [120, 150]
-    assert provider_metadata_events[0]["cache_hit_rate"] == pytest.approx(120 / 600)
-    assert provider_metadata_events[1]["cache_hit_rate"] == pytest.approx(150 / 720)
+    assert [event["cache_hit_rate"] for event in provider_metadata_events] == [None, None]
+    assert [event["cache_coverage"] for event in provider_metadata_events] == [0, 0]
     assert response["llm_request_metadata"]["output_tokens"] == 60
     assert response["llm_request_metadata"]["total_output_tokens"] == 22
     assert response["llm_request_metadata"]["total_input_tokens"] == 720
     assert response["llm_request_metadata"]["total_cached_tokens"] == 150
-    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(150 / 720)
+    assert response["llm_request_metadata"]["cache_hit_rate"] is None
+    assert response["llm_request_metadata"]["cache_coverage"] == 0
     assert unknown_calls == []
 
 

@@ -21,7 +21,8 @@ const sessionActivityFields = [
   'last_active',
   'source',
   'is_loading',
-  'is_reply_running'
+  'is_reply_running',
+  'is_context_summarizing'
 ]
 
 export const mergeSessionActivities = (sessions, activities) => {

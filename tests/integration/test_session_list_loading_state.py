@@ -9,6 +9,7 @@ from app.api.v1 import chat as chat_api
 from app.core.crud.session.message import message_crud
 from app.models.message import Message
 from app.models.session import ChatSession
+from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SESSION_REPLY_ACTIVE_STATUSES,
     SESSION_REPLY_TERMINAL_STATUSES,
@@ -28,6 +29,7 @@ async def db_session(database_factory) -> AsyncSession:
             User.__table__,
             ChatSession.__table__,
             Message.__table__,
+            SessionReplyStreamEvent.__table__,
             SessionReplyWorkItem.__table__,
         ]
     ) as factory:

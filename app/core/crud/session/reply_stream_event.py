@@ -1,11 +1,45 @@
 from typing import Any
 
-from sqlalchemy import func
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import exists, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
+from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
+from app.providers.database import ensure_sqlite_outer_transaction
+
+
+def context_summary_running_expression():
+    latest_summary_type = (
+        select(SessionReplyStreamEvent.event["type"].as_string())
+        .where(
+            SessionReplyStreamEvent.work_id == SessionReplyWorkItem.id,
+            SessionReplyStreamEvent.event["type"].as_string().in_(["context_summary_start", "context_summary_end"]),
+            SessionReplyStreamEvent.event["work_sequence_no"].as_integer() == SessionReplyWorkItem.sequence_no,
+        )
+        .order_by(SessionReplyStreamEvent.sequence_no.desc())
+        .limit(1)
+        .correlate(SessionReplyWorkItem)
+        .scalar_subquery()
+    )
+    return exists(
+        select(SessionReplyWorkItem.id)
+        .where(
+            SessionReplyWorkItem.session_id == ChatSession.session_id,
+            SessionReplyWorkItem.uid == ChatSession.uid,
+            SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING,
+            SessionReplyWorkItem.work_type.in_(
+                [
+                    SessionReplyWorkType.FOREGROUND_REPLY,
+                    SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                ]
+            ),
+            latest_summary_type == "context_summary_start",
+        )
+        .correlate(ChatSession)
+    ).label("is_context_summarizing")
 
 
 class CRUDSessionReplyStreamEvent:
@@ -18,28 +52,28 @@ class CRUDSessionReplyStreamEvent:
         event: dict[str, Any],
         commit: bool = True,
     ) -> tuple[SessionReplyStreamEvent, bool]:
-        statement = (
-            sqlite_insert(SessionReplyStreamEvent)
-            .values(work_id=work_id, sequence_no=sequence_no, event=event)
-            .on_conflict_do_nothing(
-                index_elements=[
-                    SessionReplyStreamEvent.work_id,
-                    SessionReplyStreamEvent.sequence_no,
-                ]
-            )
-            .returning(SessionReplyStreamEvent)
-        )
-        result = await db.execute(statement)
-        item = result.scalars().first()
-        created = item is not None
-        if item is None:
+        item = SessionReplyStreamEvent(work_id=work_id, sequence_no=sequence_no, event=event)
+        await ensure_sqlite_outer_transaction(db)
+        try:
+            async with db.begin_nested():
+                db.add(item)
+                await db.flush()
+        except IntegrityError:
             existing = await db.execute(
-                select(SessionReplyStreamEvent).where(
+                select(SessionReplyStreamEvent)
+                .where(
                     SessionReplyStreamEvent.work_id == work_id,
                     SessionReplyStreamEvent.sequence_no == sequence_no,
                 )
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
-            item = existing.scalars().one()
+            item = existing.scalars().first()
+            if item is None:
+                raise
+            created = False
+        else:
+            created = True
         if commit:
             await db.commit()
         return item, created

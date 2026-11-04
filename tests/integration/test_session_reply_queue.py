@@ -16,6 +16,7 @@ from app.core.constants import (
     TERMINAL_WATCH_TOOL_NAME,
 )
 from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_stream_event import context_summary_running_expression, session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
@@ -1296,3 +1297,202 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
     assert checkpoints[0] == checkpoints[1]
     assert results_snapshots[0] == results_snapshots[1]
     assert message_counts[0] == message_counts[1]
+
+
+@pytest.mark.asyncio
+async def test_context_summary_lifecycle_events_are_committed_and_visible_to_session_projection(
+    concurrent_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch,
+):
+    session_id, uid, worker_id = "session-1", "user-1", "context-summary-worker"
+    request_id = "context-summary-request-1"
+    lock_until = 9999999999
+    crud = CRUDSessionReplyWorkItem()
+
+    async with concurrent_session_factory() as setup_db:
+        setup_db.add(ChatSession(session_id=session_id, uid=uid, profile_id=1))
+        await setup_db.flush()
+        work = await enqueue(
+            crud,
+            setup_db,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=1,
+            dedupe_key="foreground-context-summary-lifecycle",
+        )
+        work.status = SessionReplyWorkStatus.RUNNING
+        work.locked_by = worker_id
+        work.lock_until = lock_until
+        work.execution_state = {
+            "stream_requested": False,
+            "context_summary_events_requested": False,
+            "request_ids": [request_id],
+        }
+        await setup_db.commit()
+        assert work.id is not None
+        work_id = work.id
+        work_sequence_no = work.sequence_no
+
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", concurrent_session_factory)
+
+    async def observe_published_event(expected_type: str, expected_running: bool, expected_sequence_no: int) -> None:
+        async with concurrent_session_factory() as verify_db:
+            events = await session_reply_stream_event_crud.list_after_sequence(
+                verify_db,
+                work_id=work_id,
+                after_sequence_no=0,
+            )
+            assert [event.sequence_no for event in events] == list(range(1, expected_sequence_no + 1))
+            latest_event = events[-1]
+            assert latest_event.event == {
+                "type": expected_type,
+                "session_id": session_id,
+                "work_id": work_id,
+                "work_sequence_no": work_sequence_no,
+                "event_sequence_no": expected_sequence_no,
+            }
+
+            projection = await verify_db.execute(select(context_summary_running_expression()).select_from(ChatSession).where(ChatSession.session_id == session_id, ChatSession.uid == uid))
+            assert bool(projection.scalar_one()) is expected_running
+
+            persisted_work = await crud.get(verify_db, work_id)
+            assert persisted_work is not None
+            assert persisted_work.status == SessionReplyWorkStatus.RUNNING
+            assert persisted_work.locked_by == worker_id
+            assert persisted_work.lock_until == lock_until
+            assert persisted_work.execution_state == {
+                "stream_requested": False,
+                "context_summary_events_requested": False,
+                "request_ids": [request_id],
+            }
+            await verify_db.rollback()
+            assert not verify_db.in_transaction()
+
+    async def dispatch(**kwargs):
+        lifecycle_callback = kwargs["context_summary_lifecycle_callback"]
+        assert lifecycle_callback is not None
+
+        await lifecycle_callback({"type": "context_summary_start"})
+        await observe_published_event("context_summary_start", True, 1)
+        await lifecycle_callback({"type": "context_summary_end"})
+        await observe_published_event("context_summary_end", False, 2)
+        return llm_response_payload("stubbed reply", history=[])
+
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+
+    async with concurrent_session_factory() as generation_db:
+        generation_work = await crud.get(generation_db, work_id)
+        assert generation_work is not None
+        generation_db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
+        try:
+            response = await executor_interactive_module._dispatch_interactive_work(
+                generation_db,
+                work=generation_work,
+                worker_id=worker_id,
+                message="queued message",
+                initial_message=InternalMessage(id=1, role=MessageRole.USER, content="queued message"),
+                history_before_id=1,
+                frozen_user_message_ids=[1],
+                attachments=None,
+                allow_additional_user_messages=False,
+                execution_resume_state=None,
+            )
+        finally:
+            await generation_db.rollback()
+        assert not generation_db.in_transaction()
+
+    async with concurrent_session_factory() as verify_db:
+        events = await session_reply_stream_event_crud.list_after_sequence(
+            verify_db,
+            work_id=work_id,
+            after_sequence_no=0,
+        )
+        assert [event.sequence_no for event in events] == [1, 2]
+        assert [event.event["event_sequence_no"] for event in events] == [1, 2]
+    assert [event.event["work_id"] for event in events] == [work_id, work_id]
+
+    assert response["choices"][0]["message"]["content"] == "stubbed reply"
+
+
+@pytest.mark.asyncio
+async def test_stream_event_publish_savepoint_preserves_caller_transaction(
+    concurrent_session_factory: async_sessionmaker[AsyncSession],
+):
+    session_id, uid = "session-1", "user-1"
+    crud = CRUDSessionReplyWorkItem()
+    start_event = {"type": "context_summary_start"}
+    end_event = {"type": "context_summary_end"}
+
+    async with concurrent_session_factory() as db:
+        db.add(ChatSession(session_id=session_id, uid=uid, profile_id=1, title="initial title"))
+        await db.flush()
+        work = await enqueue(
+            crud,
+            db,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=1,
+            dedupe_key="foreground-stream-event-savepoint",
+        )
+        await db.commit()
+        assert work.id is not None
+        work_id = work.id
+
+        session = await db.get(ChatSession, session_id)
+        assert session is not None
+        session.title = "committed title"
+        first, created = await session_reply_stream_event_crud.publish(
+            db,
+            work_id=work_id,
+            sequence_no=1,
+            event=start_event,
+            commit=False,
+        )
+        assert created is True
+        assert first.event == start_event
+
+        duplicate, created = await session_reply_stream_event_crud.publish(
+            db,
+            work_id=work_id,
+            sequence_no=1,
+            event=end_event,
+            commit=False,
+        )
+        assert created is False
+        assert duplicate.event == start_event
+        assert session.title == "committed title"
+        assert db.in_transaction()
+        await db.commit()
+
+        async with concurrent_session_factory() as verify_db:
+            committed_session = await verify_db.get(ChatSession, session_id)
+            committed_events = await session_reply_stream_event_crud.list_after_sequence(
+                verify_db,
+                work_id=work_id,
+                after_sequence_no=0,
+            )
+            assert committed_session is not None
+            assert committed_session.title == "committed title"
+            assert [(event.sequence_no, event.event) for event in committed_events] == [(1, start_event)]
+
+        session.title = "rolled-back title"
+        second, created = await session_reply_stream_event_crud.publish(
+            db,
+            work_id=work_id,
+            sequence_no=2,
+            event=end_event,
+            commit=False,
+        )
+        assert created is True
+        assert second.event == end_event
+        assert db.in_transaction()
+        await db.rollback()
+
+    async with concurrent_session_factory() as verify_db:
+        rolled_back_session = await verify_db.get(ChatSession, session_id)
+        rolled_back_events = await session_reply_stream_event_crud.list_after_sequence(
+            verify_db,
+            work_id=work_id,
+            after_sequence_no=0,
+        )
+        assert rolled_back_session is not None
+        assert rolled_back_session.title == "committed title"
+        assert [(event.sequence_no, event.event) for event in rolled_back_events] == [(1, start_event)]

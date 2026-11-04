@@ -388,6 +388,7 @@ async def get_user_sessions_activity(db: AsyncSession = Depends(get_db), current
             "source": row.source or "http",
             "is_loading": bool(row.is_loading),
             "is_reply_running": bool(row.is_reply_running),
+            "is_context_summarizing": bool(row.is_context_summarizing),
             "title": row.title,
             "is_owned": row.uid == uid,
             "last_read_message_id": row.last_read_message_id if row.uid == uid else None,
@@ -448,6 +449,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "latest_message_id": row.latest_message_id,
                 "is_loading": bool(row.is_loading),
                 "is_reply_running": bool(row.is_reply_running),
+                "is_context_summarizing": bool(row.is_context_summarizing),
                 "username": row.username,
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
@@ -461,6 +463,8 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "source": row.source or "http",
                 "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
                 "llm_request_metadata": row.llm_request_metadata,
+                "context_summary_revision": row.context_summary_revision,
+                "context_content_revision": row.context_content_revision,
                 "reply_works": reply_works_by_session.get(row.session_id, []),
             }
         )

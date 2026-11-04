@@ -246,7 +246,10 @@ async def _seed_pending_confirmation(
                     "total_input_tokens": 1000,
                     "total_cached_tokens": 250,
                     "total_output_tokens": 200,
-                    "cache_hit_rate": 0.25,
+                    "cache_reported_input_tokens": 500,
+                    "cache_reported_cached_tokens": 250,
+                    "cache_hit_rate": 0.5,
+                    "cache_coverage": 0.5,
                     "context_window_tokens": 4096,
                     "max_output_tokens": 512,
                 },
@@ -664,7 +667,10 @@ async def test_confirmation_workflow_approves_executes_replaces_pending_result_a
     assert session.llm_request_metadata["total_input_tokens"] == 1120
     assert session.llm_request_metadata["total_cached_tokens"] == 270
     assert session.llm_request_metadata["total_output_tokens"] == 207
-    assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
+    assert session.llm_request_metadata["cache_reported_input_tokens"] == 620
+    assert session.llm_request_metadata["cache_reported_cached_tokens"] == 270
+    assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 620)
+    assert session.llm_request_metadata["cache_coverage"] == pytest.approx(620 / 1120)
 
 
 @pytest.mark.asyncio

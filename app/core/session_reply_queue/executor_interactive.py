@@ -336,6 +336,8 @@ async def _dispatch_interactive_work(
             build_session_cache_metrics(
                 result.total_input_tokens,
                 result.total_cached_tokens,
+                cache_reported_input_tokens=result.cache_reported_input_tokens,
+                cache_reported_cached_tokens=result.cache_reported_cached_tokens,
             )
         )
         stream_state.session_token_totals["total_output_tokens"] = result.total_output_tokens
@@ -402,7 +404,7 @@ async def _dispatch_interactive_work(
                 _publish_interactive_work_stream_event,
                 stream_state,
             )
-            if context_summary_events_requested
+            if update_session_context
             else None,
         )
         if scheduled_task_work:

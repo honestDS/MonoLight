@@ -32,6 +32,7 @@ from app.core.log import channel_log_extra
 from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
 from app.core.provider_usage import build_reply_usage_snapshot
 from app.core.tools.end_session import END_SESSION_TOOL_NAME, is_end_session_signal, is_skip_reply_signal
+from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.frozen_context import compact_frozen_context_messages
@@ -291,6 +292,11 @@ async def generate_interactive_turn(
                 "total_output_tokens": state.checkpoint_state.session_total_output_tokens,
                 "context_window_tokens": max(1, int(state.chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K),
                 "max_output_tokens": max(0, int(state.chat_params["max_tokens"])),
+                "summary_trigger_tokens": calculate_context_summary_trigger_tokens(
+                    context_window_k=state.chat_params["context_window_k"],
+                    max_tokens=state.chat_params["max_tokens"],
+                    threshold_percent=state.cfg.other.context_summary_threshold_percent,
+                ),
                 **({"channel_id": current_channel_id} if current_channel_id is not None else {}),
                 "model_id": model_id,
                 "protocol": protocol,

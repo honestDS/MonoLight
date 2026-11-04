@@ -1,72 +1,11 @@
 <template>
   <div class="message-list-wrapper">
-    <Transition name="request-metadata-fade">
-      <div
-        v-if="showRequestMetadata"
-        :class="['llm-request-metadata', 'glass-surface', { 'is-collapsed': requestMetadataCollapsed }]"
-      >
-        <div
-          id="llm-request-metadata-content"
-          class="llm-request-metadata-content"
-          role="status"
-          :aria-hidden="requestMetadataCollapsed"
-          :aria-label="$t('chat.llm_request_metadata_label')"
-        >
-          <span class="llm-request-metadata-item">
-            <span>{{ $t('chat.input_tokens') }}</span>
-            <strong>{{ formatTokenCount(llmRequestMetadata?.total_input_tokens) }}</strong>
-          </span>
-          <span class="llm-request-metadata-item">
-            <span>{{ $t('chat.total_output') }}</span>
-            <strong>{{ formatTokenCount(llmRequestMetadata?.total_output_tokens ?? llmRequestMetadata?.output_tokens) }}</strong>
-          </span>
-          <span class="llm-request-metadata-item">
-            <span>{{ $t('chat.cache_hit_rate') }}</span>
-            <strong>{{ formatCacheHitRate(llmRequestMetadata?.cache_hit_rate) }}</strong>
-          </span>
-          <span class="llm-request-metadata-item">
-            <span>{{ $t('chat.context_limit') }}</span>
-            <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
-          </span>
-          <span class="llm-request-metadata-item">
-            <span>{{ $t('chat.max_output') }}</span>
-            <strong>{{ formatTokenCount(llmRequestMetadata?.max_output_tokens) }}</strong>
-          </span>
-        </div>
-        <div class="request-metadata-actions">
-          <span class="request-metadata-collapsed-label" aria-hidden="true">
-            {{ $t('chat.request_metadata_short_label') }}
-          </span>
-          <el-tooltip
-            v-if="currentSessionInfo"
-            :content="formatSessionTooltip(currentSessionInfo)"
-            placement="bottom"
-            :show-after="100"
-            popper-class="session-info-tooltip"
-          >
-            <el-icon class="session-info-icon"><InfoFilled /></el-icon>
-          </el-tooltip>
-          <el-tooltip
-            :content="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
-            placement="bottom"
-            :show-after="300"
-          >
-            <button
-              type="button"
-              class="request-metadata-toggle"
-              :aria-label="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
-              :aria-expanded="!requestMetadataCollapsed"
-              aria-controls="llm-request-metadata-content"
-              @click="requestMetadataCollapsed = !requestMetadataCollapsed"
-            >
-              <el-icon class="request-metadata-toggle-icon" :class="{ 'is-expanded': !requestMetadataCollapsed }">
-                <ArrowDown />
-              </el-icon>
-            </button>
-          </el-tooltip>
-        </div>
-      </div>
-    </Transition>
+    <ChatRequestMetadata
+      v-if="showRequestMetadata"
+      :metadata="llmRequestMetadata"
+      :session-info="currentSessionInfo"
+      :context-summarizing="contextSummarizing"
+    />
     <VList
       :key="currentSessionId || '__new_session__'"
       ref="virtualList"
@@ -377,12 +316,13 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
-import { ArrowDown, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
+import { WarningFilled } from '@element-plus/icons-vue'
 import 'highlight.js/styles/github.css'
 import 'github-markdown-css/github-markdown.css'
 import VirtualizedCode from './VirtualizedCode.vue'
 import ThinkingBlock from './ThinkingBlock.vue'
 import CollapsibleMessageText from './CollapsibleMessageText.vue'
+import ChatRequestMetadata from './ChatRequestMetadata.vue'
 import {
   formatTimestamp,
   getMessageTimestamp,
@@ -390,7 +330,6 @@ import {
   getToolResultContent
 } from '../utils'
 import { getMessageListScrollState, getReasoningCollapseName, isFollowableLlmOutput } from '../utils/chatPresentation.js'
-import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
 import { useChatMessagePresentation } from '../composables/chat/useChatMessagePresentation.js'
 import { useChatAuditConfirmation } from '../composables/chat/useChatAuditConfirmation.js'
 import { useChatMessageFiles } from '../composables/chat/useChatMessageFiles.js'
@@ -413,9 +352,6 @@ const props = defineProps({
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
 const {
-  formatTokenCount,
-  formatCacheHitRate,
-  formatSessionTooltip,
   renderMarkdown,
   renderTextWithLinks,
   getDisplayKey,
@@ -453,9 +389,6 @@ const {
   getSentFileImageUrls,
   handleFileDownload
 } = useChatMessageFiles({ props, t, getMessageFiles })
-const storedRequestMetadataCollapsed = getClientSetting('requestMetadataCollapsed', true)
-const requestMetadataCollapsed = ref(typeof storedRequestMetadataCollapsed === 'boolean' ? storedRequestMetadataCollapsed : true)
-watch(requestMetadataCollapsed, value => setClientSetting('requestMetadataCollapsed', value))
 const virtualList = ref(null)
 const maintainScrollPosition = ref(false)
 let bottomScrollRequest = 0

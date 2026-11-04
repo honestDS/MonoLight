@@ -35,6 +35,7 @@ from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
     build_session_cache_metrics,
     extract_provider_token_metrics,
+    extract_session_cache_reporting_totals,
     extract_session_total_output_tokens,
     merge_session_cache_token_totals,
 )
@@ -254,13 +255,15 @@ async def prepare_request_messages(
     session = await session_crud.get_by_session_id(context.db, context.session_id)
     if session is not None and hasattr(context.db, "refresh"):
         await context.db.refresh(session)
+    session_metadata = getattr(session, "llm_request_metadata", None)
     context.session_total_input_tokens, context.session_total_cached_tokens = merge_session_cache_token_totals(
-        getattr(session, "llm_request_metadata", None),
+        session_metadata,
         total_input_tokens=context.session_total_input_tokens,
         total_cached_tokens=context.session_total_cached_tokens,
     )
+    cache_reported_input_tokens, cache_reported_cached_tokens = extract_session_cache_reporting_totals(session_metadata)
     persisted_total = extract_session_total_output_tokens(
-        getattr(session, "llm_request_metadata", None),
+        session_metadata,
     )
     if context.session_total_output_tokens is None:
         context.session_total_output_tokens = persisted_total
@@ -292,6 +295,8 @@ async def prepare_request_messages(
         **build_session_cache_metrics(
             context.session_total_input_tokens,
             context.session_total_cached_tokens,
+            cache_reported_input_tokens=cache_reported_input_tokens,
+            cache_reported_cached_tokens=cache_reported_cached_tokens,
         ),
     }
     context.latest_precheck_request_metadata = metadata
@@ -355,12 +360,7 @@ async def generate(
 
 async def update_output_metadata(context: MemoryRecallContext, response: Any) -> None:
     provider_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
-    provider_metrics.update(
-        build_session_cache_metrics(
-            context.session_total_input_tokens,
-            context.session_total_cached_tokens,
-        )
-    )
+    provider_metrics.pop("cache_hit_rate", None)
     if "output_tokens" in provider_metrics:
         output_tokens = provider_metrics["output_tokens"]
         context.total_output_tokens += output_tokens

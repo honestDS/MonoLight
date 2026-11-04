@@ -13,6 +13,7 @@ from app.models.context_summary_stage import ContextSummaryFragment, ContextSumm
 from app.models.message import Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
+from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.user import User
 
@@ -24,6 +25,7 @@ async def db_session(database_factory) -> AsyncGenerator[AsyncSession]:
             Message.__table__,
             ChatSession.__table__,
             SessionReplyWorkItem.__table__,
+            SessionReplyStreamEvent.__table__,
             ContextSummaryStage.__table__,
             ContextSummaryFragment.__table__,
             AuditToolResultVersion.__table__,
@@ -230,6 +232,9 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "total_input_tokens": 1000,
             "total_cached_tokens": 325,
             "cached_tokens": 40,
+            "summary_trigger_tokens": 1600,
+            "cache_reported_input_tokens": 500,
+            "cache_reported_cached_tokens": 250,
             "cache_hit_rate": 0.325,
             "model_id": "grok-4.5",
             "protocol": "openai",
@@ -252,7 +257,11 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "total_input_tokens": 1000,
         "total_cached_tokens": 325,
         "cached_tokens": 40,
-        "cache_hit_rate": 0.325,
+        "summary_trigger_tokens": 1600,
+        "cache_reported_input_tokens": 500,
+        "cache_reported_cached_tokens": 250,
+        "cache_hit_rate": 0.5,
+        "cache_coverage": 0.5,
         "model_id": "grok-4.5",
         "protocol": "openai",
         "input_tokens_source": "provider",
@@ -346,6 +355,20 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "total_cached_tokens": 1001,
         },
     )
+    invalid_cache_reported_input_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": 123,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "total_input_tokens": 1000,
+            "total_cached_tokens": 325,
+            "cache_reported_input_tokens": 1001,
+            "cache_reported_cached_tokens": 250,
+        },
+    )
     await db_session.refresh(session)
 
     assert invalid_updated is False
@@ -356,6 +379,7 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
     assert invalid_total_input_tokens_updated is False
     assert invalid_total_cached_tokens_updated is False
     assert invalid_total_cached_tokens_exceed_input_updated is False
+    assert invalid_cache_reported_input_updated is False
     assert session.llm_request_metadata == {
         "input_tokens": 123,
         "context_window_tokens": 4096,
@@ -368,7 +392,11 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "total_input_tokens": 1000,
         "total_cached_tokens": 325,
         "cached_tokens": 40,
-        "cache_hit_rate": 0.325,
+        "summary_trigger_tokens": 1600,
+        "cache_reported_input_tokens": 500,
+        "cache_reported_cached_tokens": 250,
+        "cache_hit_rate": 0.5,
+        "cache_coverage": 0.5,
         "model_id": "grok-4.5",
         "protocol": "openai",
         "input_tokens_source": "provider",

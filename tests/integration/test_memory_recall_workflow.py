@@ -192,7 +192,10 @@ async def _seed_memory_recall_workflow(session_factory, *, chat_protocol: str = 
                     "total_input_tokens": 1000,
                     "total_cached_tokens": 250,
                     "total_output_tokens": 200,
-                    "cache_hit_rate": 0.25,
+                    "cache_reported_input_tokens": 500,
+                    "cache_reported_cached_tokens": 250,
+                    "cache_hit_rate": 0.5,
+                    "cache_coverage": 0.5,
                 },
             )
         )
@@ -599,7 +602,10 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         assert chat_session.llm_request_metadata["output_tokens"] == 10
         assert chat_session.llm_request_metadata["total_input_tokens"] == 1000
         assert chat_session.llm_request_metadata["total_cached_tokens"] == 250
-        assert chat_session.llm_request_metadata["cache_hit_rate"] == 0.25
+        assert chat_session.llm_request_metadata["cache_reported_input_tokens"] == 500
+        assert chat_session.llm_request_metadata["cache_reported_cached_tokens"] == 250
+        assert chat_session.llm_request_metadata["cache_hit_rate"] == 0.5
+        assert chat_session.llm_request_metadata["cache_coverage"] == 0.5
         assert chat_session.llm_request_metadata["total_output_tokens"] == 200
         recall_rows = [row for row in rows if row.dedupe_key and row.dedupe_key.startswith("memory-recall-")]
         assert [row.type for row in recall_rows] == [MessageType.TOOL_CALL, MessageType.TOOL_RESULT]
@@ -618,7 +624,10 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     assert metadata_events[-1]["output_tokens"] == 12
     assert metadata_events[-1]["total_input_tokens"] == 1000
     assert metadata_events[-1]["total_cached_tokens"] == 250
-    assert metadata_events[-1]["cache_hit_rate"] == 0.25
+    assert metadata_events[-1]["cache_reported_input_tokens"] == 500
+    assert metadata_events[-1]["cache_reported_cached_tokens"] == 250
+    assert metadata_events[-1]["cache_hit_rate"] == 0.5
+    assert metadata_events[-1]["cache_coverage"] == 0.5
     assert metadata_events[-1]["total_output_tokens"] == 200
     assert [event["type"] for event in events if event["type"] != "llm_request_metadata"] == [
         "agent_loop_start",
@@ -1445,7 +1454,7 @@ async def test_memory_recall_output_budget_falls_back_without_mutating_main_cont
         assert session.llm_request_metadata["total_input_tokens"] == 1000
         assert session.llm_request_metadata["total_cached_tokens"] == 250
         assert session.llm_request_metadata["total_output_tokens"] == 200
-        assert session.llm_request_metadata["cache_hit_rate"] == 0.25
+        assert session.llm_request_metadata["cache_hit_rate"] == 0.5
         assert {row.cursor_key for row in cursor_rows} == {
             "1:CHAT:AUXILIARY:1",
             "1:CHAT:AUXILIARY:2",

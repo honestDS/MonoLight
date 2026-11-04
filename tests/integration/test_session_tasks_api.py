@@ -40,7 +40,7 @@ TASK_FIELDS = {
     "completed_status",
     "has_unread_result",
 }
-ACTIVITY_FIELDS = TASK_FIELDS | {"is_owned", "is_loading", "is_reply_running"}
+ACTIVITY_FIELDS = TASK_FIELDS | {"is_owned", "is_loading", "is_reply_running", "is_context_summarizing"}
 INTERACTIVE_WORK_TYPES = (
     SessionReplyWorkType.FOREGROUND_REPLY,
     SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
@@ -193,6 +193,7 @@ async def test_tasks_are_owned_only_nonempty_and_lightweight(api_context) -> Non
         "is_owned": True,
         "is_loading": True,
         "is_reply_running": False,
+        "is_context_summarizing": False,
     }
     assert rows["owned-empty"]["is_running"] is False
     assert rows["owned-empty"]["has_unread_result"] is False

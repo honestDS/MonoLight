@@ -10,6 +10,7 @@ import {
   applyAuditToolResultsUpdateToMessages
 } from './auditConfirmationState.js'
 import {
+  invalidateLlmRequestInput,
   isMainDialogueRequestMetadata,
   mergeLlmRequestMetadata,
   normalizeLlmRequestMetadata
@@ -42,6 +43,17 @@ export function useChatSessionEvents({
   const contextSummaryTracker = createContextSummaryTracker()
   const llmRequestMetadataBySession = ref(new Map())
   const workLifecycleTracker = createWorkLifecycleTracker()
+
+  const hasNewerContextRevision = metadata => {
+    const session = currentSession.value
+    for (const field of ['context_summary_revision', 'context_content_revision']) {
+      const currentRevision = session?.[field]
+      if (!Number.isInteger(currentRevision) || currentRevision < 0) continue
+      const metadataRevision = metadata[field]
+      if (!Number.isInteger(metadataRevision) || metadataRevision < currentRevision) return true
+    }
+    return false
+  }
 
   const applyTodoPlan = (plan, sessionId = sessionManager.currentSessionId.value) => {
     if (!sessionId || sessionId !== sessionManager.currentSessionId.value) return
@@ -80,13 +92,25 @@ export function useChatSessionEvents({
     { immediate: true }
   )
 
-  const isContextSummarizing = computed(() => contextSummaryWorkKeys.value.size > 0)
+  const isContextSummarizing = computed(() => (
+    contextSummaryWorkKeys.value.size > 0
+    || (
+      currentSession.value?.stream_llm_request === false
+      && currentSession.value?.is_context_summarizing === true
+    )
+  ))
 
   const llmRequestMetadata = computed(() => {
     const sessionId = sessionManager.currentSessionId.value
     if (!sessionId) return null
-    return llmRequestMetadataBySession.value.get(sessionId)
+    const metadata = llmRequestMetadataBySession.value.get(sessionId)
       || normalizeLlmRequestMetadata(currentSession.value?.llm_request_metadata)
+    if (!metadata || !hasNewerContextRevision(metadata)) return metadata
+    return {
+      ...metadata,
+      input_tokens: null,
+      input_tokens_source: 'estimated'
+    }
   })
 
   const processAiResponse = (response, thinkingId = null, requestId = null) => {
@@ -109,13 +133,55 @@ export function useChatSessionEvents({
     })
   }
 
-  const cacheLlmRequestMetadata = (sessionId, currentMetadata, metadata) => {
-    const nextMetadata = mergeLlmRequestMetadata(currentMetadata, metadata)
+  const storeLlmRequestMetadata = (sessionId, metadata) => {
     const nextMetadataBySession = new Map(llmRequestMetadataBySession.value)
-    nextMetadataBySession.set(sessionId, nextMetadata)
+    nextMetadataBySession.set(sessionId, metadata)
     llmRequestMetadataBySession.value = nextMetadataBySession
-    return nextMetadata
+    return metadata
   }
+
+  const cacheLlmRequestMetadata = (sessionId, currentMetadata, metadata) => {
+    let nextMetadata = mergeLlmRequestMetadata(currentMetadata, metadata)
+    if (isContextSummarizing.value) {
+      nextMetadata = invalidateLlmRequestInput(nextMetadata, {})
+    }
+    return storeLlmRequestMetadata(sessionId, nextMetadata)
+  }
+
+  const invalidateCurrentLlmRequestInput = (event) => {
+    const sessionId = sessionManager.currentSessionId.value
+    if (!sessionId) return
+
+    const currentMetadata = llmRequestMetadataBySession.value.get(sessionId)
+      || normalizeLlmRequestMetadata(currentSession.value?.llm_request_metadata)
+    if (!currentMetadata) return
+
+    const invalidatedMetadata = invalidateLlmRequestInput(currentMetadata, event)
+    storeLlmRequestMetadata(sessionId, invalidatedMetadata)
+    const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
+    if (sessionIndex !== -1) {
+      sessionManager.sessions.value[sessionIndex] = {
+        ...sessionManager.sessions.value[sessionIndex],
+        llm_request_metadata: invalidatedMetadata
+      }
+    }
+  }
+
+  watch(
+    () => [
+      sessionManager.currentSessionId.value,
+      currentSession.value?.stream_llm_request === false
+        && currentSession.value?.is_context_summarizing === true
+    ],
+    ([sessionId, isSummarizing], previousValue) => {
+      if (!sessionId || !isSummarizing) return
+      const [previousSessionId, wasSummarizing] = previousValue || []
+      if (sessionId !== previousSessionId || !wasSummarizing) {
+        invalidateCurrentLlmRequestInput({})
+      }
+    },
+    { immediate: true, flush: 'sync' }
+  )
 
   const updateLlmRequestMetadata = (event, isCurrentRequestSession) => {
     if (!isCurrentRequestSession()) return
@@ -287,6 +353,8 @@ export function useChatSessionEvents({
           || contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)
           || workLifecycleTracker.isWorkTerminal(data.work_id)
         ) return
+
+        invalidateCurrentLlmRequestInput(data)
         contextSummaryTracker.startContextSummaryWork(
           contextSummaryWorkKeys.value,
           contextSummaryRequestKeys,
@@ -461,7 +529,10 @@ export function useChatSessionEvents({
               'total_input_tokens',
               'total_cached_tokens',
               'total_output_tokens',
-              'cache_hit_rate'
+              'cache_hit_rate',
+              'cache_reported_input_tokens',
+              'cache_reported_cached_tokens',
+              'cache_coverage'
             ].includes(field)))
             : data.llm_request_metadata
           updateLlmRequestMetadata({

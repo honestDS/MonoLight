@@ -1,3 +1,5 @@
+import { getCacheUsagePresentation } from './requestUsagePresentation.js'
+
 export const MAIN_DIALOGUE_REQUEST_PURPOSE = 'main_dialogue'
 
 const REQUEST_METADATA_FIELDS = [
@@ -6,7 +8,20 @@ const REQUEST_METADATA_FIELDS = [
   'context_window_tokens',
   'max_output_tokens'
 ]
-const CUMULATIVE_TOTAL_FIELDS = ['total_input_tokens', 'total_cached_tokens', 'total_output_tokens']
+const CUMULATIVE_TOTAL_FIELDS = [
+  'total_input_tokens',
+  'total_cached_tokens',
+  'total_output_tokens',
+  'cache_reported_input_tokens',
+  'cache_reported_cached_tokens'
+]
+const CONTEXT_IDENTITY_FIELDS = [
+  'channel_id',
+  'model_id',
+  'protocol',
+  'context_summary_revision',
+  'context_content_revision'
+]
 
 const hasOwn = (value, field) => (
   value !== null && value !== undefined && Object.prototype.hasOwnProperty.call(value, field)
@@ -54,9 +69,60 @@ export const normalizeLlmRequestMetadata = (metadata) => {
     hasOwn(metadata, 'total_cached_tokens') &&
     metadata.total_cached_tokens > metadata.total_input_tokens
   ) return null
-  if (Object.prototype.hasOwnProperty.call(metadata, 'cache_hit_rate')) {
-    if (!Number.isFinite(metadata.cache_hit_rate) || metadata.cache_hit_rate < 0 || metadata.cache_hit_rate > 1) return null
-    normalizedMetadata.cache_hit_rate = Number(metadata.cache_hit_rate)
+  if (
+    hasOwn(metadata, 'cache_reported_input_tokens') &&
+    hasOwn(metadata, 'cache_reported_cached_tokens') &&
+    metadata.cache_reported_cached_tokens > metadata.cache_reported_input_tokens
+  ) return null
+  if (
+    hasOwn(metadata, 'cache_reported_input_tokens') &&
+    hasOwn(metadata, 'total_input_tokens') &&
+    metadata.cache_reported_input_tokens > metadata.total_input_tokens
+  ) return null
+  if (
+    hasOwn(metadata, 'cache_reported_cached_tokens') &&
+    hasOwn(metadata, 'total_cached_tokens') &&
+    metadata.cache_reported_cached_tokens > metadata.total_cached_tokens
+  ) return null
+  for (const field of ['cache_hit_rate', 'cache_coverage']) {
+    if (!hasOwn(metadata, field)) continue
+    if (metadata[field] === null) {
+      normalizedMetadata[field] = null
+      continue
+    }
+    if (!Number.isFinite(metadata[field]) || metadata[field] < 0 || metadata[field] > 1) return null
+    normalizedMetadata[field] = Number(metadata[field])
+  }
+  if (hasOwn(metadata, 'summary_trigger_tokens')) {
+    if (
+      metadata.summary_trigger_tokens !== null &&
+      (!Number.isFinite(metadata.summary_trigger_tokens) ||
+        !Number.isInteger(metadata.summary_trigger_tokens) ||
+        metadata.summary_trigger_tokens <= 0)
+    ) return null
+    normalizedMetadata.summary_trigger_tokens = metadata.summary_trigger_tokens
+  }
+  if (hasOwn(metadata, 'channel_id')) {
+    if (
+      !Number.isFinite(metadata.channel_id) ||
+      !Number.isInteger(metadata.channel_id) ||
+      metadata.channel_id <= 0
+    ) return null
+    normalizedMetadata.channel_id = metadata.channel_id
+  }
+  for (const field of ['model_id', 'protocol']) {
+    if (!hasOwn(metadata, field)) continue
+    if (typeof metadata[field] !== 'string' || !metadata[field].trim()) return null
+    normalizedMetadata[field] = metadata[field].trim()
+  }
+  for (const field of ['context_summary_revision', 'context_content_revision']) {
+    if (!hasOwn(metadata, field)) continue
+    if (
+      !Number.isFinite(metadata[field]) ||
+      !Number.isInteger(metadata[field]) ||
+      metadata[field] < 0
+    ) return null
+    normalizedMetadata[field] = metadata[field]
   }
   if (Object.prototype.hasOwnProperty.call(metadata, 'response_id')) normalizedMetadata.response_id = metadata.response_id
   if (Object.prototype.hasOwnProperty.call(metadata, 'turn')) normalizedMetadata.turn = metadata.turn
@@ -84,6 +150,21 @@ export const isMainDialogueRequestMetadata = (metadata) => (
   !metadata?.request_purpose || metadata.request_purpose === MAIN_DIALOGUE_REQUEST_PURPOSE
 )
 
+const hasCompleteContextIdentity = (metadata) => {
+  for (const field of CONTEXT_IDENTITY_FIELDS) {
+    if (!hasOwn(metadata, field) || metadata[field] === null || metadata[field] === undefined) return false
+  }
+  return true
+}
+
+const hasMatchingContextIdentity = (currentMetadata, incomingMetadata) => {
+  if (!hasCompleteContextIdentity(currentMetadata) || !hasCompleteContextIdentity(incomingMetadata)) return false
+  for (const field of CONTEXT_IDENTITY_FIELDS) {
+    if (currentMetadata[field] !== incomingMetadata[field]) return false
+  }
+  return true
+}
+
 export const mergeLlmRequestMetadata = (currentMetadata, metadata) => {
   const current = currentMetadata && typeof currentMetadata === 'object' ? currentMetadata : {}
   const incoming = metadata && typeof metadata === 'object' ? metadata : {}
@@ -91,7 +172,7 @@ export const mergeLlmRequestMetadata = (currentMetadata, metadata) => {
   const shouldReplaceRequest = !totalsOnly && shouldReplaceLlmRequestMetadata(current, incoming)
   const nextMetadata = shouldReplaceRequest ? { ...incoming } : { ...current }
 
-  for (const field of ['output_tokens', 'cached_tokens', 'cache_hit_rate']) {
+  for (const field of ['output_tokens', 'cached_tokens']) {
     if (!hasOwn(nextMetadata, field) && hasOwn(current, field)) nextMetadata[field] = current[field]
   }
 
@@ -101,30 +182,48 @@ export const mergeLlmRequestMetadata = (currentMetadata, metadata) => {
     const hasCurrentValue = isValidNonNegativeNumber(currentValue)
     const hasIncomingValue = isValidNonNegativeNumber(incomingValue)
     if (!hasCurrentValue && !hasIncomingValue) continue
-    nextMetadata[field] = Math.trunc(
-      hasCurrentValue && hasIncomingValue
-        ? Math.max(currentValue, incomingValue)
-        : hasCurrentValue
-          ? currentValue
-          : incomingValue
+    if (hasCurrentValue && hasIncomingValue) {
+      nextMetadata[field] = Math.trunc(Math.max(currentValue, incomingValue))
+    } else if (hasCurrentValue) {
+      nextMetadata[field] = Math.trunc(currentValue)
+    } else {
+      nextMetadata[field] = Math.trunc(incomingValue)
+    }
+  }
+
+  const cacheUsagePresentation = getCacheUsagePresentation(nextMetadata)
+  nextMetadata.cache_hit_rate = cacheUsagePresentation.hitRate
+  nextMetadata.cache_coverage = cacheUsagePresentation.coverage
+
+  if (!totalsOnly && shouldReplaceRequest && incoming.input_tokens_source === 'estimated') {
+    const canReuseProviderInput = (
+      current.input_tokens_source === 'provider' &&
+      isValidNonNegativeNumber(current.input_tokens) &&
+      hasMatchingContextIdentity(current, incoming)
     )
+    if (canReuseProviderInput) {
+      nextMetadata.input_tokens = current.input_tokens
+      nextMetadata.input_tokens_source = 'provider'
+    } else {
+      nextMetadata.input_tokens = null
+      nextMetadata.input_tokens_source = 'estimated'
+    }
   }
+  return nextMetadata
+}
 
-  if (
-    isValidNonNegativeNumber(nextMetadata.total_input_tokens) &&
-    isValidNonNegativeNumber(nextMetadata.total_cached_tokens)
-  ) {
-    nextMetadata.cache_hit_rate = nextMetadata.total_input_tokens === 0
-      ? 0
-      : nextMetadata.total_cached_tokens / nextMetadata.total_input_tokens
+export const invalidateLlmRequestInput = (currentMetadata, event) => {
+  if (!currentMetadata || typeof currentMetadata !== 'object') return null
+  if (!event || typeof event !== 'object') return currentMetadata
+  if (!shouldReplaceLlmRequestMetadata(currentMetadata, event)) return currentMetadata
+
+  const nextMetadata = {
+    ...currentMetadata,
+    input_tokens: null,
+    input_tokens_source: 'estimated'
   }
-
-  if (!totalsOnly && incoming.input_tokens_source === 'estimated') {
-    const confirmedInputTokens = current.input_tokens_source !== 'estimated' && Number.isFinite(current.input_tokens)
-      ? current.input_tokens
-      : null
-    nextMetadata.input_tokens = confirmedInputTokens
-    nextMetadata.input_tokens_source = confirmedInputTokens === null ? 'estimated' : 'provider'
+  for (const field of ['work_sequence_no', 'event_sequence_no']) {
+    if (hasOwn(event, field)) nextMetadata[field] = event[field]
   }
   return nextMetadata
 }
