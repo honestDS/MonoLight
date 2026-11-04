@@ -12,7 +12,6 @@ from app.core.session.source import default_show_tool_calls_for_source
 from app.core.utils.request_token_baseline import (
     MAIN_DIALOGUE_REQUEST_PURPOSE,
     build_session_cache_metrics,
-    extract_session_cache_reporting_totals,
     extract_session_total_output_tokens,
     merge_session_cache_token_totals,
 )
@@ -455,8 +454,6 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             "total_input_tokens",
             "total_cached_tokens",
             "cached_tokens",
-            "cache_reported_input_tokens",
-            "cache_reported_cached_tokens",
         )
         for field in optional_int_fields:
             if field not in metadata:
@@ -481,25 +478,13 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         if has_total_input_tokens and metadata["total_cached_tokens"] > metadata["total_input_tokens"]:
             return False
 
-        has_cache_reported_input_tokens = "cache_reported_input_tokens" in metadata
-        has_cache_reported_cached_tokens = "cache_reported_cached_tokens" in metadata
-        if has_cache_reported_input_tokens != has_cache_reported_cached_tokens:
-            return False
-        if has_cache_reported_input_tokens:
-            if metadata["cache_reported_cached_tokens"] > metadata["cache_reported_input_tokens"]:
-                return False
-            if has_total_input_tokens and (metadata["cache_reported_input_tokens"] > metadata["total_input_tokens"] or metadata["cache_reported_cached_tokens"] > metadata["total_cached_tokens"]):
-                return False
-
-        for field in ("cache_hit_rate", "cache_coverage"):
-            if field not in metadata:
-                continue
-            value = metadata[field]
+        if "cache_hit_rate" in metadata:
+            value = metadata["cache_hit_rate"]
             if value is not None:
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
                     return False
                 value = float(value)
-            persisted_metadata[field] = value
+            persisted_metadata["cache_hit_rate"] = value
 
         for field in ("model_id", "protocol"):
             if field not in metadata:
@@ -548,8 +533,6 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             for field in (
                 "total_input_tokens",
                 "total_cached_tokens",
-                "cache_reported_input_tokens",
-                "cache_reported_cached_tokens",
             )
         )
         if has_cache_metrics:
@@ -558,20 +541,9 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
                 total_input_tokens=metadata.get("total_input_tokens", 0),
                 total_cached_tokens=metadata.get("total_cached_tokens", 0),
             )
-            persisted_cache_reported_input_tokens, persisted_cache_reported_cached_tokens = extract_session_cache_reporting_totals(current_metadata)
-            cache_reported_input_tokens = max(
-                persisted_cache_reported_input_tokens,
-                metadata.get("cache_reported_input_tokens", 0),
-            )
-            cache_reported_cached_tokens = max(
-                persisted_cache_reported_cached_tokens,
-                metadata.get("cache_reported_cached_tokens", 0),
-            )
             cache_metrics = build_session_cache_metrics(
                 total_input_tokens,
                 total_cached_tokens,
-                cache_reported_input_tokens=cache_reported_input_tokens,
-                cache_reported_cached_tokens=cache_reported_cached_tokens,
             )
         else:
             cache_metrics = {}

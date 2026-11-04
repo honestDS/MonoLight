@@ -35,7 +35,6 @@ from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
     build_session_cache_metrics,
     extract_provider_token_metrics,
-    extract_session_cache_reporting_totals,
     extract_session_total_output_tokens,
     merge_session_cache_token_totals,
 )
@@ -261,7 +260,6 @@ async def prepare_request_messages(
         total_input_tokens=context.session_total_input_tokens,
         total_cached_tokens=context.session_total_cached_tokens,
     )
-    cache_reported_input_tokens, cache_reported_cached_tokens = extract_session_cache_reporting_totals(session_metadata)
     persisted_total = extract_session_total_output_tokens(
         session_metadata,
     )
@@ -295,8 +293,6 @@ async def prepare_request_messages(
         **build_session_cache_metrics(
             context.session_total_input_tokens,
             context.session_total_cached_tokens,
-            cache_reported_input_tokens=cache_reported_input_tokens,
-            cache_reported_cached_tokens=cache_reported_cached_tokens,
         ),
     }
     context.latest_precheck_request_metadata = metadata

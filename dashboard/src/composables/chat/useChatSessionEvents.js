@@ -529,10 +529,7 @@ export function useChatSessionEvents({
               'total_input_tokens',
               'total_cached_tokens',
               'total_output_tokens',
-              'cache_hit_rate',
-              'cache_reported_input_tokens',
-              'cache_reported_cached_tokens',
-              'cache_coverage'
+              'cache_hit_rate'
             ].includes(field)))
             : data.llm_request_metadata
           updateLlmRequestMetadata({

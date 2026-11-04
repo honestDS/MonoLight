@@ -9,7 +9,7 @@ import {
   shouldReplaceLlmRequestMetadata
 } from '../src/composables/chat/llmRequestMetadata.js'
 import {
-  getCacheUsagePresentation,
+  getSessionCacheHitRate,
   getContextSummaryProgress
 } from '../src/composables/chat/requestUsagePresentation.js'
 
@@ -139,17 +139,14 @@ test('metadata replacement follows work and event sequence ordering', () => {
   )
 })
 
-test('normalizes cumulative totals and the two reported cache counts', () => {
+test('normalizes cumulative totals and cache hit rate', () => {
   const metadata = normalizeLlmRequestMetadata({
     input_tokens: 120,
     input_tokens_source: 'provider',
     total_input_tokens: 100120,
     total_cached_tokens: 0,
     total_output_tokens: 7,
-    cache_reported_input_tokens: 100,
-    cache_reported_cached_tokens: 0,
     cache_hit_rate: 0,
-    cache_coverage: 100 / 100120,
     ...requestLimits
   })
 
@@ -157,10 +154,7 @@ test('normalizes cumulative totals and the two reported cache counts', () => {
   assert.equal(metadata.total_input_tokens, 100120)
   assert.equal(metadata.total_cached_tokens, 0)
   assert.equal(metadata.total_output_tokens, 7)
-  assert.equal(metadata.cache_reported_input_tokens, 100)
-  assert.equal(metadata.cache_reported_cached_tokens, 0)
   assert.equal(metadata.cache_hit_rate, 0)
-  assert.equal(metadata.cache_coverage, 100 / 100120)
 })
 
 test('rejects invalid cumulative totals and impossible cache totals', () => {
@@ -170,18 +164,10 @@ test('rejects invalid cumulative totals and impossible cache totals', () => {
     ...requestLimits,
     total_input_tokens: 1000,
     total_cached_tokens: 250,
-    total_output_tokens: 200,
-    cache_reported_input_tokens: 100,
-    cache_reported_cached_tokens: 25
+    total_output_tokens: 200
   }
 
-  for (const field of [
-    'total_input_tokens',
-    'total_cached_tokens',
-    'total_output_tokens',
-    'cache_reported_input_tokens',
-    'cache_reported_cached_tokens'
-  ]) {
+  for (const field of ['total_input_tokens', 'total_cached_tokens', 'total_output_tokens']) {
     for (const value of [-1, Number.NaN, true]) {
       assert.equal(normalizeLlmRequestMetadata({ ...validMetadata, [field]: value }), null)
     }
@@ -191,18 +177,6 @@ test('rejects invalid cumulative totals and impossible cache totals', () => {
     normalizeLlmRequestMetadata({ ...validMetadata, total_cached_tokens: 1001 }),
     null
   )
-  assert.equal(
-    normalizeLlmRequestMetadata({ ...validMetadata, cache_reported_cached_tokens: 101 }),
-    null
-  )
-  assert.equal(
-    normalizeLlmRequestMetadata({ ...validMetadata, cache_reported_input_tokens: 1001 }),
-    null
-  )
-  assert.equal(
-    normalizeLlmRequestMetadata({ ...validMetadata, cache_reported_cached_tokens: 251 }),
-    null
-  )
 })
 
 test('normalizes totals-only persistent metadata without fabricated request fields', () => {
@@ -210,19 +184,13 @@ test('normalizes totals-only persistent metadata without fabricated request fiel
     total_input_tokens: 0,
     total_cached_tokens: 0,
     total_output_tokens: 0,
-    cache_reported_input_tokens: 0,
-    cache_reported_cached_tokens: 0,
-    cache_hit_rate: null,
-    cache_coverage: null
+    cache_hit_rate: null
   })
 
   assert.equal(metadata.total_input_tokens, 0)
   assert.equal(metadata.total_cached_tokens, 0)
   assert.equal(metadata.total_output_tokens, 0)
-  assert.equal(metadata.cache_reported_input_tokens, 0)
-  assert.equal(metadata.cache_reported_cached_tokens, 0)
   assert.equal(metadata.cache_hit_rate, null)
-  assert.equal(metadata.cache_coverage, null)
   assert.equal(Object.prototype.hasOwnProperty.call(metadata, 'input_tokens'), false)
   assert.equal(Object.prototype.hasOwnProperty.call(metadata, 'context_window_tokens'), false)
   assert.equal(Object.prototype.hasOwnProperty.call(metadata, 'max_output_tokens'), false)
@@ -238,9 +206,7 @@ test('merge retains cumulative totals omitted by estimated updates, including ze
       input_tokens_source: 'provider',
       total_input_tokens: 100120,
       total_cached_tokens: 0,
-      total_output_tokens: 0,
-      cache_reported_input_tokens: 100,
-      cache_reported_cached_tokens: 0
+      total_output_tokens: 0
     },
     {
       input_tokens: null,
@@ -254,33 +220,51 @@ test('merge retains cumulative totals omitted by estimated updates, including ze
   assert.equal(merged.total_input_tokens, 100120)
   assert.equal(merged.total_cached_tokens, 0)
   assert.equal(merged.total_output_tokens, 0)
-  assert.equal(merged.cache_reported_input_tokens, 100)
-  assert.equal(merged.cache_reported_cached_tokens, 0)
   assert.equal(merged.cache_hit_rate, 0)
-  assert.equal(merged.cache_coverage, 100 / 100120)
 })
 
-test('cache presentation distinguishes an unknown sample from an explicit zero-hit sample', () => {
-  assert.deepEqual(
-    getCacheUsagePresentation({ total_input_tokens: 100 }),
-    { hitRate: null, coverage: null }
-  )
-  assert.deepEqual(
-    getCacheUsagePresentation({
+test('session cache hit rate uses cumulative totals and rejects invalid values', () => {
+  for (const recentRequest of [
+    { input_tokens: 120, cached_tokens: 12 },
+    { input_tokens: 800000, cached_tokens: 0 }
+  ]) {
+    assert.equal(
+      getSessionCacheHitRate({
+        ...recentRequest,
+        total_input_tokens: 1000000,
+        total_cached_tokens: 600000
+      }),
+      0.6
+    )
+  }
+  assert.equal(
+    getSessionCacheHitRate({
+      input_tokens: 80,
+      cached_tokens: 0,
       total_input_tokens: 100,
-      cache_reported_input_tokens: 10,
-      cache_reported_cached_tokens: 0
+      total_cached_tokens: 0
     }),
-    { hitRate: 0, coverage: 0.1 }
+    0
   )
-  assert.deepEqual(
-    getCacheUsagePresentation({
-      total_input_tokens: 0,
-      cache_reported_input_tokens: 0,
-      cache_reported_cached_tokens: 0
-    }),
-    { hitRate: null, coverage: null }
+  assert.equal(getSessionCacheHitRate({ total_input_tokens: 0, total_cached_tokens: 0 }), null)
+  assert.equal(getSessionCacheHitRate({ total_input_tokens: 100 }), null)
+  assert.equal(
+    getSessionCacheHitRate({ total_input_tokens: 100, total_cached_tokens: 101 }),
+    null
   )
+
+  for (const field of ['total_input_tokens', 'total_cached_tokens']) {
+    for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      assert.equal(
+        getSessionCacheHitRate({
+          total_input_tokens: 100,
+          total_cached_tokens: 25,
+          [field]: value
+        }),
+        null
+      )
+    }
+  }
 })
 
 test('merge keeps latest request fields while folding cumulative maxima', () => {
@@ -294,9 +278,7 @@ test('merge keeps latest request fields while folding cumulative maxima', () => 
     event_sequence_no: 4,
     total_input_tokens: 100,
     total_cached_tokens: 20,
-    total_output_tokens: 30,
-    cache_reported_input_tokens: 80,
-    cache_reported_cached_tokens: 20
+    total_output_tokens: 30
   }
   const older = {
     input_tokens: 80,
@@ -309,10 +291,7 @@ test('merge keeps latest request fields while folding cumulative maxima', () => 
     total_input_tokens: 150,
     total_cached_tokens: 30,
     total_output_tokens: 45,
-    cache_reported_input_tokens: 90,
-    cache_reported_cached_tokens: 30,
-    cache_hit_rate: 0.99,
-    cache_coverage: 0.99
+    cache_hit_rate: 0.99
   }
 
   const merged = mergeLlmRequestMetadata(current, older)
@@ -325,10 +304,7 @@ test('merge keeps latest request fields while folding cumulative maxima', () => 
   assert.equal(merged.total_input_tokens, 150)
   assert.equal(merged.total_cached_tokens, 30)
   assert.equal(merged.total_output_tokens, 45)
-  assert.equal(merged.cache_reported_input_tokens, 90)
-  assert.equal(merged.cache_reported_cached_tokens, 30)
-  assert.equal(merged.cache_hit_rate, 30 / 90)
-  assert.equal(merged.cache_coverage, 90 / 150)
+  assert.equal(merged.cache_hit_rate, 30 / 150)
 
   const smallerSnapshot = mergeLlmRequestMetadata(merged, {
     input_tokens: 240,
@@ -340,19 +316,13 @@ test('merge keeps latest request fields while folding cumulative maxima', () => 
     total_input_tokens: 120,
     total_cached_tokens: 25,
     total_output_tokens: 40,
-    cache_reported_input_tokens: 70,
-    cache_reported_cached_tokens: 25,
-    cache_hit_rate: 0.99,
-    cache_coverage: 0.99
+    cache_hit_rate: 0.99
   })
 
   assert.equal(smallerSnapshot.total_input_tokens, 150)
   assert.equal(smallerSnapshot.total_cached_tokens, 30)
   assert.equal(smallerSnapshot.total_output_tokens, 45)
-  assert.equal(smallerSnapshot.cache_reported_input_tokens, 90)
-  assert.equal(smallerSnapshot.cache_reported_cached_tokens, 30)
-  assert.equal(smallerSnapshot.cache_hit_rate, 30 / 90)
-  assert.equal(smallerSnapshot.cache_coverage, 90 / 150)
+  assert.equal(smallerSnapshot.cache_hit_rate, 30 / 150)
 })
 
 test('totals-only updates preserve request context and work order', () => {
@@ -366,18 +336,13 @@ test('totals-only updates preserve request context and work order', () => {
       event_sequence_no: 4,
       total_input_tokens: 100,
       total_cached_tokens: 20,
-      total_output_tokens: 30,
-      cache_reported_input_tokens: 80,
-      cache_reported_cached_tokens: 20
+      total_output_tokens: 30
     },
     {
       total_input_tokens: 120,
       total_cached_tokens: 30,
       total_output_tokens: 60,
-      cache_reported_input_tokens: 90,
-      cache_reported_cached_tokens: 30,
-      cache_hit_rate: 0.99,
-      cache_coverage: 0.99
+      cache_hit_rate: 0.99
     }
   )
 
@@ -390,10 +355,7 @@ test('totals-only updates preserve request context and work order', () => {
   assert.equal(merged.total_input_tokens, 120)
   assert.equal(merged.total_cached_tokens, 30)
   assert.equal(merged.total_output_tokens, 60)
-  assert.equal(merged.cache_reported_input_tokens, 90)
-  assert.equal(merged.cache_reported_cached_tokens, 30)
-  assert.equal(merged.cache_hit_rate, 30 / 90)
-  assert.equal(merged.cache_coverage, 90 / 120)
+  assert.equal(merged.cache_hit_rate, 30 / 120)
 })
 
 test('context summary progress uses only the latest confirmed input, not cumulative input', () => {
@@ -475,10 +437,7 @@ test('context summary invalidation keeps cumulative usage and rejects duplicate 
     total_input_tokens: 500,
     total_cached_tokens: 120,
     total_output_tokens: 40,
-    cache_reported_input_tokens: 200,
-    cache_reported_cached_tokens: 80,
-    cache_hit_rate: 0.4,
-    cache_coverage: 0.4
+    cache_hit_rate: 120 / 500
   }
 
   const invalidated = invalidateLlmRequestInput(confirmed, {
@@ -492,10 +451,7 @@ test('context summary invalidation keeps cumulative usage and rejects duplicate 
   assert.equal(invalidated.total_input_tokens, 500)
   assert.equal(invalidated.total_cached_tokens, 120)
   assert.equal(invalidated.total_output_tokens, 40)
-  assert.equal(invalidated.cache_reported_input_tokens, 200)
-  assert.equal(invalidated.cache_reported_cached_tokens, 80)
-  assert.equal(invalidated.cache_hit_rate, 0.4)
-  assert.equal(invalidated.cache_coverage, 0.4)
+  assert.equal(invalidated.cache_hit_rate, 120 / 500)
   assert.equal(getContextSummaryProgress(invalidated).status, 'waiting')
 
   const duplicate = invalidateLlmRequestInput(invalidated, {
@@ -529,7 +485,7 @@ test('context summary invalidation keeps cumulative usage and rejects duplicate 
   assert.equal(freshConfirmation.input_tokens_source, 'provider')
   assert.equal(freshConfirmation.event_sequence_no, 12)
   assert.equal(freshConfirmation.total_input_tokens, 500)
-  assert.equal(freshConfirmation.cache_reported_input_tokens, 200)
+  assert.equal(freshConfirmation.cache_hit_rate, 120 / 500)
   assert.equal(getContextSummaryProgress(freshConfirmation).status, 'ready')
   assert.equal(getContextSummaryProgress(freshConfirmation).ratio, 0.9)
 })

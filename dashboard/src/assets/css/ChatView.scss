@@ -78,8 +78,7 @@
 }
 
 .llm-request-metadata-item > span,
-.llm-request-metadata-item > strong,
-.llm-request-metadata-item > small {
+.llm-request-metadata-item > strong {
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
@@ -91,12 +90,6 @@
   font-weight: 650;
   line-height: 22px;
   white-space: nowrap;
-}
-
-.cache-usage-coverage {
-  color: var(--color-text-regular);
-  font-size: 12px;
-  line-height: 18px;
 }
 
 .context-usage-details {

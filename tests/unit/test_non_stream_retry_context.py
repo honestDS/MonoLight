@@ -982,8 +982,7 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
     assert request_metadatas[0]["total_cached_tokens"] == 100
     assert request_metadatas[1]["total_input_tokens"] == 200
     assert request_metadatas[1]["total_cached_tokens"] == 100
-    assert [metadata["cache_hit_rate"] for metadata in request_metadatas] == [None, None]
-    assert [metadata["cache_coverage"] for metadata in request_metadatas] == [0, 0]
+    assert [metadata["cache_hit_rate"] for metadata in request_metadatas] == [1.0, 0.5]
     first_user_payload = json.loads(model_requests[0]["messages"][0].content)
     second_user_payload = json.loads(model_requests[1]["messages"][0].content)
     assert first_user_payload["user_message"] == "original request"
@@ -1002,8 +1001,7 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
     assert response["llm_request_metadata"]["cached_tokens"] == 0
     assert response["llm_request_metadata"]["total_input_tokens"] == 200
     assert response["llm_request_metadata"]["total_cached_tokens"] == 100
-    assert response["llm_request_metadata"]["cache_hit_rate"] is None
-    assert response["llm_request_metadata"]["cache_coverage"] == 0
+    assert response["llm_request_metadata"]["cache_hit_rate"] == 0.5
 
 
 @pytest.mark.asyncio
@@ -1812,8 +1810,7 @@ async def test_interactive_accumulates_output_tokens_and_session_cache_metrics(m
     assert [event["input_tokens"] for event in provider_metadata_events] == [1000, 1100]
     assert [event["total_input_tokens"] for event in metadata_events] == [0, 1000, 1000, 2100]
     assert [event["total_cached_tokens"] for event in metadata_events] == [0, 200, 200, 640]
-    assert [event["cache_hit_rate"] for event in metadata_events] == [None, None, None, None]
-    assert [event["cache_coverage"] for event in metadata_events] == [None, 0, 0, 0]
+    assert [event["cache_hit_rate"] for event in metadata_events] == [None, 200 / 1000, 200 / 1000, 640 / 2100]
     assert metadata_events[1]["output_tokens"] == 12
     assert metadata_events[1]["total_output_tokens"] == 12
     assert metadata_events[2]["output_tokens"] == 12
@@ -1827,8 +1824,7 @@ async def test_interactive_accumulates_output_tokens_and_session_cache_metrics(m
     assert any(checkpoint["session_total_input_tokens"] == 1000 and checkpoint["session_total_cached_tokens"] == 200 for checkpoint in checkpoints)
     assert response["llm_request_metadata"]["output_tokens"] == 32
     assert response["llm_request_metadata"]["total_output_tokens"] == 32
-    assert response["llm_request_metadata"]["cache_hit_rate"] is None
-    assert response["llm_request_metadata"]["cache_coverage"] == 0
+    assert response["llm_request_metadata"]["cache_hit_rate"] == 640 / 2100
     assert unknown_calls == []
 
 
@@ -1946,14 +1942,12 @@ async def test_interactive_resume_continues_total_output_tokens(monkeypatch):
     assert [event["total_output_tokens"] for event in provider_metadata_events] == [19, 22]
     assert [event["total_input_tokens"] for event in provider_metadata_events] == [600, 720]
     assert [event["total_cached_tokens"] for event in provider_metadata_events] == [120, 150]
-    assert [event["cache_hit_rate"] for event in provider_metadata_events] == [None, None]
-    assert [event["cache_coverage"] for event in provider_metadata_events] == [0, 0]
+    assert [event["cache_hit_rate"] for event in provider_metadata_events] == [120 / 600, 150 / 720]
     assert response["llm_request_metadata"]["output_tokens"] == 60
     assert response["llm_request_metadata"]["total_output_tokens"] == 22
     assert response["llm_request_metadata"]["total_input_tokens"] == 720
     assert response["llm_request_metadata"]["total_cached_tokens"] == 150
-    assert response["llm_request_metadata"]["cache_hit_rate"] is None
-    assert response["llm_request_metadata"]["cache_coverage"] == 0
+    assert response["llm_request_metadata"]["cache_hit_rate"] == 150 / 720
     assert unknown_calls == []
 
 

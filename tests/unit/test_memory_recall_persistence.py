@@ -380,8 +380,7 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
             "total_output_tokens": 8,
             "total_input_tokens": 1000,
             "total_cached_tokens": 250,
-            "cache_reported_input_tokens": 500,
-            "cache_reported_cached_tokens": 250,
+            "cache_hit_rate": 0.25,
         },
     )
 
@@ -419,10 +418,7 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
     assert metadata["total_output_tokens"] == 8
     assert metadata["total_input_tokens"] == 1000
     assert metadata["total_cached_tokens"] == 250
-    assert metadata["cache_reported_input_tokens"] == 500
-    assert metadata["cache_reported_cached_tokens"] == 250
-    assert metadata["cache_hit_rate"] == 0.5
-    assert metadata["cache_coverage"] == 0.5
+    assert metadata["cache_hit_rate"] == 0.25
     assert metadata["response_id"] == response_id
     assert "memory query secret" not in json.dumps(metadata)
     assert "retrieved memory body" not in json.dumps(metadata)
@@ -442,10 +438,7 @@ async def test_update_output_metadata_preserves_session_cache_metrics_and_accumu
         "total_output_tokens": 8,
         "total_input_tokens": 1000,
         "total_cached_tokens": 250,
-        "cache_reported_input_tokens": 500,
-        "cache_reported_cached_tokens": 250,
-        "cache_hit_rate": 0.5,
-        "cache_coverage": 0.5,
+        "cache_hit_rate": 0.25,
     }
     context.latest_precheck_request_metadata = metadata
     events = []
@@ -474,14 +467,10 @@ async def test_update_output_metadata_preserves_session_cache_metrics_and_accumu
     assert metadata["cached_tokens"] == 300
     assert metadata["total_input_tokens"] == 1000
     assert metadata["total_cached_tokens"] == 250
-    assert metadata["cache_reported_input_tokens"] == 500
-    assert metadata["cache_reported_cached_tokens"] == 250
-    assert metadata["cache_hit_rate"] == 0.5
-    assert metadata["cache_coverage"] == 0.5
+    assert metadata["cache_hit_rate"] == 0.25
     assert metadata["output_tokens"] == 14
     assert metadata["total_output_tokens"] == 8
-    assert events[-1]["cache_reported_input_tokens"] == 500
-    assert events[-1]["cache_reported_cached_tokens"] == 250
-    assert events[-1]["cache_hit_rate"] == 0.5
-    assert events[-1]["cache_coverage"] == 0.5
+    assert events[-1]["total_input_tokens"] == 1000
+    assert events[-1]["total_cached_tokens"] == 250
+    assert events[-1]["cache_hit_rate"] == 0.25
     assert events[-1]["total_output_tokens"] == 8

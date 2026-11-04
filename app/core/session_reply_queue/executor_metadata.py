@@ -20,7 +20,6 @@ from app.core.utils.request_token_baseline import (
     PROVIDER_REQUEST_ID_METADATA_KEY,
     build_session_cache_metrics,
     extract_provider_request_usage,
-    extract_session_cache_reporting_totals,
     extract_session_cache_token_totals,
     extract_session_total_output_tokens,
     merge_session_cache_token_totals,
@@ -45,8 +44,6 @@ class _ProviderUsagePersistenceResult:
     created: bool
     total_input_tokens: int
     total_cached_tokens: int
-    cache_reported_input_tokens: int
-    cache_reported_cached_tokens: int
     total_output_tokens: int
 
 
@@ -143,34 +140,22 @@ async def _persist_session_reply_provider_usage(
             raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_SESSION_NOT_FOUND))
 
         total_input_tokens, total_cached_tokens = extract_session_cache_token_totals(session.llm_request_metadata)
-        cache_reported_input_tokens, cache_reported_cached_tokens = extract_session_cache_reporting_totals(session.llm_request_metadata)
         total_output_tokens = extract_session_total_output_tokens(session.llm_request_metadata)
         if not created:
             return _ProviderUsagePersistenceResult(
                 created=False,
                 total_input_tokens=total_input_tokens,
                 total_cached_tokens=total_cached_tokens,
-                cache_reported_input_tokens=cache_reported_input_tokens,
-                cache_reported_cached_tokens=cache_reported_cached_tokens,
                 total_output_tokens=total_output_tokens,
             )
 
         new_total_input_tokens = total_input_tokens
         new_total_cached_tokens = total_cached_tokens
-        new_cache_reported_input_tokens = cache_reported_input_tokens
-        new_cache_reported_cached_tokens = cache_reported_cached_tokens
         new_total_output_tokens = total_output_tokens
         if request_purpose is ProviderUsageType.MAIN_DIALOGUE and has_token_usage:
             new_total_input_tokens += input_tokens
             new_total_cached_tokens += cached_tokens
             new_total_output_tokens += output_tokens
-            detail_input_tokens = detail.input_tokens
-            detail_cached_tokens = detail.cached_tokens
-            detail_input_tokens_are_valid = isinstance(detail_input_tokens, int) and not isinstance(detail_input_tokens, bool) and detail_input_tokens > 0
-            detail_cached_tokens_are_valid = isinstance(detail_cached_tokens, int) and not isinstance(detail_cached_tokens, bool) and detail_cached_tokens >= 0
-            if detail_input_tokens_are_valid and detail_cached_tokens_are_valid:
-                new_cache_reported_input_tokens += detail_input_tokens
-                new_cache_reported_cached_tokens += min(detail_cached_tokens, detail_input_tokens)
 
             should_update_session_context = update_session_context
             if should_update_session_context and metadata.get("input_tokens_source") == "estimated" and input_tokens == 0 and output_tokens > 0:
@@ -189,8 +174,6 @@ async def _persist_session_reply_provider_usage(
                 **build_session_cache_metrics(
                     new_total_input_tokens,
                     new_total_cached_tokens,
-                    cache_reported_input_tokens=new_cache_reported_input_tokens,
-                    cache_reported_cached_tokens=new_cache_reported_cached_tokens,
                 ),
                 "total_output_tokens": new_total_output_tokens,
             }
@@ -211,8 +194,6 @@ async def _persist_session_reply_provider_usage(
             created=True,
             total_input_tokens=new_total_input_tokens,
             total_cached_tokens=new_total_cached_tokens,
-            cache_reported_input_tokens=new_cache_reported_input_tokens,
-            cache_reported_cached_tokens=new_cache_reported_cached_tokens,
             total_output_tokens=new_total_output_tokens,
         )
 
@@ -274,8 +255,6 @@ async def _generate_auxiliary_reply_with_request_metadata(
     session_total_output_tokens = 0
     session_total_input_tokens = 0
     session_total_cached_tokens = 0
-    session_cache_reported_input_tokens = 0
-    session_cache_reported_cached_tokens = 0
     work_output_tokens = 0
     if "additional_system_prompt" not in kwargs:
         execution_state = getattr(work, "execution_state", None)
@@ -292,13 +271,12 @@ async def _generate_auxiliary_reply_with_request_metadata(
         if session is not None:
             session_total_output_tokens = extract_session_total_output_tokens(session.llm_request_metadata)
             session_total_input_tokens, session_total_cached_tokens = merge_session_cache_token_totals(session.llm_request_metadata)
-            session_cache_reported_input_tokens, session_cache_reported_cached_tokens = extract_session_cache_reporting_totals(session.llm_request_metadata)
 
     seen_provider_request_ids: set[str] = set()
 
     async def persist_request_metadata(metadata: dict[str, Any]) -> None:
         nonlocal latest_request_metadata, session_total_output_tokens, session_total_input_tokens, session_total_cached_tokens
-        nonlocal session_cache_reported_input_tokens, session_cache_reported_cached_tokens, work_output_tokens
+        nonlocal work_output_tokens
         metadata = {
             **metadata,
             "request_purpose": request_purpose.value,
@@ -321,8 +299,6 @@ async def _generate_auxiliary_reply_with_request_metadata(
                 **build_session_cache_metrics(
                     session_total_input_tokens,
                     session_total_cached_tokens,
-                    cache_reported_input_tokens=session_cache_reported_input_tokens,
-                    cache_reported_cached_tokens=session_cache_reported_cached_tokens,
                 ),
                 "output_tokens": work_output_tokens,
                 "total_output_tokens": session_total_output_tokens,
@@ -338,8 +314,6 @@ async def _generate_auxiliary_reply_with_request_metadata(
                 raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_MISSING))
             session_total_input_tokens = result.total_input_tokens
             session_total_cached_tokens = result.total_cached_tokens
-            session_cache_reported_input_tokens = result.cache_reported_input_tokens
-            session_cache_reported_cached_tokens = result.cache_reported_cached_tokens
             session_total_output_tokens = result.total_output_tokens
             if not result.created and first_seen_provider_request:
                 work_output_tokens -= request_output_tokens
@@ -348,8 +322,6 @@ async def _generate_auxiliary_reply_with_request_metadata(
                 **build_session_cache_metrics(
                     session_total_input_tokens,
                     session_total_cached_tokens,
-                    cache_reported_input_tokens=session_cache_reported_input_tokens,
-                    cache_reported_cached_tokens=session_cache_reported_cached_tokens,
                 ),
                 "output_tokens": work_output_tokens,
                 "total_output_tokens": session_total_output_tokens,

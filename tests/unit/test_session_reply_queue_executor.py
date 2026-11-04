@@ -484,9 +484,6 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
         "total_input_tokens": 0,
         "total_cached_tokens": 0,
         "cache_hit_rate": None,
-        "cache_reported_input_tokens": 0,
-        "cache_reported_cached_tokens": 0,
-        "cache_coverage": None,
         "work_id": 7,
         "work_sequence_no": 1,
     }

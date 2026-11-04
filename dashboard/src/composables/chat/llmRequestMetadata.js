@@ -1,4 +1,4 @@
-import { getCacheUsagePresentation } from './requestUsagePresentation.js'
+import { getSessionCacheHitRate } from './requestUsagePresentation.js'
 
 export const MAIN_DIALOGUE_REQUEST_PURPOSE = 'main_dialogue'
 
@@ -11,9 +11,7 @@ const REQUEST_METADATA_FIELDS = [
 const CUMULATIVE_TOTAL_FIELDS = [
   'total_input_tokens',
   'total_cached_tokens',
-  'total_output_tokens',
-  'cache_reported_input_tokens',
-  'cache_reported_cached_tokens'
+  'total_output_tokens'
 ]
 const CONTEXT_IDENTITY_FIELDS = [
   'channel_id',
@@ -69,29 +67,13 @@ export const normalizeLlmRequestMetadata = (metadata) => {
     hasOwn(metadata, 'total_cached_tokens') &&
     metadata.total_cached_tokens > metadata.total_input_tokens
   ) return null
-  if (
-    hasOwn(metadata, 'cache_reported_input_tokens') &&
-    hasOwn(metadata, 'cache_reported_cached_tokens') &&
-    metadata.cache_reported_cached_tokens > metadata.cache_reported_input_tokens
-  ) return null
-  if (
-    hasOwn(metadata, 'cache_reported_input_tokens') &&
-    hasOwn(metadata, 'total_input_tokens') &&
-    metadata.cache_reported_input_tokens > metadata.total_input_tokens
-  ) return null
-  if (
-    hasOwn(metadata, 'cache_reported_cached_tokens') &&
-    hasOwn(metadata, 'total_cached_tokens') &&
-    metadata.cache_reported_cached_tokens > metadata.total_cached_tokens
-  ) return null
-  for (const field of ['cache_hit_rate', 'cache_coverage']) {
-    if (!hasOwn(metadata, field)) continue
-    if (metadata[field] === null) {
-      normalizedMetadata[field] = null
-      continue
+  if (hasOwn(metadata, 'cache_hit_rate')) {
+    if (metadata.cache_hit_rate === null) {
+      normalizedMetadata.cache_hit_rate = null
+    } else {
+      if (!Number.isFinite(metadata.cache_hit_rate) || metadata.cache_hit_rate < 0 || metadata.cache_hit_rate > 1) return null
+      normalizedMetadata.cache_hit_rate = Number(metadata.cache_hit_rate)
     }
-    if (!Number.isFinite(metadata[field]) || metadata[field] < 0 || metadata[field] > 1) return null
-    normalizedMetadata[field] = Number(metadata[field])
   }
   if (hasOwn(metadata, 'summary_trigger_tokens')) {
     if (
@@ -191,9 +173,7 @@ export const mergeLlmRequestMetadata = (currentMetadata, metadata) => {
     }
   }
 
-  const cacheUsagePresentation = getCacheUsagePresentation(nextMetadata)
-  nextMetadata.cache_hit_rate = cacheUsagePresentation.hitRate
-  nextMetadata.cache_coverage = cacheUsagePresentation.coverage
+  nextMetadata.cache_hit_rate = getSessionCacheHitRate(nextMetadata)
 
   if (!totalsOnly && shouldReplaceRequest && incoming.input_tokens_source === 'estimated') {
     const canReuseProviderInput = (

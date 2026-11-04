@@ -274,59 +274,28 @@ def test_merge_session_cache_token_totals(metadata, total_input_tokens, total_ca
     )
 
 
-def test_build_session_cache_metrics_uses_reported_samples_for_rate_and_coverage():
-    zero_metrics = baseline_module.build_session_cache_metrics(0, 0)
-    no_reported_metrics = baseline_module.build_session_cache_metrics(2100, 640)
-    sampled_metrics = baseline_module.build_session_cache_metrics(
-        2100,
-        640,
-        cache_reported_input_tokens=1000,
-        cache_reported_cached_tokens=250,
-    )
-    zero_cache_sample_metrics = baseline_module.build_session_cache_metrics(
-        2100,
-        640,
-        cache_reported_input_tokens=1000,
-        cache_reported_cached_tokens=0,
-    )
-    invalid_sample_metrics = baseline_module.build_session_cache_metrics(
-        2100,
-        640,
-        cache_reported_input_tokens=2200,
-        cache_reported_cached_tokens=640,
-    )
+@pytest.mark.parametrize(
+    ("total_input_tokens", "total_cached_tokens", "expected"),
+    (
+        (2100, 640, (2100, 640, 640 / 2100)),
+        (2100, 0, (2100, 0, 0)),
+        (0, 0, (0, 0, None)),
+        (2100, 2200, (0, 0, None)),
+        (2100, -1, (0, 0, None)),
+        (2100, True, (0, 0, None)),
+    ),
+)
+def test_build_session_cache_metrics_returns_three_validated_fields(total_input_tokens, total_cached_tokens, expected):
+    metrics = baseline_module.build_session_cache_metrics(total_input_tokens, total_cached_tokens)
 
-    assert zero_metrics["total_input_tokens"] == 0
-    assert zero_metrics["total_cached_tokens"] == 0
-    assert zero_metrics["cache_hit_rate"] is None
-    assert zero_metrics["cache_coverage"] is None
-
-    assert no_reported_metrics["total_input_tokens"] == 2100
-    assert no_reported_metrics["total_cached_tokens"] == 640
-    assert no_reported_metrics["cache_reported_input_tokens"] == 0
-    assert no_reported_metrics["cache_reported_cached_tokens"] == 0
-    assert no_reported_metrics["cache_hit_rate"] is None
-    assert no_reported_metrics["cache_coverage"] == pytest.approx(0.0)
-
-    assert sampled_metrics["total_input_tokens"] == 2100
-    assert sampled_metrics["total_cached_tokens"] == 640
-    assert sampled_metrics["cache_reported_input_tokens"] == 1000
-    assert sampled_metrics["cache_reported_cached_tokens"] == 250
-    assert sampled_metrics["cache_hit_rate"] == pytest.approx(250 / 1000)
-    assert sampled_metrics["cache_coverage"] == pytest.approx(1000 / 2100)
-
-    assert zero_cache_sample_metrics["cache_hit_rate"] == pytest.approx(0.0)
-    assert zero_cache_sample_metrics["cache_coverage"] == pytest.approx(1000 / 2100)
-
-    assert invalid_sample_metrics["total_input_tokens"] == 2100
-    assert invalid_sample_metrics["total_cached_tokens"] == 640
-    assert invalid_sample_metrics["cache_reported_input_tokens"] == 0
-    assert invalid_sample_metrics["cache_reported_cached_tokens"] == 0
-    assert invalid_sample_metrics["cache_hit_rate"] is None
-    assert invalid_sample_metrics["cache_coverage"] == pytest.approx(0.0)
+    assert metrics == {
+        "total_input_tokens": expected[0],
+        "total_cached_tokens": expected[1],
+        "cache_hit_rate": expected[2],
+    }
 
 
-def test_accumulate_session_cache_metrics_keeps_totals_without_reported_samples():
+def test_accumulate_session_cache_metrics_keeps_provider_totals_and_ignores_estimates():
     first_provider_metrics = baseline_module.extract_provider_token_metrics(
         {
             "prompt_tokens": 1000,
@@ -337,10 +306,7 @@ def test_accumulate_session_cache_metrics_keeps_totals_without_reported_samples(
 
     assert first_provider_metrics["total_input_tokens"] == 1000
     assert first_provider_metrics["total_cached_tokens"] == 200
-    assert first_provider_metrics["cache_reported_input_tokens"] == 0
-    assert first_provider_metrics["cache_reported_cached_tokens"] == 0
-    assert first_provider_metrics["cache_hit_rate"] is None
-    assert first_provider_metrics["cache_coverage"] == pytest.approx(0.0)
+    assert first_provider_metrics["cache_hit_rate"] == pytest.approx(200 / 1000)
 
     second_provider_metrics = baseline_module.extract_provider_token_metrics(
         {
@@ -368,17 +334,23 @@ def test_accumulate_session_cache_metrics_keeps_totals_without_reported_samples(
     assert (total_input_tokens, total_cached_tokens) == (2100, 640)
     assert second_provider_metrics["total_input_tokens"] == 2100
     assert second_provider_metrics["total_cached_tokens"] == 640
-    assert second_provider_metrics["cache_reported_input_tokens"] == 0
-    assert second_provider_metrics["cache_reported_cached_tokens"] == 0
-    assert second_provider_metrics["cache_hit_rate"] is None
-    assert second_provider_metrics["cache_coverage"] == pytest.approx(0.0)
+    assert second_provider_metrics["cache_hit_rate"] == pytest.approx(640 / 2100)
     assert unchanged_totals == (2100, 640)
     assert estimated_metrics["total_input_tokens"] == 2100
     assert estimated_metrics["total_cached_tokens"] == 640
-    assert estimated_metrics["cache_reported_input_tokens"] == 0
-    assert estimated_metrics["cache_reported_cached_tokens"] == 0
-    assert estimated_metrics["cache_hit_rate"] is None
-    assert estimated_metrics["cache_coverage"] == pytest.approx(0.0)
+    assert estimated_metrics["cache_hit_rate"] == pytest.approx(640 / 2100)
+
+    third_provider_metrics = baseline_module.extract_provider_token_metrics({"prompt_tokens": 100})
+    updated_totals = baseline_module.accumulate_session_cache_metrics(
+        third_provider_metrics,
+        total_input_tokens=total_input_tokens,
+        total_cached_tokens=total_cached_tokens,
+    )
+
+    assert updated_totals == (2200, 640)
+    assert third_provider_metrics["total_input_tokens"] == 2200
+    assert third_provider_metrics["total_cached_tokens"] == 640
+    assert third_provider_metrics["cache_hit_rate"] == pytest.approx(640 / 2200)
 
 
 def test_provider_request_usage_metadata_round_trips_raw_provider_metrics():

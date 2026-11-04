@@ -40,7 +40,6 @@
               <span class="llm-request-metadata-item">
                 <span>{{ $t('chat.cache_hit_rate') }}</span>
                 <strong>{{ cacheHitRateText }}</strong>
-                <small class="cache-usage-coverage">{{ cacheCoverageText }}</small>
               </span>
             </el-tooltip>
             <span class="llm-request-metadata-item">
@@ -149,7 +148,7 @@ import { useI18n } from 'vue-i18n'
 import { ArrowDown } from '@element-plus/icons-vue'
 
 import {
-  getCacheUsagePresentation,
+  getSessionCacheHitRate,
   getContextSummaryProgress
 } from '../composables/chat/requestUsagePresentation.js'
 import { getClientSetting, setClientSetting } from '../utils/clientSettings.js'
@@ -172,7 +171,6 @@ const requestMetadataCollapsed = ref(
 )
 watch(requestMetadataCollapsed, value => setClientSetting('requestMetadataCollapsed', value))
 
-const cacheUsage = computed(() => getCacheUsagePresentation(props.metadata))
 const contextSummaryProgress = computed(() => getContextSummaryProgress(props.metadata, props.contextSummarizing))
 const hasContextSummaryProgress = computed(() => (
   contextSummaryProgress.value.status === 'ready' ||
@@ -183,10 +181,7 @@ const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.
 const formatPercent = value => percentNumberFormatter.format(value)
 const formatPercentOrUnknown = value => Number.isFinite(value) ? formatPercent(value) : t('chat.usage_unknown')
 
-const cacheHitRateText = computed(() => formatPercentOrUnknown(cacheUsage.value.hitRate))
-const cacheCoverageText = computed(() => t('chat.cache_coverage', {
-  percent: formatPercentOrUnknown(cacheUsage.value.coverage)
-}))
+const cacheHitRateText = computed(() => formatPercentOrUnknown(getSessionCacheHitRate(props.metadata)))
 
 const contextSummaryStatusText = computed(() => {
   if (contextSummaryProgress.value.status === 'summarizing') return t('chat.context_summarizing')

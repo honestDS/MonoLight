@@ -41,25 +41,17 @@ export const getContextSummaryProgress = (metadata, contextSummarizing = false) 
   }
 }
 
-export const getCacheUsagePresentation = (metadata) => {
-  const reportedInputTokens = metadata?.cache_reported_input_tokens
-  const reportedCachedTokens = metadata?.cache_reported_cached_tokens
+export const getSessionCacheHitRate = (metadata) => {
   const totalInputTokens = metadata?.total_input_tokens
+  const totalCachedTokens = metadata?.total_cached_tokens
 
-  const hasValidCounts = (
-    isValidNonNegativeNumber(reportedInputTokens) &&
-    isValidNonNegativeNumber(reportedCachedTokens) &&
-    isValidNonNegativeNumber(totalInputTokens) &&
-    reportedCachedTokens <= reportedInputTokens &&
-    reportedInputTokens <= totalInputTokens
-  )
-  if (!hasValidCounts) return { hitRate: null, coverage: null }
+  if (
+    !isValidPositiveNumber(totalInputTokens) ||
+    !isValidNonNegativeNumber(totalCachedTokens) ||
+    totalCachedTokens > totalInputTokens
+  ) {
+    return null
+  }
 
-  let hitRate = null
-  if (reportedInputTokens > 0) hitRate = reportedCachedTokens / reportedInputTokens
-
-  let coverage = null
-  if (totalInputTokens > 0) coverage = reportedInputTokens / totalInputTokens
-
-  return { hitRate, coverage }
+  return totalCachedTokens / totalInputTokens
 }

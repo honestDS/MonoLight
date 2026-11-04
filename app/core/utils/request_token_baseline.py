@@ -116,17 +116,6 @@ def extract_session_cache_token_totals(metadata: Any) -> tuple[int, int]:
     return 0, 0
 
 
-def extract_session_cache_reporting_totals(metadata: Any) -> tuple[int, int]:
-    if not isinstance(metadata, dict):
-        return 0, 0
-
-    cache_reported_input_tokens = metadata.get("cache_reported_input_tokens")
-    cache_reported_cached_tokens = metadata.get("cache_reported_cached_tokens")
-    if _is_non_negative_int(cache_reported_input_tokens) and _is_non_negative_int(cache_reported_cached_tokens) and cache_reported_cached_tokens <= cache_reported_input_tokens:
-        return cache_reported_input_tokens, cache_reported_cached_tokens
-    return 0, 0
-
-
 def merge_session_cache_token_totals(
     metadata: Any,
     *,
@@ -146,22 +135,14 @@ def merge_session_cache_token_totals(
 def build_session_cache_metrics(
     total_input_tokens: Any,
     total_cached_tokens: Any,
-    *,
-    cache_reported_input_tokens: Any = 0,
-    cache_reported_cached_tokens: Any = 0,
 ) -> dict[str, int | float | None]:
     if not (_is_non_negative_int(total_input_tokens) and _is_non_negative_int(total_cached_tokens) and total_cached_tokens <= total_input_tokens):
         total_input_tokens, total_cached_tokens = 0, 0
-    if not (_is_non_negative_int(cache_reported_input_tokens) and _is_non_negative_int(cache_reported_cached_tokens) and cache_reported_cached_tokens <= cache_reported_input_tokens and cache_reported_input_tokens <= total_input_tokens and cache_reported_cached_tokens <= total_cached_tokens):
-        cache_reported_input_tokens, cache_reported_cached_tokens = 0, 0
 
     return {
         "total_input_tokens": total_input_tokens,
         "total_cached_tokens": total_cached_tokens,
-        "cache_reported_input_tokens": cache_reported_input_tokens,
-        "cache_reported_cached_tokens": cache_reported_cached_tokens,
-        "cache_hit_rate": cache_reported_cached_tokens / cache_reported_input_tokens if cache_reported_input_tokens > 0 else None,
-        "cache_coverage": cache_reported_input_tokens / total_input_tokens if total_input_tokens > 0 else None,
+        "cache_hit_rate": total_cached_tokens / total_input_tokens if total_input_tokens > 0 else None,
     }
 
 

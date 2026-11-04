@@ -97,10 +97,7 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
           total_input_tokens: 1000,
           total_cached_tokens: 250,
           total_output_tokens: 200,
-          cache_reported_input_tokens: 400,
-          cache_reported_cached_tokens: 250,
-          cache_hit_rate: 250 / 400,
-          cache_coverage: 400 / 1000
+          cache_hit_rate: 250 / 1000
         }
       }),
       createSession('B', { source: 'ws' })
@@ -113,11 +110,12 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
   const totals = () => [
     currentMetadata().total_input_tokens,
     currentMetadata().total_cached_tokens,
-    currentMetadata().total_output_tokens
+    currentMetadata().total_output_tokens,
+    currentMetadata().cache_hit_rate
   ]
 
   await harness.flush()
-  assert.deepEqual(totals(), [1000, 250, 200])
+  assert.deepEqual(totals(), [1000, 250, 200, 250 / 1000])
   assert.equal(currentMetadata().input_tokens, undefined)
 
   const mainMetadata = {
@@ -133,13 +131,10 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
     total_input_tokens: 1120,
     total_cached_tokens: 270,
     total_output_tokens: 207,
-    cache_reported_input_tokens: 448,
-    cache_reported_cached_tokens: 270,
-    cache_hit_rate: 270 / 448,
-    cache_coverage: 448 / 1120
+    cache_hit_rate: 270 / 1120
   }
   await receiveWs(harness, mainMetadata)
-  assert.deepEqual(totals(), [1120, 270, 207])
+  assert.deepEqual(totals(), [1120, 270, 207, 270 / 1120])
   assert.equal(currentMetadata().input_tokens, 120)
   assert.equal(currentMetadata().context_window_tokens, 8192)
   assert.equal(currentMetadata().max_output_tokens, 1024)
@@ -156,20 +151,17 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
     total_input_tokens: 1420,
     total_cached_tokens: 360,
     total_output_tokens: 218,
-    cache_reported_input_tokens: 568,
-    cache_reported_cached_tokens: 360,
-    cache_hit_rate: 360 / 568,
-    cache_coverage: 568 / 1420
+    cache_hit_rate: 360 / 1420
   }
   await receiveWs(harness, olderMetadata)
-  assert.deepEqual(totals(), [1420, 360, 218])
+  assert.deepEqual(totals(), [1420, 360, 218, 360 / 1420])
   assert.equal(currentMetadata().input_tokens, 120)
   assert.equal(currentMetadata().context_window_tokens, 8192)
   assert.equal(currentMetadata().max_output_tokens, 1024)
   assert.equal(currentMetadata().work_sequence_no, 3)
 
   await receiveWs(harness, { ...olderMetadata })
-  assert.deepEqual(totals(), [1420, 360, 218])
+  assert.deepEqual(totals(), [1420, 360, 218, 360 / 1420])
   await receiveWs(harness, {
     ...olderMetadata,
     input_tokens: 88,
@@ -179,12 +171,9 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
     total_input_tokens: 1300,
     total_cached_tokens: 300,
     total_output_tokens: 210,
-    cache_reported_input_tokens: 520,
-    cache_reported_cached_tokens: 300,
-    cache_hit_rate: 300 / 520,
-    cache_coverage: 520 / 1300
+    cache_hit_rate: 300 / 1300
   })
-  assert.deepEqual(totals(), [1420, 360, 218])
+  assert.deepEqual(totals(), [1420, 360, 218, 360 / 1420])
 
   for (const [index, request_purpose] of [
     'memory_recall',
@@ -204,10 +193,7 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
       total_input_tokens: 999999,
       total_cached_tokens: 888888,
       total_output_tokens: 999999,
-      cache_reported_input_tokens: 900000,
-      cache_reported_cached_tokens: 888888,
-      cache_hit_rate: 888888 / 900000,
-      cache_coverage: 900000 / 999999
+      cache_hit_rate: 888888 / 999999
     })
   }
   await receiveWs(harness, {
@@ -218,12 +204,9 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
     total_input_tokens: 999999,
     total_cached_tokens: 888888,
     total_output_tokens: 999999,
-    cache_reported_input_tokens: 900000,
-    cache_reported_cached_tokens: 888888,
-    cache_hit_rate: 888888 / 900000,
-    cache_coverage: 900000 / 999999
+    cache_hit_rate: 888888 / 999999
   })
-  assert.deepEqual(totals(), [1420, 360, 218])
+  assert.deepEqual(totals(), [1420, 360, 218, 360 / 1420])
 
   const scheduledMetadata = {
     input_tokens: 120,
@@ -236,20 +219,14 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
     total_input_tokens: 1540,
     total_cached_tokens: 380,
     total_output_tokens: 225,
-    cache_reported_input_tokens: 616,
-    cache_reported_cached_tokens: 380,
-    cache_hit_rate: 380 / 616,
-    cache_coverage: 616 / 1540
+    cache_hit_rate: 380 / 1540
   }
   harness.sessions.find(item => item.session_id === 'A').llm_request_metadata = {
     ...currentMetadata(),
     total_input_tokens: scheduledMetadata.total_input_tokens,
     total_cached_tokens: scheduledMetadata.total_cached_tokens,
     total_output_tokens: scheduledMetadata.total_output_tokens,
-    cache_reported_input_tokens: scheduledMetadata.cache_reported_input_tokens,
-    cache_reported_cached_tokens: scheduledMetadata.cache_reported_cached_tokens,
-    cache_hit_rate: scheduledMetadata.cache_hit_rate,
-    cache_coverage: scheduledMetadata.cache_coverage
+    cache_hit_rate: scheduledMetadata.cache_hit_rate
   }
 
   await receiveWs(harness, {
@@ -263,7 +240,7 @@ test('composed session accumulates LLM totals across ordered main and scheduled 
     event_sequence_no: 1,
     llm_request_metadata: scheduledMetadata
   })
-  assert.deepEqual(totals(), [1540, 380, 225])
+  assert.deepEqual(totals(), [1540, 380, 225, 380 / 1540])
   assert.equal(currentMetadata().work_sequence_no, 3)
   assert.deepEqual(sessionMetadata(), currentMetadata())
 })
@@ -1059,10 +1036,7 @@ const createMainMetadata = ({
   total_input_tokens: 50000,
   total_cached_tokens: 250,
   total_output_tokens: 200,
-  cache_reported_input_tokens: 20000,
-  cache_reported_cached_tokens: 250,
-  cache_hit_rate: 250 / 20000,
-  cache_coverage: 20000 / 50000
+  cache_hit_rate: 250 / 50000
 })
 
 const createTaskMetadata = (source, workSequenceNo, totals = null) => ({
@@ -1115,10 +1089,7 @@ test('composed cumulative-only independent responses preserve the main context',
     total_input_tokens: totalInputTokens,
     total_cached_tokens: totalCachedTokens,
     total_output_tokens: totalOutputTokens,
-    cache_reported_input_tokens: totalInputTokens * 0.4,
-    cache_reported_cached_tokens: totalCachedTokens,
-    cache_hit_rate: totalCachedTokens / (totalInputTokens * 0.4),
-    cache_coverage: (totalInputTokens * 0.4) / totalInputTokens,
+    cache_hit_rate: totalCachedTokens / totalInputTokens,
     request_purpose: 'main_dialogue',
     work_id: workId,
     work_sequence_no: workSequenceNo,
@@ -1172,10 +1143,7 @@ test('composed cumulative-only independent responses preserve the main context',
     'total_input_tokens',
     'total_cached_tokens',
     'total_output_tokens',
-    'cache_reported_input_tokens',
-    'cache_reported_cached_tokens',
-    'cache_hit_rate',
-    'cache_coverage'
+    'cache_hit_rate'
   ].map(field => [field, metadata[field]]))
   const assertMainContext = expected => assert.deepEqual(
     pickMainFields(currentMetadata()),
@@ -1229,10 +1197,7 @@ test('composed cumulative-only independent responses preserve the main context',
     total_input_tokens: 51400,
     total_cached_tokens: 360,
     total_output_tokens: 230,
-    cache_reported_input_tokens: 20560,
-    cache_reported_cached_tokens: 360,
-    cache_hit_rate: 360 / 20560,
-    cache_coverage: 20560 / 51400
+    cache_hit_rate: 360 / 51400
   }
   await receiveWs(harness, {
     type: 'llm_request_metadata',
@@ -1266,10 +1231,7 @@ test('composed proactive task results do not overwrite main dialogue token metad
     total_input_tokens: 50120,
     total_cached_tokens: 270,
     total_output_tokens: 207,
-    cache_reported_input_tokens: 20048,
-    cache_reported_cached_tokens: 270,
-    cache_hit_rate: 270 / 20048,
-    cache_coverage: 20048 / 50120
+    cache_hit_rate: 270 / 50120
   }
 
   for (const source of ['scheduled_task', 'agent_work']) {
@@ -1341,10 +1303,7 @@ test('composed proactive task results do not overwrite main dialogue token metad
           total_input_tokens: 110120,
           total_cached_tokens: 570,
           total_output_tokens: 218,
-          cache_reported_input_tokens: 44048,
-          cache_reported_cached_tokens: 570,
-          cache_hit_rate: 570 / 44048,
-          cache_coverage: 44048 / 110120
+          cache_hit_rate: 570 / 110120
         }
         await receiveWs(harness, {
           type: 'llm_request_metadata',
@@ -1377,10 +1336,7 @@ test('composed proactive task metadata keeps main context at boundary inputs', a
       total_input_tokens: metadata.total_input_tokens,
       total_cached_tokens: metadata.total_cached_tokens,
       total_output_tokens: metadata.total_output_tokens,
-      cache_reported_input_tokens: metadata.cache_reported_input_tokens,
-      cache_reported_cached_tokens: metadata.cache_reported_cached_tokens,
-      cache_hit_rate: metadata.cache_hit_rate,
-      cache_coverage: metadata.cache_coverage
+      cache_hit_rate: metadata.cache_hit_rate
     }, expectedTotals)
     for (const field of forbiddenRequestFields) assert.equal(metadata[field], undefined)
   }
@@ -1388,10 +1344,7 @@ test('composed proactive task metadata keeps main context at boundary inputs', a
     total_input_tokens: 0,
     total_cached_tokens: 0,
     total_output_tokens: 0,
-    cache_reported_input_tokens: 0,
-    cache_reported_cached_tokens: 0,
-    cache_hit_rate: null,
-    cache_coverage: null
+    cache_hit_rate: null
   }
 
   for (const source of ['scheduled_task', 'agent_work']) {
@@ -1467,10 +1420,7 @@ test('composed proactive task metadata keeps main context at boundary inputs', a
             total_input_tokens: 1000,
             total_cached_tokens: 999,
             total_output_tokens: 888,
-            cache_reported_input_tokens: 999,
-            cache_reported_cached_tokens: 999,
-            cache_hit_rate: 1,
-            cache_coverage: 999 / 1000
+            cache_hit_rate: 999 / 1000
           }
         }
       ]
@@ -1495,10 +1445,7 @@ test('composed reconnect refreshes persisted task totals without replaying task 
     total_input_tokens: 50120,
     total_cached_tokens: 270,
     total_output_tokens: 207,
-    cache_reported_input_tokens: 20048,
-    cache_reported_cached_tokens: 270,
-    cache_hit_rate: 270 / 20048,
-    cache_coverage: 20048 / 50120
+    cache_hit_rate: 270 / 50120
   }
   const expectedMetadata = { ...mainMetadata, ...taskTotals }
   const taskContent = 'task completed while disconnected'
@@ -1556,10 +1503,7 @@ test('composed reconnect refreshes persisted task totals without replaying task 
     total_input_tokens: 50000,
     total_cached_tokens: 250,
     total_output_tokens: 200,
-    cache_reported_input_tokens: 20000,
-    cache_reported_cached_tokens: 250,
-    cache_hit_rate: 250 / 20000,
-    cache_coverage: 20000 / 50000
+    cache_hit_rate: 250 / 50000
   })
   assert.deepEqual(snapshotMetadata(chat.llmRequestMetadata.value), expectedMetadata)
 })
@@ -1570,10 +1514,7 @@ test('composed reconnect preserves newer metadata across stale session snapshots
     total_input_tokens: 50120,
     total_cached_tokens: 270,
     total_output_tokens: 207,
-    cache_reported_input_tokens: 20048,
-    cache_reported_cached_tokens: 270,
-    cache_hit_rate: 270 / 20048,
-    cache_coverage: 20048 / 50120
+    cache_hit_rate: 270 / 50120
   }
   const persistedMetadata = { ...mainMetadata, ...persistedTotals }
   const expectedNextMetadata = {
@@ -1587,10 +1528,7 @@ test('composed reconnect preserves newer metadata across stale session snapshots
     total_input_tokens: 110120,
     total_cached_tokens: 570,
     total_output_tokens: 218,
-    cache_reported_input_tokens: 44048,
-    cache_reported_cached_tokens: 570,
-    cache_hit_rate: 570 / 44048,
-    cache_coverage: 44048 / 110120
+    cache_hit_rate: 570 / 110120
   }
   let holdNextListRefresh = false
   let capturedPending = null
@@ -1670,10 +1608,7 @@ test('composed reconnect keeps recovered metadata isolated across session switch
     total_input_tokens: 50120,
     total_cached_tokens: 270,
     total_output_tokens: 207,
-    cache_reported_input_tokens: 20048,
-    cache_reported_cached_tokens: 270,
-    cache_hit_rate: 270 / 20048,
-    cache_coverage: 20048 / 50120
+    cache_hit_rate: 270 / 50120
   }
   const recoveredMetadata = { ...mainMetadata, ...taskTotals }
   const otherMetadata = {
@@ -1686,10 +1621,7 @@ test('composed reconnect keeps recovered metadata isolated across session switch
     total_input_tokens: 7000,
     total_cached_tokens: 70,
     total_output_tokens: 70,
-    cache_reported_input_tokens: 2800,
-    cache_reported_cached_tokens: 70,
-    cache_hit_rate: 70 / 2800,
-    cache_coverage: 2800 / 7000
+    cache_hit_rate: 70 / 7000
   }
   let holdNextListRefresh = false
   let capturedPending = null
@@ -1788,19 +1720,13 @@ test('composed non-stream session refresh keeps context summary usage scoped and
     total_input_tokens: 7000,
     total_cached_tokens: 70,
     total_output_tokens: 70,
-    cache_reported_input_tokens: 2800,
-    cache_reported_cached_tokens: 70,
-    cache_hit_rate: 70 / 2800,
-    cache_coverage: 2800 / 7000
+    cache_hit_rate: 70 / 7000
   }
   const totals = metadata => [
     metadata?.total_input_tokens,
     metadata?.total_cached_tokens,
     metadata?.total_output_tokens,
-    metadata?.cache_reported_input_tokens,
-    metadata?.cache_reported_cached_tokens,
-    metadata?.cache_hit_rate,
-    metadata?.cache_coverage
+    metadata?.cache_hit_rate
   ]
   const confirmedTotals = totals(confirmedMetadata)
   const harness = await createHarness(t, {

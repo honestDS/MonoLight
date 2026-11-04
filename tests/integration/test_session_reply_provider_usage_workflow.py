@@ -122,10 +122,7 @@ def _session_metadata(total_input_tokens: int, total_cached_tokens: int, total_o
         "total_input_tokens": total_input_tokens,
         "total_cached_tokens": total_cached_tokens,
         "total_output_tokens": total_output_tokens,
-        "cache_reported_input_tokens": total_input_tokens,
-        "cache_reported_cached_tokens": total_cached_tokens,
         "cache_hit_rate": total_cached_tokens / total_input_tokens if total_input_tokens else None,
-        "cache_coverage": 1.0 if total_input_tokens else None,
     }
 
 
@@ -170,10 +167,7 @@ def _request_metadata(
             total_input_tokens=input_tokens,
             total_cached_tokens=cached_tokens,
             total_output_tokens=output_tokens,
-            cache_reported_input_tokens=input_tokens,
-            cache_reported_cached_tokens=cached_tokens,
             cache_hit_rate=cached_tokens / input_tokens if input_tokens else None,
-            cache_coverage=1.0 if input_tokens else None,
         )
     return metadata
 
@@ -323,9 +317,6 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
         assert session.llm_request_metadata["total_cached_tokens"] == 250
         assert session.llm_request_metadata["total_output_tokens"] == 200
         assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(0.25)
-        assert session.llm_request_metadata["cache_reported_input_tokens"] == 1000
-        assert session.llm_request_metadata["cache_reported_cached_tokens"] == 250
-        assert session.llm_request_metadata["cache_coverage"] == pytest.approx(1.0)
 
     foreground_model_id = "foreground-model-" + "m" * 300
     foreground_response_model_id = "foreground-response-model-" + "r" * 300
@@ -398,21 +389,18 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
         assert session.llm_request_metadata["total_cached_tokens"] == 340
         assert session.llm_request_metadata["total_output_tokens"] == 211
         assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(340 / 1300)
-        assert session.llm_request_metadata["cache_reported_input_tokens"] == 1300
-        assert session.llm_request_metadata["cache_reported_cached_tokens"] == 340
-        assert session.llm_request_metadata["cache_coverage"] == pytest.approx(1.0)
         assert not any(key.startswith("_provider_") for key in session.llm_request_metadata)
 
 
 @pytest.mark.parametrize(
-    ("usage", "expected_detail", "expected_daily", "expected_totals", "expected_cache_metrics", "expected_context_input_tokens"),
+    ("usage", "expected_detail", "expected_daily", "expected_totals", "expected_cache_hit_rate", "expected_context_input_tokens"),
     [
         pytest.param(
             None,
             (None, None, None),
             (0, 0, 0, 1, 0, 0, 0),
             (1000, 250, 200),
-            (1000, 250, 0.25, 1.0),
+            0.25,
             1000,
             id="usage-missing",
         ),
@@ -425,7 +413,7 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
             (0, 0, 0),
             (0, 0, 0, 1, 1, 1, 1),
             (1000, 250, 200),
-            (1000, 250, 0.25, 1.0),
+            0.25,
             1000,
             id="usage-all-zero",
         ),
@@ -435,7 +423,7 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
             (0, 0, 5, 1, 0, 0, 1),
             # Output-only usage updates the cumulative output without replacing context.
             (1000, 250, 205),
-            (1000, 250, 0.25, 1.0),
+            0.25,
             1000,
             id="usage-completion-only",
         ),
@@ -444,7 +432,7 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
             (20, None, None),
             (20, 0, 0, 1, 1, 0, 0),
             (1020, 250, 200),
-            (1000, 250, 0.25, 1000 / 1020),
+            250 / 1020,
             20,
             id="usage-input-only",
         ),
@@ -456,7 +444,7 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
             (20, 0, None),
             (20, 0, 0, 1, 1, 1, 0),
             (1020, 250, 200),
-            (1020, 250, 250 / 1020, 1.0),
+            250 / 1020,
             20,
             id="usage-zero-cache",
         ),
@@ -469,7 +457,7 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
             (20, 3, 5),
             (20, 3, 5, 1, 1, 1, 1),
             (1020, 253, 205),
-            (1020, 253, 253 / 1020, 1.0),
+            253 / 1020,
             20,
             id="usage-full",
         ),
@@ -483,7 +471,7 @@ async def test_foreground_reply_real_response_snapshot_is_separate_from_session_
     expected_detail: tuple[int | None, int | None, int | None],
     expected_daily: tuple[int, int, int, int, int, int, int],
     expected_totals: tuple[int, int, int],
-    expected_cache_metrics: tuple[int, int, float, float],
+    expected_cache_hit_rate: float,
     expected_context_input_tokens: int,
 ) -> None:
     work = _work(
@@ -553,11 +541,7 @@ async def test_foreground_reply_real_response_snapshot_is_separate_from_session_
         session.llm_request_metadata["total_cached_tokens"],
         session.llm_request_metadata["total_output_tokens"],
     ) == expected_totals
-    expected_reported_input_tokens, expected_reported_cached_tokens, expected_cache_hit_rate, expected_cache_coverage = expected_cache_metrics
-    assert session.llm_request_metadata["cache_reported_input_tokens"] == expected_reported_input_tokens
-    assert session.llm_request_metadata["cache_reported_cached_tokens"] == expected_reported_cached_tokens
     assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(expected_cache_hit_rate)
-    assert session.llm_request_metadata["cache_coverage"] == pytest.approx(expected_cache_coverage)
     assert session.llm_request_metadata["input_tokens"] == expected_context_input_tokens
     assert not any(key.startswith("_provider_") for key in session.llm_request_metadata)
 
@@ -857,10 +841,7 @@ async def test_interactive_metadata_boundary_is_cumulative_without_leaking_non_m
     assert response_metadata["total_input_tokens"] == 1120
     assert response_metadata["total_cached_tokens"] == 270
     assert response_metadata["total_output_tokens"] == 207
-    assert response_metadata["cache_reported_input_tokens"] == 1120
-    assert response_metadata["cache_reported_cached_tokens"] == 270
     assert response_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
-    assert response_metadata["cache_coverage"] == pytest.approx(1.0)
     assert response_metadata["work_id"] == 7
     assert response_metadata["work_sequence_no"] == 9
     if updates_context:
@@ -903,10 +884,7 @@ async def test_interactive_metadata_boundary_is_cumulative_without_leaking_non_m
         assert session.llm_request_metadata["total_input_tokens"] == 1120
         assert session.llm_request_metadata["total_cached_tokens"] == 270
         assert session.llm_request_metadata["total_output_tokens"] == 207
-        assert session.llm_request_metadata["cache_reported_input_tokens"] == 1120
-        assert session.llm_request_metadata["cache_reported_cached_tokens"] == 270
         assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(270 / 1120)
-        assert session.llm_request_metadata["cache_coverage"] == pytest.approx(1.0)
         if updates_context:
             assert session.llm_request_metadata["input_tokens"] == 120
             assert session.llm_request_metadata["context_window_tokens"] == 4096
@@ -950,10 +928,7 @@ async def test_interactive_metadata_boundary_is_cumulative_without_leaking_non_m
                 assert metadata_event["total_input_tokens"] == 1120
                 assert metadata_event["total_cached_tokens"] == 270
                 assert metadata_event["total_output_tokens"] == 207
-                assert metadata_event["cache_reported_input_tokens"] == 1120
-                assert metadata_event["cache_reported_cached_tokens"] == 270
                 assert metadata_event["cache_hit_rate"] == pytest.approx(270 / 1120)
-                assert metadata_event["cache_coverage"] == pytest.approx(1.0)
                 assert not any(key.startswith("_provider_") for key in metadata_event)
                 if updates_context:
                     assert metadata_event["input_tokens"] == 120
@@ -1031,10 +1006,7 @@ async def test_interleaved_foreground_and_scheduled_usage_keep_latest_totals(
         "total_input_tokens": 1300,
         "total_cached_tokens": 340,
         "total_output_tokens": 211,
-        "cache_reported_input_tokens": 1300,
-        "cache_reported_cached_tokens": 340,
         "cache_hit_rate": 340 / 1300,
-        "cache_coverage": 1.0,
     }
     scheduled_metadata = _request_metadata(
         "scheduled-interleaved-request",
@@ -1165,10 +1137,7 @@ async def test_interleaved_foreground_and_scheduled_usage_keep_latest_totals(
         assert session.llm_request_metadata["total_input_tokens"] == 1300
         assert session.llm_request_metadata["total_cached_tokens"] == 340
         assert session.llm_request_metadata["total_output_tokens"] == 211
-        assert session.llm_request_metadata["cache_reported_input_tokens"] == 1300
-        assert session.llm_request_metadata["cache_reported_cached_tokens"] == 340
         assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(340 / 1300)
-        assert session.llm_request_metadata["cache_coverage"] == pytest.approx(1.0)
         assert session.llm_request_metadata["input_tokens"] == 300
         assert session.llm_request_metadata_work_sequence_no == 1
         assert (
@@ -1190,10 +1159,7 @@ async def test_interleaved_foreground_and_scheduled_usage_keep_latest_totals(
             assert all(event["total_input_tokens"] == 1300 for event in metadata_events)
             assert all(event["total_cached_tokens"] == 340 for event in metadata_events)
             assert all(event["total_output_tokens"] == 211 for event in metadata_events)
-            assert all(event["cache_reported_input_tokens"] == 1300 for event in metadata_events)
-            assert all(event["cache_reported_cached_tokens"] == 340 for event in metadata_events)
             assert all(event["cache_hit_rate"] == pytest.approx(340 / 1300) for event in metadata_events)
-            assert all(event["cache_coverage"] == pytest.approx(1.0) for event in metadata_events)
             assert all(not any(key.startswith("_provider_") for key in event) for event in metadata_events)
         else:
             assert session.llm_request_metadata_event_sequence_no == 0
@@ -1347,10 +1313,7 @@ async def test_provider_usage_waits_for_main_metadata_snapshot_before_committing
         total_input_tokens=1300,
         total_cached_tokens=340,
         total_output_tokens=211,
-        cache_reported_input_tokens=1300,
-        cache_reported_cached_tokens=340,
         cache_hit_rate=340 / 1300,
-        cache_coverage=1.0,
         request_purpose=ProviderUsageType.MAIN_DIALOGUE.value,
         work_sequence_no=1,
         event_sequence_no=0,
@@ -1422,10 +1385,7 @@ async def test_provider_usage_waits_for_main_metadata_snapshot_before_committing
         assert session.llm_request_metadata["total_input_tokens"] == 1420
         assert session.llm_request_metadata["total_cached_tokens"] == 360
         assert session.llm_request_metadata["total_output_tokens"] == 218
-        assert session.llm_request_metadata["cache_reported_input_tokens"] == 1420
-        assert session.llm_request_metadata["cache_reported_cached_tokens"] == 360
         assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(360 / 1420)
-        assert session.llm_request_metadata["cache_coverage"] == pytest.approx(1.0)
         assert session.llm_request_metadata["input_tokens"] == 300
         assert session.llm_request_metadata_work_sequence_no == 1
         assert session.llm_request_metadata_event_sequence_no == 0
@@ -1565,10 +1525,7 @@ async def test_foreground_usage_updates_baseline_after_scheduled_usage_with_larg
         assert session.llm_request_metadata["total_input_tokens"] == 300
         assert session.llm_request_metadata["total_cached_tokens"] == 90
         assert session.llm_request_metadata["total_output_tokens"] == 11
-        assert session.llm_request_metadata["cache_reported_input_tokens"] == 300
-        assert session.llm_request_metadata["cache_reported_cached_tokens"] == 90
         assert session.llm_request_metadata["cache_hit_rate"] == pytest.approx(90 / 300)
-        assert session.llm_request_metadata["cache_coverage"] == pytest.approx(1.0)
         assert session.llm_request_metadata_work_sequence_no == 2
         assert session.llm_request_metadata_event_sequence_no == 0
         assert (
@@ -1673,10 +1630,7 @@ async def test_provider_usage_survives_reply_rollback_cancellation_and_retry_is_
     metadata, usages, daily = await read_state()
     assert metadata["total_input_tokens"] == 100
     assert metadata["total_cached_tokens"] == 100
-    assert metadata["cache_reported_input_tokens"] == 100
-    assert metadata["cache_reported_cached_tokens"] == 100
     assert metadata["cache_hit_rate"] == 1
-    assert metadata["cache_coverage"] == 1
     assert len(usages) == 1
     assert usages[0].provider_request_id == "provider-request-1"
     assert usages[0].work_id == 7
@@ -1694,10 +1648,7 @@ async def test_provider_usage_survives_reply_rollback_cancellation_and_retry_is_
     metadata, usages, daily = await read_state()
     assert metadata["total_input_tokens"] == 100
     assert metadata["total_cached_tokens"] == 100
-    assert metadata["cache_reported_input_tokens"] == 100
-    assert metadata["cache_reported_cached_tokens"] == 100
     assert metadata["cache_hit_rate"] == 1
-    assert metadata["cache_coverage"] == 1
     assert len(usages) == 1
     assert (
         daily[0].input_tokens,
@@ -1710,10 +1661,7 @@ async def test_provider_usage_survives_reply_rollback_cancellation_and_retry_is_
     metadata, usages, daily = await read_state()
     assert metadata["total_input_tokens"] == 200
     assert metadata["total_cached_tokens"] == 200
-    assert metadata["cache_reported_input_tokens"] == 200
-    assert metadata["cache_reported_cached_tokens"] == 200
     assert metadata["cache_hit_rate"] == 1
-    assert metadata["cache_coverage"] == 1
     assert len(usages) == 2
     assert {usage.provider_request_id for usage in usages} == {
         "provider-request-1",
@@ -1730,10 +1678,7 @@ async def test_provider_usage_survives_reply_rollback_cancellation_and_retry_is_
     metadata, usages, daily = await read_state()
     assert metadata["total_input_tokens"] == 300
     assert metadata["total_cached_tokens"] == 300
-    assert metadata["cache_reported_input_tokens"] == 300
-    assert metadata["cache_reported_cached_tokens"] == 300
     assert metadata["cache_hit_rate"] == 1
-    assert metadata["cache_coverage"] == 1
     assert len(usages) == 3
     assert {usage.provider_request_id for usage in usages} == {
         "provider-request-1",
