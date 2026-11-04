@@ -2,16 +2,18 @@ import json
 from typing import Any
 
 import pytest
+from sqlalchemy import event, func
 from sqlmodel import select
 
 import app.core.background_tasks.external_work as external_work_module
+import app.core.background_tasks.result_delivery as result_delivery_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.session_reply_queue.executor_interactive as executor_interactive_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
 import app.providers.database as database_provider
-from app.core.constants import SHELL_TOOL_NAME
+from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY, SHELL_TOOL_NAME
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.dispatcher.save_message import save_message
@@ -21,7 +23,13 @@ from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.session_reply_work_item import (
+    SessionReplyCheckpointMessage,
+    SessionReplySourceType,
+    SessionReplyWorkItem,
+    SessionReplyWorkStatus,
+    SessionReplyWorkType,
+)
 from app.models.user import User
 from app.providers.llm.client import LLMClient
 
@@ -350,3 +358,152 @@ async def test_result_delivery_merges_two_suspended_sources_into_latest_foregrou
             assert len(after_works) == 3 and len(after_markers) == len(marker_ids) == 2
             assert {work.status for work in after_works} == {SessionReplyWorkStatus.MERGED, SessionReplyWorkStatus.SUCCEEDED}
             assert len(captured_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_pending_external_results_without_results_does_not_load_checkpoint_messages(database_factory) -> None:
+    session_id = "result-delivery-empty-session"
+    uid = "result-delivery-empty-user"
+    worker_id = "result-delivery-empty-worker"
+    current_state = {"phase": "running", "request_ids": ["empty-current-request"]}
+    waiting_state = {"phase": "waiting", "request_ids": ["empty-waiting-request"]}
+    current_message = InternalMessage(
+        role=MessageRole.USER,
+        content="current checkpoint " + ("x" * (2 * 1024 * 1024 + 1)),
+        created_at=1793775600.0,
+    )
+    waiting_message = InternalMessage(
+        role=MessageRole.USER,
+        content="waiting checkpoint " + ("y" * (2 * 1024 * 1024 + 1)),
+        created_at=1793775601.0,
+    )
+    assert isinstance(current_message.content, str) and len(current_message.content) > 2 * 1024 * 1024
+    assert isinstance(waiting_message.content, str) and len(waiting_message.content) > 2 * 1024 * 1024
+    current_payload = current_message.model_dump(mode="json", exclude_none=True)
+    waiting_payload = waiting_message.model_dump(mode="json", exclude_none=True)
+    current_checkpoint = {
+        "messages": [current_payload],
+        "turn_messages": [current_payload],
+        "current_turn": 7,
+    }
+    waiting_checkpoint = {
+        "messages": [waiting_payload],
+        "turn_messages": [waiting_payload],
+        "current_turn": 11,
+    }
+
+    async with database_factory(foreign_keys=True, wal=True) as factory:
+        async with factory() as db:
+            db.add(ChatSession(session_id=session_id, uid=uid))
+            await db.commit()
+
+        async with factory() as db:
+            current, current_created = await session_reply_work_item_crud.enqueue(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile_id=PROFILE_ID,
+                work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                source_type=SessionReplySourceType.USER_MESSAGE,
+                source_id="empty-current-source",
+                dedupe_key="result-delivery-empty-current",
+                commit=False,
+            )
+            waiting, waiting_created = await session_reply_work_item_crud.enqueue(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile_id=PROFILE_ID,
+                work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                source_type=SessionReplySourceType.USER_MESSAGE,
+                source_id="empty-waiting-source",
+                dedupe_key="result-delivery-empty-waiting",
+                commit=False,
+            )
+            assert current_created is True and waiting_created is True
+            assert current.id is not None and waiting.id is not None
+            current_id, waiting_id = current.id, waiting.id
+
+            current.status = SessionReplyWorkStatus.RUNNING
+            current.locked_by = worker_id
+            current.lock_until = 4_000_000_000
+            current.execution_state = current_state
+            waiting.status = SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            waiting.execution_state = waiting_state
+            db.add_all([current, waiting])
+            await db.flush()
+            await session_reply_work_item_crud.save_checkpoint(db, current_id, current_checkpoint)
+            await session_reply_work_item_crud.save_checkpoint(db, waiting_id, waiting_checkpoint)
+            await db.commit()
+
+        async with factory() as db:
+            body_count_result = await db.execute(
+                select(func.count())
+                .select_from(SessionReplyCheckpointMessage)
+                .where(
+                    SessionReplyCheckpointMessage.uid == uid,
+                    SessionReplyCheckpointMessage.session_id == session_id,
+                )
+            )
+            initial_body_count = body_count_result.scalar_one()
+            assert initial_body_count == 2
+            db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (current_id, worker_id)
+            body_sql: list[str] = []
+            engine = factory.kw["bind"]
+
+            def record_body_sql(
+                _connection: Any,
+                _cursor: Any,
+                statement: str,
+                _parameters: Any,
+                _context: Any,
+                _executemany: bool,
+            ) -> None:
+                normalized = statement.lower()
+                if "session_reply_checkpoint_message" in normalized and "_reference" not in normalized:
+                    body_sql.append(statement)
+
+            event.listen(engine.sync_engine, "before_cursor_execute", record_body_sql)
+            try:
+                first_result = await result_delivery_module.receive_pending_external_results(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=PROFILE_ID,
+                )
+                second_result = await result_delivery_module.receive_pending_external_results(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=PROFILE_ID,
+                )
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", record_body_sql)
+            await db.rollback()
+
+        assert first_result == []
+        assert second_result == []
+        assert body_sql == []
+
+        async with factory() as db:
+            current_after = await session_reply_work_item_crud.get(db, current_id)
+            waiting_after = await session_reply_work_item_crud.get(db, waiting_id)
+            assert current_after is not None and waiting_after is not None
+            assert current_after.status == SessionReplyWorkStatus.RUNNING
+            assert current_after.locked_by == worker_id
+            assert current_after.execution_state == current_state
+            assert waiting_after.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            assert waiting_after.execution_state == waiting_state
+
+            assert await session_reply_work_item_crud.get_checkpoint(db, current_id) == current_checkpoint
+            assert await session_reply_work_item_crud.get_checkpoint(db, waiting_id) == waiting_checkpoint
+            body_count_result = await db.execute(
+                select(func.count())
+                .select_from(SessionReplyCheckpointMessage)
+                .where(
+                    SessionReplyCheckpointMessage.uid == uid,
+                    SessionReplyCheckpointMessage.session_id == session_id,
+                )
+            )
+            assert body_count_result.scalar_one() == initial_body_count
+            assert list((await db.execute(select(BackgroundTask))).scalars().all()) == []

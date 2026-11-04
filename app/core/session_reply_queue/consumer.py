@@ -1,7 +1,17 @@
 import asyncio
 import uuid
 
-from app.core.constants import ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED, ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
+    ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
+    SESSION_REPLY_CLEANUP_BATCH_SIZE,
+    SESSION_REPLY_CLEANUP_INTERVAL_SECONDS,
+    SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN,
+    SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS,
+    SESSION_REPLY_LEASE_SECONDS,
+    SESSION_REPLY_POLL_INTERVAL_SECONDS,
+    SESSION_REPLY_RECOVERY_INTERVAL_SECONDS,
+)
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
@@ -23,14 +33,6 @@ from app.models.session_reply_work_item import SessionReplySourceType, SessionRe
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
-
-SESSION_REPLY_POLL_INTERVAL_SECONDS = 0.2
-SESSION_REPLY_LEASE_SECONDS = 300
-SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS = 100
-SESSION_REPLY_RECOVERY_INTERVAL_SECONDS = 30
-SESSION_REPLY_CLEANUP_INTERVAL_SECONDS = 3600
-SESSION_REPLY_CLEANUP_BATCH_SIZE = 500
-SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN = 5000
 
 
 class SessionReplyConsumer:
@@ -171,21 +173,14 @@ class SessionReplyConsumer:
             has_active_audit_execution = work is not None and (work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or work_has_active_audit_execution(work))
             if has_active_audit_execution:
                 await mark_work_audit_execution_unknown(work_id, worker_id, error)
-            if (
-                isinstance(exc, LLMContextLengthException)
-                and work is not None
-                and work.work_type == SessionReplyWorkType.AGENT_WORK
-                and work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN
-            ):
+            if isinstance(exc, LLMContextLengthException) and work is not None and work.work_type == SessionReplyWorkType.AGENT_WORK and work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN:
                 await fail_session_reply_work(
                     work_id,
                     worker_id,
                     error,
                     user_error=t(ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED),
                 )
-            elif isinstance(exc, BaseBusinessException) and (
-                not has_active_audit_execution or isinstance(exc, LLMRequestRejectedException)
-            ):
+            elif isinstance(exc, BaseBusinessException) and (not has_active_audit_execution or isinstance(exc, LLMRequestRejectedException)):
                 await fail_session_reply_work(
                     work_id,
                     worker_id,

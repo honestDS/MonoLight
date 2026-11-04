@@ -1137,7 +1137,7 @@ async def test_terminal_auto_watch_profile_change_routes_agent_work_by_work_prof
             work.work_type = SessionReplyWorkType.AGENT_WORK
             work.source_type = SessionReplySourceType.SCHEDULED_TASK_RUN
             work.execution_state = {
-                "frozen_context_messages": [],
+                "frozen_context_message_ids": [],
                 "agent_work": AgentWorkSpec(instruction="watch the scheduled terminal").model_dump(mode="json"),
             }
         await db.flush()

@@ -619,7 +619,7 @@ class CRUDTerminalWatchReply:
         checkpoint.pop("reply_skipped", None)
         checkpoint.pop("deferred_external_results", None)
         checkpoint.pop("pending_resume_message_ids", None)
-        if not isinstance(state.get("frozen_context_messages"), list):
+        if not isinstance(state.get("frozen_context_message_ids"), list):
             checkpoint["messages"] = []
         checkpoint["turn_messages"] = []
         checkpoint["reload_history"] = True

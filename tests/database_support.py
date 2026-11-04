@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.sql.schema import Table
 from sqlmodel import SQLModel
 
-from app.models.session_reply_work_item import SessionReplyWorkCheckpoint, SessionReplyWorkItem
+from app.models.session_reply_work_item import (
+    SessionReplyCheckpointMessage,
+    SessionReplyCheckpointMessageReference,
+    SessionReplyWorkCheckpoint,
+    SessionReplyWorkItem,
+)
 
 _TEMPLATE_ROOT = tempfile.TemporaryDirectory(prefix="monolight-pytest-schema-")
 _TEMPLATE_PATHS: dict[tuple[str, ...], Path] = {}
@@ -22,8 +27,14 @@ def _resolve_tables(tables: Iterable[Table] | None) -> tuple[tuple[str, ...], tu
         return tuple(sorted(table.key for table in resolved)), None
 
     resolved = list(tables)
-    if SessionReplyWorkItem.__table__ in resolved and SessionReplyWorkCheckpoint.__table__ not in resolved:
-        resolved.append(SessionReplyWorkCheckpoint.__table__)
+    if SessionReplyWorkItem.__table__ in resolved:
+        for dependency in (
+            SessionReplyWorkCheckpoint.__table__,
+            SessionReplyCheckpointMessage.__table__,
+            SessionReplyCheckpointMessageReference.__table__,
+        ):
+            if dependency not in resolved:
+                resolved.append(dependency)
     resolved = tuple(resolved)
     return tuple(sorted(table.key for table in resolved)), resolved
 

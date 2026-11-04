@@ -904,7 +904,7 @@ async def test_agent_work_failure_message_is_visible_in_session_history(
     await db_session.refresh(work)
     assert work.id is not None
     work.execution_state = {
-        "frozen_context_messages": [],
+        "frozen_context_message_ids": [],
         "agent_work": AgentWorkSpec(
             instruction="计划任务失败",
             execution_scope=END_SESSION_SCOPE_TASK,
@@ -1326,7 +1326,7 @@ async def test_scheduled_task_dispatch_enqueues_once_and_delete_preserves_queued
         assert queued_work.work_type == SessionReplyWorkType.AGENT_WORK
         assert queued_work.status == SessionReplyWorkStatus.READY_FOR_LLM
         assert trigger_message.work_id == queued_work.id
-        assert queued_work.execution_state.get("frozen_context_messages") == []
+        assert queued_work.execution_state.get("frozen_context_message_ids") == []
         queued_spec = AgentWorkSpec.model_validate(queued_work.execution_state.get("agent_work"))
         assert queued_spec.instruction == "Review deployment status"
         assert queued_spec.execution_scope == END_SESSION_SCOPE_TASK
@@ -3114,7 +3114,7 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
     }
     root_work.execution_state = {
         **(root_work.execution_state or {}),
-        "frozen_context_messages": [],
+        "frozen_context_message_ids": [],
     }
     root_work.status = SessionReplyWorkStatus.SUCCEEDED
     root_work.locked_by = None
@@ -3225,7 +3225,7 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
     assert root_after is not None
     assert root_after.source_type == root_source_type
     assert root_after.status == SessionReplyWorkStatus.SUCCEEDED
-    assert root_after.execution_state["frozen_context_messages"] == []
+    assert root_after.execution_state["frozen_context_message_ids"] == []
     assert isinstance(root_checkpoint, dict)
     assert confirmed_after is not None
     assert confirmed_after.status == SessionReplyWorkStatus.RUNNING

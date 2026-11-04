@@ -154,7 +154,7 @@ class SessionReplyFreeze:
             }
         ):
             return None
-        if isinstance((work.execution_state or {}).get("frozen_context_messages"), list):
+        if isinstance((work.execution_state or {}).get("frozen_context_message_ids"), list):
             return None
         if bool((work.execution_state or {}).get("audit_decision_response")):
             return None

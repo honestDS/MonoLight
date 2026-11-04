@@ -520,13 +520,14 @@ async def prepare_terminal_auto_watch_resume(
                 ]
             )
         )
-        if isinstance(state.get("frozen_context_messages"), list):
+        if isinstance(state.get("frozen_context_message_ids"), list):
             checkpoint_messages = checkpoint.get("messages")
             had_checkpoint_messages = isinstance(checkpoint_messages, list) and bool(checkpoint_messages)
             if had_checkpoint_messages:
                 resume_messages = [InternalMessage.model_validate(item) for item in checkpoint_messages]
             else:
-                resume_messages = [InternalMessage.model_validate(item) for item in state["frozen_context_messages"]]
+                frozen_context = await session_reply_work_item_crud.get_frozen_context(db, work)
+                resume_messages = [InternalMessage.model_validate(item) for item in frozen_context]
             existing_ids = {message.id for message in resume_messages if _positive_int(message.id)}
             for marker_id in marker_ids:
                 if marker_id in existing_ids:

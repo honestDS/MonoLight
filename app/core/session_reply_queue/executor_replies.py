@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from typing import Any
@@ -7,10 +8,11 @@ from app.core.constants import (
     ERR_BACKGROUND_TASK_NOT_FOUND,
     ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
     ERR_LLM_UNEXPECTED_ERROR,
+    ERR_SESSION_REPLY_LEASE_LOST,
 )
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
-from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
@@ -134,7 +136,7 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
         guidance_prompt=message.guidance_prompt,
     )
     execution_scope = execution_state.get("execution_scope")
-    frozen_context_messages = load_frozen_context_messages(execution_state.get("frozen_context_messages"))
+    frozen_context_messages = load_frozen_context_messages(await session_reply_work_item_crud.get_frozen_context(db, work))
     return await _dispatch_interactive_work(
         db,
         work=work,
@@ -249,29 +251,47 @@ async def _execute_background_task_resume(db, work: SessionReplyWorkItem, worker
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
 
-    request_context = _load_background_request_context(task)
-    task_extra = task.extra if isinstance(task.extra, dict) else {}
-    frozen_context_messages = load_frozen_context_messages(task_extra.get("frozen_context_messages"))
-    if frozen_context_messages is None:
-        boundary = _background_context_boundary(task, request_context)
-        if boundary is not None:
-            frozen_context_messages = load_frozen_context_messages(
-                await capture_frozen_context_messages(
-                    db,
-                    session_id=work.session_id,
-                    uid=work.uid,
-                    before_id=boundary + 1,
-                )
-            )
-        else:
-            frozen_context_messages = [message.model_copy(deep=True) for message in request_context]
-
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
-    if "frozen_context_messages" not in execution_state:
+    if "frozen_context_message_ids" in execution_state:
+        frozen_context_messages = load_frozen_context_messages(await session_reply_work_item_crud.get_frozen_context(db, work))
+    else:
+        request_context = _load_background_request_context(task)
+        task_extra = task.extra if isinstance(task.extra, dict) else {}
+        frozen_context_messages = load_frozen_context_messages(task_extra.get("frozen_context_messages"))
+        if frozen_context_messages is None:
+            boundary = _background_context_boundary(task, request_context)
+            if boundary is not None:
+                frozen_context_messages = load_frozen_context_messages(
+                    await capture_frozen_context_messages(
+                        db,
+                        session_id=work.session_id,
+                        uid=work.uid,
+                        before_id=boundary + 1,
+                    )
+                )
+            else:
+                frozen_context_messages = [message.model_copy(deep=True) for message in request_context]
+
+        await ensure_session_reply_work_claim(db)
+        frozen_context_message_ids = await session_reply_work_item_crud.save_frozen_context(
+            db,
+            work.id,
+            serialize_frozen_context_messages(frozen_context_messages),
+        )
         execution_state = {
             **execution_state,
-            "frozen_context_messages": serialize_frozen_context_messages(frozen_context_messages),
+            "frozen_context_message_ids": frozen_context_message_ids,
         }
+        claimed = await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=work.id,
+            worker_id=worker_id,
+            values={"execution_state": execution_state},
+            commit=False,
+        )
+        if not claimed:
+            await db.rollback()
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
         work.execution_state = execution_state
     resume_state = await session_reply_work_item_crud.get_checkpoint(db, work.id)
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):

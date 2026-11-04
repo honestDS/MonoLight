@@ -1,5 +1,6 @@
 import asyncio
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -11,11 +12,15 @@ from sqlmodel import select
 
 from app.core.constants import (
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
+    ERR_SESSION_REPLY_CHECKPOINT_INVALID,
     ERR_SESSION_REPLY_DEDUPLICATION_FAILED,
     ERR_SESSION_REPLY_LEASE_LOST,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
+    SESSION_REPLY_CLEANUP_BATCH_SIZE,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    SESSION_REPLY_WORK_RETENTION_HOURS,
 )
+from app.core.crud.session.reply_checkpoint_message import session_reply_checkpoint_message_crud
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditRecord
@@ -34,8 +39,6 @@ from app.models.session_reply_work_item import (
 )
 
 _TERMINAL_STATUS_VALUES = [status.value for status in SESSION_REPLY_TERMINAL_STATUSES]
-SESSION_REPLY_WORK_RETENTION_HOURS = 24
-SESSION_REPLY_CLEANUP_BATCH_SIZE = 500
 
 
 @dataclass(frozen=True)
@@ -43,10 +46,11 @@ class SessionReplyCleanupResult:
     work_items: int = 0
     stream_events: int = 0
     sequences: int = 0
+    checkpoint_messages: int = 0
 
     @property
     def total(self) -> int:
-        return self.work_items + self.stream_events + self.sequences
+        return self.work_items + self.stream_events + self.sequences + self.checkpoint_messages
 
 
 class CRUDSessionReplyWorkItem:
@@ -54,20 +58,111 @@ class CRUDSessionReplyWorkItem:
         result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work_id))
         return result.scalars().first()
 
-    async def get_checkpoint(self, db: AsyncSession, work_id: int) -> dict[str, Any] | None:
+    async def _get_checkpoint_payload(self, db: AsyncSession, work_id: int) -> dict[str, Any] | None:
         result = await db.execute(select(SessionReplyWorkCheckpoint.checkpoint).where(SessionReplyWorkCheckpoint.work_id == work_id))
         return result.scalar_one_or_none()
 
-    async def save_checkpoint(self, db: AsyncSession, work_id: int, checkpoint: dict[str, Any]) -> None:
-        # 调用方须在同一事务内先完成工作行条件写入或持有行锁，以串行化多执行者更新。
-        result = await db.execute(update(SessionReplyWorkCheckpoint).where(SessionReplyWorkCheckpoint.work_id == work_id).values(checkpoint=checkpoint))
-        if (result.rowcount or 0) == 0:
+    async def _save_checkpoint_payload(self, db: AsyncSession, work_id: int, checkpoint: dict[str, Any]) -> None:
+        existing_checkpoint = await self._get_checkpoint_payload(db, work_id)
+        if existing_checkpoint is None:
             db.add(SessionReplyWorkCheckpoint(work_id=work_id, checkpoint=checkpoint))
             await db.flush()
+            return
+        if existing_checkpoint == checkpoint:
+            return
+        await db.execute(update(SessionReplyWorkCheckpoint).where(SessionReplyWorkCheckpoint.work_id == work_id).values(checkpoint=checkpoint))
+
+    async def get_checkpoint(self, db: AsyncSession, work_id: int) -> dict[str, Any] | None:
+        checkpoint = await self._get_checkpoint_payload(db, work_id)
+        if checkpoint is None:
+            return None
+        restored_checkpoint = deepcopy(checkpoint)
+        message_keys: list[str] = []
+        message_group_lengths: list[int] = []
+        message_ids: list[int] = []
+        for key in ("messages", "turn_messages"):
+            if key not in restored_checkpoint:
+                continue
+            group_ids = restored_checkpoint[key]
+            message_keys.append(key)
+            message_group_lengths.append(len(group_ids))
+            for message_id in group_ids:
+                message_ids.append(message_id)
+        if message_keys:
+            loaded_messages = await session_reply_checkpoint_message_crud.load_messages(db, work_id, message_ids)
+            offset = 0
+            for index, key in enumerate(message_keys):
+                group_length = message_group_lengths[index]
+                restored_checkpoint[key] = loaded_messages[offset : offset + group_length]
+                offset += group_length
+        return restored_checkpoint
+
+    async def get_checkpoint_metadata(self, db: AsyncSession, work_id: int) -> dict[str, Any] | None:
+        checkpoint = await self._get_checkpoint_payload(db, work_id)
+        if checkpoint is None:
+            return None
+        metadata: dict[str, Any] = {}
+        for key, value in deepcopy(checkpoint).items():
+            if key not in ("messages", "turn_messages"):
+                metadata[key] = value
+        return metadata
+
+    async def save_checkpoint(self, db: AsyncSession, work_id: int, checkpoint: dict[str, Any]) -> None:
+        # 调用方须在同一事务内先完成工作行条件写入或持有行锁，以串行化多执行者更新。
+        lightweight_checkpoint: dict[str, Any] = {}
+        message_keys: list[str] = []
+        message_groups: list[list[dict[str, Any]]] = []
+        for key, value in checkpoint.items():
+            if key == "messages" or key == "turn_messages":
+                if not isinstance(value, list):
+                    raise ValueError(t(ERR_SESSION_REPLY_CHECKPOINT_INVALID))
+                message_keys.append(key)
+                message_groups.append(value)
+            else:
+                lightweight_checkpoint[key] = deepcopy(value)
+
+        message_id_groups = await session_reply_checkpoint_message_crud.save_groups(
+            db,
+            work_id,
+            "checkpoint",
+            message_groups,
+        )
+        for index, key in enumerate(message_keys):
+            lightweight_checkpoint[key] = message_id_groups[index]
+        await self._save_checkpoint_payload(db, work_id, lightweight_checkpoint)
+
+    async def save_checkpoint_metadata(self, db: AsyncSession, work_id: int, metadata: dict[str, Any]) -> None:
+        if "messages" in metadata or "turn_messages" in metadata:
+            raise ValueError(t(ERR_SESSION_REPLY_CHECKPOINT_INVALID))
+
+        existing_checkpoint = await self._get_checkpoint_payload(db, work_id)
+        lightweight_checkpoint: dict[str, Any] = {}
+        if existing_checkpoint is not None:
+            for key in ("messages", "turn_messages"):
+                if key in existing_checkpoint:
+                    lightweight_checkpoint[key] = deepcopy(existing_checkpoint[key])
+        for key, value in metadata.items():
+            lightweight_checkpoint[key] = deepcopy(value)
+        await self._save_checkpoint_payload(db, work_id, lightweight_checkpoint)
+
+    async def save_frozen_context(self, db: AsyncSession, work_id: int, messages: list[dict[str, Any]]) -> list[int]:
+        message_id_groups = await session_reply_checkpoint_message_crud.save_groups(db, work_id, "frozen", [messages])
+        return message_id_groups[0]
+
+    async def get_frozen_context(self, db: AsyncSession, work: SessionReplyWorkItem) -> list[dict[str, Any]] | None:
+        execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+        if "frozen_context_message_ids" not in execution_state:
+            return None
+        return await session_reply_checkpoint_message_crud.load_messages(
+            db,
+            work.id,
+            execution_state["frozen_context_message_ids"],
+        )
 
     async def delete_checkpoint(self, db: AsyncSession, work_id: int) -> None:
         # 调用方须在同一事务内先完成工作行条件写入或持有行锁，以串行化多执行者更新。
         await db.execute(delete(SessionReplyWorkCheckpoint).where(SessionReplyWorkCheckpoint.work_id == work_id))
+        await session_reply_checkpoint_message_crud.delete_references(db, work_id, "checkpoint")
 
     async def get_audit_source_work(
         self,
@@ -603,6 +698,7 @@ class CRUDSessionReplyWorkItem:
         work_item_count = 0
         stream_event_count = 0
         sequence_count = 0
+        checkpoint_message_count = 0
         expired_work_conditions = [
             SessionReplyWorkItem.status.in_(_TERMINAL_STATUS_VALUES),
             SessionReplyWorkItem.updated_at < cutoff,
@@ -683,12 +779,19 @@ class CRUDSessionReplyWorkItem:
             )
             orphan_sequence_result = await db.execute(delete(SessionReplySequence).where(SessionReplySequence.session_id.in_(orphan_sequence_ids)).execution_options(synchronize_session=False))
             await db.commit()
-            sequence_count += orphan_sequence_result.rowcount or 0
+            deleted = orphan_sequence_result.rowcount or 0
+            sequence_count += deleted
+            remaining -= deleted
+
+        if remaining > 0:
+            checkpoint_message_count = await session_reply_checkpoint_message_crud.cleanup_unreferenced(db, limit=remaining)
+            await db.commit()
 
         return SessionReplyCleanupResult(
             work_items=work_item_count,
             stream_events=stream_event_count,
             sequences=sequence_count,
+            checkpoint_messages=checkpoint_message_count,
         )
 
     async def cancel_session(

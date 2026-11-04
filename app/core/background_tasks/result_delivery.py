@@ -157,7 +157,7 @@ async def receive_pending_external_results(
         raise _unknown()
     current_state = _state(current)
     message_work_id = await session_reply_work_item_crud.get_message_work_id(db, current)
-    isolated_result_scope = isinstance(current_state.get("frozen_context_messages"), list) or _status(current.work_type) == SessionReplyWorkType.BACKGROUND_TASK_RESUME.value or message_work_id is not None
+    isolated_result_scope = isinstance(current_state.get("frozen_context_message_ids"), list) or _status(current.work_type) == SessionReplyWorkType.BACKGROUND_TASK_RESUME.value or message_work_id is not None
     include_sibling_works = not isolated_result_scope
 
     if include_sibling_works:
@@ -178,7 +178,7 @@ async def receive_pending_external_results(
         if not await _same_scope(db, source, current) or (source.id != current.id and _status(source.status) == SessionReplyWorkStatus.RUNNING.value):
             continue
         state = _state(source)
-        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, source.id)
+        checkpoint = await session_reply_work_item_crud.get_checkpoint_metadata(db, source.id)
         context = {"work": source, "state": state, "checkpoint": checkpoint, "received": set(), "auto_sessions": set()}
         contexts.append(context)
         if source.id is not None:
@@ -300,7 +300,7 @@ async def receive_pending_external_results(
                 origin = await valid_origin(int(raw_work_id), delivery.get("identity"), True)
                 if origin is not None:
                     if origin.id not in by_work_id:
-                        origin_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, origin.id)
+                        origin_checkpoint = await session_reply_work_item_crud.get_checkpoint_metadata(db, origin.id)
                         origin_context = {
                             "work": origin,
                             "state": _state(origin),
@@ -415,17 +415,18 @@ async def receive_pending_external_results(
         if not await external_work_crud.update_active_reply(db, work=source, values=values):
             raise _unknown()
         if checkpoint_to_save is not None:
-            await session_reply_work_item_crud.save_checkpoint(db, source.id, checkpoint_to_save)
+            await session_reply_work_item_crud.save_checkpoint_metadata(db, source.id, checkpoint_to_save)
 
     if not await session_reply_work_item_crud.update_claimed(
         db,
         work_id=current.id,
         worker_id=worker_id,
         values={"execution_state": target_state},
-        checkpoint=target_checkpoint,
         commit=False,
     ):
         raise _unknown()
+    if target_checkpoint is not None:
+        await session_reply_work_item_crud.save_checkpoint_metadata(db, current.id, target_checkpoint)
     await db.flush()
     messages: list[Message] = []
     for marker_id in marker_order:

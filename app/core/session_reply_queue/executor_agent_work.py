@@ -11,7 +11,6 @@ from app.core.session_reply_queue.executor_common import _response_content
 from app.core.session_reply_queue.executor_interactive import _dispatch_interactive_work
 from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
 from app.core.utils.assistant_files import parse_assistant_files_content
-from app.core.utils.dispatcher.frozen_context import load_frozen_context_messages
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
@@ -55,8 +54,7 @@ async def execute_agent_work(db, work: SessionReplyWorkItem, worker_id: str = ""
     if spec.report_target != AgentWorkReportTarget.SESSION:
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
-    frozen_context_messages = load_frozen_context_messages(execution_state.get("frozen_context_messages"))
-    if frozen_context_messages != []:
+    if execution_state.get("frozen_context_message_ids") != []:
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
 
     checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)

@@ -61,7 +61,7 @@ async def test_agent_work_executes_with_empty_conversation_context(
         dedupe_key="agent-work:scheduled:21:8",
         execution_state={
             "agent_work": spec.model_dump(mode="json"),
-            "frozen_context_messages": [],
+            "frozen_context_message_ids": [],
         },
     )
     trigger = Message(
@@ -132,7 +132,7 @@ async def test_agent_work_rejects_unimplemented_parent_report_routing(monkeypatc
         profile_id=4,
         execution_state={
             "agent_work": spec.model_dump(mode="json"),
-            "frozen_context_messages": [],
+            "frozen_context_message_ids": [],
         },
     )
 

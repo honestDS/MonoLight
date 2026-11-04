@@ -317,7 +317,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         )
 
     actor_username = execution_state.get("actor_username") or getattr(record, "decided_by", None) or record.operator_username
-    frozen_context_messages = load_frozen_context_messages(execution_state.get("frozen_context_messages"))
+    frozen_context_messages = load_frozen_context_messages(await session_reply_work_item_crud.get_frozen_context(db, work))
     cfg = await validate_profile_and_cfg(db, profile)
     session = await session_crud.get_by_session_id(db, work.session_id)
     confirmed_tool_context_window_k = _resolve_confirmed_tool_context_window_k(session)
@@ -405,11 +405,19 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     frozen_context_messages,
                     pending_tool_results,
                 )
+                await ensure_session_reply_work_claim(db)
+                frozen_context_message_ids = await session_reply_work_item_crud.save_frozen_context(
+                    db,
+                    work.id,
+                    serialize_frozen_context_messages(frozen_context_messages),
+                )
                 refreshed_state = {
                     **(work.execution_state or {}),
-                    "frozen_context_messages": serialize_frozen_context_messages(frozen_context_messages),
+                    "frozen_context_message_ids": frozen_context_message_ids,
                 }
                 work.execution_state = refreshed_state
+                db.add(work)
+                await db.flush()
                 checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
                 if isinstance(checkpoint, dict) and isinstance(checkpoint.get("messages"), list):
                     checkpoint_messages = [InternalMessage.model_validate(item) for item in checkpoint["messages"]]
@@ -424,9 +432,6 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                         **checkpoint,
                         "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],
                     }
-                    await ensure_session_reply_work_claim(db)
-                    db.add(work)
-                    await db.flush()
                     await session_reply_work_item_crud.save_checkpoint(db, work.id, new_checkpoint)
             if reaudit_round.confirmation_payload is not None:
                 confirmation_content = json.dumps(reaudit_round.confirmation_payload, ensure_ascii=False)

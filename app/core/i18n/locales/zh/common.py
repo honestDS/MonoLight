@@ -254,6 +254,7 @@ MESSAGES = {
     "ERR_SESSION_REPLY_LEASE_LOST": "会话回复工作在{operation}时丢失租约",
     "ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT": "会话回复工作在冻结输入时丢失租约",
     "ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT": "会话回复工作在保存执行检查点时丢失租约",
+    "ERR_SESSION_REPLY_CHECKPOINT_INVALID": "任务执行快照的消息引用无效或内容缺失",
     "ERR_SESSION_REPLY_WORK_NOT_FOUND": "会话回复工作已不存在",
     "ERR_SESSION_REPLY_WORK_ENDED": "会话回复工作已结束，状态为 {status}",
     "ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED": "最终助手消息未持久化",

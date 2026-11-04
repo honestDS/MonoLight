@@ -254,6 +254,7 @@ MESSAGES = {
     "ERR_SESSION_REPLY_LEASE_LOST": "Session reply work lease was lost while {operation}",
     "ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT": "Session reply work lease was lost while freezing input",
     "ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT": "Session reply work lease was lost while saving execution checkpoint",
+    "ERR_SESSION_REPLY_CHECKPOINT_INVALID": "The task execution snapshot contains invalid message references or missing content",
     "ERR_SESSION_REPLY_WORK_NOT_FOUND": "Session reply work no longer exists",
     "ERR_SESSION_REPLY_WORK_ENDED": "Session reply work ended with status {status}",
     "ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED": "Final assistant message was not persisted",

@@ -58,8 +58,8 @@ async def _build_terminal_watch_background(
             origin_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, origin_work.id)
             if isinstance(origin_checkpoint, dict) and isinstance(origin_checkpoint.get("messages"), list) and origin_checkpoint["messages"]:
                 frozen_context_messages = serialize_frozen_context_messages(origin_checkpoint["messages"])
-            elif isinstance(origin_state.get("frozen_context_messages"), list):
-                frozen_context_messages = serialize_frozen_context_messages(origin_state["frozen_context_messages"])
+            elif isinstance(origin_state.get("frozen_context_message_ids"), list):
+                frozen_context_messages = serialize_frozen_context_messages(await session_reply_work_item_crud.get_frozen_context(db, origin_work))
             for message_id in origin_work.input_message_ids or []:
                 if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
                     continue

@@ -31,7 +31,20 @@ def _mock_checkpoint_lookup(monkeypatch):
     async def get_checkpoint(*_args, **_kwargs):
         return None
 
+    async def get_checkpoint_metadata(*_args, **_kwargs):
+        return None
+
+    async def save_frozen_context(_db, _work_id, messages):
+        assert messages == []
+        return []
+
+    async def update_claimed(*_args, **_kwargs):
+        return True
+
     monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "get_checkpoint", get_checkpoint)
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "get_checkpoint_metadata", get_checkpoint_metadata)
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "save_frozen_context", save_frozen_context)
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "update_claimed", update_claimed)
 
 
 @pytest.mark.asyncio

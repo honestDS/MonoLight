@@ -17,6 +17,7 @@ from app.core.crud.audit.audit import audit_crud
 from app.core.i18n import t
 from app.core.tools.read_multimodal_file import parse_multimodal_file_read_result
 from app.core.utils.context_summary import ContextSummaryTriggerMode
+from app.core.utils.dispatcher.checkpoint_message import CheckpointMessageSerializer
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.helpers import process_single_tool_with_isolated_db
 from app.core.utils.dispatcher.markdown_instruction import ensure_user_runtime_instructions
@@ -149,6 +150,10 @@ class _ExecutionCheckpointState:
     execution_phase: str = GOAL_EXECUTION_PHASE_RUNNING
     pending_resume_message_ids: list[int] = field(default_factory=list)
     reply_skipped: bool = False
+    checkpoint_message_serializer: CheckpointMessageSerializer = field(
+        default_factory=CheckpointMessageSerializer,
+        repr=False,
+    )
 
 
 def _is_valid_memory_recall_boundary(value: Any) -> bool:
@@ -180,9 +185,10 @@ async def _save_execution_checkpoint(
 ) -> None:
     if state.callback is None:
         return
+    serialized_messages, serialized_turn_messages = state.checkpoint_message_serializer.serialize_groups((messages, state.turn_messages))
     checkpoint = {
-        "messages": [item.model_dump(mode="json") for item in messages],
-        "turn_messages": [item.model_dump(mode="json") for item in state.turn_messages],
+        "messages": serialized_messages,
+        "turn_messages": serialized_turn_messages,
         "files_to_user": state.files_to_user,
         "current_turn": current_turn,
         "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,

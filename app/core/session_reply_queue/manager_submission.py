@@ -498,8 +498,7 @@ class SessionReplySubmission:
                 await db.rollback()
                 raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
             is_scheduled_task_source = await is_scheduled_task_work(db, source_work)
-            source_state = source_work.execution_state if isinstance(source_work.execution_state, dict) else {}
-            source_frozen_context = source_state.get("frozen_context_messages")
+            source_frozen_context = await session_reply_work_item_crud.get_frozen_context(db, source_work)
             if isinstance(source_frozen_context, list):
                 source_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, source_work.id)
                 checkpoint_messages = source_checkpoint.get("messages") if isinstance(source_checkpoint, dict) else None
@@ -540,7 +539,16 @@ class SessionReplySubmission:
         if cleaned_additional_system_prompt:
             work.execution_state["additional_system_prompt"] = cleaned_additional_system_prompt
         if frozen_context_messages is not None:
-            work.execution_state["frozen_context_messages"] = frozen_context_messages
+            await db.flush()
+            frozen_context_message_ids = await session_reply_work_item_crud.save_frozen_context(
+                db,
+                work.id,
+                frozen_context_messages,
+            )
+            work.execution_state = {
+                **(work.execution_state or {}),
+                "frozen_context_message_ids": frozen_context_message_ids,
+            }
         db.add(work)
         if source_dispatcher_checkpoint is not None:
             await db.flush()

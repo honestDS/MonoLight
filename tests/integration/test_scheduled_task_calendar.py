@@ -775,7 +775,7 @@ async def test_scheduler_dispatches_due_calendar_task_once_with_complete_agent_w
     assert queued_work.work_type == SessionReplyWorkType.AGENT_WORK
     assert queued_work.status == SessionReplyWorkStatus.READY_FOR_LLM
     assert queued_work.source_id == str(trigger_message.id)
-    assert queued_work.execution_state["frozen_context_messages"] == []
+    assert queued_work.execution_state["frozen_context_message_ids"] == []
     queued_spec = AgentWorkSpec.model_validate(queued_work.execution_state["agent_work"])
     assert queued_spec.instruction == instruction
     assert queued_spec.execution_scope == END_SESSION_SCOPE_TASK

@@ -98,6 +98,41 @@ class SessionReplyWorkCheckpoint(SQLModel, table=True):
     checkpoint: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
 
 
+class SessionReplyCheckpointMessage(SQLModel, table=True):
+    __tablename__ = "session_reply_checkpoint_message"
+    __table_args__ = (
+        UniqueConstraint("session_id", "uid", "content_hash"),
+        ForeignKeyConstraint(
+            ["session_id", "uid"],
+            ["chat_session.session_id", "chat_session.uid"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    uid: str = Field(max_length=100)
+    session_id: str = Field(max_length=100)
+    content_hash: str = Field(max_length=64)
+    payload: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+
+
+class SessionReplyCheckpointMessageReference(SQLModel, table=True):
+    __tablename__ = "session_reply_checkpoint_message_reference"
+
+    work_id: int = Field(
+        primary_key=True,
+        foreign_key="session_reply_work_item.id",
+        ondelete="CASCADE",
+    )
+    kind: str = Field(primary_key=True, max_length=20)
+    message_id: int = Field(
+        primary_key=True,
+        foreign_key="session_reply_checkpoint_message.id",
+        index=True,
+        ondelete="CASCADE",
+    )
+
+
 class SessionReplySequence(SQLModel, table=True):
     __tablename__ = "session_reply_sequence"
 

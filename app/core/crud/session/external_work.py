@@ -170,7 +170,7 @@ class CRUDExternalWork:
             .execution_options(populate_existing=True)
         )
         works = list(result.scalars().all())
-        return [candidate for candidate in works if candidate.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or not isinstance((candidate.execution_state or {}).get("frozen_context_messages"), list)]
+        return [candidate for candidate in works if candidate.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or not isinstance((candidate.execution_state or {}).get("frozen_context_message_ids"), list)]
 
     async def list_completed_reply_tasks(
         self,
@@ -479,7 +479,7 @@ class CRUDExternalWork:
         checkpoint.pop("reply_skipped", None)
         checkpoint.pop("deferred_external_results", None)
         checkpoint.pop("pending_resume_message_ids", None)
-        if not isinstance(state.get("frozen_context_messages"), list):
+        if not isinstance(state.get("frozen_context_message_ids"), list):
             checkpoint["messages"] = []
         checkpoint["turn_messages"] = []
         checkpoint["reload_history"] = True

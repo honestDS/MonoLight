@@ -1298,14 +1298,7 @@ async def test_websocket_approval_inherits_scheduled_source_checkpoint(
         source_id="scheduled-run-1",
         dedupe_key="scheduled-source-work",
         status=SessionReplyWorkStatus.SUCCEEDED,
-        execution_state={
-            "frozen_context_messages": [
-                source_checkpoint_messages[0].model_dump(
-                    mode="json",
-                    exclude_none=True,
-                )
-            ],
-        },
+        execution_state={},
     )
     db_session.add(source_work)
     db_session.add(
@@ -1315,6 +1308,13 @@ async def test_websocket_approval_inherits_scheduled_source_checkpoint(
         )
     )
     await db_session.flush()
+    frozen_context_message_ids = await session_reply_work_item_crud.save_frozen_context(
+        db_session,
+        source_work.id,
+        [source_checkpoint_messages[0].model_dump(mode="json", exclude_none=True)],
+    )
+    source_work.execution_state = {"frozen_context_message_ids": frozen_context_message_ids}
+    db_session.add(source_work)
     await session_reply_work_item_crud.save_checkpoint(db_session, source_work.id, source_checkpoint)
     await db_session.commit()
     await db_session.refresh(source_work)

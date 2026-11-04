@@ -1534,21 +1534,24 @@ async def test_task_confirmation_inherits_source_work_checkpoint(
                 ).model_dump(mode="json", exclude_none=True),
             ],
         }
-        source_work.execution_state = {
-            "frozen_context_messages": [
-                InternalMessage(
-                    id=10,
-                    role=MessageRole.USER,
-                    content="base-snapshot-only",
-                ).model_dump(mode="json", exclude_none=True),
-            ],
-        }
+        frozen_context_messages = [
+            InternalMessage(
+                id=10,
+                role=MessageRole.USER,
+                content="base-snapshot-only",
+            ).model_dump(mode="json", exclude_none=True),
+        ]
+        source_work.execution_state = {}
         record = await db.get(AuditRecord, audit_record_id)
         assert record is not None
         record.execution_scope = "task"
         record.source_work_id = source_work.id
         await db.flush()
         assert source_work.id is not None
+        frozen_context_message_ids = await session_reply_work_item_crud.save_frozen_context(db, source_work.id, frozen_context_messages)
+        source_work.execution_state = {
+            "frozen_context_message_ids": frozen_context_message_ids,
+        }
         await session_reply_work_item_crud.save_checkpoint(db, source_work.id, source_checkpoint)
         await db.commit()
 
@@ -1564,11 +1567,13 @@ async def test_task_confirmation_inherits_source_work_checkpoint(
             attachments=None,
             source="http",
         )
+        confirmed_frozen_context = await session_reply_work_item_crud.get_frozen_context(db, confirmed_work)
+        assert confirmed_frozen_context is not None
 
     assert submission_status == "approved"
     assert confirmed_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
     assert confirmed_work.execution_state["execution_scope"] == "task"
-    frozen_messages = [InternalMessage.model_validate(item) for item in confirmed_work.execution_state["frozen_context_messages"]]
+    frozen_messages = [InternalMessage.model_validate(item) for item in confirmed_frozen_context]
     assert [message.content for message in frozen_messages if message.role == MessageRole.USER] == ["scheduled-trigger-context"]
     assert not any(message.content == "base-snapshot-only" for message in frozen_messages)
     assert any(message.role == MessageRole.ASSISTANT and any(tool_call.id == "original-shell-call-1" for tool_call in message.tool_calls or []) for message in frozen_messages)
@@ -1629,12 +1634,13 @@ async def test_foreground_confirmation_does_not_inherit_live_source_checkpoint(
             attachments=None,
             source="http",
         )
+        confirmed_frozen_context = await session_reply_work_item_crud.get_frozen_context(db, confirmed_work)
         confirmed_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, confirmed_work.id)
 
     assert submission_status == "approved"
     assert confirmed_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
     assert confirmed_work.execution_state["execution_scope"] == "foreground"
-    assert "frozen_context_messages" not in confirmed_work.execution_state
+    assert confirmed_frozen_context is None
     assert "dispatcher_checkpoint" not in confirmed_work.execution_state
     assert confirmed_checkpoint is None
 
@@ -2651,7 +2657,7 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
         source_work.execution_state = {
             **(source_work.execution_state or {}),
             "execution_scope": "task",
-            "frozen_context_messages": [],
+            "frozen_context_message_ids": [],
         }
         record.source_work_id = source_work.id
         record.execution_scope = "task"
@@ -2835,7 +2841,8 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
         assert submission_status == "approved"
         assert submitted_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
         assert submitted_work.execution_state["execution_scope"] == "task"
-        assert submitted_work.execution_state["frozen_context_messages"]
+        submitted_frozen_context = await session_reply_work_item_crud.get_frozen_context(db, submitted_work)
+        assert submitted_frozen_context
         submitted_work_id = submitted_work.id
 
     async with confirmation_workflow_session_factory() as db:

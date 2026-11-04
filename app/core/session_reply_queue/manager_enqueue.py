@@ -337,7 +337,7 @@ class SessionReplyEnqueue:
                 **(work.execution_state or {}),
                 "language": get_current_locale(),
                 "execution_scope": spec.execution_scope,
-                "frozen_context_messages": [],
+                "frozen_context_message_ids": [],
                 "agent_work": spec.model_dump(mode="json"),
             }
             db.add(work)

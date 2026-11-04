@@ -100,6 +100,9 @@ async def test_background_task_resume_dispatches_deferred_external_result_with_f
         assert profile_id == work.profile_id
         return SimpleNamespace(id=profile_id, uid=work.uid)
 
+    async def update_claimed(db, **kwargs):
+        return True
+
     async def dispatch_interactive_work(db, **kwargs):
         captured.update(kwargs)
         return {
@@ -110,6 +113,7 @@ async def test_background_task_resume_dispatches_deferred_external_result_with_f
 
     monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "update_claimed", update_claimed)
     monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", dispatch_interactive_work)
     monkeypatch.setattr(
         executor_replies_module,
@@ -170,6 +174,30 @@ def checkpoint_store(monkeypatch):
     monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "get_checkpoint", get_checkpoint)
     monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "save_checkpoint", save_checkpoint)
     return checkpoints
+
+
+@pytest.fixture(autouse=True)
+def frozen_context_store(monkeypatch):
+    messages_by_id = {}
+
+    async def get_frozen_context(_db, work):
+        message_ids = work.execution_state.get("frozen_context_message_ids")
+        if message_ids is None:
+            return None
+        return [messages_by_id[message_id] for message_id in message_ids]
+
+    async def save_frozen_context(_db, work_id, messages):
+        next_message_id = max(messages_by_id, default=0) + 1
+        message_ids = []
+        for message in messages:
+            messages_by_id[next_message_id] = message
+            message_ids.append(next_message_id)
+            next_message_id += 1
+        return message_ids
+
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "get_frozen_context", get_frozen_context)
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "save_frozen_context", save_frozen_context)
+    return messages_by_id
 
 
 @pytest.mark.asyncio
@@ -1196,19 +1224,20 @@ async def test_agent_work_external_resume_routes_back_to_agent_work_executor(mon
 
 
 @pytest.mark.asyncio
-async def test_confirmed_external_resume_preserves_task_scope_and_frozen_context(monkeypatch, checkpoint_store):
+async def test_confirmed_external_resume_preserves_task_scope_and_frozen_context(monkeypatch, checkpoint_store, frozen_context_store):
     frozen_message = InternalMessage(
         id=3,
         role=MessageRole.USER,
         content="scheduled frozen context",
     )
+    frozen_context_store[3] = frozen_message.model_dump(mode="json", exclude_none=True)
     work = SimpleNamespace(
         id=7,
         work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
         execution_state={
             "decision_message_id": 4,
             "execution_scope": "task",
-            "frozen_context_messages": [frozen_message.model_dump(mode="json", exclude_none=True)],
+            "frozen_context_message_ids": [3],
         },
         input_message_ids=[],
         uid="user-1",
@@ -1667,7 +1696,11 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_confirmed_file_reaudit_pending_replaces_original_result_without_saving_tool_chain(monkeypatch, checkpoint_store):
+async def test_confirmed_file_reaudit_pending_replaces_original_result_without_saving_tool_chain(
+    monkeypatch,
+    checkpoint_store,
+    frozen_context_store,
+):
     source_internal = InternalMessage(
         role=MessageRole.ASSISTANT,
         tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
@@ -1700,19 +1733,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         execution_state={
             "audit_claim_token": "old-token",
             "decision_message_id": 4,
-            "frozen_context_messages": [
-                InternalMessage(
-                    id=1,
-                    role=MessageRole.ASSISTANT,
-                    tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
-                ).model_dump(mode="json", exclude_none=True),
-                InternalMessage(
-                    id=2,
-                    role=MessageRole.TOOL,
-                    tool_call_id="original-1",
-                    content="old-pending-result",
-                ).model_dump(mode="json", exclude_none=True),
-            ],
+            "frozen_context_message_ids": [1, 2],
         },
         uid="user-1",
         session_id="session-1",
@@ -1735,6 +1756,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
             ).model_dump(mode="json", exclude_none=True),
         ]
     }
+    frozen_context_store.update({message["id"]: message for message in checkpoint_store[work.id]["messages"]})
     pending_message = Message(
         id=2,
         uid="user-1",
@@ -1849,7 +1871,8 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     assert len(saved_messages) == 1
     assert saved_messages[0][0][4] == MessageType.AUDIT_CONFIRMATION
     assert any(message.role == MessageRole.TOOL and message.tool_call_id == "original-1" for message in memory_chains[0])
-    refreshed_frozen = [InternalMessage.model_validate(item) for item in work.execution_state["frozen_context_messages"]]
+    refreshed_frozen_payload = await executor_replies_module.session_reply_work_item_crud.get_frozen_context(FakeDb(), work)
+    refreshed_frozen = [InternalMessage.model_validate(item) for item in refreshed_frozen_payload]
     assert refreshed_frozen[1].role == MessageRole.TOOL
     assert refreshed_frozen[1].tool_call_id == "original-1"
     assert refreshed_frozen[1].content != "old-pending-result"
@@ -1911,7 +1934,10 @@ def test_confirmed_wait_checkpoint_refreshes_result_and_keeps_decision():
 
 
 @pytest.mark.asyncio
-async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continues_reply(monkeypatch):
+async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continues_reply(
+    monkeypatch,
+    frozen_context_store,
+):
     source_internal = InternalMessage(
         role=MessageRole.ASSISTANT,
         tool_calls=[
@@ -1970,32 +1996,39 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
             "audit_claim_token": "claim-token",
             "decision_message_id": 4,
             "execution_scope": "task",
-            "frozen_context_messages": [
-                InternalMessage(id=3, role=MessageRole.USER, content="scheduled trigger context").model_dump(mode="json", exclude_none=True),
-                InternalMessage(
-                    id=1,
-                    role=MessageRole.ASSISTANT,
-                    tool_calls=[
-                        InternalToolCall(
-                            id="original-1",
-                            name="execute_shell",
-                            arguments={"command": "echo 1", "execution_mode": "interactive"},
-                        )
-                    ],
-                ).model_dump(mode="json", exclude_none=True),
-                InternalMessage(
-                    id=2,
-                    role=MessageRole.TOOL,
-                    tool_call_id="original-1",
-                    content="pending",
-                ).model_dump(mode="json", exclude_none=True),
-            ],
+            "frozen_context_message_ids": [3, 1, 2],
         },
         uid="user-1",
         session_id="session-1",
         profile_id=3,
         dedupe_key="confirmed-audit:42",
         created_at=datetime(2026, 7, 20, 0, 0, 0),
+    )
+    frozen_context_store.update(
+        {
+            3: InternalMessage(
+                id=3,
+                role=MessageRole.USER,
+                content="scheduled trigger context",
+            ).model_dump(mode="json", exclude_none=True),
+            1: InternalMessage(
+                id=1,
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    InternalToolCall(
+                        id="original-1",
+                        name="execute_shell",
+                        arguments={"command": "echo 1", "execution_mode": "interactive"},
+                    )
+                ],
+            ).model_dump(mode="json", exclude_none=True),
+            2: InternalMessage(
+                id=2,
+                role=MessageRole.TOOL,
+                tool_call_id="original-1",
+                content="pending",
+            ).model_dump(mode="json", exclude_none=True),
+        }
     )
     created_attempts = []
     finish_attempt_calls = []
