@@ -3100,21 +3100,21 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
     )
     assert created is True
     assert root_work.id is not None
+    checkpoint = {
+        "messages": [
+            source_internal.model_dump(mode="json", exclude_none=True),
+            tool_result_internal.model_dump(mode="json", exclude_none=True),
+        ],
+        "turn_messages": [
+            source_internal.model_dump(mode="json", exclude_none=True),
+            tool_result_internal.model_dump(mode="json", exclude_none=True),
+        ],
+        "current_turn": 1,
+        "reload_history": False,
+    }
     root_work.execution_state = {
         **(root_work.execution_state or {}),
         "frozen_context_messages": [],
-        "dispatcher_checkpoint": {
-            "messages": [
-                source_internal.model_dump(mode="json", exclude_none=True),
-                tool_result_internal.model_dump(mode="json", exclude_none=True),
-            ],
-            "turn_messages": [
-                source_internal.model_dump(mode="json", exclude_none=True),
-                tool_result_internal.model_dump(mode="json", exclude_none=True),
-            ],
-            "current_turn": 1,
-            "reload_history": False,
-        },
     }
     root_work.status = SessionReplyWorkStatus.SUCCEEDED
     root_work.locked_by = None
@@ -3124,6 +3124,8 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
     original_source_row.work_id = root_work.id
     original_tool_result_row.work_id = root_work.id
     db_session.add_all([root_work, original_record, original_source_row, original_tool_result_row])
+    await db_session.flush()
+    await session_reply_work_item_crud.save_checkpoint(db_session, root_work.id, checkpoint)
     await db_session.commit()
 
     profile = await db_session.get(Profile, PROFILE_ID)
@@ -3214,6 +3216,7 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
         followup_detail = (await verification_db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id == followup_record.id))).scalars().one()
         original_source_after = await verification_db.get(Message, original_source_message.id)
         original_result_after = await verification_db.get(Message, original_tool_result_row.id)
+        root_checkpoint = await session_reply_work_item_crud.get_checkpoint(verification_db, root_work.id)
         claims = list((await verification_db.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.uid == UID, AuditConfirmationClaim.session_id == SESSION_ID))).scalars().all())
         cards = list((await verification_db.execute(select(Message).where(Message.uid == UID, Message.session_id == SESSION_ID, Message.type == MessageType.AUDIT_CONFIRMATION))).scalars().all())
         executions = list((await verification_db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id.in_([original_record.id, followup_record.id])))).scalars().all())
@@ -3223,7 +3226,7 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
     assert root_after.source_type == root_source_type
     assert root_after.status == SessionReplyWorkStatus.SUCCEEDED
     assert root_after.execution_state["frozen_context_messages"] == []
-    assert isinstance(root_after.execution_state.get("dispatcher_checkpoint"), dict)
+    assert isinstance(root_checkpoint, dict)
     assert confirmed_after is not None
     assert confirmed_after.status == SessionReplyWorkStatus.RUNNING
     assert original_after is not None
@@ -3992,14 +3995,17 @@ async def test_scheduled_agent_work_reload_history_resume_stays_context_free(
     work.status = SessionReplyWorkStatus.RUNNING
     work.locked_by = worker_id
     work.lock_until = int(get_local_time().timestamp()) + 300
-    work.execution_state = dict(work.execution_state or {})
-    work.execution_state["dispatcher_checkpoint"] = {
+    checkpoint = {
         "messages": [],
         "turn_messages": [],
         "reload_history": True,
         "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
         "context_summary_fixed_upper_message_id": trigger_a.id,
     }
+    work.execution_state = dict(work.execution_state or {})
+    await db_session.flush()
+    assert work.id is not None
+    await session_reply_work_item_crud.save_checkpoint(db_session, work.id, checkpoint)
     await db_session.commit()
     await db_session.refresh(work)
     db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
@@ -4745,20 +4751,10 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
         assert model_id == chat_model_id
         chat_calls += 1
         if checkpoint_kind == "tool_history":
-            multimodal_tool_call = next(
-                tool_call
-                for message in messages
-                if message.role == MessageRole.ASSISTANT
-                for tool_call in message.tool_calls or []
-                if tool_call.id == multimodal_tool_call_id
-            )
+            multimodal_tool_call = next(tool_call for message in messages if message.role == MessageRole.ASSISTANT for tool_call in message.tool_calls or [] if tool_call.id == multimodal_tool_call_id)
             assert multimodal_tool_call.name == READ_MULTIMODAL_FILE_TOOL_NAME
             assert multimodal_tool_call.arguments == {"path": str(image_path)}
-            multimodal_tool_result_message = next(
-                message
-                for message in messages
-                if message.role == MessageRole.TOOL and message.tool_call_id == multimodal_tool_call_id
-            )
+            multimodal_tool_result_message = next(message for message in messages if message.role == MessageRole.TOOL and message.tool_call_id == multimodal_tool_call_id)
             assert multimodal_tool_result_message.tool_execution_status == "succeeded"
             assert json.loads(multimodal_tool_result_message.content) == multimodal_tool_result
             assert messages[-1].role == MessageRole.USER
@@ -4790,11 +4786,9 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
                 assert persisted_work is not None
                 assert persisted_work.status == SessionReplyWorkStatus.RUNNING
                 assert persisted_work.locked_by == worker_id
-                persisted_checkpoint = (persisted_work.execution_state or {}).get("dispatcher_checkpoint")
+                persisted_checkpoint = await session_reply_work_item_crud.get_checkpoint(checkpoint_db, work_id)
                 assert isinstance(persisted_checkpoint, dict)
-                persisted_messages = [
-                    InternalMessage.model_validate(item) for item in persisted_checkpoint.get("messages", [])
-                ]
+                persisted_messages = [InternalMessage.model_validate(item) for item in persisted_checkpoint.get("messages", [])]
                 persisted_summary = get_summary_content(persisted_messages)
                 assert persisted_summary == summary
             raise RuntimeError("scheduled context interruption after checkpoint save")
@@ -4860,18 +4854,18 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
                     ),
                 ]
 
-            claimed_work.execution_state = {
-                **execution_state,
-                "dispatcher_checkpoint": {
-                    "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],
-                    "turn_messages": [],
-                    "reload_history": False,
-                    "current_turn": 1,
-                    "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
-                    "context_summary_fixed_upper_message_id": trigger_message.id,
-                },
+            checkpoint = {
+                "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],
+                "turn_messages": [],
+                "reload_history": False,
+                "current_turn": 1,
+                "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
+                "context_summary_fixed_upper_message_id": trigger_message.id,
             }
+            claimed_work.execution_state = dict(execution_state)
             claim_db.add(claimed_work)
+            await claim_db.flush()
+            await session_reply_work_item_crud.save_checkpoint(claim_db, work_id, checkpoint)
             await claim_db.commit()
             claim_db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
 
@@ -4901,7 +4895,7 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
         persisted_work = await verification_db.get(SessionReplyWorkItem, work_id)
         persisted_session = await verification_db.get(ChatSession, SESSION_ID)
         assert persisted_work is not None
-        persisted_checkpoint = (persisted_work.execution_state or {}).get("dispatcher_checkpoint")
+        persisted_checkpoint = await session_reply_work_item_crud.get_checkpoint(verification_db, work_id)
         assert isinstance(persisted_checkpoint, dict)
         persisted_final_summary = get_summary_content([InternalMessage.model_validate(item) for item in persisted_checkpoint.get("messages", [])])
 
@@ -5019,18 +5013,18 @@ async def test_scheduled_task_context_overflow_routes_fallback_and_persists_noti
             InternalMessage(role=MessageRole.SYSTEM, content="定时任务执行上下文。"),
             InternalMessage(role=MessageRole.USER, content=CONTEXT_SUMMARY_WRAPPER.format(through_message_id=trigger_message.id, content=existing_summary)),
         ]
-        claimed_work.execution_state = {
-            **execution_state,
-            "dispatcher_checkpoint": {
-                "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],
-                "turn_messages": [],
-                "reload_history": False,
-                "current_turn": 1,
-                "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
-                "context_summary_fixed_upper_message_id": trigger_message.id,
-            },
+        checkpoint = {
+            "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],
+            "turn_messages": [],
+            "reload_history": False,
+            "current_turn": 1,
+            "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
+            "context_summary_fixed_upper_message_id": trigger_message.id,
         }
+        claimed_work.execution_state = dict(execution_state)
         claim_db.add(claimed_work)
+        await claim_db.flush()
+        await session_reply_work_item_crud.save_checkpoint(claim_db, work_id, checkpoint)
         await claim_db.commit()
 
     expected_summary_warning = t(

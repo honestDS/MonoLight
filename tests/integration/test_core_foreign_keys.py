@@ -164,6 +164,7 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         ("session_id", "uid"),
         "CASCADE",
     ),
+    ("session_reply_work_checkpoint", ("work_id",), "session_reply_work_item", ("id",), "CASCADE"),
     ("session_reply_sequence", ("session_id",), "chat_session", ("session_id",), "CASCADE"),
     # terminal
     (

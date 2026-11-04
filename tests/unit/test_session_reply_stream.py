@@ -24,6 +24,18 @@ from app.providers.llm import client as llm_client_module
 from app.providers.llm.client import LLMClient
 
 
+@pytest.fixture
+def no_checkpoint(monkeypatch):
+    async def get_checkpoint(_db, _work_id):
+        return None
+
+    monkeypatch.setattr(
+        executor_replies_module.session_reply_work_item_crud,
+        "get_checkpoint",
+        get_checkpoint,
+    )
+
+
 def test_llm_request_context_debug_log_does_not_estimate_tokens(monkeypatch):
     bound_fields = {}
     logged_messages = []
@@ -1387,7 +1399,7 @@ async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_foreground_persists_each_tool_event_with_original_response_id(monkeypatch):
+async def test_execute_foreground_persists_each_tool_event_with_original_response_id(monkeypatch, no_checkpoint):
     work = SimpleNamespace(
         id=7,
         work_type=SessionReplyWorkType.FOREGROUND_REPLY,
@@ -1662,7 +1674,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
 
 
 @pytest.mark.asyncio
-async def test_execute_foreground_stream_reraises_llm_exception(monkeypatch):
+async def test_execute_foreground_stream_reraises_llm_exception(monkeypatch, no_checkpoint):
     work = SimpleNamespace(
         id=9,
         work_type=SessionReplyWorkType.FOREGROUND_REPLY,
@@ -1722,7 +1734,7 @@ async def test_execute_foreground_stream_reraises_llm_exception(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_foreground_persists_non_stream_llm_request_metadata(monkeypatch):
+async def test_execute_foreground_persists_non_stream_llm_request_metadata(monkeypatch, no_checkpoint):
     work = SimpleNamespace(
         id=8,
         work_type=SessionReplyWorkType.FOREGROUND_REPLY,

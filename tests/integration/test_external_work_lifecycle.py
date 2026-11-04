@@ -161,11 +161,11 @@ async def _create_case(
             values={
                 "input_message_ids": [user_message.id],
                 "execution_state": {
-                    "dispatcher_checkpoint": checkpoint,
                     "request_ids": ["external-request-1"],
                     "show_tool_calls": True,
                 },
             },
+            checkpoint=checkpoint,
         )
 
         db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (claimed.id, REPLY_WORKER)
@@ -323,14 +323,14 @@ async def _prepare_claimed_external_resume(case: ExternalWorkCase, worker_id: st
 
         work = await db.get(SessionReplyWorkItem, case.work_id)
         assert work is not None
-        assert isinstance(work.execution_state, dict)
-        assert isinstance(work.execution_state.get("dispatcher_checkpoint"), dict)
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
+        assert isinstance(checkpoint, dict)
         await external_work_module.prepare_external_work_resume(
             db,
             uid=case.uid,
             session_id=case.session_id,
             profile_id=case.profile_id,
-            checkpoint=work.execution_state["dispatcher_checkpoint"],
+            checkpoint=checkpoint,
         )
         await db.commit()
 
@@ -377,11 +377,11 @@ async def _create_target_work(case: ExternalWorkCase, content: str) -> tuple[int
             values={
                 "input_message_ids": [message.id],
                 "execution_state": {
-                    "dispatcher_checkpoint": checkpoint,
                     "request_ids": [f"target-request-{message.id}"],
                     "show_tool_calls": True,
                 },
             },
+            checkpoint=checkpoint,
         )
         await db.commit()
         return claimed.id, message.id, worker_id
@@ -623,6 +623,7 @@ async def _snapshot_stopped_task_replies(
         closing_work = await db.get(SessionReplyWorkItem, closing_work_id)
         task = await db.get(BackgroundTask, task_id)
         assert old_work is not None and closing_work is not None and task is not None
+        old_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, old_work.id)
         cross_works = [await db.get(SessionReplyWorkItem, work_id) for work_id in cross_work_ids]
         assert all(work is not None for work in cross_works)
 
@@ -630,7 +631,7 @@ async def _snapshot_stopped_task_replies(
         assert session is not None
         activity = next(row for row in await session_crud.get_user_activity(db, uid=case.uid) if row.session_id == case.session_id)
         return {
-            "old": (old_work.status, old_work.execution_state, old_work.locked_by, old_work.lock_until),
+            "old": (old_work.status, old_work.execution_state, old_work.locked_by, old_work.lock_until, old_checkpoint),
             "closing": (closing_work.status, closing_work.event_sent, closing_work.result_message_id, closing_work.execution_state),
             "cross": {work.id: (work.status, work.execution_state, work.locked_by, work.lock_until) for work in cross_works if work is not None and work.id is not None},
             "task": (task.status, task.reply_status, task.extra, task.result),
@@ -642,12 +643,14 @@ async def _snapshot(case: ExternalWorkCase) -> dict[str, Any]:
     async with case.factory() as db:
         work = await db.get(SessionReplyWorkItem, case.work_id)
         assert work is not None
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
         task_result = await db.execute(select(BackgroundTask).where(BackgroundTask.session_id == case.session_id).order_by(BackgroundTask.id))
         message_result = await db.execute(select(Message).where(Message.session_id == case.session_id, Message.uid == case.uid).order_by(Message.id))
         stream_result = await db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == case.work_id).order_by(SessionReplyStreamEvent.sequence_no))
         session_event_result = await db.execute(select(SessionEvent).where(SessionEvent.session_id == case.session_id, SessionEvent.uid == case.uid).order_by(SessionEvent.id))
         return {
             "work": work,
+            "checkpoint": checkpoint,
             "tasks": list(task_result.scalars().all()),
             "messages": list(message_result.scalars().all()),
             "stream_events": list(stream_result.scalars().all()),
@@ -1049,8 +1052,8 @@ async def test_parallel_external_resume_is_idempotent_and_persists_protocol_even
     async with external_work_database() as db:
         work = await db.get(SessionReplyWorkItem, case.work_id)
         assert work is not None
-        assert isinstance(work.execution_state, dict)
-        checkpoint = work.execution_state["dispatcher_checkpoint"]
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
+        assert isinstance(checkpoint, dict)
         assert "deferred_external_results" not in checkpoint
         db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (case.work_id, "external-resume-worker")
         await external_work_module.prepare_external_work_resume(
@@ -1406,7 +1409,9 @@ async def test_external_result_delivery_rolls_back_partial_claim_and_preserves_s
         assert target is not None
         assert target.input_message_ids == [target_user_id]
         assert "received_external_task_ids" not in target.execution_state
-        assert len(target.execution_state["dispatcher_checkpoint"]["messages"]) == 1
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, target.id)
+        assert isinstance(checkpoint, dict)
+        assert len(checkpoint["messages"]) == 1
 
     await _make_work_ready_for_claim(external_work_database, target_id)
     assert await _claim_next(external_work_database, target_worker) == target_id
@@ -1751,11 +1756,7 @@ async def test_background_task_resume_does_not_claim_unrelated_auto_reply_task(e
             profile_id=PROFILE_ID,
         )
 
-        payload_task_ids = {
-            payload["task_id"]
-            for message in received
-            for payload in _result_payloads(message.content or "{}")
-        }
+        payload_task_ids = {payload["task_id"] for message in received for payload in _result_payloads(message.content or "{}")}
         assert payload_task_ids == {source_task.id}
         await db.refresh(source_task)
         await db.refresh(unrelated_task)
@@ -2238,8 +2239,6 @@ async def test_reopened_completed_work_keeps_only_new_result_files(
         )
         checkpoint["files_to_user"] = [old_file]
         state = dict(work.execution_state)
-        state["dispatcher_checkpoint"] = checkpoint
-        work.execution_state = state
         assert await session_reply_work_item_crud.update_claimed(
             db,
             work_id=case.work_id,
@@ -2247,6 +2246,8 @@ async def test_reopened_completed_work_keeps_only_new_result_files(
             values={"execution_state": state},
             commit=False,
         )
+        await db.flush()
+        await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
         old_history = await save_message(
             db,
             case.session_id,
@@ -2275,7 +2276,7 @@ async def test_reopened_completed_work_keeps_only_new_result_files(
     assert delivered["work"].status == SessionReplyWorkStatus.SUCCEEDED
     assert delivered["work"].event_sent is True
     assert delivered["work"].result_message_id == old_history.id
-    assert delivered["work"].execution_state["dispatcher_checkpoint"]["files_to_user"] == [old_file]
+    assert delivered["checkpoint"]["files_to_user"] == [old_file]
     assert {slot["task_id"] for slot in delivered["work"].execution_state["pending_tools"]} == {case.task_ids["call-late"]}
     late_task_before = next(task for task in delivered["tasks"] if task.id == case.task_ids["call-late"])
     assert late_task_before.status == BackgroundTaskStatus.PENDING
@@ -2289,7 +2290,7 @@ async def test_reopened_completed_work_keeps_only_new_result_files(
     assert after["work"].id == case.work_id
     assert after["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
     expected_files = [new_file] if late_has_file else []
-    assert after["work"].execution_state["dispatcher_checkpoint"].get("files_to_user", []) == expected_files
+    assert after["checkpoint"].get("files_to_user", []) == expected_files
 
     preserved_history = next(message for message in after["messages"] if message.id == old_history.id)
     assert preserved_history.id == old_history.id
@@ -2322,7 +2323,7 @@ async def test_reopened_completed_work_keeps_only_new_result_files(
     assert await external_work_module.resume_external_work_for_task(case.task_ids["call-late"]) is False
     repeated = await _snapshot(case)
     assert repeated["work"].status == SessionReplyWorkStatus.READY_FOR_LLM
-    assert repeated["work"].execution_state["dispatcher_checkpoint"].get("files_to_user", []) == expected_files
+    assert repeated["checkpoint"].get("files_to_user", []) == expected_files
     repeated_history = next(message for message in repeated["messages"] if message.id == old_history.id)
     assert repeated_history.id == old_history.id
     assert repeated_history.content == old_history_content
@@ -2476,9 +2477,10 @@ async def test_complete_stopped_task_replies_merges_external_resume_context_task
             "terminal_auto_watch_task_ids": [first_task_id, second_task_id],
             "external_resume_pending": True,
             "terminal_auto_resume": True,
-            "dispatcher_checkpoint": checkpoint,
         }
         closing_work.execution_state = {"stopped_task_ids": stopped_task_ids}
+        await db.flush()
+        await session_reply_work_item_crud.save_checkpoint(db, old_work.id, checkpoint)
         await db.commit()
 
     before = await _snapshot_stopped_task_replies(
@@ -2493,11 +2495,10 @@ async def test_complete_stopped_task_replies_merges_external_resume_context_task
         "terminal_auto_watch_task_ids",
         "external_resume_pending",
         "terminal_auto_resume",
-        "dispatcher_checkpoint",
     }
     assert before_state["external_resume_context"][0]["task_id"] == first_task_id
     assert before_state["external_resume_context"][0]["tasks"] == [first_payload, second_payload]
-    assert before_state["dispatcher_checkpoint"]["deferred_external_results"] is True
+    assert before["old"][4]["deferred_external_results"] is True
 
     async with external_work_database() as db:
         await external_work_module.complete_stopped_task_replies(db, work_id=closing_work_id)
@@ -2513,8 +2514,8 @@ async def test_complete_stopped_task_replies_merges_external_resume_context_task
     if stopped_position == "all":
         assert first["old"][0] == SessionReplyWorkStatus.CANCELLED
         assert first["session_is_reply_running"] is False
-        assert set(first["old"][1]) == {"dispatcher_checkpoint"}
-        assert first["old"][1]["dispatcher_checkpoint"] == {key: value for key, value in checkpoint.items() if key != "deferred_external_results"}
+        assert first["old"][1] == {}
+        assert first["old"][4] == {key: value for key, value in checkpoint.items() if key != "deferred_external_results"}
     else:
         remaining_task_id = second_task_id if stopped_position == "first" else first_task_id
         remaining_payload = second_payload if stopped_position == "first" else first_payload
@@ -2524,7 +2525,7 @@ async def test_complete_stopped_task_replies_merges_external_resume_context_task
         assert state["terminal_auto_watch_task_ids"] == [remaining_task_id]
         assert state["external_resume_pending"] is True
         assert "terminal_auto_resume" not in state
-        assert state["dispatcher_checkpoint"] == checkpoint
+        assert first["old"][4] == checkpoint
         assert len(state["external_resume_context"]) == 1
         merged_payload = state["external_resume_context"][0]
         for key, value in remaining_payload.items():

@@ -898,8 +898,9 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
     db_session.add_all([Message(id=message_id, **message_fields, role=MessageRole.TOOL, type=MessageType.TOOL_RESULT, content=result.model_dump_json(exclude_none=True)) for _call_id, (message_id, result) in database_results.items()])
     await db_session.flush()
 
+    crud = CRUDSessionReplyWorkItem()
     work = await enqueue(
-        CRUDSessionReplyWorkItem(),
+        crud,
         db_session,
         work_type=SessionReplyWorkType.FOREGROUND_REPLY,
         source_id=1,
@@ -909,8 +910,10 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
     work.locked_by = worker_id
     work.lock_until = 9999999999
     work.input_message_ids = [1]
-    work.execution_state = {"stream_requested": False, "dispatcher_checkpoint": checkpoint}
+    work.execution_state = {"stream_requested": False}
     db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+    await db_session.flush()
+    await crud.save_checkpoint(db_session, work.id, checkpoint)
     await db_session.commit()
 
     async def load_messages() -> list[Message]:
@@ -956,9 +959,8 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
     async def dispatch(**kwargs):
         resume_state = kwargs["execution_resume_state"]
         async with test_session_factory() as verify_db:
-            saved = await verify_db.get(SessionReplyWorkItem, work.id)
-            assert saved is not None
-            assert saved.execution_state["dispatcher_checkpoint"] == resume_state
+            saved_checkpoint = await crud.get_checkpoint(verify_db, work.id)
+            assert saved_checkpoint == resume_state
         internal_messages = [InternalMessage.model_validate(message) for message in resume_state["messages"]]
         materialized_messages = materialize_user_environment_prompts(internal_messages)
         provider_messages = OpenAIChatCompletionsTransformer.to_provider(materialized_messages)
@@ -984,7 +986,8 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
         await db_session.refresh(work)
         saved_work_result = await db_session.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work.id).execution_options(populate_existing=True))
         saved_work = saved_work_result.scalar_one()
-        saved_checkpoint = saved_work.execution_state["dispatcher_checkpoint"]
+        saved_checkpoint = await crud.get_checkpoint(db_session, work.id)
+        assert saved_checkpoint is not None
         checkpoint_snapshots.append(copy.deepcopy(saved_checkpoint))
         assert saved_work.status == SessionReplyWorkStatus.RUNNING
         assert saved_work.locked_by == worker_id
@@ -1163,8 +1166,9 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
     db_session.add_all(db_messages)
     await db_session.flush()
 
+    crud = CRUDSessionReplyWorkItem()
     work = await enqueue(
-        CRUDSessionReplyWorkItem(),
+        crud,
         db_session,
         work_type=SessionReplyWorkType.FOREGROUND_REPLY,
         source_id=1,
@@ -1174,8 +1178,10 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
     work.locked_by = worker_id
     work.lock_until = 9999999999
     work.input_message_ids = [1]
-    work.execution_state = {"stream_requested": False, "dispatcher_checkpoint": checkpoint}
+    work.execution_state = {"stream_requested": False}
     db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work.id, worker_id)
+    await db_session.flush()
+    await crud.save_checkpoint(db_session, work.id, checkpoint)
     await db_session.commit()
 
     async def load_messages() -> list[Message]:
@@ -1228,8 +1234,8 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
     async def dispatch(**kwargs):
         resume = kwargs["execution_resume_state"]
         async with test_session_factory() as verify_db:
-            saved = await verify_db.get(SessionReplyWorkItem, work.id)
-            assert saved is not None and saved.execution_state["dispatcher_checkpoint"] == resume
+            saved_checkpoint = await crud.get_checkpoint(verify_db, work.id)
+            assert saved_checkpoint == resume
         assert_provider(resume["messages"], rounds)
         assert_provider(resume["turn_messages"], [current])
         return expected_response
@@ -1243,8 +1249,8 @@ async def test_foreground_reply_restores_reused_tool_call_ids_by_turn_and_occurr
         unknown_checkpoint_ids = []
         assert await executor_replies_module._execute_foreground(db_session, work, worker_id) == expected_response
         await db_session.refresh(work)
-        saved = await db_session.get(SessionReplyWorkItem, work.id)
-        checkpoint = saved.execution_state["dispatcher_checkpoint"]
+        checkpoint = await crud.get_checkpoint(db_session, work.id)
+        assert checkpoint is not None
         checkpoints.append(copy.deepcopy(checkpoint))
         messages = [InternalMessage.model_validate(m) for m in checkpoint["messages"]]
         current_messages = [InternalMessage.model_validate(m) for m in checkpoint["turn_messages"]]

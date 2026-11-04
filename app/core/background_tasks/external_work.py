@@ -110,6 +110,7 @@ async def complete_stopped_task_replies(db: AsyncSession, *, work_id: int) -> No
 
     for candidate in candidates:
         candidate_state = dict(candidate.execution_state) if isinstance(candidate.execution_state, dict) else {}
+        checkpoint: dict[str, Any] | None = None
         has_other_wait = False
         for state_key in ("pending_tools", "terminal_watch_waits", "external_resume_context"):
             raw_slots = candidate_state.get(state_key)
@@ -163,11 +164,10 @@ async def complete_stopped_task_replies(db: AsyncSession, *, work_id: int) -> No
         if not candidate_state.get("external_resume_context"):
             candidate_state.pop("external_resume_pending", None)
             candidate_state.pop("terminal_auto_resume", None)
-            checkpoint = candidate_state.get("dispatcher_checkpoint")
-            if isinstance(checkpoint, dict):
-                checkpoint = dict(checkpoint)
+            checkpoint_raw = await session_reply_work_item_crud.get_checkpoint(db, candidate.id)
+            if isinstance(checkpoint_raw, dict):
+                checkpoint = dict(checkpoint_raw)
                 checkpoint.pop("deferred_external_results", None)
-                candidate_state["dispatcher_checkpoint"] = checkpoint
 
         values: dict[str, Any] = {"execution_state": candidate_state}
         if has_other_wait:
@@ -185,7 +185,9 @@ async def complete_stopped_task_replies(db: AsyncSession, *, work_id: int) -> No
                     candidate_state["external_resume_pending"] = False
         if not has_other_wait:
             values.update({"status": SessionReplyWorkStatus.CANCELLED, "locked_by": None, "lock_until": None})
-        await external_work_crud.update_active_reply(db, work=candidate, values=values)
+        updated = await external_work_crud.update_active_reply(db, work=candidate, values=values)
+        if updated and checkpoint is not None:
+            await session_reply_work_item_crud.save_checkpoint(db, candidate.id, checkpoint)
 
     await external_work_crud.mark_stopped_results_delivered(db, uid=work.uid, task_ids=actual_task_ids)
     await db.flush()
@@ -470,12 +472,12 @@ async def prepare_external_work_resume(
                 "context_summary_fixed_upper_message_id": max(marker_ids),
             }
         )
-    state["dispatcher_checkpoint"] = new_checkpoint
     updated = await session_reply_work_item_crud.update_claimed(
         db,
         work_id=work_id,
         worker_id=worker_id,
         values={"execution_state": state},
+        checkpoint=new_checkpoint,
         commit=False,
     )
     if not updated:
@@ -550,18 +552,18 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 marker_ids = await _persist_external_work_markers(db, work=work, state=state, payloads=marker_payloads)
                 latest_marker_id = max(marker_ids)
                 _remove_consumed_slots(state, consumed_slot_keys)
-                state.pop("dispatcher_checkpoint", None)
                 state.pop("active_audit_execution", None)
                 state.pop("external_resume_context", None)
                 state.pop("external_resume_pending", None)
                 if not await external_work_crud.interrupt_waiting(db, work=work, execution_state=state, error=_unknown_error(), commit=False):
                     await db.rollback()
                     return False
+                await session_reply_work_item_crud.delete_checkpoint(db, work.id)
                 await session_event_crud.publish(db, dedupe_key=f"external-work-interrupted:{work.id}:{latest_marker_id}", uid=uid, session_id=session_id, event={"type": "work_ready", "session_id": session_id, "work_id": work.id}, commit=False)
                 await db.commit()
                 return True
 
-            checkpoint_raw = state.get("dispatcher_checkpoint")
+            checkpoint_raw = await session_reply_work_item_crud.get_checkpoint(db, work.id)
             checkpoint = dict(checkpoint_raw) if isinstance(checkpoint_raw, dict) else {}
             from app.core.utils.assistant_files import merge_assistant_files
             from app.core.utils.dispatcher.helpers import extract_files_to_user
@@ -588,7 +590,6 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                         "deferred_external_results": True,
                     }
                 )
-            state["dispatcher_checkpoint"] = checkpoint
             _remove_consumed_slots(state, consumed_slot_keys)
             state.pop("active_audit_execution", None)
             state["external_resume_pending"] = True
@@ -597,6 +598,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
             if not await external_work_crud.wake_waiting(db, work=work, execution_state=state, commit=False):
                 await db.rollback()
                 return False
+            await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
             latest_task_id = max(slot[0] for slot, _call_id, _result_text in result_entries)
             await session_event_crud.publish(db, dedupe_key=f"external-work-ready:{work.id}:{latest_task_id}", uid=uid, session_id=session_id, event={"type": "work_ready", "session_id": session_id, "work_id": work.id}, commit=False)
             await db.commit()

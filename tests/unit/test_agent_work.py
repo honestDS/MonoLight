@@ -87,12 +87,17 @@ async def test_agent_work_executes_with_empty_conversation_context(
         assert message_id == spec.instruction_message_id
         return trigger
 
+    async def get_checkpoint(_db, work_id):
+        assert work_id == work.id
+        return None
+
     async def dispatch_interactive_work(_db, **kwargs):
         captured.update(kwargs)
         return {"content": "done", "history": [], "files": []}
 
     monkeypatch.setattr(executor_agent_work_module.profile_crud, "get_with_relations", get_profile)
     monkeypatch.setattr(executor_agent_work_module.message_crud, "get", get_message)
+    monkeypatch.setattr(executor_agent_work_module.session_reply_work_item_crud, "get_checkpoint", get_checkpoint)
     monkeypatch.setattr(executor_agent_work_module, "_dispatch_interactive_work", dispatch_interactive_work)
 
     response = await executor_agent_work_module.execute_agent_work(object(), work, "worker-1")

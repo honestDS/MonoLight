@@ -613,7 +613,7 @@ class CRUDTerminalWatchReply:
         generation = state.get("terminal_resume_generation")
         if not isinstance(generation, int) or isinstance(generation, bool):
             generation = 0
-        checkpoint = state.get("dispatcher_checkpoint")
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
         checkpoint = dict(checkpoint) if isinstance(checkpoint, dict) else {}
         checkpoint.pop("files_to_user", None)
         checkpoint.pop("reply_skipped", None)
@@ -628,7 +628,6 @@ class CRUDTerminalWatchReply:
                 "terminal_resume_generation": generation + 1,
                 "terminal_auto_resume": True,
                 "external_resume_pending": True,
-                "dispatcher_checkpoint": checkpoint,
             }
         )
         result = await db.execute(
@@ -656,7 +655,10 @@ class CRUDTerminalWatchReply:
             )
             .execution_options(synchronize_session=False)
         )
-        return (result.rowcount or 0) == 1
+        updated = (result.rowcount or 0) == 1
+        if updated:
+            await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
+        return updated
 
 
 terminal_watch_reply_crud = CRUDTerminalWatchReply()

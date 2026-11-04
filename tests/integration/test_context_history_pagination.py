@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import context as context_module
 from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER
 from app.core.context import ContextManager
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
 from app.core.utils.context_summary.common import serialize_message
 from app.core.utils.dispatcher.frozen_context import capture_frozen_context_messages, load_frozen_context_messages
@@ -17,7 +18,6 @@ from app.core.utils.dispatcher.markdown_instruction import materialize_user_envi
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
-from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
@@ -932,9 +932,8 @@ async def test_sent_file_history_isolated_across_same_work_reload_and_frozen_con
             assert sent_token not in serialized_context
             assert sent_download_url not in serialized_context
 
-            checkpoint_work = await db.get(SessionReplyWorkItem, initial_work_id)
-            assert checkpoint_work is not None
-            checkpoint = checkpoint_work.execution_state["dispatcher_checkpoint"]
+            checkpoint = await session_reply_work_item_crud.get_checkpoint(db, initial_work_id)
+            assert checkpoint is not None
             checkpoint_messages = checkpoint["messages"]
             checkpoint_tool_call_ids = [tool_call.get("id") for item in checkpoint_messages if item.get("role") == MessageRole.ASSISTANT.value for tool_call in item.get("tool_calls") or []]
             checkpoint_tool_result_ids = [item.get("tool_call_id") for item in checkpoint_messages if item.get("role") == MessageRole.TOOL.value]

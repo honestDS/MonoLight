@@ -10,6 +10,7 @@ from app.core.constants import (
 )
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
@@ -80,7 +81,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             response["llm_request_metadata"] = llm_request_metadata
         return response
 
-    resume_state = execution_state.get("dispatcher_checkpoint")
+    resume_state = await session_reply_work_item_crud.get_checkpoint(db, work.id)
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
         resume_state = None
     elif resume_state.get("reload_history") is not True:
@@ -111,7 +112,7 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
         return await _execute_background_task_resume(db, work, worker_id)
 
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
-    checkpoint = execution_state.get("dispatcher_checkpoint")
+    checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
     if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
 
@@ -272,7 +273,7 @@ async def _execute_background_task_resume(db, work: SessionReplyWorkItem, worker
             "frozen_context_messages": serialize_frozen_context_messages(frozen_context_messages),
         }
         work.execution_state = execution_state
-    resume_state = execution_state.get("dispatcher_checkpoint")
+    resume_state = await session_reply_work_item_crud.get_checkpoint(db, work.id)
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
         resume_state = None
 

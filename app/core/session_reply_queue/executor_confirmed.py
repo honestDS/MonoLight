@@ -25,7 +25,7 @@ from app.core.constants import (
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
-from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.i18n import get_current_locale, t
 from app.core.prompts import AUDIT_SOURCE_MESSAGE_INVALID_PROMPT
@@ -215,13 +215,13 @@ def _refresh_confirmed_frozen_tool_results(
 
 
 def _build_confirmed_wait_checkpoint(
-    execution_state: dict[str, Any],
+    checkpoint: dict[str, Any] | None,
     *,
     pending_tool_results: dict[str, Message],
     decision_message_id: int,
     decision_raw_message: str,
 ) -> dict[str, Any]:
-    checkpoint = dict(execution_state.get("dispatcher_checkpoint") or {})
+    checkpoint = dict(checkpoint or {})
     checkpoint_messages = [InternalMessage.model_validate(item) for item in checkpoint.get("messages", [])]
     checkpoint_messages = (
         _refresh_confirmed_frozen_tool_results(
@@ -409,7 +409,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     **(work.execution_state or {}),
                     "frozen_context_messages": serialize_frozen_context_messages(frozen_context_messages),
                 }
-                checkpoint = refreshed_state.get("dispatcher_checkpoint")
+                work.execution_state = refreshed_state
+                checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
                 if isinstance(checkpoint, dict) and isinstance(checkpoint.get("messages"), list):
                     checkpoint_messages = [InternalMessage.model_validate(item) for item in checkpoint["messages"]]
                     checkpoint_messages = (
@@ -419,11 +420,14 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                         )
                         or checkpoint_messages
                     )
-                    refreshed_state["dispatcher_checkpoint"] = {
+                    new_checkpoint = {
                         **checkpoint,
                         "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],
                     }
-                work.execution_state = refreshed_state
+                    await ensure_session_reply_work_claim(db)
+                    db.add(work)
+                    await db.flush()
+                    await session_reply_work_item_crud.save_checkpoint(db, work.id, new_checkpoint)
             if reaudit_round.confirmation_payload is not None:
                 confirmation_content = json.dumps(reaudit_round.confirmation_payload, ensure_ascii=False)
                 await save_message(
@@ -662,8 +666,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         tool_results=[message for message in replacement_state.turn_messages if message.role == MessageRole.TOOL],
     )
     if wait_response is not None:
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
         checkpoint = _build_confirmed_wait_checkpoint(
-            work.execution_state or {},
+            checkpoint,
             pending_tool_results=pending_tool_results,
             decision_message_id=decision_message_id,
             decision_raw_message=decision_raw_message,

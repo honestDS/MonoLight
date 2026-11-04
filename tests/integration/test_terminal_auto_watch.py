@@ -770,6 +770,9 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_active_manual_watc
             .scalars()
             .all()
         )
+        checkpoint_work = resume_work_items[0]
+        assert checkpoint_work.id is not None
+        checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, checkpoint_work.id) or {})
 
     assert persisted_manual is not None
     assert persisted_manual.status == manual_status
@@ -795,7 +798,6 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_active_manual_watc
         "next_offset": AFTER_OFFSET,
     }
     assert json.loads(resume_payload["tool_result"]["content"]) == persisted_auto.result
-    checkpoint = dict(resume_state.get("dispatcher_checkpoint") or {})
     assert checkpoint["reload_history"] is True
     assert checkpoint["deferred_external_results"] is True
 
@@ -906,6 +908,9 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_manual_watch_on_ot
             .scalars()
             .all()
         )
+        checkpoint_work = resume_work_items[0]
+        assert checkpoint_work.id is not None
+        checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, checkpoint_work.id) or {})
 
     assert persisted_manual is not None
     assert persisted_manual.status == BackgroundTaskStatus.PENDING
@@ -932,7 +937,6 @@ async def test_terminal_auto_watch_reply_is_not_suppressed_by_manual_watch_on_ot
         "terminal_session_id": SECOND_TERMINAL_SESSION_ID,
     }
     assert json.loads(resume_payload["tool_result"]["content"]) == persisted_auto.result
-    checkpoint = dict(resume_state.get("dispatcher_checkpoint") or {})
     assert checkpoint["reload_history"] is True
     assert checkpoint["deferred_external_results"] is True
 
@@ -1557,7 +1561,7 @@ async def test_terminal_exited_completed_auto_watch_reuses_cached_result_for_new
         if old_result_consumed:
             db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (old_work.id, old_worker_id)
             assert await prepare_terminal_auto_watch_resume(db, old_work, old_worker_id)
-            checkpoint = (old_work.execution_state or {}).get("dispatcher_checkpoint") or {}
+            checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, old_work.id) or {})
             pending_resume_ids = checkpoint.get("pending_resume_message_ids")
             assert isinstance(pending_resume_ids, list) and len(pending_resume_ids) == 1
             old_marker_id = pending_resume_ids[0]
@@ -1638,7 +1642,7 @@ async def test_terminal_exited_completed_auto_watch_reuses_cached_result_for_new
             assert claimed_work.id is not None
             db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (claimed_work.id, resume_worker_id)
             assert await prepare_terminal_auto_watch_resume(db, claimed_work, resume_worker_id)
-            checkpoint = (claimed_work.execution_state or {}).get("dispatcher_checkpoint") or {}
+            checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, claimed_work.id) or {})
             pending_resume_ids = checkpoint.get("pending_resume_message_ids")
             assert isinstance(pending_resume_ids, list) and len(pending_resume_ids) == 1
             marker = await db.get(Message, pending_resume_ids[0])
@@ -2067,7 +2071,7 @@ async def test_terminal_auto_watch_timeout_delivery_stays_independent_per_waitin
             else:
                 assert marker_id == shared_marker_id
             await db.refresh(claimed_work)
-            checkpoint = (claimed_work.execution_state or {}).get("dispatcher_checkpoint") or {}
+            checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, claimed_work.id) or {})
             assert checkpoint["pending_resume_message_ids"] == [shared_marker_id]
             await db.refresh(second_task)
             deliveries = second_task.extra["terminal_watch_deliveries"]
@@ -2270,8 +2274,7 @@ async def test_terminal_auto_watch_shared_subscriptions_deliver_independent_resu
             assert await prepare_terminal_auto_watch_resume(db, claimed_work, worker_id)
 
             _work, claimed_subscription, claimed_queued_result, _claimed_queued_body = wait_by_work_id[claimed_work.id]
-            state = claimed_work.execution_state or {}
-            checkpoint = state.get("dispatcher_checkpoint") or {}
+            checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, claimed_work.id) or {})
             pending_resume_ids = checkpoint.get("pending_resume_message_ids")
             assert isinstance(pending_resume_ids, list)
             assert len(pending_resume_ids) == 1
@@ -2443,6 +2446,7 @@ async def test_terminal_auto_watch_replies_group_by_origin_work_across_terminals
             .all()
         )
         persisted_work = await db.get(SessionReplyWorkItem, work.id)
+        checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, work.id) or {})
 
     assert len(persisted_tasks) == 2
     assert all(task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED for task in persisted_tasks)
@@ -2456,7 +2460,6 @@ async def test_terminal_auto_watch_replies_group_by_origin_work_across_terminals
 
     assert persisted_work is not None
     assert persisted_work.status == SessionReplyWorkStatus.RUNNING
-    checkpoint = (persisted_work.execution_state or {}).get("dispatcher_checkpoint") or {}
     assert checkpoint["reload_history"] is True
     assert "external_resume_messages" not in checkpoint
     assert checkpoint["pending_resume_message_ids"] == [message.id for message in result_messages]
@@ -3529,7 +3532,7 @@ async def test_terminal_closing_subscription_creates_auto_watch_and_delivers_pro
         assert claimed_work.id == work_id
         db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, resume_worker_id)
         assert await prepare_terminal_auto_watch_resume(db, claimed_work, resume_worker_id)
-        checkpoint = (claimed_work.execution_state or {}).get("dispatcher_checkpoint") or {}
+        checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, claimed_work.id) or {})
         pending_resume_ids = checkpoint.get("pending_resume_message_ids")
         assert isinstance(pending_resume_ids, list) and len(pending_resume_ids) == 1
         marker = await db.get(Message, pending_resume_ids[0])
@@ -3653,28 +3656,29 @@ async def test_terminal_auto_watch_route_preserves_reclaimed_work_checkpoint(
             "consumed": False,
             "routed": True,
         }
+        persisted_checkpoint = await session_reply_work_item_crud.get_checkpoint(verify_db, persisted_work.id)
+        assert persisted_checkpoint == checkpoint
         state = persisted_work.execution_state or {}
-        assert state["dispatcher_checkpoint"] == checkpoint
         assert state["terminal_auto_resume"] is True
         assert persisted_work.status == SessionReplyWorkStatus.RUNNING
         assert persisted_work.locked_by == new_worker_id
         assert persisted_work.lock_until == reclaimed_lock_until
 
         stale_update = {
-            "dispatcher_checkpoint": {
-                "messages": [],
-                "test_marker": "old-worker-must-not-overwrite",
-            }
+            "messages": [],
+            "test_marker": "old-worker-must-not-overwrite",
         }
         assert not await session_reply_work_item_crud.update_claimed(
             verify_db,
             work_id=work_id,
             worker_id=old_worker_id,
-            values={"execution_state": stale_update},
+            values={"execution_state": {"stale_worker": True}},
+            checkpoint=stale_update,
         )
         await verify_db.refresh(persisted_work)
         final_state = persisted_work.execution_state or {}
-        assert final_state["dispatcher_checkpoint"] == checkpoint
+        final_checkpoint = await session_reply_work_item_crud.get_checkpoint(verify_db, persisted_work.id)
+        assert final_checkpoint == checkpoint
         assert final_state["terminal_auto_resume"] is True
         assert persisted_work.status == SessionReplyWorkStatus.RUNNING
         assert persisted_work.locked_by == new_worker_id
@@ -4239,7 +4243,7 @@ async def test_terminal_close_replies_clear_only_the_closed_terminal_watch_slot(
             assert await prepare_terminal_auto_watch_resume(db, claimed_origin, resume_worker_id)
             await db.refresh(claimed_origin)
             assert claimed_origin.status == SessionReplyWorkStatus.RUNNING
-            checkpoint = (claimed_origin.execution_state or {}).get("dispatcher_checkpoint") or {}
+            checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, claimed_origin.id) or {})
             pending_resume_ids = checkpoint.get("pending_resume_message_ids")
             assert isinstance(pending_resume_ids, list) and pending_resume_ids
             marker_payloads = []

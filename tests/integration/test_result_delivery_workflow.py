@@ -81,6 +81,12 @@ async def _seed_suspended_source(factory, *, label: str, result_marker: str) -> 
             assistant_call.model_copy(update={"id": saved_call.id}).model_dump(mode="json", exclude_none=True),
             tool_result.model_copy(update={"id": saved_result.id}).model_dump(mode="json", exclude_none=True),
         ]
+        cp = {
+            "messages": checkpoint_messages,
+            "turn_messages": checkpoint_messages,
+            "reload_history": False,
+            "current_turn": 1,
+        }
         slot = {
             "task_id": task.id,
             "tool_call_id": call_id,
@@ -97,16 +103,12 @@ async def _seed_suspended_source(factory, *, label: str, result_marker: str) -> 
             "expose_tool_call_content": True,
             "pending_tools": [slot],
             "external_tool_result_message_ids": [saved_result.id],
-            "dispatcher_checkpoint": {
-                "messages": checkpoint_messages,
-                "turn_messages": checkpoint_messages,
-                "reload_history": False,
-                "current_turn": 1,
-            },
         }
         user_row = await db.get(Message, user_message.id)
         assert user_row is not None
         user_row.is_processed = True
+        await db.flush()
+        await session_reply_work_item_crud.save_checkpoint(db, work.id, cp)
         await db.commit()
         return {
             "work_id": work.id,
@@ -251,20 +253,22 @@ async def test_result_delivery_merges_two_suspended_sources_into_latest_foregrou
                 frozen_history = parse_db_messages_to_internal(persisted_messages)
                 frozen_message_ids = [message.id for message in frozen_history]
                 assert frozen_message_ids == [message.id for message in persisted_messages]
+                cp = {
+                    "messages": [message.model_dump(mode="json") for message in frozen_history],
+                    "turn_messages": [],
+                    "current_turn": 0,
+                    "reload_history": False,
+                }
                 target.input_message_ids = [latest_user.id]
                 target.attempt_count = 1
                 target.execution_state = {
                     **(target.execution_state or {}),
-                    "dispatcher_checkpoint": {
-                        "messages": [message.model_dump(mode="json") for message in frozen_history],
-                        "turn_messages": [],
-                        "current_turn": 0,
-                        "reload_history": False,
-                    },
                 }
                 persisted_latest = await db.get(Message, latest_user.id)
                 assert persisted_latest is not None
                 persisted_latest.is_processed = True
+                await db.flush()
+                await session_reply_work_item_crud.save_checkpoint(db, target.id, cp)
                 await db.commit()
 
         async with factory() as db:

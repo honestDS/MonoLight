@@ -53,6 +53,7 @@ from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SessionReplySequence,
     SessionReplySourceType,
+    SessionReplyWorkCheckpoint,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
     SessionReplyWorkType,
@@ -77,6 +78,7 @@ async def db_session(database_factory) -> AsyncSession:
         SessionTodoPlan.__table__,
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
+        SessionReplyWorkCheckpoint.__table__,
     ]
     async with database_factory(tables=tables) as factory:
         async with factory() as session:
@@ -1282,6 +1284,10 @@ async def test_websocket_approval_inherits_scheduled_source_checkpoint(
             content="pending confirmation",
         ),
     ]
+    source_checkpoint = {
+        "messages": [message.model_dump(mode="json", exclude_none=True) for message in source_checkpoint_messages],
+        "current_turn": 1,
+    }
     source_work = SessionReplyWorkItem(
         uid="owner",
         session_id="session-1",
@@ -1299,13 +1305,6 @@ async def test_websocket_approval_inherits_scheduled_source_checkpoint(
                     exclude_none=True,
                 )
             ],
-            "dispatcher_checkpoint": {
-                "messages": [
-                    message.model_dump(mode="json", exclude_none=True)
-                    for message in source_checkpoint_messages
-                ],
-                "current_turn": 1,
-            },
         },
     )
     db_session.add(source_work)
@@ -1315,6 +1314,8 @@ async def test_websocket_approval_inherits_scheduled_source_checkpoint(
             next_sequence_no=2,
         )
     )
+    await db_session.flush()
+    await session_reply_work_item_crud.save_checkpoint(db_session, source_work.id, source_checkpoint)
     await db_session.commit()
     await db_session.refresh(source_work)
 
@@ -1344,18 +1345,13 @@ async def test_websocket_approval_inherits_scheduled_source_checkpoint(
     ]
 
     works = await list_work(db_session)
-    confirmed_work = next(
-        work
-        for work in works
-        if work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
-    )
+    confirmed_work = next(work for work in works if work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION)
     assert events[-1]["type"] == "done"
     assert confirmed_work.execution_state["execution_scope"] == "task"
-    assert confirmed_work.execution_state["dispatcher_checkpoint"]["current_turn"] == 1
-    inherited_messages = [
-        InternalMessage.model_validate(item)
-        for item in confirmed_work.execution_state["dispatcher_checkpoint"]["messages"]
-    ]
+    checkpoint = await session_reply_work_item_crud.get_checkpoint(db_session, confirmed_work.id)
+    assert checkpoint is not None
+    assert checkpoint["current_turn"] == 1
+    inherited_messages = [InternalMessage.model_validate(item) for item in checkpoint["messages"]]
     assert [message.id for message in inherited_messages] == [10, 11, 12]
     assert inherited_messages[1].tool_calls[0].id == "call-1"
     assert inherited_messages[2].tool_call_id == "call-1"

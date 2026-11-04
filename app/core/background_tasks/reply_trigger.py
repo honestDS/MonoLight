@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import select, update
 
 from app.core.background_tasks.terminal_watch_reply import route_terminal_auto_watch_reply
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
@@ -232,11 +233,7 @@ async def trigger_background_task_reply(task_id: int) -> None:
             return
 
         reply_mode = BackgroundTaskReplyMode(extra["reply_mode"])
-        enqueue = (
-            session_reply_queue_manager.enqueue_background_task_resume
-            if reply_mode is BackgroundTaskReplyMode.RESUME_AGENT
-            else session_reply_queue_manager.enqueue_background_summary
-        )
+        enqueue = session_reply_queue_manager.enqueue_background_task_resume if reply_mode is BackgroundTaskReplyMode.RESUME_AGENT else session_reply_queue_manager.enqueue_background_summary
         if reply_mode is BackgroundTaskReplyMode.RESUME_ORIGIN:
             raise RuntimeError("Origin-bound background task must resume its origin work")
         work, _ = await enqueue(
@@ -251,18 +248,14 @@ async def trigger_background_task_reply(task_id: int) -> None:
             payload = _build_background_tool_result_payload(task)
             if origin is not None:
                 payload = {**payload, "tasks": [dict(payload)]}
+            checkpoint = {
+                "messages": [],
+                "turn_messages": [],
+                "reload_history": True,
+                "deferred_external_results": True,
+            }
             execution_state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
-            execution_state.update(
-                {
-                    "external_resume_context": [payload],
-                    "dispatcher_checkpoint": {
-                        "messages": [],
-                        "turn_messages": [],
-                        "reload_history": True,
-                        "deferred_external_results": True,
-                    },
-                }
-            )
+            execution_state.update({"external_resume_context": [payload]})
             if origin is not None:
                 execution_state.update(
                     {
@@ -274,5 +267,7 @@ async def trigger_background_task_reply(task_id: int) -> None:
                 )
             work.execution_state = execution_state
             db.add(work)
+            await db.flush()
+            await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
         await db.commit()
         logger.bind(task_id=task_id, uid=task.uid, session_id=task.session_id).info("Background task reply queued")

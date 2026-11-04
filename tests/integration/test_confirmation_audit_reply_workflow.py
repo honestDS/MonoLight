@@ -81,6 +81,7 @@ from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySequence,
     SessionReplySourceType,
+    SessionReplyWorkCheckpoint,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
     SessionReplyWorkType,
@@ -135,6 +136,7 @@ async def confirmation_workflow_session_factory(tmp_path) -> AsyncGenerator[asyn
         AuditToolResultVersion.__table__,
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
+        SessionReplyWorkCheckpoint.__table__,
         ProviderUsageDetail.__table__,
         ProviderUsageDaily.__table__,
         SystemSetting.__table__,
@@ -1506,6 +1508,32 @@ async def test_task_confirmation_inherits_source_work_checkpoint(
             commit=False,
         )
         source_work.status = SessionReplyWorkStatus.SUCCEEDED
+        source_checkpoint = {
+            "messages": [
+                InternalMessage(
+                    id=11,
+                    role=MessageRole.USER,
+                    content="scheduled-trigger-context",
+                ).model_dump(mode="json", exclude_none=True),
+                InternalMessage(
+                    id=12,
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id="original-shell-call-1",
+                            name="execute_shell",
+                            arguments={"command": "echo confirmed-1", "execution_mode": "non_interactive"},
+                        )
+                    ],
+                ).model_dump(mode="json", exclude_none=True),
+                InternalMessage(
+                    id=13,
+                    role=MessageRole.TOOL,
+                    tool_call_id="original-shell-call-1",
+                    content="pending-confirmation-result",
+                ).model_dump(mode="json", exclude_none=True),
+            ],
+        }
         source_work.execution_state = {
             "frozen_context_messages": [
                 InternalMessage(
@@ -1514,37 +1542,14 @@ async def test_task_confirmation_inherits_source_work_checkpoint(
                     content="base-snapshot-only",
                 ).model_dump(mode="json", exclude_none=True),
             ],
-            "dispatcher_checkpoint": {
-                "messages": [
-                    InternalMessage(
-                        id=11,
-                        role=MessageRole.USER,
-                        content="scheduled-trigger-context",
-                    ).model_dump(mode="json", exclude_none=True),
-                    InternalMessage(
-                        id=12,
-                        role=MessageRole.ASSISTANT,
-                        tool_calls=[
-                            InternalToolCall(
-                                id="original-shell-call-1",
-                                name="execute_shell",
-                                arguments={"command": "echo confirmed-1", "execution_mode": "non_interactive"},
-                            )
-                        ],
-                    ).model_dump(mode="json", exclude_none=True),
-                    InternalMessage(
-                        id=13,
-                        role=MessageRole.TOOL,
-                        tool_call_id="original-shell-call-1",
-                        content="pending-confirmation-result",
-                    ).model_dump(mode="json", exclude_none=True),
-                ],
-            },
         }
         record = await db.get(AuditRecord, audit_record_id)
         assert record is not None
         record.execution_scope = "task"
         record.source_work_id = source_work.id
+        await db.flush()
+        assert source_work.id is not None
+        await session_reply_work_item_crud.save_checkpoint(db, source_work.id, source_checkpoint)
         await db.commit()
 
     async with confirmation_workflow_session_factory() as db:
@@ -1593,21 +1598,23 @@ async def test_foreground_confirmation_does_not_inherit_live_source_checkpoint(
             commit=False,
         )
         source_work.status = SessionReplyWorkStatus.SUCCEEDED
-        source_work.execution_state = {
-            "dispatcher_checkpoint": {
-                "messages": [
-                    InternalMessage(
-                        id=21,
-                        role=MessageRole.USER,
-                        content="live-foreground-checkpoint",
-                    ).model_dump(mode="json", exclude_none=True),
-                ],
-            },
+        source_checkpoint = {
+            "messages": [
+                InternalMessage(
+                    id=21,
+                    role=MessageRole.USER,
+                    content="live-foreground-checkpoint",
+                ).model_dump(mode="json", exclude_none=True),
+            ],
         }
+        source_work.execution_state = {}
         record = await db.get(AuditRecord, audit_record_id)
         assert record is not None
         record.execution_scope = "foreground"
         record.source_work_id = source_work.id
+        await db.flush()
+        assert source_work.id is not None
+        await session_reply_work_item_crud.save_checkpoint(db, source_work.id, source_checkpoint)
         await db.commit()
 
     async with confirmation_workflow_session_factory() as db:
@@ -1622,12 +1629,14 @@ async def test_foreground_confirmation_does_not_inherit_live_source_checkpoint(
             attachments=None,
             source="http",
         )
+        confirmed_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, confirmed_work.id)
 
     assert submission_status == "approved"
     assert confirmed_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
     assert confirmed_work.execution_state["execution_scope"] == "foreground"
     assert "frozen_context_messages" not in confirmed_work.execution_state
     assert "dispatcher_checkpoint" not in confirmed_work.execution_state
+    assert confirmed_checkpoint is None
 
 
 @pytest.mark.asyncio
@@ -2465,6 +2474,7 @@ async def test_confirmation_audit_decision_continues_without_forced_memory_recal
         )
         messages = list((await db.execute(select(Message).where(Message.session_id == "session-confirmation").order_by(Message.id))).scalars().all())
         executions = list((await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id == audit_record_id).order_by(AuditExecutionRecord.id))).scalars().all())
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, submitted_work_id) or {}
 
     assert record is not None
     assert work is not None
@@ -2483,7 +2493,6 @@ async def test_confirmation_audit_decision_continues_without_forced_memory_recal
     assert forced_recall_requests == []
     assert not [message for message in messages if (message.dedupe_key or "").startswith("memory-recall-")]
 
-    checkpoint = (work.execution_state or {}).get("dispatcher_checkpoint") or {}
     assert checkpoint.get("memory_recall_boundary_message_id") != decision_message.id
     final_message = next(message for message in messages if message.id == work.result_message_id)
     assert final_message.role == MessageRole.ASSISTANT
@@ -2631,18 +2640,18 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
             source_row.work_id = source_work.id
             db.add(source_row)
 
+        source_checkpoint = {
+            "messages": checkpoint_messages,
+            "turn_messages": [],
+            "files_to_user": [],
+            "current_turn": 1,
+            "execution_phase": "running",
+        }
         source_work.status = SessionReplyWorkStatus.SUCCEEDED
         source_work.execution_state = {
             **(source_work.execution_state or {}),
             "execution_scope": "task",
             "frozen_context_messages": [],
-            "dispatcher_checkpoint": {
-                "messages": checkpoint_messages,
-                "turn_messages": [],
-                "files_to_user": [],
-                "current_turn": 1,
-                "execution_phase": "running",
-            },
         }
         record.source_work_id = source_work.id
         record.execution_scope = "task"
@@ -2657,6 +2666,8 @@ async def test_agent_work_confirmation_continuation_preserves_private_work_scope
                 is_processed=True,
             )
         )
+        await db.flush()
+        await session_reply_work_item_crud.save_checkpoint(db, source_work.id, source_checkpoint)
         await db.commit()
 
     for module in (

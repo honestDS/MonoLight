@@ -27,6 +27,7 @@ from app.models.session_reply_work_item import (
     SESSION_REPLY_TERMINAL_STATUSES,
     SessionReplySequence,
     SessionReplySourceType,
+    SessionReplyWorkCheckpoint,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
     SessionReplyWorkType,
@@ -52,6 +53,21 @@ class CRUDSessionReplyWorkItem:
     async def get(self, db: AsyncSession, work_id: int) -> SessionReplyWorkItem | None:
         result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work_id))
         return result.scalars().first()
+
+    async def get_checkpoint(self, db: AsyncSession, work_id: int) -> dict[str, Any] | None:
+        result = await db.execute(select(SessionReplyWorkCheckpoint.checkpoint).where(SessionReplyWorkCheckpoint.work_id == work_id))
+        return result.scalar_one_or_none()
+
+    async def save_checkpoint(self, db: AsyncSession, work_id: int, checkpoint: dict[str, Any]) -> None:
+        # 调用方须在同一事务内先完成工作行条件写入或持有行锁，以串行化多执行者更新。
+        result = await db.execute(update(SessionReplyWorkCheckpoint).where(SessionReplyWorkCheckpoint.work_id == work_id).values(checkpoint=checkpoint))
+        if (result.rowcount or 0) == 0:
+            db.add(SessionReplyWorkCheckpoint(work_id=work_id, checkpoint=checkpoint))
+            await db.flush()
+
+    async def delete_checkpoint(self, db: AsyncSession, work_id: int) -> None:
+        # 调用方须在同一事务内先完成工作行条件写入或持有行锁，以串行化多执行者更新。
+        await db.execute(delete(SessionReplyWorkCheckpoint).where(SessionReplyWorkCheckpoint.work_id == work_id))
 
     async def get_audit_source_work(
         self,
@@ -870,6 +886,7 @@ class CRUDSessionReplyWorkItem:
         work_id: int,
         worker_id: str,
         values: dict[str, Any],
+        checkpoint: dict[str, Any] | None = None,
         commit: bool = True,
     ) -> bool:
         result = await db.execute(
@@ -881,9 +898,13 @@ class CRUDSessionReplyWorkItem:
             )
             .values(**values, updated_at=get_local_time())
         )
+        claimed = (result.rowcount or 0) == 1
+        if claimed and checkpoint is not None:
+            # 工作行条件更新与快照写入须在同一事务内完成，以串行化多执行者更新。
+            await self.save_checkpoint(db, work_id, checkpoint)
         if commit:
             await db.commit()
-        return (result.rowcount or 0) == 1
+        return claimed
 
     async def merge_ready_foreground(
         self,

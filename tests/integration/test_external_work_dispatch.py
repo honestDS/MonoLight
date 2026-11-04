@@ -354,7 +354,7 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
 
                 persisted_work = await inspection_db.get(SessionReplyWorkItem, work_id)
                 assert persisted_work is not None
-                checkpoint = dict((persisted_work.execution_state or {}).get("dispatcher_checkpoint") or {})
+                checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(inspection_db, persisted_work.id) or {})
                 assert "reload_history" not in checkpoint
                 checkpoint_messages = checkpoint.get("messages")
                 assert isinstance(checkpoint_messages, list)
@@ -612,7 +612,7 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
                 assert failed_task.result == {"content": expected_task_result}
                 assert failed_work is not None
                 assert failed_work.status == SessionReplyWorkStatus.RUNNING
-                failed_checkpoint = dict((failed_work.execution_state or {}).get("dispatcher_checkpoint") or {})
+                failed_checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, failed_work.id) or {})
                 assert failed_checkpoint.get("deferred_external_results") is True
                 assert failed_checkpoint.get("reload_history") is True
                 assert failed_result_messages == []
@@ -1787,7 +1787,7 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
             assert len(external_resume_context) == 1
             assert external_resume_context[0]["task_id"] == task_id
             assert external_resume_context[0]["task"] == expected_task_result
-            deferred_checkpoint = dict(summary_state.get("dispatcher_checkpoint") or {})
+            deferred_checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, summary_work.id) or {})
             assert deferred_checkpoint.get("deferred_external_results") is True
 
             future_user = Message(
@@ -1852,7 +1852,7 @@ async def test_terminal_auto_watch_result_round_trips_through_queue_and_openai_p
 
                 persisted_work = await inspection_db.get(SessionReplyWorkItem, work_id)
                 assert persisted_work is not None
-                checkpoint = dict((persisted_work.execution_state or {}).get("dispatcher_checkpoint") or {})
+                checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(inspection_db, persisted_work.id) or {})
                 assert "reload_history" not in checkpoint
                 assert "deferred_external_results" not in checkpoint
                 checkpoint_messages = checkpoint.get("messages")
@@ -2096,7 +2096,7 @@ async def test_ordinary_background_task_queues_tool_summary_without_tools(databa
             work = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.source_id == str(task_id)))).scalars().one()
             assert work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
             assert "external_resume_context" not in (work.execution_state or {})
-            assert "dispatcher_checkpoint" not in (work.execution_state or {})
+            assert await session_reply_work_item_crud.get_checkpoint(db, work.id) is None
             captured: dict[str, object] = {}
 
             async def generate_auxiliary(_db, **kwargs):

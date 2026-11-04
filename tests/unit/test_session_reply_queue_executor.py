@@ -56,9 +56,74 @@ from tests.unit.response_test_support import (
 )
 
 
-def test_background_task_resume_work_type_is_distinct():
-    assert SessionReplyWorkType.BACKGROUND_TASK_RESUME.value == "background_task_resume"
-    assert SessionReplyWorkType.BACKGROUND_TASK_RESUME is not SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY
+@pytest.mark.asyncio
+async def test_background_task_resume_dispatches_deferred_external_result_with_frozen_context(monkeypatch, checkpoint_store):
+    frozen_message = InternalMessage(
+        id=3,
+        role=MessageRole.USER,
+        content="任务快照",
+    )
+    task = SimpleNamespace(
+        id=8,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        extra={"frozen_context_messages": [frozen_message.model_dump(mode="json", exclude_none=True)]},
+    )
+    external_result = {
+        "task_id": task.id,
+        "status": "succeeded",
+        "result": {"content": "后台工具结果"},
+    }
+    work = SimpleNamespace(
+        id=7,
+        source_id=str(task.id),
+        uid=task.uid,
+        session_id=task.session_id,
+        profile_id=task.profile_id,
+        work_type=SessionReplyWorkType.BACKGROUND_TASK_RESUME,
+        execution_state={"external_resume_context": [external_result]},
+    )
+    checkpoint = {
+        "messages": [],
+        "deferred_external_results": True,
+        "reload_history": True,
+    }
+    checkpoint_store[work.id] = checkpoint
+    captured = {}
+
+    async def get_task(db, task_id):
+        assert task_id == task.id
+        return task
+
+    async def get_profile(db, profile_id):
+        assert profile_id == work.profile_id
+        return SimpleNamespace(id=profile_id, uid=work.uid)
+
+    async def dispatch_interactive_work(db, **kwargs):
+        captured.update(kwargs)
+        return {
+            "content": "后台续接完成",
+            "history": [{"role": "assistant", "content": "后台续接完成"}],
+            "files": [],
+        }
+
+    monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_replies_module, "_dispatch_interactive_work", dispatch_interactive_work)
+    monkeypatch.setattr(
+        executor_replies_module,
+        "_generate_auxiliary_reply_with_request_metadata",
+        lambda *args, **kwargs: pytest.fail("background task resume must not use auxiliary reply"),
+    )
+
+    response = await executor_replies_module._execute_external_resume(object(), work, "worker-1")
+
+    assert response["content"] == "后台续接完成"
+    assert json.loads(captured["message"]) == external_result
+    assert captured["allow_additional_user_messages"] is False
+    assert captured["execution_scope"] == "foreground"
+    assert [message.content for message in captured["frozen_context_messages"]] == ["任务快照"]
 
 
 def llm_response_payload(*args, files=None, **kwargs):
@@ -92,8 +157,23 @@ def _isolate_confirmed_tool_runtime_dependencies(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def checkpoint_store(monkeypatch):
+    checkpoints = {}
+
+    async def get_checkpoint(_db, work_id):
+        return checkpoints.get(work_id)
+
+    async def save_checkpoint(_db, work_id, checkpoint):
+        checkpoints[work_id] = checkpoint
+
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "get_checkpoint", get_checkpoint)
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "save_checkpoint", save_checkpoint)
+    return checkpoints
+
+
 @pytest.mark.asyncio
-async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
+async def test_foreground_executor_resumes_persisted_checkpoint(monkeypatch, checkpoint_store):
     checkpoint = {
         "messages": [
             {"role": "user", "content": "original"},
@@ -125,10 +205,10 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
         input_message_ids=[1],
         execution_state={
             "stream_requested": False,
-            "dispatcher_checkpoint": checkpoint,
             "additional_system_prompt": "channel instruction",
         },
     )
+    checkpoint_store[work.id] = checkpoint
     dispatch_kwargs = {}
     checkpoint_updates = []
 
@@ -209,9 +289,9 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
     assert dispatch_kwargs["message"] == "original"
     assert dispatch_kwargs["additional_system_prompt"] == "channel instruction"
     assert checkpoint_updates[0]["values"]["execution_state"]["stream_requested"] is False
-    assert checkpoint_updates[0]["values"]["execution_state"]["dispatcher_checkpoint"]["messages"][0]["content"] == "updated"
-    assert checkpoint_updates[0]["values"]["execution_state"]["dispatcher_checkpoint"]["memory_recall_boundary_message_id"] == 1
-    assert checkpoint_updates[0]["values"]["execution_state"]["dispatcher_checkpoint"]["memory_recall_status"] == "completed"
+    assert checkpoint_updates[0]["checkpoint"]["messages"][0]["content"] == "updated"
+    assert checkpoint_updates[0]["checkpoint"]["memory_recall_boundary_message_id"] == 1
+    assert checkpoint_updates[0]["checkpoint"]["memory_recall_status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -1098,7 +1178,7 @@ async def test_execute_background_summary_is_auxiliary_and_disables_tools(monkey
 async def test_agent_work_external_resume_routes_back_to_agent_work_executor(monkeypatch):
     work = SimpleNamespace(
         work_type=SessionReplyWorkType.AGENT_WORK,
-        execution_state={"dispatcher_checkpoint": {"messages": []}, "external_resume_pending": True},
+        execution_state={"external_resume_pending": True},
     )
     captured = {}
 
@@ -1116,25 +1196,26 @@ async def test_agent_work_external_resume_routes_back_to_agent_work_executor(mon
 
 
 @pytest.mark.asyncio
-async def test_confirmed_external_resume_preserves_task_scope_and_frozen_context(monkeypatch):
+async def test_confirmed_external_resume_preserves_task_scope_and_frozen_context(monkeypatch, checkpoint_store):
     frozen_message = InternalMessage(
         id=3,
         role=MessageRole.USER,
         content="scheduled frozen context",
     )
     work = SimpleNamespace(
+        id=7,
         work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
         execution_state={
             "decision_message_id": 4,
             "execution_scope": "task",
             "frozen_context_messages": [frozen_message.model_dump(mode="json", exclude_none=True)],
-            "dispatcher_checkpoint": {"messages": [frozen_message.model_dump(mode="json", exclude_none=True)]},
         },
         input_message_ids=[],
         uid="user-1",
         session_id="session-1",
         profile_id=3,
     )
+    checkpoint_store[work.id] = {"messages": [frozen_message.model_dump(mode="json", exclude_none=True)]}
     captured = {}
     decision_message = SimpleNamespace(
         id=4,
@@ -1586,7 +1667,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_confirmed_file_reaudit_pending_replaces_original_result_without_saving_tool_chain(monkeypatch):
+async def test_confirmed_file_reaudit_pending_replaces_original_result_without_saving_tool_chain(monkeypatch, checkpoint_store):
     source_internal = InternalMessage(
         role=MessageRole.ASSISTANT,
         tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
@@ -1632,21 +1713,6 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
                     content="old-pending-result",
                 ).model_dump(mode="json", exclude_none=True),
             ],
-            "dispatcher_checkpoint": {
-                "messages": [
-                    InternalMessage(
-                        id=1,
-                        role=MessageRole.ASSISTANT,
-                        tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
-                    ).model_dump(mode="json", exclude_none=True),
-                    InternalMessage(
-                        id=2,
-                        role=MessageRole.TOOL,
-                        tool_call_id="original-1",
-                        content="old-pending-result",
-                    ).model_dump(mode="json", exclude_none=True),
-                ]
-            },
         },
         uid="user-1",
         session_id="session-1",
@@ -1654,6 +1720,21 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         dedupe_key="confirmed-audit:42",
         created_at=datetime(2026, 7, 20, 0, 0, 0),
     )
+    checkpoint_store[work.id] = {
+        "messages": [
+            InternalMessage(
+                id=1,
+                role=MessageRole.ASSISTANT,
+                tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
+            ).model_dump(mode="json", exclude_none=True),
+            InternalMessage(
+                id=2,
+                role=MessageRole.TOOL,
+                tool_call_id="original-1",
+                content="old-pending-result",
+            ).model_dump(mode="json", exclude_none=True),
+        ]
+    }
     pending_message = Message(
         id=2,
         uid="user-1",
@@ -1678,6 +1759,12 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     class FakeDb:
         async def get(self, model, item_id):
             return source_message
+
+        def add(self, instance):
+            return None
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             event_order.append("commit")
@@ -1766,7 +1853,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     assert refreshed_frozen[1].role == MessageRole.TOOL
     assert refreshed_frozen[1].tool_call_id == "original-1"
     assert refreshed_frozen[1].content != "old-pending-result"
-    refreshed_checkpoint = [InternalMessage.model_validate(item) for item in work.execution_state["dispatcher_checkpoint"]["messages"]]
+    refreshed_checkpoint = [InternalMessage.model_validate(item) for item in checkpoint_store[work.id]["messages"]]
     assert refreshed_checkpoint[1].tool_call_id == "original-1"
     assert refreshed_checkpoint[1].content == refreshed_frozen[1].content
 
@@ -1788,28 +1875,26 @@ def test_confirmed_wait_checkpoint_refreshes_result_and_keeps_decision():
     )
     checkpoint = executor_confirmed_module._build_confirmed_wait_checkpoint(
         {
-            "dispatcher_checkpoint": {
-                "messages": [
-                    InternalMessage(
-                        id=1,
-                        role=MessageRole.ASSISTANT,
-                        tool_calls=[
-                            InternalToolCall(
-                                id="original-1",
-                                name="execute_shell",
-                                arguments={"command": "echo 1"},
-                            )
-                        ],
-                    ).model_dump(mode="json", exclude_none=True),
-                    InternalMessage(
-                        id=2,
-                        role=MessageRole.TOOL,
-                        tool_call_id="original-1",
-                        content="pending",
-                    ).model_dump(mode="json", exclude_none=True),
-                ],
-                "turn_messages": [{"role": "assistant", "content": "stale"}],
-            }
+            "messages": [
+                InternalMessage(
+                    id=1,
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id="original-1",
+                            name="execute_shell",
+                            arguments={"command": "echo 1"},
+                        )
+                    ],
+                ).model_dump(mode="json", exclude_none=True),
+                InternalMessage(
+                    id=2,
+                    role=MessageRole.TOOL,
+                    tool_call_id="original-1",
+                    content="pending",
+                ).model_dump(mode="json", exclude_none=True),
+            ],
+            "turn_messages": [{"role": "assistant", "content": "stale"}],
         },
         pending_tool_results={"original-1": pending_message},
         decision_message_id=4,

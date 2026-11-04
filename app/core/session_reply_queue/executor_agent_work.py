@@ -5,6 +5,7 @@ from pydantic import ValidationError
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
 from app.core.session_reply_queue.executor_common import _response_content
 from app.core.session_reply_queue.executor_interactive import _dispatch_interactive_work
@@ -58,7 +59,7 @@ async def execute_agent_work(db, work: SessionReplyWorkItem, worker_id: str = ""
     if frozen_context_messages != []:
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
 
-    checkpoint = execution_state.get("dispatcher_checkpoint")
+    checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
     resume_state = None
     if isinstance(checkpoint, dict) and isinstance(checkpoint.get("messages"), list):
         if checkpoint.get("reload_history") is True:

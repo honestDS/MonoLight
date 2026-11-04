@@ -249,10 +249,7 @@ async def _save_interactive_work_execution_checkpoint(
     work_id = work.id
     if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0:
         raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
-    state = {
-        **(work.execution_state or {}),
-        "dispatcher_checkpoint": checkpoint,
-    }
+    state = dict(work.execution_state or {})
     if active_audit_execution_present:
         if active_audit_execution is None:
             state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
@@ -263,6 +260,7 @@ async def _save_interactive_work_execution_checkpoint(
         work_id=work_id,
         worker_id=worker_id,
         values={"execution_state": state},
+        checkpoint=checkpoint,
     )
     if not updated:
         raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))

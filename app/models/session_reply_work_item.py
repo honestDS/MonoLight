@@ -87,6 +87,17 @@ class SessionReplyWorkItem(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
 
 
+class SessionReplyWorkCheckpoint(SQLModel, table=True):
+    __tablename__ = "session_reply_work_checkpoint"
+
+    work_id: int = Field(
+        primary_key=True,
+        foreign_key="session_reply_work_item.id",
+        ondelete="CASCADE",
+    )
+    checkpoint: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+
+
 class SessionReplySequence(SQLModel, table=True):
     __tablename__ = "session_reply_sequence"
 

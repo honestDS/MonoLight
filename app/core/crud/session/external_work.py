@@ -170,12 +170,7 @@ class CRUDExternalWork:
             .execution_options(populate_existing=True)
         )
         works = list(result.scalars().all())
-        return [
-            candidate
-            for candidate in works
-            if candidate.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
-            or not isinstance((candidate.execution_state or {}).get("frozen_context_messages"), list)
-        ]
+        return [candidate for candidate in works if candidate.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or not isinstance((candidate.execution_state or {}).get("frozen_context_messages"), list)]
 
     async def list_completed_reply_tasks(
         self,
@@ -478,7 +473,7 @@ class CRUDExternalWork:
         state.pop("terminal_auto_resume", None)
         state.pop("received_external_task_ids", None)
 
-        checkpoint = state.get("dispatcher_checkpoint")
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
         checkpoint = dict(checkpoint) if isinstance(checkpoint, dict) else {}
         checkpoint.pop("files_to_user", None)
         checkpoint.pop("reply_skipped", None)
@@ -490,7 +485,6 @@ class CRUDExternalWork:
         checkpoint["reload_history"] = True
         checkpoint["execution_phase"] = GOAL_EXECUTION_PHASE_RUNNING
         checkpoint["current_turn"] = 0
-        state["dispatcher_checkpoint"] = checkpoint
 
         generation = state.get("terminal_resume_generation")
         state["terminal_resume_generation"] = generation + 1 if isinstance(generation, int) and not isinstance(generation, bool) else 1
@@ -519,6 +513,8 @@ class CRUDExternalWork:
             .execution_options(synchronize_session=False)
         )
         updated = (result.rowcount or 0) == 1
+        if updated:
+            await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
         await db.flush()
         return updated
 

@@ -509,7 +509,7 @@ async def prepare_terminal_auto_watch_resume(
                     seen_message_ids.add(message_id)
                     external_tool_result_message_ids.append(message_id)
             state["external_tool_result_message_ids"] = external_tool_result_message_ids
-        raw_checkpoint = state.get("dispatcher_checkpoint")
+        raw_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
         checkpoint = dict(raw_checkpoint) if isinstance(raw_checkpoint, dict) else {}
         checkpoint.pop("external_resume_messages", None)
         checkpoint["pending_resume_message_ids"] = list(
@@ -547,7 +547,6 @@ async def prepare_terminal_auto_watch_resume(
             old_upper = checkpoint.get("context_summary_fixed_upper_message_id")
             upper_bounds = [*marker_ids, old_upper] if _positive_int(old_upper) else marker_ids
             checkpoint["context_summary_fixed_upper_message_id"] = max(upper_bounds)
-        state["dispatcher_checkpoint"] = checkpoint
         if work.input_message_ids:
             state["external_resume_pending"] = True
         else:
@@ -558,6 +557,7 @@ async def prepare_terminal_auto_watch_resume(
             work_id=work.id,
             worker_id=worker_id,
             values={"execution_state": state},
+            checkpoint=checkpoint,
             commit=False,
         )
         if not updated:

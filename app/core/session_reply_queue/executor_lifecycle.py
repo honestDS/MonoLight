@@ -269,7 +269,7 @@ async def fail_session_reply_work(
         if isinstance(db_info, dict):
             db_info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
         is_independent_work = (await session_reply_work_item_crud.get_message_work_id(db, work)) is not None
-        checkpoint = (work.execution_state or {}).get("dispatcher_checkpoint")
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
         if isinstance(checkpoint, dict) and checkpoint.get("deferred_external_results") is True:
             await prepare_external_work_resume(
                 db,

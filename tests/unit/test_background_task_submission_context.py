@@ -26,6 +26,14 @@ def _background_result_event(**overrides):
     return Message(**values)
 
 
+@pytest.fixture(autouse=True)
+def _mock_checkpoint_lookup(monkeypatch):
+    async def get_checkpoint(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(executor_replies_module.session_reply_work_item_crud, "get_checkpoint", get_checkpoint)
+
+
 @pytest.mark.asyncio
 async def test_background_task_resume_does_not_scan_sibling_result_sources(monkeypatch):
     worker_id = "worker-1"

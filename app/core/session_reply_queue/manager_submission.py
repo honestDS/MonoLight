@@ -501,7 +501,7 @@ class SessionReplySubmission:
             source_state = source_work.execution_state if isinstance(source_work.execution_state, dict) else {}
             source_frozen_context = source_state.get("frozen_context_messages")
             if isinstance(source_frozen_context, list):
-                source_checkpoint = source_state.get("dispatcher_checkpoint")
+                source_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, source_work.id)
                 checkpoint_messages = source_checkpoint.get("messages") if isinstance(source_checkpoint, dict) else None
                 if isinstance(source_checkpoint, dict) and isinstance(checkpoint_messages, list) and checkpoint_messages:
                     source_dispatcher_checkpoint = dict(source_checkpoint)
@@ -541,9 +541,10 @@ class SessionReplySubmission:
             work.execution_state["additional_system_prompt"] = cleaned_additional_system_prompt
         if frozen_context_messages is not None:
             work.execution_state["frozen_context_messages"] = frozen_context_messages
-        if source_dispatcher_checkpoint is not None:
-            work.execution_state["dispatcher_checkpoint"] = source_dispatcher_checkpoint
         db.add(work)
+        if source_dispatcher_checkpoint is not None:
+            await db.flush()
+            await session_reply_work_item_crud.save_checkpoint(db, work.id, source_dispatcher_checkpoint)
         await db.commit()
         if confirmation_projection is not None and confirmation_projection.status_update is not None:
             await _broadcast_confirmation_status_update(

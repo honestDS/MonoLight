@@ -117,11 +117,6 @@ def _clean_state(state: dict[str, Any], received: set[int], auto_sessions: set[s
     if not cleaned.get("external_resume_context"):
         cleaned.pop("external_resume_pending", None)
         cleaned.pop("terminal_auto_resume", None)
-        checkpoint = cleaned.get("dispatcher_checkpoint")
-        if isinstance(checkpoint, dict):
-            checkpoint = dict(checkpoint)
-            checkpoint.pop("deferred_external_results", None)
-            cleaned["dispatcher_checkpoint"] = checkpoint
     return cleaned
 
 
@@ -183,7 +178,8 @@ async def receive_pending_external_results(
         if not await _same_scope(db, source, current) or (source.id != current.id and _status(source.status) == SessionReplyWorkStatus.RUNNING.value):
             continue
         state = _state(source)
-        context = {"work": source, "state": state, "received": set(), "auto_sessions": set()}
+        checkpoint = await session_reply_work_item_crud.get_checkpoint(db, source.id)
+        context = {"work": source, "state": state, "checkpoint": checkpoint, "received": set(), "auto_sessions": set()}
         contexts.append(context)
         if source.id is not None:
             by_work_id[source.id] = context
@@ -210,7 +206,6 @@ async def receive_pending_external_results(
                 raise _unknown()
             source_context_by_task.setdefault(task_id, context)
             candidate_ids.append(task_id)
-        checkpoint = state.get("dispatcher_checkpoint")
         for marker_id in _ids(checkpoint.get("pending_resume_message_ids", []) if isinstance(checkpoint, dict) else []):
             marker = await message_crud.get(db, marker_id)
             if marker is None:
@@ -245,6 +240,7 @@ async def receive_pending_external_results(
         return None
 
     target_state = _state(current)
+    target_checkpoint: dict[str, Any] | None = None
     owner_markers: dict[int, tuple[Message, dict[str, Any]]] = {}
     persisted_by_anchor: dict[int, list[int]] = {}
     marker_order: list[int] = []
@@ -304,9 +300,11 @@ async def receive_pending_external_results(
                 origin = await valid_origin(int(raw_work_id), delivery.get("identity"), True)
                 if origin is not None:
                     if origin.id not in by_work_id:
+                        origin_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, origin.id)
                         origin_context = {
                             "work": origin,
                             "state": _state(origin),
+                            "checkpoint": origin_checkpoint,
                             "received": set(),
                             "auto_sessions": set(),
                         }
@@ -396,8 +394,13 @@ async def receive_pending_external_results(
         if not context["received"]:
             continue
         source, cleaned = context["work"], _clean_state(context["state"], context["received"], context["auto_sessions"])
+        checkpoint_to_save = None
+        if "external_resume_context" not in cleaned and isinstance(context["checkpoint"], dict):
+            checkpoint_to_save = dict(context["checkpoint"])
+            checkpoint_to_save.pop("deferred_external_results", None)
         if source.id == current.id:
             target_state = _clean_state(target_state, context["received"], context["auto_sessions"])
+            target_checkpoint = checkpoint_to_save
             continue
         if _status(source.status) not in {SessionReplyWorkStatus.READY_FOR_LLM.value, SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value}:
             continue
@@ -411,8 +414,17 @@ async def receive_pending_external_results(
             values = {"execution_state": cleaned, "status": SessionReplyWorkStatus.MERGED, "locked_by": None, "lock_until": None, "merged_into_id": current.id}
         if not await external_work_crud.update_active_reply(db, work=source, values=values):
             raise _unknown()
+        if checkpoint_to_save is not None:
+            await session_reply_work_item_crud.save_checkpoint(db, source.id, checkpoint_to_save)
 
-    if not await session_reply_work_item_crud.update_claimed(db, work_id=current.id, worker_id=worker_id, values={"execution_state": target_state}, commit=False):
+    if not await session_reply_work_item_crud.update_claimed(
+        db,
+        work_id=current.id,
+        worker_id=worker_id,
+        values={"execution_state": target_state},
+        checkpoint=target_checkpoint,
+        commit=False,
+    ):
         raise _unknown()
     await db.flush()
     messages: list[Message] = []

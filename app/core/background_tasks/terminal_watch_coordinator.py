@@ -55,7 +55,7 @@ async def _build_terminal_watch_background(
         origin_work = await session_reply_work_item_crud.get(db, origin_work_id)
         if origin_work is not None and origin_work.uid == uid and origin_work.session_id == session_id and origin_work.profile_id == profile_id and origin_work.dedupe_key == origin_work_identity:
             origin_state = origin_work.execution_state if isinstance(origin_work.execution_state, dict) else {}
-            origin_checkpoint = origin_state.get("dispatcher_checkpoint")
+            origin_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, origin_work.id)
             if isinstance(origin_checkpoint, dict) and isinstance(origin_checkpoint.get("messages"), list) and origin_checkpoint["messages"]:
                 frozen_context_messages = serialize_frozen_context_messages(origin_checkpoint["messages"])
             elif isinstance(origin_state.get("frozen_context_messages"), list):
@@ -97,22 +97,9 @@ async def _build_terminal_watch_background(
             if parsed_messages and parsed_messages[0].role == MessageRole.USER:
                 request_context.append(_serialize_terminal_request_message(parsed_messages[0]))
     if not frozen_context_messages:
-        related_ids = [
-            message.id
-            for message in parsed_history
-            if isinstance(message.id, int)
-            and not isinstance(message.id, bool)
-            and (
-                message is tool_call_message
-                or (message.role == MessageRole.TOOL and message.tool_call_id == terminal_session.original_tool_call_id)
-            )
-        ]
+        related_ids = [message.id for message in parsed_history if isinstance(message.id, int) and not isinstance(message.id, bool) and (message is tool_call_message or (message.role == MessageRole.TOOL and message.tool_call_id == terminal_session.original_tool_call_id))]
         if not related_ids:
-            related_ids = [
-                message.get("id")
-                for message in request_context
-                if isinstance(message, dict) and isinstance(message.get("id"), int) and not isinstance(message.get("id"), bool)
-            ]
+            related_ids = [message.get("id") for message in request_context if isinstance(message, dict) and isinstance(message.get("id"), int) and not isinstance(message.get("id"), bool)]
         if related_ids:
             frozen_context_messages = await capture_frozen_context_messages(
                 db,
@@ -373,11 +360,7 @@ async def create_terminal_watch_subscription(
 
     origin_work_id = extra.get("origin_work_id") if isinstance(extra, dict) else None
     origin_work_identity = extra.get("origin_work_identity") if isinstance(extra, dict) else None
-    background_context_payload = {
-        key: extra[key]
-        for key in ("request_context", "purpose", "frozen_context_messages")
-        if isinstance(extra, dict) and key in extra
-    }
+    background_context_payload = {key: extra[key] for key in ("request_context", "purpose", "frozen_context_messages") if isinstance(extra, dict) and key in extra}
     valid_origin = isinstance(origin_work_id, int) and not isinstance(origin_work_id, bool) and origin_work_id > 0 and isinstance(origin_work_identity, str) and bool(origin_work_identity.strip())
     origin_payload: dict[str, Any] = {}
     if valid_origin:
