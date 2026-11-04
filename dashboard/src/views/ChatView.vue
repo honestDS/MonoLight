@@ -152,9 +152,6 @@
         :history-loading="historyLoading"
         :initial-history-loaded="renderedInitialHistoryLoaded"
         :context-summarizing="isContextSummarizing"
-        :llm-request-metadata="llmRequestMetadata"
-        :current-session-info="currentSessionInfo"
-        :show-request-metadata="sessionEngaged"
         :hide-empty-tip="!currentSessionId"
         @audit-decision="handleAuditDecision"
       />
@@ -176,6 +173,13 @@
         </div>
 
         <div class="input-wrapper">
+          <ChatRequestMetadata
+            v-if="sessionEngaged"
+            :metadata="llmRequestMetadata"
+            :session-info="currentSessionInfo"
+            :context-summarizing="isContextSummarizing"
+          />
+
           <div class="input-controls">
             <div ref="chatInputBoxRef" class="chat-input-box">
               <!-- 自定义附件展示区域（取代 el-upload 原生列表） -->
@@ -421,6 +425,7 @@ import { ChatLineSquare, Delete, InfoFilled, Plus, Refresh, UploadFilled, ArrowD
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import ChatMessageList from '../components/ChatMessageList.vue'
+import ChatRequestMetadata from '../components/ChatRequestMetadata.vue'
 import SessionTodoPanel from '../components/SessionTodoPanel.vue'
 import HelpTooltip from '../components/HelpTooltip.vue'
 import { useChatSession } from '../composables/chat/useChatSession'

@@ -1,11 +1,5 @@
 <template>
   <div class="message-list-wrapper">
-    <ChatRequestMetadata
-      v-if="showRequestMetadata"
-      :metadata="llmRequestMetadata"
-      :session-info="currentSessionInfo"
-      :context-summarizing="contextSummarizing"
-    />
     <VList
       :key="currentSessionId || '__new_session__'"
       ref="virtualList"
@@ -322,7 +316,6 @@ import 'github-markdown-css/github-markdown.css'
 import VirtualizedCode from './VirtualizedCode.vue'
 import ThinkingBlock from './ThinkingBlock.vue'
 import CollapsibleMessageText from './CollapsibleMessageText.vue'
-import ChatRequestMetadata from './ChatRequestMetadata.vue'
 import {
   formatTimestamp,
   getMessageTimestamp,
@@ -344,9 +337,6 @@ const props = defineProps({
   historyLoading: { type: Boolean, default: false },
   initialHistoryLoaded: { type: Boolean, default: true },
   contextSummarizing: { type: Boolean, default: false },
-  llmRequestMetadata: { type: Object, default: null },
-  currentSessionInfo: { type: Object, default: null },
-  showRequestMetadata: { type: Boolean, default: true },
   hideEmptyTip: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])

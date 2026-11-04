@@ -1,55 +1,86 @@
 <template>
   <Transition name="request-metadata-fade">
     <div
-      :class="['llm-request-metadata', 'glass-surface', { 'is-collapsed': requestMetadataCollapsed }]"
+      :class="['llm-request-metadata', { 'is-collapsed': requestMetadataCollapsed }]"
     >
-      <div
-        id="llm-request-metadata-content"
-        class="llm-request-metadata-content"
-        role="status"
-        :aria-hidden="requestMetadataCollapsed"
-        :aria-label="$t('chat.llm_request_metadata_label')"
-      >
-        <el-tooltip
-          :content="$t('chat.cumulative_usage_hint')"
-          placement="bottom"
-          :show-after="300"
+      <Transition name="request-metadata-panel">
+        <div
+          id="llm-request-metadata-content"
+          class="request-metadata-details glass-surface"
+          v-show="!requestMetadataCollapsed"
+          role="region"
+          :aria-label="$t('chat.llm_request_metadata_label')"
         >
-          <span class="llm-request-metadata-item">
-            <span>{{ $t('chat.input_tokens') }}</span>
-            <strong>{{ formatTokenCount(metadata?.total_input_tokens) }}</strong>
-          </span>
-        </el-tooltip>
-        <el-tooltip
-          :content="$t('chat.cumulative_usage_hint')"
-          placement="bottom"
-          :show-after="300"
-        >
-          <span class="llm-request-metadata-item">
-            <span>{{ $t('chat.total_output') }}</span>
-            <strong>{{ formatTokenCount(metadata?.total_output_tokens) }}</strong>
-          </span>
-        </el-tooltip>
-        <el-tooltip
-          :content="$t('chat.cache_usage_hint')"
-          placement="bottom"
-          :show-after="300"
-        >
-          <span class="llm-request-metadata-item">
-            <span>{{ $t('chat.cache_hit_rate') }}</span>
-            <strong>{{ cacheHitRateText }}</strong>
-            <small class="cache-usage-coverage">{{ cacheCoverageText }}</small>
-          </span>
-        </el-tooltip>
-        <span class="llm-request-metadata-item">
-          <span>{{ $t('chat.context_limit') }}</span>
-          <strong>{{ formatTokenCount(metadata?.context_window_tokens) }}</strong>
-        </span>
-        <span class="llm-request-metadata-item">
-          <span>{{ $t('chat.max_output') }}</span>
-          <strong>{{ formatTokenCount(metadata?.max_output_tokens) }}</strong>
-        </span>
-      </div>
+          <div class="llm-request-metadata-content">
+            <el-tooltip
+              :content="$t('chat.cumulative_usage_hint')"
+              placement="top"
+              :show-after="300"
+            >
+              <span class="llm-request-metadata-item">
+                <span>{{ $t('chat.input_tokens') }}</span>
+                <strong>{{ formatTokenCount(metadata?.total_input_tokens) }}</strong>
+              </span>
+            </el-tooltip>
+            <el-tooltip
+              :content="$t('chat.cumulative_usage_hint')"
+              placement="top"
+              :show-after="300"
+            >
+              <span class="llm-request-metadata-item">
+                <span>{{ $t('chat.total_output') }}</span>
+                <strong>{{ formatTokenCount(metadata?.total_output_tokens) }}</strong>
+              </span>
+            </el-tooltip>
+            <el-tooltip
+              :content="$t('chat.cache_usage_hint')"
+              placement="top"
+              :show-after="300"
+            >
+              <span class="llm-request-metadata-item">
+                <span>{{ $t('chat.cache_hit_rate') }}</span>
+                <strong>{{ cacheHitRateText }}</strong>
+                <small class="cache-usage-coverage">{{ cacheCoverageText }}</small>
+              </span>
+            </el-tooltip>
+            <span class="llm-request-metadata-item">
+              <span>{{ $t('chat.context_limit') }}</span>
+              <strong>{{ formatTokenCount(metadata?.context_window_tokens) }}</strong>
+            </span>
+            <span class="llm-request-metadata-item">
+              <span>{{ $t('chat.max_output') }}</span>
+              <strong>{{ formatTokenCount(metadata?.max_output_tokens) }}</strong>
+            </span>
+          </div>
+
+          <div v-if="hasContextSummaryProgress" class="context-usage-details">
+            {{ $t('chat.context_summary_usage_details', {
+              input: formatTokenCount(contextSummaryProgress.inputTokens),
+              threshold: formatTokenCount(contextSummaryProgress.triggerTokens),
+              remaining: formatTokenCount(contextSummaryProgress.remainingTokens)
+            }) }}
+          </div>
+
+          <div class="request-metadata-detail-footer">
+            <div class="request-metadata-context-note">
+              <span>{{ $t('chat.context_summary_last_request') }}</span>
+              <span v-if="hasContextSummaryProgress">
+                {{ $t('chat.context_summary_remaining', { percent: formatPercent(contextSummaryProgress.remainingRatio) }) }}
+              </span>
+            </div>
+            <dl v-if="sessionInfo" class="request-metadata-session-times">
+              <div class="request-metadata-session-time">
+                <dt>{{ $t('chat.session_created_at') }}</dt>
+                <dd>{{ sessionInfo.created_at || '-' }}</dd>
+              </div>
+              <div class="request-metadata-session-time">
+                <dt>{{ $t('chat.session_last_active') }}</dt>
+                <dd>{{ sessionInfo.last_active || '-' }}</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </Transition>
 
       <section
         class="context-usage"
@@ -59,15 +90,41 @@
       >
         <div class="context-usage-heading">
           <span>{{ $t('chat.context_summary_usage') }}</span>
-          <span>{{ $t('chat.context_summary_last_request') }}</span>
-        </div>
-        <div class="context-usage-status">
-          <template v-if="hasContextSummaryProgress">
-            <span>{{ $t('chat.context_summary_used', { percent: formatPercent(contextSummaryProgress.ratio) }) }}</span>
-            <span>{{ $t('chat.context_summary_remaining', { percent: formatPercent(contextSummaryProgress.remainingRatio) }) }}</span>
-          </template>
+          <strong v-if="hasContextSummaryProgress" class="context-usage-value">
+            {{ formatPercent(contextSummaryProgress.ratio) }}
+          </strong>
           <span v-else>{{ contextSummaryStatusText }}</span>
         </div>
+        <div
+          v-if="contextSummaryProgress.status === 'threshold_reached'"
+          class="context-usage-status"
+        >
+          {{ $t('chat.context_summary_reached') }}
+        </div>
+        <el-tooltip
+          :content="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
+          placement="bottom"
+          :show-after="300"
+        >
+          <button
+            type="button"
+            class="request-metadata-toggle"
+            :aria-label="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
+            :aria-expanded="!requestMetadataCollapsed"
+            aria-controls="llm-request-metadata-content"
+            @click="requestMetadataCollapsed = !requestMetadataCollapsed"
+            @keydown.esc="requestMetadataCollapsed = true"
+          >
+            <span>{{ $t('chat.request_metadata_short_label') }}</span>
+            <el-icon
+              class="request-metadata-toggle-icon"
+              :class="{ 'is-expanded': !requestMetadataCollapsed }"
+              aria-hidden="true"
+            >
+              <ArrowDown />
+            </el-icon>
+          </button>
+        </el-tooltip>
         <progress
           v-if="hasContextSummaryProgress"
           class="context-usage-progress"
@@ -81,53 +138,7 @@
           class="context-usage-placeholder"
           aria-hidden="true"
         ></span>
-        <div v-if="hasContextSummaryProgress" class="context-usage-details">
-          {{ $t('chat.context_summary_usage_details', {
-            input: formatTokenCount(contextSummaryProgress.inputTokens),
-            threshold: formatTokenCount(contextSummaryProgress.triggerTokens),
-            remaining: formatTokenCount(contextSummaryProgress.remainingTokens)
-          }) }}
-        </div>
-        <div
-          v-if="contextSummaryProgress.status === 'threshold_reached'"
-          class="context-usage-status"
-        >
-          {{ $t('chat.context_summary_reached') }}
-        </div>
       </section>
-
-      <div class="request-metadata-actions">
-        <span class="request-metadata-collapsed-label" aria-hidden="true">
-          {{ $t('chat.request_metadata_short_label') }}
-        </span>
-        <el-tooltip
-          v-if="sessionInfo"
-          :content="formatSessionTooltip(sessionInfo)"
-          placement="bottom"
-          :show-after="100"
-          popper-class="session-info-tooltip"
-        >
-          <el-icon class="session-info-icon"><InfoFilled /></el-icon>
-        </el-tooltip>
-        <el-tooltip
-          :content="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
-          placement="bottom"
-          :show-after="300"
-        >
-          <button
-            type="button"
-            class="request-metadata-toggle"
-            :aria-label="$t(requestMetadataCollapsed ? 'chat.expand_request_metadata' : 'chat.collapse_request_metadata')"
-            :aria-expanded="!requestMetadataCollapsed"
-            aria-controls="llm-request-metadata-content"
-            @click="requestMetadataCollapsed = !requestMetadataCollapsed"
-          >
-            <el-icon class="request-metadata-toggle-icon" :class="{ 'is-expanded': !requestMetadataCollapsed }">
-              <ArrowDown />
-            </el-icon>
-          </button>
-        </el-tooltip>
-      </div>
     </div>
   </Transition>
 </template>
@@ -135,7 +146,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ArrowDown, InfoFilled } from '@element-plus/icons-vue'
+import { ArrowDown } from '@element-plus/icons-vue'
 
 import {
   getCacheUsagePresentation,
@@ -148,7 +159,6 @@ const props = defineProps({
   sessionInfo: { type: Object, default: null },
   contextSummarizing: { type: Boolean, default: false }
 })
-
 const { t } = useI18n()
 const tokenNumberFormatter = new Intl.NumberFormat()
 const percentNumberFormatter = new Intl.NumberFormat(undefined, {
@@ -187,12 +197,4 @@ const contextSummaryStatusText = computed(() => {
 const contextSummaryAriaValueText = computed(() => t('chat.context_summary_used', {
   percent: formatPercent(contextSummaryProgress.value.ratio)
 }))
-
-const formatSessionTooltip = (info) => {
-  if (!info) return ''
-  return [
-    `${t('chat.session_last_active')}: ${info.last_active || '-'}`,
-    `${t('chat.session_created_at')}: ${info.created_at || '-'}`
-  ].join('\n')
-}
 </script>
