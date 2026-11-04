@@ -46,12 +46,16 @@ def _assistant(call_id="call-1", message_id=None):
 def _context(*, messages=None, turn_messages=None, main_tools=None):
     channel = SimpleNamespace(
         id=1,
+        name="chat-channel",
+        usage_key="chat-channel-key",
         base_url="https://example.invalid",
         chat_timeout=60,
         get_decrypted_api_key=lambda: "api-key",
     )
     auxiliary_channel = SimpleNamespace(
         id=2,
+        name="auxiliary-channel",
+        usage_key="auxiliary-channel-key",
         base_url="https://example.invalid",
         chat_timeout=60,
         get_decrypted_api_key=lambda: "api-key",
@@ -331,7 +335,10 @@ async def test_generate_commits_before_network_and_discards_stream_content(monke
     context = _context()
     context.dispatcher_mode = "stream" if stream else "non_stream"
     order = context.db.order
-    marker = object()
+    marker = InternalResponse(
+        message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"),
+        model="model-1",
+    )
 
     async def non_stream_generate(**_kwargs):
         order.append("model")

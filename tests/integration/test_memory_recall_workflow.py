@@ -1010,6 +1010,8 @@ async def test_memory_request_replays_only_recoverable_provider_reasoning(
             auxiliary_channel=cfg.channel.resolve_auxiliary_channel(),
             auxiliary_channel_obj=SimpleNamespace(
                 id=1,
+                usage_key="0123456789abcdef0123456789abcdef",
+                name="recall-channel",
                 base_url="https://chat.invalid",
                 http_proxy=None,
                 get_decrypted_api_key=lambda: "chat-key",

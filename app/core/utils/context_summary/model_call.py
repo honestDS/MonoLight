@@ -1,7 +1,9 @@
+from app.core.provider_usage import ProviderUsageSource, record_provider_response_usage
 from app.core.utils.context_summary.common import ContextSummaryOutputBudgetError
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
+from app.models.provider_usage import ProviderUsageType
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
 CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS = 600.0
@@ -51,6 +53,17 @@ async def call_context_summary_model(
         timeout=CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
         http_proxy=model.http_proxy,
         custom_headers=model.custom_headers,
+    )
+    await record_provider_response_usage(
+        response,
+        usage_type=ProviderUsageType.CONTEXT_SUMMARY,
+        source=ProviderUsageSource(
+            channel_id=model.channel_id,
+            channel_key=model.channel_usage_key,
+            channel_name=model.channel_name,
+            model_id=model.model_id,
+            protocol=model.protocol,
+        ),
     )
     finish_reason = response.finish_reason
     if finish_reason == "length":

@@ -126,6 +126,7 @@ MESSAGES = {
     "LOG_WEIXIN_OPENCLAW_UNSUPPORTED_ITEM_IGNORED": "微信 OpenClaw 入站消息包含暂不支持的消息项，已忽略",
     "LOG_WEIXIN_OPENCLAW_UPLOAD_URL_MISSING": "微信 OpenClaw 获取上传地址响应缺少可用 CDN 上传地址",
     "LOG_OPENAI_CHAT_FAILED": "OpenAI 对话接口调用失败: {error}",
+    "LOG_UPSTREAM_MODEL_USAGE": "上游模型计量响应: protocol={protocol}, model_id={model_id}, usage={usage}, result_count={result_count}",
     "LOG_OPENAI_EMBEDDING_FAILED": "嵌入模型接口调用失败: {error}",
     "LOG_OPENAI_EMBEDDING_OPTIONAL_PARAMS_FAILED": "嵌入模型接口携带可选参数调用失败，准备降级重试: {error}",
     "LOG_OPENAI_IMAGE_GENERATION_FAILED": "OpenAI 图片生成接口调用失败: {error}",

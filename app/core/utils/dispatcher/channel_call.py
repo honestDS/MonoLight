@@ -18,6 +18,7 @@ from app.core.exceptions import (
 )
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
+from app.core.provider_usage import ProviderUsageSource, build_reply_usage_snapshot, record_provider_response_usage
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
@@ -27,6 +28,7 @@ from app.core.utils.request_token_baseline import (
 )
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, resolve_model_protocol
 from app.models.message import InternalMessage, InternalResponse
+from app.models.provider_usage import ProviderUsageType
 from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
@@ -86,6 +88,7 @@ async def generate_chat_with_fallback(
             )
             await db.commit()
             provider_request_id = str(uuid.uuid4())
+            protocol = resolve_model_protocol(model_entry)
             response = await LLMClient.generate(
                 api_key=chat_channel_obj.get_decrypted_api_key(),
                 base_url=chat_channel_obj.base_url,
@@ -98,7 +101,7 @@ async def generate_chat_with_fallback(
                 max_tokens=chat_params["max_tokens"],
                 tools=tools,
                 tool_choice=tool_choice,
-                protocol=resolve_model_protocol(model_entry),
+                protocol=protocol,
                 timeout=chat_params["chat_timeout"],
                 http_proxy=get_channel_http_proxy(chat_channel_obj),
                 custom_headers=get_model_custom_headers(model_entry),
@@ -115,10 +118,29 @@ async def generate_chat_with_fallback(
                         "max_output_tokens": max(0, int(chat_params["max_tokens"])),
                         **({"channel_id": chat_channel_obj.id} if isinstance(chat_channel_obj.id, int) and not isinstance(chat_channel_obj.id, bool) and chat_channel_obj.id > 0 else {}),
                         "model_id": model_entry["model_id"],
-                        "protocol": resolve_model_protocol(model_entry),
+                        "protocol": protocol,
                         **provider_token_metrics,
                         **build_provider_request_usage_metadata(provider_request_id, provider_token_metrics),
+                        **build_reply_usage_snapshot(chat_channel_obj, response),
                     }
+                )
+            else:
+                if call_context.startswith("background_task_proactive_reply"):
+                    usage_type = ProviderUsageType.BACKGROUND_SUMMARY
+                elif call_context == "message_platform_outbound_text_refinement":
+                    usage_type = ProviderUsageType.PLATFORM_NOTIFICATION
+                else:
+                    usage_type = ProviderUsageType.OTHER_AUXILIARY
+                await record_provider_response_usage(
+                    response,
+                    usage_type=usage_type,
+                    source=ProviderUsageSource.from_channel(
+                        chat_channel_obj,
+                        model_id=model_entry["model_id"],
+                        protocol=protocol,
+                    ),
+                    uid=uid,
+                    session_id=session_id,
                 )
             if require_content and not (ai_msg.content or "").strip():
                 raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)

@@ -43,6 +43,7 @@ from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
+from app.core.provider_usage import ProviderUsageSource
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs, get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.operation_directories import (
@@ -411,11 +412,12 @@ class ImageGenerationExecutor(BaseExecutor):
                         "reference_images": reference_payloads,
                     }
                 await self.db.commit()
+                protocol = resolve_model_protocol(model_entry)
                 response = await ImageGenerationClient.generate_image(
                     api_key=channel.get_decrypted_api_key(),
                     base_url=channel.base_url or "",
                     model_id=model_entry["model_id"],
-                    protocol=resolve_model_protocol(model_entry),
+                    protocol=protocol,
                     prompt=prompt_text,
                     size=resolved_size,
                     n=1,
@@ -423,6 +425,13 @@ class ImageGenerationExecutor(BaseExecutor):
                     timeout=float(getattr(getattr(self.cfg, "tool", None), "image_generation_timeout", 60.0) or 60.0),
                     http_proxy=http_proxy,
                     custom_headers=get_model_custom_headers(model_entry),
+                    usage_source=ProviderUsageSource.from_channel(
+                        channel,
+                        model_id=model_entry["model_id"],
+                        protocol=protocol,
+                    ),
+                    usage_uid=self.uid,
+                    usage_session_id=self.session_id,
                     **input_kwargs,
                 )
                 images = response.get("data") if isinstance(response, dict) else None

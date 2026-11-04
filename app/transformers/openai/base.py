@@ -110,8 +110,8 @@ class BaseOpenAITransformer(BaseTransformer):
         )
 
     @staticmethod
-    def _nonnegative_token_count(value: Any) -> int:
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    def _nonnegative_token_count(value: Any) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
     @classmethod
     def _normalize_finish_reason(cls, raw_reason: Any) -> tuple[str | None, dict[str, Any] | None]:

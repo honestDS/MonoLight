@@ -1,7 +1,10 @@
+from functools import partial
 from typing import Any
 
 from app.core.constants import ERR_LLM_UNSUPPORTED_PROTOCOL
 from app.core.exceptions import LLMException
+from app.core.provider_usage import ProviderUsageSource, record_provider_usage
+from app.models.provider_usage import ProviderUsageType
 from app.transformers.openai import OpenAIEmbeddingTransformer
 
 
@@ -17,6 +20,22 @@ class EmbeddingClient:
             raise LLMException(ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
         return transformer
 
+    @staticmethod
+    async def _record_usage(
+        response_model_id: str | None,
+        input_tokens: int | None,
+        *,
+        model_id: str,
+        protocol: str,
+        usage_source: ProviderUsageSource | None,
+    ) -> None:
+        await record_provider_usage(
+            usage_type=ProviderUsageType.EMBEDDING,
+            source=usage_source if usage_source is not None else ProviderUsageSource(model_id=model_id, protocol=protocol),
+            response_model_id=response_model_id,
+            input_tokens=input_tokens,
+        )
+
     @classmethod
     async def get_embeddings(
         cls,
@@ -27,10 +46,17 @@ class EmbeddingClient:
         input_texts: str | list[str],
         http_proxy: str | None = None,
         custom_headers: dict[str, str] | None = None,
+        usage_source: ProviderUsageSource | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         transformer = cls.get_transformer(protocol)
-        return await transformer.get_embeddings(
+        record_usage = partial(
+            cls._record_usage,
+            model_id=model_id,
+            protocol=protocol,
+            usage_source=usage_source,
+        )
+        response = await transformer.get_embeddings(
             api_key=api_key,
             base_url=base_url,
             model_id=model_id,
@@ -39,6 +65,8 @@ class EmbeddingClient:
             custom_headers=custom_headers,
             **kwargs,
         )
+        await record_usage(*transformer.extract_usage(response))
+        return response
 
     @classmethod
     async def embed_texts(
@@ -53,8 +81,15 @@ class EmbeddingClient:
         timeout: float = 30.0,
         http_proxy: str | None = None,
         custom_headers: dict[str, str] | None = None,
+        usage_source: ProviderUsageSource | None = None,
     ) -> list[list[float]]:
         transformer = cls.get_transformer(protocol)
+        record_usage = partial(
+            cls._record_usage,
+            model_id=model_id,
+            protocol=protocol,
+            usage_source=usage_source,
+        )
         return await transformer.embed_texts(
             api_key=api_key,
             base_url=base_url,
@@ -65,4 +100,5 @@ class EmbeddingClient:
             timeout=timeout,
             http_proxy=http_proxy,
             custom_headers=custom_headers,
+            on_usage=record_usage,
         )

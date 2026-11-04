@@ -16,6 +16,7 @@ from app.core.memory.normalization import build_memory_content_hash, normalize_m
 from app.core.memory.organization import (
     MemoryOrganizationExecutionBudget,
     MemoryOrganizationExecutionRequest,
+    MemoryOrganizationModelConfig,
     MemoryOrganizationPlanInvalidError,
     MemoryOrganizationSnapshot,
     MemoryOrganizationSnapshotItem,
@@ -378,7 +379,21 @@ def _handler_request(snapshot: MemoryOrganizationSnapshot) -> MemoryOrganization
     return MemoryOrganizationExecutionRequest(
         trigger="manual",
         snapshot=snapshot,
-        organization_model=object(),  # type: ignore[arg-type]
+        organization_model=MemoryOrganizationModelConfig(
+            channel_id=7,
+            channel_name="organization-test-channel",
+            model_id="organization-test-model",
+            usage="CHAT",
+            protocol="openai",
+            context_window_k=1,
+            context_window_tokens=1000,
+            max_tokens=100,
+            snapshot_count=snapshot.count,
+            required_output_tokens=100,
+            policy_version=snapshot.policy_version,
+            base_url="https://organization.invalid/v1",
+            api_key="organization-test-api-key",
+        ),
         messages=(InternalMessage(role=MessageRole.SYSTEM, content="system"),),
         budget=MemoryOrganizationExecutionBudget(
             required_input_tokens=10,

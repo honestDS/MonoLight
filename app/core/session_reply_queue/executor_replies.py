@@ -26,7 +26,7 @@ from app.core.utils.dispatcher.frozen_context import capture_frozen_context_mess
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType, decode_message_content
-from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
+from app.models.provider_usage import ProviderUsageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkType
 
 __all__ = []
@@ -49,7 +49,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
             db,
             work=work,
-            request_purpose=SessionReplyProviderRequestPurpose.AUDIT_AUXILIARY,
+            request_purpose=ProviderUsageType.AUDIT_AUXILIARY,
             uid=work.uid,
             session_id=work.session_id,
             profile=profile,
@@ -133,9 +133,7 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
         guidance_prompt=message.guidance_prompt,
     )
     execution_scope = execution_state.get("execution_scope")
-    frozen_context_messages = load_frozen_context_messages(
-        execution_state.get("frozen_context_messages")
-    )
+    frozen_context_messages = load_frozen_context_messages(execution_state.get("frozen_context_messages"))
     return await _dispatch_interactive_work(
         db,
         work=work,
@@ -145,10 +143,7 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
         history_before_id=message_ids[0],
         frozen_user_message_ids=message_ids,
         attachments=initial_message.attachments,
-        allow_additional_user_messages=(
-            execution_scope == END_SESSION_SCOPE_FOREGROUND
-            and frozen_context_messages is None
-        ),
+        allow_additional_user_messages=(execution_scope == END_SESSION_SCOPE_FOREGROUND and frozen_context_messages is None),
         execution_resume_state=checkpoint,
         execution_scope=execution_scope,
         frozen_context_messages=frozen_context_messages,
@@ -219,7 +214,7 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
     ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
         db,
         work=work,
-        request_purpose=SessionReplyProviderRequestPurpose.BACKGROUND_SUMMARY,
+        request_purpose=ProviderUsageType.BACKGROUND_SUMMARY,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,

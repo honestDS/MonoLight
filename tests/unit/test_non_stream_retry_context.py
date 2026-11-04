@@ -120,6 +120,7 @@ async def _build_max_tokens_runtime_instruction(
 class _Channel:
     id = 1
     name = "test-channel"
+    usage_key = "0123456789abcdef0123456789abcdef"
     base_url = "https://example.invalid"
 
     def get_decrypted_api_key(self):
@@ -287,11 +288,7 @@ async def test_frozen_context_length_compacts_locally_before_channel_fallback(mo
         attempts.append(kwargs["model_id"])
         if len(attempts) == 1:
             raise LLMContextLengthException(provider_message="maximum context length exceeded")
-        assert any(
-            message["content"] == "locally compressed request"
-            for checkpoint in saved_checkpoints
-            for message in checkpoint["messages"]
-        )
+        assert any(message["content"] == "locally compressed request" for checkpoint in saved_checkpoints for message in checkpoint["messages"])
         assert json.loads(kwargs["messages"][0].content)["user_message"] == "locally compressed request"
         return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model=kwargs["model_id"], usage={})
 
@@ -2749,19 +2746,9 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
         "tool_end",
     ]
     assert json.loads(response["choices"][0]["message"]["content"])["type"] == "audit_confirmation"
-    checkpoint_messages = [
-        InternalMessage.model_validate(item)
-        for item in checkpoints[-1]["messages"]
-    ]
-    assert any(
-        message.role == MessageRole.ASSISTANT
-        and any(tool_call.id == "call-1" for tool_call in message.tool_calls or [])
-        for message in checkpoint_messages
-    )
-    assert any(
-        message.role == MessageRole.TOOL and message.tool_call_id == "call-1"
-        for message in checkpoint_messages
-    )
+    checkpoint_messages = [InternalMessage.model_validate(item) for item in checkpoints[-1]["messages"]]
+    assert any(message.role == MessageRole.ASSISTANT and any(tool_call.id == "call-1" for tool_call in message.tool_calls or []) for message in checkpoint_messages)
+    assert any(message.role == MessageRole.TOOL and message.tool_call_id == "call-1" for message in checkpoint_messages)
     assert unknown_calls == []
 
 

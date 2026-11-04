@@ -112,10 +112,10 @@ def test_openai_usage_normalization() -> None:
         }
     )
     assert {key: invalid_usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")} == {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-        "cached_tokens": 0,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "total_tokens": None,
+        "cached_tokens": None,
     }
 
 
@@ -2561,7 +2561,7 @@ async def test_responses_stream_terminal_snapshot_backfills_completed_image(
         "total_tokens": 6,
         "prompt_tokens": 4,
         "completion_tokens": 2,
-        "cached_tokens": 0,
+        "cached_tokens": None,
     }
     assert result.finish_details is not None
     assert result.finish_details["status"] == status

@@ -67,6 +67,7 @@ from app.core.log import (
 )
 from app.core.profile.selection import resolve_profile_for_session
 from app.core.profile.validation import get_validated_profile_for_assignment
+from app.core.provider_usage import ProviderUsageSource
 from app.core.security import get_current_user
 from app.core.session.cleanup import delete_session_data
 from app.core.session.notifier import session_notifier
@@ -746,6 +747,7 @@ async def generate_title(
         channel, model_entry, _rule = selection
         try:
             await db.commit()
+            protocol = resolve_model_protocol(model_entry)
             title = await generate_session_title(
                 uid=owner_uid,
                 session_id=request.session_id,
@@ -753,7 +755,12 @@ async def generate_title(
                 api_key=channel.get_decrypted_api_key(),
                 base_url=channel.base_url,
                 model_id=model_entry["model_id"],
-                protocol=resolve_model_protocol(model_entry),
+                protocol=protocol,
+                usage_source=ProviderUsageSource.from_channel(
+                    channel,
+                    model_id=model_entry["model_id"],
+                    protocol=protocol,
+                ),
                 model_entry=model_entry,
                 raise_on_error=True,
                 http_proxy=get_channel_http_proxy(channel),

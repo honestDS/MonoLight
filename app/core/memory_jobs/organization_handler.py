@@ -44,7 +44,9 @@ from app.core.memory_jobs.executor import (
     MemoryJobRetryableError,
 )
 from app.core.memory_jobs.manager import memory_job_manager
+from app.core.provider_usage import ProviderUsageSource, record_provider_response_usage
 from app.models.memory import LongTermMemoryMutationJob, LongTermMemoryMutationOperation
+from app.models.provider_usage import ProviderUsageType
 
 logger = get_logger(__name__)
 
@@ -141,6 +143,28 @@ def _response_metadata(response: Any) -> tuple[dict[str, Any], str | None]:
     if not isinstance(usage, dict) or (finish_reason is not None and not isinstance(finish_reason, str)):
         raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     return usage, finish_reason
+
+
+async def _organization_usage_source(
+    context: MemoryJobExecutionContext,
+    request: MemoryOrganizationExecutionRequest,
+) -> ProviderUsageSource:
+    organization_model = request.organization_model
+    channel_key: str | None = None
+    try:
+        async with context.session_factory() as db:
+            channel = await channel_crud.get(db, organization_model.channel_id)
+        if channel is not None:
+            channel_key = channel.usage_key
+    except Exception:
+        pass
+    return ProviderUsageSource(
+        channel_id=organization_model.channel_id,
+        channel_key=channel_key,
+        channel_name=organization_model.channel_name,
+        model_id=organization_model.model_id,
+        protocol=organization_model.protocol,
+    )
 
 
 def _log_organization_model_call_failure(
@@ -439,6 +463,7 @@ async def handle_memory_organization(context: MemoryJobExecutionContext) -> Memo
         )
 
     await context.checkpoint()
+    usage_source = await _organization_usage_source(context, request)
     try:
         response = await call_organization_model(request)
     except MemoryOrganizationContextExceededError as exc:
@@ -462,6 +487,16 @@ async def handle_memory_organization(context: MemoryJobExecutionContext) -> Memo
             raise _organization_context_exceeded(request, external_context_error=True) from exc
         _log_organization_model_call_failure(request, claimed_job, exc)
         raise MemoryJobRetryableError(t(ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED)) from exc
+
+    try:
+        await record_provider_response_usage(
+            response,
+            usage_type=ProviderUsageType.MEMORY_ORGANIZATION,
+            source=usage_source,
+            uid=claimed_job.uid,
+        )
+    except Exception:
+        pass
 
     await context.checkpoint()
     try:

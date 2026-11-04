@@ -1,17 +1,19 @@
 from collections.abc import AsyncGenerator
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import ForeignKeyConstraint
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, select
 
 from app.core.crud.context_summary.fragment import (
     build_context_summary_fragment_dedupe_key,
     context_summary_fragment_crud,
 )
 from app.core.crud.context_summary.stage import context_summary_stage_crud
+from app.core.crud.provider_usage import provider_usage_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
 from app.core.utils.context_summary.stage import build_summary_work_identity
@@ -21,13 +23,14 @@ from app.models import (
     ContextSummaryStage,
     Profile,
     PromptLibrary,
+    ProviderUsageDaily,
+    ProviderUsageDetail,
     ScheduledTask,
     SessionEvent,
-    SessionReplyProviderUsage,
     SessionReplyWorkItem,
 )
+from app.models.provider_usage import ProviderUsageType
 from app.models.scheduled_task import ScheduledTaskStatus
-from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
 from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkType
 
 EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
@@ -161,7 +164,6 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         ("session_id", "uid"),
         "CASCADE",
     ),
-    ("session_reply_provider_usage", ("work_id", "session_id", "uid"), "session_reply_work_item", ("id", "session_id", "uid"), "CASCADE"),
     ("session_reply_sequence", ("session_id",), "chat_session", ("session_id",), "CASCADE"),
     # terminal
     (
@@ -218,7 +220,8 @@ async def db_session_factory(database_factory) -> AsyncGenerator[async_sessionma
             Profile.__table__,
             ChatSession.__table__,
             SessionReplyWorkItem.__table__,
-            SessionReplyProviderUsage.__table__,
+            ProviderUsageDetail.__table__,
+            ProviderUsageDaily.__table__,
             ContextSummaryStage.__table__,
             ContextSummaryFragment.__table__,
             SessionEvent.__table__,
@@ -284,7 +287,7 @@ async def test_sqlite_enforces_session_owner_foreign_key_and_cascade(db_session_
 
 
 @pytest.mark.asyncio
-async def test_provider_usage_cascades_with_reply_work_but_session_totals_remain(db_session_factory):
+async def test_provider_usage_survives_reply_work_deletion_and_session_totals_remain(db_session_factory):
     async with db_session_factory() as db:
         chat_session = ChatSession(
             session_id="session-usage",
@@ -317,26 +320,42 @@ async def test_provider_usage_cascades_with_reply_work_but_session_totals_remain
         db.add(work_item)
         await db.flush()
 
-        provider_usage = SessionReplyProviderUsage(
+        provider_usage = ProviderUsageDetail(
             provider_request_id="request-usage-1",
-            work_id=77,
-            session_id="session-usage",
+            created_at=datetime(2026, 1, 1, 12, 0, 0),
+            type=ProviderUsageType.MAIN_DIALOGUE.value,
             uid="user-1",
+            session_id="session-usage",
+            work_id=77,
             input_tokens=100,
             cached_tokens=25,
-            request_purpose=SessionReplyProviderRequestPurpose.MAIN_DIALOGUE,
             output_tokens=7,
         )
-        db.add(provider_usage)
+        assert await provider_usage_crud.create_once(db, provider_usage) is True
         await db.commit()
-        provider_usage_id = provider_usage.id
-        assert provider_usage_id is not None
 
         await db.delete(work_item)
         await db.commit()
 
     async with db_session_factory() as check_db:
-        assert await check_db.get(SessionReplyProviderUsage, provider_usage_id) is None
+        assert await check_db.get(SessionReplyWorkItem, 77) is None
+        persisted_usage = await check_db.get(ProviderUsageDetail, "request-usage-1")
+        assert persisted_usage is not None
+        assert (
+            persisted_usage.work_id,
+            persisted_usage.type,
+            persisted_usage.input_tokens,
+            persisted_usage.cached_tokens,
+            persisted_usage.output_tokens,
+        ) == (77, ProviderUsageType.MAIN_DIALOGUE.value, 100, 25, 7)
+        daily_usage = (await check_db.execute(select(ProviderUsageDaily))).scalars().one()
+        assert (
+            daily_usage.type,
+            daily_usage.input_tokens,
+            daily_usage.cached_tokens,
+            daily_usage.output_tokens,
+            daily_usage.request_count,
+        ) == (ProviderUsageType.MAIN_DIALOGUE.value, 100, 25, 7, 1)
         chat_session = await check_db.get(ChatSession, "session-usage")
         assert chat_session is not None
         assert chat_session.llm_request_metadata["total_input_tokens"] == 100

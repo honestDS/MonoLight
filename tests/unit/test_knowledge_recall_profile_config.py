@@ -76,6 +76,7 @@ async def test_get_profile_rerank_config_uses_knowledge_candidate_k(monkeypatch)
     channel = SimpleNamespace(
         id=17,
         name="rerank-channel",
+        usage_key="0123456789abcdef0123456789abcdef",
         base_url="https://rerank.invalid",
         http_proxy=None,
         get_decrypted_api_key=lambda: "api-key",
@@ -120,6 +121,7 @@ async def test_get_profile_rerank_config_uses_knowledge_candidate_k(monkeypatch)
 
     assert result is not None
     assert result.candidate_k == 31
+    assert result.channel_usage_key == "0123456789abcdef0123456789abcdef"
 
 
 @pytest.mark.asyncio

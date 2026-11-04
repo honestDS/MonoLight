@@ -196,13 +196,7 @@ class InternalMessage(BaseModel):
 class InternalResponse(BaseModel):
     message: InternalMessage
     model: str
-    usage: dict[str, Any] = PyField(
-        default_factory=lambda: {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        }
-    )
+    usage: dict[str, Any] = PyField(default_factory=dict)
     finish_reason: str | None = None
     finish_details: dict[str, Any] | None = None
     provider_metadata: dict[str, Any] | None = None

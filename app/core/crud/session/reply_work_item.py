@@ -53,6 +53,29 @@ class CRUDSessionReplyWorkItem:
         result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work_id))
         return result.scalars().first()
 
+    async def get_audit_source_work(
+        self,
+        db: AsyncSession,
+        *,
+        audit_record_id: int,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+    ) -> SessionReplyWorkItem | None:
+        result = await db.execute(
+            select(SessionReplyWorkItem)
+            .join(AuditRecord, AuditRecord.source_work_id == SessionReplyWorkItem.id)
+            .where(
+                AuditRecord.id == audit_record_id,
+                AuditRecord.uid == uid,
+                AuditRecord.session_id == session_id,
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.profile_id == profile_id,
+            )
+        )
+        return result.scalars().first()
+
     async def get_message_work_id(self, db: AsyncSession, work: SessionReplyWorkItem) -> int | None:
         if work.work_type == SessionReplyWorkType.AGENT_WORK:
             return work.id

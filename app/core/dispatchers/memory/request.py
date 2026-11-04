@@ -305,6 +305,9 @@ async def generate(
     request_messages: list[InternalMessage],
     metadata: dict[str, Any],
 ) -> Any:
+    from app.core.provider_usage import ProviderUsageSource, record_provider_response_usage
+    from app.models.provider_usage import ProviderUsageType
+
     await context.db.commit()
     channel = context.auxiliary_channel_obj
     model_entry = context.auxiliary_model_entry
@@ -330,11 +333,24 @@ async def generate(
         async def discard_content(_content: str) -> None:
             return None
 
-        return await LLMClient.generate_with_stream_callback(
+        response = await LLMClient.generate_with_stream_callback(
             **generation_kwargs,
             on_content=discard_content,
         )
-    return await LLMClient.generate(**generation_kwargs)
+    else:
+        response = await LLMClient.generate(**generation_kwargs)
+    await record_provider_response_usage(
+        response,
+        usage_type=ProviderUsageType.MEMORY_RECALL_PRECHECK,
+        source=ProviderUsageSource.from_channel(
+            channel,
+            model_id=model_entry["model_id"],
+            protocol=protocol,
+        ),
+        uid=context.uid,
+        session_id=context.session_id,
+    )
+    return response
 
 
 async def update_output_metadata(context: MemoryRecallContext, response: Any) -> None:

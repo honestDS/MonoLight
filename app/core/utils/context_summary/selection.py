@@ -29,6 +29,7 @@ class ContextSummaryModelSnapshot:
     reasoning_effort: str | None = None
     http_proxy: str | None = None
     custom_headers: dict[str, str] | None = None
+    channel_usage_key: str | None = None
 
     def accepts_prompt_tokens(self, prompt_tokens: int) -> bool:
         return prompt_tokens <= self.input_budget_tokens
@@ -83,4 +84,5 @@ async def select_context_summary_model(
         input_budget_tokens=context_window_tokens - max_output_tokens - normalized_safety_margin,
         http_proxy=get_channel_http_proxy(channel),
         custom_headers=get_model_custom_headers(model_entry),
+        channel_usage_key=channel.usage_key,
     )

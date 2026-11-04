@@ -132,6 +132,9 @@ async def test_generate_session_title_enforces_output_budget(
 async def test_selected_profile_title_passes_model_capability_to_task_generation(monkeypatch):
     db = SimpleNamespace()
     channel = SimpleNamespace(
+        id=1,
+        name="title-channel",
+        usage_key="title-channel-usage-key",
         base_url="https://example.invalid",
         http_proxy=None,
         get_decrypted_api_key=lambda: "api-key",

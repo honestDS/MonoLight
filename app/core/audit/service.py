@@ -62,6 +62,7 @@ from app.core.prompts import (
     AUDIT_SUMMARY_PROMPT,
     AUDIT_TASK_AUTHORIZATION_PROMPT,
 )
+from app.core.provider_usage import ProviderUsageSource, record_provider_response_usage
 from app.core.terminal.manager import terminal_session_manager
 from app.core.tools import tool_requires_audit
 from app.core.tools.file_tool import resolve_file_tool_target_path
@@ -78,6 +79,7 @@ from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConcl
 from app.models.channel import ModelUsage, resolve_model_protocol
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
+from app.models.provider_usage import ProviderUsageType
 from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkType
 from app.providers.llm.client import LLMClient
 
@@ -592,6 +594,12 @@ async def _run_audit_model(
     shell_results: list[dict[str, Any]] = []
     max_rounds = read_budget.remaining + (2 if result_ids is not None else 1)
     format_correction_used = False
+    if result_ids is None:
+        usage_type = ProviderUsageType.AUDIT_AUXILIARY
+    elif payload.get("task_instruction") is not None:
+        usage_type = ProviderUsageType.TASK_AUTHORIZATION
+    else:
+        usage_type = ProviderUsageType.SAFETY_AUDIT
     for _round_index in range(max_rounds):
         await ensure_session_reply_work_claim(db)
         await db.commit()
@@ -617,6 +625,11 @@ async def _run_audit_model(
             request_context_tokens=request_context_tokens,
             http_proxy=get_channel_http_proxy(channel),
             custom_headers=get_model_custom_headers(model_entry),
+        )
+        await record_provider_response_usage(
+            response,
+            usage_type=usage_type,
+            source=ProviderUsageSource.from_channel(channel, model_id=model_id, protocol=protocol),
         )
         if response.message.tool_calls:
             if read_budget.remaining <= 0:

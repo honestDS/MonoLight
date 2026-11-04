@@ -22,6 +22,7 @@ from app.core.constants import (
     ERR_VECTOR_ITEM_LENGTH_MISMATCH,
 )
 from app.core.i18n import t
+from app.core.provider_usage import ProviderUsageSource
 from app.models.knowledge_base import KnowledgeBase
 
 
@@ -80,6 +81,7 @@ def teardown_module(_module) -> None:
 class _FakeChannel:
     def __init__(self, *, channel_id: int = 7, is_active: bool = True, base_url: str | None = "https://embedding.example/v1", model_ids: list[dict] | None = None):
         self.id = channel_id
+        self.usage_key = "0123456789abcdef0123456789abcdef"
         self.name = "embedding-channel"
         self.is_active = is_active
         self.base_url = base_url
@@ -300,6 +302,13 @@ async def test_embed_texts_with_config_commits_before_forwarding_all_arguments(m
                 "timeout": 45.5,
                 "http_proxy": "http://proxy-user:proxy-pass@proxy.example.com:8080",
                 "custom_headers": {"x-trace-id": "header-value-secret"},
+                "usage_source": ProviderUsageSource(
+                    channel_id=7,
+                    channel_key=None,
+                    channel_name="embedding-channel",
+                    model_id="embedding-model",
+                    protocol="openai_embedding",
+                ),
             },
         ),
     ]
@@ -330,6 +339,13 @@ async def test_detect_embedding_dimensions_uses_actual_vector_and_omits_declared
             "timeout": 45.5,
             "http_proxy": "http://proxy-user:proxy-pass@proxy.example.com:8080",
             "custom_headers": {"x-trace-id": "header-value-secret"},
+            "usage_source": ProviderUsageSource(
+                channel_id=7,
+                channel_key=None,
+                channel_name="embedding-channel",
+                model_id="embedding-model",
+                protocol="openai_embedding",
+            ),
         }
     ]
 

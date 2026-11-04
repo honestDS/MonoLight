@@ -1,4 +1,5 @@
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
@@ -15,12 +16,31 @@ from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 from app.core.utils.model_request_headers import build_model_request_headers
 
-from ..base import BaseEmbeddingTransformer
+from ..base import BaseEmbeddingTransformer, log_upstream_usage
 
 logger = get_logger(__name__)
 
 
 class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
+    @staticmethod
+    def extract_usage(response: dict[str, Any]) -> tuple[str | None, int | None]:
+        model = response.get("model")
+        model = model if isinstance(model, str) else None
+        usage = response.get("usage")
+        if not isinstance(usage, dict):
+            return model, None
+
+        prompt_tokens = usage.get("prompt_tokens")
+        if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens >= 0:
+            return model, prompt_tokens
+
+        if "prompt_tokens" not in usage:
+            total_tokens = usage.get("total_tokens")
+            if isinstance(total_tokens, int) and not isinstance(total_tokens, bool) and total_tokens >= 0:
+                return model, total_tokens
+
+        return model, None
+
     async def get_embeddings(
         self,
         api_key: str,
@@ -58,7 +78,16 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
                     txt = await resp.text()
                     if resp.status != 200:
                         raise EmbeddingException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
-                    return json.loads(txt)
+                    response = json.loads(txt)
+                    if isinstance(response, dict):
+                        data = response.get("data")
+                        log_upstream_usage(
+                            model_id=model_id,
+                            protocol="openai_embedding",
+                            blocks={"usage": response.get("usage")},
+                            result_count=len(data) if isinstance(data, list) else None,
+                        )
+                    return response
         except EmbeddingException:
             raise
         except Exception as e:
@@ -79,6 +108,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
         timeout: float = 30.0,
         http_proxy: str | None = None,
         custom_headers: dict[str, str] | None = None,
+        on_usage: Callable[[str | None, int | None], Awaitable[None]] | None = None,
     ) -> list[list[float]]:
         if not input_texts:
             return []
@@ -102,7 +132,10 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
             )
 
             dimensions_supported = result["dimensions_supported"]
-            batch_embeddings = [item["embedding"] for item in result["response"].get("data", [])]
+            response = result["response"]
+            if on_usage is not None:
+                await on_usage(*self.extract_usage(response))
+            batch_embeddings = [item["embedding"] for item in response.get("data", [])]
 
             if len(batch_embeddings) != len(batch_texts):
                 raise EmbeddingException(ERR_EMBEDDING_COUNT_MISMATCH)

@@ -2,6 +2,8 @@ from typing import Any
 
 from app.core.constants import ERR_LLM_UNSUPPORTED_PROTOCOL
 from app.core.exceptions import LLMException
+from app.core.provider_usage import ProviderUsageSource, record_provider_usage
+from app.models.provider_usage import ProviderUsageType
 from app.transformers.openai import OpenAIImageGenerationTransformer
 
 
@@ -33,10 +35,14 @@ class ImageGenerationClient:
         timeout: float = 60.0,
         http_proxy: str | None = None,
         custom_headers: dict[str, str] | None = None,
+        usage_source: ProviderUsageSource | None = None,
+        usage_type: ProviderUsageType = ProviderUsageType.IMAGE_GENERATION,
+        usage_uid: str | None = None,
+        usage_session_id: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         transformer = cls.get_transformer(protocol)
-        return await transformer.generate_image(
+        response = await transformer.generate_image(
             api_key=api_key,
             base_url=base_url,
             model_id=model_id,
@@ -51,3 +57,16 @@ class ImageGenerationClient:
             custom_headers=custom_headers,
             **kwargs,
         )
+        response_model_id, input_tokens, cached_tokens, output_tokens, image_count = transformer.extract_usage(response)
+        await record_provider_usage(
+            usage_type=usage_type,
+            source=usage_source if usage_source is not None else ProviderUsageSource(model_id=model_id, protocol=protocol),
+            uid=usage_uid,
+            session_id=usage_session_id,
+            response_model_id=response_model_id,
+            input_tokens=input_tokens,
+            cached_tokens=cached_tokens,
+            output_tokens=output_tokens,
+            image_count=image_count,
+        )
+        return response

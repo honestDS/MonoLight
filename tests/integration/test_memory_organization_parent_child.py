@@ -5,7 +5,6 @@ import json
 from collections.abc import AsyncGenerator
 from dataclasses import replace
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,6 +25,7 @@ from app.core.memory import (
 from app.core.memory.organization import (
     MemoryOrganizationExecutionBudget,
     MemoryOrganizationExecutionRequest,
+    MemoryOrganizationModelConfig,
     MemoryOrganizationPlanCheckpoint,
     MemoryOrganizationSnapshot,
     MemoryOrganizationValidatedItem,
@@ -130,7 +130,21 @@ def _request(*, snapshot_count: int = 5) -> MemoryOrganizationExecutionRequest:
     return MemoryOrganizationExecutionRequest(
         trigger="manual",
         snapshot=snapshot,
-        organization_model=SimpleNamespace(channel_id=7),  # type: ignore[arg-type]
+        organization_model=MemoryOrganizationModelConfig(
+            channel_id=7,
+            channel_name="memory-organization-parent-child-memory_organization_parent_child-channel",
+            model_id="organization-model",
+            usage="CHAT",
+            protocol="openai",
+            context_window_k=1,
+            context_window_tokens=1024,
+            max_tokens=100,
+            snapshot_count=snapshot_count,
+            required_output_tokens=100,
+            policy_version=5,
+            base_url="https://organization.invalid/v1",
+            api_key="organization-test-api-key",
+        ),
         messages=(InternalMessage(role=MessageRole.SYSTEM, content="system"),),
         budget=MemoryOrganizationExecutionBudget(
             required_input_tokens=10,
@@ -798,8 +812,8 @@ async def test_organization_model_request_rejection_fails_parent_without_retry_o
     parent = await _claimed_parent(db_session, uid=uid, max_attempts=4)
     request = replace(
         _request(),
-        organization_model=SimpleNamespace(
-            channel_id=7,
+        organization_model=replace(
+            _request().organization_model,
             channel_name="test",
             model_id="memory-model",
         ),

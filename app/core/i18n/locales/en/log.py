@@ -126,6 +126,7 @@ MESSAGES = {
     "LOG_WEIXIN_OPENCLAW_UNSUPPORTED_ITEM_IGNORED": "Weixin OpenClaw cannot parse quoted messages with the current platform capability; related item ignored",
     "LOG_WEIXIN_OPENCLAW_UPLOAD_URL_MISSING": "Weixin OpenClaw getuploadurl response has no usable CDN upload URL",
     "LOG_OPENAI_CHAT_FAILED": "OpenAI chat API call failed: {error}",
+    "LOG_UPSTREAM_MODEL_USAGE": "Upstream model usage response: protocol={protocol}, model_id={model_id}, usage={usage}, result_count={result_count}",
     "LOG_OPENAI_EMBEDDING_FAILED": "Embedding model API call failed: {error}",
     "LOG_OPENAI_EMBEDDING_OPTIONAL_PARAMS_FAILED": "Embedding model API call with optional parameters failed, preparing fallback retry: {error}",
     "LOG_OPENAI_IMAGE_GENERATION_FAILED": "OpenAI image generation API call failed: {error}",

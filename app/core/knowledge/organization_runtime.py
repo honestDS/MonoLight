@@ -33,10 +33,12 @@ from app.core.knowledge.organization_types import (
     KnowledgeOrganizationUpdate,
 )
 from app.core.prompts import KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT
+from app.core.provider_usage import ProviderUsageSource, record_provider_response_usage
 from app.core.utils.llm_request_params import build_internal_task_generation_params
 from app.core.utils.tokenizer import estimate_tokens, truncate_text_to_tokens
 from app.models.channel import ChannelModelItem, ModelUsage, is_channel_model_available, resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
+from app.models.provider_usage import ProviderUsageType
 from app.providers.llm.client import LLMClient
 from app.providers.vector.chroma import async_get_collection_items_by_ids, async_query_collection
 
@@ -59,6 +61,7 @@ class KnowledgeOrganizationModelConfig:
     max_output_tokens: int = 0
     safety_margin_tokens: int = 0
     system_prompt_tokens: int = 0
+    channel_usage_key: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "custom_headers", MappingProxyType(dict(self.custom_headers)))
@@ -68,6 +71,16 @@ class KnowledgeOrganizationModelConfig:
         return max(
             0,
             self.context_window_tokens - self.max_output_tokens - self.safety_margin_tokens - self.system_prompt_tokens,
+        )
+
+    @property
+    def usage_source(self) -> ProviderUsageSource:
+        return ProviderUsageSource(
+            channel_id=self.channel_id,
+            channel_key=self.channel_usage_key,
+            channel_name=self.channel_name,
+            model_id=self.model_id,
+            protocol=self.protocol,
         )
 
 
@@ -331,6 +344,7 @@ def _build_model_config(channel, item: ChannelModelItem) -> KnowledgeOrganizatio
         max_output_tokens=item.max_tokens,
         safety_margin_tokens=KNOWLEDGE_ORGANIZATION_CONTEXT_SAFETY_MARGIN_TOKENS,
         system_prompt_tokens=system_prompt_tokens,
+        channel_usage_key=channel.usage_key,
     )
 
 
@@ -409,6 +423,11 @@ async def call_knowledge_organization_model(
         request_context_tokens=estimate_tokens(KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT) + estimate_tokens(payload),
         http_proxy=model.http_proxy,
         custom_headers=dict(model.custom_headers),
+    )
+    await record_provider_response_usage(
+        response,
+        usage_type=ProviderUsageType.KNOWLEDGE_ORGANIZATION,
+        source=model.usage_source,
     )
     content = response.message.content
     if not isinstance(content, str):

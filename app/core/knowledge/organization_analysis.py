@@ -31,6 +31,7 @@ from app.core.knowledge.organization_types import (
     KnowledgeOrganizationScopeItem,
 )
 from app.core.prompts import KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT
+from app.core.provider_usage import record_provider_response_usage
 from app.core.utils.llm_request_params import build_internal_task_generation_params
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.knowledge_base import (
@@ -41,6 +42,7 @@ from app.models.knowledge_base import (
     KnowledgeOrganizationStageStatus,
 )
 from app.models.message import InternalMessage, MessageRole
+from app.models.provider_usage import ProviderUsageType
 from app.providers.llm.client import LLMClient
 
 __all__ = []
@@ -78,6 +80,11 @@ async def _default_analysis_caller(model: KnowledgeOrganizationModelConfig, *, c
         request_context_tokens=prompt_tokens + estimate_tokens(payload),
         http_proxy=model.http_proxy,
         custom_headers=dict(model.custom_headers),
+    )
+    await record_provider_response_usage(
+        response,
+        usage_type=ProviderUsageType.KNOWLEDGE_ORGANIZATION,
+        source=model.usage_source,
     )
     content_value = response.message.content
     if not isinstance(content_value, str):

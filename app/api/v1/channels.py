@@ -57,6 +57,7 @@ from app.core.exceptions import (
     ResourceNotFoundException,
 )
 from app.core.i18n import t
+from app.core.provider_usage import ProviderUsageSource, record_provider_response_usage
 from app.core.security import get_current_user
 from app.core.utils.channel_profile_sync import (
     _clear_unavailable_audit_model_refs,
@@ -88,6 +89,7 @@ from app.models.channel import (
     validate_channel_model_ids,
 )
 from app.models.message import InternalMessage, MessageRole
+from app.models.provider_usage import ProviderUsageType
 from app.providers.database import get_db
 from app.providers.embedding import EmbeddingClient
 from app.providers.image_generation import ImageGenerationClient
@@ -432,6 +434,15 @@ async def test_channel_chat(
         else:
             response = await LLMClient.generate_with_stream_callback(**request_kwargs, on_content=on_content)
             total_latency_ms = round((perf_counter() - request_start) * 1000, 2)
+        await record_provider_response_usage(
+            response,
+            usage_type=ProviderUsageType.CHANNEL_TEST,
+            source=ProviderUsageSource(
+                model_id=request_kwargs["model_id"],
+                protocol=protocol.value.lower(),
+            ),
+            uid=getattr(_admin, "uid", None),
+        )
         content = response.message.content
         if isinstance(content, str):
             reply = content.strip()
@@ -496,6 +507,8 @@ async def test_channel_image_generation(
             timeout=payload.timeout,
             http_proxy=payload.http_proxy,
             custom_headers=payload.advanced_settings.custom_headers,
+            usage_type=ProviderUsageType.CHANNEL_TEST,
+            usage_uid=getattr(_admin, "uid", None),
         )
         latency_ms = round((perf_counter() - request_start) * 1000, 2)
         images = response.get("data") if isinstance(response, dict) else None
@@ -774,15 +787,17 @@ async def test_embedding_dimension(
     if model_entry is None:
         raise ParameterException(ERR_CHANNEL_MODEL_NOT_FOUND)
 
+    protocol = resolve_model_protocol(model_entry)
     try:
         embedding_response = await EmbeddingClient.get_embeddings(
             api_key=db_obj.get_decrypted_api_key(),
             base_url=db_obj.base_url,
             model_id=model_id,
             input_texts=["dimension test"],
-            protocol=resolve_model_protocol(model_entry),
+            protocol=protocol,
             http_proxy=get_channel_http_proxy(db_obj),
             custom_headers=get_model_custom_headers(model_entry),
+            usage_source=ProviderUsageSource.from_channel(db_obj, model_id=model_id, protocol=protocol),
         )
         if "data" in embedding_response and len(embedding_response["data"]) > 0:
             dimension = len(embedding_response["data"][0]["embedding"])

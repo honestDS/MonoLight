@@ -40,7 +40,7 @@ from app.core.terminal.schemas import (
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
-from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
+from app.models.provider_usage import ProviderUsageType
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
     SessionReplyWorkItem,
@@ -302,7 +302,7 @@ async def test_non_streaming_interactive_work_delegates_provider_usage_persisten
     metadata, persisted_work, request_purpose, update_session_context = persistence_calls[0]
     assert metadata == request_metadata
     assert persisted_work is work
-    assert request_purpose == SessionReplyProviderRequestPurpose.MAIN_DIALOGUE
+    assert request_purpose == ProviderUsageType.MAIN_DIALOGUE
     assert update_session_context is True
 
 
@@ -1013,7 +1013,7 @@ async def test_scheduled_reply_persists_and_clears_audit_binding(monkeypatch):
     ai_msg, _, _, _ = await executor_metadata_module._generate_auxiliary_reply_with_request_metadata(
         object(),
         work=work,
-        request_purpose=SessionReplyProviderRequestPurpose.SCHEDULED_SUMMARY,
+        request_purpose=ProviderUsageType.SCHEDULED_SUMMARY,
         uid=work.uid,
         session_id=work.session_id,
         profile=SimpleNamespace(id=3, uid="user-1"),
@@ -1089,7 +1089,7 @@ async def test_execute_background_summary_is_auxiliary_and_disables_tools(monkey
 
     assert response["content"] == "background summary"
     assert response["llm_request_metadata"]["request_purpose"] == "background_summary"
-    assert captured["request_purpose"] == SessionReplyProviderRequestPurpose.BACKGROUND_SUMMARY
+    assert captured["request_purpose"] == ProviderUsageType.BACKGROUND_SUMMARY
     assert captured["allow_tools"] is False
     assert captured["submission_context"] == []
 
@@ -1127,14 +1127,8 @@ async def test_confirmed_external_resume_preserves_task_scope_and_frozen_context
         execution_state={
             "decision_message_id": 4,
             "execution_scope": "task",
-            "frozen_context_messages": [
-                frozen_message.model_dump(mode="json", exclude_none=True)
-            ],
-            "dispatcher_checkpoint": {
-                "messages": [
-                    frozen_message.model_dump(mode="json", exclude_none=True)
-                ]
-            },
+            "frozen_context_messages": [frozen_message.model_dump(mode="json", exclude_none=True)],
+            "dispatcher_checkpoint": {"messages": [frozen_message.model_dump(mode="json", exclude_none=True)]},
         },
         input_message_ids=[],
         uid="user-1",
@@ -1180,9 +1174,7 @@ async def test_confirmed_external_resume_preserves_task_scope_and_frozen_context
     assert response == {"content": "resumed"}
     assert captured["execution_scope"] == "task"
     assert captured["allow_additional_user_messages"] is False
-    assert [message.content for message in captured["frozen_context_messages"]] == [
-        "scheduled frozen context"
-    ]
+    assert [message.content for message in captured["frozen_context_messages"]] == ["scheduled frozen context"]
 
 
 @pytest.mark.asyncio
@@ -1770,17 +1762,11 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     assert len(saved_messages) == 1
     assert saved_messages[0][0][4] == MessageType.AUDIT_CONFIRMATION
     assert any(message.role == MessageRole.TOOL and message.tool_call_id == "original-1" for message in memory_chains[0])
-    refreshed_frozen = [
-        InternalMessage.model_validate(item)
-        for item in work.execution_state["frozen_context_messages"]
-    ]
+    refreshed_frozen = [InternalMessage.model_validate(item) for item in work.execution_state["frozen_context_messages"]]
     assert refreshed_frozen[1].role == MessageRole.TOOL
     assert refreshed_frozen[1].tool_call_id == "original-1"
     assert refreshed_frozen[1].content != "old-pending-result"
-    refreshed_checkpoint = [
-        InternalMessage.model_validate(item)
-        for item in work.execution_state["dispatcher_checkpoint"]["messages"]
-    ]
+    refreshed_checkpoint = [InternalMessage.model_validate(item) for item in work.execution_state["dispatcher_checkpoint"]["messages"]]
     assert refreshed_checkpoint[1].tool_call_id == "original-1"
     assert refreshed_checkpoint[1].content == refreshed_frozen[1].content
 
@@ -1830,10 +1816,7 @@ def test_confirmed_wait_checkpoint_refreshes_result_and_keeps_decision():
         decision_raw_message="同意",
     )
 
-    messages = [
-        InternalMessage.model_validate(item)
-        for item in checkpoint["messages"]
-    ]
+    messages = [InternalMessage.model_validate(item) for item in checkpoint["messages"]]
     assert messages[1].tool_call_id == "original-1"
     assert messages[1].content == "actual-result"
     assert messages[-1].id == 4
@@ -2039,6 +2022,7 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
     monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", lambda **kwargs: True)
     monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
     monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", create_execution)
+
     def prevalidate_tool_round(*args, **kwargs):
         precheck_calls.append(kwargs)
         return {}

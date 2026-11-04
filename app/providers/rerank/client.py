@@ -1,8 +1,12 @@
+from functools import partial
+
 from app.core.constants import ERR_LLM_UNSUPPORTED_PROTOCOL
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.provider_usage import ProviderUsageSource, record_provider_usage
 from app.core.rerank.schemas import RerankResult
+from app.models.provider_usage import ProviderUsageType
 from app.transformers.cohere_rerank import CohereRerankTransformer
 
 # 单个 chunk 发送给远程 reranker 前的最大字符截断长度，防止 Payload Too Large 及过大网络开销
@@ -28,6 +32,22 @@ class RerankClient:
         # 强制截断单个 chunk 内容长度，保护远程接口
         return [(doc or "")[:RERANK_MAX_DOCUMENT_CHARS] for doc in documents]
 
+    @staticmethod
+    async def _record_usage(
+        response_model_id: str | None,
+        rerank_search_units: int | None,
+        *,
+        model_id: str,
+        protocol: str,
+        usage_source: ProviderUsageSource | None,
+    ) -> None:
+        await record_provider_usage(
+            usage_type=ProviderUsageType.RERANK,
+            source=usage_source if usage_source is not None else ProviderUsageSource(model_id=model_id, protocol=protocol),
+            response_model_id=response_model_id,
+            rerank_search_units=rerank_search_units,
+        )
+
     @classmethod
     async def rerank_texts(
         cls,
@@ -41,6 +61,7 @@ class RerankClient:
         timeout: float = 15.0,
         http_proxy: str | None = None,
         custom_headers: dict[str, str] | None = None,
+        usage_source: ProviderUsageSource | None = None,
     ) -> list[RerankResult]:
         # 空文档短路，避免无意义的远程调用
         if not documents:
@@ -48,6 +69,12 @@ class RerankClient:
 
         transformer = cls.get_transformer(protocol)
         truncated_documents = cls._truncate_documents(documents)
+        record_usage = partial(
+            cls._record_usage,
+            model_id=model_id,
+            protocol=protocol,
+            usage_source=usage_source,
+        )
 
         raw_results = await transformer.rerank_texts(
             api_key=api_key,
@@ -59,6 +86,7 @@ class RerankClient:
             timeout=timeout,
             http_proxy=http_proxy,
             custom_headers=custom_headers,
+            on_usage=record_usage,
         )
 
         results = [RerankResult(index=item["index"], relevance_score=item["relevance_score"]) for item in raw_results]

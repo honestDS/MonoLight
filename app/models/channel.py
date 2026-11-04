@@ -3,6 +3,7 @@
 import copy
 import enum
 from typing import Annotated
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -443,6 +444,7 @@ class ChannelBase(SQLModel):
 class ModelChannel(ChannelBase, table=True):
     __tablename__ = "channel"
     id: int | None = Field(default=None, primary_key=True, index=True)
+    usage_key: str = Field(default_factory=lambda: uuid4().hex, nullable=False, unique=True, max_length=32)
 
     def get_decrypted_api_key(self) -> str:
         """获取解密后的API密钥"""

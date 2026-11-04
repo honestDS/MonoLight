@@ -22,6 +22,7 @@ from app.models.message import InternalMessage, InternalResponse, MessageRole
 class _SummaryChannel:
     id = 7
     name = "summary-channel"
+    usage_key = "0123456789abcdef0123456789abcdef"
     base_url = "https://example.invalid"
     http_proxy = "http://proxy.example.com:8080"
 
@@ -103,6 +104,7 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(
     assert snapshot == ContextSummaryModelSnapshot(
         channel_id=7,
         channel_name="summary-channel",
+        channel_usage_key="0123456789abcdef0123456789abcdef",
         model_id="summary-model",
         protocol="openai_responses",
         base_url="https://example.invalid",

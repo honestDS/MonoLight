@@ -931,8 +931,8 @@ class DeepSeekResponsesTransformer(BaseTransformer):
         input_details = normalized.get("input_tokens_details")
         prompt_tokens = cls._nonnegative_token_count(normalized.get("input_tokens"))
         completion_tokens = cls._nonnegative_token_count(normalized.get("output_tokens"))
-        total_tokens = normalized.get("total_tokens")
-        if not isinstance(total_tokens, int) or isinstance(total_tokens, bool) or total_tokens < 0:
+        total_tokens = cls._nonnegative_token_count(normalized.get("total_tokens"))
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
             total_tokens = prompt_tokens + completion_tokens
         cached_tokens = input_details.get("cached_tokens") if isinstance(input_details, dict) else None
         normalized.update(
@@ -946,8 +946,10 @@ class DeepSeekResponsesTransformer(BaseTransformer):
         return normalized
 
     @staticmethod
-    def _nonnegative_token_count(value: Any) -> int:
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    def _nonnegative_token_count(value: Any) -> int | None:
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        return None
 
     @classmethod
     def _parse_arguments(cls, raw_arguments: Any) -> dict[str, Any]:

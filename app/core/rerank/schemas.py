@@ -24,3 +24,4 @@ class RerankConfig:
     priority: int
     http_proxy: str | None = None
     custom_headers: dict[str, str] | None = None
+    channel_usage_key: str | None = None

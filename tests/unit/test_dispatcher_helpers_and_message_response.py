@@ -147,6 +147,7 @@ async def test_channel_call_releases_connection_and_reports_empty_response_usage
     channel = SimpleNamespace(
         id=1,
         name="channel-1",
+        usage_key="11111111111111111111111111111111",
         base_url="https://example.invalid",
         get_decrypted_api_key=lambda: "secret",
     )
@@ -215,12 +216,14 @@ async def test_channel_call_context_length_error_uses_existing_channel_fallback(
     channel_1 = SimpleNamespace(
         id=1,
         name="channel-1",
+        usage_key="22222222222222222222222222222222",
         base_url="https://example.invalid",
         get_decrypted_api_key=lambda: "secret-1",
     )
     channel_2 = SimpleNamespace(
         id=2,
         name="channel-2",
+        usage_key="33333333333333333333333333333333",
         base_url="https://example.invalid",
         get_decrypted_api_key=lambda: "secret-2",
     )
@@ -267,12 +270,14 @@ async def test_channel_call_context_length_recovery_retries_current_channel_befo
     channel_1 = SimpleNamespace(
         id=1,
         name="channel-1",
+        usage_key="44444444444444444444444444444444",
         base_url="https://example.invalid",
         get_decrypted_api_key=lambda: "secret-1",
     )
     channel_2 = SimpleNamespace(
         id=2,
         name="channel-2",
+        usage_key="55555555555555555555555555555555",
         base_url="https://example.invalid",
         get_decrypted_api_key=lambda: "secret-2",
     )

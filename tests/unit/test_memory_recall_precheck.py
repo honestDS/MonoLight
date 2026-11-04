@@ -83,6 +83,7 @@ def _context(*, messages=None, turn_messages=None, boundary=42):
     channel = SimpleNamespace(
         id=11,
         name="primary",
+        usage_key="0123456789abcdef0123456789abcdef",
         base_url="https://example.invalid",
         chat_timeout=60,
         get_decrypted_api_key=lambda: "api-key",
@@ -90,6 +91,7 @@ def _context(*, messages=None, turn_messages=None, boundary=42):
     auxiliary_channel = SimpleNamespace(
         id=11,
         name="primary",
+        usage_key="0123456789abcdef0123456789abcdef",
         base_url="https://example.invalid",
         chat_timeout=60,
         get_decrypted_api_key=lambda: "api-key",

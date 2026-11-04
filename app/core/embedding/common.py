@@ -19,6 +19,7 @@ from app.core.constants import (
 )
 from app.core.crud.channel.channel import channel_crud
 from app.core.i18n import t
+from app.core.provider_usage import ProviderUsageSource
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import ModelUsage, resolve_model_protocol
@@ -39,6 +40,7 @@ class EmbeddingRuntimeConfig:
     api_key: str = field(repr=False)
     http_proxy: str | None = field(default=None, repr=False)
     custom_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
+    channel_usage_key: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "custom_headers", MappingProxyType(dict(self.custom_headers)))
@@ -104,6 +106,7 @@ async def load_embedding_runtime_config(
         api_key=channel.get_decrypted_api_key(),
         http_proxy=get_channel_http_proxy(channel),
         custom_headers=get_model_custom_headers(model_entry),
+        channel_usage_key=channel.usage_key,
     )
 
 
@@ -133,6 +136,13 @@ async def embed_texts_with_config(
         timeout=config.timeout,
         http_proxy=config.http_proxy,
         custom_headers=dict(config.custom_headers),
+        usage_source=ProviderUsageSource(
+            channel_id=config.channel_id,
+            channel_key=config.channel_usage_key,
+            channel_name=config.channel_name,
+            model_id=config.model_id,
+            protocol=config.protocol,
+        ),
     )
 
 

@@ -30,6 +30,7 @@ from app.core.exceptions import (
 from app.core.i18n import t
 from app.core.log import channel_log_extra
 from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
+from app.core.provider_usage import build_reply_usage_snapshot
 from app.core.tools.end_session import END_SESSION_TOOL_NAME, is_end_session_signal, is_skip_reply_signal
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
@@ -118,9 +119,7 @@ async def generate_interactive_turn(
         pending_modalities = {item["modality"] for item in pending_file_inputs}
         if ("image" in pending_modalities and not state.img_understanding) or ("audio" in pending_modalities and not state.audio_understanding) or ("video" in pending_modalities and not state.video_understanding):
             raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
-        request_messages = materialize_user_environment_prompts(
-            [MessageAssembler.prepare_inline_images(message, state.cfg.tool) for message in [*messages, *tool_call_correction_messages]]
-        )
+        request_messages = materialize_user_environment_prompts([MessageAssembler.prepare_inline_images(message, state.cfg.tool) for message in [*messages, *tool_call_correction_messages]])
         pending_multimodal_message = build_pending_multimodal_input_message(
             pending_file_inputs,
             image_understanding=state.img_understanding,
@@ -134,15 +133,7 @@ async def generate_interactive_turn(
 
     async def compact_current_context(*, force: bool, channel_id: int | None, model_id: str, protocol: str) -> bool:
         claim_info = getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
-        work_id = (
-            claim_info[0]
-            if isinstance(claim_info, (tuple, list))
-            and len(claim_info) == 2
-            and isinstance(claim_info[0], int)
-            and not isinstance(claim_info[0], bool)
-            and claim_info[0] > 0
-            else None
-        )
+        work_id = claim_info[0] if isinstance(claim_info, (tuple, list)) and len(claim_info) == 2 and isinstance(claim_info[0], int) and not isinstance(claim_info[0], bool) and claim_info[0] > 0 else None
         previous_messages = state.messages
         pending_multimodal_tool_call_ids = {item["tool_call_id"] for item in collect_pending_multimodal_file_inputs(previous_messages)}
         try:
@@ -388,7 +379,7 @@ async def generate_interactive_turn(
             metadata_changed = any(state.latest_llm_request_metadata.get(field) != value for field, value in provider_metadata_updates.items())
             state.latest_llm_request_metadata.update(provider_metadata_updates)
             if state.request_metadata_callback is not None:
-                await state.request_metadata_callback({**state.latest_llm_request_metadata, **provider_request_usage_metadata})
+                await state.request_metadata_callback({**state.latest_llm_request_metadata, **provider_request_usage_metadata, **build_reply_usage_snapshot(state.chat_channel_obj, response)})
             if metadata_changed and state.stream_event_callback is not None:
                 await state.stream_event_callback(dict(state.latest_llm_request_metadata))
             if tool_calls_forbidden:

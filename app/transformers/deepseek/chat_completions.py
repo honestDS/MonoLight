@@ -384,10 +384,10 @@ class DeepSeekChatCompletionsTransformer(BaseTransformer):
         if not isinstance(cached_tokens, int) or isinstance(cached_tokens, bool) or cached_tokens < 0:
             cached_tokens = normalized.get("prompt_cache_hit_tokens")
         if not isinstance(cached_tokens, int) or isinstance(cached_tokens, bool) or cached_tokens < 0:
-            cached_tokens = 0
+            cached_tokens = None
 
-        def token_count(value: Any) -> int:
-            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+        def token_count(value: Any) -> int | None:
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
         normalized.update(
             {

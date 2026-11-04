@@ -15,12 +15,39 @@ from app.core.utils import llm_request_policy
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 from app.core.utils.model_request_headers import build_model_request_headers
 
-from ..base import BaseImageGenerationTransformer
+from ..base import BaseImageGenerationTransformer, log_upstream_usage
 
 logger = get_logger(__name__)
 
 
 class OpenAIImageGenerationTransformer(BaseImageGenerationTransformer):
+    @staticmethod
+    def extract_usage(response: dict[str, Any]) -> tuple[str | None, int | None, int | None, int | None, int | None]:
+        model = response.get("model")
+        model = model if isinstance(model, str) else None
+
+        input_tokens = None
+        cached_tokens = None
+        output_tokens = None
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            raw_input_tokens = usage.get("input_tokens")
+            if isinstance(raw_input_tokens, int) and not isinstance(raw_input_tokens, bool) and raw_input_tokens >= 0:
+                input_tokens = raw_input_tokens
+
+            input_details = usage.get("input_tokens_details")
+            raw_cached_tokens = input_details.get("cached_tokens") if isinstance(input_details, dict) else None
+            if isinstance(raw_cached_tokens, int) and not isinstance(raw_cached_tokens, bool) and raw_cached_tokens >= 0:
+                cached_tokens = raw_cached_tokens if input_tokens is None else min(raw_cached_tokens, input_tokens)
+
+            raw_output_tokens = usage.get("output_tokens")
+            if isinstance(raw_output_tokens, int) and not isinstance(raw_output_tokens, bool) and raw_output_tokens >= 0:
+                output_tokens = raw_output_tokens
+
+        data = response.get("data")
+        image_count = len(data) if isinstance(data, list) else None
+        return model, input_tokens, cached_tokens, output_tokens, image_count
+
     async def generate_image(
         self,
         api_key: str,
@@ -104,6 +131,13 @@ class OpenAIImageGenerationTransformer(BaseImageGenerationTransformer):
                     result = json.loads(txt)
                     if not isinstance(result, dict):
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR)
+                    data = result.get("data")
+                    log_upstream_usage(
+                        model_id=model_id,
+                        protocol="openai_image",
+                        blocks={"usage": result.get("usage")},
+                        result_count=len(data) if isinstance(data, list) else None,
+                    )
                     return result
         except LLMException:
             raise

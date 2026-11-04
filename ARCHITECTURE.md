@@ -155,6 +155,7 @@ app/core/
 ├── exceptions.py           # 应用异常类型
 ├── paths.py                # 运行数据、临时文件与发布资源路径
 ├── prompts.py              # 对话、审计与任务授权提示内容
+├── provider_usage.py       # 统一用量采集、实际渠道快照与触发清理服务
 ├── security.py             # 认证与安全辅助
 ├── skills.py               # 共享技能发现、目录浏览与管理员删除
 ├── system_secrets.py       # 系统密钥管理
@@ -439,6 +440,7 @@ app/core/message_platforms/
 ```text
 app/core/crud/
 ├── base.py                     # 通用数据访问抽象
+├── provider_usage.py           # 请求明细去重、每日汇总累加与触发清理数据访问
 ├── account/
 │   ├── file_cleanup.py         # 用户文件清理记录数据访问
 │   └── user.py                 # 用户数据访问
@@ -490,7 +492,6 @@ app/core/crud/
 │   ├── event.py                # 会话事件数据访问
 │   ├── external_work.py        # 外部异步操作关联数据访问
 │   ├── todo.py                 # 会话 Todo 计划数据访问
-│   ├── reply_provider_usage.py # 模型请求用量去重与用途记录
 │   ├── reply_stream_event.py   # 回复流事件数据访问
 │   ├── reply_work_item.py      # 工作认领、独立消息归属与恢复状态访问
 │   └── terminal_watch.py       # 终端观察通知数据访问
@@ -703,11 +704,12 @@ app/models/
 ├── agent_work.py           # 独立 AgentWork 执行契约与结果目标
 ├── profile.py              # Profile 模型及独立的对话、总结与辅助渠道配置
 ├── prompt.py               # Prompt 模型
+├── provider_usage.py       # 短期请求明细与长期每日汇总
 ├── scheduled_task.py       # 会话绑定、间隔/Cron 规则与执行状态
 ├── session.py              # 会话设置、上下文摘要与累计用量状态
 ├── session_event.py        # 会话事件模型
 ├── session_reply_stream_event.py # 回复流事件模型
-├── session_reply_provider_usage.py # 模型请求用途与用量去重模型
+├── session_reply_provider_usage.py # 仅为保持已发布迁移不动的隔离历史表定义，不参与现行建表
 ├── session_reply_work_item.py # 回复工作、执行快照与队列序号模型
 ├── session_todo.py             # 会话级 Todo 计划持久化模型
 ├── system_log.py           # 系统日志模型
@@ -718,6 +720,7 @@ app/models/
 ```
 
 `app/models/` 定义关系型持久化对象，由 `app/core/crud/` 提供访问，由 `app/providers/database/` 提供数据库连接和初始化能力。
+统一用量记录保留实际渠道快照且不外键渠道；会话主累计与统一 usage 记录相互独立。
 知识库接口数据结构位于 `app/models/knowledge_base/schemas.py`，仍由 `app.models.knowledge_base` 对外导出。
 
 ## 外部能力封装：`app/providers/`

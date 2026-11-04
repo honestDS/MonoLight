@@ -594,6 +594,7 @@ async def test_real_channel_fallback_preserves_persisted_provider_state(
     channel_one = SimpleNamespace(
         id=1,
         name="channel-one",
+        usage_key="00000000000000000000000000000001",
         api_key=API_KEY,
         base_url=BASE_URL,
         http_proxy=None,
@@ -602,6 +603,7 @@ async def test_real_channel_fallback_preserves_persisted_provider_state(
     channel_two = SimpleNamespace(
         id=2,
         name="channel-two",
+        usage_key="00000000000000000000000000000002",
         api_key=API_KEY,
         base_url=BASE_URL,
         http_proxy=None,
@@ -972,6 +974,7 @@ async def test_reasoning_effort_reaches_openai_protocol_payloads(
     channel = SimpleNamespace(
         id=1,
         name="reasoning-channel",
+        usage_key="00000000000000000000000000000003",
         api_key=API_KEY,
         base_url=BASE_URL,
         http_proxy=None,
@@ -1111,6 +1114,7 @@ async def test_automatic_fallback_uses_selected_rule_reasoning_effort(
     primary_channel = SimpleNamespace(
         id=1,
         name="primary-channel",
+        usage_key="00000000000000000000000000000004",
         api_key=API_KEY,
         base_url=BASE_URL,
         http_proxy=None,
@@ -1119,6 +1123,7 @@ async def test_automatic_fallback_uses_selected_rule_reasoning_effort(
     fallback_channel = SimpleNamespace(
         id=2,
         name="fallback-channel",
+        usage_key="00000000000000000000000000000005",
         api_key=API_KEY,
         base_url=BASE_URL,
         http_proxy=None,

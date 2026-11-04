@@ -1,48 +1,61 @@
-from datetime import datetime
-from enum import StrEnum
+# 历史兼容文件：仅为已发布迁移脚本提供旧表结构定义。
+# 被 scripts/migration_20260825_add_session_reply_provider_usage.py 引用。
+# 不参与现行业务读写或应用自动建表。
+# 清理上述历史迁移脚本时，须一并删除本文件。
 
-from sqlalchemy import ForeignKeyConstraint
-from sqlmodel import Column, DateTime, Field, SQLModel, UniqueConstraint
+from sqlalchemy import Column, DateTime, Enum, ForeignKeyConstraint, Integer, MetaData, String, Table, UniqueConstraint
 
-from app.core.utils.time import get_local_time
+metadata = MetaData()
 
+session_reply_work_item = Table(
+    "session_reply_work_item",
+    metadata,
+    Column("id", Integer),
+    Column("session_id", String(100)),
+    Column("uid", String(100)),
+)
 
-class SessionReplyProviderRequestPurpose(StrEnum):
-    MAIN_DIALOGUE = "main_dialogue"
-    BACKGROUND_SUMMARY = "background_summary"
-    SCHEDULED_SUMMARY = "scheduled_summary"
-    AUDIT_AUXILIARY = "audit_auxiliary"
-    CONFIRMED_AUXILIARY = "confirmed_auxiliary"
-    LEGACY_UNKNOWN = "legacy_unknown"
-
-    @property
-    def contributes_to_session_totals(self) -> bool:
-        return self is SessionReplyProviderRequestPurpose.MAIN_DIALOGUE
-
-
-class SessionReplyProviderUsage(SQLModel, table=True):
-    __tablename__ = "session_reply_provider_usage"
-    __table_args__ = (
-        UniqueConstraint("provider_request_id", name="uq_session_reply_provider_usage_request"),
-        ForeignKeyConstraint(
-            ["work_id", "session_id", "uid"],
-            [
-                "session_reply_work_item.id",
-                "session_reply_work_item.session_id",
-                "session_reply_work_item.uid",
-            ],
-            name="fk_session_reply_provider_usage_work_owner",
-            ondelete="CASCADE",
+session_reply_provider_usage = Table(
+    "session_reply_provider_usage",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True, index=True),
+    Column("provider_request_id", String(64), nullable=False, index=True),
+    Column("work_id", Integer, nullable=False, index=True),
+    Column("session_id", String(100), nullable=False, index=True),
+    Column("uid", String(100), nullable=False, index=True),
+    Column("input_tokens", Integer, nullable=False),
+    Column("cached_tokens", Integer, nullable=False),
+    Column(
+        "request_purpose",
+        Enum(
+            "MAIN_DIALOGUE",
+            "BACKGROUND_SUMMARY",
+            "SCHEDULED_SUMMARY",
+            "AUDIT_AUXILIARY",
+            "CONFIRMED_AUXILIARY",
+            "LEGACY_UNKNOWN",
+            name="sessionreplyproviderrequestpurpose",
         ),
-    )
+        nullable=False,
+        index=True,
+    ),
+    Column("output_tokens", Integer, nullable=False),
+    Column("created_at", DateTime(timezone=True), index=True),
+    UniqueConstraint("provider_request_id", name="uq_session_reply_provider_usage_request"),
+    ForeignKeyConstraint(
+        ["work_id", "session_id", "uid"],
+        [
+            "session_reply_work_item.id",
+            "session_reply_work_item.session_id",
+            "session_reply_work_item.uid",
+        ],
+        name="fk_session_reply_provider_usage_work_owner",
+        ondelete="CASCADE",
+    ),
+)
 
-    id: int | None = Field(default=None, primary_key=True, index=True)
-    provider_request_id: str = Field(index=True, max_length=64)
-    work_id: int = Field(index=True, ge=1)
-    session_id: str = Field(index=True, max_length=100)
-    uid: str = Field(index=True, max_length=100)
-    input_tokens: int = Field(ge=0)
-    cached_tokens: int = Field(ge=0)
-    request_purpose: SessionReplyProviderRequestPurpose = Field(index=True, max_length=40)
-    output_tokens: int = Field(ge=0)
-    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
+
+class SessionReplyProviderUsage:
+    """Historical migration table definition only; not an ORM model."""
+
+    __table__ = session_reply_provider_usage

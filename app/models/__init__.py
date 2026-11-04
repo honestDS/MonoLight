@@ -41,10 +41,11 @@ from app.models.message_platform import MessagePlatform as MessagePlatform
 from app.models.message_platform_outbox import MessagePlatformOutbox as MessagePlatformOutbox
 from app.models.profile import Profile as Profile
 from app.models.prompt import PromptLibrary as PromptLibrary
+from app.models.provider_usage import ProviderUsageDaily as ProviderUsageDaily
+from app.models.provider_usage import ProviderUsageDetail as ProviderUsageDetail
 from app.models.scheduled_task import ScheduledTask as ScheduledTask
 from app.models.session import ChatSession as ChatSession
 from app.models.session_event import SessionEvent as SessionEvent
-from app.models.session_reply_provider_usage import SessionReplyProviderUsage as SessionReplyProviderUsage
 from app.models.session_reply_stream_event import SessionReplyStreamEvent as SessionReplyStreamEvent
 from app.models.session_reply_work_item import SessionReplySequence as SessionReplySequence
 from app.models.session_reply_work_item import SessionReplyWorkItem as SessionReplyWorkItem

@@ -26,9 +26,11 @@ from app.core.session_reply_queue.executor_common import (
 )
 from app.core.session_reply_queue.executor_metadata import _persist_interactive_work_request_metadata
 from app.core.session_reply_queue.manager import get_work_request_ids, session_reply_queue_manager
+from app.core.session_reply_queue.manager_common import is_scheduled_task_work
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.request_token_baseline import build_session_cache_metrics
 from app.models.message import InternalMessage, MessageType
+from app.models.provider_usage import ProviderUsageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
@@ -49,6 +51,7 @@ class _InteractiveWorkStreamEventState:
     work_sequence_no: int | None = None
     update_session_context: bool = True
     session_token_totals: dict[str, Any] = field(default_factory=dict)
+    is_scheduled_task_work: bool = False
 
     def __post_init__(self) -> None:
         if self.work_id is None or self.uid is None or self.session_id is None or self.work_sequence_no is None:
@@ -152,6 +155,8 @@ async def _publish_interactive_work_stream_event(
     stream_state: _InteractiveWorkStreamEventState,
     event: dict[str, Any],
 ) -> None:
+    if event.get("type") == "llm_request_metadata" and stream_state.is_scheduled_task_work:
+        return
     if event.get("type") == "agent_loop_start":
         await _publish_newly_dequeued_request_ids(stream_state)
     persisted_event = await _persist_interactive_work_stream_event(stream_state, event)
@@ -288,8 +293,13 @@ async def _dispatch_interactive_work(
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     await ensure_session_reply_work_claim(db, commit=True)
     execution_state = work.execution_state or {}
+    scheduled_task_work = await is_scheduled_task_work(db, work)
+    if scheduled_task_work:
+        request_purpose = ProviderUsageType.SCHEDULED_TASK
+    else:
+        request_purpose = ProviderUsageType.MAIN_DIALOGUE
     is_independent_work = (await session_reply_work_item_crud.get_message_work_id(db, work)) is not None
-    update_session_context = not is_independent_work and frozen_context_messages is None
+    update_session_context = not scheduled_task_work and not is_independent_work and frozen_context_messages is None
     stream_requested = False if is_independent_work else bool((work.execution_state or {}).get("stream_requested"))
     context_summary_events_requested = False if is_independent_work else bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
@@ -306,6 +316,7 @@ async def _dispatch_interactive_work(
         turn_end_content_by_response_id={},
         tool_names_by_response_id={},
         update_session_context=update_session_context,
+        is_scheduled_task_work=scheduled_task_work,
     )
     metadata_work = SimpleNamespace(
         id=work_id,
@@ -318,6 +329,7 @@ async def _dispatch_interactive_work(
         result = await _persist_interactive_work_request_metadata(
             metadata,
             work=work,
+            request_purpose=request_purpose,
             update_session_context=update_session_context,
         )
         if result is None:
@@ -395,7 +407,9 @@ async def _dispatch_interactive_work(
             if context_summary_events_requested
             else None,
         )
-        if isinstance(response.get("llm_request_metadata"), dict):
+        if scheduled_task_work:
+            response.pop("llm_request_metadata", None)
+        elif isinstance(response.get("llm_request_metadata"), dict):
             response["llm_request_metadata"] = _metadata_with_work_order(
                 metadata_work,
                 {
@@ -433,7 +447,9 @@ async def _dispatch_interactive_work(
             await _publish_interactive_work_stream_event(stream_state, event)
     if not isinstance(response, dict):
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-    if isinstance(response.get("llm_request_metadata"), dict):
+    if scheduled_task_work:
+        response.pop("llm_request_metadata", None)
+    elif isinstance(response.get("llm_request_metadata"), dict):
         response["llm_request_metadata"] = _metadata_with_work_order(
             metadata_work,
             {

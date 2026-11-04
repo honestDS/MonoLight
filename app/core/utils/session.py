@@ -10,6 +10,7 @@ from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.profile.selection import resolve_profile_for_session
 from app.core.prompts import SESSION_TITLE_PROMPT
+from app.core.provider_usage import ProviderUsageSource, record_provider_response_usage
 from app.core.session.source import is_web_session_source
 from app.core.utils.auxiliary_request import AuxiliaryRequestOutputBudgetError, ensure_auxiliary_output_budget
 from app.core.utils.dispatcher.helpers import format_exception_message
@@ -19,6 +20,7 @@ from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import ProfileConfig
+from app.models.provider_usage import ProviderUsageType
 from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import LLMClient
@@ -72,6 +74,7 @@ async def generate_session_title(
     http_proxy: str | None = None,
     custom_headers: dict[str, str] | None = None,
     timeout: float = 60.0,
+    usage_source: ProviderUsageSource | None = None,
 ) -> str | None:
     """
     异步生成会话标题并保存到数据库
@@ -103,6 +106,13 @@ async def generate_session_title(
             http_proxy=http_proxy,
             custom_headers=custom_headers,
             timeout=timeout,
+        )
+        await record_provider_response_usage(
+            response,
+            usage_type=ProviderUsageType.SESSION_TITLE,
+            source=usage_source if usage_source is not None else ProviderUsageSource(model_id=model_id, protocol=protocol),
+            uid=uid,
+            session_id=session_id,
         )
         ensure_auxiliary_output_budget(response, max_output_tokens=generation_params["max_tokens"])
 
@@ -181,6 +191,11 @@ async def generate_session_title_for_selected_profile(
                     http_proxy=get_channel_http_proxy(channel),
                     custom_headers=get_model_custom_headers(model_entry),
                     timeout=auxiliary_channel.chat_timeout,
+                    usage_source=ProviderUsageSource.from_channel(
+                        channel,
+                        model_id=model_entry["model_id"],
+                        protocol=resolve_model_protocol(model_entry),
+                    ),
                 )
             except Exception as exc:
                 excluded_priorities.add(rule.priority)

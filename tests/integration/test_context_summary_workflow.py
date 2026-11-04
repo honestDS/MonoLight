@@ -1105,6 +1105,7 @@ async def test_context_summary_rule_budget_and_reasoning_reach_upstream_request(
     class SummaryChannel:
         id = 11
         name = "integration-summary"
+        usage_key = "0123456789abcdef0123456789abcdef"
         is_active = True
         model_ids = [
             {
@@ -1608,9 +1609,7 @@ async def test_context_summary_reduction_splits_repeated_range_and_completes(
     async with context_summary_database() as db:
         persisted_stage, created = await context_summary_stage_crud.create_stage(db, stage=lower_stage)
         assert created is True
-        for fragment_index, (message_start_id, message_end_id, content) in enumerate(
-            [(1, 3, first_content), (4, 4, last_content)]
-        ):
+        for fragment_index, (message_start_id, message_end_id, content) in enumerate([(1, 3, first_content), (4, 4, last_content)]):
             fragment = make_fragment(
                 fragment_index=fragment_index,
                 work_dedupe_key=work_dedupe_key,

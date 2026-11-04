@@ -727,10 +727,10 @@ def test_to_internal_response_normalizes_invalid_usage_counts() -> None:
         "fallback-model",
     )
 
-    assert response.usage["prompt_tokens"] == 0
-    assert response.usage["completion_tokens"] == 0
-    assert response.usage["total_tokens"] == 0
-    assert response.usage["cached_tokens"] == 0
+    assert response.usage["prompt_tokens"] is None
+    assert response.usage["completion_tokens"] is None
+    assert response.usage["total_tokens"] is None
+    assert response.usage["cached_tokens"] is None
 
 
 def test_to_internal_response_rejects_empty_completed_output() -> None:

@@ -66,6 +66,9 @@ def _install_fallback_clients(
     after_primary=None,
 ):
     channel = SimpleNamespace(
+        id=1,
+        name="image-channel",
+        usage_key="image-channel-key",
         base_url="https://example.invalid",
         get_decrypted_api_key=lambda: "secret",
     )
@@ -137,6 +140,9 @@ def image_generation_executor(tmp_path, monkeypatch):
     channel_calls = []
     remote_calls = []
     channel = SimpleNamespace(
+        id=1,
+        name="image-channel",
+        usage_key="image-channel-key",
         base_url="https://example.invalid",
         get_decrypted_api_key=lambda: "secret",
     )
@@ -268,6 +274,9 @@ async def test_image_generation_releases_database_connection_before_remote_call(
     async def select_channel(db, *_args, **_kwargs):
         assert db is session
         channel = SimpleNamespace(
+            id=1,
+            name="image-channel",
+            usage_key="image-channel-key",
             base_url="https://example.invalid",
             get_decrypted_api_key=lambda: "secret",
         )
@@ -841,6 +850,9 @@ async def test_image_generation_downloads_url_with_channel_proxy(
     expected_proxy,
 ):
     channel = SimpleNamespace(
+        id=1,
+        name="image-channel",
+        usage_key="image-channel-key",
         base_url="https://example.invalid",
         http_proxy=raw_proxy,
         get_decrypted_api_key=lambda: "api-key",
@@ -999,11 +1011,17 @@ async def test_image_generation_fallback_download_uses_secondary_channel_proxy(
     secondary_url = "https://images.example/secondary.png"
     secondary_bytes = _image_bytes("PNG")
     primary_channel = SimpleNamespace(
+        id=1,
+        name="primary-channel",
+        usage_key="primary-channel-key",
         base_url="https://primary.example",
         http_proxy=primary_proxy,
         get_decrypted_api_key=lambda: "primary-key",
     )
     secondary_channel = SimpleNamespace(
+        id=2,
+        name="secondary-channel",
+        usage_key="secondary-channel-key",
         base_url="https://secondary.example",
         http_proxy=secondary_proxy,
         get_decrypted_api_key=lambda: "secondary-key",

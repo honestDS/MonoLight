@@ -10,6 +10,7 @@ from app.core.constants import ERR_PROFILE_RERANK_CHANNEL_NO_URL
 from app.core.exceptions import RerankException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.provider_usage import ProviderUsageSource
 from app.core.rerank.schemas import RerankConfig
 from app.core.retrieval.schemas import RetrievalHit
 from app.core.utils.http_proxy import get_channel_http_proxy
@@ -71,6 +72,7 @@ async def get_profile_rerank_config(
     return RerankConfig(
         channel_id=channel.id,
         channel_name=channel.name,
+        channel_usage_key=channel.usage_key,
         api_key=channel.get_decrypted_api_key(),
         base_url=channel.base_url,
         model_id=model_entry["model_id"],
@@ -105,6 +107,13 @@ async def rerank_retrieval_hits(
         timeout=config.timeout,
         http_proxy=config.http_proxy,
         custom_headers=config.custom_headers,
+        usage_source=ProviderUsageSource(
+            channel_id=config.channel_id,
+            channel_key=config.channel_usage_key,
+            channel_name=config.channel_name,
+            model_id=config.model_id,
+            protocol=config.protocol,
+        ),
     )
 
     if not results:

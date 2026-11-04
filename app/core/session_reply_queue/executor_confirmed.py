@@ -61,7 +61,7 @@ from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
-from app.models.session_reply_provider_usage import SessionReplyProviderRequestPurpose
+from app.models.provider_usage import ProviderUsageType
 from app.models.session_reply_work_item import SessionReplyWorkItem
 
 __all__ = []
@@ -144,7 +144,7 @@ async def _source_invalid_confirmed_tool_response(
     ai_msg, turn_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
         db,
         work=work,
-        request_purpose=SessionReplyProviderRequestPurpose.CONFIRMED_AUXILIARY,
+        request_purpose=ProviderUsageType.CONFIRMED_AUXILIARY,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,
@@ -449,7 +449,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             ai_msg, final_messages, files, llm_request_metadata = await _generate_auxiliary_reply_with_request_metadata(
                 db,
                 work=work,
-                request_purpose=SessionReplyProviderRequestPurpose.CONFIRMED_AUXILIARY,
+                request_purpose=ProviderUsageType.CONFIRMED_AUXILIARY,
                 uid=work.uid,
                 session_id=work.session_id,
                 profile=profile,

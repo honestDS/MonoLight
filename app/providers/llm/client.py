@@ -519,11 +519,7 @@ class LLMClient:
         content_callbacks_released = normalized_protocol != "openai"
         tool_call_assembler = _StreamToolCallAssembler(normalized_protocol)
         model = model_id
-        usage: dict[str, Any] = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        }
+        usage: dict[str, Any] = {}
         finish_reason: str | None = None
         finish_details: dict[str, Any] | None = None
         provider_metadata: dict[str, Any] | None = None

@@ -1,18 +1,73 @@
+import re
 from abc import (
     ABC,
     abstractmethod,
 )
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from typing import (
     Any,
 )
 
 from app.core.constants import ERR_CHANNEL_MODEL_LIST_UNSUPPORTED
 from app.core.exceptions import LLMException
+from app.core.i18n import t
+from app.core.log import get_logger
 from app.models.message import (
     InternalMessage,
     InternalResponse,
 )
+
+logger = get_logger(__name__)
+
+_USAGE_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_USAGE_MAX_DEPTH = 3
+_USAGE_MAX_ITEMS = 16
+
+
+def _summarize_usage(value: Any, depth: int = 0) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if not isinstance(value, Mapping):
+        return type(value).__name__
+    if depth >= _USAGE_MAX_DEPTH:
+        return type(value).__name__
+
+    summary: dict[str, Any] = {}
+    for key, item in value.items():
+        if len(summary) >= _USAGE_MAX_ITEMS:
+            break
+        if not isinstance(key, str) or _USAGE_KEY_PATTERN.fullmatch(key) is None:
+            continue
+        summary[key] = _summarize_usage(item, depth + 1)
+    return summary
+
+
+def log_upstream_usage(
+    *,
+    model_id: str,
+    protocol: str,
+    blocks: dict[str, Any],
+    result_count: int | None = None,
+) -> None:
+    try:
+        provider_usage = _summarize_usage(blocks)
+        logger.bind(
+            model_id=model_id,
+            protocol=protocol,
+            provider_usage=provider_usage,
+        ).debug(
+            t(
+                "LOG_UPSTREAM_MODEL_USAGE",
+                protocol=protocol,
+                model_id=model_id,
+                usage=provider_usage,
+                result_count=result_count,
+            )
+        )
+    except Exception:
+        pass
 
 
 class BaseTransformer(ABC):
