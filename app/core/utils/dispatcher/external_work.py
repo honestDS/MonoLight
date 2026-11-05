@@ -1,6 +1,7 @@
 import json
 
 from app.core.constants import (
+    AGENT_WORK_TOOL_NAME,
     ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     SHELL_TOOL_NAME,
@@ -32,12 +33,29 @@ def build_external_wait_response(
 
         if not isinstance(payload, dict) or payload.get("status") != "queued":
             continue
-        task_id = payload.get("task_id")
-        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
-            continue
-
         tool_call = tool_calls_by_id.get(tool_result.tool_call_id)
         if tool_call is None:
+            continue
+
+        if tool_call.name == AGENT_WORK_TOOL_NAME:
+            child_work_id = payload.get("child_work_id")
+            subagent_id = payload.get("subagent_id")
+            if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(subagent_id, str) or not subagent_id:
+                continue
+            pending_tools.append(
+                {
+                    "child_work_id": child_work_id,
+                    "subagent_id": subagent_id,
+                    "tool_call_id": tool_call.id,
+                    "tool_name": tool_call.name,
+                    "tool_result_message_id": tool_result.id,
+                    "response_id": response_id,
+                }
+            )
+            continue
+
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
             continue
         pending_tools.append(
             {
@@ -158,18 +176,22 @@ async def build_terminal_wait_response(
             }
         )
 
-    pending_tools_by_id: dict[int, dict] = {}
+    pending_tools_by_key: dict[tuple, dict] = {}
     if pure_response is not None:
         for pending_tool in pure_response["pending_tools"]:
-            pending_tools_by_id.setdefault(pending_tool["task_id"], pending_tool)
+            if "child_work_id" in pending_tool:
+                key = ("child", pending_tool["child_work_id"], pending_tool["tool_call_id"])
+            else:
+                key = ("task", pending_tool["task_id"])
+            pending_tools_by_key.setdefault(key, pending_tool)
     for observed_tool in observed_tools:
-        pending_tools_by_id.setdefault(observed_tool["task_id"], observed_tool)
+        pending_tools_by_key.setdefault(("task", observed_tool["task_id"]), observed_tool)
 
-    if not pending_tools_by_id:
+    if not pending_tools_by_key:
         return None
     return {
         "status": "waiting_external_work",
-        "pending_tools": list(pending_tools_by_id.values()),
+        "pending_tools": list(pending_tools_by_key.values()),
     }
 
 

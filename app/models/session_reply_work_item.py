@@ -72,6 +72,7 @@ class SessionReplyWorkItem(SQLModel, table=True):
     uid: str = Field(index=True, max_length=100)
     session_id: str = Field(index=True, max_length=100)
     profile_id: int = Field(index=True)
+    subagent_id: str | None = Field(default=None, index=True, max_length=32)
     sequence_no: int = Field(index=True, ge=1)
     work_type: SessionReplyWorkType = Field(index=True, max_length=40)
     source_type: SessionReplySourceType = Field(index=True, max_length=40)

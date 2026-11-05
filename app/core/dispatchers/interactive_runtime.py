@@ -20,6 +20,7 @@ from app.core.constants import (
     LOG_DISPATCHER_LLM_LOOP_TERMINATED,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED_SKIP_REPLY,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    TOOL_WORKFLOW_SUBAGENT,
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.message_platform.platform import message_platform_crud
@@ -173,6 +174,8 @@ async def dispatch_interactive(
             context_frozen=frozen_context_messages is not None,
             call_context=call_context,
         )
+        is_subagent_work = state.tool_workflow == TOOL_WORKFLOW_SUBAGENT
+        accepts_additional_messages = state.execution_scope == END_SESSION_SCOPE_FOREGROUND or is_subagent_work
 
         async def append_external_results() -> bool:
             if state.execution_scope != END_SESSION_SCOPE_FOREGROUND:
@@ -304,7 +307,7 @@ async def dispatch_interactive(
                 state.cfg = await validate_profile_and_cfg(db, profile)
                 memory_config = getattr(state.cfg, "memory", None)
                 state.memory_enabled = bool(getattr(memory_config, "enabled", False))
-                state.memory_precheck_enabled = state.memory_enabled and bool(getattr(memory_config, "precheck_enabled", True))
+                state.memory_precheck_enabled = state.memory_enabled and not is_subagent_work and bool(getattr(memory_config, "precheck_enabled", True))
                 if not state.memory_enabled:
                     state.checkpoint_state.memory_recall_boundary_message_id = None
                     state.checkpoint_state.memory_recall_status = None
@@ -461,7 +464,7 @@ async def dispatch_interactive(
                     reuse_input = reuse_saved_input
                     reuse_saved_input = False
                     new_user_batch = None
-                    if not reuse_input and state.execution_scope == END_SESSION_SCOPE_FOREGROUND:
+                    if accepts_additional_messages and (not reuse_input or is_subagent_work):
                         new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
                         if new_user_batch is not None:
                             state.current_turn = 0
@@ -560,7 +563,7 @@ async def dispatch_interactive(
                             tool_workflow=state.tool_workflow,
                         )
                     if end_session_signal:
-                        if state.execution_scope == END_SESSION_SCOPE_FOREGROUND:
+                        if accepts_additional_messages:
                             new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
                             if new_user_batch is not None:
                                 append_new_user_messages(
@@ -650,7 +653,7 @@ async def dispatch_interactive(
                     state.messages.append(ai_msg)
                     state.turn_messages.append(display_msg)
 
-                    new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"]) if not ai_msg.tool_calls and state.execution_scope == END_SESSION_SCOPE_FOREGROUND else None
+                    new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"]) if not ai_msg.tool_calls and accepts_additional_messages else None
                     saved_msg = await save_assistant_message(
                         db,
                         session_id,

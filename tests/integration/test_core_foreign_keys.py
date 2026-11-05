@@ -187,6 +187,19 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         "CASCADE",
     ),
     ("session_reply_sequence", ("session_id",), "chat_session", ("session_id",), "CASCADE"),
+    ("subagent", ("session_id", "uid"), "chat_session", ("session_id", "uid"), "CASCADE"),
+    ("subagent", ("profile_id",), "profile", ("id",), "CASCADE"),
+    ("subagent_work", ("child_work_id",), "session_reply_work_item", ("id",), "CASCADE"),
+    ("subagent_work", ("subagent_id",), "subagent", ("id",), "CASCADE"),
+    ("subagent_tool_call", ("subagent_id",), "subagent", ("id",), "CASCADE"),
+    (
+        "subagent_tool_call",
+        ("child_work_id",),
+        "subagent_work",
+        ("child_work_id",),
+        "CASCADE",
+    ),
+    ("subagent_tool_call", ("parent_work_id",), "session_reply_work_item", ("id",), "CASCADE"),
     # terminal
     (
         "terminal_session",

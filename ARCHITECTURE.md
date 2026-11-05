@@ -385,6 +385,12 @@ app/core/session_reply_queue/
 ├── executor_metadata.py    # 请求用量记录、跨工作汇总与主对话信息隔离
 ├── executor_replies.py     # 前台回复与冻结上下文的后台续接
 ├── executor_resume.py      # 交互工作 checkpoint 工具结果恢复
+├── child_checkpoint.py     # 父工具中断后的子代理等待恢复
+├── child_delivery.py       # 子代理结果向父工作交付
+├── child_lifecycle.py      # 子代理轮次完成、确认与晚到消息协调
+├── child_recovery.py       # 未交付子代理结果的补偿
+├── child_result.py         # 子代理状态结果投影
+├── child_work.py           # 子代理创建、查询、消息与取消协调
 ├── manager.py              # 回复工作管理组合入口
 ├── manager_common.py       # 请求标识、事件与失败处理辅助
 ├── manager_enqueue.py      # 回复工作入队
@@ -393,7 +399,9 @@ app/core/session_reply_queue/
 └── manager_submission.py   # 用户消息提交、确认判定与工作上下文继承
 ```
 
-`AgentWork` 是独立指令执行的共用底层：输入必须自包含，不读取所属主会话的实时历史；执行过程复用会话回复队列、交互式工具循环、审计、外部工作恢复与自身 checkpoint，并与普通会话共用上下文分片、合并和精简。任务只读取自身快照，以独立工作身份保存摘要片段；压缩后的任务消息保存在自身执行记录，不改写主会话摘要。结果交付按目标区分：`SESSION` 面向主会话直接展示最终结果，计划任务使用这一途径，内部工具过程保留在自身工作上下文；`PARENT_WORK` 面向父工作独立上报，为未来子代理机制预留，当前不开放执行。定时任务通过 `AgentWork` 执行，未来其他独立 Agent 调度场景可复用同一执行边界。
+`AgentWork` 是独立指令执行的共用底层：输入必须自包含，不读取所属主会话的实时历史；执行过程复用会话回复队列、交互式工具循环、审计、外部工作恢复与自身 checkpoint，并与普通会话共用上下文分片、合并和精简。任务只读取自身快照，以独立工作身份保存摘要片段；压缩后的任务消息保存在自身执行记录，不改写主会话摘要。结果交付按目标区分：`SESSION` 面向主会话直接展示最终结果，计划任务使用这一途径，内部工具过程保留在自身工作上下文；`PARENT_WORK` 用于当前主对话子代理结果按父工作与原工具调用交付。定时任务通过 `AgentWork` 执行，其他独立 Agent 调度场景复用同一执行边界。
+
+子代理由稳定的 `Subagent` 身份表示；`SubagentWork` 表示每一轮及其确认后的续接工作，`SubagentToolCall` 分别关联父工具结果。子代理私有消息与 checkpoint 和主会话历史隔离，结果交付与未交付结果补偿以相关持久化记录为依据。
 
 前台与独立任务在既有执行状态 `execution_state.work_category` 中保存原任务分类，不新增队列表字段；确认继承与恢复均保留原任务分类。全局 `agent_work_max_concurrency` 仅负责计划任务、子代理及其确认恢复；Profile 分别通过 `scheduled_task_max_concurrency` 和 `subagent_max_concurrency` 限制对应独立工作。前台回复及其确认、续接不占用独立任务额度。
 
@@ -491,6 +499,7 @@ app/core/crud/
 ├── session/
 │   ├── message.py              # 主会话与独立工作消息读写及历史隔离
 │   ├── session.py              # 会话设置、上下文状态与累计用量访问
+│   ├── subagent.py             # 子代理身份、轮次、工具关联与交付状态数据访问
 │   ├── event.py                # 会话事件数据访问
 │   ├── external_work.py        # 外部异步操作关联数据访问
 │   ├── todo.py                 # 会话 Todo 计划数据访问
@@ -580,6 +589,7 @@ app/core/tools/
 ├── image_generation.py     # 图像生成工具
 ├── knowledge_base_query.py # 知识库查询与托管知识可信元数据
 ├── longterm_memory.py      # 统一记忆工具：个人记忆与托管知识维护
+├── agent_work.py           # AgentWork 与子代理工作工具
 ├── read_text_file.py       # 审计取证用文本读取
 ├── read_multimodal_file.py # 多模态文件读取工具
 ├── scheduled_tasks.py      # 间隔与 Cron 定时任务管理工具
@@ -706,6 +716,7 @@ app/models/
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息发件箱模型
 ├── agent_work.py           # 独立 AgentWork 执行契约与结果目标
+├── subagent.py              # Subagent、SubagentWork 与 SubagentToolCall 持久化模型
 ├── profile.py              # Profile 模型及独立的对话、总结与辅助渠道配置
 ├── prompt.py               # Prompt 模型
 ├── provider_usage.py       # 短期请求明细与长期每日汇总

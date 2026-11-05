@@ -866,16 +866,10 @@ async def test_agent_work_saved_messages_are_hidden_until_promoted(db_session: A
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "report_target",
-    [AgentWorkReportTarget.SESSION, AgentWorkReportTarget.PARENT_WORK],
-    ids=["session-report", "parent-work-report"],
-)
-async def test_agent_work_failure_message_is_visible_in_session_history(
+async def test_scheduled_agent_work_failure_message_is_visible_in_session_history(
     db_session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    report_target: AgentWorkReportTarget,
 ) -> None:
     profile_id = 192
     session_id = "agent-work-failure-isolation"
@@ -908,8 +902,7 @@ async def test_agent_work_failure_message_is_visible_in_session_history(
         "agent_work": AgentWorkSpec(
             instruction="计划任务失败",
             execution_scope=END_SESSION_SCOPE_TASK,
-            report_target=report_target,
-            parent_work_id=1 if report_target == AgentWorkReportTarget.PARENT_WORK else None,
+            report_target=AgentWorkReportTarget.SESSION,
         ).model_dump(mode="json"),
     }
     db_session.add(work)
@@ -938,25 +931,17 @@ async def test_agent_work_failure_message_is_visible_in_session_history(
         ui_history = await message_crud.get_history_paged(verification_db, session_id=session_id, uid=UID)
         session_events = list((await verification_db.execute(select(SessionEvent).where(SessionEvent.session_id == session_id, SessionEvent.uid == UID).order_by(SessionEvent.id.asc()))).scalars().all())
 
-    if report_target == AgentWorkReportTarget.SESSION:
-        assert error_message.work_id is None
-        assert session.latest_message_id == error_message.id
-        assert [message.id for message in reversed(model_history)] == [error_message.id]
-        assert [message.id for message in reversed(ui_history)] == [error_message.id]
-        assert len(session_events) == 1
-        error_event = session_events[0].event
-        assert error_event["type"] == "proactive_reply_error"
-        assert error_event["work_id"] == work.id
-        assert error_event["message_id"] == error_message.id
-        assert error_event["content"] == error_message.content
-        assert finished_work.event_sent is True
-    else:
-        assert error_message.work_id == work.id
-        assert session.latest_message_id is None
-        assert model_history == []
-        assert ui_history == []
-        assert session_events == []
-        assert finished_work.event_sent is False
+    assert error_message.work_id is None
+    assert session.latest_message_id == error_message.id
+    assert [message.id for message in reversed(model_history)] == [error_message.id]
+    assert [message.id for message in reversed(ui_history)] == [error_message.id]
+    assert len(session_events) == 1
+    error_event = session_events[0].event
+    assert error_event["type"] == "proactive_reply_error"
+    assert error_event["work_id"] == work.id
+    assert error_event["message_id"] == error_message.id
+    assert error_event["content"] == error_message.content
+    assert finished_work.event_sent is True
 
 
 @pytest.mark.asyncio

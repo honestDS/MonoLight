@@ -22,6 +22,9 @@ from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.notifier import send_session_event
+from app.core.session_reply_queue.child_checkpoint import recover_child_work_wait
+from app.core.session_reply_queue.child_delivery import deliver_child_work_results, resume_child_work_for_parent
+from app.core.session_reply_queue.child_lifecycle import finish_child_work, prepare_child_completion
 from app.core.session_reply_queue.executor_agent_work import execute_agent_work, load_agent_work_spec
 from app.core.session_reply_queue.executor_common import (
     _error_message_dedupe_key,
@@ -41,7 +44,7 @@ from app.core.session_reply_queue.manager import build_identified_work_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.agent_work import AgentWorkReportTarget
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus
-from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
@@ -100,7 +103,17 @@ async def _resume_pending_external_results(work: SessionReplyWorkItem) -> None:
 
 async def _promote_independent_work_message(db, work: SessionReplyWorkItem, message_id: int | None) -> bool:
     message_work_id = await session_reply_work_item_crud.get_message_work_id(db, work)
-    if message_work_id is None or (work.work_type == SessionReplyWorkType.AGENT_WORK and load_agent_work_spec(work).report_target != AgentWorkReportTarget.SESSION):
+    if message_work_id is None:
+        return False
+    if work.subagent_id is not None:
+        if message_id is None:
+            return False
+        message = await db.get(Message, message_id)
+        if message is None:
+            raise RuntimeError(t(ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
+        if message.type != MessageType.AUDIT_CONFIRMATION:
+            return False
+    elif work.work_type == SessionReplyWorkType.AGENT_WORK and load_agent_work_spec(work).report_target != AgentWorkReportTarget.SESSION:
         return False
     await ensure_session_reply_work_claim(db)
     if message_id is None or not await message_crud.promote_work_message_to_session(db, message_id=message_id, work_id=message_work_id, commit=False):
@@ -126,7 +139,12 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         saved_skip_response = isinstance(saved_response, dict) and saved_response.get("skip_reply") is True
         persisted_result = None
         skip_reply = saved_skip_response
-        if saved_skip_response:
+        recovered_child_wait = None
+        if execution_state.get("has_child_work") is True:
+            recovered_child_wait = await recover_child_work_wait(db, work=work, worker_id=worker_id)
+        if recovered_child_wait is not None:
+            response = recovered_child_wait
+        elif saved_skip_response:
             response = saved_response
         else:
             persisted_result = await _get_persisted_result(db, work)
@@ -160,6 +178,13 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                 commit=True,
             ):
                 return
+            child_work_id = next(
+                (pending_tool.get("child_work_id") for pending_tool in pending_tools if isinstance(pending_tool.get("child_work_id"), int) and not isinstance(pending_tool.get("child_work_id"), bool) and pending_tool.get("child_work_id") > 0),
+                None,
+            )
+            if child_work_id is not None:
+                async with AsyncSessionLocal() as delivery_db:
+                    await resume_child_work_for_parent(delivery_db, parent_work_id=work.id)
             for pending_tool in pending_tools:
                 task_id = pending_tool.get("task_id")
                 if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
@@ -218,6 +243,21 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         await send_session_event(work.uid, work.session_id, _event_for_work(work, identified_response))
 
     async with AsyncSessionLocal() as db:
+        actual = await session_reply_work_item_crud.get(db, work_id)
+        if actual is None:
+            await db.rollback()
+            return
+        if actual.subagent_id is not None:
+            requeued = await prepare_child_completion(
+                db,
+                work=actual,
+                worker_id=worker_id,
+                result_message_id=result_message.id if result_message is not None else None,
+                skip_reply=skip_reply,
+            )
+            if requeued:
+                await db.commit()
+                return
         updated = await session_reply_work_item_crud.mark_terminal(
             db,
             work_id=work_id,
@@ -230,6 +270,9 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         if not updated:
             await db.rollback()
             return
+
+        if actual.subagent_id is not None:
+            await finish_child_work(db, work=actual)
 
         await external_work_crud.finish_received_results(db, work=work, commit=False)
 
@@ -249,7 +292,18 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                     reply_lock_until=None,
                 )
             )
+        deliver_child_results = actual.subagent_id is not None
+        child_work_id = None
+        if deliver_child_results:
+            execution_state = actual.execution_state if isinstance(actual.execution_state, dict) else {}
+            child_work_id = execution_state.get("child_work_id", actual.id)
         await db.commit()
+        if deliver_child_results:
+            async with AsyncSessionLocal() as delivery_db:
+                await deliver_child_work_results(
+                    delivery_db,
+                    child_work_id=child_work_id,
+                )
 
     await _resume_pending_external_results(work)
 
@@ -315,7 +369,7 @@ async def fail_session_reply_work(
                     error=error,
                 )
             )
-        await session_reply_work_item_crud.mark_terminal(
+        updated = await session_reply_work_item_crud.mark_terminal(
             db,
             work_id=work_id,
             worker_id=worker_id,
@@ -325,7 +379,20 @@ async def fail_session_reply_work(
             event_sent=event_sent,
             commit=False,
         )
+        if updated and work.subagent_id is not None:
+            await finish_child_work(db, work=work)
+        deliver_child_results = updated and work.subagent_id is not None
+        child_work_id = None
+        if deliver_child_results:
+            execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+            child_work_id = execution_state.get("child_work_id", work.id)
         await db.commit()
+        if deliver_child_results:
+            async with AsyncSessionLocal() as delivery_db:
+                await deliver_child_work_results(
+                    delivery_db,
+                    child_work_id=child_work_id,
+                )
 
 
 def retry_delay_seconds(attempt_count: int) -> int:

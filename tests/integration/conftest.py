@@ -153,6 +153,7 @@ def image_chat_runtime(
     import app.core.crud.channel.cursor as channel_cursor_module
     import app.core.dispatchers.dispatcher as dispatcher_module
     import app.core.session_reply_queue.consumer as consumer_module
+    import app.core.session_reply_queue.executor_audit as executor_audit_module
     import app.core.session_reply_queue.executor_interactive as executor_interactive_module
     import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
     import app.core.session_reply_queue.executor_metadata as executor_metadata_module
@@ -299,6 +300,7 @@ def image_chat_runtime(
                 database_module,
                 chat_module,
                 dispatcher_module,
+                executor_audit_module,
                 executor_interactive_module,
                 executor_lifecycle_module,
                 executor_metadata_module,
@@ -339,12 +341,17 @@ def image_chat_runtime(
             client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
             run_count = 0
 
-            async def run_next():
+            async def run_next(*, independent_only: bool | None = None):
                 nonlocal run_count
                 run_count += 1
                 worker_id = f"image-chat-worker-{run_count}"
                 async with factory() as db:
-                    work = await session_reply_work_item_crud.claim_next(db, worker_id=worker_id, lease_seconds=300)
+                    work = await session_reply_work_item_crud.claim_next(
+                        db,
+                        worker_id=worker_id,
+                        lease_seconds=300,
+                        independent_only=independent_only,
+                    )
                 if work is None or work.id is None:
                     return None
                 await consumer_module.SessionReplyConsumer()._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts)

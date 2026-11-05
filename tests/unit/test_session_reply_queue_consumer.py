@@ -35,6 +35,9 @@ async def test_consumer_recovery_runs_full_failure_flow_for_exhausted_claims(mon
             )
         ]
 
+    async def reconcile_children(db):
+        return 0
+
     async def fail_work(work_id: int, worker_id: str, error: str) -> None:
         failure_calls.append((work_id, worker_id, error))
 
@@ -43,6 +46,7 @@ async def test_consumer_recovery_runs_full_failure_flow_for_exhausted_claims(mon
 
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "recover_expired", recover_expired)
+    monkeypatch.setattr(consumer_module, "reconcile_child_work", reconcile_children)
     monkeypatch.setattr(consumer_module, "mark_work_audit_execution_unknown", mark_unknown)
     monkeypatch.setattr(consumer_module, "fail_session_reply_work", fail_work)
 

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    AGENT_WORK_TOOL_NAME,
     ERR_DELETE_DEFAULT_PROFILE,
     ERR_DELETE_LAST_PROFILE,
     ERR_ONLY_ADMIN_ALLOWED,
@@ -106,6 +107,7 @@ PROFILE_TOOL_OPTIONS = [
     {"value": SEND_FILE_TO_USER_TOOL_NAME, "label_key": "TOOL_SEND_FILE_TO_USER_LABEL"},
     {"value": MANAGE_BACKGROUND_TASKS_TOOL_NAME, "label_key": "TOOL_MANAGE_BACKGROUND_TASKS_LABEL"},
     {"value": MANAGE_SCHEDULED_TASKS_TOOL_NAME, "label_key": "TOOL_MANAGE_SCHEDULED_TASKS_LABEL"},
+    {"value": AGENT_WORK_TOOL_NAME, "label_key": "TOOL_AGENT_WORK_LABEL"},
     {"value": IMAGE_GENERATION_TOOL_NAME, "label_key": "TOOL_GENERATE_IMAGE_LABEL"},
     {"value": READ_MULTIMODAL_FILE_TOOL_NAME, "label_key": "TOOL_READ_MULTIMODAL_FILE_LABEL"},
 ]

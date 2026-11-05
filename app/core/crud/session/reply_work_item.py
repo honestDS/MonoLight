@@ -782,6 +782,8 @@ class CRUDSessionReplyWorkItem:
         expired_work_conditions = [
             SessionReplyWorkItem.status.in_(_TERMINAL_STATUS_VALUES),
             SessionReplyWorkItem.updated_at < cutoff,
+            SessionReplyWorkItem.subagent_id.is_(None),
+            func.coalesce(SessionReplyWorkItem.execution_state["has_child_work"].as_boolean(), False).is_(False),
         ]
 
         expired_event_ids = (
@@ -1016,7 +1018,12 @@ class CRUDSessionReplyWorkItem:
         expired_work_ids = [work.id for work in expired_work if work.id is not None]
         streamed_work_ids: set[int] = set()
         if expired_work_ids:
-            stream_result = await db.execute(select(SessionReplyStreamEvent.work_id).where(SessionReplyStreamEvent.work_id.in_(expired_work_ids)))
+            stream_result = await db.execute(
+                select(SessionReplyStreamEvent.work_id).where(
+                    SessionReplyStreamEvent.work_id.in_(expired_work_ids),
+                    func.coalesce(SessionReplyStreamEvent.event["type"].as_string(), "") != "work_suspended",
+                )
+            )
             streamed_work_ids = {work_id for work_id in stream_result.scalars().all() if work_id is not None}
 
         terminal_claims: list[tuple[int, str, str]] = []

@@ -105,7 +105,14 @@ class CRUDSessionReplyStreamEvent:
         return result.scalar() is not None
 
     async def has_events(self, db: AsyncSession, *, work_id: int) -> bool:
-        result = await db.execute(select(SessionReplyStreamEvent.id).where(SessionReplyStreamEvent.work_id == work_id).limit(1))
+        result = await db.execute(
+            select(SessionReplyStreamEvent.id)
+            .where(
+                SessionReplyStreamEvent.work_id == work_id,
+                func.coalesce(SessionReplyStreamEvent.event["type"].as_string(), "") != "work_suspended",
+            )
+            .limit(1)
+        )
         return result.scalar() is not None
 
     async def list_after_sequence(

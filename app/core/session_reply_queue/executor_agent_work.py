@@ -2,10 +2,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.core.constants import ERR_LLM_UNEXPECTED_ERROR
+from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_SUBAGENT_CONTEXT_INVALID
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.subagent import subagent_crud
+from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.session_reply_queue.executor_common import _response_content
 from app.core.session_reply_queue.executor_interactive import _dispatch_interactive_work
@@ -15,7 +17,7 @@ from app.core.utils.dispatcher.helpers import dump_background_proactive_history
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.message import InternalMessage, MessageRole
-from app.models.session_reply_work_item import SessionReplyWorkItem
+from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkItem
 
 __all__ = ["execute_agent_work", "load_agent_work_spec"]
 
@@ -34,7 +36,9 @@ async def _load_instruction_message(db, work: SessionReplyWorkItem, spec: AgentW
         return InternalMessage(role=MessageRole.USER, content=spec.instruction)
 
     message = await message_crud.get(db, message_id)
-    if message is None or message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id or message.role != MessageRole.USER:
+    if message is None or message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id or message.role != MessageRole.USER or (spec.report_target == AgentWorkReportTarget.PARENT_WORK and message.work_id != work.id):
+        if spec.report_target == AgentWorkReportTarget.PARENT_WORK:
+            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
 
     parsed = parse_db_messages_to_internal([message])
@@ -51,8 +55,25 @@ async def execute_agent_work(db, work: SessionReplyWorkItem, worker_id: str = ""
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
 
     spec = load_agent_work_spec(work)
-    if spec.report_target != AgentWorkReportTarget.SESSION:
-        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+    if spec.report_target == AgentWorkReportTarget.PARENT_WORK:
+        if work.source_type != SessionReplySourceType.PARENT_WORK or work.source_id != str(spec.parent_work_id) or work.subagent_id != spec.subagent_id:
+            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+
+        subagent = await subagent_crud.get_scoped(
+            db,
+            subagent_id=spec.subagent_id,
+            uid=work.uid,
+            session_id=work.session_id,
+            profile_id=work.profile_id,
+        )
+        round_row = await subagent_crud.get_round_for_work(db, work)
+        call = await subagent_crud.get_call(
+            db,
+            parent_work_id=spec.parent_work_id,
+            tool_call_id=spec.parent_tool_call_id,
+        )
+        if subagent is None or round_row is None or call is None or round_row.result is not None or round_row.waiting_confirmation is not False or subagent.active_child_work_id != round_row.child_work_id or call.child_work_id != round_row.child_work_id or call.subagent_id != subagent.id:
+            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
     if execution_state.get("frozen_context_message_ids") != []:
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))

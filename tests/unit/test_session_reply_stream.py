@@ -1408,6 +1408,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         uid="user-1",
         session_id="session-1",
         profile_id=3,
+        subagent_id=None,
         dedupe_key="foreground-message:session-1:11",
         created_at=datetime(2026, 7, 13, 21, 0, 0),
         execution_state={
@@ -1684,6 +1685,7 @@ async def test_execute_foreground_stream_reraises_llm_exception(monkeypatch, no_
         uid="user-1",
         session_id="session-1",
         profile_id=3,
+        subagent_id=None,
         dedupe_key="foreground-message:session-1:13",
         created_at=datetime(2026, 7, 13, 21, 0, 0),
         execution_state={"stream_requested": True},
@@ -1745,6 +1747,7 @@ async def test_execute_foreground_persists_non_stream_llm_request_metadata(monke
         uid="user-1",
         session_id="session-1",
         profile_id=3,
+        subagent_id=None,
         dedupe_key="foreground-message:session-1:12",
         created_at=datetime(2026, 7, 13, 21, 0, 0),
         execution_state={

@@ -8,11 +8,12 @@ from app.core.audit.confirmation import (
 from app.core.constants import (
     ERR_PERSISTED_USER_MESSAGE_MISMATCH,
     ERR_PROFILE_NOT_FOUND,
+    ERR_SUBAGENT_CONTEXT_INVALID,
 )
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
-from app.core.exceptions import ResourceNotFoundException
+from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.i18n import get_current_locale, t
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.message import (
@@ -26,7 +27,9 @@ from app.models.message import (
 from app.models.profile import Profile
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
+    SessionReplyWorkCategory,
     SessionReplyWorkItem,
+    SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
 
@@ -319,8 +322,16 @@ class SessionReplyEnqueue:
         spec: AgentWorkSpec,
         commit: bool = True,
     ) -> tuple[SessionReplyWorkItem, bool]:
-        if spec.report_target != AgentWorkReportTarget.SESSION:
-            raise ValueError("parent-work AgentWork routing is not enabled yet")
+        if spec.report_target == AgentWorkReportTarget.PARENT_WORK:
+            if source_type != SessionReplySourceType.PARENT_WORK or str(source_id) != str(spec.parent_work_id):
+                raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+            parent_work = await session_reply_work_item_crud.get(db, spec.parent_work_id)
+            if parent_work is None or parent_work.uid != uid or parent_work.session_id != session_id or parent_work.profile_id != profile_id or parent_work.work_category != SessionReplyWorkCategory.FOREGROUND or parent_work.status != SessionReplyWorkStatus.RUNNING:
+                raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+        elif source_type == SessionReplySourceType.PARENT_WORK:
+            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+
+        agent_work_state = spec.model_dump(mode="json")
         work, created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
@@ -333,14 +344,19 @@ class SessionReplyEnqueue:
             commit=False,
         )
         if created:
+            work.subagent_id = spec.subagent_id
             work.execution_state = {
                 **(work.execution_state or {}),
                 "language": get_current_locale(),
                 "execution_scope": spec.execution_scope,
                 "frozen_context_message_ids": [],
-                "agent_work": spec.model_dump(mode="json"),
+                "agent_work": agent_work_state,
             }
             db.add(work)
+        else:
+            state = work.execution_state if isinstance(work.execution_state, dict) else {}
+            if work.uid != uid or work.session_id != session_id or work.profile_id != profile_id or state.get("agent_work") != agent_work_state:
+                raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
         if commit:
             await db.commit()
             await db.refresh(work)

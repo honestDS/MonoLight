@@ -593,6 +593,23 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                 )
             _remove_consumed_slots(state, consumed_slot_keys)
             state.pop("active_audit_execution", None)
+            child_work_waits = state.get("child_work_waits")
+            if isinstance(child_work_waits, list) and child_work_waits:
+                previous_resume_context = state.get("external_resume_context")
+                if not isinstance(previous_resume_context, list):
+                    previous_resume_context = []
+                state["external_resume_context"] = [*previous_resume_context, *marker_payloads]
+                if not await external_work_crud.update_waiting_state(
+                    db,
+                    work_id=work.id,
+                    execution_state=state,
+                    commit=False,
+                ):
+                    await db.rollback()
+                    return False
+                await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
+                await db.commit()
+                return False
             state["external_resume_pending"] = True
             state["external_resume_context"] = marker_payloads
 

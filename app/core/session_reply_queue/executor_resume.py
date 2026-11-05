@@ -3,8 +3,13 @@ import json
 from collections import Counter, deque
 from typing import Any
 
+from app.core.constants import ERR_SUBAGENT_CONTEXT_INVALID
 from app.core.crud.session.message import message_crud
-from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
+from app.core.crud.session.reply_work_item import (
+    ensure_session_reply_work_claim,
+    session_reply_work_item_crud,
+)
+from app.core.exceptions import ParameterException
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.session_reply_queue.executor_interactive import _save_interactive_work_execution_checkpoint
@@ -74,6 +79,20 @@ async def restore_interactive_tool_replies(
         if not group["missing"] or assistant.id is None:
             continue
 
+        group_history_kwargs = history_kwargs
+        if work.subagent_id is not None:
+            original_assistant = await message_crud.get(db, assistant.id)
+            if original_assistant is None or (original_assistant.uid != work.uid or original_assistant.session_id != work.session_id or original_assistant.profile_id != work.profile_id or original_assistant.role != MessageRole.ASSISTANT or original_assistant.type != MessageType.TOOL_CALL):
+                raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+
+            original_work_id = original_assistant.work_id
+            if not isinstance(original_work_id, int) or isinstance(original_work_id, bool) or original_work_id <= 0:
+                raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+            original_work = await session_reply_work_item_crud.get(db, original_work_id)
+            if original_work is None or (original_work.uid != work.uid or original_work.session_id != work.session_id or original_work.profile_id != work.profile_id or original_work.subagent_id != work.subagent_id):
+                raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+            group_history_kwargs = {"work_id": original_work_id}
+
         pending_by_id: dict[str, deque[int]] = {}
         for call_index, tool_call in group["missing"]:
             pending_by_id.setdefault(tool_call.id, deque()).append(call_index)
@@ -87,7 +106,7 @@ async def restore_interactive_tool_replies(
                 after_id=assistant.id,
                 page_after_id=cursor,
                 limit=200,
-                **history_kwargs,
+                **group_history_kwargs,
             )
             if not page:
                 break

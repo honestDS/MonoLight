@@ -18,6 +18,7 @@ from app.models.channel import ChannelConfig
 from app.models.knowledge_base import KnowledgeBaseType
 from app.models.profile import Profile, ProfileConfig
 
+from .agent_work import AGENT_WORK_TOOL_SCHEMA, AgentWorkExecutor
 from .background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA, ManageBackgroundTasksExecutor
 from .end_session import (
     END_SESSION_TOOL_NAME as END_SESSION_TOOL_NAME,
@@ -76,6 +77,7 @@ CONFIGURABLE_TOOL_SCHEMAS = [
     SEND_FILE_TO_USER_TOOL_SCHEMA,
     MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA,
     MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA,
+    AGENT_WORK_TOOL_SCHEMA,
     READ_MULTIMODAL_FILE_TOOL_SCHEMA,
 ]
 
@@ -113,6 +115,7 @@ TOOL_EXECUTOR_MAP = {
     SEND_FILE_TO_USER_TOOL_SCHEMA["function"]["name"]: SendFileToUserExecutor,
     MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"]: ManageBackgroundTasksExecutor,
     MANAGE_SCHEDULED_TASKS_TOOL_SCHEMA["function"]["name"]: ManageScheduledTasksExecutor,
+    AGENT_WORK_TOOL_SCHEMA["function"]["name"]: AgentWorkExecutor,
     READ_MULTIMODAL_FILE_TOOL_SCHEMA["function"]["name"]: ReadMultimodalFileExecutor,
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,

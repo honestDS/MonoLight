@@ -17,9 +17,11 @@ from app.core.crud.session.reply_work_item import (
     session_reply_work_item_crud,
 )
 from app.core.crud.session.session import session_crud
+from app.core.crud.session.subagent import subagent_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.i18n import t
 from app.core.message_platforms.notifier import send_session_stream_event
+from app.core.prompts import SUBAGENT_EXECUTION_GUIDANCE_PROMPT
 from app.core.session_reply_queue.executor_common import (
     _metadata_with_work_order,
     _result_message_dedupe_key,
@@ -28,8 +30,9 @@ from app.core.session_reply_queue.executor_metadata import _persist_interactive_
 from app.core.session_reply_queue.manager import get_work_request_ids, session_reply_queue_manager
 from app.core.session_reply_queue.manager_common import is_scheduled_task_work, resolve_work_tool_workflow
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.request_token_baseline import build_session_cache_metrics
-from app.models.message import InternalMessage, MessageType
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.provider_usage import ProviderUsageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
@@ -207,6 +210,23 @@ async def _fetch_additional_foreground_user_messages(
     return batch
 
 
+async def _fetch_additional_subagent_messages(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+) -> UserInputBatch | None:
+    await ensure_session_reply_work_claim(db)
+    pending_messages = await subagent_crud.list_pending_messages(db, work=work)
+    parsed_messages = tuple(message for message in parse_db_messages_to_internal(pending_messages) if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0)
+    if not parsed_messages:
+        return None
+    return UserInputBatch(
+        messages=parsed_messages,
+        source_message_ids=tuple(message.id for message in parsed_messages),
+    )
+
+
 async def _check_interactive_work_validity(
     *,
     work_id: int,
@@ -255,15 +275,39 @@ async def _save_interactive_work_execution_checkpoint(
             state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
         else:
             state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
-    updated = await session_reply_work_item_crud.update_claimed(
-        db,
-        work_id=work_id,
-        worker_id=worker_id,
-        values={"execution_state": state},
-        checkpoint=checkpoint,
-    )
+    is_subagent_work = work.subagent_id is not None
+    if is_subagent_work:
+        checkpoint_message_ids: list[int] = []
+        seen_message_ids: set[int] = set()
+        for message in checkpoint.get("messages", []):
+            if not isinstance(message, dict) or message.get("role") != MessageRole.USER:
+                continue
+            message_id = message.get("id")
+            if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0 or message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
+            checkpoint_message_ids.append(message_id)
+        if checkpoint_message_ids:
+            await subagent_crud.acknowledge_messages(
+                db,
+                work=work,
+                message_ids=checkpoint_message_ids,
+            )
+    update_kwargs = {
+        "work_id": work_id,
+        "worker_id": worker_id,
+        "values": {"execution_state": state},
+        "checkpoint": checkpoint,
+    }
+    if is_subagent_work:
+        update_kwargs["commit"] = False
+    updated = await session_reply_work_item_crud.update_claimed(db, **update_kwargs)
     if not updated:
+        if is_subagent_work:
+            await db.rollback()
         raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
+    if is_subagent_work:
+        await db.commit()
     work.id = work_id
     work.execution_state = state
 
@@ -343,6 +387,24 @@ async def _dispatch_interactive_work(
     expose_tool_call_content = False if is_independent_work else bool(execution_state.get("expose_tool_call_content", True))
     show_tool_calls = False if is_independent_work else bool(execution_state.get("show_tool_calls", True))
 
+    if work.subagent_id is not None:
+        additional_user_messages_fetcher = partial(
+            _fetch_additional_subagent_messages,
+            db,
+            work=work,
+            worker_id=worker_id,
+        )
+    elif allow_additional_user_messages:
+        additional_user_messages_fetcher = partial(
+            _fetch_additional_foreground_user_messages,
+            db,
+            work=work,
+            worker_id=worker_id,
+            stream_state=stream_state,
+        )
+    else:
+        additional_user_messages_fetcher = None
+
     dispatch_kwargs = {
         "db": db,
         "message": message,
@@ -363,15 +425,7 @@ async def _dispatch_interactive_work(
         "frozen_user_message_ids": frozen_user_message_ids,
         "final_message_dedupe_key": _result_message_dedupe_key(work),
         "persisted_profile_id": work.profile_id,
-        "additional_user_messages_fetcher": partial(
-            _fetch_additional_foreground_user_messages,
-            db,
-            work=work,
-            worker_id=worker_id,
-            stream_state=stream_state,
-        )
-        if allow_additional_user_messages
-        else None,
+        "additional_user_messages_fetcher": additional_user_messages_fetcher,
         "execution_resume_state": execution_resume_state,
         "execution_checkpoint_callback": partial(
             _save_interactive_work_execution_checkpoint,
@@ -394,7 +448,13 @@ async def _dispatch_interactive_work(
         "tool_workflow": await resolve_work_tool_workflow(db, work),
     }
     additional_system_prompt = execution_state.get("additional_system_prompt")
-    if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
+    if work.subagent_id is not None:
+        if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
+            additional_system_prompt = f"{additional_system_prompt.strip()}\n\n{SUBAGENT_EXECUTION_GUIDANCE_PROMPT}"
+        else:
+            additional_system_prompt = SUBAGENT_EXECUTION_GUIDANCE_PROMPT
+        dispatch_kwargs["additional_system_prompt"] = additional_system_prompt
+    elif isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
         dispatch_kwargs["additional_system_prompt"] = additional_system_prompt.strip()
     if not stream_requested:
         response = await ChatDispatcher.dispatch(

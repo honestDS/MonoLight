@@ -47,6 +47,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkType,
 )
 from app.models.session_todo import SessionTodoPlan
+from app.models.subagent import Subagent, SubagentToolCall, SubagentWork
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
@@ -82,6 +83,9 @@ async def db_session(tmp_path) -> AsyncIterator[async_sessionmaker[AsyncSession]
             AuditConfirmationClaim.__table__,
             SessionReplySequence.__table__,
             SessionReplyWorkItem.__table__,
+            Subagent.__table__,
+            SubagentWork.__table__,
+            SubagentToolCall.__table__,
             SessionReplyStreamEvent.__table__,
             SessionEvent.__table__,
             MessagePlatformOutbox.__table__,

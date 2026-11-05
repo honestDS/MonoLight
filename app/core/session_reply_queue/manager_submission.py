@@ -28,6 +28,7 @@ from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
+from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import get_current_locale, t
 from app.core.utils.dispatcher.frozen_context import serialize_frozen_context_messages
@@ -490,6 +491,8 @@ class SessionReplySubmission:
         frozen_context_messages = None
         source_dispatcher_checkpoint = None
         source_work_category = SessionReplyWorkCategory.FOREGROUND
+        source_subagent = None
+        source_child_round = None
         source_work_id = claimed_record.source_work_id
         if isinstance(source_work_id, int) and not isinstance(source_work_id, bool) and source_work_id > 0:
             source_work = await session_reply_work_item_crud.get(db, source_work_id)
@@ -497,6 +500,20 @@ class SessionReplySubmission:
                 await db.rollback()
                 raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
             source_work_category = source_work.work_category
+            if source_work.subagent_id is not None:
+                source_subagent = await subagent_crud.get_scoped(
+                    db,
+                    subagent_id=source_work.subagent_id,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    lock=True,
+                    touch=False,
+                )
+                source_child_round = await subagent_crud.get_round_for_work(db, source_work)
+                if source_subagent is None or source_child_round is None or source_child_round.result is not None or source_subagent.active_child_work_id != source_child_round.child_work_id or source_child_round.waiting_confirmation is not True:
+                    await db.rollback()
+                    raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
             source_frozen_context = await session_reply_work_item_crud.get_frozen_context(db, source_work)
             if isinstance(source_frozen_context, list):
                 source_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, source_work.id)
@@ -534,6 +551,18 @@ class SessionReplySubmission:
             "request_ids": merge_work_request_ids(work, request_id=request_id),
             "guidance_prompt": guidance_prompt,
         }
+        if source_child_round is not None:
+            work.subagent_id = source_subagent.id
+            work.execution_state = {
+                **(work.execution_state or {}),
+                "child_work_id": source_child_round.child_work_id,
+            }
+            source_child_round.current_work_id = work.id
+            source_child_round.waiting_confirmation = False
+            db.add(source_child_round)
+            for pending_message in await subagent_crud.list_pending_messages(db, work=source_work):
+                pending_message.work_id = work.id
+                db.add(pending_message)
         if cleaned_additional_system_prompt:
             work.execution_state["additional_system_prompt"] = cleaned_additional_system_prompt
         if frozen_context_messages is not None:

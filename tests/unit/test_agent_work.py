@@ -3,29 +3,54 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from app.core.constants import END_SESSION_SCOPE_TASK
+from app.core.constants import END_SESSION_SCOPE_FOREGROUND, END_SESSION_SCOPE_TASK
 from app.core.prompts import SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.session_reply_queue import executor_agent_work as executor_agent_work_module
+from app.core.tools.agent_work import CreateArguments, SendArguments
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.message import Message, MessageRole, MessageType
 
 
-def test_agent_work_spec_requires_parent_for_parent_report_target() -> None:
+@pytest.mark.parametrize("missing_field", ["parent_work_id", "subagent_id", "parent_tool_call_id"])
+def test_agent_work_spec_requires_parent_for_parent_report_target(missing_field: str) -> None:
+    parent_fields = {
+        "parent_work_id": 17,
+        "subagent_id": "a" * 32,
+        "parent_tool_call_id": "call-parent",
+    }
+    missing_parent_fields = parent_fields.copy()
+    missing_parent_fields.pop(missing_field)
+
     with pytest.raises(ValidationError):
         AgentWorkSpec(
             instruction="inspect the build",
             execution_scope=END_SESSION_SCOPE_TASK,
             report_target=AgentWorkReportTarget.PARENT_WORK,
+            **missing_parent_fields,
         )
 
     spec = AgentWorkSpec(
         instruction="inspect the build",
         execution_scope=END_SESSION_SCOPE_TASK,
         report_target=AgentWorkReportTarget.PARENT_WORK,
-        parent_work_id=17,
+        **parent_fields,
     )
 
     assert spec.parent_work_id == 17
+    assert spec.subagent_id == "a" * 32
+    assert spec.parent_tool_call_id == "call-parent"
+
+
+def test_agent_work_spec_rejects_parent_fields_for_session() -> None:
+    with pytest.raises(ValidationError):
+        AgentWorkSpec(
+            instruction="inspect the build",
+            execution_scope=END_SESSION_SCOPE_TASK,
+            report_target=AgentWorkReportTarget.SESSION,
+            parent_work_id=17,
+            subagent_id="a" * 32,
+            parent_tool_call_id="call-parent",
+        )
 
 
 @pytest.mark.parametrize(
@@ -117,29 +142,42 @@ async def test_agent_work_executes_with_empty_conversation_context(
     assert captured["attachments"] == attachments
 
 
-@pytest.mark.asyncio
-async def test_agent_work_rejects_unimplemented_parent_report_routing(monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = AgentWorkSpec(
-        instruction="inspect the build",
-        execution_scope=END_SESSION_SCOPE_TASK,
-        report_target=AgentWorkReportTarget.PARENT_WORK,
-        parent_work_id=17,
-    )
-    work = SimpleNamespace(
-        id=18,
-        uid="user-1",
-        session_id="child-session",
-        profile_id=4,
-        execution_state={
-            "agent_work": spec.model_dump(mode="json"),
-            "frozen_context_message_ids": [],
-        },
-    )
+def test_agent_work_parent_report_requires_task_scope() -> None:
+    with pytest.raises(ValidationError):
+        AgentWorkSpec(
+            instruction="inspect the build",
+            execution_scope=END_SESSION_SCOPE_FOREGROUND,
+            report_target=AgentWorkReportTarget.PARENT_WORK,
+            parent_work_id=17,
+            subagent_id="a" * 32,
+            parent_tool_call_id="call-parent",
+        )
 
-    async def get_profile(_db, profile_id):
-        return SimpleNamespace(id=profile_id, uid=work.uid)
 
-    monkeypatch.setattr(executor_agent_work_module.profile_crud, "get_with_relations", get_profile)
+@pytest.mark.parametrize("model", [CreateArguments, SendArguments])
+@pytest.mark.parametrize(
+    "message, is_valid",
+    [
+        pytest.param("", False, id="empty"),
+        pytest.param("   ", False, id="spaces"),
+        pytest.param("\t\n", False, id="tab-and-newline"),
+        pytest.param("\n  inspect the build  \t\n", True, id="surrounding-whitespace"),
+    ],
+)
+def test_agent_work_message_validation_preserves_valid_text(
+    model: type[CreateArguments] | type[SendArguments],
+    message: str,
+    is_valid: bool,
+) -> None:
+    arguments = {"message": message}
+    if model is SendArguments:
+        arguments["subagent_id"] = "a" * 32
 
-    with pytest.raises(RuntimeError):
-        await executor_agent_work_module.execute_agent_work(object(), work, "worker-1")
+    if not is_valid:
+        with pytest.raises(ValidationError) as exc_info:
+            model(**arguments)
+        assert any(error["loc"] == ("message",) for error in exc_info.value.errors())
+        return
+
+    parsed = model(**arguments)
+    assert parsed.message == message

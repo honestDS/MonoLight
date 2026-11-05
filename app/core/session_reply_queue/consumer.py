@@ -21,6 +21,7 @@ from app.core.exceptions import BaseBusinessException, LLMContextLengthException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.log import get_logger
+from app.core.session_reply_queue.child_recovery import reconcile_child_work
 from app.core.session_reply_queue.executor import (
     execute_session_reply_work,
     fail_session_reply_work,
@@ -226,6 +227,8 @@ class SessionReplyConsumer:
         for work_id, worker_id, error in terminal_claims:
             await mark_work_audit_execution_unknown(work_id, worker_id, error)
             await fail_session_reply_work(work_id, worker_id, error)
+        async with AsyncSessionLocal() as db:
+            await reconcile_child_work(db)
 
     async def _cleanup_terminal_items_if_due(self, now: float) -> None:
         if now < self._next_cleanup_at:

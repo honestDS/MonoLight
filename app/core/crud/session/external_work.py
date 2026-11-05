@@ -5,10 +5,12 @@ from sqlalchemy import and_, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import GOAL_EXECUTION_PHASE_RUNNING, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
+from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CONTEXT_INVALID, GOAL_EXECUTION_PHASE_RUNNING, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
+from app.core.crud.session.subagent import subagent_crud
 from app.core.crud.session.terminal_watch import get_terminal_watch_deliveries
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
@@ -329,12 +331,64 @@ class CRUDExternalWork:
         state["external_tool_result_message_ids"] = external_tool_result_message_ids
 
         terminal_watch_slots: list[dict] = []
+        subagent_slots: list[dict] = []
         current_pending_tools: list[dict] = []
         for slot in pending_tools:
-            if slot.get("terminal_watch") is True or slot.get("tool_name") == TERMINAL_WATCH_TOOL_NAME:
+            if slot.get("child_work_id") is not None and slot.get("tool_name") == AGENT_WORK_TOOL_NAME:
+                subagent_slots.append(slot)
+            elif slot.get("terminal_watch") is True or slot.get("tool_name") == TERMINAL_WATCH_TOOL_NAME:
                 terminal_watch_slots.append(slot)
             else:
                 current_pending_tools.append(slot)
+
+        child_work_waits_by_key: dict[tuple[Any, Any], dict] = {}
+        previous_child_work_waits = state.get("child_work_waits")
+        if isinstance(previous_child_work_waits, list):
+            for slot in previous_child_work_waits:
+                if isinstance(slot, dict):
+                    key = (slot.get("child_work_id"), slot.get("tool_call_id"))
+                    child_work_waits_by_key[key] = slot
+
+        for slot in subagent_slots:
+            child_work_id = slot.get("child_work_id")
+            tool_call_id = slot.get("tool_call_id")
+            tool_result_message_id = slot.get("tool_result_message_id")
+            if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(tool_call_id, str) or not tool_call_id.strip() or not isinstance(tool_result_message_id, int) or isinstance(tool_result_message_id, bool) or tool_result_message_id <= 0:
+                raise ValueError(t(ERR_SUBAGENT_CONTEXT_INVALID))
+
+            call = await subagent_crud.get_call(
+                db,
+                parent_work_id=work.id,
+                tool_call_id=tool_call_id,
+            )
+            if call is None or call.subagent_id != slot.get("subagent_id") or call.child_work_id != child_work_id or call.delivered is not False:
+                raise ValueError(t(ERR_SUBAGENT_CONTEXT_INVALID))
+
+            subagent = await subagent_crud.get_scoped(
+                db,
+                subagent_id=call.subagent_id,
+                uid=work.uid,
+                session_id=work.session_id,
+                profile_id=work.profile_id,
+                lock=False,
+                touch=False,
+            )
+            if subagent is None:
+                raise ValueError(t(ERR_SUBAGENT_CONTEXT_INVALID))
+
+            round_row = await subagent_crud.get_round(
+                db,
+                child_work_id=call.child_work_id,
+                subagent_id=call.subagent_id,
+            )
+            if round_row is None:
+                raise ValueError(t(ERR_SUBAGENT_CONTEXT_INVALID))
+
+            call.tool_result_message_id = slot["tool_result_message_id"]
+            call.response_id = slot.get("response_id")
+            db.add(call)
+            key = (slot["child_work_id"], slot["tool_call_id"])
+            child_work_waits_by_key[key] = slot
 
         pending_tools_by_task_id: dict[Any, dict] = {}
         previous_pending_tools = state.get("pending_tools")
@@ -367,6 +421,10 @@ class CRUDExternalWork:
 
         state["terminal_watch_waits"] = terminal_watch_waits
         state["pending_tools"] = pending_tool_waits
+        if child_work_waits_by_key:
+            state["child_work_waits"] = list(child_work_waits_by_key.values())
+        else:
+            state.pop("child_work_waits", None)
         state["external_resume_pending"] = False
         state.pop("resume_trigger_message_id", None)
 
@@ -643,10 +701,14 @@ class CRUDExternalWork:
                 break
             for work in waiting:
                 after_id = work.id or after_id
+                execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+                child_work_waits = execution_state.get("child_work_waits")
+                if isinstance(child_work_waits, list) and child_work_waits and not execution_state.get("pending_tools") and not execution_state.get("terminal_watch_waits"):
+                    continue
                 if await self.interrupt_waiting(
                     db,
                     work=work,
-                    execution_state=dict(work.execution_state) if isinstance(work.execution_state, dict) else {},
+                    execution_state=execution_state,
                     error=error,
                     commit=False,
                 ):
