@@ -30,7 +30,6 @@ Monolight/
 └── ruff.toml               # Ruff 配置
 ```
 
-版本控制目录、虚拟环境、缓存目录和本地工具配置不属于产品模块，不在本文展开。
 
 ## 后端分层：`app/`
 
@@ -54,8 +53,6 @@ app/
 ```
 
 ### 应用入口与 Worker
-
-`main.py` 提供 Web 应用入口；`start.py` 负责启动协调，先通过短生命周期初始化子进程完成系统初始化，再启动 Web 进程和长期后台进程。后台服务启动时具备异常中断任务清理协调机制，确保历史未完成任务状态一致后再开展业务处理。
 
 ```text
 app/workers/
@@ -98,7 +95,6 @@ app/api/
 └── knowledge_input.py       # 知识录入请求体限制与上传文件的有界流式读取
 ```
 
-该层只承载跨知识库接口复用的输入边界处理；具体业务校验和持久化仍由 `app/core/` 与 `app/models/` 负责。
 
 ### 接口层：`app/api/v1/`
 
@@ -119,7 +115,6 @@ app/api/v1/
 └── users.py                # 用户管理接口
 ```
 
-接口层负责对外协议和访问入口，业务能力由 `app/core/` 提供，接口数据结构由 `app/schemas/` 描述。
 
 ## 核心层：`app/core/`
 
@@ -272,7 +267,6 @@ app/core/knowledge/
 └── unified_recall.py       # 托管知识与用户知识库候选合并、全局重排和结果组装
 ```
 
-知识正文的录入边界由 `app/core/constants.py` 统一定义，入口层负责限制实际接收量，知识领域负责校验解码后的正文，文档切分负责限制分块资源消耗。统一召回保留命中知识的完整正文；模型上下文容量与超限恢复由 Dispatcher 和上下文总结组件负责，不由知识领域截断正文。
 
 ### 知识作业：`app/core/knowledge_jobs/`
 
@@ -331,7 +325,6 @@ app/core/memory_jobs/
 └── manager_submission.py   # 普通变更作业提交
 ```
 
-该目录承载长期记忆的独立作业能力，与长期记忆领域服务和 Worker 进程协作。
 
 ### 长期记忆领域：`app/core/memory/`
 
@@ -398,12 +391,6 @@ app/core/session_reply_queue/
 ├── manager_result.py       # 工作结果等待与读取
 └── manager_submission.py   # 用户消息提交、确认判定与工作上下文继承
 ```
-
-`AgentWork` 是独立指令执行的共用底层：输入必须自包含，不读取所属主会话的实时历史；执行过程复用会话回复队列、交互式工具循环、审计、外部工作恢复与自身 checkpoint，并与普通会话共用上下文分片、合并和精简。任务只读取自身快照，以独立工作身份保存摘要片段；压缩后的任务消息保存在自身执行记录，不改写主会话摘要。结果交付按目标区分：`SESSION` 面向主会话直接展示最终结果，计划任务使用这一途径，内部工具过程保留在自身工作上下文；`PARENT_WORK` 用于当前主对话子代理结果按父工作与原工具调用交付。定时任务通过 `AgentWork` 执行，其他独立 Agent 调度场景复用同一执行边界。
-
-子代理由稳定的 `Subagent` 身份表示；`SubagentWork` 表示每一轮及其确认后的续接工作，`SubagentToolCall` 分别关联父工具结果。子代理私有消息与 checkpoint 和主会话历史隔离，结果交付与未交付结果补偿以相关持久化记录为依据。
-
-前台与独立任务在既有执行状态 `execution_state.work_category` 中保存原任务分类，不新增队列表字段；确认继承与恢复均保留原任务分类。全局 `agent_work_max_concurrency` 仅负责计划任务、子代理及其确认恢复；Profile 分别通过 `scheduled_task_max_concurrency` 和 `subagent_max_concurrency` 限制对应独立工作。前台回复及其确认、续接不占用独立任务额度。
 
 ### 交互终端：`app/core/terminal/`
 
@@ -671,9 +658,6 @@ app/core/utils/
 └── tokenizer.py            # 按模型标识选择编码的令牌统计辅助
 ```
 
-`app/core/constants.py` 集中声明前台对话、计划任务、子代理、后台主动回复、审计取证的工具范围；`tools` 负责结合 Profile 实际可用配置生成模型列表，Dispatcher/确认执行复用同一规则，队列依据原工作关联解析工作流。
-
-标题生成与前置记忆召回复用辅助请求配置边界，相关运行态与主对话分离。
 
 ### 多语言：`app/core/i18n/`
 
@@ -734,10 +718,6 @@ app/models/
 └── worker_lease.py         # Worker 协调模型
 ```
 
-`app/models/` 定义关系型持久化对象，由 `app/core/crud/` 提供访问，由 `app/providers/database/` 提供数据库连接和初始化能力。
-统一用量记录保留实际渠道快照且不外键渠道；会话主累计与统一 usage 记录相互独立。
-知识库接口数据结构位于 `app/models/knowledge_base/schemas.py`，仍由 `app.models.knowledge_base` 对外导出。
-
 ## 外部能力封装：`app/providers/`
 
 ```text
@@ -767,19 +747,6 @@ app/providers/
 └── web.py                  # 网页服务选择与 Firecrawl 适配
 ```
 
-Provider 层隔离数据库、向量存储、语言模型、嵌入、重排、图像生成和网页服务等外部依赖。
-
-### 模型输入 Token 计量
-
-模型输入 Token 明确区分“Provider 确认值”和“本地估算值”，两者不得互相冒充：
-
-- Provider 成功响应中的输入 Token 用量是主会话上下文占用、前端展示和主动总结阈值的权威来源。主动总结只复用同一 `channel_id + model_id + protocol` 且上下文版本未变化的最近一次 Provider 确认值；旧 metadata 没有渠道身份时不得复用，避免不同 NewAPI/OpenAI-compatible 渠道的同名 alias 串用。
-- 主对话模型请求不会因为本地 Token 估算超过配置窗口而被拒绝或触发总结。若 Provider 明确返回上下文超限，则在当前渠道强制总结后重试；仅 `context_window - max_output - safety_margin <= 0` 这类与 Tokenizer 无关的静态配置错误会在本地直接拒绝。
-- 本地 Token 估算只用于发送前必须确定大小的内部链路，例如工具结果截断、审计载荷拟合、总结分片和压缩结果校验，不作为整个会话是否超限的事实来源。
-- `app/core/utils/context_summary/engine.py`：会话与 AgentWork 共用的摘要再次压缩和完整请求容量检查；`app/core/utils/dispatcher/frozen_context.py` 捕获、恢复工作上下文并接入共用总结，压缩后的任务消息保存在自身执行记录，不改写主会话摘要。
-- `transformers` 负责把内部消息转换为实际 Provider 请求形态；`providers/llm/token_estimation.py` 对该 Provider 载荷做本地估算。审计完整请求拟合、工具结果预算和总结后的最终请求校验都复用这一口径；回传的推理文本或原生推理项按实际请求形态计入，未发送的内部元数据不计入，避免重复。
-- `core/utils/tokenizer.py` 只根据 `model_id` 选择 tiktoken 已知编码；协议只表示请求格式，不能用于推断真实模型厂商。对于 `gpt-5.6-*` 这类 tiktoken 前缀表已能表达、但点号版本名无法直接命中的名称，仅做名称归一化后再次交给 tiktoken 决策；无法确认的普通 alias 使用通用回退。
-- 不通过 OpenAI-compatible 协议猜测并调用厂商专有的预请求 Token 计数接口，也不维护“本地估算 / Provider usage”的历史校准系数；聚合网关后的真实 Provider 由对端响应负责给出最终 usage 和上下文超限结果。
 
 ## 接口数据与协议转换
 
@@ -807,8 +774,7 @@ app/transformers/
     ├── image_generation.py # 图像生成协议转换
     └── responses.py        # Responses 协议转换
 ```
-
-`schemas` 描述应用对外的数据契约，`transformers` 隔离不同外部模型协议与内部模型表示。
+。
 
 ## 前端分层：`dashboard/`
 
@@ -824,7 +790,6 @@ dashboard/
 └── package.json            # 前端依赖与测试、发布构建脚本
 ```
 
-开发服务器将同源 `/api` 的 HTTP/WebSocket 请求代理到 `APP_HOST`/`APP_PORT` 指定的后端；生产环境仍由 FastAPI 托管预构建资源。
 
 ### 前端源码：`dashboard/src/`
 
@@ -1054,8 +1019,6 @@ temp/                       # 上传文件、工具结果和其他临时数据
     └── generated_images/    # 模型生成的图片文件
 ```
 
-关系型数据由 `app/providers/database/` 管理，向量数据由 `app/providers/vector/` 管理，文件型持久化由核心服务和路径组件管理。
-共享技能资产访问与 Shell 执行职责分离。
 
 ## 依赖方向
 
