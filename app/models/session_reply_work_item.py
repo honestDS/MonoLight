@@ -8,6 +8,12 @@ from sqlmodel import JSON, Column, DateTime, Field, SQLModel, UniqueConstraint
 from app.core.utils.time import get_local_time
 
 
+class SessionReplyWorkCategory(StrEnum):
+    FOREGROUND = "foreground"
+    SCHEDULED_TASK = "scheduled_task"
+    SUBAGENT = "subagent"
+
+
 class SessionReplyWorkType(StrEnum):
     FOREGROUND_REPLY = "foreground_reply"
     CONFIRMED_TOOL_EXECUTION = "confirmed_tool_execution"
@@ -85,6 +91,16 @@ class SessionReplyWorkItem(SQLModel, table=True):
     error: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
     updated_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
+
+    @property
+    def work_category(self) -> SessionReplyWorkCategory:
+        if self.work_type == SessionReplyWorkType.AGENT_WORK:
+            if self.source_type == SessionReplySourceType.PARENT_WORK:
+                return SessionReplyWorkCategory.SUBAGENT
+            return SessionReplyWorkCategory.SCHEDULED_TASK
+
+        work_category = self.execution_state.get("work_category", SessionReplyWorkCategory.FOREGROUND.value)
+        return SessionReplyWorkCategory(work_category)
 
 
 class SessionReplyWorkCheckpoint(SQLModel, table=True):

@@ -193,7 +193,7 @@ test('submits organization without selected items and refreshes managed knowledg
     assert.equal(selectedKb.organization_error, null)
     assert.deepEqual(harness.refreshed, [[true, true]])
     assert.deepEqual(harness.scheduled, [[]])
-    assert.equal(harness.messages[0].args[0], locale === 'zh' ? '知识整理已提交' : 'Organization job submitted')
+    assert.equal(harness.messages[0].args[0], locale === 'zh' ? '整理任务已提交' : 'Organization job submitted')
     assert.equal(harness.module.organizationSubmitting.value, false)
   }
 })
@@ -218,7 +218,7 @@ test('guards duplicate organization submissions and localizes failures before al
 
     assert.equal(
       harness.messages[harness.messages.length - 1].args[0],
-      locale === 'zh' ? '提交知识整理失败: network error' : 'Failed to submit organization job: network error',
+      locale === 'zh' ? '提交整理任务失败： network error' : 'Failed to submit organization job: network error',
     )
     assert.equal(harness.module.organizationSubmitting.value, false)
     await harness.module.submitKnowledgeOrganization()
@@ -255,7 +255,7 @@ test('retries failed and cancelled jobs when the server allows it', async t => {
       assert.deepEqual(normalize(harness.api.retries), [{ selectedId: selectedKb.id, jobId: job.id }])
       assert.equal(harness.confirms.length, 1)
       assert.deepEqual(normalize(harness.confirms[0][2]), {
-        confirmButtonText: locale === 'zh' ? '重试整理' : 'Retry Organization',
+        confirmButtonText: locale === 'zh' ? '重试整理任务' : 'Retry Organization',
         cancelButtonText: locale === 'zh' ? '取消' : 'Cancel',
         type: 'warning',
         showCancelButton: true,
@@ -267,7 +267,7 @@ test('retries failed and cancelled jobs when the server allows it', async t => {
       assert.ok(retryHtml.includes(harness.t('knowledgeBase.organization_retry_confirm')))
       assert.equal(
         harness.messages[harness.messages.length - 1].args[0],
-        locale === 'zh' ? '整理作业已重新提交' : 'Organization job retried',
+        locale === 'zh' ? '整理任务已重新提交' : 'Organization job retried',
       )
       assert.deepEqual(harness.refreshed, [[true, true]])
       assert.equal(harness.module.organizationActionJobId.value, null)
@@ -302,7 +302,7 @@ test('does not retry after confirmation cancel or close and can retry again', as
     assert.deepEqual(normalize(harness.api.retries), [{ selectedId: selectedKb.id, jobId: job.id }])
     assert.deepEqual(harness.refreshed, [[true, true]])
     assert.equal(harness.confirms.length, 2)
-    assert.equal(harness.messages.at(-1).args[0], '整理作业已重新提交')
+    assert.equal(harness.messages.at(-1).args[0], '整理任务已重新提交')
   }
 })
 
@@ -334,7 +334,7 @@ test('cancels eligible organization jobs through the shared confirmation', async
       assert.deepEqual(harness.refreshed, [[true, true]])
       assert.equal(
         harness.messages.at(-1).args[0],
-        locale === 'zh' ? '整理作业已取消' : 'Organization job cancelled',
+        locale === 'zh' ? '整理任务已取消' : 'Organization job cancelled',
       )
     }
   }
@@ -584,7 +584,7 @@ test('ignores late organization submissions after a new session starts', async t
 
     assert.equal(harness.messages.length, 1)
     assert.equal(harness.messages[0].type, 'success')
-    assert.equal(harness.messages[0].args[0], '知识整理已提交')
+    assert.equal(harness.messages[0].args[0], '整理任务已提交')
     assert.deepEqual(harness.refreshed, [[true, true]])
     assert.deepEqual(harness.scheduled, [[]])
     assert.equal(harness.module.organizationSubmitting.value, false)

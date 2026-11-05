@@ -374,7 +374,7 @@ app/core/memory/
 ```text
 app/core/session_reply_queue/
 ├── __init__.py             # 队列能力导出
-├── consumer.py             # 回复工作消费
+├── consumer.py             # 前台与独立任务分开领取回复工作
 ├── executor.py             # 回复工作执行兼容导出入口
 ├── executor_agent_work.py  # 独立 AgentWork 指令执行与自身上下文恢复
 ├── executor_audit.py       # 审计执行绑定、未知终态与文件快照校验
@@ -394,6 +394,8 @@ app/core/session_reply_queue/
 ```
 
 `AgentWork` 是独立指令执行的共用底层：输入必须自包含，不读取所属主会话的实时历史；执行过程复用会话回复队列、交互式工具循环、审计、外部工作恢复与自身 checkpoint，并与普通会话共用上下文分片、合并和精简。任务只读取自身快照，以独立工作身份保存摘要片段；压缩后的任务消息保存在自身执行记录，不改写主会话摘要。结果交付按目标区分：`SESSION` 面向主会话直接展示最终结果，计划任务使用这一途径，内部工具过程保留在自身工作上下文；`PARENT_WORK` 面向父工作独立上报，为未来子代理机制预留，当前不开放执行。定时任务通过 `AgentWork` 执行，未来其他独立 Agent 调度场景可复用同一执行边界。
+
+前台与独立任务在既有执行状态 `execution_state.work_category` 中保存原任务分类，不新增队列表字段；确认继承与恢复均保留原任务分类。全局 `agent_work_max_concurrency` 仅负责计划任务、子代理及其确认恢复；Profile 分别通过 `scheduled_task_max_concurrency` 和 `subagent_max_concurrency` 限制对应独立工作。前台回复及其确认、续接不占用独立任务额度。
 
 ### 交互终端：`app/core/terminal/`
 
@@ -493,7 +495,7 @@ app/core/crud/
 │   ├── external_work.py        # 外部异步操作关联数据访问
 │   ├── todo.py                 # 会话 Todo 计划数据访问
 │   ├── reply_stream_event.py   # 回复流事件数据访问
-│   ├── reply_work_item.py      # 工作认领、独立消息归属与恢复状态访问
+│   ├── reply_work_item.py      # 工作认领、原任务分类和数据库两层并发限制持久化、独立消息归属与恢复状态访问
 │   └── terminal_watch.py       # 终端观察通知数据访问
 ├── system/
 │   ├── log.py                  # 系统日志数据访问

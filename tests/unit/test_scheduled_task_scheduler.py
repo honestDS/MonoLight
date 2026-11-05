@@ -16,18 +16,48 @@ def test_task_concurrency_defaults_are_applied_to_existing_profile_configs():
 
     assert cfg.tool.background_task_max_concurrency == 2
     assert cfg.tool.scheduled_task_max_concurrency == 4
+    assert cfg.tool.subagent_max_concurrency == 4
 
 
-def test_session_reply_global_concurrency_default():
+def test_agent_work_global_concurrency_default():
     settings = SystemRuntimeSettings()
 
-    assert settings.session_reply_max_concurrency == 4
+    assert settings.agent_work_max_concurrency == 4
 
 
 @pytest.mark.parametrize("value", [0, 101])
-def test_session_reply_global_concurrency_range(value):
+def test_agent_work_global_concurrency_range(value):
     with pytest.raises(ValidationError):
-        SystemRuntimeSettings(session_reply_max_concurrency=value)
+        SystemRuntimeSettings(agent_work_max_concurrency=value)
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"tool": {"subagent_max_concurrency": 1}}, 1),
+        ({"tool": {"subagent_max_concurrency": 20}}, 20),
+        ({"subagent_max_concurrency": 1}, 1),
+        ({"subagent_max_concurrency": 20}, 20),
+    ],
+)
+def test_subagent_concurrency_range_accepts_nested_and_flat_configs(config, expected):
+    cfg = ProfileConfig.model_validate(config)
+
+    assert cfg.tool.subagent_max_concurrency == expected
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"tool": {"subagent_max_concurrency": 0}},
+        {"tool": {"subagent_max_concurrency": 21}},
+        {"subagent_max_concurrency": 0},
+        {"subagent_max_concurrency": 21},
+    ],
+)
+def test_subagent_concurrency_range_rejects_nested_and_flat_configs(config):
+    with pytest.raises(ValidationError):
+        ProfileConfig.model_validate(config)
 
 
 @pytest.mark.asyncio

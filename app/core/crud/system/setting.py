@@ -28,7 +28,7 @@ DEFAULT_SYSTEM_SETTINGS = {
     "llm_request_max_size_mb": str(DEFAULT_LLM_REQUEST_MAX_SIZE_MB),
     "audit_retention_days": "90",
     "audit_report_email": "",
-    "session_reply_max_concurrency": "4",
+    "agent_work_max_concurrency": "4",
     "log_redaction_enabled": "false",
 }
 
@@ -131,7 +131,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         raw_llm_request_max_size_mb = values.get("llm_request_max_size_mb", DEFAULT_SYSTEM_SETTINGS["llm_request_max_size_mb"])
         raw_audit_retention_days = values.get("audit_retention_days", DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
         raw_audit_report_email = values.get("audit_report_email", DEFAULT_SYSTEM_SETTINGS["audit_report_email"])
-        raw_session_reply_max_concurrency = values.get("session_reply_max_concurrency", DEFAULT_SYSTEM_SETTINGS["session_reply_max_concurrency"])
+        raw_agent_work_max_concurrency = values.get("agent_work_max_concurrency", DEFAULT_SYSTEM_SETTINGS["agent_work_max_concurrency"])
         raw_log_redaction_enabled = values.get("log_redaction_enabled", DEFAULT_SYSTEM_SETTINGS["log_redaction_enabled"])
         try:
             temp_dir_max_size_mb = int(raw_temp_dir_max_size_mb)
@@ -142,9 +142,9 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         except (TypeError, ValueError):
             audit_retention_days = int(DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
         try:
-            session_reply_max_concurrency = int(raw_session_reply_max_concurrency)
+            agent_work_max_concurrency = int(raw_agent_work_max_concurrency)
         except (TypeError, ValueError):
-            session_reply_max_concurrency = int(DEFAULT_SYSTEM_SETTINGS["session_reply_max_concurrency"])
+            agent_work_max_concurrency = int(DEFAULT_SYSTEM_SETTINGS["agent_work_max_concurrency"])
         llm_request_max_size_mb = _parse_llm_request_max_size_mb(raw_llm_request_max_size_mb)
         return SystemRuntimeSettings(
             log_locale=normalize_locale(raw_log_locale),
@@ -152,7 +152,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             llm_request_max_size_mb=llm_request_max_size_mb,
             audit_retention_days=audit_retention_days,
             audit_report_email=str(raw_audit_report_email or "").strip(),
-            session_reply_max_concurrency=session_reply_max_concurrency,
+            agent_work_max_concurrency=agent_work_max_concurrency,
             log_redaction_enabled=_parse_log_redaction_enabled(raw_log_redaction_enabled),
         )
 
@@ -164,7 +164,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             "llm_request_max_size_mb": str(normalized.llm_request_max_size_mb),
             "audit_retention_days": str(normalized.audit_retention_days),
             "audit_report_email": normalized.audit_report_email,
-            "session_reply_max_concurrency": str(normalized.session_reply_max_concurrency),
+            "agent_work_max_concurrency": str(normalized.agent_work_max_concurrency),
             "log_redaction_enabled": "true" if normalized.log_redaction_enabled else "false",
         }
         for key, value in values.items():

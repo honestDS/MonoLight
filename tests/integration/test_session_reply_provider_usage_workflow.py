@@ -35,6 +35,7 @@ from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySequence,
     SessionReplySourceType,
+    SessionReplyWorkCategory,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
     SessionReplyWorkType,
@@ -190,6 +191,14 @@ def _work(
     source_type: SessionReplySourceType,
     source_id: str,
 ) -> SessionReplyWorkItem:
+    if work_type == SessionReplyWorkType.AGENT_WORK:
+        if source_type == SessionReplySourceType.PARENT_WORK:
+            work_category = SessionReplyWorkCategory.SUBAGENT
+        else:
+            work_category = SessionReplyWorkCategory.SCHEDULED_TASK
+    else:
+        work_category = SessionReplyWorkCategory.FOREGROUND
+
     return SessionReplyWorkItem(
         id=work_id,
         uid=UID,
@@ -203,7 +212,7 @@ def _work(
         status=SessionReplyWorkStatus.RUNNING,
         locked_by="worker-1",
         input_message_ids=[1],
-        execution_state={"stream_requested": False},
+        execution_state={"stream_requested": False, "work_category": work_category.value},
     )
 
 

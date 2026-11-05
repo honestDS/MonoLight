@@ -741,7 +741,7 @@ async def test_consumer_does_not_cancel_reply_during_external_resume_handoff(
     async def runtime_settings(_db):
         consumer_after_cancel_check.set()
         consumer._stop_event.set()
-        return SimpleNamespace(session_reply_max_concurrency=0)
+        return SimpleNamespace(agent_work_max_concurrency=0)
 
     async def skip_recovery():
         return None
@@ -864,7 +864,7 @@ async def test_consumer_cancels_reply_after_claim_is_invalidated(
     async def runtime_settings(_db):
         consumer_checked_claim.set()
         consumer._stop_event.set()
-        return SimpleNamespace(session_reply_max_concurrency=0)
+        return SimpleNamespace(agent_work_max_concurrency=0)
 
     async def skip_recovery():
         return None

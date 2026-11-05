@@ -62,3 +62,20 @@ test('removing current default tools affects only that profile configuration', (
   assert.ok(defaultProfileConfigs().tool.enabled_tools.includes('web_tool'))
   assert.ok(defaultProfileConfigs().tool.enabled_tools.includes('manage_background_tasks'))
 })
+
+test('subagent concurrency stays isolated across profile creation and persistence', () => {
+  const firstProfile = defaultProfileConfigs()
+  const secondProfile = defaultProfileConfigs()
+
+  assert.equal(firstProfile.tool.subagent_max_concurrency, 4)
+  assert.equal(secondProfile.tool.subagent_max_concurrency, 4)
+
+  firstProfile.tool.subagent_max_concurrency = 20
+  const savedFirstProfile = JSON.parse(JSON.stringify(firstProfile))
+
+  assert.equal(savedFirstProfile.tool.subagent_max_concurrency, 20)
+  assert.equal(savedFirstProfile.tool.scheduled_task_max_concurrency, 4)
+  assert.equal(savedFirstProfile.tool.background_task_max_concurrency, 2)
+  assert.equal(secondProfile.tool.subagent_max_concurrency, 4)
+  assert.equal(defaultProfileConfigs().tool.subagent_max_concurrency, 4)
+})

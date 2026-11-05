@@ -4,6 +4,7 @@ import uuid
 from app.core.constants import (
     ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
+    SESSION_REPLY_CLAIM_BATCH_SIZE,
     SESSION_REPLY_CLEANUP_BATCH_SIZE,
     SESSION_REPLY_CLEANUP_INTERVAL_SECONDS,
     SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN,
@@ -117,27 +118,44 @@ class SessionReplyConsumer:
 
                 async with AsyncSessionLocal() as db:
                     settings = await system_setting_crud.get_runtime_settings(db)
-                    scheduled_profile_ids = await session_reply_work_item_crud.list_ready_scheduled_profile_ids(db)
-                    profiles = await profile_crud.get_by_ids(db, scheduled_profile_ids)
-                scheduled_profile_limits = {profile.id: ProfileConfig.model_validate(profile.configs).tool.scheduled_task_max_concurrency for profile in profiles if profile.id is not None}
-                available_slots = max(0, settings.session_reply_max_concurrency - len(self._running))
+                    agent_profile_ids = await session_reply_work_item_crud.list_ready_agent_profile_ids(db)
+                    profiles = await profile_crud.get_by_ids(db, agent_profile_ids)
+                scheduled_profile_limits: dict[int, int] = {}
+                subagent_profile_limits: dict[int, int] = {}
+                for profile in profiles:
+                    if profile.id is None:
+                        continue
+                    profile_config = ProfileConfig.model_validate(profile.configs)
+                    scheduled_profile_limits[profile.id] = profile_config.tool.scheduled_task_max_concurrency
+                    subagent_profile_limits[profile.id] = profile_config.tool.subagent_max_concurrency
+
                 claimed_count = 0
-                for _ in range(available_slots):
-                    worker_id = uuid.uuid4().hex
-                    async with AsyncSessionLocal() as db:
-                        work = await session_reply_work_item_crud.claim_next(
-                            db,
-                            worker_id=worker_id,
-                            lease_seconds=SESSION_REPLY_LEASE_SECONDS,
-                            scheduled_profile_limits=scheduled_profile_limits,
-                        )
-                    if work is None or work.id is None:
-                        break
-                    language = str((work.execution_state or {}).get("language") or "zh")
-                    task = asyncio.create_task(self._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts, language))
-                    self._running[work.id] = (task, worker_id)
-                    task.add_done_callback(lambda finished_task, work_id=work.id: self._discard_completed(work_id, finished_task))
-                    claimed_count += 1
+                for independent_only, batch_size in (
+                    (False, SESSION_REPLY_CLAIM_BATCH_SIZE),
+                    (True, min(SESSION_REPLY_CLAIM_BATCH_SIZE, settings.agent_work_max_concurrency)),
+                ):
+                    for _ in range(batch_size):
+                        if self._stop_event.is_set():
+                            break
+                        worker_id = uuid.uuid4().hex
+                        async with AsyncSessionLocal() as db:
+                            work = await session_reply_work_item_crud.claim_next(
+                                db,
+                                worker_id=worker_id,
+                                lease_seconds=SESSION_REPLY_LEASE_SECONDS,
+                                scheduled_profile_limits=scheduled_profile_limits,
+                                independent_only=independent_only,
+                                agent_work_max_concurrency=settings.agent_work_max_concurrency,
+                                subagent_profile_limits=subagent_profile_limits,
+                                exclude_work_ids=set(self._running),
+                            )
+                        if work is None or work.id is None:
+                            break
+                        language = str((work.execution_state or {}).get("language") or "zh")
+                        task = asyncio.create_task(self._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts, language))
+                        self._running[work.id] = (task, worker_id)
+                        task.add_done_callback(lambda finished_task, work_id=work.id: self._discard_completed(work_id, finished_task))
+                        claimed_count += 1
 
                 if claimed_count == 0:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=SESSION_REPLY_POLL_INTERVAL_SECONDS)

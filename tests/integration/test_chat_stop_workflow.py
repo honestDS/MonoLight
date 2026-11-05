@@ -1368,7 +1368,7 @@ async def test_consumer_cancels_http_stopped_claim_without_retry(
     dispatch_calls = 0
 
     async def runtime_settings(_db):
-        return SimpleNamespace(session_reply_max_concurrency=1)
+        return SimpleNamespace(agent_work_max_concurrency=1)
 
     async def controlled_dispatch(**_kwargs):
         nonlocal dispatch_calls

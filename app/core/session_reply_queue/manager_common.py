@@ -23,12 +23,12 @@ from app.core.utils.context_messages import to_jsonable
 from app.models.message import Message
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
+    SessionReplyWorkCategory,
     SessionReplyWorkItem,
     SessionReplyWorkType,
 )
 
 __all__ = [
-    "SCHEDULED_TASK_ORIGIN_STATE_KEY",
     "WORK_RESULT_POLL_INTERVAL_SECONDS",
     "get_work_request_ids",
     "merge_work_request_ids",
@@ -46,7 +46,6 @@ __all__ = [
 
 logger = get_logger(__name__)
 
-SCHEDULED_TASK_ORIGIN_STATE_KEY = "scheduled_task_origin"
 WORK_RESULT_POLL_INTERVAL_SECONDS = 0.2
 
 
@@ -85,37 +84,7 @@ def is_submission_queued(submission_status: str) -> bool:
 
 
 async def is_scheduled_task_work(db: AsyncSession, work: SessionReplyWorkItem) -> bool:
-    current_work = work
-    visited_work_ids: set[int] = set()
-    while current_work is not None:
-        if current_work.work_type == SessionReplyWorkType.AGENT_WORK:
-            return current_work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN
-        if current_work.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or current_work.source_type != SessionReplySourceType.AUDIT_RECORD:
-            return False
-        execution_state = current_work.execution_state if isinstance(current_work.execution_state, dict) else {}
-        if execution_state.get(SCHEDULED_TASK_ORIGIN_STATE_KEY) is True:
-            return True
-        work_id = current_work.id
-        if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0 or work_id in visited_work_ids:
-            return False
-        visited_work_ids.add(work_id)
-        source_id = current_work.source_id
-        if isinstance(source_id, bool) or not isinstance(source_id, (int, str)):
-            return False
-        try:
-            audit_record_id = int(source_id)
-        except (TypeError, ValueError):
-            return False
-        if audit_record_id <= 0:
-            return False
-        current_work = await session_reply_work_item_crud.get_audit_source_work(
-            db,
-            audit_record_id=audit_record_id,
-            uid=current_work.uid,
-            session_id=current_work.session_id,
-            profile_id=current_work.profile_id,
-        )
-    return False
+    return work.work_category == SessionReplyWorkCategory.SCHEDULED_TASK
 
 
 async def resolve_work_tool_workflow(db: AsyncSession, work: SessionReplyWorkItem) -> str:

@@ -1,11 +1,11 @@
 export default {
   welcome: 'Welcome',
-  subtitle: 'Start your digital evolution',
-  brand_desc: 'An ultimate, pure intelligent evolution entity',
+  subtitle: 'Sign in to start a conversation',
+  brand_desc: 'A simple, helpful AI assistant',
   username: 'Username',
   password: 'Password',
-  submit: 'Login',
+  submit: 'Sign in',
   signup: 'Sign up',
-  success: 'Login successful',
-  login_failed: 'Login failed',
+  success: 'Signed in successfully',
+  login_failed: 'Could not sign in',
 }

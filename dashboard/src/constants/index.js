@@ -65,6 +65,7 @@ export const defaultProfileConfigs = (defaults = {}) => ({
     executor_max_workers: 10,
     background_task_max_concurrency: 2,
     scheduled_task_max_concurrency: 4,
+    subagent_max_concurrency: 4,
     firecrawl_api_key: '',
     enabled_tools: [SHELL_TOOL_NAME, FILE_TOOL_NAME, WEB_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, MANAGE_BACKGROUND_TASKS_TOOL_NAME, MANAGE_SCHEDULED_TASKS_TOOL_NAME, IMAGE_GENERATION_TOOL_NAME, READ_MULTIMODAL_FILE_TOOL_NAME],
     allowed_operation_dirs: [],

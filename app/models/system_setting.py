@@ -27,7 +27,7 @@ class SystemRuntimeSettings(SQLModel):
     )
     audit_retention_days: int = Field(default=90, ge=1, le=3650)
     audit_report_email: str = Field(default="", max_length=320)
-    session_reply_max_concurrency: int = Field(default=4, ge=1, le=100)
+    agent_work_max_concurrency: int = Field(default=4, ge=1, le=100)
 
     model_config = ConfigDict(validate_assignment=True)
 

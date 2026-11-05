@@ -533,6 +533,23 @@
                   </el-form-item>
                   <el-form-item>
                     <template #label>
+                      {{ $t('profiles.subagent_max_concurrency') }}
+                      <HelpTooltip :content="$t('profiles.subagent_max_concurrency_hint')" />
+                    </template>
+                    <el-input-number
+                      v-model="form.configs.tool.subagent_max_concurrency"
+                      :min="1"
+                      :max="20"
+                      :precision="0"
+                      :step="1"
+                      step-strictly
+                      controls-position="right"
+                      class="full-width-input"
+                      :aria-label="$t('profiles.subagent_max_concurrency')"
+                    />
+                  </el-form-item>
+                  <el-form-item>
+                    <template #label>
                       {{ $t('profiles.tool_timeout') }}
                       <HelpTooltip :content="$t('profiles.tool_timeout_hint')" />
                     </template>

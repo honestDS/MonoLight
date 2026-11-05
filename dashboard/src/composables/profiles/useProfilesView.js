@@ -56,7 +56,7 @@ export function useProfilesView() {
     llm_request_max_size_mb: 32,
     audit_retention_days: 90,
     audit_report_email: '',
-    session_reply_max_concurrency: 4
+    agent_work_max_concurrency: 4
   })
 
   const form = reactive({

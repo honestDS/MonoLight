@@ -4,7 +4,7 @@ export default {
   refresh: '刷新列表',
   name: '名称',
   owner_username: '所属用户',
-  session_id: '会话 ID',
+  session_id: '会话编号',
   message: '执行指令',
   interval_seconds: '间隔秒数',
   schedule_type: '执行方式',

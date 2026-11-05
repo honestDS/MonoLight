@@ -188,7 +188,7 @@ const createHarness = async (t, options = {}) => {
     llm_request_max_size_mb: 64,
     audit_retention_days: 120,
     audit_report_email: 'audit@example.com',
-    session_reply_max_concurrency: 8,
+    agent_work_max_concurrency: 8,
     log_redaction_enabled: false,
   }
   const channelApi = {
@@ -653,7 +653,7 @@ test('superuser can load, open, and save global settings', async t => {
     llm_request_max_size_mb: 128,
     audit_retention_days: 180,
     audit_report_email: 'ops@example.com',
-    session_reply_max_concurrency: 12,
+    agent_work_max_concurrency: 12,
     log_redaction_enabled: true,
   }
   const harness = await createHarness(t, {
@@ -669,6 +669,7 @@ test('superuser can load, open, and save global settings', async t => {
   assert.equal(await harness.module.loadSystemSettings(), true)
   assert.equal(harness.api.systemSettings.length, 1)
   assert.deepEqual(normalize(harness.module.systemSettings), loadedSettings)
+  assert.equal(harness.module.systemSettings.agent_work_max_concurrency, 12)
   assert.equal(typeof harness.module.systemSettings.log_redaction_enabled, 'boolean')
 
   await harness.module.showSystemSettingsDialog()
@@ -678,6 +679,7 @@ test('superuser can load, open, and save global settings', async t => {
 
   harness.module.systemSettings.audit_retention_days = 365
   harness.module.systemSettings.llm_request_max_size_mb = 256
+  harness.module.systemSettings.agent_work_max_concurrency = 6
   harness.module.systemSettings.log_redaction_enabled = false
   const expectedPayload = normalize(harness.module.systemSettings)
   assert.equal(typeof expectedPayload.log_redaction_enabled, 'boolean')
@@ -686,6 +688,8 @@ test('superuser can load, open, and save global settings', async t => {
 
   assert.deepEqual(harness.api.systemSettingsUpdates, [expectedPayload])
   assert.equal(harness.api.systemSettingsUpdates[0].llm_request_max_size_mb, 256)
+  assert.equal(harness.api.systemSettingsUpdates[0].agent_work_max_concurrency, 6)
+  assert.equal('session_reply_max_concurrency' in harness.api.systemSettingsUpdates[0], false)
   assert.equal(typeof harness.api.systemSettingsUpdates[0].log_redaction_enabled, 'boolean')
   assert.equal(harness.api.systemSettingsUpdates[0].log_redaction_enabled, false)
   assert.deepEqual(normalize(harness.module.systemSettings), {
@@ -693,6 +697,7 @@ test('superuser can load, open, and save global settings', async t => {
     audit_report_email: 'saved@example.com',
   })
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 256)
+  assert.equal(harness.module.systemSettings.agent_work_max_concurrency, 6)
   assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
   assert.equal(typeof harness.module.systemSettings.log_redaction_enabled, 'boolean')
   assert.equal(harness.module.settingsDialogVisible.value, false)
@@ -717,7 +722,7 @@ test('legacy global settings responses preserve the default request size across 
     temp_dir_max_size_mb: 4096,
     audit_retention_days: 180,
     audit_report_email: 'ops@example.com',
-    session_reply_max_concurrency: 12,
+    agent_work_max_concurrency: 12,
   }
   const harness = await createHarness(t, {
     superuser: true,
@@ -805,7 +810,7 @@ test('clearing permissions ignores late global settings responses', async t => {
     temp_dir_max_size_mb: 8192,
     audit_retention_days: 365,
     audit_report_email: 'late@example.com',
-    session_reply_max_concurrency: 32,
+    agent_work_max_concurrency: 32,
   }))
   await opening
   await flush()

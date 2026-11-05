@@ -32,9 +32,9 @@ export default {
   no_data: '暂无数据',
   empty_content: '暂无内容',
   unknown_tool: '未知工具',
-  context_recall: '上下文召回',
+  context_recall: '检索已有信息',
   tool_result: '工具返回',
-  ws_disconnected: 'WebSocket 连接已断开',
+  ws_disconnected: '实时连接已断开',
   unknown_error: '未知错误',
   network_request_failed: '网络请求失败',
   menu: {

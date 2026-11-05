@@ -834,3 +834,133 @@ async def test_profile_tool_config_discards_legacy_goal_fields_and_persists_para
     list_payload = _assert_standard(list_response, 200)
     listed_profile = next(item for item in list_payload["data"]["items"] if item["id"] == profile_id)
     assert_config(listed_profile["configs"], 4)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", ["nested", "flat"])
+async def test_profile_subagent_max_concurrency_api_round_trip_and_partial_update(
+    layout: str,
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    create_configs = _profile_configs()
+    create_configs["tool"]["max_parallel_tools"] = 7
+    create_configs["tool"]["scheduled_task_max_concurrency"] = 6
+    if layout == "nested":
+        create_configs["tool"]["subagent_max_concurrency"] = 1
+        update_configs = {"tool": {"subagent_max_concurrency": 20}}
+    else:
+        create_configs["tool"].pop("subagent_max_concurrency")
+        create_configs["subagent_max_concurrency"] = 1
+        update_configs = {"subagent_max_concurrency": 20}
+
+    def assert_tool_config(configs: dict, subagent_max_concurrency: int) -> None:
+        assert configs["tool"]["subagent_max_concurrency"] == subagent_max_concurrency
+        assert configs["tool"]["max_parallel_tools"] == 7
+        assert configs["tool"]["scheduled_task_max_concurrency"] == 6
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await client.post(
+            "/api/v1/profiles/create",
+            json={"name": f"profile-subagent-round-trip-{layout}", "configs": create_configs},
+        )
+        create_payload = _assert_standard(create_response, 200)
+        profile_id = create_payload["data"]["id"]
+        assert_tool_config(create_payload["data"]["configs"], 1)
+
+        db_session.expire_all()
+        persisted_profile = await profile_crud.get(db_session, profile_id)
+        assert persisted_profile is not None
+        assert_tool_config(persisted_profile.configs, 1)
+
+        update_response = await client.post(
+            "/api/v1/profiles/update",
+            params={"profile_id": profile_id},
+            json={"configs": update_configs},
+        )
+        update_payload = _assert_standard(update_response, 200)
+        assert_tool_config(update_payload["data"]["configs"], 20)
+
+        db_session.expire_all()
+        persisted_profile = await profile_crud.get(db_session, profile_id)
+        assert persisted_profile is not None
+        assert_tool_config(persisted_profile.configs, 20)
+
+        list_response = await client.get("/api/v1/profiles/list")
+
+    list_payload = _assert_standard(list_response, 200)
+    listed_profile = next(item for item in list_payload["data"]["items"] if item["id"] == profile_id)
+    assert_tool_config(listed_profile["configs"], 20)
+
+
+@pytest.mark.asyncio
+async def test_profile_subagent_max_concurrency_defaults_to_four_on_create(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    create_configs = _profile_configs()
+    create_configs["tool"].pop("subagent_max_concurrency")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/profiles/create",
+            json={"name": "profile-subagent-default", "configs": create_configs},
+        )
+
+    payload = _assert_standard(response, 200)
+    profile_id = payload["data"]["id"]
+    assert payload["data"]["configs"]["tool"]["subagent_max_concurrency"] == 4
+    db_session.expire_all()
+    persisted_profile = await profile_crud.get(db_session, profile_id)
+    assert persisted_profile is not None
+    assert persisted_profile.configs["tool"]["subagent_max_concurrency"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("invalid_value", [0, 21])
+async def test_profile_subagent_max_concurrency_invalid_api_values_do_not_mutate_configs(
+    operation: str,
+    invalid_value: int,
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    original_configs = _profile_configs()
+    original_configs["tool"]["max_parallel_tools"] = 7
+    original_configs["tool"]["scheduled_task_max_concurrency"] = 6
+    profile = await profile_crud.create(
+        db_session,
+        obj_in={"uid": "user-a", "name": "profile-subagent-invalid-original", "configs": original_configs},
+    )
+    profile_id = profile.id
+    persisted_configs = ProfileConfig.model_validate(profile.configs).model_dump()
+
+    invalid_configs = _profile_configs()
+    if operation == "create":
+        invalid_configs["tool"]["subagent_max_concurrency"] = invalid_value
+        request_path = "/api/v1/profiles/create"
+        request_kwargs = {
+            "json": {
+                "name": f"profile-subagent-invalid-{operation}-{invalid_value}",
+                "configs": invalid_configs,
+            }
+        }
+    else:
+        request_path = "/api/v1/profiles/update"
+        request_kwargs = {
+            "params": {"profile_id": profile_id},
+            "json": {"configs": {"tool": {"subagent_max_concurrency": invalid_value}}},
+        }
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(request_path, **request_kwargs)
+
+    payload = _assert_standard(response, 422)
+    assert payload["data"] is None
+    db_session.expire_all()
+    persisted_profile = await profile_crud.get(db_session, profile_id)
+    assert persisted_profile is not None
+    assert persisted_profile.configs == persisted_configs

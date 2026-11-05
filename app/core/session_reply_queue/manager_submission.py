@@ -43,16 +43,15 @@ from app.models.message import (
 from app.models.profile import Profile
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
+    SessionReplyWorkCategory,
     SessionReplyWorkItem,
     SessionReplyWorkType,
 )
 from app.providers.database import ensure_sqlite_outer_transaction
 
 from .manager_common import (
-    SCHEDULED_TASK_ORIGIN_STATE_KEY,
     _serialize_message_content,
     get_tool_call_visibility,
-    is_scheduled_task_work,
     merge_work_request_ids,
 )
 
@@ -490,14 +489,14 @@ class SessionReplySubmission:
         show_tool_calls, expose_tool_call_content = get_tool_call_visibility(session, source)
         frozen_context_messages = None
         source_dispatcher_checkpoint = None
-        is_scheduled_task_source = False
+        source_work_category = SessionReplyWorkCategory.FOREGROUND
         source_work_id = claimed_record.source_work_id
         if isinstance(source_work_id, int) and not isinstance(source_work_id, bool) and source_work_id > 0:
             source_work = await session_reply_work_item_crud.get(db, source_work_id)
             if source_work is None or source_work.uid != uid or source_work.session_id != session_id or source_work.profile_id != profile_id:
                 await db.rollback()
                 raise ParameterException(ERR_CHAT_REQUEST_WORK_UNAVAILABLE)
-            is_scheduled_task_source = await is_scheduled_task_work(db, source_work)
+            source_work_category = source_work.work_category
             source_frozen_context = await session_reply_work_item_crud.get_frozen_context(db, source_work)
             if isinstance(source_frozen_context, list):
                 source_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, source_work.id)
@@ -516,6 +515,7 @@ class SessionReplySubmission:
             source_type=SessionReplySourceType.AUDIT_RECORD,
             source_id=claimed_record.id,
             dedupe_key=f"confirmed-audit:{claimed_record.id}",
+            work_category=source_work_category,
             commit=False,
         )
         work.execution_state = {
@@ -534,8 +534,6 @@ class SessionReplySubmission:
             "request_ids": merge_work_request_ids(work, request_id=request_id),
             "guidance_prompt": guidance_prompt,
         }
-        if is_scheduled_task_source:
-            work.execution_state[SCHEDULED_TASK_ORIGIN_STATE_KEY] = True
         if cleaned_additional_system_prompt:
             work.execution_state["additional_system_prompt"] = cleaned_additional_system_prompt
         if frozen_context_messages is not None:

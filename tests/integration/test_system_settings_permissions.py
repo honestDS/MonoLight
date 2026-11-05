@@ -30,7 +30,7 @@ RUNTIME_KEYS = (
     "llm_request_max_size_mb",
     "audit_retention_days",
     "audit_report_email",
-    "session_reply_max_concurrency",
+    "agent_work_max_concurrency",
 )
 
 
@@ -54,7 +54,7 @@ async def seed_data(
                 SystemSetting(key="temp_dir_max_size_mb", value="2048"),
                 SystemSetting(key="audit_retention_days", value="180"),
                 SystemSetting(key="audit_report_email", value="initial@example.com"),
-                SystemSetting(key="session_reply_max_concurrency", value="8"),
+                SystemSetting(key="agent_work_max_concurrency", value="8"),
             ]
         )
         await session.commit()
@@ -119,11 +119,12 @@ VALID_SETTINGS = {
     "llm_request_max_size_mb": 64,
     "audit_retention_days": 365,
     "audit_report_email": "updated@example.com",
-    "session_reply_max_concurrency": 12,
+    "agent_work_max_concurrency": 12,
 }
 
 INVALID_LLM_REQUEST_MAX_SIZE_VALUES = (0, -1, 1025, 1.5, None, "invalid")
 INVALID_STORED_LLM_REQUEST_MAX_SIZE_VALUES = ("-1", "0", "1025", "invalid")
+INVALID_AGENT_WORK_MAX_CONCURRENCY_VALUES = (0, 101, None, 1.5, "invalid")
 
 
 FORBIDDEN_REQUESTS = (
@@ -215,7 +216,7 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
             "llm_request_max_size_mb": 32,
             "audit_retention_days": 180,
             "audit_report_email": "initial@example.com",
-            "session_reply_max_concurrency": 8,
+            "agent_work_max_concurrency": 8,
         }
 
         updated = await client.post(
@@ -228,7 +229,7 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
                 "llm_request_max_size_mb": 64,
                 "audit_retention_days": 365,
                 "audit_report_email": "  updated@example.com  ",
-                "session_reply_max_concurrency": 12,
+                "agent_work_max_concurrency": 12,
             },
         )
         assert updated.status_code == 200
@@ -243,13 +244,53 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
             "llm_request_max_size_mb": "64",
             "audit_retention_days": "365",
             "audit_report_email": "updated@example.com",
-            "session_reply_max_concurrency": "12",
+            "agent_work_max_concurrency": "12",
         }
 
         after = await client.get(SETTINGS_PATH, headers={"Authorization": f"Bearer {token}"})
         assert after.status_code == 200
         assert after.json()["code"] == 200
         assert after.json()["data"] == VALID_SETTINGS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", (1, 100))
+async def test_superuser_persists_agent_work_max_concurrency_boundaries(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    value: int,
+) -> None:
+    token = _token("admin")
+    payload = {**VALID_SETTINGS, "agent_work_max_concurrency": value}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        updated = await _request(client, "POST", token=token, json=payload)
+        assert updated.status_code == 200
+        assert updated.json()["code"] == 200
+        assert updated.json()["data"] == payload
+
+        persisted = {key: stored_value for _, key, stored_value in await _settings_snapshot(setup_session_factory) if "concurrency" in key}
+        assert persisted == {"agent_work_max_concurrency": str(value)}
+
+        read_back = await _request(client, "GET", token=token)
+        assert read_back.status_code == 200
+        assert read_back.json()["code"] == 200
+        assert read_back.json()["data"] == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_value", INVALID_AGENT_WORK_MAX_CONCURRENCY_VALUES)
+async def test_superuser_rejects_invalid_agent_work_max_concurrency_without_changes(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    invalid_value: Any,
+) -> None:
+    token = _token("admin")
+    payload = {**VALID_SETTINGS, "agent_work_max_concurrency": invalid_value}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        before = await _settings_snapshot(setup_session_factory)
+        response = await _request(client, "POST", token=token, json=payload)
+        assert response.status_code == 422
+        assert await _settings_snapshot(setup_session_factory) == before
 
 
 @pytest.mark.asyncio

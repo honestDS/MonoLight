@@ -12,26 +12,26 @@ export default {
   profile: 'Profile',
   language: 'Language',
   stream_llm_request: 'Stream model requests',
-  stream_llm_request_hint: 'Only controls streaming requests to the model, independently of streaming responses.',
+  stream_llm_request_hint: 'Receive model output as it arrives, independently of how platform replies are sent.',
   use_stream_dispatch: 'Stream Responses',
-  use_stream_dispatch_hint: 'Only controls incremental delivery of replies; it does not change how the model is requested.',
+  use_stream_dispatch_hint: 'Send replies in parts as processing progresses. Model requests are unchanged.',
   inherited_profile: 'Use user default profile',
-  session_settings_hint: 'Saving here replaces the conversation and display settings for every session under this message platform. You can still change each session separately on the chat page afterward.',
+  session_settings_hint: 'Saving replaces the settings for all sessions on this platform. You can adjust each session afterward.',
   overwrite_settings_title: 'Replace session settings',
-  overwrite_settings_confirm: 'Saving will replace the conversation and display settings for every session under this message platform, including settings changed separately on the chat page.',
+  overwrite_settings_confirm: 'This will replace conversation and display settings for all sessions on this platform, including custom changes.',
   continue_save: 'Continue saving',
   default_profile_suffix: ' (Default)',
   enabled: 'Enabled',
-  api_timeout_ms: 'API Timeout(ms)',
-  long_poll_timeout_ms: 'Long Poll Timeout(ms)',
-  poll_interval_ms: 'Long Poll Interval(ms)',
+  api_timeout_ms: 'API Timeout (ms)',
+  long_poll_timeout_ms: 'Message Wait Timeout (ms)',
+  poll_interval_ms: 'Message Check Interval (ms)',
   merge_single_poll_messages: 'Merge messages in one poll',
   last_error: 'Last Error',
   actions: 'Actions',
   login: 'QR Login',
   recover: 'Recover',
   qrcode_title: 'Weixin OpenClaw QR Login',
-  qrcode_tip: 'Scan and confirm with Weixin. The token will be saved to the platform config after login succeeds.',
+  qrcode_tip: 'Scan with Weixin and confirm sign-in. Your login token is saved automatically.',
   fill_required: 'Please fill required fields',
   uid_required: 'Please bind a user before enabling the platform',
   create_success: 'Created successfully',
@@ -46,7 +46,7 @@ export default {
   login_expired: 'QR code expired',
   status_map: {
     DISCONNECTED: 'Disconnected',
-    WAITING_LOGIN: 'Waiting Login',
+    WAITING_LOGIN: 'Waiting for sign-in',
     CONNECTED: 'Connected',
     ERROR: 'Error'
   },
@@ -54,13 +54,13 @@ export default {
     WEIXIN_OPENCLAW: 'Weixin OpenClaw'
   },
   language_map: {
-    zh: '中文',
+    zh: 'Chinese',
     en: 'English'
   },
   error_map: {
     ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED: 'QR code expired',
     ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID: 'QR code response is missing required fields',
     ERR_MESSAGE_PLATFORM_UID_REQUIRED: 'A bound user is required before enabling a message platform',
-    ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING: 'Platform token is missing and cannot be recovered. Please scan the QR code again to bind the platform'
+    ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING: 'Login token is missing. Scan the QR code to sign in again.'
   }
 }

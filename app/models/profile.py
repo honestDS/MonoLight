@@ -126,6 +126,7 @@ class ToolConfig(BaseModel):
     max_parallel_tools: int = PydanticField(5, ge=1, le=20, description="允许的最大并行工具调用数量")
     background_task_max_concurrency: int = PydanticField(2, ge=1, le=20, description="允许的最大后台任务并发数量")
     scheduled_task_max_concurrency: int = PydanticField(4, ge=1, le=20, description="允许的最大计划任务回复并发数量")
+    subagent_max_concurrency: int = PydanticField(4, ge=1, le=20, description="允许的最大子代理运行并发数量")
     firecrawl_api_key: str | None = PydanticField(None, description="Firecrawl API Key")
     enabled_tools: list[str] = PydanticField(
         default_factory=lambda: [
@@ -286,6 +287,7 @@ class ProfileConfig(BaseModel):
                 "max_parallel_tools",
                 "background_task_max_concurrency",
                 "scheduled_task_max_concurrency",
+                "subagent_max_concurrency",
                 "firecrawl_api_key",
                 "enabled_tools",
                 "allowed_operation_dirs",
@@ -415,6 +417,7 @@ PROFILE_EXAMPLE = {
             "max_parallel_tools": 5,
             "background_task_max_concurrency": 2,
             "scheduled_task_max_concurrency": 4,
+            "subagent_max_concurrency": 4,
             "firecrawl_api_key": "",
             "enabled_tools": [SHELL_TOOL_NAME, FILE_TOOL_NAME, WEB_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, MANAGE_BACKGROUND_TASKS_TOOL_NAME, MANAGE_SCHEDULED_TASKS_TOOL_NAME, IMAGE_GENERATION_TOOL_NAME, READ_MULTIMODAL_FILE_TOOL_NAME],
             "allowed_operation_dirs": [],

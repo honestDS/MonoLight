@@ -87,6 +87,7 @@ from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySequence,
     SessionReplySourceType,
+    SessionReplyWorkCategory,
     SessionReplyWorkCheckpoint,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
@@ -1513,6 +1514,7 @@ async def test_task_confirmation_inherits_source_work_checkpoint(
             dedupe_key="scheduled-task-summary:source-checkpoint",
             commit=False,
         )
+        assert source_work.work_category == SessionReplyWorkCategory.SCHEDULED_TASK
         source_work.status = SessionReplyWorkStatus.SUCCEEDED
         source_checkpoint = {
             "messages": [
@@ -1578,6 +1580,7 @@ async def test_task_confirmation_inherits_source_work_checkpoint(
 
     assert submission_status == "approved"
     assert confirmed_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    assert confirmed_work.work_category == SessionReplyWorkCategory.SCHEDULED_TASK
     assert confirmed_work.execution_state["execution_scope"] == "task"
     frozen_messages = [InternalMessage.model_validate(item) for item in confirmed_frozen_context]
     assert [message.content for message in frozen_messages if message.role == MessageRole.USER] == ["scheduled-trigger-context"]
@@ -1608,6 +1611,7 @@ async def test_foreground_confirmation_does_not_inherit_live_source_checkpoint(
             dedupe_key="foreground-source-checkpoint",
             commit=False,
         )
+        assert source_work.work_category == SessionReplyWorkCategory.FOREGROUND
         source_work.status = SessionReplyWorkStatus.SUCCEEDED
         source_checkpoint = {
             "messages": [
@@ -1645,6 +1649,7 @@ async def test_foreground_confirmation_does_not_inherit_live_source_checkpoint(
 
     assert submission_status == "approved"
     assert confirmed_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    assert confirmed_work.work_category == SessionReplyWorkCategory.FOREGROUND
     assert confirmed_work.execution_state["execution_scope"] == "foreground"
     assert confirmed_frozen_context is None
     assert "dispatcher_checkpoint" not in confirmed_work.execution_state

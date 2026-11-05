@@ -163,6 +163,18 @@ test('preserves unrelated model entry settings during budget adjustment', () => 
 test('renders the automatic budget adjustment message in Chinese and English', () => {
   const entry = defaultModelEntry()
   applyOpenRouterModelMetadata(entry, { context_length: 1000 })
+  const expectedByLocale = {
+    zh: {
+      context: '1 千词元',
+      output: '743 个输出词元',
+      foreignText: /[A-Za-z]/
+    },
+    en: {
+      context: '1 thousand tokens',
+      output: '743 tokens',
+      foreignText: /[\u4e00-\u9fff]/
+    }
+  }
   const i18n = createI18n({
     legacy: false,
     locale: 'zh',
@@ -179,9 +191,32 @@ test('renders the automatic budget adjustment message in Chinese and English', (
       max_tokens: entry.max_tokens
     })
 
-    assert.match(rendered, /1K/)
-    assert.match(rendered, /743/)
-    assert.ok(rendered.replace(/1K|743/g, '').trim().length > 0)
+    assert.ok(rendered.includes(expectedByLocale[locale].context))
+    assert.ok(rendered.includes(expectedByLocale[locale].output))
+    assert.doesNotMatch(rendered, expectedByLocale[locale].foreignText)
     assert.doesNotMatch(rendered, /\{[^{}]*\}/)
   }
+})
+
+test('renders HTTP proxy format errors without compiler errors', t => {
+  const consoleError = t.mock.method(console, 'error', () => {})
+  const i18n = createI18n({
+    legacy: false,
+    locale: 'zh',
+    fallbackLocale: 'en',
+    messages: { zh: zhChannels, en: enChannels },
+    missingWarn: false,
+    fallbackWarn: false
+  })
+
+  for (const locale of ['zh', 'en']) {
+    i18n.global.locale.value = locale
+    const rendered = i18n.global.t('http_proxy_format_error')
+
+    assert.ok(rendered.includes('http://username:password@host:port'))
+    assert.ok(rendered.includes('http://host:port'))
+    assert.doesNotMatch(rendered, /\{'@'\}/)
+  }
+
+  assert.equal(consoleError.mock.callCount(), 0)
 })

@@ -164,9 +164,9 @@
           <el-input v-model.trim="systemSettings.audit_report_email" type="email" :placeholder="$t('profiles.audit_report_email_placeholder')" class="full-width-input" />
           <div class="help-text mt-5">{{ $t('profiles.audit_report_email_hint') }}</div>
         </el-form-item>
-        <el-form-item :label="$t('profiles.session_reply_max_concurrency')">
-          <el-input-number v-model="systemSettings.session_reply_max_concurrency" :min="1" :max="100" class="full-width-input" controls-position="right" />
-          <div class="help-text mt-5">{{ $t('profiles.session_reply_max_concurrency_hint') }}</div>
+        <el-form-item :label="$t('profiles.agent_work_max_concurrency')">
+          <el-input-number v-model="systemSettings.agent_work_max_concurrency" :min="1" :max="100" class="full-width-input" controls-position="right" />
+          <div class="help-text mt-5">{{ $t('profiles.agent_work_max_concurrency_hint') }}</div>
         </el-form-item>
       </el-form>
       <template #footer>

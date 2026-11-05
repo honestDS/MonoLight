@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, func, or_, true, update
+from sqlalchemy import and_, case, delete, exists, func, or_, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -32,6 +32,7 @@ from app.models.session_reply_work_item import (
     SESSION_REPLY_TERMINAL_STATUSES,
     SessionReplySequence,
     SessionReplySourceType,
+    SessionReplyWorkCategory,
     SessionReplyWorkCheckpoint,
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
@@ -39,6 +40,25 @@ from app.models.session_reply_work_item import (
 )
 
 _TERMINAL_STATUS_VALUES = [status.value for status in SESSION_REPLY_TERMINAL_STATUSES]
+
+
+def _work_category_expression(table: Any) -> Any:
+    return case(
+        (
+            table.c.work_type == SessionReplyWorkType.AGENT_WORK,
+            case(
+                (
+                    table.c.source_type == SessionReplySourceType.PARENT_WORK,
+                    SessionReplyWorkCategory.SUBAGENT.value,
+                ),
+                else_=SessionReplyWorkCategory.SCHEDULED_TASK.value,
+            ),
+        ),
+        else_=func.coalesce(
+            table.c.execution_state["work_category"].as_string(),
+            SessionReplyWorkCategory.FOREGROUND.value,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -397,8 +417,19 @@ class CRUDSessionReplyWorkItem:
         source_type: SessionReplySourceType,
         source_id: str | int,
         dedupe_key: str,
+        work_category: SessionReplyWorkCategory | None = None,
         commit: bool = True,
     ) -> tuple[SessionReplyWorkItem, bool]:
+        resolved_work_category = work_category
+        if resolved_work_category is None:
+            if work_type == SessionReplyWorkType.AGENT_WORK:
+                if source_type == SessionReplySourceType.PARENT_WORK:
+                    resolved_work_category = SessionReplyWorkCategory.SUBAGENT
+                else:
+                    resolved_work_category = SessionReplyWorkCategory.SCHEDULED_TASK
+            else:
+                resolved_work_category = SessionReplyWorkCategory.FOREGROUND
+
         async with db.begin_nested() as savepoint:
             sequence_no = await self.allocate_sequence_no(db, session_id)
             now = get_local_time()
@@ -414,7 +445,7 @@ class CRUDSessionReplyWorkItem:
                     source_id=str(source_id),
                     dedupe_key=dedupe_key,
                     status=SessionReplyWorkStatus.READY_FOR_LLM,
-                    execution_state={},
+                    execution_state={"work_category": resolved_work_category.value},
                     event_sent=False,
                     attempt_count=0,
                     max_attempts=2,
@@ -445,15 +476,16 @@ class CRUDSessionReplyWorkItem:
         db: AsyncSession,
         work: SessionReplyWorkItem,
     ) -> bool:
-        if work.id is None or work.sequence_no is None or work.work_type == SessionReplyWorkType.AGENT_WORK:
+        if work.id is None or work.sequence_no is None or work.work_category != SessionReplyWorkCategory.FOREGROUND:
             return False
+        work_category = _work_category_expression(SessionReplyWorkItem.__table__)
         result = await db.execute(
             select(SessionReplyWorkItem.id)
             .where(
                 SessionReplyWorkItem.uid == work.uid,
                 SessionReplyWorkItem.session_id == work.session_id,
                 SessionReplyWorkItem.sequence_no < work.sequence_no,
-                SessionReplyWorkItem.work_type != SessionReplyWorkType.AGENT_WORK,
+                work_category == SessionReplyWorkCategory.FOREGROUND.value,
                 SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
                 SessionReplyWorkItem.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
             )
@@ -468,71 +500,119 @@ class CRUDSessionReplyWorkItem:
         worker_id: str,
         lease_seconds: int,
         scheduled_profile_limits: dict[int, int] | None = None,
+        independent_only: bool | None = None,
+        agent_work_max_concurrency: int = 4,
+        subagent_profile_limits: dict[int, int] | None = None,
+        exclude_work_ids: set[int] | None = None,
     ) -> SessionReplyWorkItem | None:
         now = int(time.time())
         earlier_work = SessionReplyWorkItem.__table__.alias("earlier_session_reply_work")
         active_running = SessionReplyWorkItem.__table__.alias("active_running_session_reply_work")
-        scheduled_running = SessionReplyWorkItem.__table__.alias("scheduled_running_session_reply_work")
-        scheduled_limits = scheduled_profile_limits or {}
-        scheduled_limit_conditions = [
-            and_(
-                SessionReplyWorkItem.profile_id == profile_id,
-                select(scheduled_running.c.id)
-                .where(
-                    scheduled_running.c.profile_id == profile_id,
-                    scheduled_running.c.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN.value,
-                    scheduled_running.c.status == SessionReplyWorkStatus.RUNNING.value,
-                    scheduled_running.c.lock_until > now,
-                )
-                .limit(limit)
-                .offset(limit - 1)
-                .scalar_subquery()
-                .is_(None),
-            )
-            for profile_id, limit in scheduled_limits.items()
-        ]
-        scheduled_capacity_available = (
-            or_(
-                SessionReplyWorkItem.source_type != SessionReplySourceType.SCHEDULED_TASK_RUN,
-                *scheduled_limit_conditions,
-            )
-            if scheduled_limits
-            else true()
-        )
-        candidate = (
-            select(SessionReplyWorkItem.id)
+        work_category = _work_category_expression(SessionReplyWorkItem.__table__)
+        earlier_category = _work_category_expression(earlier_work)
+        running_category = _work_category_expression(active_running)
+        scheduled_limits = scheduled_profile_limits
+        if scheduled_limits is None:
+            scheduled_limits = {}
+        subagent_limits = subagent_profile_limits
+        if subagent_limits is None:
+            subagent_limits = {}
+
+        scheduled_limit_cases: list[tuple[Any, int]] = []
+        for profile_id, limit in scheduled_limits.items():
+            scheduled_limit_cases.append((SessionReplyWorkItem.profile_id == profile_id, limit))
+        subagent_limit_cases: list[tuple[Any, int]] = []
+        for profile_id, limit in subagent_limits.items():
+            subagent_limit_cases.append((SessionReplyWorkItem.profile_id == profile_id, limit))
+        scheduled_profile_limit: Any = 4
+        if scheduled_limit_cases:
+            scheduled_profile_limit = case(*scheduled_limit_cases, else_=4)
+        subagent_profile_limit: Any = 4
+        if subagent_limit_cases:
+            subagent_profile_limit = case(*subagent_limit_cases, else_=4)
+
+        independent_running_count = (
+            select(func.count(active_running.c.id))
             .where(
-                SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
-                SessionReplyWorkItem.available_at <= now,
-                scheduled_capacity_available,
+                running_category != SessionReplyWorkCategory.FOREGROUND.value,
+                active_running.c.status == SessionReplyWorkStatus.RUNNING.value,
+                active_running.c.lock_until > now,
+            )
+            .scalar_subquery()
+        )
+        scheduled_running_count = (
+            select(func.count(active_running.c.id))
+            .where(
+                active_running.c.profile_id == SessionReplyWorkItem.profile_id,
+                running_category == SessionReplyWorkCategory.SCHEDULED_TASK.value,
+                active_running.c.status == SessionReplyWorkStatus.RUNNING.value,
+                active_running.c.lock_until > now,
+            )
+            .scalar_subquery()
+        )
+        subagent_running_count = (
+            select(func.count(active_running.c.id))
+            .where(
+                active_running.c.profile_id == SessionReplyWorkItem.profile_id,
+                running_category == SessionReplyWorkCategory.SUBAGENT.value,
+                active_running.c.status == SessionReplyWorkStatus.RUNNING.value,
+                active_running.c.lock_until > now,
+            )
+            .scalar_subquery()
+        )
+        scheduled_profile_capacity_available = or_(
+            work_category != SessionReplyWorkCategory.SCHEDULED_TASK.value,
+            scheduled_running_count < scheduled_profile_limit,
+        )
+        subagent_profile_capacity_available = or_(
+            work_category != SessionReplyWorkCategory.SUBAGENT.value,
+            subagent_running_count < subagent_profile_limit,
+        )
+
+        candidate_conditions = [
+            SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+            SessionReplyWorkItem.available_at <= now,
+            or_(
+                work_category == SessionReplyWorkCategory.FOREGROUND.value,
+                independent_running_count < agent_work_max_concurrency,
+            ),
+            scheduled_profile_capacity_available,
+            subagent_profile_capacity_available,
+        ]
+        if independent_only is False:
+            candidate_conditions.append(work_category == SessionReplyWorkCategory.FOREGROUND.value)
+        elif independent_only is True:
+            candidate_conditions.append(work_category != SessionReplyWorkCategory.FOREGROUND.value)
+        if exclude_work_ids:
+            candidate_conditions.append(SessionReplyWorkItem.id.not_in(exclude_work_ids))
+        candidate_conditions.extend(
+            [
                 or_(
-                    SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                    work_category != SessionReplyWorkCategory.FOREGROUND.value,
                     ~exists(
                         select(1).where(
                             earlier_work.c.session_id == SessionReplyWorkItem.session_id,
                             earlier_work.c.sequence_no < SessionReplyWorkItem.sequence_no,
-                            earlier_work.c.work_type != SessionReplyWorkType.AGENT_WORK.value,
+                            earlier_category == SessionReplyWorkCategory.FOREGROUND.value,
                             earlier_work.c.status.not_in(_TERMINAL_STATUS_VALUES),
                             earlier_work.c.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value,
                         )
                     ),
                 ),
                 or_(
-                    SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                    work_category != SessionReplyWorkCategory.FOREGROUND.value,
                     ~exists(
                         select(1).where(
                             active_running.c.session_id == SessionReplyWorkItem.session_id,
-                            active_running.c.work_type != SessionReplyWorkType.AGENT_WORK.value,
+                            running_category == SessionReplyWorkCategory.FOREGROUND.value,
                             active_running.c.status == SessionReplyWorkStatus.RUNNING.value,
                             active_running.c.lock_until > now,
                         )
                     ),
                 ),
-            )
-            .order_by(SessionReplyWorkItem.created_at, SessionReplyWorkItem.id)
-            .limit(1)
-            .scalar_subquery()
+            ]
         )
+        candidate = select(SessionReplyWorkItem.id).where(*candidate_conditions).order_by(SessionReplyWorkItem.created_at, SessionReplyWorkItem.id).limit(1).scalar_subquery()
         statement = (
             update(SessionReplyWorkItem)
             .where(
@@ -606,12 +686,12 @@ class CRUDSessionReplyWorkItem:
             await db.commit()
         return active_claims
 
-    async def list_ready_scheduled_profile_ids(self, db: AsyncSession) -> set[int]:
+    async def list_ready_agent_profile_ids(self, db: AsyncSession) -> set[int]:
         result = await db.execute(
             select(SessionReplyWorkItem.profile_id)
             .where(
-                SessionReplyWorkItem.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN,
                 SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+                _work_category_expression(SessionReplyWorkItem.__table__) != SessionReplyWorkCategory.FOREGROUND.value,
             )
             .distinct()
         )
@@ -1081,6 +1161,7 @@ class CRUDSessionReplyWorkItem:
         *,
         work: SessionReplyWorkItem,
     ) -> list[SessionReplyWorkItem]:
+        work_category = _work_category_expression(SessionReplyWorkItem.__table__)
         blocking_sequence_result = await db.execute(
             select(SessionReplyWorkItem.sequence_no)
             .where(
@@ -1088,7 +1169,7 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyWorkItem.sequence_no > work.sequence_no,
                 SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
                 SessionReplyWorkItem.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
-                SessionReplyWorkItem.work_type != SessionReplyWorkType.AGENT_WORK,
+                work_category == SessionReplyWorkCategory.FOREGROUND.value,
                 or_(
                     SessionReplyWorkItem.work_type != SessionReplyWorkType.FOREGROUND_REPLY,
                     SessionReplyWorkItem.profile_id != work.profile_id,

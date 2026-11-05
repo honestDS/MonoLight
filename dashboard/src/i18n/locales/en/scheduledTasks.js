@@ -29,7 +29,7 @@ export default {
   timezone: 'Time Zone',
   timezone_hint: 'Uses the browser default; editing preserves it until manually changed.',
   cron_expression: 'Cron Expression',
-  cron_hint: '5 fields: min hour dom month dow; L in the day-of-month field means the last day; DOM,DOW uses OR.',
+  cron_hint: 'Use five fields: minute, hour, day of month, month, and day of week. L means the last day of the month. If both day fields are set, either match triggers the task.',
   invalid_interval: 'Enter a whole number of at least 60 seconds',
   invalid_time: 'Enter a valid time',
   invalid_weekdays: 'Select at least one weekday',
