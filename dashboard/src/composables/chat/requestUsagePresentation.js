@@ -2,6 +2,16 @@ const isValidNonNegativeNumber = (value) => Number.isFinite(value) && value >= 0
 
 const isValidPositiveNumber = (value) => Number.isFinite(value) && value > 0
 
+const tokenNumberFormatter = new Intl.NumberFormat('en-US', {
+  notation: 'compact',
+  compactDisplay: 'short',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+})
+
+export const formatTokenCount = (value) =>
+  Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
+
 const emptyContextSummaryProgress = (status) => ({
   status,
   inputTokens: null,

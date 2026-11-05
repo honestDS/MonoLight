@@ -51,8 +51,8 @@ export default {
   reasoning_efforts: '思考等级候选',
   reasoning_efforts_placeholder: '选择候选或输入后按回车添加',
   reasoning_efforts_hint: '仅保存可选等级；实际使用的思考等级请在配置文件中对应模型的路由规则里设置。',
-  max_tokens: '最大输出词元数',
-  context_window_k: '上下文容量（千词元）',
+  max_tokens: '最大输出 Token 数',
+  context_window_k: '上下文容量（千 Token）',
   image_understanding: '图像理解',
   audio_understanding: '音频理解',
   video_understanding: '视频理解（尚未实现）',
@@ -93,7 +93,7 @@ export default {
   chat_test_total_latency: '总延迟',
   chat_test_model: '模型',
   chat_test_reply: '回复内容',
-  chat_test_usage: '词元用量',
+  chat_test_usage: 'Token 用量',
   chat_test_failed: '模型检测失败',
   model_test_running: '测试进行中',
   model_test_success: '测试成功',
@@ -140,6 +140,6 @@ export default {
   model_metadata_invalid_response: 'OpenRouter 返回了无效的模型信息',
   model_metadata_no_mappable_fields: 'OpenRouter 未返回可用参数',
   model_metadata_detect_success: '已从 OpenRouter 读取 {model} 的参数：{fields}',
-  model_metadata_max_tokens_adjusted: '读取到上下文容量为 {context_window_k} 千词元，原最大输出词元数不适用，已调整为 {max_tokens} 个输出词元。',
+  model_metadata_max_tokens_adjusted: '读取到上下文容量为 {context_window_k} 千 Token，原最大输出 Token 数不适用，已调整为 {max_tokens} 个输出 Token。',
   model_metadata_detect_failed: '从 OpenRouter 读取参数失败'
 }

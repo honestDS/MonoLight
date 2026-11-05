@@ -148,6 +148,7 @@ import { useI18n } from 'vue-i18n'
 import { ArrowDown } from '@element-plus/icons-vue'
 
 import {
+  formatTokenCount,
   getSessionCacheHitRate,
   getContextSummaryProgress
 } from '../composables/chat/requestUsagePresentation.js'
@@ -159,7 +160,6 @@ const props = defineProps({
   contextSummarizing: { type: Boolean, default: false }
 })
 const { t } = useI18n()
-const tokenNumberFormatter = new Intl.NumberFormat()
 const percentNumberFormatter = new Intl.NumberFormat(undefined, {
   style: 'percent',
   maximumFractionDigits: 2
@@ -177,7 +177,6 @@ const hasContextSummaryProgress = computed(() => (
   contextSummaryProgress.value.status === 'threshold_reached'
 ))
 
-const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
 const formatPercent = value => percentNumberFormatter.format(value)
 const formatPercentOrUnknown = value => Number.isFinite(value) ? formatPercent(value) : t('chat.usage_unknown')
 

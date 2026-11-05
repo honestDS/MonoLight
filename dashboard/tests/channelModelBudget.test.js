@@ -165,8 +165,8 @@ test('renders the automatic budget adjustment message in Chinese and English', (
   applyOpenRouterModelMetadata(entry, { context_length: 1000 })
   const expectedByLocale = {
     zh: {
-      context: '1 千词元',
-      output: '743 个输出词元',
+      context: '1 千 Token',
+      output: '743 个输出 Token',
       foreignText: /[A-Za-z]/
     },
     en: {
@@ -190,10 +190,11 @@ test('renders the automatic budget adjustment message in Chinese and English', (
       context_window_k: entry.context_window_k,
       max_tokens: entry.max_tokens
     })
+    const languageText = locale === 'zh' ? rendered.replace(/\bToken\b/g, '') : rendered
 
     assert.ok(rendered.includes(expectedByLocale[locale].context))
     assert.ok(rendered.includes(expectedByLocale[locale].output))
-    assert.doesNotMatch(rendered, expectedByLocale[locale].foreignText)
+    assert.doesNotMatch(languageText, expectedByLocale[locale].foreignText)
     assert.doesNotMatch(rendered, /\{[^{}]*\}/)
   }
 })

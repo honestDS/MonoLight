@@ -9,6 +9,7 @@ import {
   shouldReplaceLlmRequestMetadata
 } from '../src/composables/chat/llmRequestMetadata.js'
 import {
+  formatTokenCount,
   getSessionCacheHitRate,
   getContextSummaryProgress
 } from '../src/composables/chat/requestUsagePresentation.js'
@@ -488,4 +489,99 @@ test('context summary invalidation keeps cumulative usage and rejects duplicate 
   assert.equal(freshConfirmation.cache_hit_rate, 120 / 500)
   assert.equal(getContextSummaryProgress(freshConfirmation).status, 'ready')
   assert.equal(getContextSummaryProgress(freshConfirmation).ratio, 0.9)
+})
+
+test('formats token counts with decimal compact units and fixed precision', () => {
+  const cases = [
+    [0, '0.00'],
+    [801, '801.00'],
+    [999, '999.00'],
+    [1000, '1.00K'],
+    [1024, '1.02K'],
+    [20480, '20.48K'],
+    [81520, '81.52K'],
+    [1e6, '1.00M'],
+    [1048000, '1.05M'],
+    [1e9, '1.00B'],
+    [1234567890, '1.23B']
+  ]
+
+  for (const [value, expected] of cases) {
+    assert.equal(formatTokenCount(value), expected)
+  }
+})
+
+test('rounding promotes token counts at compact unit boundaries', () => {
+  const cases = [
+    [999994, '999.99K'],
+    [999995, '1.00M'],
+    [999994999, '999.99M'],
+    [999995000, '1.00B']
+  ]
+
+  for (const [value, expected] of cases) {
+    assert.equal(formatTokenCount(value), expected)
+  }
+})
+
+test('formats unknown token values as a placeholder', () => {
+  for (const value of [
+    null,
+    undefined,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    '1000',
+    true,
+    false
+  ]) {
+    assert.equal(formatTokenCount(value), '-')
+  }
+})
+
+test('formats the screenshot metadata while preserving raw summary progress values', () => {
+  const metadata = Object.freeze({
+    input_tokens: 23382,
+    input_tokens_source: 'provider',
+    summary_trigger_tokens: 513632,
+    total_input_tokens: 81520,
+    total_output_tokens: 801,
+    context_window_tokens: 1048000,
+    max_output_tokens: 20480
+  })
+
+  const progress = getContextSummaryProgress(metadata)
+  const displayedCounts = [
+    metadata.total_input_tokens,
+    metadata.total_output_tokens,
+    metadata.context_window_tokens,
+    metadata.max_output_tokens,
+    progress.inputTokens,
+    progress.triggerTokens,
+    progress.remainingTokens
+  ].map(formatTokenCount)
+
+  assert.deepEqual(displayedCounts, [
+    '81.52K',
+    '801.00',
+    '1.05M',
+    '20.48K',
+    '23.38K',
+    '513.63K',
+    '490.25K'
+  ])
+  assert.equal(progress.inputTokens, 23382)
+  assert.equal(progress.triggerTokens, 513632)
+  assert.equal(progress.remainingTokens, 490250)
+  assert.equal(progress.ratio, 23382 / 513632)
+  assert.equal(progress.status, 'ready')
+  assert.deepEqual(metadata, {
+    input_tokens: 23382,
+    input_tokens_source: 'provider',
+    summary_trigger_tokens: 513632,
+    total_input_tokens: 81520,
+    total_output_tokens: 801,
+    context_window_tokens: 1048000,
+    max_output_tokens: 20480
+  })
 })
