@@ -5,9 +5,15 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import tools
 from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
+    TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
+    TOOL_WORKFLOW_FOREGROUND,
+    TOOL_WORKFLOW_SCHEDULED_TASK,
+    TOOL_WORKFLOW_SUBAGENT,
 )
+from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
@@ -28,6 +34,7 @@ __all__ = [
     "merge_work_request_ids",
     "is_submission_queued",
     "is_scheduled_task_work",
+    "resolve_work_tool_workflow",
     "get_tool_call_visibility",
     "build_input_accepted_event",
     "build_input_queued_event",
@@ -109,6 +116,53 @@ async def is_scheduled_task_work(db: AsyncSession, work: SessionReplyWorkItem) -
             profile_id=current_work.profile_id,
         )
     return False
+
+
+async def resolve_work_tool_workflow(db: AsyncSession, work: SessionReplyWorkItem) -> str:
+    current_work = work
+    visited_work_ids: set[int] = set()
+    while True:
+        work_id = current_work.id
+        if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0 or work_id in visited_work_ids:
+            raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+        visited_work_ids.add(work_id)
+
+        if current_work.work_type == SessionReplyWorkType.AGENT_WORK:
+            if current_work.source_type == SessionReplySourceType.PARENT_WORK:
+                return TOOL_WORKFLOW_SUBAGENT
+            return TOOL_WORKFLOW_SCHEDULED_TASK
+
+        if current_work.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or current_work.source_type != SessionReplySourceType.AUDIT_RECORD:
+            return TOOL_WORKFLOW_FOREGROUND
+
+        # Resolve the original approval instead of the mutable execution binding.
+        execution_state = current_work.execution_state if isinstance(current_work.execution_state, dict) else {}
+        decision_message_id = execution_state.get("decision_message_id")
+        if isinstance(decision_message_id, bool) or not isinstance(decision_message_id, int) or decision_message_id <= 0:
+            raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+
+        record = await audit_crud.get_approved_record_by_decision_message(
+            db,
+            uid=current_work.uid,
+            session_id=current_work.session_id,
+            decision_message_id=decision_message_id,
+        )
+        if record is None:
+            raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+
+        source_work = await session_reply_work_item_crud.get_audit_source_work(
+            db,
+            audit_record_id=record.id,
+            uid=current_work.uid,
+            session_id=current_work.session_id,
+            profile_id=current_work.profile_id,
+        )
+        if source_work is not None:
+            current_work = source_work
+            continue
+        if record.source == "background_task":
+            return TOOL_WORKFLOW_BACKGROUND_PROACTIVE
+        return tools.resolve_tool_workflow(execution_scope=record.execution_scope)
 
 
 def build_input_accepted_event(

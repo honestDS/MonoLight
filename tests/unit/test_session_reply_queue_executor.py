@@ -7,7 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.audit.service import AuditRoundResult
-from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.constants import (
+    SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
+    TOOL_WORKFLOW_FOREGROUND,
+    TOOL_WORKFLOW_SCHEDULED_TASK,
+)
 from app.core.session_reply_queue import (
     executor as executor_module,
 )
@@ -146,6 +150,9 @@ def _isolate_confirmed_tool_runtime_dependencies(monkeypatch):
             llm_request_metadata={"context_window_tokens": 4096},
         )
 
+    async def resolve_work_tool_workflow(_db, _work):
+        return TOOL_WORKFLOW_FOREGROUND
+
     async def persist_todo_snapshot(_db, *, uid, session_id, tool_results):
         return None
 
@@ -153,6 +160,11 @@ def _isolate_confirmed_tool_runtime_dependencies(monkeypatch):
         executor_confirmed_module,
         "session_crud",
         SimpleNamespace(get_by_session_id=get_session),
+    )
+    monkeypatch.setattr(
+        executor_confirmed_module,
+        "resolve_work_tool_workflow",
+        resolve_work_tool_workflow,
     )
     monkeypatch.setattr(
         executor_confirmed_module,
@@ -1129,7 +1141,7 @@ async def test_scheduled_reply_persists_and_clears_audit_binding(monkeypatch):
         allow_tools=True,
         initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
         initial_fixed_upper_message_id=8,
-        restrict_tools_to_background_allowlist=False,
+        tool_workflow=TOOL_WORKFLOW_SCHEDULED_TASK,
         reply_source="scheduled_task",
         final_message_dedupe_key=executor_common_module._result_message_dedupe_key(work),
         audit_execution_binding_callback=partial(
@@ -1640,7 +1652,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         work.execution_state = kwargs["values"]["execution_state"]
         return True
 
-    async def get_tools(db, profile):
+    async def get_tools(db, profile, **kwargs):
         return [], None
 
     async def create_execution(db, **kwargs):
@@ -2064,7 +2076,7 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
     async def validate_profile(db, profile):
         return SimpleNamespace()
 
-    async def get_tools(db, profile):
+    async def get_tools(db, profile, **kwargs):
         return [], None
 
     async def create_execution(db, **kwargs):
@@ -2450,7 +2462,7 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
     async def validate_profile(db, profile):
         return SimpleNamespace()
 
-    async def get_tools(db, profile):
+    async def get_tools(db, profile, **kwargs):
         return [], None
 
     async def update_confirmation(*args, **kwargs):
@@ -2557,7 +2569,7 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
     async def validate_profile(db, profile):
         return SimpleNamespace()
 
-    async def get_tools(db, profile):
+    async def get_tools(db, profile, **kwargs):
         return [], None
 
     async def create_execution(db, **kwargs):

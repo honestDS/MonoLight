@@ -2,20 +2,18 @@ import json
 from importlib import import_module
 from typing import Any
 
-from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, END_SESSION_TOOL_NAME, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, KNOWLEDGE_BASE_QUERY_TOOL_NAME, SEND_FILE_TO_USER_TOOL_NAME, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, END_SESSION_TOOL_NAME, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TOOL_WORKFLOW_BACKGROUND_PROACTIVE, TOOL_WORKFLOW_POLICIES
 from app.core.dispatchers.context import DispatchMode
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.tools import TOOL_EXECUTOR_MAP
+from app.core.tools import TOOL_EXECUTOR_MAP, filter_tools_for_workflow
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import ToolConfig
 from app.providers.database import AsyncSessionLocal
-
-BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {SEND_FILE_TO_USER_TOOL_NAME, KNOWLEDGE_BASE_QUERY_TOOL_NAME}
 
 logger = get_logger(__name__)
 
@@ -117,6 +115,8 @@ async def process_single_tool_with_isolated_db(
     dispatch_source: str = "interactive_tool",
     session_reply_work_claim: tuple[int, str] | None = None,
     execution_scope: str | None = None,
+    tool_schemas: list[dict[str, Any]] | None = None,
+    tool_workflow: str | None = None,
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatchers.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
@@ -146,6 +146,8 @@ async def process_single_tool_with_isolated_db(
             dispatch_mode=dispatch_mode,
             dispatch_source=dispatch_source,
             execution_scope=execution_scope,
+            tool_schemas=tool_schemas,
+            tool_workflow=tool_workflow,
         )
 
 
@@ -175,15 +177,22 @@ def _get_tool_schema_name(schema: dict[str, Any]) -> str | None:
 
 
 def filter_background_proactive_tools(tools: list[dict[str, Any]], allowed_tool_names: set[str] | None = None) -> list[dict[str, Any]]:
-    allowed_names = allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
+    if allowed_tool_names is None:
+        allowed_names = set(TOOL_WORKFLOW_POLICIES[TOOL_WORKFLOW_BACKGROUND_PROACTIVE])
+    else:
+        allowed_names = allowed_tool_names
     missing_tool_names = sorted(tool_name for tool_name in allowed_names if tool_name not in TOOL_EXECUTOR_MAP)
     if missing_tool_names:
         raise ServerException(message=ERR_INTERNAL_SERVER_ERROR, missing_tools=", ".join(missing_tool_names))
-    return [tool for tool in tools if _get_tool_schema_name(tool) in allowed_names]
+    workflow_tools = filter_tools_for_workflow(tools, TOOL_WORKFLOW_BACKGROUND_PROACTIVE)
+    return [tool for tool in workflow_tools if _get_tool_schema_name(tool) in allowed_names]
 
 
 def get_unsupported_background_proactive_tool_names(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> list[str]:
-    allowed_names = allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
+    if allowed_tool_names is None:
+        allowed_names = set(TOOL_WORKFLOW_POLICIES[TOOL_WORKFLOW_BACKGROUND_PROACTIVE])
+    else:
+        allowed_names = allowed_tool_names
     return sorted({tool_call.name for tool_call in tool_calls if tool_call.name not in allowed_names or tool_call.name not in TOOL_EXECUTOR_MAP})
 
 

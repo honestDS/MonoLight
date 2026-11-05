@@ -11,10 +11,10 @@ from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.core.audit.confirmation import ConfirmationDecision, is_confirmation_candidate, message_has_quote, parse_confirmation_decision
 from app.core.audit.context_budget import (
     AUDIT_READ_TEXT_FILE_TOOL_SCHEMA,
-    AUDIT_SHELL_TOOL_SCHEMA,
     build_read_tool_message,
     fit_file_tool_payload_to_context,
     fit_read_result_to_context,
+    get_audit_tool_schemas,
     max_input_tokens,
     read_token_budget,
 )
@@ -1309,7 +1309,7 @@ def test_audit_summary_evidence_content_is_truncated_with_or_without_file_tool_c
         ]
 
     chat_params = {"context_window_k": 8, "max_tokens": 512}
-    tools = [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA]
+    tools = get_audit_tool_schemas()
     system_prompt = "请依据审计数据总结待确认操作。"
 
     def request_context_tokens(candidate_payload):

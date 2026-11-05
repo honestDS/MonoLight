@@ -4,13 +4,19 @@ from typing import Any
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.channel.router import select_channel
-from app.core.constants import TOOL_AUDIT_EXEMPT_OPERATIONS
+from app.core.constants import (
+    END_SESSION_SCOPE_TASK,
+    TOOL_AUDIT_EXEMPT_OPERATIONS,
+    TOOL_WORKFLOW_FOREGROUND,
+    TOOL_WORKFLOW_POLICIES,
+    TOOL_WORKFLOW_SCHEDULED_TASK,
+)
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.embedding.knowledge_base import build_knowledge_base_whitelist
 from app.core.log import get_logger
 from app.models.channel import ChannelConfig
 from app.models.knowledge_base import KnowledgeBaseType
-from app.models.profile import Profile
+from app.models.profile import Profile, ProfileConfig
 
 from .background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA, ManageBackgroundTasksExecutor
 from .end_session import (
@@ -122,6 +128,65 @@ CONTROL_TOOL_ROUND_EXECUTION_POLICIES = {
 }
 
 
+def resolve_tool_workflow(*, execution_scope: str | None = None, tool_workflow: str | None = None) -> str:
+    if tool_workflow is not None:
+        return tool_workflow
+    if execution_scope == END_SESSION_SCOPE_TASK:
+        return TOOL_WORKFLOW_SCHEDULED_TASK
+    return TOOL_WORKFLOW_FOREGROUND
+
+
+def filter_tools_for_workflow(tool_schemas: list[dict[str, Any]], tool_workflow: str) -> list[dict[str, Any]]:
+    workflow_policy = TOOL_WORKFLOW_POLICIES.get(tool_workflow)
+    if workflow_policy is None:
+        return []
+
+    filtered_tools = []
+    for schema in tool_schemas:
+        if not isinstance(schema, dict):
+            continue
+        function = schema.get("function")
+        if not isinstance(function, dict):
+            continue
+        tool_name = function.get("name")
+        parameter_policy = workflow_policy.get(tool_name)
+        if parameter_policy is None:
+            continue
+
+        tool_schema = copy.deepcopy(schema)
+        if parameter_policy:
+            parameters = tool_schema.get("function", {}).get("parameters")
+            properties = parameters.get("properties") if isinstance(parameters, dict) else None
+            if not isinstance(properties, dict):
+                continue
+
+            include_tool = True
+            for parameter_name, allowed_values in parameter_policy.items():
+                property_schema = properties.get(parameter_name)
+                if not isinstance(property_schema, dict):
+                    include_tool = False
+                    break
+                if "enum" not in property_schema:
+                    property_schema["enum"] = list(allowed_values)
+                    continue
+
+                schema_enum = property_schema["enum"]
+                if not isinstance(schema_enum, (list, tuple)):
+                    include_tool = False
+                    break
+                property_enum = [value for value in schema_enum if value in allowed_values]
+                if not property_enum:
+                    include_tool = False
+                    break
+                property_schema["enum"] = property_enum
+
+            if not include_tool:
+                continue
+
+        filtered_tools.append(tool_schema)
+    return filtered_tools
+
+
 def get_tool_round_execution_policy(tool_name: str) -> str:
     control_policy = CONTROL_TOOL_ROUND_EXECUTION_POLICIES.get(tool_name)
     if control_policy is not None:
@@ -197,8 +262,14 @@ def tool_schema_has_parameter(tool_name: str, parameter_name: str) -> bool:
     return False
 
 
-def get_tool_parameters_schema(tool_name: str, *, tool_schemas: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+def get_tool_parameters_schema(
+    tool_name: str,
+    *,
+    tool_schemas: list[dict[str, Any]] | None = None,
+    tool_workflow: str = TOOL_WORKFLOW_FOREGROUND,
+) -> dict[str, Any] | None:
     schemas = tool_schemas if tool_schemas is not None else _iter_tool_schemas()
+    schemas = filter_tools_for_workflow(schemas, tool_workflow)
     for schema in schemas:
         function = schema.get("function", {})
         if function.get("name") != tool_name:
@@ -226,28 +297,21 @@ def tool_runs_in_background(tool_name: str, arguments: dict[str, Any] | None = N
     return tool_name in ALWAYS_BACKGROUND_TOOL_NAMES or requires_background_execution(tool_name, arguments)
 
 
-def _get_enabled_tool_names(profile: Profile) -> set[str]:
-    configs = profile.configs or {}
-    tool_config = configs.get("tool", {}) if isinstance(configs, dict) else {}
-    enabled_tools = tool_config.get("enabled_tools")
-    if enabled_tools is None:
-        return set(get_registered_tool_names())
+def is_tool_enabled_for_config(tool_name: str, cfg: ProfileConfig) -> bool:
+    if tool_name in SYSTEM_BUILTIN_TOOL_NAMES:
+        return True
+    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
+        return bool(getattr(getattr(cfg, "memory", None), "enabled", False))
+    if tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
+        return not bool(getattr(getattr(cfg, "memory", None), "enabled", False))
+
+    enabled_tools = getattr(getattr(cfg, "tool", None), "enabled_tools", None)
     if not isinstance(enabled_tools, list):
-        return set()
-    normalized_names = set()
-    for name in enabled_tools:
-        if not isinstance(name, str):
-            continue
-        normalized_names.add(name)
-    return normalized_names
-
-
-def _is_memory_enabled(profile: Profile) -> bool:
-    configs = profile.configs or {}
-    if not isinstance(configs, dict):
         return False
-    memory_config = configs.get("memory")
-    return isinstance(memory_config, dict) and memory_config.get("enabled") is True
+    enabled_tool_names = {name for name in enabled_tools if isinstance(name, str)}
+    if tool_name in SHELL_COMPANION_TOOL_NAMES:
+        return SHELL_TOOL_SCHEMA["function"]["name"] in enabled_tool_names
+    return tool_name in enabled_tool_names
 
 
 async def _is_image_generation_profile_available(db: AsyncSession, profile: Profile) -> bool:
@@ -288,32 +352,36 @@ async def get_tools_for_profile(
     *,
     allow_background: bool = True,
     goal_mode: bool = False,
+    tool_workflow: str = TOOL_WORKFLOW_FOREGROUND,
 ) -> tuple[list[dict[str, Any]], list[int]]:
     """
     根据 Profile 中的 enabled_tools 生成当前会话向 LLM 暴露的工具列表。
     query_knowledge_base 属于动态工具：长期记忆关闭且存在已发布、索引可用的用户知识库时才暴露，
     并会注入运行时知识库白名单；该工具不受 enabled_tools 控制。
     """
-    enabled_tool_names = _get_enabled_tool_names(profile)
-    base_tools = [copy.deepcopy(schema) for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS]
+    cfg = ProfileConfig.model_validate(profile.configs or {})
+    base_tools = []
+    for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS:
+        if is_tool_enabled_for_config(schema["function"]["name"], cfg):
+            base_tools.append(copy.deepcopy(schema))
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
-        if schema["function"]["name"] in enabled_tool_names:
+        if is_tool_enabled_for_config(schema["function"]["name"], cfg):
             tool_schema = copy.deepcopy(schema)
             base_tools.append(_inject_background_control(tool_schema) if allow_background else tool_schema)
             if schema["function"]["name"] == SHELL_TOOL_SCHEMA["function"]["name"]:
                 base_tools.extend(copy.deepcopy(companion_schema) for companion_schema in SHELL_COMPANION_TOOL_SCHEMAS)
-    if allow_background and IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"] in enabled_tool_names and await _is_image_generation_profile_available(db, profile):
+    if allow_background and is_tool_enabled_for_config(IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"], cfg) and await _is_image_generation_profile_available(db, profile):
         base_tools.append(copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA))
-    if _is_memory_enabled(profile):
+    if is_tool_enabled_for_config(MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, cfg):
         base_tools.extend(copy.deepcopy(schema) for schema in CONFIGURABLE_MEMORY_TOOL_SCHEMAS)
-        return base_tools, []
+        return filter_tools_for_workflow(base_tools, tool_workflow), []
 
     whitelist_ids = []
 
     try:
         profile_id = profile.id
         if not isinstance(profile_id, int):
-            return base_tools, whitelist_ids
+            return filter_tools_for_workflow(base_tools, tool_workflow), whitelist_ids
 
         knowledge_bases = await knowledge_base_crud.list_recall_sources_by_profile(
             db,
@@ -346,4 +414,4 @@ async def get_tools_for_profile(
     except Exception as e:
         logger.warning(f"Failed to build dynamic tools for profile {getattr(profile, 'id', None)}: {e}")
 
-    return base_tools, whitelist_ids
+    return filter_tools_for_workflow(base_tools, tool_workflow), whitelist_ids

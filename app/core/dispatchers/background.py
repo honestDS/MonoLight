@@ -21,6 +21,7 @@ from app.core.constants import (
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     FINAL_REPLY_TOOL_CORRECTION_MAX_ATTEMPTS,
+    TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
 )
 from app.core.context import ContextManager
 from app.core.crud.account.user import user_crud
@@ -38,9 +39,7 @@ from app.core.prompts import (
     BACKGROUND_PROACTIVE_TOOL_USAGE_GUIDANCE_PROMPT,
 )
 from app.core.tools import (
-    END_SESSION_TOOL_NAME,
-    MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
-    MANAGE_TODO_TOOL_NAME,
+    filter_tools_for_workflow,
     get_tools_for_profile,
 )
 from app.core.utils.assistant_files import (
@@ -55,10 +54,8 @@ from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import (
-    BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES,
     dump_background_proactive_history,
     extract_files_to_user,
-    filter_background_proactive_tools,
     get_unsupported_background_proactive_tool_names,
     process_single_tool_with_isolated_db,
     validate_background_proactive_tool_calls,
@@ -145,7 +142,7 @@ class BackgroundDispatcherMixin:
         persist_response: bool = True,
         initial_trigger_mode: ContextSummaryTriggerMode | None = None,
         initial_fixed_upper_message_id: int | None = None,
-        restrict_tools_to_background_allowlist: bool = True,
+        tool_workflow: str = TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
         reply_source: str = "background_task",
         final_message_dedupe_key: str | None = None,
         audit_execution_binding_callback: Callable[[dict[str, Any] | None], Awaitable[None]] | None = None,
@@ -165,13 +162,14 @@ class BackgroundDispatcherMixin:
         allowed_knowledge_base_ids = None
         allowed_tool_names = None
         if allow_tools:
-            profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
-            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") not in {END_SESSION_TOOL_NAME, MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
-            if restrict_tools_to_background_allowlist:
-                profile_tools = filter_background_proactive_tools(profile_tools)
-                allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
-            else:
-                allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
+            profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(
+                db,
+                profile,
+                allow_background=False,
+                tool_workflow=tool_workflow,
+            )
+            profile_tools = filter_tools_for_workflow(profile_tools, tool_workflow)
+            allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
             tools = profile_tools or None
 
         async def recover_context_length(chat_params, chat_channel_obj, model_entry, *, active_tools, target_messages=None):
@@ -370,7 +368,7 @@ class BackgroundDispatcherMixin:
                         "error": "Unsupported tool call in background proactive reply.",
                         "instruction": BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
                         "unsupported_tool_calls": unsupported_tool_names,
-                        "allowed_tool_calls": sorted(allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES),
+                        "allowed_tool_calls": sorted(allowed_tool_names or []),
                     },
                 )
                 correction_context_messages = [*messages, *correction_messages]
@@ -515,6 +513,7 @@ class BackgroundDispatcherMixin:
                 cfg,
                 allow_background_submission=False,
                 tool_schemas=tools,
+                tool_workflow=tool_workflow,
             )
             if precheck_errors:
                 prefix_tool_responses = {
@@ -682,6 +681,8 @@ class BackgroundDispatcherMixin:
                                 model_id=model_entry["model_id"],
                                 protocol=resolve_model_protocol(model_entry),
                                 allow_background_submission=False,
+                                tool_schemas=tools,
+                                tool_workflow=tool_workflow,
                                 dispatch_mode="background",
                                 dispatch_source=reply_source,
                             )

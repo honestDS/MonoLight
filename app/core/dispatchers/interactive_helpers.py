@@ -348,6 +348,8 @@ class _ParallelToolExecutionContext:
     source_message_id: int | None = None
     session_reply_work_claim: tuple[int, str] | None = None
     execution_scope: str | None = None
+    tool_schemas: list[dict[str, Any]] | None = None
+    tool_workflow: str | None = None
 
 
 async def _execute_isolated_tool_call(
@@ -375,6 +377,8 @@ async def _execute_isolated_tool_call(
                 source_message_id=context.source_message_id,
                 session_reply_work_claim=context.session_reply_work_claim,
                 execution_scope=context.execution_scope,
+                tool_schemas=context.tool_schemas,
+                tool_workflow=context.tool_workflow,
             )
         )
         if context.active_tasks is not None:

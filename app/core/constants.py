@@ -721,6 +721,81 @@ TOOL_AUDIT_EXEMPT_OPERATIONS = frozenset({(TERMINAL_TOOL_NAME, "read"), (TERMINA
 ERR_TERMINAL_TOOL_OPERATION_INVALID = "ERR_TERMINAL_TOOL_OPERATION_INVALID"
 TERMINAL_READ_MAX_BYTES = 16 * 1024
 TERMINAL_WATCH_TOOL_NAME = "terminal_watch"
+TOOL_WORKFLOW_FOREGROUND = "foreground"
+TOOL_WORKFLOW_SCHEDULED_TASK = "scheduled_task"
+TOOL_WORKFLOW_SUBAGENT = "subagent"
+TOOL_WORKFLOW_BACKGROUND_PROACTIVE = "background_proactive"
+TOOL_WORKFLOW_AUDIT = "audit"
+TOOL_WORKFLOW_POLICIES = {
+    TOOL_WORKFLOW_FOREGROUND: {
+        MANAGE_TODO_TOOL_NAME: {"operation": ("read", "write")},
+        END_SESSION_TOOL_NAME: {},
+        SKILL_TOOL_NAME: {"operation": ("list", "browse")},
+        SHELL_TOOL_NAME: {"execution_mode": ("non_interactive", "interactive")},
+        FILE_TOOL_NAME: {"operation": ("read", "write", "edit", "patch", "grep")},
+        WEB_TOOL_NAME: {"operation": ("search", "scrape")},
+        SEND_FILE_TO_USER_TOOL_NAME: {},
+        MANAGE_BACKGROUND_TASKS_TOOL_NAME: {"operation": ("list", "cancel")},
+        MANAGE_SCHEDULED_TASKS_TOOL_NAME: {"operation": ("create", "list", "delete")},
+        READ_MULTIMODAL_FILE_TOOL_NAME: {},
+        IMAGE_GENERATION_TOOL_NAME: {},
+        KNOWLEDGE_BASE_QUERY_TOOL_NAME: {},
+        MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME: {
+            "operation": (
+                "recall",
+                "create",
+                "update",
+                "delete",
+                "knowledge_create",
+                "knowledge_update",
+                "knowledge_delete",
+            )
+        },
+        TERMINAL_TOOL_NAME: {"operation": TERMINAL_TOOL_OPERATIONS},
+        TERMINAL_WATCH_TOOL_NAME: {},
+    },
+    TOOL_WORKFLOW_SCHEDULED_TASK: {
+        END_SESSION_TOOL_NAME: {},
+        SKILL_TOOL_NAME: {"operation": ("list", "browse")},
+        SHELL_TOOL_NAME: {"execution_mode": ("non_interactive", "interactive")},
+        FILE_TOOL_NAME: {"operation": ("read", "write", "edit", "patch", "grep")},
+        WEB_TOOL_NAME: {"operation": ("search", "scrape")},
+        SEND_FILE_TO_USER_TOOL_NAME: {},
+        MANAGE_BACKGROUND_TASKS_TOOL_NAME: {"operation": ("list", "cancel")},
+        READ_MULTIMODAL_FILE_TOOL_NAME: {},
+        IMAGE_GENERATION_TOOL_NAME: {},
+        KNOWLEDGE_BASE_QUERY_TOOL_NAME: {},
+        MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME: {
+            "operation": (
+                "recall",
+                "create",
+                "update",
+                "delete",
+                "knowledge_create",
+                "knowledge_update",
+                "knowledge_delete",
+            )
+        },
+        TERMINAL_TOOL_NAME: {"operation": TERMINAL_TOOL_OPERATIONS},
+        TERMINAL_WATCH_TOOL_NAME: {},
+    },
+    TOOL_WORKFLOW_SUBAGENT: {
+        END_SESSION_TOOL_NAME: {},
+        SKILL_TOOL_NAME: {"operation": ("list", "browse")},
+        FILE_TOOL_NAME: {"operation": ("read", "write", "edit", "patch", "grep")},
+        WEB_TOOL_NAME: {"operation": ("search", "scrape")},
+        READ_MULTIMODAL_FILE_TOOL_NAME: {},
+        KNOWLEDGE_BASE_QUERY_TOOL_NAME: {},
+    },
+    TOOL_WORKFLOW_BACKGROUND_PROACTIVE: {
+        SEND_FILE_TO_USER_TOOL_NAME: {},
+        KNOWLEDGE_BASE_QUERY_TOOL_NAME: {},
+    },
+    TOOL_WORKFLOW_AUDIT: {
+        READ_TEXT_FILE_TOOL_NAME: {},
+        SHELL_TOOL_NAME: {"execution_mode": ("non_interactive",)},
+    },
+}
 TERMINAL_WATCH_POLL_INTERVAL_SECONDS = 0.5
 TERMINAL_WATCH_MAX_CONCURRENCY = 32
 TERMINAL_WATCH_MAX_OUTPUT_BYTES = 16384

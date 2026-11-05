@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.constants import TOOL_WORKFLOW_BACKGROUND_PROACTIVE
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.dispatchers.context import build_dispatch_context
@@ -824,8 +825,9 @@ async def test_background_active_reply_excludes_memory_tool_and_disables_memory_
     async def fake_validate(_db, _profile):
         return cfg
 
-    async def fake_get_tools(_db, _profile, allow_background):
+    async def fake_get_tools(_db, _profile, allow_background, *, tool_workflow):
         assert allow_background is False
+        assert tool_workflow == TOOL_WORKFLOW_BACKGROUND_PROACTIVE
         return [
             copy.deepcopy(MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA),
             copy.deepcopy(SEND_FILE_TO_USER_TOOL_SCHEMA),

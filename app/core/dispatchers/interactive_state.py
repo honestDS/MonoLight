@@ -15,8 +15,10 @@ from app.core.constants import (
     ERR_SESSION_REPLY_EXECUTION_PHASE_INVALID,
     GOAL_EXECUTION_PHASE_RUNNING,
     GOAL_EXECUTION_PHASES,
+    TOOL_WORKFLOW_FOREGROUND,
 )
 from app.core.i18n import t
+from app.core.tools import resolve_tool_workflow
 from app.core.tools.end_session import (
     resolve_end_session_scope,
 )
@@ -60,6 +62,7 @@ class InteractiveDispatchState:
     execution_resume_state: dict[str, Any] | None
     checkpoint_state: _ExecutionCheckpointState
     execution_scope: str = END_SESSION_SCOPE_FOREGROUND
+    tool_workflow: str = TOOL_WORKFLOW_FOREGROUND
     context_frozen: bool = False
     turn_messages: list[InternalMessage] = field(default_factory=list)
     files_to_user: list[str] = field(default_factory=list)
@@ -119,6 +122,7 @@ def build_interactive_dispatch_state(
     execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     initial_message_type: MessageType = MessageType.TEXT,
     execution_scope: str | None = None,
+    tool_workflow: str | None = None,
     context_frozen: bool = False,
     call_context: str | None = None,
 ) -> InteractiveDispatchState:
@@ -197,6 +201,10 @@ def build_interactive_dispatch_state(
         execution_resume_state=execution_resume_state,
         checkpoint_state=checkpoint_state,
         execution_scope=resolved_execution_scope,
+        tool_workflow=resolve_tool_workflow(
+            execution_scope=resolved_execution_scope,
+            tool_workflow=tool_workflow,
+        ),
         context_frozen=context_frozen,
         turn_messages=turn_messages,
         files_to_user=files_to_user,

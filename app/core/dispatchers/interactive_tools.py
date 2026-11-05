@@ -221,6 +221,7 @@ async def handle_interactive_tool_round(
         executable_tool_calls,
         state.cfg,
         tool_schemas=state.tools,
+        tool_workflow=state.tool_workflow,
         goal_mode=state.goal_mode,
         execution_scope=state.execution_scope,
     )
@@ -627,6 +628,8 @@ async def handle_interactive_tool_round(
         tool_result_round_budget_tokens=tool_result_round_budget_tokens,
         model_id=state.model_entry["model_id"],
         protocol=resolve_model_protocol(state.model_entry),
+        tool_schemas=state.tools,
+        tool_workflow=state.tool_workflow,
         context_summary_boundary_message_id=state.checkpoint_state.upper_message_id,
         source_message_id=state.checkpoint_state.memory_recall_boundary_message_id or (state.initial_msg.id if state.memory_enabled else None),
         session_reply_work_claim=getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY),

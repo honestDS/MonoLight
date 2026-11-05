@@ -148,7 +148,7 @@ app/core/
 ├── tools/                  # 模型可调用工具
 ├── user/                   # 用户生命周期服务
 ├── utils/                  # 通用辅助组件与内部任务模型请求策略
-├── constants.py            # 核心常量
+├── constants.py            # 核心常量与工作流工具规则
 ├── context.py              # 主会话历史、工具链对齐与模型可见内容处理
 ├── crypto.py               # 通用敏感数据处理
 ├── event_loop.py           # 平台事件循环支持
@@ -560,7 +560,7 @@ app/core/retrieval/
 
 ```text
 app/core/tools/
-├── __init__.py             # 工具注册、可用范围与审计豁免判定
+├── __init__.py             # 工具注册、Profile 可用性与工作流工具范围筛选
 ├── base.py                 # 工具抽象
 ├── background_tasks.py      # 后台任务查询与取消工具
 ├── end_session.py          # 会话结束与回复控制工具
@@ -658,6 +658,8 @@ app/core/utils/
 ├── time.py                 # 时间辅助
 └── tokenizer.py            # 按模型标识选择编码的令牌统计辅助
 ```
+
+`app/core/constants.py` 集中声明前台对话、计划任务、子代理、后台主动回复、审计取证的工具范围；`tools` 负责结合 Profile 实际可用配置生成模型列表，Dispatcher/确认执行复用同一规则，队列依据原工作关联解析工作流。
 
 标题生成与前置记忆召回复用辅助请求配置边界，相关运行态与主对话分离。
 

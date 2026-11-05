@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
-    END_SESSION_SCOPE_TASK,
     ERR_BACKGROUND_TASK_UNSUPPORTED,
     ERR_TERMINAL_PTY_DIMENSIONS_INVALID,
     ERR_TERMINAL_PTY_INPUT_INVALID,
@@ -27,13 +26,11 @@ from app.core.constants import (
     ERR_TOOL_NOT_REGISTERED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
-    MANAGE_SCHEDULED_TASKS_TOOL_NAME,
-    MANAGE_TODO_TOOL_NAME,
     MSG_BACKGROUND_TASK_QUEUED,
-    SHELL_TOOL_NAME,
     TERMINAL_TOOL_NAME,
     TERMINAL_TOOL_OPERATIONS,
     TERMINAL_WATCH_TOOL_NAME,
+    TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
 )
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.dispatchers.context import DispatchMode, build_dispatch_context
@@ -49,14 +46,13 @@ from app.core.terminal.watch_schema import TerminalWatchRequest
 from app.core.tools import (
     KNOWLEDGE_BASE_QUERY_TOOL_NAME,
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
-    SHELL_COMPANION_TOOL_NAMES,
-    SYSTEM_BUILTIN_TOOL_NAMES,
     TOOL_EXECUTOR_MAP,
     get_tool_parameters_schema,
-    get_tool_required_parameters,
     get_tool_round_execution_policy,
+    get_tools_for_profile,
+    is_tool_enabled_for_config,
+    resolve_tool_workflow,
     tool_runs_in_background,
-    tool_schema_has_parameter,
     validate_longterm_memory_arguments,
 )
 from app.core.tools.timeout import resolve_tool_claim_timeout, resolve_tool_execution_timeout
@@ -72,22 +68,6 @@ from app.models.profile import (
     Profile,
     ProfileConfig,
 )
-
-
-def _is_tool_enabled(tool_name: str, cfg: ProfileConfig, *, goal_mode: bool = False) -> bool:
-    if tool_name in SYSTEM_BUILTIN_TOOL_NAMES:
-        return True
-    if tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME:
-        return bool(getattr(getattr(cfg, "memory", None), "enabled", False))
-    if tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
-        return not bool(getattr(getattr(cfg, "memory", None), "enabled", False))
-    enabled_tools = getattr(getattr(cfg, "tool", None), "enabled_tools", None)
-    if not isinstance(enabled_tools, list):
-        return False
-    enabled_tool_names = {name for name in enabled_tools if isinstance(name, str)}
-    if tool_name in SHELL_COMPANION_TOOL_NAMES:
-        return SHELL_TOOL_NAME in enabled_tool_names
-    return tool_name in enabled_tool_names
 
 
 def _build_tool_disabled_result(tool_name: str) -> str:
@@ -355,20 +335,27 @@ def prevalidate_tool_round(
     allow_background_submission: bool = True,
     tool_schemas: list[dict[str, Any]] | None = None,
     execution_scope: str | None = None,
+    tool_workflow: str | None = None,
 ) -> dict[str, str]:
     errors: dict[str, str] = {}
+    resolved_tool_workflow = resolve_tool_workflow(
+        execution_scope=execution_scope,
+        tool_workflow=tool_workflow,
+    )
     for tool_call in tool_calls:
         tool_name = tool_call.name
         args = dict(tool_call.arguments or {})
-        background_requested = bool(args.pop("run_in_background", False))
-        parameters_schema = get_tool_parameters_schema(tool_name, tool_schemas=tool_schemas)
+        background_requested = bool(args.get("run_in_background", False))
+        parameters_schema = get_tool_parameters_schema(
+            tool_name,
+            tool_schemas=tool_schemas,
+            tool_workflow=resolved_tool_workflow,
+        )
         required_parameters = parameters_schema.get("required", []) if parameters_schema is not None else []
         declared_properties = parameters_schema.get("properties", {}) if parameters_schema is not None else {}
         missing_arguments = sorted(parameter_name for parameter_name in required_parameters if isinstance(parameter_name, str) and parameter_name not in args)
         unsupported_arguments = sorted(argument_name for argument_name in args if parameters_schema is not None and argument_name not in declared_properties)
-        if execution_scope == END_SESSION_SCOPE_TASK and tool_name in {MANAGE_SCHEDULED_TASKS_TOOL_NAME, MANAGE_TODO_TOOL_NAME}:
-            errors[tool_call.id] = _build_tool_disabled_result(tool_name)
-        elif not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
+        if parameters_schema is None or not is_tool_enabled_for_config(tool_name, cfg):
             errors[tool_call.id] = _build_tool_disabled_result(tool_name)
         elif missing_arguments:
             errors[tool_call.id] = _build_missing_required_arguments_result(
@@ -422,11 +409,11 @@ async def process_single_tool(
     dispatch_source: str = "interactive_tool",
     goal_mode: bool = False,
     execution_scope: str | None = None,
+    tool_schemas: list[dict[str, Any]] | None = None,
+    tool_workflow: str | None = None,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
-    missing_arguments = sorted(parameter_name for parameter_name in get_tool_required_parameters(tool_name) if parameter_name not in args)
-    unsupported_arguments = sorted(argument_name for argument_name in args if not tool_schema_has_parameter(tool_name, argument_name))
     background_requested = bool(args.pop("run_in_background", False))
     background_required = tool_runs_in_background(tool_name, args)
     run_in_background = background_required or background_requested
@@ -434,22 +421,32 @@ async def process_single_tool(
     log_args = json.dumps(args, ensure_ascii=False)
     LogManager.log_tool_call(turn, tool_name, log_args, session_id, uid)
 
-    if execution_scope == END_SESSION_SCOPE_TASK and tool_name in {MANAGE_SCHEDULED_TASKS_TOOL_NAME, MANAGE_TODO_TOOL_NAME}:
-        tool_result = _build_tool_disabled_result(tool_name)
-    elif not _is_tool_enabled(tool_name, cfg, goal_mode=goal_mode):
-        tool_result = _build_tool_disabled_result(tool_name)
-    elif missing_arguments:
-        tool_result = _build_missing_required_arguments_result(tool_name, missing_arguments)
-    elif unsupported_arguments:
-        tool_result = _build_unsupported_arguments_result(tool_name, unsupported_arguments)
-    elif tool_name == TERMINAL_WATCH_TOOL_NAME and (schema_errors := _validate_terminal_watch_arguments(args)):
-        tool_result = _build_schema_validation_result(tool_name, schema_errors)
-    elif tool_name == TERMINAL_TOOL_NAME and (schema_errors := _validate_terminal_tool_arguments(args)):
-        tool_result = _build_schema_validation_result(tool_name, schema_errors)
-    elif run_in_background and not allow_background_submission:
-        tool_result = _build_background_task_unsupported_result(tool_name)
+    if tool_workflow is None and dispatch_mode == "background":
+        resolved_tool_workflow = TOOL_WORKFLOW_BACKGROUND_PROACTIVE
     else:
-        tool_result = None
+        resolved_tool_workflow = resolve_tool_workflow(
+            execution_scope=execution_scope,
+            tool_workflow=tool_workflow,
+        )
+    if tool_schemas is None:
+        tool_schemas, _ = await get_tools_for_profile(
+            db,
+            profile,
+            allow_background=allow_background_submission,
+            goal_mode=goal_mode,
+            tool_workflow=resolved_tool_workflow,
+        )
+
+    precheck_errors = prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        goal_mode=goal_mode,
+        allow_background_submission=allow_background_submission,
+        tool_schemas=tool_schemas,
+        execution_scope=execution_scope,
+        tool_workflow=resolved_tool_workflow,
+    )
+    tool_result = precheck_errors.get(tool_call.id)
 
     if tool_result is None and run_in_background:
         from app.core.background_tasks.manager import background_task_manager

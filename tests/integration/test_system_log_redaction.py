@@ -27,8 +27,17 @@ from app.core.tools.base import BaseExecutor
 from app.core.utils.dispatcher.process_single_tool import process_single_tool
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers
+from app.models.knowledge_base import (
+    KnowledgeBase,
+    KnowledgeBaseCollectionOwner,
+    KnowledgeBaseDocument,
+    KnowledgeBaseIndexStatus,
+    KnowledgeBaseProfileBinding,
+    KnowledgeBaseType,
+)
 from app.models.message import InternalToolCall
 from app.models.profile import Profile, ProfileConfig
+from app.models.prompt import PromptLibrary
 from app.models.system_log import SystemLog, SystemLogCreate
 from app.models.system_setting import SystemSetting
 from app.models.user import User
@@ -46,7 +55,17 @@ async def log_session_factory(
     database_factory,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with database_factory(
-        tables=[User.__table__, SystemSetting.__table__, SystemLog.__table__],
+        tables=[
+            User.__table__,
+            SystemSetting.__table__,
+            SystemLog.__table__,
+            Profile.__table__,
+            PromptLibrary.__table__,
+            KnowledgeBase.__table__,
+            KnowledgeBaseCollectionOwner.__table__,
+            KnowledgeBaseProfileBinding.__table__,
+            KnowledgeBaseDocument.__table__,
+        ],
         name="system-log-redaction.sqlite3",
     ) as session_factory:
         async with session_factory() as session:
@@ -336,25 +355,50 @@ TOOL_CASES = (
             "operation": "recall",
             "query": "call-query-secret",
             "knowledge_query": "call-knowledge-query-secret",
-            "content": "call-content-secret",
-            "knowledge_content": "call-knowledge-content-secret",
-            "change_evidence": "call-change-evidence-secret",
         },
         "metadata": {"operation": "recall"},
+    },
+    {
+        "id": "manage-memory-create",
+        "name": MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+        "memory_enabled": True,
+        "arguments": {
+            "operation": "create",
+            "content": "call-content-secret",
+            "memory_key": "call-memory-key-secret",
+            "memory_type": "fact",
+            "change_evidence": "call-change-evidence-secret",
+        },
+        "metadata": {"operation": "create"},
+        "result_payload": {"status": "success", "content": "result-created-memory-content"},
+        "result_secrets": ["result-created-memory-content"],
+    },
+    {
+        "id": "manage-knowledge-create",
+        "name": MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+        "memory_enabled": True,
+        "arguments": {
+            "operation": "knowledge_create",
+            "knowledge_key": "call-knowledge-key-secret",
+            "knowledge_content": "call-knowledge-content-secret",
+        },
+        "metadata": {"operation": "knowledge_create"},
+        "result_payload": {"status": "success", "knowledge_content": "result-created-knowledge-content"},
+        "result_secrets": ["result-created-knowledge-content"],
     },
     {
         "id": "query-knowledge-base",
         "name": KNOWLEDGE_BASE_QUERY_TOOL_NAME,
         "memory_enabled": False,
-        "arguments": {"knowledge_base_id": 17, "query": "call-query-secret"},
-        "metadata": {"knowledge_base_id": 17},
+        "arguments": {"knowledge_base_id": "17", "query": "call-query-secret"},
+        "metadata": {"knowledge_base_id": "17"},
     },
     {
         "id": "query-knowledge-base-error",
         "name": KNOWLEDGE_BASE_QUERY_TOOL_NAME,
         "memory_enabled": False,
-        "arguments": {"knowledge_base_id": 17, "query": "call-query-secret"},
-        "metadata": {"knowledge_base_id": 17},
+        "arguments": {"knowledge_base_id": "17", "query": "call-query-secret"},
+        "metadata": {"knowledge_base_id": "17"},
         "result_error": True,
     },
 )
@@ -389,7 +433,10 @@ async def test_process_single_tool_logs_original_data_and_crud_applies_setting(
 ) -> None:
     tool_name = tool_case["name"]
 
-    if tool_case.get("result_error"):
+    if "result_payload" in tool_case:
+        result_payload = tool_case["result_payload"]
+        result_secrets = tool_case["result_secrets"]
+    elif tool_case.get("result_error"):
         result_payload = {"error": "result-error-body"}
         result_secrets = ["result-error-body"]
     elif tool_case["memory_enabled"]:
@@ -432,7 +479,7 @@ async def test_process_single_tool_logs_original_data_and_crud_applies_setting(
             "memory": {"enabled": tool_case["memory_enabled"]},
         }
     )
-    profile = Profile(uid="tool-user", name="tool-profile", configs={})
+    profile = Profile(id=1, uid="tool-user", name="tool-profile", configs=cfg.model_dump(mode="json"))
     call = InternalToolCall(
         id="redaction-test-call",
         name=tool_name,
@@ -451,6 +498,51 @@ async def test_process_single_tool_logs_original_data_and_crud_applies_setting(
                     "extra": dict(record["extra"]),
                 }
             )
+
+    async with log_session_factory() as session:
+        session.add(User(uid="tool-user", username="tool-user", is_active=True))
+        session.add(profile)
+        await session.flush()
+        if tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
+            knowledge_base = KnowledgeBase(
+                id=17,
+                uid="tool-user",
+                name="log-test",
+                embedding_channel_id=1,
+                embedding_model_id="embedding-model",
+                embedding_dimensions=3,
+                collection_name="log-test-legacy",
+                knowledge_base_type=KnowledgeBaseType.USER,
+                active_embedding_channel_id=1,
+                active_embedding_model_id="embedding-model",
+                active_embedding_dimensions=3,
+                active_embedding_signature="log-test-signature",
+                active_embedding_revision=1,
+                active_collection_name="log-test-active",
+                index_status=KnowledgeBaseIndexStatus.READY,
+            )
+            session.add(knowledge_base)
+            await session.flush()
+            session.add(
+                KnowledgeBaseProfileBinding(
+                    uid="tool-user",
+                    knowledge_base_id=17,
+                    profile_id=1,
+                )
+            )
+            session.add(
+                KnowledgeBaseDocument(
+                    knowledge_base_id=17,
+                    filename="log-test.md",
+                    content="published content",
+                    chunk_size=1000,
+                    chunk_overlap=100,
+                    batch_size=16,
+                    chunk_count=1,
+                    chunk_ids=["log-test-chunk-1"],
+                )
+            )
+        await session.commit()
 
     sink_id = logger.add(capture, level="DEBUG", enqueue=False)
     try:
@@ -476,7 +568,7 @@ async def test_process_single_tool_logs_original_data_and_crud_applies_setting(
 
             call_record = next(record for record in captured if "tool_call" in record["extra"])
             result_record = next(record for record in captured if "tool_result" in record["extra"])
-            call_secrets = [tool_case["arguments"][key] for key in ("query", "knowledge_query", "content", "knowledge_content", "change_evidence") if key in tool_case["arguments"]]
+            call_secrets = [tool_case["arguments"][key] for key in ("query", "knowledge_query", "content", "knowledge_key", "knowledge_content", "change_evidence") if key in tool_case["arguments"]]
             assert all(secret in call_record["message"] for secret in call_secrets)
             call_payload = _tool_log_payload(call_record["message"])
             assert {key: call_payload[key] for key in tool_case["metadata"]} == tool_case["metadata"]

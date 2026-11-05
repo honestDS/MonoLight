@@ -563,7 +563,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
             return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False):
+    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
         return [], []
 
     async def prepare_messages(*args, **kwargs):
@@ -710,7 +710,7 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
             return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False):
+    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
         return [], []
 
     async def generate_with_stream_callback(**kwargs):
@@ -849,7 +849,7 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
             return _Channel(), {"model_id": "model-2", "max_tokens": 256, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "max_tokens": 1024, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False):
+    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
         return [], []
 
     async def prepare_messages(*args, **kwargs):
@@ -1049,7 +1049,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
             return _Channel(), {"model_id": "model-2", "max_tokens": 256, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "max_tokens": 1024, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False):
+    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
         return [], []
 
     async def prepare_messages(*args, **kwargs):
@@ -1252,7 +1252,7 @@ async def _run_audited_interactive_dispatch(
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False):
+    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
         return [
             {
                 "type": "function",

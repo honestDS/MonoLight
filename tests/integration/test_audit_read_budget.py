@@ -6,7 +6,8 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from app.core.constants import MSG_AUDIT_WAITING_CONFIRMATION, READ_TEXT_FILE_TOOL_NAME, SHELL_TOOL_NAME
+import app.core.constants as constants
+from app.core.constants import MSG_AUDIT_WAITING_CONFIRMATION, READ_TEXT_FILE_TOOL_NAME, SHELL_TOOL_NAME, TOOL_WORKFLOW_AUDIT
 from app.core.crud.audit.audit import audit_crud
 from app.core.i18n import t
 from app.core.tools.shell import ShellExecutor
@@ -947,4 +948,82 @@ async def test_invalid_shell_evidence_consumes_budget_without_execution_or_recur
     assert evidence_error
     assert invalid_evidence[0]["tool_call_id"] == evidence_arguments.get("tool_call_id")
     assert "SHOULD_NOT_EXECUTE" not in json.dumps(invalid_evidence)
+    assert context["summary"]["response"] == expected_summary
+
+
+@pytest.mark.asyncio
+async def test_audit_policy_controls_model_tools_and_actual_evidence_execution(
+    audit_database,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    await _seed_audit_channel(audit_database)
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
+    _patch_audit_root(monkeypatch, tmp_path / "audit")
+    monkeypatch.delitem(constants.TOOL_WORKFLOW_POLICIES[TOOL_WORKFLOW_AUDIT], SHELL_TOOL_NAME)
+
+    audited_call = InternalToolCall(
+        id="audit-policy-business-shell-call",
+        name=SHELL_TOOL_NAME,
+        arguments={"command": "echo BUSINESS_COMMAND_MUST_NOT_RUN", "execution_mode": "non_interactive"},
+    )
+    cfg = _audit_config(tmp_path, threshold=5)
+    cfg.security.audit_depth = 1
+    generate_calls: list[dict[str, Any]] = []
+    shell_executions: list[tuple[str, str]] = []
+    expected_summary = "策略拒绝Shell取证，摘要不再请求新取证。"
+    _record_real_shell_execution(monkeypatch, shell_executions)
+
+    async def generate(**kwargs: Any) -> InternalResponse:
+        generate_calls.append(kwargs)
+        call_index = len(generate_calls)
+        if call_index == 1:
+            assert kwargs["tools"] is not None
+            assert [tool["function"]["name"] for tool in kwargs["tools"]] == [READ_TEXT_FILE_TOOL_NAME]
+            return _tool_response([_shell_call("audit-policy-denied", audited_call.id, "echo SHOULD_NOT_EXECUTE")])
+        if call_index == 2:
+            assert kwargs["tools"] is None
+            evidence = _tool_results(kwargs["messages"])
+            assert len(evidence) == 1
+            assert evidence[0]["status"] == "denied"
+            assert evidence[0]["tool_call_id"] == audited_call.id
+            assert evidence[0]["remaining_evidence_calls"] == 0
+            return _audit_response([audited_call.id], deny=False, score=5)
+        assert call_index == 3
+        assert kwargs["tools"] is None
+        summary_payload = _model_payload(kwargs)
+        assert summary_payload["file_reads"] == []
+        assert len(summary_payload["shell_results"]) == 1
+        assert summary_payload["shell_results"][0]["status"] == "denied"
+        return _text_response(expected_summary)
+
+    monkeypatch.setattr("app.core.audit.service.LLMClient.generate", generate)
+    async with audit_database() as db:
+        result = await _audit_round(db, cfg=cfg, tool_calls=[audited_call], working_directory=tmp_path)
+
+    assert result is not None
+    assert result.status is AuditRecordStatus.PENDING
+    assert result.may_execute is False
+    assert len(generate_calls) == 3
+    assert shell_executions == []
+    assert result.confirmation_payload is not None
+    assert result.confirmation_payload["summary"] == expected_summary
+    assert len(result.tool_results) == 1
+    assert json.loads(result.tool_results[0].content or "{}") == {
+        "status": AuditRecordStatus.PENDING.value,
+        "error": t(MSG_AUDIT_WAITING_CONFIRMATION),
+    }
+
+    async with audit_database() as db:
+        record = await audit_crud.get_record(db, result.audit_record_id)
+        assert record is not None
+        assert record.status is AuditRecordStatus.PENDING
+        assert record.context_file_path is not None
+        context = json.loads(Path(record.context_file_path).read_text(encoding="utf-8"))
+
+    assert context["evidence_calls"] == 1
+    assert context["shell_calls"] == 1
+    assert context["scoring_response"]["shell_results"][0]["status"] == "denied"
+    assert context["summary"]["file_reads"] == []
+    assert context["summary"]["shell_results"] == []
     assert context["summary"]["response"] == expected_summary

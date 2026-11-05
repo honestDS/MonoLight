@@ -4,9 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.constants import TOOL_RESULT_COMPACT_TRUNCATION_NOTICE, TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE
+from app.core.constants import SHELL_TOOL_NAME, TOOL_RESULT_COMPACT_TRUNCATION_NOTICE, TOOL_RESULT_MINIMAL_TRUNCATION_NOTICE
 from app.core.dispatchers import interactive_tools as interactive_tools_module
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
+from app.core.tools.knowledge_base_query import KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.core.utils.dispatcher import truncate_tool_result as truncate_tool_result_module
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
@@ -411,6 +412,10 @@ async def _process_fake_executor_result(
     )
     profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
     tool_call = SimpleNamespace(id="call-test", name=tool_name, arguments=arguments)
+    if tool_name == process_single_tool_module.KNOWLEDGE_BASE_QUERY_TOOL_NAME:
+        tool_schemas = [KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA]
+    else:
+        tool_schemas = None
     tool_result = await process_single_tool_module.process_single_tool(
         tool_call,
         db=SimpleNamespace(),
@@ -423,6 +428,7 @@ async def _process_fake_executor_result(
         uid="user-1",
         context_window_k=700,
         tool_result_round_budget_tokens=budget_tokens,
+        tool_schemas=tool_schemas,
     )
     assert received_arguments == [arguments]
     return tool_result.content
@@ -532,7 +538,7 @@ async def test_process_single_tool_preserves_managed_knowledge_order_and_full_te
     ("tool_name", "arguments", "source_type"),
     [
         (
-            process_single_tool_module.SHELL_TOOL_NAME,
+            SHELL_TOOL_NAME,
             {"command": "echo test", "execution_mode": "interactive"},
             "managed_knowledge",
         ),

@@ -28,7 +28,13 @@ import app.core.terminal.session_runtime_state as terminal_session_runtime_state
 import app.core.terminal.worker_coordinator as terminal_worker_coordinator_module
 from app.core.audit.confirmation_persistence import persist_pending_confirmation_bundle
 from app.core.audit.integrity import build_tool_round_integrity_snapshot
-from app.core.constants import ERR_TERMINAL_COMMAND_TIMEOUT, ERR_TOOL_EXECUTION_TIMEOUT, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import (
+    ERR_TERMINAL_COMMAND_TIMEOUT,
+    ERR_TOOL_EXECUTION_TIMEOUT,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    TOOL_WORKFLOW_FOREGROUND,
+    TOOL_WORKFLOW_SCHEDULED_TASK,
+)
 from app.core.context import ContextManager
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
@@ -857,7 +863,7 @@ async def test_background_unconfirmed_file_tool_timeout_persists_execution_unkno
                         call_context="scheduled_task",
                         allow_tools=True,
                         persist_response=False,
-                        restrict_tools_to_background_allowlist=False,
+                        tool_workflow=TOOL_WORKFLOW_SCHEDULED_TASK,
                         reply_source="scheduled_task",
                     )
                 )
@@ -947,6 +953,7 @@ async def test_interactive_unconfirmed_file_tool_timeout_persists_execution_unkn
                     uid="timeout-owner",
                     session_id="timeout-session",
                     execution_scope=None,
+                    tool_workflow=TOOL_WORKFLOW_FOREGROUND,
                     active_tasks=set(),
                     session_source="http",
                     final_message_dedupe_key=None,

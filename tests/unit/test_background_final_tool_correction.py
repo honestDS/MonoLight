@@ -8,6 +8,7 @@ from app.core.constants import (
     ERR_LLM_EMPTY_RESPONSE,
     ERR_LLM_FINAL_REPLY_TOOL_CORRECTION_FAILED,
     MANAGE_TODO_TOOL_NAME,
+    TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
 )
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
@@ -106,11 +107,7 @@ async def test_background_summary_request_keeps_tool_result_protocol_chain(monke
     for index, message in enumerate(messages):
         if message.role != MessageRole.TOOL:
             continue
-        assert any(
-            previous.role == MessageRole.ASSISTANT
-            and any(tool_call.id == message.tool_call_id for tool_call in previous.tool_calls or [])
-            for previous in messages[:index]
-        )
+        assert any(previous.role == MessageRole.ASSISTANT and any(tool_call.id == message.tool_call_id for tool_call in previous.tool_calls or []) for previous in messages[:index])
 
 
 @pytest.mark.asyncio
@@ -145,10 +142,7 @@ async def test_background_summary_submission_context_skips_shared_summary_checkp
         )
         if hasattr(request_messages, "__await__"):
             request_messages = await request_messages
-        assert any(
-            "frozen original request" in str(message.content)
-            for message in request_messages
-        )
+        assert any("frozen original request" in str(message.content) for message in request_messages)
         return (
             InternalResponse(
                 message=InternalMessage(role=MessageRole.ASSISTANT, content="summary"),
@@ -183,9 +177,7 @@ async def test_background_summary_submission_context_skips_shared_summary_checkp
         profile=profile,
         call_context="session_reply_background_summary",
         allow_tools=False,
-        submission_context=[
-            InternalMessage(id=10, role=MessageRole.USER, content="frozen original request")
-        ],
+        submission_context=[InternalMessage(id=10, role=MessageRole.USER, content="frozen original request")],
         initial_trigger_mode=background_module.ContextSummaryTriggerMode.USER_MESSAGE,
         initial_fixed_upper_message_id=10,
     )
@@ -316,8 +308,15 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     async def fake_validate_profile_and_cfg(_db, _profile):
         return cfg
 
-    async def fake_get_tools_for_profile(_db, _profile, allow_background):
+    async def fake_get_tools_for_profile(
+        _db,
+        _profile,
+        allow_background,
+        *,
+        tool_workflow=TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
+    ):
         assert allow_background is False
+        assert tool_workflow == TOOL_WORKFLOW_BACKGROUND_PROACTIVE
         return (
             [
                 SEND_FILE_TO_USER_TOOL_SCHEMA,
@@ -424,7 +423,6 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
             profile=profile,
             call_context="background_task_proactive_reply",
             allow_tools=True,
-            restrict_tools_to_background_allowlist=False,
         )
 
     if outcome == "failure":
@@ -535,10 +533,17 @@ async def test_reply_corrects_illegal_tool_calls_without_executing_or_persisting
     async def fake_validate_profile_and_cfg(_db, _profile):
         return cfg
 
-    async def fake_get_tools_for_profile(_db, _profile, allow_background):
+    async def fake_get_tools_for_profile(
+        _db,
+        _profile,
+        allow_background,
+        *,
+        tool_workflow=TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
+    ):
         nonlocal tool_schema_load_calls
         tool_schema_load_calls += 1
         assert allow_background is False
+        assert tool_workflow == TOOL_WORKFLOW_BACKGROUND_PROACTIVE
         return (
             [
                 SEND_FILE_TO_USER_TOOL_SCHEMA,

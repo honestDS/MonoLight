@@ -4,8 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core import constants, tools
 from app.core.background_tasks.manager import background_task_manager
-from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_TOOL_EXECUTION_TIMEOUT
+from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_TOOL_EXECUTION_TIMEOUT, TOOL_WORKFLOW_FOREGROUND
 from app.core.i18n import set_current_locale, t
 from app.core.i18n.context import reset_current_locale
 from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
@@ -184,6 +185,27 @@ def _install_fake_executor(monkeypatch, tool_name: str, execute_callback):
                 finished.set()
 
     monkeypatch.setitem(TOOL_EXECUTOR_MAP, tool_name, FakeExecutor)
+    if tool_name == "future_test_tool":
+        monkeypatch.setattr(
+            tools,
+            "CONFIGURABLE_TOOL_SCHEMAS",
+            [
+                *tools.CONFIGURABLE_TOOL_SCHEMAS,
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": "Test-only future tool.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            ],
+        )
+        monkeypatch.setitem(constants.TOOL_WORKFLOW_POLICIES[TOOL_WORKFLOW_FOREGROUND], tool_name, {})
     return started, finished
 
 
@@ -533,11 +555,15 @@ async def test_always_background_image_submission_is_not_limited_by_foreground_e
     """验证后台提交行为，不验证前台工具排除集合。"""
     submissions = []
 
+    async def image_generation_profile_available(*_args, **_kwargs):
+        return True
+
     async def fake_submit(db, **kwargs):
         submissions.append((db, kwargs))
         await asyncio.sleep(0.06)
         return SimpleNamespace(id=123)
 
+    monkeypatch.setattr(tools, "_is_image_generation_profile_available", image_generation_profile_available)
     monkeypatch.setattr(background_task_manager, "submit", fake_submit)
     active_tasks = set()
 

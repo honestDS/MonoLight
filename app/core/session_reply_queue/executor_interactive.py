@@ -26,7 +26,7 @@ from app.core.session_reply_queue.executor_common import (
 )
 from app.core.session_reply_queue.executor_metadata import _persist_interactive_work_request_metadata
 from app.core.session_reply_queue.manager import get_work_request_ids, session_reply_queue_manager
-from app.core.session_reply_queue.manager_common import is_scheduled_task_work
+from app.core.session_reply_queue.manager_common import is_scheduled_task_work, resolve_work_tool_workflow
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.request_token_baseline import build_session_cache_metrics
 from app.models.message import InternalMessage, MessageType
@@ -391,6 +391,7 @@ async def _dispatch_interactive_work(
         ),
         "expose_tool_call_content": expose_tool_call_content,
         "show_tool_calls": show_tool_calls,
+        "tool_workflow": await resolve_work_tool_workflow(db, work),
     }
     additional_system_prompt = execution_state.get("additional_system_prompt")
     if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():

@@ -10,7 +10,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import select
 
-from app.core.constants import ERR_LLM_EMPTY_RESPONSE
+from app.core.constants import ERR_LLM_EMPTY_RESPONSE, TOOL_WORKFLOW_SCHEDULED_TASK
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.dispatchers import stream as stream_dispatcher_module
@@ -25,7 +25,7 @@ from app.core.utils.request_token_baseline import (
     extract_provider_token_metrics,
 )
 from app.core.utils.time import get_local_time
-from app.models.audit import AuditRecord
+from app.models.audit import AuditDecision, AuditRecord, AuditRecordStatus
 from app.models.message import InternalMessage, Message, MessageRole
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
@@ -281,7 +281,7 @@ async def test_auxiliary_usage_is_audit_only_while_foreground_usage_updates_sess
             allow_tools=True,
             initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
             initial_fixed_upper_message_id=int(scheduled_work.source_id),
-            restrict_tools_to_background_allowlist=False,
+            tool_workflow=TOOL_WORKFLOW_SCHEDULED_TASK,
             reply_source="scheduled_task",
             final_message_dedupe_key="session-reply-work:7:result",
         )
@@ -782,6 +782,27 @@ async def test_interactive_metadata_boundary_is_cumulative_without_leaking_non_m
         session.llm_request_metadata_work_sequence_no = 2
         session.llm_request_metadata_event_sequence_no = 4
         work.execution_state = {"stream_requested": stream_requested}
+        if work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
+            work.execution_state["decision_message_id"] = 1
+            db.add(
+                AuditRecord(
+                    id=int(source_id),
+                    uid=UID,
+                    session_id=SESSION_ID,
+                    operator_username=UID,
+                    source="http",
+                    language="en",
+                    execution_scope="foreground",
+                    status=AuditRecordStatus.SUCCEEDED,
+                    decision_message_id=1,
+                    decision=AuditDecision.APPROVE,
+                    source_assistant_message_id=1,
+                    working_directory=".",
+                    round_arguments_hash="a" * 64,
+                    tool_count=1,
+                    source_work_id=None,
+                )
+            )
         await db.commit()
 
     monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)

@@ -23,6 +23,7 @@ from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.audit import (
     AuditConfirmationClaim,
+    AuditDecision,
     AuditExecutionRecord,
     AuditExecutionStatus,
     AuditFailureType,
@@ -47,6 +48,26 @@ class CRUDAuditPreparation:
     async def get_record(self, db: AsyncSession, audit_record_id: int) -> AuditRecord | None:
         result = await db.execute(select(AuditRecord).where(AuditRecord.id == audit_record_id).execution_options(populate_existing=True))
         return result.scalars().first()
+
+    async def get_approved_record_by_decision_message(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        decision_message_id: int,
+    ) -> AuditRecord | None:
+        result = await db.execute(
+            select(AuditRecord)
+            .where(
+                AuditRecord.uid == uid,
+                AuditRecord.session_id == session_id,
+                AuditRecord.decision_message_id == decision_message_id,
+                AuditRecord.decision == AuditDecision.APPROVE,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
 
     async def list_tool_details(self, db: AsyncSession, audit_record_id: int) -> list[AuditToolDetail]:
         result = await db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id == audit_record_id).order_by(AuditToolDetail.turn_index, AuditToolDetail.id))

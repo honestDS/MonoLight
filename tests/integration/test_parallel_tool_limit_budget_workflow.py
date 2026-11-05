@@ -13,7 +13,12 @@ from sqlmodel import select
 
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_tools as interactive_tools
-from app.core.constants import END_SESSION_SCOPE_FOREGROUND, END_SESSION_TOOL_NAME
+from app.core.constants import (
+    END_SESSION_SCOPE_FOREGROUND,
+    END_SESSION_TOOL_NAME,
+    TOOL_WORKFLOW_FOREGROUND,
+    TOOL_WORKFLOW_SCHEDULED_TASK,
+)
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.tools.file_tool import FILE_TOOL_SCHEMA
@@ -155,6 +160,7 @@ def _build_interactive_state(
         active_tasks=set(),
         session_source="http",
         execution_scope=END_SESSION_SCOPE_FOREGROUND,
+        tool_workflow=TOOL_WORKFLOW_FOREGROUND,
         final_message_dedupe_key=None,
         context_summary_lifecycle_callback=None,
         context_summary_work_validity_checker=None,
@@ -462,7 +468,7 @@ async def test_background_parallel_tool_limit_budget_uses_executable_call_count(
             call_context="scheduled_task",
             allow_tools=True,
             persist_response=False,
-            restrict_tools_to_background_allowlist=False,
+            tool_workflow=TOOL_WORKFLOW_SCHEDULED_TASK,
             reply_source="scheduled_task",
         )
 

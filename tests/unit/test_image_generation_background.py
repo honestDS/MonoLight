@@ -211,12 +211,19 @@ async def test_image_generation_is_submitted_in_background_without_parameter(
 ):
     submitted = {}
 
+    async def fake_profile_available(*_args, **_kwargs):
+        return True
+
     async def fake_submit(_db, **kwargs):
         submitted.update(kwargs)
         return SimpleNamespace(id=42)
 
     from app.core.background_tasks.manager import background_task_manager
 
+    monkeypatch.setattr(
+        "app.core.tools._is_image_generation_profile_available",
+        fake_profile_available,
+    )
     monkeypatch.setattr(background_task_manager, "submit", fake_submit)
 
     cfg = ProfileConfig.model_validate(

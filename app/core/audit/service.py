@@ -10,11 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.confirmation import cancel_confirmation_by_session, update_confirmation_message_status
 from app.core.audit.context_budget import (
-    AUDIT_READ_TEXT_FILE_TOOL_SCHEMA,
-    AUDIT_SHELL_TOOL_SCHEMA,
     build_read_tool_message,
     fit_file_tool_payload_to_context,
     fit_read_result_to_context,
+    get_audit_tool_schemas,
     read_token_budget,
 )
 from app.core.audit.integrity import build_tool_round_integrity_snapshot, create_file_integrity_snapshot, serialize_tool_arguments
@@ -48,6 +47,7 @@ from app.core.constants import (
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     SHELL_TOOL_NAME,
     TERMINAL_TOOL_NAME,
+    TOOL_WORKFLOW_AUDIT,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.channel.channel import channel_crud
@@ -64,12 +64,13 @@ from app.core.prompts import (
 )
 from app.core.provider_usage import ProviderUsageSource, record_provider_response_usage
 from app.core.terminal.manager import terminal_session_manager
-from app.core.tools import tool_requires_audit
+from app.core.tools import get_tool_parameters_schema, tool_requires_audit
 from app.core.tools.file_tool import resolve_file_tool_target_path
 from app.core.tools.read_text_file import read_text_file
 from app.core.tools.shell import ShellExecutor
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.dispatcher.helpers import resolve_chat_params
+from app.core.utils.dispatcher.process_single_tool import _validate_schema_value
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.operation_directories import get_allowed_operation_dirs, get_write_protected_dirs, is_path_write_protected, normalize_allowed_operation_dirs
@@ -254,18 +255,27 @@ async def _execute_audit_read_tool_call(
     read_budget: AuditReadBudget,
     max_tokens: int,
 ) -> dict[str, Any]:
+    arguments = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
     if not read_budget.consume():
         return {
-            "path": tool_call.arguments.get("path"),
-            "tool_call_id": tool_call.arguments.get("tool_call_id"),
+            "path": arguments.get("path"),
+            "tool_call_id": arguments.get("tool_call_id"),
             "status": "limit_exceeded",
             "error": t(ERR_AUDIT_FILE_READ_LIMIT_EXCEEDED),
             **_remaining_evidence_call_fields(read_budget),
         }
-    if tool_call.name != AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["name"]:
+    parameters_schema = get_tool_parameters_schema(
+        tool_call.name,
+        tool_schemas=get_audit_tool_schemas(),
+        tool_workflow=TOOL_WORKFLOW_AUDIT,
+    )
+    if tool_call.name != READ_TEXT_FILE_TOOL_NAME or parameters_schema is None:
         return {"status": "denied", "error": f"only {READ_TEXT_FILE_TOOL_NAME} is available", **_remaining_evidence_call_fields(read_budget)}
-    requested_path = tool_call.arguments.get("path")
-    original_tool_call_id = tool_call.arguments.get("tool_call_id")
+    schema_errors = _validate_schema_value(arguments, parameters_schema, "arguments")
+    if schema_errors:
+        return {"status": "invalid", "error": "; ".join(schema_errors), **_remaining_evidence_call_fields(read_budget)}
+    requested_path = arguments.get("path")
+    original_tool_call_id = arguments.get("tool_call_id")
     if not isinstance(requested_path, str) or not requested_path or not isinstance(original_tool_call_id, str) or not original_tool_call_id:
         return {"status": "invalid", "error": "path and tool_call_id are required", **_remaining_evidence_call_fields(read_budget)}
     arguments_summary = serialize_execution_summary(tool_call.arguments)
@@ -321,13 +331,22 @@ async def _execute_audit_shell_tool_call(
     if not consumed:
         return evidence_result("limit_exceeded", json.dumps({"error": t(ERR_AUDIT_FILE_READ_LIMIT_EXCEEDED)}, ensure_ascii=False))
 
+    parameters_schema = get_tool_parameters_schema(
+        tool_call.name,
+        tool_schemas=get_audit_tool_schemas(),
+        tool_workflow=TOOL_WORKFLOW_AUDIT,
+    )
+    if tool_call.name != SHELL_TOOL_NAME or parameters_schema is None:
+        return evidence_result("denied", json.dumps({"error": f"only {SHELL_TOOL_NAME} is available"}, ensure_ascii=False))
+    schema_errors = _validate_schema_value(arguments, parameters_schema, "arguments")
+    if schema_errors:
+        return evidence_result("invalid", json.dumps({"error": "; ".join(schema_errors)}, ensure_ascii=False))
+
     allowed_arguments = {"command", "execution_mode", "tool_call_id"}
     if set(arguments) != allowed_arguments:
         error = "arguments must contain only command, execution_mode, and tool_call_id"
     elif not isinstance(command, str) or not command.strip():
         error = "command must be a non-empty string"
-    elif arguments.get("execution_mode") != "non_interactive":
-        error = "execution_mode must be non_interactive"
     elif not isinstance(original_tool_call_id, str) or original_tool_call_id not in expected_tool_call_ids:
         error = "tool_call_id does not belong to this audit round"
     else:
@@ -344,7 +363,7 @@ async def _execute_audit_shell_tool_call(
             working_directory=working_directory,
         )
         executor.set_config(cfg)
-        content = await executor.execute(command, execution_mode="non_interactive")
+        content = await executor.execute(command, execution_mode=arguments["execution_mode"])
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -603,7 +622,7 @@ async def _run_audit_model(
     for _round_index in range(max_rounds):
         await ensure_session_reply_work_claim(db)
         await db.commit()
-        active_tools = [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA] if read_budget.remaining > 0 else None
+        active_tools = get_audit_tool_schemas() if read_budget.remaining > 0 else None
         request_context_tokens = LLMClient.estimate_request_input_tokens_locally(
             model_id=model_id,
             messages=messages,
@@ -636,7 +655,7 @@ async def _run_audit_model(
                 raise RuntimeError(t(ERR_AUDIT_FILE_ROUNDS_EXCEEDED))
             messages.append(response.message)
             for tool_call in response.message.tool_calls:
-                if tool_call.name == AUDIT_SHELL_TOOL_SCHEMA["function"]["name"]:
+                if tool_call.name == SHELL_TOOL_NAME:
                     result = await _execute_audit_shell_tool_call(
                         tool_call,
                         expected_tool_call_ids=expected_tool_call_ids,

@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.channel.router import select_channel
 from app.core.constants import (
     END_SESSION_SCOPE_FOREGROUND,
-    END_SESSION_SCOPE_TASK,
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
     ERR_MESSAGE_PLATFORM_NOT_FOUND,
@@ -20,8 +19,6 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASE_RUNNING,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED_SKIP_REPLY,
-    MANAGE_SCHEDULED_TASKS_TOOL_NAME,
-    MANAGE_TODO_TOOL_NAME,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
 from app.core.crud.account.user import user_crud
@@ -56,6 +53,7 @@ from app.core.utils.dispatcher.helpers import (
 )
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
+from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
@@ -109,6 +107,7 @@ async def dispatch_interactive(
     actor_username: str | None = None,
     initial_message_type: MessageType = MessageType.TEXT,
     execution_scope: str | None = None,
+    tool_workflow: str | None = None,
     frozen_context_messages: list[InternalMessage] | None = None,
     call_context: str | None = None,
     *,
@@ -170,6 +169,7 @@ async def dispatch_interactive(
             execution_checkpoint_callback=execution_checkpoint_callback,
             initial_message_type=initial_message_type,
             execution_scope=execution_scope,
+            tool_workflow=tool_workflow,
             context_frozen=frozen_context_messages is not None,
             call_context=call_context,
         )
@@ -331,9 +331,12 @@ async def dispatch_interactive(
                 state.chat_channel_obj, state.model_entry, state.channel_rule = selection
                 state.img_understanding, state.audio_understanding, state.video_understanding = get_multimodal_from_entry(state.model_entry)
                 state.chat_params = resolve_chat_params(state.model_entry, state.chat_channel)
-                state.tools, state.allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, goal_mode=state.goal_mode)
-                if state.execution_scope == END_SESSION_SCOPE_TASK:
-                    state.tools = [tool for tool in state.tools if tool.get("function", {}).get("name") not in {MANAGE_SCHEDULED_TASKS_TOOL_NAME, MANAGE_TODO_TOOL_NAME}]
+                state.tools, state.allowed_knowledge_base_ids = await get_tools_for_profile(
+                    db,
+                    profile,
+                    goal_mode=state.goal_mode,
+                    tool_workflow=state.tool_workflow,
+                )
 
                 reload_history = False
                 if state.execution_resume_state is not None:
@@ -547,6 +550,15 @@ async def dispatch_interactive(
                     ai_msg = generation_result.message
 
                     end_session_signal = (state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)) or (state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and is_skip_reply_signal(ai_msg))
+                    if end_session_signal:
+                        end_session_signal = not prevalidate_tool_round(
+                            ai_msg.tool_calls,
+                            state.cfg,
+                            tool_schemas=state.tools,
+                            goal_mode=state.goal_mode,
+                            execution_scope=state.execution_scope,
+                            tool_workflow=state.tool_workflow,
+                        )
                     if end_session_signal:
                         if state.execution_scope == END_SESSION_SCOPE_FOREGROUND:
                             new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])

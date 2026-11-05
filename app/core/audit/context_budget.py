@@ -3,7 +3,8 @@ import hashlib
 import json
 from typing import Any
 
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, FILE_TOOL_NAME
+from app.core import tools
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, FILE_TOOL_NAME, TOOL_WORKFLOW_AUDIT
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA
 from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
 from app.core.utils.tokenizer import estimate_tokens, truncate_text_to_tokens
@@ -26,13 +27,19 @@ AUDIT_SHELL_TOOL_SCHEMA["function"]["description"] = (
     f"{ShellExecutor.get_blacklist_description()}"
 )
 AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["command"]["description"] = "A separate shell command used only to verify environmental facts; do not provide or execute the pending business command."
-AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["execution_mode"]["enum"] = ["non_interactive"]
 AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["execution_mode"]["description"] = "For audit evidence, use only non_interactive and finish within the existing tool_timeout. Do not create terminals or background tasks, switch languages, or wrap the original business command to evade these restrictions."
 AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["properties"]["tool_call_id"] = {
     "type": "string",
     "description": "The original tool_call_id of the pending business operation being assessed.",
 }
 AUDIT_SHELL_TOOL_SCHEMA["function"]["parameters"]["required"].append("tool_call_id")
+
+
+def get_audit_tool_schemas() -> list[dict[str, Any]]:
+    return tools.filter_tools_for_workflow(
+        [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA],
+        TOOL_WORKFLOW_AUDIT,
+    )
 
 
 def max_input_tokens(chat_params: dict[str, Any]) -> int:
@@ -73,7 +80,7 @@ def fit_file_tool_payload_to_context(
         ]
         return estimate_request_context_tokens(
             messages,
-            [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA],
+            get_audit_tool_schemas(),
             model_id=model_id,
             protocol=protocol,
         )
@@ -191,7 +198,7 @@ def read_token_budget(
 ) -> tuple[int, int]:
     request_context_tokens = estimate_request_context_tokens(
         messages,
-        [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA],
+        get_audit_tool_schemas(),
         model_id=model_id,
         protocol=protocol,
     )
@@ -223,7 +230,7 @@ def fit_read_result_to_context(
         return read_result
 
     input_limit = max_input_tokens(chat_params)
-    tools = [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA, AUDIT_SHELL_TOOL_SCHEMA]
+    tools = get_audit_tool_schemas()
     if (
         estimate_request_context_tokens(
             [*messages, build_read_tool_message(tool_call_id, read_result)],

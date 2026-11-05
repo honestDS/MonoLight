@@ -22,6 +22,7 @@ from app.core.constants import (
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     MSG_AUDIT_STATUS_CANCELLED,
     SHELL_TOOL_NAME,
+    TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
@@ -39,6 +40,7 @@ from app.core.session_reply_queue.executor_interactive import (
     _save_interactive_work_execution_checkpoint,
 )
 from app.core.session_reply_queue.executor_metadata import _generate_auxiliary_reply_with_request_metadata
+from app.core.session_reply_queue.manager_common import resolve_work_tool_workflow
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import serialize_execution_summary
@@ -319,6 +321,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     actor_username = execution_state.get("actor_username") or getattr(record, "decided_by", None) or record.operator_username
     frozen_context_messages = load_frozen_context_messages(await session_reply_work_item_crud.get_frozen_context(db, work))
     cfg = await validate_profile_and_cfg(db, profile)
+    tool_workflow = await resolve_work_tool_workflow(db, work)
+    allow_background_submission = tool_workflow != TOOL_WORKFLOW_BACKGROUND_PROACTIVE
     session = await session_crud.get_by_session_id(db, work.session_id)
     confirmed_tool_context_window_k = _resolve_confirmed_tool_context_window_k(session)
     confirmed_tool_model_id, confirmed_tool_protocol = _resolve_confirmed_tool_model_scope(session)
@@ -492,7 +496,12 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         )
         details = await audit_crud.list_tool_details(db, audit_record_id)
 
-    _tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
+    _tools, allowed_knowledge_base_ids = await get_tools_for_profile(
+        db,
+        profile,
+        allow_background=allow_background_submission,
+        tool_workflow=tool_workflow,
+    )
     detail_by_original_id = {detail.original_tool_call_id: detail for detail in details}
     confirmed_calls = [InternalToolCall(id=f"call_{uuid.uuid4().hex}", name=item.name, arguments=dict(item.arguments or {})) for item in source_tool_calls]
     confirmed_message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=confirmed_calls)
@@ -528,7 +537,14 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
 
     precheck_errors = prevalidate_tool_round_protocol(confirmed_calls, cfg)
     if not precheck_errors:
-        precheck_errors = prevalidate_tool_round(confirmed_calls, cfg, tool_schemas=_tools, execution_scope=record.execution_scope)
+        precheck_errors = prevalidate_tool_round(
+            confirmed_calls,
+            cfg,
+            allow_background_submission=allow_background_submission,
+            tool_schemas=_tools,
+            execution_scope=record.execution_scope,
+            tool_workflow=tool_workflow,
+        )
     all_attempts_created = len(executions_by_original_call_id) == len(source_tool_calls)
     all_succeeded = all_attempts_created and not precheck_errors
     execution_round_status = None
@@ -594,10 +610,13 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                     context_window_k=confirmed_tool_context_window_k,
                     tool_call_count=len(confirmed_calls),
+                    allow_background_submission=allow_background_submission,
                     tool_result_round_budget_tokens=confirmed_tool_result_round_budget_tokens,
                     model_id=confirmed_tool_model_id,
                     protocol=confirmed_tool_protocol,
                     execution_scope=record.execution_scope,
+                    tool_schemas=_tools,
+                    tool_workflow=tool_workflow,
                 )
                 await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
                 terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == SHELL_TOOL_NAME else None
