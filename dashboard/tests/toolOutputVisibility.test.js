@@ -59,6 +59,22 @@ const internalMessages = [
 const backgroundResults = internalMessages.filter(
   message => message.type === 'background_result'
 )
+const guidanceCases = {
+  pending: {
+    id: 'guidance-pending',
+    role: 'system',
+    type: 'guidance',
+    content: '[系统提示信息]pending guidance[系统提示信息结束]',
+    is_processed: false
+  },
+  used: {
+    id: 'guidance-used',
+    role: 'system',
+    type: 'guidance',
+    content: '[系统提示信息]used guidance[系统提示信息结束]',
+    is_processed: true
+  }
+}
 
 for (const showToolCalls of [true, false]) {
   test(`background results follow showToolCalls=${showToolCalls}`, () => {
@@ -111,6 +127,46 @@ for (const [showToolCalls, expected] of [
   })
 }
 
+const mixedGuidanceMessages = [
+  visibilityCases.user,
+  guidanceCases.pending,
+  ...internalMessages,
+  visibilityCases.assistant,
+  guidanceCases.used,
+  visibilityCases.toolCall,
+  visibilityCases.toolResult
+]
+
+for (const showToolCalls of [true, false]) {
+  test(`guidance messages remain visible with showToolCalls=${showToolCalls}`, () => {
+    const original = structuredClone(mixedGuidanceMessages)
+    const filtered = filterToolOutputMessages(mixedGuidanceMessages, showToolCalls)
+    const expected = showToolCalls
+      ? [
+          visibilityCases.user,
+          guidanceCases.pending,
+          ...backgroundResults,
+          visibilityCases.assistant,
+          guidanceCases.used,
+          visibilityCases.toolCall,
+          visibilityCases.toolResult
+        ]
+      : [
+          visibilityCases.user,
+          guidanceCases.pending,
+          visibilityCases.assistant,
+          guidanceCases.used
+        ]
+
+    assert.deepEqual(filtered, expected)
+    assert.deepEqual(mixedGuidanceMessages, original)
+    assert.deepEqual(
+      filterToolOutputMessages(filtered, showToolCalls),
+      filtered
+    )
+  })
+}
+
 test('response history filtering applies tool visibility without mutating response data', () => {
   const response = {
     id: 'response-1',
@@ -125,7 +181,9 @@ test('response history filtering applies tool visibility without mutating respon
     history: [
       ...internalMessages,
       visibilityCases.user,
+      guidanceCases.pending,
       visibilityCases.assistant,
+      guidanceCases.used,
       visibilityCases.toolResult,
       visibilityCases.auditConfirmation
     ]
@@ -137,7 +195,9 @@ test('response history filtering applies tool visibility without mutating respon
     const expectedHistory = [
       ...(showToolCalls ? backgroundResults : []),
       visibilityCases.user,
+      guidanceCases.pending,
       visibilityCases.assistant,
+      guidanceCases.used,
       ...(showToolCalls
         ? [visibilityCases.toolResult]
         : []),

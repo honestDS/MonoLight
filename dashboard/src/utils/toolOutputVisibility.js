@@ -37,6 +37,8 @@ export const filterToolOutputMessages = (messages, showToolCalls = true) => {
   if (!Array.isArray(messages)) return messages || []
 
   return messages.filter((message) => {
+    if (message?.type === 'guidance') return true
+
     if (message?.role === 'system' || message?.role === 'background_system') {
       return false
     }
