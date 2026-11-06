@@ -18,12 +18,20 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud a
 from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
 from app.core.prompts import EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
-from app.core.session_reply_queue.child_result import build_child_call_result
+from app.core.session_reply_queue.child_result import (
+    build_child_call_result,
+    get_child_snapshot,
+    load_child_work,
+)
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkStatus
 
-__all__ = ["resume_child_work_for_parent", "deliver_child_work_results"]
+__all__ = [
+    "acknowledge_queried_child_results",
+    "resume_child_work_for_parent",
+    "deliver_child_work_results",
+]
 
 
 def _is_positive_int(value: Any) -> bool:
@@ -151,6 +159,247 @@ async def _load_child_tool_result(
     return message, stored
 
 
+async def _apply_child_call_result(
+    db: AsyncSession,
+    *,
+    parent,
+    call,
+    round_row,
+    snapshot: dict[str, Any],
+    messages: list[InternalMessage],
+    turn_messages: list[InternalMessage] | None,
+) -> tuple[str, dict[str, Any], bool]:
+    pending_message, stored = await _load_child_tool_result(
+        db,
+        parent=parent,
+        call=call,
+        round_row=round_row,
+        message_id=call.tool_result_message_id,
+    )
+    try:
+        child_result = build_child_call_result(call, snapshot)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
+    execution_status = {
+        "succeeded": "succeeded",
+        "execution_unknown": "execution_unknown",
+    }.get(snapshot.get("status"), "failed")
+    await replace_pending_tool_result(
+        db,
+        pending_message=pending_message,
+        original_tool_call_id=stored.tool_call_id,
+        content=json.dumps(child_result, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        tool_execution_status=execution_status,
+        audit_record_id=pending_message.audit_record_id,
+    )
+    try:
+        replacement = InternalMessage.model_validate_json(pending_message.content or "{}")
+        replacement_payload = json.loads(replacement.content or "{}")
+    except (TypeError, ValueError) as exc:
+        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
+    if replacement.role != MessageRole.TOOL or replacement.tool_call_id != stored.tool_call_id or not isinstance(replacement_payload, dict) or replacement_payload.get("child_work_id") != round_row.child_work_id:
+        _invalid_context()
+    replacement.id = pending_message.id
+    replacement.type = pending_message.type
+    if pending_message.created_at is not None:
+        replacement.created_at = pending_message.created_at.timestamp()
+
+    call_ids = {call.tool_call_id, stored.tool_call_id}
+    has_context = _has_tool_call_context([*messages, *(turn_messages or [])], call_ids)
+    replaced = _replace_checkpoint_tool_result(
+        messages,
+        replacement=replacement,
+        message_id=call.tool_result_message_id,
+        call_ids=call_ids,
+    )
+    if turn_messages is not None:
+        replaced = (
+            _replace_checkpoint_tool_result(
+                turn_messages,
+                replacement=replacement,
+                message_id=call.tool_result_message_id,
+                call_ids=call_ids,
+            )
+            or replaced
+        )
+    needs_resume_message = not has_context or not replaced
+    call.delivered = True
+    db.add(call)
+    return stored.tool_call_id, replacement_payload, needs_resume_message
+
+
+async def acknowledge_queried_child_results(
+    db: AsyncSession,
+    *,
+    parent,
+    checkpoint: dict[str, Any],
+    execution_state: dict[str, Any],
+) -> None:
+    if parent.subagent_id is not None:
+        return
+
+    child_work_waits = execution_state.get("child_work_waits")
+    if not isinstance(child_work_waits, list) or not child_work_waits:
+        return
+
+    messages = _parse_checkpoint_messages(checkpoint.get("messages"))
+    turn_messages = None
+    if "turn_messages" in checkpoint:
+        turn_messages = _parse_checkpoint_messages(checkpoint["turn_messages"])
+
+    query_calls: dict[str, Any] = {}
+    candidates: dict[tuple[str, int], list[tuple[InternalMessage, dict[str, Any]]]] = {}
+    for message in messages:
+        if message.role == MessageRole.ASSISTANT:
+            query_calls = {}
+            for tool_call in message.tool_calls or []:
+                if tool_call.name != AGENT_WORK_TOOL_NAME or not isinstance(tool_call.arguments, dict) or tool_call.arguments.get("operation") != "query":
+                    continue
+                subagent_id = tool_call.arguments.get("subagent_id")
+                if not isinstance(subagent_id, str) or not subagent_id.strip():
+                    continue
+                query_calls[tool_call.id] = tool_call
+            continue
+        if message.role != MessageRole.TOOL:
+            query_calls = {}
+            continue
+
+        query_call = query_calls.get(message.tool_call_id) if isinstance(message.tool_call_id, str) else None
+        if query_call is None:
+            continue
+        try:
+            payload = json.loads(message.content or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("status") != "success" or payload.get("operation") != "query":
+            continue
+
+        arguments = query_call.arguments
+        subagent_id = arguments["subagent_id"]
+        if payload.get("subagent_id") != subagent_id:
+            continue
+        work = payload.get("work")
+        if not isinstance(work, dict) or work.get("completed") is not True:
+            continue
+        child_work_id = work.get("work_id")
+        if not _is_positive_int(child_work_id):
+            continue
+        if "work_id" in arguments and arguments.get("work_id") != child_work_id:
+            continue
+
+        candidates.setdefault((subagent_id, child_work_id), []).append((message, payload))
+
+    if not candidates:
+        return
+
+    calls = await subagent_crud.list_calls(
+        db,
+        parent_work_id=parent.id,
+        undelivered_only=True,
+    )
+    if not calls:
+        return
+
+    message_work_id = await reply_work_crud.get_message_work_id(db, parent)
+    accepted_tool_call_ids: set[str] = set()
+    for call in calls:
+        call_candidates = candidates.get((call.subagent_id, call.child_work_id))
+        if not call_candidates:
+            continue
+
+        matching_wait = False
+        has_tool_binding = False
+        for slot in child_work_waits:
+            if not isinstance(slot, dict):
+                continue
+            if slot.get("tool_call_id") == call.tool_call_id:
+                has_tool_binding = True
+            if slot.get("child_work_id") == call.child_work_id and slot.get("subagent_id") == call.subagent_id and slot.get("tool_call_id") == call.tool_call_id and slot.get("tool_result_message_id") == call.tool_result_message_id:
+                matching_wait = True
+                break
+        if not matching_wait:
+            if has_tool_binding:
+                _invalid_context()
+            continue
+
+        if call.parent_work_id != parent.id or call.delivered is not False or not isinstance(call.tool_call_id, str) or not call.tool_call_id.strip() or not isinstance(call.arguments, dict) or call.arguments.get("operation") not in {"create", "send_message"} or not _is_positive_int(call.tool_result_message_id):
+            _invalid_context()
+
+        subagent = await subagent_crud.get_scoped(
+            db,
+            subagent_id=call.subagent_id,
+            uid=parent.uid,
+            session_id=parent.session_id,
+            profile_id=parent.profile_id,
+            lock=False,
+            touch=False,
+        )
+        if subagent is None:
+            _invalid_context()
+        round_row = await subagent_crud.get_round(
+            db,
+            child_work_id=call.child_work_id,
+            subagent_id=call.subagent_id,
+        )
+        if round_row is None:
+            _invalid_context()
+        await load_child_work(db, subagent=subagent, round_row=round_row)
+        snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
+        if not isinstance(snapshot, dict) or snapshot.get("completed") is not True:
+            continue
+
+        for query_message, payload in call_candidates:
+            if payload.get("work") != snapshot:
+                continue
+            if not _is_positive_int(query_message.id) or query_message.id <= call.tool_result_message_id:
+                continue
+            persisted = await message_crud.get(db, query_message.id)
+            if persisted is None:
+                continue
+            if (
+                persisted.id != query_message.id
+                or persisted.uid != parent.uid
+                or persisted.session_id != parent.session_id
+                or persisted.profile_id != parent.profile_id
+                or persisted.role != MessageRole.TOOL
+                or persisted.type != MessageType.TOOL_RESULT
+                or persisted.work_id != message_work_id
+                or persisted.audit_record_id is not None
+            ):
+                _invalid_context()
+            try:
+                stored = InternalMessage.model_validate_json(persisted.content or "{}")
+                stored_payload = json.loads(stored.content or "{}")
+            except (TypeError, ValueError):
+                continue
+            if stored.role != MessageRole.TOOL or stored.tool_call_id != query_message.tool_call_id or stored_payload != payload:
+                continue
+
+            await _apply_child_call_result(
+                db,
+                parent=parent,
+                call=call,
+                round_row=round_row,
+                snapshot=snapshot,
+                messages=messages,
+                turn_messages=turn_messages,
+            )
+            accepted_tool_call_ids.add(call.tool_call_id)
+            break
+
+    if not accepted_tool_call_ids:
+        return
+
+    remaining_waits = [slot for slot in child_work_waits if not isinstance(slot, dict) or not isinstance(slot.get("tool_call_id"), str) or slot.get("tool_call_id") not in accepted_tool_call_ids]
+    if remaining_waits:
+        execution_state["child_work_waits"] = remaining_waits
+    else:
+        execution_state.pop("child_work_waits", None)
+    checkpoint["messages"] = _serialize_checkpoint_messages(messages)
+    if turn_messages is not None:
+        checkpoint["turn_messages"] = _serialize_checkpoint_messages(turn_messages)
+
+
 async def resume_child_work_for_parent(
     db: AsyncSession,
     *,
@@ -270,70 +519,26 @@ async def resume_child_work_for_parent(
         message_work_id: int | None = None
         turn_message_ids = {message.id for message in turn_messages if _is_positive_int(message.id)} if turn_messages is not None else set()
         for slot, call, _subagent, round_row in validated_slots:
-            if not isinstance(round_row.result, dict):
+            snapshot = round_row.result
+            if not isinstance(snapshot, dict):
                 remaining_slots.append(slot)
                 continue
             if call.delivered:
                 continue
             delivered_child_work_ids.append(round_row.child_work_id)
 
-            pending_message, stored = await _load_child_tool_result(
+            call_id, replacement_payload, needs_resume_message = await _apply_child_call_result(
                 db,
                 parent=parent,
                 call=call,
                 round_row=round_row,
-                message_id=slot["tool_result_message_id"],
+                snapshot=snapshot,
+                messages=messages,
+                turn_messages=turn_messages,
             )
-            try:
-                child_result = build_child_call_result(call, round_row.result)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
-            execution_status = {
-                "succeeded": "succeeded",
-                "execution_unknown": "execution_unknown",
-            }.get(round_row.result.get("status"), "failed")
-            await replace_pending_tool_result(
-                db,
-                pending_message=pending_message,
-                original_tool_call_id=stored.tool_call_id,
-                content=json.dumps(child_result, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                tool_execution_status=execution_status,
-                audit_record_id=pending_message.audit_record_id,
-            )
-            try:
-                replacement = InternalMessage.model_validate_json(pending_message.content or "{}")
-                replacement_payload = json.loads(replacement.content or "{}")
-            except (TypeError, ValueError) as exc:
-                raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
-            if replacement.role != MessageRole.TOOL or replacement.tool_call_id != stored.tool_call_id or not isinstance(replacement_payload, dict) or replacement_payload.get("child_work_id") != round_row.child_work_id:
-                _invalid_context()
-            replacement.id = pending_message.id
-            replacement.type = pending_message.type
-            if pending_message.created_at is not None:
-                replacement.created_at = pending_message.created_at.timestamp()
-
-            call_ids = {call.tool_call_id, stored.tool_call_id}
-            has_context = _has_tool_call_context([*messages, *(turn_messages or [])], call_ids)
-            replaced = _replace_checkpoint_tool_result(
-                messages,
-                replacement=replacement,
-                message_id=slot["tool_result_message_id"],
-                call_ids=call_ids,
-            )
-            if turn_messages is not None:
-                replaced = (
-                    _replace_checkpoint_tool_result(
-                        turn_messages,
-                        replacement=replacement,
-                        message_id=slot["tool_result_message_id"],
-                        call_ids=call_ids,
-                    )
-                    or replaced
-                )
-            needs_resume_message = not has_context or not replaced
             if is_live_parent or needs_resume_message:
                 resume_message = _build_resume_message(
-                    call_id=stored.tool_call_id,
+                    call_id=call_id,
                     arguments=call.arguments,
                     result=replacement_payload,
                 )
@@ -365,9 +570,6 @@ async def resume_child_work_for_parent(
                 if needs_resume_message and turn_messages is not None and marker.id not in turn_message_ids:
                     turn_messages.append(resume_message.model_copy(deep=True))
                     turn_message_ids.add(marker.id)
-
-            call.delivered = True
-            db.add(call)
 
         checkpoint["messages"] = _serialize_checkpoint_messages(messages)
         if turn_messages is not None:

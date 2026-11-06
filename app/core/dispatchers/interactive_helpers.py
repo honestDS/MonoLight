@@ -210,6 +210,10 @@ async def _save_execution_checkpoint(
     if state.reply_skipped:
         checkpoint["reply_skipped"] = True
     await state.callback(checkpoint)
+    if checkpoint["messages"] is not serialized_messages:
+        messages[:] = [InternalMessage.model_validate(message) for message in checkpoint["messages"]]
+    if checkpoint["turn_messages"] is not serialized_turn_messages:
+        state.turn_messages[:] = [InternalMessage.model_validate(message) for message in checkpoint["turn_messages"]]
 
 
 async def _mark_claimed_audit_execution_unknown(

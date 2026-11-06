@@ -1,5 +1,6 @@
 import asyncio
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta
 from functools import partial
 from types import SimpleNamespace
@@ -250,11 +251,26 @@ async def test_foreground_executor_resumes_persisted_checkpoint(monkeypatch, che
     )
     checkpoint_store[work.id] = checkpoint
     dispatch_kwargs = {}
-    checkpoint_updates = []
 
     class FakeDb:
+        def __init__(self):
+            self.pending_state = None
+            self.pending_checkpoint = None
+
         async def refresh(self, instance) -> None:
             return None
+
+        async def commit(self) -> None:
+            if self.pending_state is not None:
+                work.execution_state = deepcopy(self.pending_state)
+            if self.pending_checkpoint is not None:
+                checkpoint_store[work.id] = deepcopy(self.pending_checkpoint)
+            self.pending_state = None
+            self.pending_checkpoint = None
+
+        async def rollback(self) -> None:
+            self.pending_state = None
+            self.pending_checkpoint = None
 
     class EventDb:
         pass
@@ -299,7 +315,11 @@ async def test_foreground_executor_resumes_persisted_checkpoint(monkeypatch, che
         )
 
     async def update_claimed(db, **kwargs):
-        checkpoint_updates.append(kwargs)
+        values = kwargs.get("values", {})
+        if "execution_state" in values:
+            db.pending_state = deepcopy(values["execution_state"])
+        if kwargs.get("checkpoint") is not None:
+            db.pending_checkpoint = deepcopy(kwargs["checkpoint"])
         return True
 
     monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
@@ -322,16 +342,19 @@ async def test_foreground_executor_resumes_persisted_checkpoint(monkeypatch, che
     )
     monkeypatch.setattr(executor_interactive_module.session_reply_work_item_crud, "update_claimed", update_claimed)
 
-    response = await executor_replies_module._execute_foreground(FakeDb(), work, "worker-1")
+    db = FakeDb()
+    response = await executor_replies_module._execute_foreground(db, work, "worker-1")
 
     assert response == llm_response_payload()
     assert dispatch_kwargs["execution_resume_state"] is checkpoint
     assert dispatch_kwargs["message"] == "original"
     assert dispatch_kwargs["additional_system_prompt"] == "channel instruction"
-    assert checkpoint_updates[0]["values"]["execution_state"]["stream_requested"] is False
-    assert checkpoint_updates[0]["checkpoint"]["messages"][0]["content"] == "updated"
-    assert checkpoint_updates[0]["checkpoint"]["memory_recall_boundary_message_id"] == 1
-    assert checkpoint_updates[0]["checkpoint"]["memory_recall_status"] == "completed"
+    saved_checkpoint = await executor_replies_module.session_reply_work_item_crud.get_checkpoint(db, work.id)
+    assert saved_checkpoint["messages"][0]["content"] == "updated"
+    assert saved_checkpoint["memory_recall_boundary_message_id"] == 1
+    assert saved_checkpoint["memory_recall_status"] == "completed"
+    assert work.execution_state["stream_requested"] is False
+    assert work.execution_state["additional_system_prompt"] == "channel instruction"
 
 
 @pytest.mark.asyncio
@@ -535,6 +558,12 @@ async def test_foreground_executor_checkpoint_preserves_and_clears_active_audit_
         async def refresh(self, instance) -> None:
             return None
 
+        async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
     class EventDb:
         pass
 
@@ -553,18 +582,17 @@ async def test_foreground_executor_checkpoint_preserves_and_clears_active_audit_
 
     async def dispatch(**kwargs):
         await kwargs["execution_checkpoint_callback"]({"messages": []})
+        checkpoint_states.append(deepcopy(work.execution_state))
         await kwargs["execution_checkpoint_callback"](
             {
                 "messages": [],
                 SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: None,
             }
         )
+        checkpoint_states.append(deepcopy(work.execution_state))
         return llm_response_payload()
 
     async def update_claimed(db, **kwargs):
-        state = kwargs["values"]["execution_state"]
-        checkpoint_states.append(state)
-        work.execution_state = state
         return True
 
     monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)

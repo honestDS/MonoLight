@@ -22,6 +22,7 @@ from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.i18n import t
 from app.core.message_platforms.notifier import send_session_stream_event
 from app.core.prompts import SUBAGENT_EXECUTION_GUIDANCE_PROMPT
+from app.core.session_reply_queue.child_delivery import acknowledge_queried_child_results
 from app.core.session_reply_queue.executor_common import (
     _metadata_with_work_order,
     _result_message_dedupe_key,
@@ -262,52 +263,71 @@ async def _save_interactive_work_execution_checkpoint(
     work: SessionReplyWorkItem,
     worker_id: str,
 ) -> None:
-    active_audit_execution_present = SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint
-    active_audit_execution = checkpoint.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
-    await ensure_session_reply_work_claim(db)
-    await db.refresh(work)
-    work_id = work.id
-    if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0:
-        raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
-    state = dict(work.execution_state or {})
-    if active_audit_execution_present:
-        if active_audit_execution is None:
-            state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
-        else:
-            state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
-    is_subagent_work = work.subagent_id is not None
-    if is_subagent_work:
-        checkpoint_message_ids: list[int] = []
-        seen_message_ids: set[int] = set()
-        for message in checkpoint.get("messages", []):
-            if not isinstance(message, dict) or message.get("role") != MessageRole.USER:
-                continue
-            message_id = message.get("id")
-            if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0 or message_id in seen_message_ids:
-                continue
-            seen_message_ids.add(message_id)
-            checkpoint_message_ids.append(message_id)
-        if checkpoint_message_ids:
-            await subagent_crud.acknowledge_messages(
-                db,
-                work=work,
-                message_ids=checkpoint_message_ids,
-            )
-    update_kwargs = {
-        "work_id": work_id,
-        "worker_id": worker_id,
-        "values": {"execution_state": state},
-        "checkpoint": checkpoint,
-    }
-    if is_subagent_work:
-        update_kwargs["commit"] = False
-    updated = await session_reply_work_item_crud.update_claimed(db, **update_kwargs)
-    if not updated:
+    try:
+        active_audit_execution_present = SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint
+        active_audit_execution = checkpoint.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
+        work_id = work.id
+        if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0:
+            raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
+
+        claimed = await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=work_id,
+            worker_id=worker_id,
+            values={},
+            commit=False,
+        )
+        if not claimed:
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
+
+        await db.refresh(work)
+        state = dict(work.execution_state or {})
+        if active_audit_execution_present:
+            if active_audit_execution is None:
+                state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
+            else:
+                state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
+        is_subagent_work = work.subagent_id is not None
         if is_subagent_work:
-            await db.rollback()
-        raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
-    if is_subagent_work:
+            checkpoint_message_ids: list[int] = []
+            seen_message_ids: set[int] = set()
+            for message in checkpoint.get("messages", []):
+                if not isinstance(message, dict) or message.get("role") != MessageRole.USER:
+                    continue
+                message_id = message.get("id")
+                if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0 or message_id in seen_message_ids:
+                    continue
+                seen_message_ids.add(message_id)
+                checkpoint_message_ids.append(message_id)
+            if checkpoint_message_ids:
+                await subagent_crud.acknowledge_messages(
+                    db,
+                    work=work,
+                    message_ids=checkpoint_message_ids,
+                )
+        else:
+            await acknowledge_queried_child_results(
+                db,
+                parent=work,
+                checkpoint=checkpoint,
+                execution_state=state,
+            )
+
+        updated = await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=work_id,
+            worker_id=worker_id,
+            values={"execution_state": state},
+            checkpoint=checkpoint,
+            commit=False,
+        )
+        if not updated:
+            raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
         await db.commit()
+    except BaseException:
+        await db.rollback()
+        raise
+
     work.id = work_id
     work.execution_state = state
 
