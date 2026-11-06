@@ -48,6 +48,7 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
             id=msg.id,
             role=MessageRole.USER,
             content=content,
+            type=msg.type,
             environment_prompt=msg.environment_prompt,
             guidance_prompt=msg.guidance_prompt,
             attachments=msg.attachments,
@@ -133,6 +134,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
 
             message_kwargs = {
                 "id": msg.id,
+                "type": m_type,
                 "content": content,
                 "reasoning_content": None if suppress_tool_result_metadata else msg.reasoning_content,
                 "refusal": refusal,

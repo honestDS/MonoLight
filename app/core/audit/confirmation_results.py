@@ -126,6 +126,7 @@ async def replace_pending_tool_result(
 
     stored_tool_result = InternalMessage(
         role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
         tool_call_id=original_tool_call_id,
         content=replacement_content,
         tool_execution_status=tool_execution_status,

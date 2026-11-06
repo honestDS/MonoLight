@@ -233,6 +233,7 @@ class SessionReplyEnqueue:
         return (
             InternalMessage.from_user_input(
                 id=message_row.id,
+                type=message_row.type,
                 content=decode_message_content(message_row.content, message_row.content_format),
                 attachments=message_row.attachments,
                 guidance_prompt=message_row.guidance_prompt,

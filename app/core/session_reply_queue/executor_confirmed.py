@@ -189,6 +189,7 @@ async def _append_confirmed_tool_result(
     stored_tool_result = tool_result.model_copy(deep=True)
     stored_tool_result.content = sanitized_content
     stored_tool_result.id = replacement_state.pending_tool_results[original_tool_call_id].id
+    stored_tool_result.type = MessageType.TOOL_RESULT
     replacement_state.messages.append(stored_tool_result)
     replacement_state.turn_messages.append(stored_tool_result)
     replacement_state.replaced_tool_results = True
@@ -210,6 +211,7 @@ def _refresh_confirmed_frozen_tool_results(
         except (TypeError, ValueError):
             continue
         refreshed.id = pending_message.id
+        refreshed.type = pending_message.type
         refreshed_by_id[pending_message.id] = refreshed
     if not refreshed_by_id:
         return messages
@@ -238,6 +240,7 @@ def _build_confirmed_wait_checkpoint(
                 id=decision_message_id,
                 role=MessageRole.USER,
                 content=decision_raw_message,
+                type=MessageType.AUDIT_DECISION,
             )
         )
     checkpoint["messages"] = [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages]
@@ -284,7 +287,10 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             else:
                 source_tool_calls_by_id = {tool_call.id: tool_call for tool_call in complete_source_tool_calls}
                 source_tool_calls = [source_tool_calls_by_id[detail_call_id] for detail_call_id in detail_call_ids]
-                source_internal = source_internal.model_copy(deep=True, update={"tool_calls": source_tool_calls})
+                source_internal = source_internal.model_copy(
+                    deep=True,
+                    update={"tool_calls": source_tool_calls, "type": source_message.type},
+                )
                 source_valid = verify_persisted_tool_round(
                     expected_round_sha256=record.round_arguments_hash,
                     expected_tool_calls=[
@@ -396,6 +402,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 stored_tool_result = tool_result.model_copy(deep=True)
                 stored_tool_result.content = sanitized_content
                 stored_tool_result.id = pending_tool_results[original_call.id].id
+                stored_tool_result.type = MessageType.TOOL_RESULT
                 messages.append(stored_tool_result)
                 turn_messages.append(stored_tool_result)
             await persist_session_todo_snapshot_on_tool_results(
@@ -714,6 +721,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         id=decision_message_id,
         role=MessageRole.USER,
         content=decision_raw_message,
+        type=MessageType.AUDIT_DECISION,
         guidance_prompt=guidance_prompt if isinstance(guidance_prompt, str) else None,
     )
     interactive_response = await _dispatch_interactive_work(

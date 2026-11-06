@@ -42,6 +42,7 @@ class MessageType(StrEnum):
     AUDIT_CONFIRMATION = "audit_confirmation"
     AUDIT_DECISION = "audit_decision"
     BACKGROUND_TASK_RESULT = "background_result"
+    SUBAGENT_RESULT = "subagent_result"
     SCHEDULED_TASK_TRIGGER = "scheduled_task_trigger"
     OUTBOUND_TEXT_REFINEMENT = "outbound_text_refinement"
 
@@ -147,6 +148,7 @@ class InternalGeneratedImage(BaseModel):
 class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
+    type: MessageType | None = None
     content: str | list[VoiceTextPart | TextPart | ImagePart | AudioPart | FilePart | MessagePart] | None = None
     reasoning_content: str | None = None
     refusal: str | None = None

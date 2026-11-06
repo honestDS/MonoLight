@@ -491,6 +491,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             .where(Message.work_id.is_(None))
             .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
             .where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
+            .where(Message.type != MessageType.SUBAGENT_RESULT)
             .where(
                 or_(
                     Message.provider_metadata["internal_control"].as_string().is_(None),

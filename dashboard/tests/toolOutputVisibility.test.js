@@ -215,3 +215,82 @@ test('response history filtering applies tool visibility without mutating respon
     )
   }
 })
+
+const externalWorkResumePayload = JSON.stringify({
+  type: 'external_work_resume',
+  source: 'subagent',
+  instruction: 'resume the delegated task',
+  tool_call: { id: 'resume-call-1', name: 'search', arguments: { query: 'MonoLight' } },
+  results: [{ content: 'subagent result' }]
+})
+const externalWorkResumeUserMessages = [
+  { role: 'user', type: 'text', content: externalWorkResumePayload },
+  { role: 'user', content: externalWorkResumePayload }
+]
+const backgroundResultMessage = {
+  type: 'background_result',
+  role: 'user',
+  content: 'background result'
+}
+const normalMainReply = { role: 'assistant', content: 'normal model response' }
+const visibilityMessages = [
+  ...externalWorkResumeUserMessages,
+  backgroundResultMessage,
+  guidanceCases.pending,
+  visibilityCases.auditConfirmation,
+  normalMainReply
+]
+
+test('ordinary user JSON text keeps visibility while background results follow showToolCalls', () => {
+  const original = structuredClone(visibilityMessages)
+
+  for (const showToolCalls of [true, false]) {
+    const filtered = filterToolOutputMessages(visibilityMessages, showToolCalls)
+    const expected = showToolCalls
+      ? visibilityMessages
+      : [
+          ...externalWorkResumeUserMessages,
+          guidanceCases.pending,
+          visibilityCases.auditConfirmation,
+          normalMainReply
+        ]
+
+    assert.deepEqual(filtered, expected)
+    assert.deepEqual(visibilityMessages, original)
+    assert.deepEqual(
+      filterToolOutputMessages(filtered, showToolCalls),
+      filtered
+    )
+  }
+})
+
+test('response history keeps ordinary user JSON text and preserves response data', () => {
+  const response = {
+    id: 'response-external-resume',
+    choices: [{ message: { role: 'assistant', content: 'final answer' } }],
+    history: visibilityMessages,
+    metadata: { request_id: 'request-1' }
+  }
+  const original = structuredClone(response)
+
+  for (const showToolCalls of [true, false]) {
+    const filtered = filterResponseHistoryToolOutput(response, showToolCalls)
+    const expectedHistory = showToolCalls
+      ? visibilityMessages
+      : [
+          ...externalWorkResumeUserMessages,
+          guidanceCases.pending,
+          visibilityCases.auditConfirmation,
+          normalMainReply
+        ]
+
+    assert.deepEqual(filtered.history, expectedHistory)
+    assert.deepEqual(filtered.choices, response.choices)
+    assert.deepEqual(filtered.metadata, response.metadata)
+    assert.deepEqual(response, original)
+    assert.deepEqual(
+      filterResponseHistoryToolOutput(filtered, showToolCalls),
+      filtered
+    )
+  }
+})

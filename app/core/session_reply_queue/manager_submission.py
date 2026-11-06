@@ -111,6 +111,7 @@ class SessionReplySubmission:
                     id=message_row.id,
                     content=decode_message_content(message_row.content, message_row.content_format),
                     attachments=message_row.attachments,
+                    type=message_row.type,
                     guidance_prompt=message_row.guidance_prompt,
                     created_at=message_row.created_at.timestamp(),
                 ),
@@ -415,6 +416,7 @@ class SessionReplySubmission:
                                 id=message_row.id,
                                 content=decode_message_content(message_row.content, message_row.content_format),
                                 attachments=message_row.attachments,
+                                type=message_row.type,
                                 guidance_prompt=message_row.guidance_prompt,
                                 created_at=message_row.created_at.timestamp(),
                             ),
@@ -598,6 +600,7 @@ class SessionReplySubmission:
             InternalMessage.from_user_input(
                 id=message_row.id,
                 content=decode_message_content(message_row.content, message_row.content_format),
+                type=message_row.type,
                 guidance_prompt=message_row.guidance_prompt,
                 created_at=message_row.created_at.timestamp(),
             ),

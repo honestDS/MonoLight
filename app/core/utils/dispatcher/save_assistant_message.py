@@ -64,4 +64,5 @@ async def save_assistant_message(
     )
     ai_msg.id = saved_msg.id
     ai_msg.created_at = saved_msg.created_at
+    ai_msg.type = saved_msg.type
     return saved_msg

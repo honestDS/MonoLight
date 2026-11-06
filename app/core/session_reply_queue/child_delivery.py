@@ -84,6 +84,7 @@ def _build_resume_message(
 ) -> InternalMessage:
     return InternalMessage(
         role=MessageRole.USER,
+        type=MessageType.SUBAGENT_RESULT,
         content=json.dumps(
             {
                 "type": "external_work_resume",
@@ -284,6 +285,7 @@ async def resume_child_work_for_parent(
             if replacement.role != MessageRole.TOOL or replacement.tool_call_id != stored.tool_call_id or not isinstance(replacement_payload, dict) or replacement_payload.get("child_work_id") != round_row.child_work_id:
                 _invalid_context()
             replacement.id = pending_message.id
+            replacement.type = pending_message.type
             if pending_message.created_at is not None:
                 replacement.created_at = pending_message.created_at.timestamp()
 
@@ -320,7 +322,7 @@ async def resume_child_work_for_parent(
                     parent.session_id,
                     parent.uid,
                     MessageRole.USER,
-                    MessageType.BACKGROUND_TASK_RESULT,
+                    MessageType.SUBAGENT_RESULT,
                     resume_message,
                     parent.profile_id,
                     is_processed=True,

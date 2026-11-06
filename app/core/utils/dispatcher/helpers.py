@@ -11,7 +11,7 @@ from app.core.tools import TOOL_EXECUTOR_MAP, filter_tools_for_workflow
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
 from app.core.utils.message_assembler import MessageAssembler
-from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
 from app.models.profile import ToolConfig
 from app.providers.database import AsyncSessionLocal
 
@@ -87,7 +87,9 @@ def _filter_tool_output_messages(messages: list[InternalMessage]) -> list[Intern
     return filtered_messages
 
 
-def _is_end_session_control_message(message: InternalMessage) -> bool:
+def _is_internal_output_message(message: InternalMessage) -> bool:
+    if message.type == MessageType.SUBAGENT_RESULT:
+        return True
     provider_metadata = message.provider_metadata
     return isinstance(provider_metadata, dict) and provider_metadata.get("internal_control") == END_SESSION_TOOL_NAME
 
@@ -156,7 +158,13 @@ def dump_output_history(
     *,
     show_tool_calls: bool = True,
 ) -> list[dict[str, Any]]:
-    output_messages = [message for message in (messages if show_tool_calls else [message for message in messages if message.role != MessageRole.TOOL and not (message.role == MessageRole.ASSISTANT and message.tool_calls)]) if not _is_end_session_control_message(message)]
+    output_messages: list[InternalMessage] = []
+    for message in messages:
+        if _is_internal_output_message(message):
+            continue
+        if not show_tool_calls and (message.role == MessageRole.TOOL or (message.role == MessageRole.ASSISTANT and message.tool_calls)):
+            continue
+        output_messages.append(message)
     visible_messages: list[InternalMessage] = []
     for message in output_messages:
         if message.role == MessageRole.TOOL and isinstance(message.content, str):
@@ -168,7 +176,7 @@ def dump_output_history(
 
 
 def dump_background_proactive_history(messages: list[InternalMessage]) -> list[dict[str, Any]]:
-    return [message.model_dump(exclude_none=True) for message in _filter_tool_output_messages(messages) if not _is_end_session_control_message(message)]
+    return [message.model_dump(exclude_none=True) for message in _filter_tool_output_messages(messages) if not _is_internal_output_message(message)]
 
 
 def _get_tool_schema_name(schema: dict[str, Any]) -> str | None:

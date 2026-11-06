@@ -359,7 +359,7 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
                         select(Message)
                         .where(
                             Message.session_id == runtime.session_id,
-                            Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                            Message.type == MessageType.SUBAGENT_RESULT,
                         )
                         .order_by(Message.id)
                     )
@@ -380,7 +380,7 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
                         select(Message)
                         .where(
                             Message.session_id == runtime.session_id,
-                            Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                            Message.type == MessageType.SUBAGENT_RESULT,
                         )
                         .order_by(Message.id)
                     )
@@ -1123,7 +1123,7 @@ async def test_agent_work_child_finishes_before_parent_suspend_is_delivered_once
                         select(Message)
                         .where(
                             Message.session_id == parent.session_id,
-                            Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                            Message.type == MessageType.SUBAGENT_RESULT,
                         )
                         .order_by(Message.id)
                     )
@@ -1156,7 +1156,7 @@ async def test_agent_work_child_finishes_before_parent_suspend_is_delivered_once
                         select(Message)
                         .where(
                             Message.session_id == runtime.session_id,
-                            Message.type == MessageType.BACKGROUND_TASK_RESULT,
+                            Message.type == MessageType.SUBAGENT_RESULT,
                         )
                         .order_by(Message.id)
                     )

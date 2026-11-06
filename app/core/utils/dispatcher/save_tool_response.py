@@ -38,6 +38,7 @@ async def save_tool_response(
     )
     stored_tool_res.id = saved_msg.id
     stored_tool_res.created_at = saved_msg.created_at
+    stored_tool_res.type = saved_msg.type
     messages.append(stored_tool_res)
     turn_messages.append(stored_tool_res)
     return stored_tool_res

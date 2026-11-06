@@ -150,6 +150,7 @@ async def restore_interactive_tool_replies(
                 continue
             tool_result = InternalMessage(
                 role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
                 tool_call_id=tool_call.id,
                 tool_execution_status="execution_unknown",
                 content=json.dumps(

@@ -665,6 +665,7 @@ async def dispatch_interactive(
                     )
                     ai_msg.id = display_msg.id
                     ai_msg.created_at = display_msg.created_at
+                    ai_msg.type = display_msg.type
                     if stream_event_callback is not None and not (ai_msg.tool_calls and not show_tool_calls):
                         turn_end_content = saved_msg.content if saved_msg is not None else display_msg.content
                         if ai_msg.tool_calls:

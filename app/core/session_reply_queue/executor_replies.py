@@ -44,6 +44,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         content=content,
         attachments=attachments or None,
         guidance_prompt=execution_state.get("guidance_prompt"),
+        type=MessageType.TEXT,
     )
     if bool((work.execution_state or {}).get("audit_decision_response")):
         profile = await profile_crud.get_with_relations(db, work.profile_id)
@@ -134,6 +135,7 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
         attachments=message.attachments,
         environment_prompt=message.environment_prompt,
         guidance_prompt=message.guidance_prompt,
+        type=message.type,
     )
     execution_scope = execution_state.get("execution_scope")
     frozen_context_messages = load_frozen_context_messages(await session_reply_work_item_crud.get_frozen_context(db, work))
@@ -307,6 +309,7 @@ async def _execute_background_task_resume(db, work: SessionReplyWorkItem, worker
         initial_message = InternalMessage(
             role=MessageRole.USER,
             content=json.dumps(payload, ensure_ascii=False),
+            type=MessageType.BACKGROUND_TASK_RESULT,
         )
     else:
         result_event = await message_crud.get_by_dedupe_key(db, f"background-task:{int(work.source_id)}:result")

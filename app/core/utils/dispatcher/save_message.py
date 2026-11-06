@@ -29,7 +29,7 @@ def _to_storable_content(content: Any, msg_type: MessageType) -> str:
             content = content.model_dump(mode="json", exclude_none=True)
         return canonical_json_dumps(content)
 
-    if msg_type in {MessageType.TEXT, MessageType.AUDIT_DECISION, MessageType.BACKGROUND_TASK_RESULT, MessageType.OUTBOUND_TEXT_REFINEMENT} and hasattr(content, "content"):
+    if msg_type in {MessageType.TEXT, MessageType.AUDIT_DECISION, MessageType.BACKGROUND_TASK_RESULT, MessageType.OUTBOUND_TEXT_REFINEMENT, MessageType.SUBAGENT_RESULT} and hasattr(content, "content"):
         payload = content.content
         if isinstance(payload, str) or payload is None:
             return payload or ""
@@ -108,6 +108,7 @@ async def save_message(
                 MessageType.AUDIT_DECISION,
                 MessageType.BACKGROUND_TASK_RESULT,
                 MessageType.OUTBOUND_TEXT_REFINEMENT,
+                MessageType.SUBAGENT_RESULT,
             }
             and isinstance(getattr(content, "content", None), list)
             else MessageContentFormat.TEXT
@@ -141,6 +142,7 @@ async def save_message(
         )
     message_kwargs = {
         "id": db_obj.id,
+        "type": db_obj.type,
         "content": decode_message_content(db_obj.content, db_obj.content_format),
         "reasoning_content": db_obj.reasoning_content,
         "provider_metadata": db_obj.provider_metadata,
