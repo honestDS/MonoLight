@@ -21,13 +21,20 @@ AGENT_WORK_TOOL_SCHEMA = {
     "function": {
         "name": AGENT_WORK_TOOL_NAME,
         "description": (
-            "Manage persistent subagents in the current session and profile. A create message must be a self-contained instruction; "
-            "the subagent does not read the main conversation history. Ownership is fixed to the current uid, session, and Profile "
-            "and cannot be supplied in arguments. The subagent_id stays stable across rounds, while each round receives a new work_id. "
-            "Successful create and send_message suspend the main conversation and resume it automatically when the child result arrives; "
-            "query and cancel are immediate. Messages sent while a round is running are read before its next model call. If a round is "
-            "interrupted, send 'continue previous task' to resume it; after completion, send a message with the same subagent_id to start "
-            "a new round. An unknown result does not prove that side effects did not occur. A subagent cannot create another subagent."
+            "When to use a subagent\n"
+            "Delegate a clearly scoped, multi-step task with an independent deliverable, such as multi-source research and fact-checking, comparing alternatives, "
+            "focused analysis or review, changes confined to a file or module, or an investigation that needs follow-up. Use ordinary tools directly for simple "
+            "lookups, reads, or small edits. Keep dependent steps with the same subagent. Independent tasks can be delegated separately, with non-overlapping file edits.\n\n"
+            "Creating a task\n"
+            "Use create with the goal, necessary background, inputs or file paths, constraints, and expected deliverable. The subagent does not automatically read this conversation, so make the task self-contained. "
+            "Specify whether it should only investigate or may make changes, and what conclusions, evidence, or files it should return.\n\n"
+            "Continuing and following up\n"
+            'Reuse the returned subagent_id with send_message to add instructions, continue interrupted work, or request follow-up work. For a simple continuation, send "continue previous task".\n\n'
+            "Waiting and checking status\n"
+            "After create or send_message is accepted, this conversation waits and resumes automatically with the result. There is no need to poll query while waiting. "
+            "Use query to inspect status, saved results, or an interruption reason, and cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
+            "Important boundaries\n"
+            "Cancelling does not undo earlier changes. If execution is reported as unknown, verify what actually happened before repeating an action. Use only subagent_id values returned in this conversation under the current Profile. A subagent cannot create other subagents."
         ),
         "parameters": {
             "type": "object",
@@ -35,23 +42,27 @@ AGENT_WORK_TOOL_SCHEMA = {
                 "operation": {
                     "type": "string",
                     "enum": ["create", "query", "send_message", "cancel"],
-                    "description": "Operation to perform: create, query, send_message, or cancel.",
+                    "description": "create: delegate a new task; send_message: add instructions or continue work with an existing subagent; query: inspect work; cancel: stop unneeded work.",
                 },
                 "message": {
                     "type": "string",
                     "minLength": 1,
-                    "description": ("Required for create and send_message. For create, provide a self-contained instruction that does not rely on the main conversation history. For send_message, this is read before the subagent's next model call; use 'continue previous task' to resume an interrupted round."),
+                    "description": (
+                        "Required for create and send_message. For create, include the goal, needed context, inputs or paths, constraints, and expected result; "
+                        "the subagent cannot read this conversation. For send_message, explain what to add, change, or continue; use 'continue previous task' "
+                        "if no new instruction is needed."
+                    ),
                 },
                 "subagent_id": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Required for query, send_message, and cancel. Use the stable id returned by create.",
+                    "description": "Required for query, send_message, and cancel. Copy the subagent_id returned by create and reuse it for follow-up work with that subagent.",
                 },
                 "work_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional for query and cancel; identifies a specific positive work round.",
+                    "description": "For query and cancel only. Copy a returned work_id to inspect or cancel that particular task run; omit it to query the latest work or cancel the current or latest work.",
                 },
             },
             "required": ["operation"],
