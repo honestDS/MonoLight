@@ -182,6 +182,40 @@ class CRUDSubagent:
         result = await db.execute(statement)
         return result.scalars().first()
 
+    async def lock_parent_for_delivery(
+        self,
+        db: AsyncSession,
+        *,
+        work_id: int,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        identity: str,
+    ) -> SessionReplyWorkItem | None:
+        statement = (
+            update(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.id == work_id,
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.profile_id == profile_id,
+                SessionReplyWorkItem.dedupe_key == identity,
+                SessionReplyWorkItem.status.in_(
+                    (
+                        SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                        SessionReplyWorkStatus.READY_FOR_LLM,
+                        SessionReplyWorkStatus.SUCCEEDED,
+                    )
+                ),
+                SessionReplyWorkItem.subagent_id.is_(None),
+            )
+            .values(updated_at=get_local_time())
+            .returning(SessionReplyWorkItem)
+            .execution_options(synchronize_session=False, populate_existing=True)
+        )
+        result = await db.execute(statement)
+        return result.scalars().first()
+
     async def get_round(self, db: AsyncSession, *, child_work_id: int, subagent_id: str) -> SubagentWork | None:
         result = await db.execute(
             select(SubagentWork)

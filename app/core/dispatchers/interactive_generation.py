@@ -59,7 +59,7 @@ from app.core.utils.request_token_baseline import (
 )
 from app.core.utils.time import get_local_time
 from app.models.channel import resolve_model_protocol
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
 from .interactive_helpers import (
@@ -191,6 +191,30 @@ async def generate_interactive_turn(
     elif goal_mode:
         system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
         state.messages.insert(system_prompt_index, InternalMessage(role=MessageRole.SYSTEM, content=GOAL_MODE_SYSTEM_PROMPT))
+
+    pending_resume_ids = set(getattr(state.checkpoint_state, "pending_resume_message_ids", []))
+    if pending_resume_ids:
+        resume_messages: list[InternalMessage] = []
+        other_messages: list[InternalMessage] = []
+        seen_resume_ids: set[int] = set()
+        for message in state.messages:
+            is_resume_message = (
+                message.id in pending_resume_ids
+                and message.role == MessageRole.USER
+                and message.type
+                in {
+                    MessageType.BACKGROUND_TASK_RESULT,
+                    MessageType.SUBAGENT_RESULT,
+                }
+            )
+            if is_resume_message:
+                if message.id not in seen_resume_ids:
+                    resume_messages.append(message)
+                    seen_resume_ids.add(message.id)
+                continue
+            other_messages.append(message)
+        if resume_messages:
+            state.messages = [*other_messages, *resume_messages]
 
     while True:
         stream_state.emitted_stream_content = False

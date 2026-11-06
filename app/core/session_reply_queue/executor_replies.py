@@ -138,6 +138,8 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
         type=message.type,
     )
     execution_scope = execution_state.get("execution_scope")
+    if execution_scope is None:
+        execution_scope = END_SESSION_SCOPE_FOREGROUND
     frozen_context_messages = load_frozen_context_messages(await session_reply_work_item_crud.get_frozen_context(db, work))
     return await _dispatch_interactive_work(
         db,

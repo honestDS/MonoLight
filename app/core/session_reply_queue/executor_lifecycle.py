@@ -304,6 +304,12 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                     delivery_db,
                     child_work_id=child_work_id,
                 )
+        else:
+            execution_state = actual.execution_state if isinstance(actual.execution_state, dict) else {}
+            child_work_waits = execution_state.get("child_work_waits")
+            if isinstance(child_work_waits, list) and child_work_waits:
+                async with AsyncSessionLocal() as delivery_db:
+                    await resume_child_work_for_parent(delivery_db, parent_work_id=work_id)
 
     await _resume_pending_external_results(work)
 

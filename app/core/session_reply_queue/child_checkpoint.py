@@ -152,6 +152,16 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
     calls = await subagent_crud.list_calls(db, parent_work_id=work.id, undelivered_only=True)
     if not calls:
         return None
+    execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+    child_work_waits = execution_state.get("child_work_waits")
+    if isinstance(child_work_waits, list):
+        registered_call_keys: set[tuple[object, object, object]] = set()
+        for slot in child_work_waits:
+            if isinstance(slot, dict):
+                registered_call_keys.add((slot.get("child_work_id"), slot.get("tool_call_id"), slot.get("tool_result_message_id")))
+        calls = [call for call in calls if (call.child_work_id, call.tool_call_id, call.tool_result_message_id) not in registered_call_keys]
+    if not calls:
+        return None
 
     await ensure_session_reply_work_claim(db)
     checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)

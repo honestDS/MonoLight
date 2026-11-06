@@ -161,34 +161,24 @@ async def resume_child_work_for_parent(
         return False
     try:
         await db.refresh(parent)
-        if parent.status != SessionReplyWorkStatus.WAITING_EXTERNAL_WORK:
-            await db.rollback()
-            return False
-
-        work = await external_work_crud.lock_waiting(
+        work = await subagent_crud.lock_parent_for_delivery(
             db,
             work_id=parent_work_id,
             uid=parent.uid,
             session_id=parent.session_id,
+            profile_id=parent.profile_id,
             identity=parent.dedupe_key,
         )
         if work is None:
             await db.rollback()
             return False
+        parent = work
 
         state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
         child_slots = state.get("child_work_waits")
         if not isinstance(child_slots, list) or not child_slots:
             await db.rollback()
             return False
-
-        checkpoint = await reply_work_crud.get_checkpoint(db, parent_work_id)
-        if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
-            _invalid_context()
-        messages = _parse_checkpoint_messages(checkpoint["messages"])
-        turn_messages = None
-        if "turn_messages" in checkpoint:
-            turn_messages = _parse_checkpoint_messages(checkpoint["turn_messages"])
 
         validated_slots: list[tuple[dict[str, Any], Any, Any, Any]] = []
         seen_slot_keys: set[tuple[int, str]] = set()
@@ -239,8 +229,41 @@ async def resume_child_work_for_parent(
                 _invalid_context()
             validated_slots.append((slot, call, subagent, round_row))
 
+        has_new_result = False
+        for _slot, call, _subagent, round_row in validated_slots:
+            if isinstance(round_row.result, dict) and call.delivered is False:
+                has_new_result = True
+                break
+        if not has_new_result:
+            await db.rollback()
+            return False
+
+        if work.status == SessionReplyWorkStatus.SUCCEEDED:
+            if not await external_work_crud.reopen_completed_waiting(db, work=work):
+                await db.rollback()
+                return False
+            await db.refresh(work)
+            state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+            child_slots = state.get("child_work_waits")
+            if not isinstance(child_slots, list) or not child_slots:
+                _invalid_context()
+
+        checkpoint = await reply_work_crud.get_checkpoint(db, parent_work_id)
+        if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
+            _invalid_context()
+        messages = _parse_checkpoint_messages(checkpoint["messages"])
+        turn_messages = None
+        if "turn_messages" in checkpoint:
+            turn_messages = _parse_checkpoint_messages(checkpoint["turn_messages"])
+        pending_resume_message_ids: list[Any] = []
+        existing_pending_resume_message_ids = checkpoint.get("pending_resume_message_ids")
+        if isinstance(existing_pending_resume_message_ids, list):
+            for message_id in existing_pending_resume_message_ids:
+                if message_id not in pending_resume_message_ids:
+                    pending_resume_message_ids.append(message_id)
+
         remaining_slots: list[dict[str, Any]] = []
-        consumed_child_work_ids: list[int] = []
+        delivered_child_work_ids: list[int] = []
         is_live_parent = not isinstance(state.get("frozen_context_message_ids"), list)
         checkpoint_message_ids = {message.id for message in messages if _is_positive_int(message.id)}
         message_work_id_loaded = False
@@ -250,9 +273,9 @@ async def resume_child_work_for_parent(
             if not isinstance(round_row.result, dict):
                 remaining_slots.append(slot)
                 continue
-            consumed_child_work_ids.append(round_row.child_work_id)
             if call.delivered:
                 continue
+            delivered_child_work_ids.append(round_row.child_work_id)
 
             pending_message, stored = await _load_child_tool_result(
                 db,
@@ -334,6 +357,8 @@ async def resume_child_work_for_parent(
                     _invalid_context()
                 resume_message.id = marker.id
                 resume_message.created_at = marker.created_at
+                if marker.id not in pending_resume_message_ids:
+                    pending_resume_message_ids.append(marker.id)
                 if marker.id not in checkpoint_message_ids:
                     messages.append(resume_message)
                     checkpoint_message_ids.add(marker.id)
@@ -347,15 +372,20 @@ async def resume_child_work_for_parent(
         checkpoint["messages"] = _serialize_checkpoint_messages(messages)
         if turn_messages is not None:
             checkpoint["turn_messages"] = _serialize_checkpoint_messages(turn_messages)
+        if pending_resume_message_ids:
+            checkpoint["pending_resume_message_ids"] = pending_resume_message_ids
+        else:
+            checkpoint.pop("pending_resume_message_ids", None)
 
         state.pop("child_work_waits", None)
         if remaining_slots:
             state["child_work_waits"] = remaining_slots
-            if not await external_work_crud.update_waiting_state(
+
+        if work.status == SessionReplyWorkStatus.READY_FOR_LLM:
+            if not await external_work_crud.update_active_reply(
                 db,
-                work_id=parent_work_id,
-                execution_state=state,
-                commit=False,
+                work=work,
+                values={"execution_state": state},
             ):
                 await db.rollback()
                 return False
@@ -377,7 +407,7 @@ async def resume_child_work_for_parent(
         checkpoint.pop("reply_skipped", None)
         checkpoint["reload_history"] = not isinstance(state.get("frozen_context_message_ids"), list)
         await reply_work_crud.save_checkpoint(db, parent_work_id, checkpoint)
-        latest_child_work_id = max(consumed_child_work_ids)
+        latest_child_work_id = max(delivered_child_work_ids)
         await session_event_crud.publish(
             db,
             dedupe_key=f"subagent-work-ready:{parent_work_id}:{latest_child_work_id}",

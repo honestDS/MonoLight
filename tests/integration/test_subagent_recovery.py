@@ -438,7 +438,7 @@ async def test_interrupted_mixed_child_and_image_wait_recovers_without_losing_im
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             image_task = await db.get(BackgroundTask, image_task_id)
-            assert parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            assert parent is not None and parent.status == SessionReplyWorkStatus.READY_FOR_LLM
             assert image_task is not None
             assert image_task.status == BackgroundTaskStatus.SUCCEEDED
             assert image_task.attempt_count == 1
@@ -791,4 +791,349 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
                 assert result_message.tool_execution_status == "succeeded"
                 assert result_payload["status"] == "success"
                 assert result_payload["child_work_id"] == call.child_work_id
+                assert result_payload["work"]["result"]["content"] == expected_summary
+
+
+@pytest.mark.parametrize("interruption_point", ["save_tool_response", "suspend_claimed"], ids=["before-c-result-save", "before-c-suspend"])
+@pytest.mark.asyncio
+async def test_interrupted_parent_create_preserves_registered_child_wait_without_replaying_children(
+    image_chat_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption_point: str,
+) -> None:
+    import app.core.dispatchers.interactive_tools as interactive_tools_module
+    from app.core.crud.session.external_work import external_work_crud
+
+    first_instruction = "Complete child A independently and return its unique summary."
+    second_instruction = "Complete child B independently and return its unique summary."
+    third_instruction = "Complete child C independently and return its unique summary."
+    first_summary = "multi-child-recovery-summary-A"
+    second_summary = "multi-child-recovery-summary-B"
+    third_summary = "multi-child-recovery-summary-C"
+
+    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
+        async with runtime.factory() as db:
+            profile = await db.get(Profile, runtime.profile.id)
+            assert profile is not None
+            configs = deepcopy(profile.configs)
+            configs["tool"]["enabled_tools"] = list(dict.fromkeys([*configs["tool"]["enabled_tools"], AGENT_WORK_TOOL_NAME]))
+            profile.configs = configs
+            await db.commit()
+
+        first_create_call = InternalToolCall(
+            id="multi-child-recovery-create-A",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "create", "message": first_instruction},
+        )
+        second_create_call = InternalToolCall(
+            id="multi-child-recovery-create-B",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "create", "message": second_instruction},
+        )
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[first_create_call, second_create_call]))
+        accepted = await runtime.client.post(
+            "/api/v1/chat/completions",
+            json={
+                "session_id": runtime.session_id,
+                "request_id": "multi-child-recovery-initial-request",
+                "message": "Create child A and child B, then wait for both.",
+            },
+        )
+        assert accepted.status_code == 200
+        parent_work_id = accepted.json()["data"]["work_id"]
+
+        initial_waiting = await runtime.run_next(independent_only=False)
+        assert initial_waiting is not None and initial_waiting.id == parent_work_id
+        assert initial_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            assert parent is not None
+            children = (
+                (
+                    await db.execute(
+                        select(SessionReplyWorkItem)
+                        .where(
+                            SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                            SessionReplyWorkItem.source_type == SessionReplySourceType.PARENT_WORK,
+                            SessionReplyWorkItem.source_id == str(parent_work_id),
+                        )
+                        .order_by(SessionReplyWorkItem.created_at, SessionReplyWorkItem.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(children) == 2
+            child_a, child_b = children
+            assert child_a.id is not None and child_b.id is not None and child_a.id != child_b.id
+            child_a_work_id, child_b_work_id = child_a.id, child_b.id
+            calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id).order_by(SubagentToolCall.id))).scalars().all()
+            assert len(calls) == 2
+            assert {call.arguments["message"] for call in calls} == {first_instruction, second_instruction}
+            call_by_child_id = {call.child_work_id: call for call in calls}
+            assert set(call_by_child_id) == {child_a_work_id, child_b_work_id}
+            rounds = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([child_a_work_id, child_b_work_id])))).scalars().all()
+            assert len(rounds) == 2
+            waits = parent.execution_state.get("child_work_waits")
+            assert isinstance(waits, list)
+            assert {slot.get("child_work_id") for slot in waits if isinstance(slot, dict)} == {child_a_work_id, child_b_work_id}
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=first_summary))
+        child_a_done = await runtime.run_next(independent_only=True)
+        assert child_a_done is not None and child_a_done.id == child_a_work_id
+        assert child_a_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            child_b = await db.get(SessionReplyWorkItem, child_b_work_id)
+            assert parent is not None and parent.status == SessionReplyWorkStatus.READY_FOR_LLM
+            assert child_b is not None and child_b.status == SessionReplyWorkStatus.READY_FOR_LLM
+            waits = parent.execution_state.get("child_work_waits")
+            assert isinstance(waits, list) and len(waits) == 1
+            assert waits[0]["child_work_id"] == child_b_work_id
+            calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id).order_by(SubagentToolCall.id))).scalars().all()
+            assert len(calls) == 2
+            assert {call.child_work_id for call in calls if call.delivered} == {child_a_work_id}
+            assert {call.child_work_id for call in calls if not call.delivered} == {child_b_work_id}
+            b_call = next(call for call in calls if call.child_work_id == child_b_work_id)
+            assert b_call.tool_result_message_id is not None
+            b_result_message_id = b_call.tool_result_message_id
+
+        third_create_call = InternalToolCall(
+            id="multi-child-recovery-create-C",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "create", "message": third_instruction},
+        )
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[third_create_call]))
+        provider_count_before_c = len(runtime.provider_payloads)
+        interrupted = False
+        if interruption_point == "save_tool_response":
+            original_save_tool_response = interactive_tools_module.save_tool_response
+
+            async def interrupt_c_queued_result(*args, **kwargs):
+                nonlocal interrupted
+                tool_result = kwargs.get("tool_res")
+                if tool_result is None and len(args) > 4:
+                    tool_result = args[4]
+                try:
+                    payload = json.loads(tool_result.content or "{}")
+                except (AttributeError, TypeError, ValueError):
+                    payload = None
+                if isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("operation") == "create":
+                    interrupted = True
+                    raise asyncio.CancelledError("interrupted before child C queued result save")
+                return await original_save_tool_response(*args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(interactive_tools_module, "save_tool_response", interrupt_c_queued_result)
+                with pytest.raises(asyncio.CancelledError):
+                    await runtime.run_next(independent_only=False)
+        else:
+
+            async def interrupt_parent_suspend(*args, **kwargs):
+                nonlocal interrupted
+                interrupted = True
+                raise asyncio.CancelledError("interrupted before child C wait registration")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(external_work_crud, "suspend_claimed", interrupt_parent_suspend)
+                with pytest.raises(asyncio.CancelledError):
+                    await runtime.run_next(independent_only=False)
+        assert interrupted
+        assert len(runtime.provider_payloads) == provider_count_before_c + 1
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            assert parent is not None and parent.status == SessionReplyWorkStatus.RUNNING
+            children = (
+                (
+                    await db.execute(
+                        select(SessionReplyWorkItem)
+                        .where(
+                            SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                            SessionReplyWorkItem.source_type == SessionReplySourceType.PARENT_WORK,
+                            SessionReplyWorkItem.source_id == str(parent_work_id),
+                        )
+                        .order_by(SessionReplyWorkItem.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(children) == 3
+            calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id).order_by(SubagentToolCall.id))).scalars().all()
+            assert len(calls) == 3
+            c_call = next(call for call in calls if call.arguments == third_create_call.arguments)
+            assert c_call.child_work_id is not None and c_call.child_work_id not in {child_a_work_id, child_b_work_id}
+            child_c_work_id = c_call.child_work_id
+            assert {child.id for child in children} == {child_a_work_id, child_b_work_id, child_c_work_id}
+            rounds = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([child_a_work_id, child_b_work_id, child_c_work_id])))).scalars().all()
+            assert len(rounds) == 3
+            child_by_id = {child.id: child for child in children}
+            assert child_by_id[child_a_work_id].status == SessionReplyWorkStatus.SUCCEEDED
+            assert child_by_id[child_b_work_id].status == SessionReplyWorkStatus.READY_FOR_LLM
+            assert child_by_id[child_c_work_id].status == SessionReplyWorkStatus.READY_FOR_LLM
+            assert {call.child_work_id for call in calls if call.delivered} == {child_a_work_id}
+            assert {call.child_work_id for call in calls if not call.delivered} == {child_b_work_id, child_c_work_id}
+            waits = parent.execution_state.get("child_work_waits")
+            assert isinstance(waits, list) and len(waits) == 1
+            assert waits[0]["child_work_id"] == child_b_work_id
+            counts_after_interruption = (len(children), len(rounds), len(calls))
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            assert parent is not None
+            parent.lock_until = 0
+            await db.commit()
+
+        await SessionReplyConsumer()._recover_expired()
+        assert not runtime.outputs
+        provider_count_after_recovery = len(runtime.provider_payloads)
+        recovered_waiting = await runtime.run_next(independent_only=False)
+        assert recovered_waiting is not None and recovered_waiting.id == parent_work_id
+        assert recovered_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert not runtime.outputs
+        assert len(runtime.provider_payloads) == provider_count_after_recovery
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            assert parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            children = (
+                (
+                    await db.execute(
+                        select(SessionReplyWorkItem)
+                        .where(
+                            SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                            SessionReplyWorkItem.source_type == SessionReplySourceType.PARENT_WORK,
+                            SessionReplyWorkItem.source_id == str(parent_work_id),
+                        )
+                        .order_by(SessionReplyWorkItem.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id).order_by(SubagentToolCall.id))).scalars().all()
+            rounds = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([child_a_work_id, child_b_work_id, child_c_work_id])))).scalars().all()
+            assert (len(children), len(rounds), len(calls)) == counts_after_interruption
+            waits = parent.execution_state.get("child_work_waits")
+            assert isinstance(waits, list) and {slot.get("child_work_id") for slot in waits if isinstance(slot, dict)} == {child_b_work_id, child_c_work_id}
+            b_wait = next(slot for slot in waits if isinstance(slot, dict) and slot.get("child_work_id") == child_b_work_id)
+            assert b_wait["tool_result_message_id"] == b_result_message_id
+            assert {call.child_work_id for call in calls if call.delivered} == {child_a_work_id}
+            assert {call.child_work_id for call in calls if not call.delivered} == {child_b_work_id, child_c_work_id}
+            assert all(call.tool_result_message_id is not None for call in calls)
+            b_call = next(call for call in calls if call.child_work_id == child_b_work_id)
+            assert b_call.tool_result_message_id == b_result_message_id
+            result_rows = (
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.session_id == parent.session_id,
+                            Message.uid == parent.uid,
+                            Message.profile_id == parent.profile_id,
+                            Message.role == MessageRole.TOOL,
+                            Message.type == MessageType.TOOL_RESULT,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(result_rows) == 3
+            result_call_ids = {_result_payload(row)[0].tool_call_id for row in result_rows}
+            assert result_call_ids == {call.tool_call_id for call in calls}
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=second_summary))
+        child_b_done = await runtime.run_next(independent_only=True)
+        assert child_b_done is not None and child_b_done.id == child_b_work_id
+        assert child_b_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=third_summary))
+        child_c_done = await runtime.run_next(independent_only=True)
+        assert child_c_done is not None and child_c_done.id == child_c_work_id
+        assert child_c_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        parent_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="multi-child-recovery-parent-final"))
+        parent_done = await runtime.run_next(independent_only=False)
+        assert parent_done is not None and parent_done.id == parent_work_id
+        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        parent_payloads = runtime.provider_payloads[parent_provider_start:]
+        assert len(parent_payloads) == 1
+        provider_items = parent_payloads[0]["input"]
+        assert isinstance(provider_items, list) and provider_items
+        assert provider_items[-1].get("role") != MessageRole.ASSISTANT.value
+        parent_request_dump = json.dumps(parent_payloads[0], ensure_ascii=False)
+        assert first_summary in parent_request_dump
+        assert second_summary in parent_request_dump
+        assert third_summary in parent_request_dump
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
+            children = (
+                (
+                    await db.execute(
+                        select(SessionReplyWorkItem)
+                        .where(
+                            SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                            SessionReplyWorkItem.source_type == SessionReplySourceType.PARENT_WORK,
+                            SessionReplyWorkItem.source_id == str(parent_work_id),
+                        )
+                        .order_by(SessionReplyWorkItem.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id).order_by(SubagentToolCall.id))).scalars().all()
+            rounds = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([child_a_work_id, child_b_work_id, child_c_work_id])))).scalars().all()
+            assert (len(children), len(rounds), len(calls)) == counts_after_interruption
+            assert all(child.status == SessionReplyWorkStatus.SUCCEEDED for child in children)
+            rounds_by_child_id = {round_row.child_work_id: round_row for round_row in rounds}
+            expected_summaries = {
+                child_a_work_id: first_summary,
+                child_b_work_id: second_summary,
+                child_c_work_id: third_summary,
+            }
+            assert set(rounds_by_child_id) == set(expected_summaries)
+            for child_work_id, expected_summary in expected_summaries.items():
+                round_row = rounds_by_child_id[child_work_id]
+                assert round_row.result is not None
+                assert round_row.result["completed"] is True
+                assert round_row.result["status"] == "succeeded"
+                assert round_row.result["result"]["content"] == expected_summary
+
+            assert len(calls) == 3 and all(call.delivered is True for call in calls)
+            result_rows = (
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.session_id == parent.session_id,
+                            Message.uid == parent.uid,
+                            Message.profile_id == parent.profile_id,
+                            Message.role == MessageRole.TOOL,
+                            Message.type == MessageType.TOOL_RESULT,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(result_rows) == 3
+            result_rows_by_call_id = {}
+            for row in result_rows:
+                result_message, result_payload = _result_payload(row)
+                result_rows_by_call_id[result_message.tool_call_id] = (row, result_message, result_payload)
+            assert set(result_rows_by_call_id) == {call.tool_call_id for call in calls}
+            calls_by_child_id = {call.child_work_id: call for call in calls}
+            for child_work_id, expected_summary in expected_summaries.items():
+                call = calls_by_child_id[child_work_id]
+                result_row, result_message, result_payload = result_rows_by_call_id[call.tool_call_id]
+                assert call.tool_result_message_id == result_row.id
+                assert result_message.tool_execution_status == "succeeded"
+                assert result_payload["status"] == "success"
+                assert result_payload["child_work_id"] == child_work_id
                 assert result_payload["work"]["result"]["content"] == expected_summary

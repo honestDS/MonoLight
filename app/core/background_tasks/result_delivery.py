@@ -121,7 +121,7 @@ def _clean_state(state: dict[str, Any], received: set[int], auto_sessions: set[s
 
 
 def _has_waits(state: dict[str, Any]) -> bool:
-    return any(isinstance(state.get(key), list) and state[key] for key in ("pending_tools", "terminal_watch_waits", "external_resume_context", "terminal_auto_watch_task_ids"))
+    return any(isinstance(state.get(key), list) and state[key] for key in ("pending_tools", "terminal_watch_waits", "external_resume_context", "terminal_auto_watch_task_ids", "child_work_waits"))
 
 
 def _read_marker(marker: Message, current: Any, task_id: int | None = None) -> dict[str, Any]:
@@ -210,6 +210,10 @@ async def receive_pending_external_results(
             marker = await message_crud.get(db, marker_id)
             if marker is None:
                 raise _unknown()
+            if _status(marker.type) == MessageType.SUBAGENT_RESULT.value:
+                if marker.uid != current.uid or marker.session_id != current.session_id or marker.profile_id != current.profile_id or _status(marker.role) != "user":
+                    raise _unknown()
+                continue
             payload = _read_marker(marker, current)
             ids = _payload_ids(payload)
             for task_id in ids:

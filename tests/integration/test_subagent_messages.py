@@ -18,7 +18,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkType,
 )
 from app.models.subagent import Subagent, SubagentToolCall, SubagentWork
-from app.transformers.openai import OpenAIResponsesTransformer
+from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
 def _provider_tool_names(payload: dict) -> set[str]:
@@ -35,13 +35,17 @@ def _provider_tool_names(payload: dict) -> set[str]:
     return names
 
 
+@pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
+@pytest.mark.parametrize("with_new_user_message", [False, True])
 @pytest.mark.asyncio
 async def test_running_subagent_reads_appended_message_on_next_model_request(
     image_chat_runtime,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    protocol: str,
+    with_new_user_message: bool,
 ) -> None:
-    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
+    async with image_chat_runtime(protocol, goal_mode=False) as runtime:
         async with runtime.factory() as db:
             profile = await db.get(Profile, runtime.profile.id)
             assert profile is not None
@@ -56,6 +60,10 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
         appended_message = "private follow-up for the running child"
         second_parent_secret = "second-parent-private-secret"
         child_summary = "child summary includes the file and follow-up"
+        first_parent_reply = "first parent resumed"
+        second_parent_reply = "second parent resumed"
+        new_user_message = "回答我就好，不用等待 third-parent-user-unique-marker"
+        parent_tool_call_ids: dict[int, str] = {}
 
         runtime.outputs.append(
             InternalMessage(
@@ -121,16 +129,22 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
         )
         child_request_started = asyncio.Event()
         release_child_request = asyncio.Event()
-        fixture_post_json = OpenAIResponsesTransformer._post_json
+        transformer = OpenAIChatCompletionsTransformer if protocol == "OPENAI" else OpenAIResponsesTransformer
+        fixture_post_json = transformer._post_json
 
         async def wrapped_post_json(_transformer, **kwargs):
+            payload = kwargs["payload"]
+            provider_items = payload.get("messages") or payload.get("input")
+            assert isinstance(provider_items, list) and provider_items
+            assert isinstance(provider_items[-1], dict)
+            assert provider_items[-1].get("role") != MessageRole.ASSISTANT.value
             response = await fixture_post_json(_transformer, **kwargs)
             if not child_request_started.is_set():
                 child_request_started.set()
                 await release_child_request.wait()
             return response
 
-        monkeypatch.setattr(OpenAIResponsesTransformer, "_post_json", wrapped_post_json)
+        monkeypatch.setattr(transformer, "_post_json", wrapped_post_json)
         child_task: asyncio.Task | None = None
         try:
             child_task = asyncio.create_task(runtime.run_next())
@@ -222,6 +236,8 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                 assert all(isinstance(call_id, str) and call_id for call_id in call_ids)
                 assert len(set(call_ids)) == 2
                 assert {call.arguments["operation"] for call in calls} == {"create", "send_message"}
+                parent_tool_call_ids = {call.parent_work_id: call.tool_call_id for call in calls}
+                assert set(parent_tool_call_ids) == {first_parent_work_id, second_parent_work_id}
 
                 persisted_parent_calls = []
                 assistant_rows = (
@@ -360,18 +376,77 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                     result_payloads.append(result_payload)
                 assert {payload["operation"] for payload in result_payloads} == {"create", "send_message"}
 
-            runtime.outputs.extend(
-                [
-                    InternalMessage(role=MessageRole.ASSISTANT, content="first parent resumed"),
-                    InternalMessage(role=MessageRole.ASSISTANT, content="second parent resumed"),
-                ]
-            )
+            parent_provider_start = len(runtime.provider_payloads)
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=first_parent_reply))
             first_parent_done = await asyncio.wait_for(runtime.run_next(), timeout=10)
-            second_parent_done = await asyncio.wait_for(runtime.run_next(), timeout=10)
             assert first_parent_done is not None and first_parent_done.id == first_parent_work_id
+            assert first_parent_done.status == SessionReplyWorkStatus.SUCCEEDED, first_parent_done.error
+
+            third_parent_work_id: int | None = None
+            if with_new_user_message:
+                third_parent_accepted = await runtime.client.post(
+                    "/api/v1/chat/completions",
+                    json={
+                        "session_id": runtime.session_id,
+                        "request_id": "subagent-message-third-parent-request",
+                        "message": new_user_message,
+                    },
+                )
+                assert third_parent_accepted.status_code == 200
+                third_parent_data = third_parent_accepted.json()["data"]
+                assert third_parent_data["submission_status"] == "queued"
+                third_parent_work_id = third_parent_data["work_id"]
+                assert isinstance(third_parent_work_id, int)
+                assert third_parent_work_id not in {first_parent_work_id, second_parent_work_id}
+
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=second_parent_reply))
+            second_parent_done = await asyncio.wait_for(runtime.run_next(), timeout=10)
             assert second_parent_done is not None and second_parent_done.id == second_parent_work_id
-            assert first_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
-            assert second_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+            assert second_parent_done.status == SessionReplyWorkStatus.SUCCEEDED, second_parent_done.error
+
+            parent_provider_payloads = runtime.provider_payloads[parent_provider_start:]
+            assert len(parent_provider_payloads) == 2
+            first_parent_payload, second_parent_payload = parent_provider_payloads
+
+            def provider_items(payload: dict) -> list[dict]:
+                items = payload.get("messages") or payload.get("input")
+                assert isinstance(items, list) and items
+                assert all(isinstance(item, dict) for item in items)
+                return items
+
+            def decode_external_resume(item: dict) -> dict | None:
+                if item.get("role") != MessageRole.USER.value or not isinstance(item.get("content"), str):
+                    return None
+                try:
+                    envelope = json.loads(item["content"])
+                    user_message = envelope.get("user_message") if isinstance(envelope, dict) else None
+                    payload = json.loads(user_message) if isinstance(user_message, str) else None
+                except (TypeError, json.JSONDecodeError):
+                    return None
+                if isinstance(payload, dict) and payload.get("type") == "external_work_resume":
+                    return payload
+                return None
+
+            first_parent_items = provider_items(first_parent_payload)
+            second_parent_items = provider_items(second_parent_payload)
+            assert first_parent_items[-1].get("role") == MessageRole.USER.value
+            assert second_parent_items[-1].get("role") == MessageRole.USER.value
+            first_parent_dump = json.dumps(first_parent_payload, ensure_ascii=False)
+            second_parent_dump = json.dumps(second_parent_payload, ensure_ascii=False)
+            assert first_parent_reply not in first_parent_dump
+            assert first_parent_reply in second_parent_dump
+            assert new_user_message not in first_parent_dump
+            assert second_parent_dump.count(new_user_message) == (1 if with_new_user_message else 0)
+
+            second_parent_call_id = parent_tool_call_ids[second_parent_work_id]
+            second_resume_entries = [(index, resume) for index, item in enumerate(second_parent_items) if (resume := decode_external_resume(item)) is not None and resume.get("source") == "subagent" and isinstance(resume.get("tool_call"), dict) and resume["tool_call"].get("id") == second_parent_call_id]
+            assert len(second_resume_entries) == 1
+            resume_index, resume_payload = second_resume_entries[0]
+            assert resume_payload["source"] == "subagent"
+            assert resume_payload["tool_call"]["id"] == second_parent_call_id
+            historical_assistant_indices = [index for index, item in enumerate(second_parent_items) if item.get("role") == MessageRole.ASSISTANT.value and first_parent_reply in json.dumps(item, ensure_ascii=False)]
+            assert len(historical_assistant_indices) == 1
+            assert historical_assistant_indices[0] < resume_index
 
             history_response = await runtime.client.get(
                 "/api/v1/chat/sessions/history",
@@ -386,9 +461,19 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                 second_parent = await db.get(SessionReplyWorkItem, second_parent_work_id)
                 child = await db.get(SessionReplyWorkItem, child_work_id)
                 assert first_parent is not None and second_parent is not None and child is not None
-                assert first_parent.status == SessionReplyWorkStatus.SUCCEEDED
-                assert second_parent.status == SessionReplyWorkStatus.SUCCEEDED
+                assert first_parent.status == SessionReplyWorkStatus.SUCCEEDED, first_parent.error
+                assert second_parent.status == SessionReplyWorkStatus.SUCCEEDED, second_parent.error
                 assert child.status == SessionReplyWorkStatus.SUCCEEDED
+                if with_new_user_message:
+                    assert third_parent_work_id is not None
+                    third_parent = await db.get(SessionReplyWorkItem, third_parent_work_id)
+                    assert third_parent is not None
+                    assert third_parent.status == SessionReplyWorkStatus.MERGED
+                    assert third_parent.merged_into_id == second_parent_work_id
+                    third_message = await db.get(Message, int(third_parent.source_id))
+                    assert third_message is not None
+                    assert third_message.content == new_user_message
+                    assert third_message.is_processed is True
                 assert await db.get(Subagent, subagent_id) is not None
                 calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.child_work_id == child_work_id).order_by(SubagentToolCall.id))).scalars().all()
                 assert len(calls) == 2
