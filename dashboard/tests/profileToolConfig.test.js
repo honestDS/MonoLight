@@ -4,6 +4,7 @@ import test from 'node:test'
 import { defaultProfileConfigs } from '../src/constants/index.js'
 
 const scheduledTaskTool = 'manage_scheduled_tasks'
+const agentWorkTool = 'agent_work'
 
 test('new profile configurations enable scheduled task management by default', () => {
   const config = defaultProfileConfigs()
@@ -78,4 +79,35 @@ test('subagent concurrency stays isolated across profile creation and persistenc
   assert.equal(savedFirstProfile.tool.background_task_max_concurrency, 2)
   assert.equal(secondProfile.tool.subagent_max_concurrency, 4)
   assert.equal(defaultProfileConfigs().tool.subagent_max_concurrency, 4)
+})
+
+test('subagent management tool enablement stays isolated across profiles and persistence', () => {
+  const firstProfile = defaultProfileConfigs()
+  const secondProfile = defaultProfileConfigs()
+  const defaultTools = [...firstProfile.tool.enabled_tools]
+
+  assert.ok(!firstProfile.tool.enabled_tools.includes(agentWorkTool))
+  assert.ok(!secondProfile.tool.enabled_tools.includes(agentWorkTool))
+  assert.equal(firstProfile.tool.subagent_max_concurrency, 4)
+
+  firstProfile.tool.enabled_tools.push(agentWorkTool)
+  const savedFirstProfile = JSON.parse(JSON.stringify(firstProfile))
+
+  assert.equal(savedFirstProfile.tool.enabled_tools.filter((tool) => tool === agentWorkTool).length, 1)
+  assert.ok(!secondProfile.tool.enabled_tools.includes(agentWorkTool))
+
+  const toolIndex = savedFirstProfile.tool.enabled_tools.indexOf(agentWorkTool)
+  assert.notEqual(toolIndex, -1)
+  savedFirstProfile.tool.enabled_tools.splice(toolIndex, 1)
+
+  assert.equal(firstProfile.tool.enabled_tools.filter((tool) => tool === agentWorkTool).length, 1)
+  assert.ok(!savedFirstProfile.tool.enabled_tools.includes(agentWorkTool))
+  assert.ok(!secondProfile.tool.enabled_tools.includes(agentWorkTool))
+
+  const newDefaultProfile = defaultProfileConfigs()
+  assert.ok(!newDefaultProfile.tool.enabled_tools.includes(agentWorkTool))
+  assert.deepEqual(firstProfile.tool.enabled_tools.filter((tool) => tool !== agentWorkTool), defaultTools)
+  assert.deepEqual(savedFirstProfile.tool.enabled_tools, defaultTools)
+  assert.deepEqual(secondProfile.tool.enabled_tools, defaultTools)
+  assert.deepEqual(newDefaultProfile.tool.enabled_tools, defaultTools)
 })

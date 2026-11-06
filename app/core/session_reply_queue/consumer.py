@@ -16,6 +16,7 @@ from app.core.constants import (
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.subagent import subagent_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import BaseBusinessException, LLMContextLengthException, LLMRequestRejectedException
 from app.core.i18n import t
@@ -233,8 +234,26 @@ class SessionReplyConsumer:
     async def _cleanup_terminal_items_if_due(self, now: float) -> None:
         if now < self._next_cleanup_at:
             return
+        await self._cleanup_idle_subagents()
         await self._cleanup_terminal_items()
         self._next_cleanup_at = now + SESSION_REPLY_CLEANUP_INTERVAL_SECONDS
+
+    async def _cleanup_idle_subagents(self) -> None:
+        subagent_count = 0
+        remaining = SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN
+
+        while remaining > 0:
+            batch_size = min(SESSION_REPLY_CLEANUP_BATCH_SIZE, remaining)
+            async with AsyncSessionLocal() as db:
+                cleanup_count = await subagent_crud.cleanup_idle(db, batch_size=batch_size)
+            subagent_count += cleanup_count
+            remaining -= cleanup_count
+            if cleanup_count < batch_size or remaining <= 0:
+                break
+            await asyncio.sleep(0)
+
+        if subagent_count > 0:
+            logger.bind(subagent_count=subagent_count).info("Expired idle subagents cleaned")
 
     async def _cleanup_terminal_items(self) -> None:
         work_item_count = 0

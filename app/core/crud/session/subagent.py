@@ -1,18 +1,143 @@
 import time
+from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import delete, exists, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import SESSION_REPLY_CLEANUP_BATCH_SIZE, SUBAGENT_IDLE_RETENTION_HOURS
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.utils.time import get_local_time
 from app.models.message import Message, MessageRole, MessageType
-from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.session_reply_work_item import (
+    SESSION_REPLY_ACTIVE_STATUSES,
+    SessionReplyCheckpointMessage,
+    SessionReplyCheckpointMessageReference,
+    SessionReplyWorkItem,
+    SessionReplyWorkStatus,
+)
 from app.models.subagent import Subagent, SubagentToolCall, SubagentWork
 
 
 class CRUDSubagent:
+    async def cleanup_idle(
+        self,
+        db: AsyncSession,
+        *,
+        retention_hours: int = SUBAGENT_IDLE_RETENTION_HOURS,
+        batch_size: int = SESSION_REPLY_CLEANUP_BATCH_SIZE,
+    ) -> int:
+        if batch_size <= 0:
+            return 0
+
+        cutoff = get_local_time() - timedelta(hours=retention_hours)
+        active_work = (
+            select(1)
+            .select_from(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.subagent_id == Subagent.id,
+                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+            )
+            .correlate(Subagent)
+        )
+        unfinished_round = (
+            select(1)
+            .select_from(SubagentWork)
+            .where(
+                SubagentWork.subagent_id == Subagent.id,
+                or_(SubagentWork.result.is_(None), SubagentWork.waiting_confirmation.is_(True)),
+            )
+            .correlate(Subagent)
+        )
+        undelivered_call = (
+            select(1)
+            .select_from(SubagentToolCall)
+            .where(
+                SubagentToolCall.subagent_id == Subagent.id,
+                SubagentToolCall.delivered.is_(False),
+            )
+            .correlate(Subagent)
+        )
+        eligible_conditions = (
+            Subagent.last_called_at < cutoff,
+            Subagent.active_child_work_id.is_(None),
+            ~exists(active_work),
+            ~exists(unfinished_round),
+            ~exists(undelivered_call),
+        )
+
+        deleted_count = 0
+        try:
+            result = await db.execute(select(Subagent.id).where(*eligible_conditions).order_by(Subagent.last_called_at.asc(), Subagent.id.asc()).limit(batch_size))
+            candidate_ids = [subagent_id for subagent_id in result.scalars().all() if subagent_id is not None]
+
+            for candidate_id in candidate_ids:
+                update_result = await db.execute(update(Subagent).where(Subagent.id == candidate_id, *eligible_conditions).values(last_called_at=Subagent.last_called_at).execution_options(synchronize_session=False))
+                if update_result.rowcount != 1:
+                    continue
+
+                subagent_result = await db.execute(select(Subagent.uid, Subagent.session_id, Subagent.profile_id, Subagent.id).where(Subagent.id == candidate_id))
+                subagent = subagent_result.one_or_none()
+                if subagent is None:
+                    continue
+
+                work_result = await db.execute(
+                    select(SessionReplyWorkItem.id).where(
+                        SessionReplyWorkItem.subagent_id == subagent.id,
+                        SessionReplyWorkItem.uid == subagent.uid,
+                        SessionReplyWorkItem.session_id == subagent.session_id,
+                        SessionReplyWorkItem.profile_id == subagent.profile_id,
+                    )
+                )
+                work_ids = [work_id for work_id in work_result.scalars().all() if work_id is not None]
+
+                checkpoint_message_ids: list[int] = []
+                if work_ids:
+                    reference_result = await db.execute(select(SessionReplyCheckpointMessageReference.message_id).where(SessionReplyCheckpointMessageReference.work_id.in_(work_ids)).distinct().order_by(SessionReplyCheckpointMessageReference.message_id.asc()))
+                    checkpoint_message_ids = list(reference_result.scalars().all())
+
+                    await message_crud.remove_by_work_ids(
+                        db,
+                        work_ids=work_ids,
+                        uid=subagent.uid,
+                        session_id=subagent.session_id,
+                        profile_id=subagent.profile_id,
+                    )
+                    await db.execute(
+                        delete(SessionReplyWorkItem)
+                        .where(
+                            SessionReplyWorkItem.id.in_(work_ids),
+                            SessionReplyWorkItem.subagent_id == subagent.id,
+                            SessionReplyWorkItem.uid == subagent.uid,
+                            SessionReplyWorkItem.session_id == subagent.session_id,
+                            SessionReplyWorkItem.profile_id == subagent.profile_id,
+                        )
+                        .execution_options(synchronize_session=False)
+                    )
+
+                delete_result = await db.execute(delete(Subagent).where(Subagent.id == subagent.id).execution_options(synchronize_session=False))
+
+                if checkpoint_message_ids:
+                    await db.execute(
+                        delete(SessionReplyCheckpointMessage)
+                        .where(
+                            SessionReplyCheckpointMessage.id.in_(checkpoint_message_ids),
+                            ~exists(select(1).select_from(SessionReplyCheckpointMessageReference).where(SessionReplyCheckpointMessageReference.message_id == SessionReplyCheckpointMessage.id).correlate(SessionReplyCheckpointMessage)),
+                        )
+                        .execution_options(synchronize_session=False)
+                    )
+
+                if delete_result.rowcount == 1:
+                    deleted_count += 1
+
+            await db.commit()
+            return deleted_count
+        except BaseException:
+            await db.rollback()
+            raise
+
     async def create(
         self,
         db: AsyncSession,

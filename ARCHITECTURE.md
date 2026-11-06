@@ -367,7 +367,7 @@ app/core/memory/
 ```text
 app/core/session_reply_queue/
 ├── __init__.py             # 队列能力导出
-├── consumer.py             # 前台与独立任务分开领取回复工作
+├── consumer.py             # 前台与独立任务分开领取、过期队列与空闲子代理维护
 ├── executor.py             # 回复工作执行兼容导出入口
 ├── executor_agent_work.py  # 独立 AgentWork 指令执行与自身上下文恢复
 ├── executor_audit.py       # 审计执行绑定、未知终态与文件快照校验
@@ -484,9 +484,9 @@ app/core/crud/
 │   ├── profile.py              # Profile 数据访问
 │   └── prompt.py               # Prompt 数据访问
 ├── session/
-│   ├── message.py              # 主会话与独立工作消息读写及历史隔离
+│   ├── message.py              # 主会话与独立工作消息读写、历史隔离与专属消息清理
 │   ├── session.py              # 会话设置、上下文状态与累计用量访问
-│   ├── subagent.py             # 子代理身份、轮次、工具关联与交付状态数据访问
+│   ├── subagent.py             # 子代理身份、轮次、工具关联、交付状态与空闲数据清理
 │   ├── event.py                # 会话事件数据访问
 │   ├── external_work.py        # 外部异步操作关联数据访问
 │   ├── todo.py                 # 会话 Todo 计划数据访问

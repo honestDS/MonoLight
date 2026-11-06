@@ -567,6 +567,29 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(stmt)
         return result.scalars().first()
 
+    async def remove_by_work_ids(
+        self,
+        db: AsyncSession,
+        *,
+        work_ids: list[int],
+        uid: str,
+        session_id: str,
+        profile_id: int,
+    ) -> int:
+        if not work_ids:
+            return 0
+        result = await db.execute(
+            delete(Message)
+            .where(
+                Message.work_id.in_(work_ids),
+                Message.uid == uid,
+                Message.session_id == session_id,
+                Message.profile_id == profile_id,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount or 0
+
     async def remove_session(
         self,
         db: AsyncSession,

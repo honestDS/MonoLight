@@ -16,6 +16,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkCheckpoint,
     SessionReplyWorkItem,
 )
+from app.models.subagent import Subagent, SubagentToolCall, SubagentWork
 
 _TEMPLATE_ROOT = tempfile.TemporaryDirectory(prefix="monolight-pytest-schema-")
 _TEMPLATE_PATHS: dict[tuple[str, ...], Path] = {}
@@ -32,6 +33,9 @@ def _resolve_tables(tables: Iterable[Table] | None) -> tuple[tuple[str, ...], tu
             SessionReplyWorkCheckpoint.__table__,
             SessionReplyCheckpointMessage.__table__,
             SessionReplyCheckpointMessageReference.__table__,
+            Subagent.__table__,
+            SubagentWork.__table__,
+            SubagentToolCall.__table__,
         ):
             if dependency not in resolved:
                 resolved.append(dependency)

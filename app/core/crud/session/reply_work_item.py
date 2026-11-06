@@ -38,6 +38,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.subagent import SubagentToolCall
 
 _TERMINAL_STATUS_VALUES = [status.value for status in SESSION_REPLY_TERMINAL_STATUSES]
 
@@ -783,7 +784,7 @@ class CRUDSessionReplyWorkItem:
             SessionReplyWorkItem.status.in_(_TERMINAL_STATUS_VALUES),
             SessionReplyWorkItem.updated_at < cutoff,
             SessionReplyWorkItem.subagent_id.is_(None),
-            func.coalesce(SessionReplyWorkItem.execution_state["has_child_work"].as_boolean(), False).is_(False),
+            ~exists(select(1).select_from(SubagentToolCall).where(SubagentToolCall.parent_work_id == SessionReplyWorkItem.id)),
         ]
 
         expired_event_ids = (
