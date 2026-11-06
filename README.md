@@ -27,6 +27,7 @@ From everyday office tasks to server operations and complex automation workflows
 
 ## 0. Current Progress
 - Fixing remaining issues
+- Improving subagent tools
 
 ## 1. Core Features
 
@@ -36,8 +37,9 @@ MonoLight is more than a chat interface or a thin wrapper around one-off tool ca
 - **Long-term memory and user preference management**: Supports cross-session long-term memory and user-level personalization. By combining relational storage with RAG retrieval, MonoLight can persist historical information and user preferences, perform hybrid retrieval, and relate retrieved information to the current context.
 - **Full-featured Shell**: In addition to ordinary one-shot shell commands, MonoLight supports interactive terminals through Windows ConPTY and Linux PTY. The AI can continuously read output, send follow-up input, query terminal status, resize the terminal, and close sessions proactively, enabling operation of TTY-dependent, interactive, or long-running command-line programs.
 - **Autonomous and continuous task execution**: Supports multi-turn tool use, parallel tool calls, background tasks, and scheduled tasks. Long-running work can continue in the background, users can inspect or cancel it, and a summary reply can be sent when the work completes.
+- **Subagent collaboration**: The primary agent can delegate tasks to multiple subagents to work in parallel, then combine their results to complete complex tasks.
 - **Knowledge, web, and file capabilities**: Supports document knowledge bases, vector retrieval, and reranking. The AI can query knowledge bases, search and crawl the web, generate images, write files, and send files back to users.
-- **Shared skills**: Administrators can share deployed skill packages. The model can use `skill_tool`'s paginated `list` and `browse` actions on demand to retrieve skill metadata and each skill directory's real absolute path, then use the currently available Shell or interactive terminal to read documentation and run scripts. Skill directories are no longer automatically added to the system prompt.
+- **Shared skills**: Administrators can provide shared skill packages. The AI can find the latest skills as needed, read their instructions, and use the included resources and scripts to complete tasks.
 - **Multi-model orchestration**: Connect and centrally manage multiple model channels. Different models can be selected for chat, context summarization, knowledge-base reranking, and image generation, with priority- and weight-based routing so that all workloads do not need to depend on a single model.
 - **IM platform integration**: Use the full agent experience directly from everyday messaging applications without staying in the browser. MonoLight currently supports WeChat OpenClaw QR-code integration, bidirectional text/image/file messaging, automatic merging of consecutive messages, in-chat tool calls, and safety confirmations. Background and scheduled tasks can proactively push results back to the platform, with automatic retry on delivery failure.
 - **Complete visual workspace**: Includes chat and session history, tool execution results, audit confirmation cards, knowledge bases, model channels, prompts, scheduled tasks, messaging platforms, and real-time/historical log management.
@@ -83,7 +85,6 @@ Image, audio, and video understanding, as well as image generation, are optional
 ## 3. Roadmap
 
 - Core
-  - [x] **Dynamic Skill loading**: Discover and browse administrator-shared skills on demand with paginated `skill_tool` actions; each `list` call reflects the latest shared skills. Online skill management is not included.
   - [ ] **Full multimodal support**: Extend beyond image, text, and file transfer to support video, audio, and other multimedia upload and interaction workflows.
   - [ ] **Agent-managed system configuration tools**: Allow system configuration files to be dynamically adjusted and managed through conversations with the LLM.
   - [ ] **WebUI analytics dashboard**: Provide real-time system health, user session data, model-call statistics, and other operational information for administrators.
@@ -92,10 +93,6 @@ Image, audio, and video understanding, as well as image generation, are optional
 - Extensions
   - [ ] **Enterprise-grade audit system**: Build on the platform's existing dual-model audit mechanism to automatically generate and deliver enterprise-grade audit reports, then immediately delete temporary audit data from the server after delivery to reduce the risk of tampering or leakage.
   - [ ] **QQ messaging adapter**: Add messaging integration for the QQ platform.
-  - [ ] **Sub-agent spawning by the primary agent**:
-    This is an exploratory feature that requires further research and implementation.
-    The main idea is for the primary agent to create temporary sub-agents for heavy workloads that can run concurrently, with the sub-agents operating under the primary agent's guidance.
-    The necessity of this feature within the current system architecture still needs to be evaluated.
 
 ## 4. Technical Architecture
 
