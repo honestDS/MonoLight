@@ -34,6 +34,7 @@ from tests.unit.response_test_support import audit_confirmation_payload, multimo
 class _Session:
     def __init__(self):
         self.commit_count = 0
+        self.info = {}
 
     async def commit(self):
         self.commit_count += 1

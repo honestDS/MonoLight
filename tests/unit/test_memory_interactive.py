@@ -23,6 +23,9 @@ from tests.unit.response_test_support import memory_content_too_long_payload, me
 
 
 class _Session:
+    def __init__(self):
+        self.info = {}
+
     async def refresh(self, session):
         return None
 

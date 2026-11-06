@@ -118,6 +118,13 @@ async def _execute_external_resume(db, work: SessionReplyWorkItem, worker_id: st
     checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
     if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+    if checkpoint.get("reload_history") is not True:
+        checkpoint = await restore_interactive_tool_replies(
+            db,
+            work=work,
+            worker_id=worker_id,
+            checkpoint=checkpoint,
+        )
 
     message_ids = work.input_message_ids
     if not message_ids:

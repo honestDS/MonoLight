@@ -4,7 +4,7 @@ import pytest
 
 from app.core.context import ContextManager
 from app.core.prompts import EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT
-from app.core.utils.dispatcher.external_work import build_external_wait_response
+from app.core.utils.dispatcher.external_work import _build_external_wait_response
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
@@ -263,7 +263,7 @@ def test_external_wait_response_accepts_queued_tool_result_with_todo_snapshot_su
     )
     tool_result_before = tool_result.model_dump(mode="json")
 
-    response = build_external_wait_response(
+    response = _build_external_wait_response(
         [tool_call],
         [tool_result],
         response_id="response-1",

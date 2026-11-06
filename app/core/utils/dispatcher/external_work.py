@@ -13,11 +13,11 @@ from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
-from app.models.message import InternalMessage, InternalToolCall
+from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.session_reply_work_item import SessionReplyWorkStatus
 
 
-def build_external_wait_response(
+def _build_external_wait_response(
     tool_calls: list[InternalToolCall],
     tool_results: list[InternalMessage],
     response_id: str | None = None,
@@ -75,6 +75,107 @@ def build_external_wait_response(
     }
 
 
+async def build_subagent_query_wait_response(
+    db,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    messages: list[InternalMessage],
+) -> dict | None:
+    if not messages or messages[-1].role != MessageRole.TOOL:
+        return None
+
+    first_tool_index = len(messages) - 1
+    while first_tool_index >= 0 and messages[first_tool_index].role == MessageRole.TOOL:
+        first_tool_index -= 1
+    if first_tool_index < 0:
+        return None
+
+    assistant_message = messages[first_tool_index]
+    if assistant_message.role != MessageRole.ASSISTANT or not assistant_message.tool_calls:
+        return None
+
+    tool_calls_by_id: dict[str, InternalToolCall] = {}
+    for tool_call in assistant_message.tool_calls:
+        if not isinstance(tool_call.id, str) or not tool_call.id or tool_call.id in tool_calls_by_id or tool_call.name != AGENT_WORK_TOOL_NAME or not isinstance(tool_call.arguments, dict) or tool_call.arguments.get("operation") != "query":
+            return None
+        tool_calls_by_id[tool_call.id] = tool_call
+
+    tool_results = messages[first_tool_index + 1 :]
+    if len(tool_results) != len(tool_calls_by_id):
+        return None
+
+    query_work_keys: set[tuple[str, int]] = set()
+    result_call_ids: set[str] = set()
+    for tool_result in tool_results:
+        tool_call_id = tool_result.tool_call_id
+        if not isinstance(tool_call_id, str) or tool_call_id not in tool_calls_by_id or tool_call_id in result_call_ids:
+            return None
+        result_call_ids.add(tool_call_id)
+
+        content = strip_session_todo_snapshot(strip_terminal_watch_snapshot(tool_result.content))
+        try:
+            payload = json.loads(content or "")
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or payload.get("status") != "success" or payload.get("operation") != "query" or tool_result.tool_execution_status in ("failed", "execution_unknown"):
+            return None
+
+        tool_call = tool_calls_by_id[tool_call_id]
+        arguments = tool_call.arguments
+        subagent_id = arguments.get("subagent_id")
+        if not isinstance(subagent_id, str) or not subagent_id.strip() or payload.get("subagent_id") != subagent_id:
+            return None
+
+        work = payload.get("work")
+        if not isinstance(work, dict) or work.get("completed") is not False:
+            return None
+        child_work_id = work.get("work_id")
+        if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0:
+            return None
+        if "work_id" in arguments and arguments.get("work_id") != child_work_id:
+            return None
+        query_work_keys.add((subagent_id, child_work_id))
+
+    claim_info = db.info.get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+    if claim_info is None:
+        return None
+    if not isinstance(claim_info, (tuple, list)) or len(claim_info) != 2 or not isinstance(claim_info[0], int) or isinstance(claim_info[0], bool) or claim_info[0] <= 0 or not isinstance(claim_info[1], str) or not claim_info[1]:
+        raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+
+    origin_work_id, worker_id = claim_info
+    parent_work = await session_reply_work_item_crud.get(db, origin_work_id)
+    if parent_work is None:
+        raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+    await db.refresh(parent_work)
+    if parent_work.uid != uid or parent_work.session_id != session_id or parent_work.profile_id != profile_id or parent_work.status != SessionReplyWorkStatus.RUNNING or parent_work.locked_by != worker_id or parent_work.subagent_id is not None:
+        raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+
+    execution_state = parent_work.execution_state if isinstance(parent_work.execution_state, dict) else {}
+    child_work_waits = execution_state.get("child_work_waits")
+    if not isinstance(child_work_waits, list):
+        return None
+
+    pending_tools: list[dict] = []
+    matched_work_keys: set[tuple[str, int]] = set()
+    for slot in child_work_waits:
+        if not isinstance(slot, dict):
+            continue
+        slot_key = (slot.get("subagent_id"), slot.get("child_work_id"))
+        if slot_key not in query_work_keys:
+            continue
+        pending_tools.append(dict(slot))
+        matched_work_keys.add(slot_key)
+
+    if matched_work_keys != query_work_keys or not pending_tools:
+        return None
+    return {
+        "status": "waiting_external_work",
+        "pending_tools": pending_tools,
+    }
+
+
 async def build_terminal_wait_response(
     db,
     *,
@@ -85,7 +186,7 @@ async def build_terminal_wait_response(
     tool_results: list[InternalMessage],
     response_id: str | None = None,
 ) -> dict | None:
-    pure_response = build_external_wait_response(tool_calls, tool_results, response_id)
+    pure_response = _build_external_wait_response(tool_calls, tool_results, response_id)
     if pure_response is not None:
         for pending_tool in pure_response["pending_tools"]:
             if pending_tool.get("tool_name") == TERMINAL_WATCH_TOOL_NAME:
@@ -195,4 +296,4 @@ async def build_terminal_wait_response(
     }
 
 
-__all__ = ["build_external_wait_response", "build_terminal_wait_response"]
+__all__ = ["build_subagent_query_wait_response", "build_terminal_wait_response"]

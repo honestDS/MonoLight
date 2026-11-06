@@ -25,7 +25,7 @@ from app.core.session_reply_queue import executor_interactive as executor_intera
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.session_reply_queue.manager_result import SessionReplyResult
 from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
-from app.core.utils.dispatcher.external_work import build_external_wait_response
+from app.core.utils.dispatcher.external_work import _build_external_wait_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
@@ -240,7 +240,7 @@ async def _suspend_case(case: ExternalWorkCase) -> None:
             pending.id = row.id
             pending_results.append(pending)
 
-        response = build_external_wait_response(
+        response = _build_external_wait_response(
             list(case.tool_calls),
             pending_results,
             response_id="external-response-1",
@@ -709,7 +709,7 @@ async def test_consumer_does_not_cancel_reply_during_external_resume_handoff(
     queued_snapshot = await _snapshot(case)
     queued_result = _tool_result(queued_snapshot, case.result_message_ids["call-1"])
     queued_result.id = case.result_message_ids["call-1"]
-    wait_response = build_external_wait_response(
+    wait_response = _build_external_wait_response(
         list(case.tool_calls),
         [queued_result],
         response_id="external-handoff-response",
