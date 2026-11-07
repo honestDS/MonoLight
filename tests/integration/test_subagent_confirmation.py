@@ -113,7 +113,7 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
                     InternalToolCall(
                         id="model-parent-create-id",
                         name=AGENT_WORK_TOOL_NAME,
-                        arguments={"operation": "create", "message": child_instruction},
+                        arguments={"operation": "create", "name": "子代理文件写入", "message": child_instruction},
                     )
                 ],
             )
@@ -392,7 +392,7 @@ async def test_subagent_cancel_round_returns_cancelled_result_to_parent(
                     InternalToolCall(
                         id="model-create-cancel-id",
                         name=AGENT_WORK_TOOL_NAME,
-                        arguments={"operation": "create", "message": child_instruction},
+                        arguments={"operation": "create", "name": "子代理取消测试", "message": child_instruction},
                     )
                 ],
             )
@@ -658,7 +658,7 @@ async def test_running_subagent_file_tool_cancel_keeps_late_result_private(
                     InternalToolCall(
                         id="model-create-late-file-tool-id",
                         name=AGENT_WORK_TOOL_NAME,
-                        arguments={"operation": "create", "message": child_instruction},
+                        arguments={"operation": "create", "name": "晚到文件写入", "message": child_instruction},
                     )
                 ],
             )

@@ -59,7 +59,7 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
         runtime.outputs.append(
             InternalMessage(
                 role=MessageRole.ASSISTANT,
-                tool_calls=[InternalToolCall(id="recovery-create-call", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "message": child_instruction})],
+                tool_calls=[InternalToolCall(id="recovery-create-call", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "文件写入恢复", "message": child_instruction})],
             )
         )
         accepted = await runtime.client.post(
@@ -258,7 +258,7 @@ async def test_interrupted_mixed_child_and_image_wait_recovers_without_losing_im
         create_call = InternalToolCall(
             id="mixed-recovery-create-call",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": child_instruction},
+            arguments={"operation": "create", "name": "混合等待恢复", "message": child_instruction},
         )
         image_call = InternalToolCall(
             id="mixed-recovery-image-call",
@@ -558,7 +558,7 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
         first_create_call = InternalToolCall(
             id="second-round-first-create-call",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": first_instruction},
+            arguments={"operation": "create", "name": "独立初始任务", "message": first_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[first_create_call]))
         accepted = await runtime.client.post(
@@ -599,7 +599,7 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
             first_result_message_id = first_call.tool_result_message_id
 
         if operation == "create":
-            second_arguments = {"operation": "create", "message": second_instruction}
+            second_arguments = {"operation": "create", "name": "独立后续任务", "message": second_instruction}
         else:
             second_arguments = {"operation": "send_message", "subagent_id": first_subagent_id, "message": second_instruction}
         second_model_call = InternalToolCall(
@@ -823,12 +823,12 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
         first_create_call = InternalToolCall(
             id="multi-child-recovery-create-A",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": first_instruction},
+            arguments={"operation": "create", "name": "并行资料整理", "message": first_instruction},
         )
         second_create_call = InternalToolCall(
             id="multi-child-recovery-create-B",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": second_instruction},
+            arguments={"operation": "create", "name": "并行方案分析", "message": second_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[first_create_call, second_create_call]))
         accepted = await runtime.client.post(
@@ -870,7 +870,10 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
             child_a_work_id, child_b_work_id = child_a.id, child_b.id
             calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id).order_by(SubagentToolCall.id))).scalars().all()
             assert len(calls) == 2
-            assert {call.arguments["message"] for call in calls} == {first_instruction, second_instruction}
+            assert {(call.arguments["name"], call.arguments["message"]) for call in calls} == {
+                ("并行资料整理", first_instruction),
+                ("并行方案分析", second_instruction),
+            }
             call_by_child_id = {call.child_work_id: call for call in calls}
             assert set(call_by_child_id) == {child_a_work_id, child_b_work_id}
             rounds = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([child_a_work_id, child_b_work_id])))).scalars().all()
@@ -903,7 +906,7 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
         third_create_call = InternalToolCall(
             id="multi-child-recovery-create-C",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": third_instruction},
+            arguments={"operation": "create", "name": "补充资料核查", "message": third_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[third_create_call]))
         provider_count_before_c = len(runtime.provider_payloads)

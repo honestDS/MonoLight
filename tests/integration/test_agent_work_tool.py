@@ -65,7 +65,7 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
         create_call = InternalToolCall(
             id="agent-work-create-call",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": child_instruction},
+            arguments={"operation": "create", "name": "文件更新", "message": child_instruction},
         )
         assert parent_secret not in child_instruction
         assert child_secret not in child_instruction
@@ -121,6 +121,7 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
 
             subagent = await db.get(Subagent, child.subagent_id)
             assert subagent is not None
+            assert subagent.name == "文件更新"
             assert (subagent.uid, subagent.session_id, subagent.profile_id) == (
                 parent.uid,
                 parent.session_id,
@@ -144,7 +145,7 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
                 child_work_id,
                 parent_work_id,
             )
-            assert call.arguments == {"operation": "create", "message": child_instruction}
+            assert call.arguments == {"operation": "create", "name": "文件更新", "message": child_instruction}
             assert call.delivered is False
 
             assistant_rows = (
@@ -421,7 +422,7 @@ async def test_agent_work_and_image_completion_resumes_parent_per_batch_and_keep
             configs["tool"]["enabled_tools"] = list(dict.fromkeys([*configs["tool"]["enabled_tools"], AGENT_WORK_TOOL_NAME]))
             profile.configs = configs
             await db.commit()
-        create_call = InternalToolCall(id="mixed-agent-work-create-call", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "message": child_instruction})
+        create_call = InternalToolCall(id="mixed-agent-work-create-call", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "图片并行任务", "message": child_instruction})
         image_calls = [
             InternalToolCall(
                 id=f"mixed-agent-work-image-call-{index + 1}",
@@ -690,12 +691,12 @@ async def test_agent_work_two_children_are_delivered_in_batches(
                 InternalToolCall(
                     id="two-child-create-call-one",
                     name=AGENT_WORK_TOOL_NAME,
-                    arguments={"operation": "create", "message": first_instruction},
+                    arguments={"operation": "create", "name": "子任务一", "message": first_instruction},
                 ),
                 InternalToolCall(
                     id="two-child-create-call-two",
                     name=AGENT_WORK_TOOL_NAME,
-                    arguments={"operation": "create", "message": second_instruction},
+                    arguments={"operation": "create", "name": "子任务二", "message": second_instruction},
                 ),
             ]
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))
@@ -1170,7 +1171,7 @@ async def test_agent_work_parent_commit_interrupt_recovers_wait_without_duplicat
         create_call = InternalToolCall(
             id="input-create-call",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": child_instruction},
+            arguments={"operation": "create", "name": "恢复子任务", "message": child_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]))
 
@@ -1477,7 +1478,7 @@ async def test_agent_work_child_finishes_before_parent_suspend_is_delivered_once
         create_call = InternalToolCall(
             id="race-create-call",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": child_instruction},
+            arguments={"operation": "create", "name": "先完成子任务", "message": child_instruction},
         )
         runtime.outputs.extend(
             [
@@ -1688,7 +1689,7 @@ async def test_agent_work_cross_scope_operations_fail_without_side_effects(
                     InternalToolCall(
                         id="model-create-call",
                         name=AGENT_WORK_TOOL_NAME,
-                        arguments={"operation": "create", "message": child_instruction},
+                        arguments={"operation": "create", "name": "跨范围子任务", "message": child_instruction},
                     )
                 ],
             )

@@ -145,11 +145,13 @@ class CRUDSubagent:
         uid: str,
         session_id: str,
         profile_id: int,
+        name: str,
     ) -> Subagent:
         subagent = Subagent(
             uid=uid,
             session_id=session_id,
             profile_id=profile_id,
+            name=name,
         )
         db.add(subagent)
         await db.flush()

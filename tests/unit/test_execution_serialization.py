@@ -56,28 +56,31 @@ def test_execution_value_normalization_keeps_all_values():
     assert result["nested"]["api_key"] == "SECRET_VALUE"
 
 
-def test_tool_result_log_keeps_json_output_and_nested_error(monkeypatch):
-    logger = CapturingLogger()
-    monkeypatch.setattr(log_module, "logger", logger)
+def test_tool_result_log_keeps_json_output_and_nested_error():
+    messages = []
+    sink_id = log_module.logger.add(lambda message: messages.append(message.record["message"]))
 
-    log_module.LogManager.log_tool_result(
-        1,
-        json.dumps(
-            {
-                "stdout": "RAW_SHELL_OUTPUT",
-                "error": "request failed: password=RAW_PASSWORD",
-                "details": {"authorization": "Bearer RAW_TOKEN"},
-            },
-            ensure_ascii=False,
-        ),
-        "session-1",
-        "user-1",
-    )
+    try:
+        log_module.LogManager.log_tool_result(
+            1,
+            json.dumps(
+                {
+                    "stdout": "RAW_SHELL_OUTPUT",
+                    "error": "request failed: password=RAW_PASSWORD",
+                    "details": {"authorization": "Bearer RAW_TOKEN"},
+                },
+                ensure_ascii=False,
+            ),
+            "session-1",
+            "user-1",
+        )
+    finally:
+        log_module.logger.remove(sink_id)
 
-    assert len(logger.messages) == 1
-    assert "RAW_SHELL_OUTPUT" in logger.messages[0]
-    assert "RAW_PASSWORD" in logger.messages[0]
-    assert "RAW_TOKEN" in logger.messages[0]
+    assert len(messages) == 1
+    assert "RAW_SHELL_OUTPUT" in messages[0]
+    assert "RAW_PASSWORD" in messages[0]
+    assert "RAW_TOKEN" in messages[0]
 
 
 def test_exception_log_keeps_original_exception_message(monkeypatch):

@@ -26,7 +26,7 @@ AGENT_WORK_TOOL_SCHEMA = {
             "focused analysis or review, changes confined to a file or module, or an investigation that needs follow-up. Use ordinary tools directly for simple "
             "lookups, reads, or small edits. Keep dependent steps with the same subagent. Independent tasks can be delegated separately, with non-overlapping file edits.\n\n"
             "Creating a task\n"
-            "Use create with the goal, necessary background, inputs or file paths, constraints, and expected deliverable. The subagent does not automatically read this conversation, so make the task self-contained. "
+            "Use create with a short, human-readable name and the goal, necessary background, inputs or file paths, constraints, and expected deliverable. The subagent does not automatically read this conversation, so make the task self-contained. "
             "Specify whether it should only investigate or may make changes, and what conclusions, evidence, or files it should return.\n\n"
             "Continuing and following up\n"
             'Reuse the returned subagent_id with send_message to add instructions, continue interrupted work, or request follow-up work. For a simple continuation, send "continue previous task".\n\n'
@@ -43,6 +43,13 @@ AGENT_WORK_TOOL_SCHEMA = {
                     "type": "string",
                     "enum": ["create", "query", "send_message", "cancel"],
                     "description": "create: delegate a new task; send_message: add instructions or continue work with an existing subagent; query: inspect work; cancel: stop unneeded work.",
+                },
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "pattern": "^[^\\r\\n\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
+                    "description": "Required only for create. A short, single-line, human-readable task label; it does not change subagent_id-based targeting.",
                 },
                 "message": {
                     "type": "string",
@@ -66,13 +73,19 @@ AGENT_WORK_TOOL_SCHEMA = {
                 },
             },
             "required": ["operation"],
+            "anyOf": [
+                {"properties": {"operation": {"const": "create"}}, "required": ["name", "message"]},
+                {"properties": {"operation": {"const": "query"}}, "required": ["subagent_id"]},
+                {"properties": {"operation": {"const": "send_message"}}, "required": ["subagent_id", "message"]},
+                {"properties": {"operation": {"const": "cancel"}}, "required": ["subagent_id"]},
+            ],
             "additionalProperties": False,
         },
     },
 }
 
 
-class CreateArguments(BaseModel):
+class _MessageArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     message: str = Field(min_length=1)
@@ -85,7 +98,20 @@ class CreateArguments(BaseModel):
         return value
 
 
-class SendArguments(CreateArguments):
+class CreateArguments(_MessageArguments):
+    name: str = Field(min_length=1, max_length=32)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("name must not be blank")
+        if any(ord(char) < 32 or 127 <= ord(char) <= 159 or char in "\u2028\u2029" for char in value):
+            raise ValueError("name must not contain control characters")
+        return value
+
+
+class SendArguments(_MessageArguments):
     subagent_id: str = Field(min_length=1, max_length=32)
 
 
@@ -177,6 +203,7 @@ class AgentWorkExecutor(BaseExecutor):
                     session_id=session_id,
                     profile_id=profile_id,
                     tool_call_id=tool_call_id,
+                    name=parsed.name,
                     message=parsed.message,
                 )
             elif operation == "query":

@@ -99,6 +99,7 @@ async def _add_finished_subagent(
         uid="user-1",
         session_id="session-1",
         profile_id=1,
+        name="清理检查",
         last_called_at=last_called_at,
     )
     db.add(subagent)
@@ -130,7 +131,7 @@ async def _add_finished_subagent(
         child_work_id=child.id,
         parent_work_id=parent.id,
         tool_call_id=f"cleanup-call:{key}",
-        arguments={"operation": "create", "message": key},
+        arguments={"operation": "create", "name": subagent.name, "message": key},
         delivered=True,
     )
     db.add(tool_call)
@@ -653,7 +654,7 @@ async def test_idle_cleanup_removes_all_expired_subagent_round_and_derived_work(
             child_work_id=second_root.id,
             parent_work_id=expired_parent.id,
             tool_call_id="cleanup-second-round-call",
-            arguments={"operation": "create", "message": "second round"},
+            arguments={"operation": "create", "name": expired_subagent.name, "message": "second round"},
             delivered=True,
         )
         db.add(second_call)

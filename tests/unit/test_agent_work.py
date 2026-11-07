@@ -170,7 +170,9 @@ def test_agent_work_message_validation_preserves_valid_text(
     is_valid: bool,
 ) -> None:
     arguments = {"message": message}
-    if model is SendArguments:
+    if model is CreateArguments:
+        arguments["name"] = "构建检查"
+    else:
         arguments["subagent_id"] = "a" * 32
 
     if not is_valid:
@@ -181,3 +183,60 @@ def test_agent_work_message_validation_preserves_valid_text(
 
     parsed = model(**arguments)
     assert parsed.message == message
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"message": "inspect the build"}, id="missing"),
+        pytest.param({"message": "inspect the build", "name": ""}, id="empty"),
+        pytest.param({"message": "inspect the build", "name": " \t "}, id="whitespace"),
+        pytest.param({"message": "inspect the build", "name": None}, id="none"),
+        pytest.param({"message": "inspect the build", "name": 7}, id="integer"),
+        pytest.param({"message": "inspect the build", "name": "n" * 33}, id="too-long"),
+        pytest.param({"message": "inspect the build", "name": "line\nbreak"}, id="newline"),
+        pytest.param({"message": "inspect the build", "name": "tab\tcharacter"}, id="tab"),
+        pytest.param({"message": "inspect the build", "name": "line\u0085break"}, id="next-line"),
+        pytest.param({"message": "inspect the build", "name": "line\u2028break"}, id="line-separator"),
+        pytest.param({"message": "inspect the build", "name": "line\u2029break"}, id="paragraph-separator"),
+        pytest.param({"message": "inspect the build", "name": "control\u009bcharacter"}, id="c1-control"),
+        pytest.param({"message": "inspect the build", "name": "nul\x00character"}, id="nul"),
+        pytest.param({"message": "inspect the build", "name": "del\x7fcharacter"}, id="del"),
+    ],
+)
+def test_create_arguments_reject_invalid_names(arguments: dict[str, object]) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        CreateArguments(**arguments)
+
+    assert any(error["loc"] == ("name",) for error in exc_info.value.errors())
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("x", id="one-character"),
+        pytest.param("n" * 32, id="32-characters"),
+        pytest.param("构建检查", id="chinese"),
+        pytest.param(" 构建检查 ", id="preserve-surrounding-spaces"),
+    ],
+)
+def test_create_arguments_preserve_valid_name(name: str) -> None:
+    parsed = CreateArguments(message="inspect the build", name=name)
+
+    assert parsed.name == name
+
+
+def test_send_arguments_does_not_require_or_accept_name() -> None:
+    parsed = SendArguments(message="continue previous task", subagent_id="a" * 32)
+
+    assert parsed.message == "continue previous task"
+    assert parsed.subagent_id == "a" * 32
+
+    with pytest.raises(ValidationError) as exc_info:
+        SendArguments(
+            message="continue previous task",
+            subagent_id="a" * 32,
+            name="follow-up",
+        )
+
+    assert any(error["loc"] == ("name",) for error in exc_info.value.errors())

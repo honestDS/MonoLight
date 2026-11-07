@@ -82,7 +82,13 @@ async def test_consumer_marks_confirmed_execution_unknown_and_does_not_retry(mon
         raise RuntimeError("tool execution interrupted")
 
     async def get_work(db, work_id: int):
-        return type("Work", (), {"work_type": SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION})()
+        return SimpleNamespace(
+            work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            subagent_id=None,
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+        )
 
     async def has_events(db, *, work_id: int) -> bool:
         return False
@@ -116,13 +122,35 @@ async def test_consumer_marks_confirmed_execution_unknown_and_does_not_retry(mon
 async def test_consumer_marks_confirmed_execution_unknown_when_cancelled(monkeypatch):
     consumer = consumer_module.SessionReplyConsumer()
     unknown_calls = []
+    work = SimpleNamespace(
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        subagent_id=None,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+    )
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
 
     async def execute_work(work_id: int, worker_id: str) -> None:
         raise asyncio.CancelledError
 
+    async def get_work(db, work_id: int):
+        return work
+
     async def mark_unknown(work_id: int, worker_id: str, error: str) -> None:
         unknown_calls.append((work_id, worker_id, error))
 
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "get", get_work)
     monkeypatch.setattr(consumer_module, "execute_session_reply_work", execute_work)
     monkeypatch.setattr(consumer_module, "mark_work_audit_execution_unknown", mark_unknown)
 
@@ -141,6 +169,10 @@ async def test_consumer_marks_foreground_audit_execution_unknown_and_does_not_re
     retry_calls = []
     work = SimpleNamespace(
         work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        subagent_id=None,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
         execution_state={
             "active_audit_execution": {
                 "audit_record_id": 42,
@@ -194,6 +226,10 @@ async def test_consumer_does_not_retry_background_or_scheduled_audit_exception(m
     retry_calls = []
     work = SimpleNamespace(
         work_type=work_type,
+        subagent_id=None,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
         execution_state={
             SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: {
                 "audit_record_id": 42,
@@ -256,6 +292,10 @@ async def test_consumer_marks_background_or_scheduled_audit_unknown_when_cancell
     unknown_calls = []
     work = SimpleNamespace(
         work_type=work_type,
+        subagent_id=None,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
         execution_state={
             SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: {
                 "audit_record_id": 42,
@@ -331,6 +371,10 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
     unknown_calls = []
     work = SimpleNamespace(
         work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        subagent_id=None,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
         execution_state={
             "active_audit_execution": {
                 "audit_record_id": 42,
@@ -419,6 +463,10 @@ async def test_consumer_delivers_request_rejection_for_active_audit_work(monkeyp
     raw_html = "<html><body>private upstream rejection body</body></html>"
     work = SimpleNamespace(
         work_type=work_type,
+        subagent_id=None,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
         execution_state={
             SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: {
                 "audit_record_id": 42,

@@ -891,20 +891,22 @@ async def test_background_task_api_routes_use_the_restricted_response(monkeypatc
         assert "arguments" not in serialized
 
 
-def test_tool_result_log_keeps_sensitive_values_and_is_truncated(monkeypatch):
-    logger = CapturingToolLog()
-    monkeypatch.setattr(log_module, "logger", logger)
+def test_tool_result_log_keeps_sensitive_values_and_is_truncated():
+    messages = []
+    sink_id = log_module.logger.add(lambda message: messages.append(message.record["message"]))
+    try:
+        log_module.LogManager.log_tool_result(
+            1,
+            json.dumps({"token": "SECRET_VALUE", "stdout": "raw-output-" * 500}),
+            "session-1",
+            "user-1",
+        )
+    finally:
+        log_module.logger.remove(sink_id)
 
-    log_module.LogManager.log_tool_result(
-        1,
-        json.dumps({"token": "SECRET_VALUE", "stdout": "raw-output-" * 500}),
-        "session-1",
-        "user-1",
-    )
-
-    assert len(logger.messages) == 1
-    assert "SECRET_VALUE" in logger.messages[0]
-    assert len(logger.messages[0]) < 2200
+    assert len(messages) == 1
+    assert "SECRET_VALUE" in messages[0]
+    assert len(messages[0]) < 2200
 
 
 @pytest.mark.asyncio

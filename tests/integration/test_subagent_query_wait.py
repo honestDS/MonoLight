@@ -67,7 +67,7 @@ async def _query_wait_case(image_chat_runtime, *, protocol="OPENAI_RESPONSES", p
             InternalToolCall(
                 id=f"query-wait-create-{index}",
                 name=AGENT_WORK_TOOL_NAME,
-                arguments={"operation": "create", "message": f"query-wait-child-instruction-{index}"},
+                arguments={"operation": "create", "name": f"等待查询-{index}", "message": f"query-wait-child-instruction-{index}"},
             )
             for index in range(pending_child_count + 1)
         ]

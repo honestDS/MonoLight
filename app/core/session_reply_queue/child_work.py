@@ -14,6 +14,7 @@ from app.core.constants import (
     ERR_SUBAGENT_NOT_FOUND,
     ERR_SUBAGENT_WORK_NOT_FOUND,
     GOAL_EXECUTION_PHASE_RUNNING,
+    LOG_DISPATCHER_MAIN_AGENT_MESSAGE,
     MSG_SUBAGENT_SUBMITTED,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
@@ -27,6 +28,7 @@ from app.core.crud.session.reply_work_item import (
 from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
+from app.core.log import agent_log_context, get_logger
 from app.core.session_reply_queue.child_delivery import deliver_child_work_results
 from app.core.session_reply_queue.child_lifecycle import finish_child_work
 from app.core.session_reply_queue.child_result import _parse_audit_record_id, get_child_snapshot, load_child_work
@@ -47,6 +49,8 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
 )
 from app.models.subagent import Subagent, SubagentToolCall
+
+logger = get_logger(__name__)
 
 __all__ = [
     "build_subagent_queued_result",
@@ -112,6 +116,17 @@ def build_subagent_queued_result(call: SubagentToolCall) -> dict[str, Any]:
         "child_work_id": call.child_work_id,
         "message": t(MSG_SUBAGENT_SUBMITTED),
     }
+
+
+def _log_subagent_message(subagent: Subagent, call: SubagentToolCall, message: str) -> None:
+    with agent_log_context(
+        subagent_name=subagent.name,
+        uid=subagent.uid,
+        session_id=subagent.session_id,
+        profile_id=subagent.profile_id,
+        work_id=call.child_work_id,
+    ):
+        logger.info(t(LOG_DISPATCHER_MAIN_AGENT_MESSAGE, message=message, attachments=str(None)))
 
 
 async def _existing_submission(
@@ -237,6 +252,7 @@ async def _start_subagent_round(
             uid=uid,
             session_id=session_id,
             profile_id=profile_id,
+            name=arguments["name"],
         )
 
     spec = AgentWorkSpec(
@@ -345,6 +361,7 @@ async def create_subagent(
     session_id: str,
     profile_id: int,
     tool_call_id: str,
+    name: str,
     message: str,
 ) -> dict[str, Any]:
     parent = await _load_parent(
@@ -353,7 +370,7 @@ async def create_subagent(
         session_id=session_id,
         profile_id=profile_id,
     )
-    arguments = {"operation": "create", "message": message}
+    arguments = {"operation": "create", "name": name, "message": message}
     existing_call = await subagent_crud.get_call(
         db,
         parent_work_id=parent.id,
@@ -479,6 +496,7 @@ async def send_subagent_message(
             parent.execution_state = parent_state
             db.add(parent)
             await db.commit()
+            _log_subagent_message(subagent, call, message)
             return build_subagent_queued_result(call)
 
         call = await _start_subagent_round(
@@ -494,6 +512,7 @@ async def send_subagent_message(
             previous_work=work,
         )
         await db.commit()
+        _log_subagent_message(subagent, call, message)
         return build_subagent_queued_result(call)
     except BaseException:
         await db.rollback()

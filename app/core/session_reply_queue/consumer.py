@@ -1,9 +1,11 @@
 import asyncio
 import uuid
+from contextlib import ExitStack
 
 from app.core.constants import (
     ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
+    ERR_SUBAGENT_CONTEXT_INVALID,
     SESSION_REPLY_CLAIM_BATCH_SIZE,
     SESSION_REPLY_CLEANUP_BATCH_SIZE,
     SESSION_REPLY_CLEANUP_INTERVAL_SECONDS,
@@ -18,10 +20,10 @@ from app.core.crud.session.reply_stream_event import session_reply_stream_event_
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.subagent import subagent_crud
 from app.core.crud.system.setting import system_setting_crud
-from app.core.exceptions import BaseBusinessException, LLMContextLengthException, LLMRequestRejectedException
+from app.core.exceptions import BaseBusinessException, LLMContextLengthException, LLMRequestRejectedException, ParameterException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
-from app.core.log import get_logger
+from app.core.log import agent_log_context, get_logger
 from app.core.session_reply_queue.child_recovery import reconcile_child_work
 from app.core.session_reply_queue.executor import (
     execute_session_reply_work,
@@ -172,54 +174,82 @@ class SessionReplyConsumer:
     async def _run_claimed(self, work_id: int, worker_id: str, attempt_count: int, max_attempts: int, language: str = "zh") -> None:
         """执行已领取回复工作并根据活动审计状态决定失败处理方式。"""
         locale_token = set_current_locale(language)
-        try:
-            await execute_session_reply_work(work_id, worker_id)
-        except asyncio.CancelledError:
-            await mark_work_audit_execution_unknown(
-                work_id,
-                worker_id,
-                t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN),
-            )
-            raise
-        except Exception as exc:
-            error = format_exception_message(exc)
-            logger.bind(work_id=work_id, worker_id=worker_id).error("Session reply work failed", exc_info=True)
-            async with AsyncSessionLocal() as db:
-                work = await session_reply_work_item_crud.get(db, work_id)
-                stream_started = await session_reply_stream_event_crud.has_events(
-                    db,
-                    work_id=work_id,
-                )
-            has_active_audit_execution = work is not None and (work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or work_has_active_audit_execution(work))
-            if has_active_audit_execution:
-                await mark_work_audit_execution_unknown(work_id, worker_id, error)
-            if isinstance(exc, LLMContextLengthException) and work is not None and work.work_type == SessionReplyWorkType.AGENT_WORK and work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN:
-                await fail_session_reply_work(
-                    work_id,
-                    worker_id,
-                    error,
-                    user_error=t(ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED),
-                )
-            elif isinstance(exc, BaseBusinessException) and (not has_active_audit_execution or isinstance(exc, LLMRequestRejectedException)):
-                await fail_session_reply_work(
-                    work_id,
-                    worker_id,
-                    error,
-                    user_error=exc.render_message(),
-                )
-            elif has_active_audit_execution or attempt_count >= max_attempts or stream_started:
-                await fail_session_reply_work(work_id, worker_id, error)
-            else:
+        with ExitStack() as log_context:
+            try:
                 async with AsyncSessionLocal() as db:
-                    await session_reply_work_item_crud.release_for_retry(
+                    work = await session_reply_work_item_crud.get(db, work_id)
+                    if work is None:
+                        return
+
+                    subagent_name = None
+                    if work.subagent_id is not None:
+                        subagent = await subagent_crud.get_scoped(
+                            db,
+                            subagent_id=work.subagent_id,
+                            uid=work.uid,
+                            session_id=work.session_id,
+                            profile_id=work.profile_id,
+                        )
+                        if subagent is None:
+                            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+                        subagent_name = subagent.name
+
+                log_context.enter_context(
+                    agent_log_context(
+                        subagent_name=subagent_name,
+                        uid=work.uid,
+                        session_id=work.session_id,
+                        profile_id=work.profile_id,
+                        work_id=work_id,
+                    )
+                )
+                await execute_session_reply_work(work_id, worker_id)
+            except asyncio.CancelledError:
+                await mark_work_audit_execution_unknown(
+                    work_id,
+                    worker_id,
+                    t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN),
+                )
+                raise
+            except Exception as exc:
+                error = format_exception_message(exc)
+                logger.bind(work_id=work_id, worker_id=worker_id).error("Session reply work failed", exc_info=True)
+                async with AsyncSessionLocal() as db:
+                    work = await session_reply_work_item_crud.get(db, work_id)
+                    stream_started = await session_reply_stream_event_crud.has_events(
                         db,
                         work_id=work_id,
-                        worker_id=worker_id,
-                        error=error,
-                        delay_seconds=retry_delay_seconds(attempt_count),
                     )
-        finally:
-            reset_current_locale(locale_token)
+                has_active_audit_execution = work is not None and (work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or work_has_active_audit_execution(work))
+                if has_active_audit_execution:
+                    await mark_work_audit_execution_unknown(work_id, worker_id, error)
+                if isinstance(exc, LLMContextLengthException) and work is not None and work.work_type == SessionReplyWorkType.AGENT_WORK and work.source_type == SessionReplySourceType.SCHEDULED_TASK_RUN:
+                    await fail_session_reply_work(
+                        work_id,
+                        worker_id,
+                        error,
+                        user_error=t(ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED),
+                    )
+                elif isinstance(exc, BaseBusinessException) and (not has_active_audit_execution or isinstance(exc, LLMRequestRejectedException)):
+                    await fail_session_reply_work(
+                        work_id,
+                        worker_id,
+                        error,
+                        user_error=exc.render_message(),
+                    )
+                elif has_active_audit_execution or attempt_count >= max_attempts or stream_started:
+                    await fail_session_reply_work(work_id, worker_id, error)
+                else:
+                    async with AsyncSessionLocal() as db:
+                        await session_reply_work_item_crud.release_for_retry(
+                            db,
+                            work_id=work_id,
+                            worker_id=worker_id,
+                            error=error,
+                            delay_seconds=retry_delay_seconds(attempt_count),
+                        )
+            finally:
+                reset_current_locale(locale_token)
 
     async def _recover_expired(self) -> None:
         """恢复过期租约并终止带活动审计绑定的回复工作。"""

@@ -23,6 +23,7 @@ class Subagent(SQLModel, table=True):
     uid: str = Field(index=True, max_length=100, nullable=False)
     session_id: str = Field(index=True, max_length=100, nullable=False)
     profile_id: int = Field(index=True, foreign_key="profile.id", ondelete="CASCADE", nullable=False)
+    name: str = Field(min_length=1, max_length=32, nullable=False)
     active_child_work_id: int | None = Field(default=None, index=True)
     latest_child_work_id: int | None = Field(default=None, index=True)
     last_called_at: datetime = Field(

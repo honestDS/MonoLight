@@ -69,12 +69,12 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             InternalToolCall(
                 id="query-delivery-create-a",
                 name=AGENT_WORK_TOOL_NAME,
-                arguments={"operation": "create", "message": create_messages[0]},
+                arguments={"operation": "create", "name": "构建检查", "message": create_messages[0]},
             ),
             InternalToolCall(
                 id="query-delivery-create-b",
                 name=AGENT_WORK_TOOL_NAME,
-                arguments={"operation": "create", "message": create_messages[1]},
+                arguments={"operation": "create", "name": "依赖分析", "message": create_messages[1]},
             ),
         ]
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))

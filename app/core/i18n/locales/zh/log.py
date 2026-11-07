@@ -1,6 +1,7 @@
 MESSAGES = {
     "LOG_ADAPTER_WEB_UNEXPECTED_ERROR": "WebChatAdapter 发生未预期错误: {error}",
     "LOG_ADAPTER_WS_UNEXPECTED_ERROR": "WebSocketChatAdapter 发生未预期错误: {error}",
+    "LOG_MAIN_AGENT": "主代理",
     "LOG_CHANNEL_ALL_UNAVAILABLE": "所有优先级组的渠道均不可用，expected_usage={expected_usage}",
     "LOG_CHANNEL_CONFIG_EMPTY": "渠道配置为空或无路由规则，expected_usage={expected_usage}",
     "LOG_CHANNEL_CURSOR_READ_FAILED": "读取轮询游标失败，回退使用下标 0: {error}",
@@ -29,6 +30,7 @@ MESSAGES = {
     "LOG_MEMORY_RECALL_CHANNEL_FAILED": "长期记忆召回预检渠道调用失败，降级到下一优先级组重试: {error}",
     "LOG_DISPATCHER_UNKNOWN_EXCEPTION": "调度器捕获到未预期的内部异常",
     "LOG_DISPATCHER_STREAM_QUEUED": "【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。",
+    "LOG_DISPATCHER_MAIN_AGENT_MESSAGE": "主代理消息: {message} 附件列表: {attachments}",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] 用户消息: {message} 附件列表: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] 第 {turn} 轮 | LLM 响应: {content}",
     "LOG_DISPATCHER_LLM_LOOP_TERMINATED": "[{username}] 第 {turn} 轮 | LLM主动终止循环，进入最终回复阶段。",
@@ -153,6 +155,7 @@ MESSAGES = {
     "LOG_SESSION_TITLE_STARTED": "开始生成会话标题任务: uid={uid}, session_id={session_id}, model={model_id}, 用户消息={message}",
     "LOG_SHELL_PROFILE_TIMEOUT_FAILED": "获取 Profile 超时配置失败: {error}",
     "LOG_SHELL_WINDOWS_SYNC_FALLBACK": "[{uid}] 使用 Windows {loop_type} 同步降级执行",
+    "LOG_SUBAGENT": "子代理：{name}",
     "LOG_TITLE_CHANNEL_FAILED": "标题生成渠道调用失败，降级到下一优先级组重试: {error}",
     "LOG_TOOL_ABORTED": "工具 {tool_name} 在执行 {duration} 后被中止",
     "LOG_TOOL_CALL": "Turn {turn} | 工具: {tool_name} | 参数: {args}",

@@ -19,6 +19,7 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASE_RUNNING,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED,
     LOG_DISPATCHER_LLM_LOOP_TERMINATED_SKIP_REPLY,
+    LOG_DISPATCHER_MAIN_AGENT_MESSAGE,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     TOOL_WORKFLOW_SUBAGENT,
 )
@@ -125,14 +126,20 @@ async def dispatch_interactive(
         profile = await profile_crud.get_with_relations(db, persisted_profile_id) if persisted_profile_id is not None else await resolve_profile_for_session(db, uid=uid, session_id=session_id)
 
         if execution_resume_state is None:
-            dispatch_logger.bind(uid=uid, session_id=session_id).info(
-                t(
+            if tool_workflow == TOOL_WORKFLOW_SUBAGENT:
+                log_message = t(
+                    LOG_DISPATCHER_MAIN_AGENT_MESSAGE,
+                    message=message,
+                    attachments=str(attachments),
+                )
+            else:
+                log_message = t(
                     "LOG_DISPATCHER_USER_MESSAGE",
                     username=username,
                     message=message,
                     attachments=str(attachments),
                 )
-            )
+            dispatch_logger.bind(uid=uid, session_id=session_id).info(log_message)
 
         await validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
 

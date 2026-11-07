@@ -89,7 +89,7 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
         create_call = InternalToolCall(
             id="visibility-parent-create-call",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": "Return the child result as a concise summary."},
+            arguments={"operation": "create", "name": "结果汇总", "message": "Return the child result as a concise summary."},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]))
 

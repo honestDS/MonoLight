@@ -76,12 +76,12 @@ async def _query_transaction_case(image_chat_runtime):
             InternalToolCall(
                 id="query-transaction-create-a",
                 name=AGENT_WORK_TOOL_NAME,
-                arguments={"operation": "create", "message": create_messages[0]},
+                arguments={"operation": "create", "message": create_messages[0], "name": "构建检查"},
             ),
             InternalToolCall(
                 id="query-transaction-create-b",
                 name=AGENT_WORK_TOOL_NAME,
-                arguments={"operation": "create", "message": create_messages[1]},
+                arguments={"operation": "create", "message": create_messages[1], "name": "依赖分析"},
             ),
         ]
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))

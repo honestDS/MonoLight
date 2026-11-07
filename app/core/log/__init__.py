@@ -11,7 +11,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from app.core.constants import LOG_MESSAGE_MAX_LENGTH, MSG_LOG_MESSAGE_TRUNCATED
+from app.core.constants import LOG_MAIN_AGENT, LOG_MESSAGE_MAX_LENGTH, LOG_SUBAGENT, MSG_LOG_MESSAGE_TRUNCATED
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.i18n.locale import DEFAULT_LOCALE
@@ -47,6 +47,25 @@ def profile_log_locale(profile: object | None) -> Iterator[None]:
         yield
     finally:
         reset_current_log_locale(token)
+
+
+@contextmanager
+def agent_log_context(subagent_name: str | None = None, **extra) -> Iterator[None]:
+    is_subagent = subagent_name is not None
+    context = {
+        **extra,
+        "agent_role": "subagent" if is_subagent else "main",
+        "subagent_name": subagent_name,
+        "agent_label": t(LOG_SUBAGENT, name=subagent_name) if is_subagent else t(LOG_MAIN_AGENT),
+    }
+    with logger.contextualize(**context):
+        yield
+
+
+def _add_agent_log_prefix(record: dict) -> None:
+    agent_label = record["extra"].get("agent_label")
+    if agent_label:
+        record["message"] = f"[{agent_label}] {record['message']}"
 
 
 def build_process_log_path(log_path: str, process_id: int | None = None) -> str:
@@ -212,7 +231,7 @@ class LogManager:
                     frame = frame.f_back
                     depth += 1
 
-                logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+                get_logger(record.name).opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
         logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
@@ -228,17 +247,17 @@ class LogManager:
                 lines.append(line)
         log_cmd = lines if len(lines) > 1 else command.strip()
         log_cmd = serialize_execution_summary(log_cmd, max_chars=LOG_MESSAGE_MAX_LENGTH)
-        logger.bind(tool_call=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_CALL", turn=turn, tool_name=tool_name, args=log_cmd))
+        get_logger(__name__).bind(tool_call=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_CALL", turn=turn, tool_name=tool_name, args=log_cmd))
 
     @staticmethod
     def log_tool_result(turn: int, result: str, session_id: str = "default", uid: str = None):
         # 记录工具执行结果日志
         result_summary = serialize_execution_summary(result, max_chars=LOG_MESSAGE_MAX_LENGTH)
-        logger.bind(tool_result=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_RESULT", turn=turn, result=result_summary))
+        get_logger(__name__).bind(tool_result=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_RESULT", turn=turn, result=result_summary))
 
 
 def get_logger(name: str):
-    return logger.bind(name=name)
+    return logger.bind(name=name).patch(_add_agent_log_prefix)
 
 
 def channel_log_extra(channel, model_entry: dict) -> dict:

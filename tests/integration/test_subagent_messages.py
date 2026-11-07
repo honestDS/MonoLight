@@ -72,7 +72,7 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                     InternalToolCall(
                         id="model-create-call",
                         name=AGENT_WORK_TOOL_NAME,
-                        arguments={"operation": "create", "message": child_instruction},
+                        arguments={"operation": "create", "name": "读取文件内容", "message": child_instruction},
                     )
                 ],
             )
@@ -236,6 +236,7 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                 assert all(isinstance(call_id, str) and call_id for call_id in call_ids)
                 assert len(set(call_ids)) == 2
                 assert {call.arguments["operation"] for call in calls} == {"create", "send_message"}
+                assert [call.arguments["name"] for call in calls if call.arguments["operation"] == "create"] == ["读取文件内容"]
                 parent_tool_call_ids = {call.parent_work_id: call.tool_call_id for call in calls}
                 assert set(parent_tool_call_ids) == {first_parent_work_id, second_parent_work_id}
 
@@ -513,7 +514,7 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
         create_call = InternalToolCall(
             id="round-one-create-call",
             name=AGENT_WORK_TOOL_NAME,
-            arguments={"operation": "create", "message": child_instruction},
+            arguments={"operation": "create", "name": "读取文件内容", "message": child_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]))
 
@@ -794,6 +795,7 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
                 ("create", old_child_work_id),
                 ("send_message", new_child_work_id),
             ]
+            assert calls[0].arguments["name"] == "读取文件内容"
             assert calls[0].parent_work_id == first_parent_work_id
             assert calls[1].parent_work_id == new_parent_work_id
             assert calls[0].tool_call_id != calls[1].tool_call_id
@@ -819,7 +821,7 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
             profile.configs = configs
             await db.commit()
 
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[InternalToolCall(id="model-create-race", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "message": "完成一个独立子任务。"})]))
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[InternalToolCall(id="model-create-race", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "完成独立子任务", "message": "完成一个独立子任务。"})]))
         accepted = await runtime.client.post("/api/v1/chat/completions", json={"session_id": runtime.session_id, "request_id": "saved-child-text-create", "message": "创建子任务并等待结果。"})
         assert accepted.status_code == 200
         first_parent_work_id = accepted.json()["data"]["work_id"]
@@ -910,6 +912,7 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
             children, rounds, calls, parents, late_rows = await load_state()
             assert len(children) == len(rounds) == 1
             assert [(call.arguments["operation"], call.child_work_id) for call in calls] == [("create", child_work_id), ("send_message", child_work_id)]
+            assert calls[0].arguments["name"] == "完成独立子任务"
             assert calls[0].tool_call_id and all(call.delivered is False for call in calls)
             assert all(parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK for parent in parents)
             assert len(late_rows) == 1 and late_rows[0].is_processed is False
