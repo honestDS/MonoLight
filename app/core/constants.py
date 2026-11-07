@@ -738,7 +738,7 @@ TOOL_WORKFLOW_POLICIES = {
         SEND_FILE_TO_USER_TOOL_NAME: {},
         MANAGE_BACKGROUND_TASKS_TOOL_NAME: {"operation": ("list", "cancel")},
         MANAGE_SCHEDULED_TASKS_TOOL_NAME: {"operation": ("create", "list", "delete")},
-        AGENT_WORK_TOOL_NAME: {"operation": ("create", "query", "send_message", "cancel")},
+        AGENT_WORK_TOOL_NAME: {"operation": ("create", "list", "query", "send_message", "cancel")},
         READ_MULTIMODAL_FILE_TOOL_NAME: {},
         IMAGE_GENERATION_TOOL_NAME: {},
         KNOWLEDGE_BASE_QUERY_TOOL_NAME: {},

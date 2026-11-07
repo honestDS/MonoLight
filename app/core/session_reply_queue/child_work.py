@@ -56,6 +56,7 @@ __all__ = [
     "build_subagent_queued_result",
     "cancel_subagent",
     "create_subagent",
+    "list_subagents",
     "query_subagent",
     "send_subagent_message",
 ]
@@ -620,6 +621,47 @@ async def cancel_subagent(
     except BaseException:
         await db.rollback()
         raise
+
+
+async def list_subagents(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+) -> dict[str, Any]:
+    await _load_parent(
+        db,
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+    )
+    active_subagents = await subagent_crud.list_active_scoped(
+        db,
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+    )
+
+    entries = []
+    for subagent, round_row in active_subagents:
+        snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
+        if snapshot.get("completed") is True:
+            continue
+        entries.append(
+            {
+                "subagent_id": subagent.id,
+                "name": subagent.name,
+                "work": snapshot,
+            }
+        )
+
+    await db.commit()
+    return {
+        "status": "success",
+        "operation": "list",
+        "subagents": entries,
+    }
 
 
 async def query_subagent(

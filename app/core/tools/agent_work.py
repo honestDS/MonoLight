@@ -32,17 +32,19 @@ AGENT_WORK_TOOL_SCHEMA = {
             'Reuse the returned subagent_id with send_message to add instructions, continue interrupted work, or request follow-up work. For a simple continuation, send "continue previous task".\n\n'
             "Waiting and checking status\n"
             "After create or send_message is accepted, this conversation waits and resumes automatically with the result. There is no need to poll query while waiting. "
-            "Use query to inspect status, saved results, or an interruption reason, and cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
+            "Use list to immediately inspect all unfinished subagents in the current user, session, and Profile scope, including queued, running, and waiting work; completed subagents are omitted. "
+            "List does not wait for work or replace automatic result delivery. Use query to inspect status, saved results, or an interruption reason, and cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
             "Important boundaries\n"
-            "Cancelling does not undo earlier changes. If execution is reported as unknown, verify what actually happened before repeating an action. Use only subagent_id values returned in this conversation under the current Profile. A subagent cannot create other subagents."
+            "Cancelling does not undo earlier changes. If execution is reported as unknown, verify what actually happened before repeating an action. "
+            "Do not poll while waiting, access subagents across users, sessions, or Profiles, or create nested subagents. Use only subagent_id values returned in this conversation under the current Profile."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["create", "query", "send_message", "cancel"],
-                    "description": "create: delegate a new task; send_message: add instructions or continue work with an existing subagent; query: inspect work; cancel: stop unneeded work.",
+                    "enum": ["create", "list", "query", "send_message", "cancel"],
+                    "description": "create: delegate a new task; list: immediately list unfinished subagents in the current scope; send_message: add instructions or continue work with an existing subagent; query: inspect work; cancel: stop unneeded work.",
                 },
                 "name": {
                     "type": "string",
@@ -64,7 +66,7 @@ AGENT_WORK_TOOL_SCHEMA = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Required for query, send_message, and cancel. Copy the subagent_id returned by create and reuse it for follow-up work with that subagent.",
+                    "description": "Required for query, send_message, and cancel. Copy the subagent_id returned by create or list and reuse it for follow-up work with that subagent.",
                 },
                 "work_id": {
                     "type": "integer",
@@ -75,6 +77,7 @@ AGENT_WORK_TOOL_SCHEMA = {
             "required": ["operation"],
             "anyOf": [
                 {"properties": {"operation": {"const": "create"}}, "required": ["name", "message"]},
+                {"properties": {"operation": {"const": "list"}}, "additionalProperties": False},
                 {"properties": {"operation": {"const": "query"}}, "required": ["subagent_id"]},
                 {"properties": {"operation": {"const": "send_message"}}, "required": ["subagent_id", "message"]},
                 {"properties": {"operation": {"const": "cancel"}}, "required": ["subagent_id"]},
@@ -122,6 +125,10 @@ class LookupArguments(BaseModel):
     work_id: int | None = Field(default=None, gt=0)
 
 
+class ListArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
 def _validation_details(error: ValidationError) -> list[dict[str, str]]:
     details: list[dict[str, str]] = []
     for item in error.errors(include_url=False, include_context=False, include_input=False):
@@ -154,14 +161,16 @@ class AgentWorkExecutor(BaseExecutor):
     requires_audit = False
 
     async def execute(self, operation: str, **arguments: Any) -> str:
-        argument_model: type[BaseModel] | None
+        argument_model: type[BaseModel] | None = None
         if operation == "create":
             argument_model = CreateArguments
-        elif operation == "send_message":
+        if operation == "list":
+            argument_model = ListArguments
+        if operation == "send_message":
             argument_model = SendArguments
-        elif operation in {"query", "cancel"}:
+        if operation in {"query", "cancel"}:
             argument_model = LookupArguments
-        else:
+        if argument_model is None:
             return _failure(
                 operation,
                 t(ERR_SUBAGENT_ARGUMENTS_INVALID),
@@ -191,6 +200,7 @@ class AgentWorkExecutor(BaseExecutor):
         from app.core.session_reply_queue.child_work import (
             cancel_subagent,
             create_subagent,
+            list_subagents,
             query_subagent,
             send_subagent_message,
         )
@@ -206,7 +216,14 @@ class AgentWorkExecutor(BaseExecutor):
                     name=parsed.name,
                     message=parsed.message,
                 )
-            elif operation == "query":
+            if operation == "list":
+                result = await list_subagents(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                )
+            if operation == "query":
                 result = await query_subagent(
                     db,
                     uid=uid,
@@ -215,7 +232,7 @@ class AgentWorkExecutor(BaseExecutor):
                     subagent_id=parsed.subagent_id,
                     work_id=parsed.work_id,
                 )
-            elif operation == "send_message":
+            if operation == "send_message":
                 result = await send_subagent_message(
                     db,
                     uid=uid,
@@ -225,7 +242,7 @@ class AgentWorkExecutor(BaseExecutor):
                     subagent_id=parsed.subagent_id,
                     message=parsed.message,
                 )
-            else:
+            if operation == "cancel":
                 result = await cancel_subagent(
                     db,
                     uid=uid,

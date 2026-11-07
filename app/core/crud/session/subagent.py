@@ -184,6 +184,35 @@ class CRUDSubagent:
         result = await db.execute(statement)
         return result.scalars().first()
 
+    async def list_active_scoped(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+    ) -> list[tuple[Subagent, SubagentWork]]:
+        result = await db.execute(
+            select(Subagent, SubagentWork)
+            .join(
+                SubagentWork,
+                (SubagentWork.subagent_id == Subagent.id) & (SubagentWork.child_work_id == Subagent.active_child_work_id),
+            )
+            .where(
+                Subagent.uid == uid,
+                Subagent.session_id == session_id,
+                Subagent.profile_id == profile_id,
+                SubagentWork.result.is_(None),
+            )
+            .order_by(Subagent.created_at.asc(), Subagent.id.asc())
+            .execution_options(populate_existing=True)
+        )
+
+        active_rows: list[tuple[Subagent, SubagentWork]] = []
+        for subagent, work in result.all():
+            active_rows.append((subagent, work))
+        return active_rows
+
     async def lock_parent_for_delivery(
         self,
         db: AsyncSession,
