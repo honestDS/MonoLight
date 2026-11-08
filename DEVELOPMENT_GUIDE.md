@@ -6,6 +6,7 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
 ## 二、 命名规范
 - **类名**：使用大驼峰命名法（PascalCase），例如 `ChatDispatcher`、`AsyncSessionLocal`。
 - **函数与方法**：使用小写加下划线（snake_case），例如 `get_current_user`、`chat_completions`。异步函数必须以 `async def` 定义。
+- **内部辅助函数**：仅供模块或函数内部使用的辅助函数（包括嵌套函数），名称必须以单个 `_` 开头，例如 `_build_request_messages`。
 - **变量与参数**：使用小写加下划线（snake_case），例如 `current_user`、`db_session`。
 - **常量**：在 `app/core/constants.py` 中定义，统一使用大写加下划线（UPPER_CASE），例如 `DEFAULT_TOKEN_LIMIT`。
 - **数据库模型**：表名使用单数小写（snake_case），例如 `profile`、`user`；模型类名为单数大驼峰。
